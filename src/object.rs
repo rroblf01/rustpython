@@ -226,6 +226,11 @@ pub enum PyObject {
         args: Vec<PyObjectRef>,
         cause: Option<Box<PyError>>,
     },
+    BuildClass,
+    BoundMethod {
+        func: PyObjectRef,
+        self_obj: PyObjectRef,
+    },
 }
 
 impl PyObject {
@@ -252,6 +257,8 @@ impl PyObject {
             PyObject::Cell { .. } => "cell",
             PyObject::Capsule { .. } => "capsule",
             PyObject::Exception { .. } => "Exception",
+            PyObject::BuildClass => "builtin_function_or_method",
+            PyObject::BoundMethod { .. } => "method",
         }.to_string()
     }
 
@@ -313,6 +320,8 @@ impl PyObject {
                 let args_str: Vec<String> = args.iter().map(|a| a.repr()).collect();
                 format!("{}({})", typ, args_str.join(", "))
             }
+            PyObject::BuildClass => "<builtin function __build_class__>".to_string(),
+            PyObject::BoundMethod { func, .. } => format!("<bound method {}>", func.borrow().type_name()),
         }
     }
 
@@ -1320,8 +1329,15 @@ impl ObjectAccess for PyObject {
             PyObject::Type { dict, .. } => {
                 dict.get(name).cloned().ok_or_else(|| PyError::attribute_error(format!("type has no attribute '{}'", name)))
             }
-            PyObject::Instance { dict, .. } => {
-                dict.get(name).cloned().ok_or_else(|| PyError::attribute_error(format!("instance has no attribute '{}'", name)))
+            PyObject::Instance { dict, typ } => {
+                dict.get(name).cloned().or_else(|| {
+                    let typ_ref = typ.borrow();
+                    if let PyObject::Type { dict: type_dict, .. } = &*typ_ref {
+                        type_dict.get(name).cloned()
+                    } else {
+                        None
+                    }
+                }).ok_or_else(|| PyError::attribute_error(format!("instance has no attribute '{}'", name)))
             }
             PyObject::List(v) => {
                 match name {

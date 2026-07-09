@@ -625,10 +625,35 @@ impl VirtualMachine {
                     PyError::runtime_error("name index out of range")
                 })?.clone();
                 let obj = self.frames.last_mut().unwrap().pop()?;
-                let result = obj.borrow().get_attribute(&name).or_else(|_| {
-                    Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'",
-                        obj.borrow().type_name(), name)))
-                })?;
+                let result = {
+                    let obj_borrowed = obj.borrow();
+                    match &*obj_borrowed {
+                        PyObject::Instance { dict, typ } => {
+                            dict.get(&name).cloned().or_else(|| {
+                                let typ_ref = typ.borrow();
+                                if let PyObject::Type { dict: type_dict, .. } = &*typ_ref {
+                                    type_dict.get(&name).cloned().map(|val| {
+                                        if matches!(&*val.borrow(), PyObject::Function { .. }) {
+                                            PyObjectRef::new(PyObject::BoundMethod {
+                                                func: val,
+                                                self_obj: obj.clone(),
+                                            })
+                                        } else {
+                                            val
+                                        }
+                                    })
+                                } else {
+                                    None
+                                }
+                            }).ok_or_else(|| PyError::attribute_error(format!("'{}' object has no attribute '{}'", obj_borrowed.type_name(), name)))
+                        }
+                        _ => {
+                            obj_borrowed.get_attribute(&name).or_else(|_| {
+                                Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", obj_borrowed.type_name(), name)))
+                            })
+                        }
+                    }
+                }?;
                 self.frames.last_mut().unwrap().push(result);
             }
 
@@ -637,8 +662,8 @@ impl VirtualMachine {
                 let name = self.frames.last().unwrap().code.names.get(name_idx).ok_or_else(|| {
                     PyError::runtime_error("name index out of range")
                 })?.clone();
-                let val = self.frames.last_mut().unwrap().pop()?;
                 let obj = self.frames.last_mut().unwrap().pop()?;
+                let val = self.frames.last_mut().unwrap().pop()?;
                 obj.borrow_mut().set_attribute(&name, val)?;
             }
 
@@ -813,13 +838,7 @@ impl VirtualMachine {
             }
 
             Opcode::LOAD_BUILD_CLASS => {
-                let builtin_type = self.builtins.get("type").cloned().unwrap_or_else(|| {
-                    PyObjectRef::new(PyObject::BuiltinFunction {
-                        name: "type".to_string(),
-                        func: builtin_type_of,
-                    })
-                });
-                self.frames.last_mut().unwrap().push(builtin_type);
+                self.frames.last_mut().unwrap().push(PyObjectRef::new(PyObject::BuildClass));
             }
 
             Opcode::LOAD_CLOSURE => {
@@ -922,6 +941,14 @@ impl VirtualMachine {
             return func(&new_args);
         }
 
+        if let PyObject::BoundMethod { func, self_obj } = &*callable.borrow() {
+            let func = func.clone();
+            let self_obj = self_obj.clone();
+            let mut new_args = vec![self_obj];
+            new_args.extend(args);
+            return self.call_function(func, new_args);
+        }
+
         if let PyObject::Function { code, globals: func_globals, .. } = &*callable.borrow() {
             let code = code.clone();
             let func_globals = func_globals.clone();
@@ -953,6 +980,62 @@ impl VirtualMachine {
                 }
             }
             return Ok(instance);
+        }
+
+        if let PyObject::BuildClass = &*callable.borrow() {
+            if args.len() < 3 {
+                return Err(PyError::type_error("__build_class__: need at least 3 arguments"));
+            }
+            // Stack before CALL: [BuildClass, func, name, bases]
+            // CALL pops: args = [bases, name, func], callable = BuildClass
+            let func = args[2].clone();
+            let name = args[1].clone();
+            let bases = args[0].clone();
+
+            let name_str = match &*name.borrow() {
+                PyObject::Str(s) => s.clone(),
+                _ => return Err(PyError::type_error("class name must be a string")),
+            };
+
+            let namespace = Rc::new(RefCell::new(HashMap::new()));
+
+            match &*func.borrow() {
+                PyObject::Function { code, .. } => {
+                    let code = code.clone();
+                    let mut new_frame = Frame::new(code, namespace.clone(), self.builtins.clone());
+                    self.frames.push(new_frame);
+                    self.execute()?;
+                    self.frames.pop();
+                }
+                _ => return Err(PyError::type_error("class body must be a function")),
+            }
+
+            let namespace_dict = namespace.borrow().clone();
+
+            let bases_vec = if matches!(&*bases.borrow(), PyObject::None) {
+                vec![]
+            } else if let PyObject::Tuple(t) = &*bases.borrow() {
+                t.clone()
+            } else {
+                vec![bases.clone()]
+            };
+
+            let class = PyObjectRef::new(PyObject::Type {
+                name: name_str,
+                dict: namespace_dict,
+                bases: bases_vec.clone(),
+                mro: vec![],
+            });
+
+            let mut mro = vec![class.clone()];
+            for base in &bases_vec {
+                mro.push(base.clone());
+            }
+            if let PyObject::Type { mro: mro_field, .. } = &mut *class.borrow_mut() {
+                *mro_field = mro;
+            }
+
+            return Ok(class);
         }
 
         Err(PyError::type_error(format!("'{}' object is not callable", type_name)))

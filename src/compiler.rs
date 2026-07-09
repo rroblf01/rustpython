@@ -35,6 +35,7 @@ enum ScopeType {
     Module,
     Function,
     Class,
+    ClassBody,
     Comprehension,
 }
 
@@ -323,7 +324,7 @@ impl Compiler {
             }
             Stmt::ClassDef { name, bases, keywords: kw, body, decorator_list: _ } => {
                 self.emit(Opcode::LOAD_BUILD_CLASS, 0);
-                self.compile_function(name.clone(), &[], body)?;
+                self.compile_class_body(name.clone(), body)?;
                 let class_name_idx = self.get_const_index(ConstValue::String(name.clone())) as u32;
                 self.emit(Opcode::LOAD_CONST, class_name_idx);
                 if bases.is_empty() {
@@ -638,7 +639,7 @@ impl Compiler {
     fn compile_assign_target(&mut self, target: &Expr) -> Result<(), String> {
         match target {
             Expr::Name(name) => {
-                if self.scope == ScopeType::Module || self.global_names.contains(name) {
+                if self.scope == ScopeType::Module || self.scope == ScopeType::ClassBody || self.global_names.contains(name) {
                     let idx = self.get_name_index(name) as u32;
                     self.emit(Opcode::STORE_NAME, idx);
                 } else {
@@ -721,6 +722,39 @@ impl Compiler {
         Ok(())
     }
 
+    fn compile_class_body(&mut self, name: String, body: &[Stmt]) -> Result<(), String> {
+        self.enter_scope(ScopeType::ClassBody);
+
+        let old_code = std::mem::replace(&mut self.code, CodeObject::new(name.clone()));
+        let old_labels = std::mem::replace(&mut self.labels, Vec::new());
+        let old_label_stack = std::mem::replace(&mut self.label_stack, Vec::new());
+        let old_loop_stack = std::mem::replace(&mut self.loop_stack, Vec::new());
+
+        self.code.arg_count = 0;
+
+        self.compile_stmts(body)?;
+
+        let const_none = self.get_const_index(ConstValue::None) as u32;
+        self.emit(Opcode::LOAD_CONST, const_none);
+        self.emit(Opcode::RETURN_VALUE, 0);
+
+        self.code.nlocals = self.code.varnames.len();
+        self.code.name = name.clone();
+        self.code.first_lineno = 1;
+
+        let func_code = std::mem::replace(&mut self.code, old_code);
+        self.labels = old_labels;
+        self.label_stack = old_label_stack;
+        self.loop_stack = old_loop_stack;
+
+        let code_const_idx = self.get_const_index(ConstValue::Code(Box::new(func_code))) as u32;
+        self.emit(Opcode::LOAD_CONST, code_const_idx);
+        self.emit(Opcode::MAKE_FUNCTION, 0);
+
+        self.leave_scope();
+        Ok(())
+    }
+
     // ---- Expression compilation ----
 
     fn compile_expr(&mut self, expr: &Expr) -> Result<(), String> {
@@ -740,7 +774,7 @@ impl Compiler {
                 self.emit(Opcode::LOAD_CONST, idx);
             }
             Expr::Name(name) => {
-                if self.scope == ScopeType::Module || self.global_names.contains(name) {
+                if self.scope == ScopeType::Module || self.scope == ScopeType::ClassBody || self.global_names.contains(name) {
                     let name_idx = self.get_name_index(name) as u32;
                     self.emit(Opcode::LOAD_NAME, name_idx);
                 } else if self.scope == ScopeType::Function && self.get_var_index(name).is_some() {
