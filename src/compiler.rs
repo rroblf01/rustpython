@@ -446,12 +446,11 @@ impl Compiler {
                     let handler_done = self.new_label();
                     for handler in handlers {
                         if let Some(typ) = &handler.typ {
-                    self.emit(Opcode::COPY, 1);
+                    self.emit(Opcode::DUP_TOP, 0);
                     self.compile_expr(typ)?;
                     self.emit(Opcode::CHECK_EXC_MATCH, 0);
                     let next_handler = self.new_label();
                     self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_handler);
-                    self.emit(Opcode::POP_TOP, 0);
                     if let Some(name) = &handler.name {
                         let idx = self.add_varname(name) as u32;
                         self.emit(Opcode::STORE_FAST, idx);
@@ -495,12 +494,11 @@ impl Compiler {
                     self.emit(Opcode::PUSH_EXC_INFO, 0);
                     for handler in handlers {
                         if let Some(typ) = &handler.typ {
-                            self.emit(Opcode::COPY, 1);
+                            self.emit(Opcode::DUP_TOP, 0);
                             self.compile_expr(typ)?;
                             self.emit(Opcode::CHECK_EXC_MATCH, 0);
                             let next_handler = self.new_label();
                             self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_handler);
-                            self.emit(Opcode::POP_TOP, 0);
                             if let Some(name) = &handler.name {
                                 let idx = self.add_varname(name) as u32;
                                 self.emit(Opcode::STORE_FAST, idx);

@@ -1619,6 +1619,31 @@ pub fn py_str_split(s: &str, sep: Option<&str>) -> PyResult<PyObjectRef> {
     Ok(py_list(parts))
 }
 
+// ---- Exception constructor functions ----
+
+macro_rules! make_exception_func {
+    ($name:ident, $typ:expr) => {
+        pub fn $name(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+            Ok(PyObjectRef::new(PyObject::Exception { typ: $typ.to_string(), args: args.to_vec(), cause: None }))
+        }
+    };
+}
+
+make_exception_func!(builtin_make_exception_baseexception, "BaseException");
+make_exception_func!(builtin_make_exception_exception, "Exception");
+make_exception_func!(builtin_make_exception_typeerror, "TypeError");
+make_exception_func!(builtin_make_exception_valueerror, "ValueError");
+make_exception_func!(builtin_make_exception_zerodivisionerror, "ZeroDivisionError");
+make_exception_func!(builtin_make_exception_nameerror, "NameError");
+make_exception_func!(builtin_make_exception_attributeerror, "AttributeError");
+make_exception_func!(builtin_make_exception_indexerror, "IndexError");
+make_exception_func!(builtin_make_exception_keyerror, "KeyError");
+make_exception_func!(builtin_make_exception_runtimeerror, "RuntimeError");
+make_exception_func!(builtin_make_exception_stopiteration, "StopIteration");
+make_exception_func!(builtin_make_exception_assertionerror, "AssertionError");
+make_exception_func!(builtin_make_exception_oserror, "OSError");
+make_exception_func!(builtin_make_exception_importerror, "ImportError");
+
 // ---- Module creation ----
 
 pub fn create_builtins() -> HashMap<String, PyObjectRef> {
@@ -1671,6 +1696,30 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     add_func!("min", builtin_min);
     add_func!("id", builtin_id);
     add_func!("isinstance", builtin_isinstance);
+
+    macro_rules! add_exc_type {
+        ($name:expr, $func:expr) => {
+            builtins.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                name: $name.to_string(),
+                func: $func,
+            }));
+        };
+    }
+
+    add_exc_type!("BaseException", builtin_make_exception_baseexception);
+    add_exc_type!("Exception", builtin_make_exception_exception);
+    add_exc_type!("TypeError", builtin_make_exception_typeerror);
+    add_exc_type!("ValueError", builtin_make_exception_valueerror);
+    add_exc_type!("ZeroDivisionError", builtin_make_exception_zerodivisionerror);
+    add_exc_type!("NameError", builtin_make_exception_nameerror);
+    add_exc_type!("AttributeError", builtin_make_exception_attributeerror);
+    add_exc_type!("IndexError", builtin_make_exception_indexerror);
+    add_exc_type!("KeyError", builtin_make_exception_keyerror);
+    add_exc_type!("RuntimeError", builtin_make_exception_runtimeerror);
+    add_exc_type!("StopIteration", builtin_make_exception_stopiteration);
+    add_exc_type!("AssertionError", builtin_make_exception_assertionerror);
+    add_exc_type!("OSError", builtin_make_exception_oserror);
+    add_exc_type!("ImportError", builtin_make_exception_importerror);
 
     builtins
 }

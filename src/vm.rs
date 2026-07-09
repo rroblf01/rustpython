@@ -757,18 +757,21 @@ impl VirtualMachine {
 
             Opcode::PUSH_EXC_INFO => {}
 
-            Opcode::POP_EXCEPT => {}
+            Opcode::POP_EXCEPT => {
+                self.frames.last_mut().unwrap().pop()?;
+            }
 
             Opcode::CHECK_EXC_MATCH => {
-                let exc = self.frames.last_mut().unwrap().pop()?;
                 let expected = self.frames.last_mut().unwrap().pop()?;
+                let exc = self.frames.last_mut().unwrap().pop()?;
+                let expected_name = match &*expected.borrow() {
+                    PyObject::Str(s) => s.clone(),
+                    PyObject::Type { name, .. } => name.clone(),
+                    PyObject::BuiltinFunction { name, .. } => name.clone(),
+                    _ => return Err(PyError::type_error("exceptions must derive from BaseException")),
+                };
                 let matched = match &*exc.borrow() {
-                    PyObject::Exception { typ, .. } => {
-                        match &*expected.borrow() {
-                            PyObject::Str(s) => typ == s,
-                            _ => false,
-                        }
-                    }
+                    PyObject::Exception { typ, .. } => typ == &expected_name,
                     _ => false,
                 };
                 self.frames.last_mut().unwrap().push(py_bool(matched));
@@ -1046,24 +1049,33 @@ impl VirtualMachine {
             while let Some(handler) = frame.exception_handlers.pop() {
                 frame.stack.truncate(handler.stack_depth);
                 frame.ip = handler.instr_addr;
-                let exc_obj = PyObjectRef::new(PyObject::Exception {
-                    typ: match error {
-                        PyError::TypeError(_) => "TypeError",
-                        PyError::ValueError(_) => "ValueError",
-                        PyError::NameError(_) => "NameError",
-                        PyError::AttributeError(_) => "AttributeError",
-                        PyError::IndexError(_) => "IndexError",
-                        PyError::KeyError(_) => "KeyError",
-                        PyError::ZeroDivisionError(_) => "ZeroDivisionError",
-                        PyError::RuntimeError(_) => "RuntimeError",
-                        PyError::StopIteration => "StopIteration",
-                        PyError::AssertionError(_) => "AssertionError",
-                        PyError::ImportError(_) => "ImportError",
-                        _ => "Exception",
-                    }.to_string(),
-                    args: vec![py_str(&error.message())],
-                    cause: None,
-                });
+                let exc_obj = {
+                    let typ = match error {
+                        PyError::TypeError(_) => "TypeError".to_string(),
+                        PyError::ValueError(_) => "ValueError".to_string(),
+                        PyError::NameError(_) => "NameError".to_string(),
+                        PyError::AttributeError(_) => "AttributeError".to_string(),
+                        PyError::IndexError(_) => "IndexError".to_string(),
+                        PyError::KeyError(_) => "KeyError".to_string(),
+                        PyError::ZeroDivisionError(_) => "ZeroDivisionError".to_string(),
+                        PyError::RuntimeError(_) => "RuntimeError".to_string(),
+                        PyError::StopIteration => "StopIteration".to_string(),
+                        PyError::AssertionError(_) => "AssertionError".to_string(),
+                        PyError::ImportError(_) => "ImportError".to_string(),
+                        PyError::Exception(_, exc) => {
+                            match &*exc.borrow() {
+                                PyObject::Exception { typ, .. } => typ.clone(),
+                                _ => "Exception".to_string(),
+                            }
+                        }
+                        _ => "Exception".to_string(),
+                    };
+                    PyObjectRef::new(PyObject::Exception {
+                        typ,
+                        args: vec![py_str(&error.message())],
+                        cause: None,
+                    })
+                };
                 frame.push(exc_obj);
                 return true;
             }
