@@ -79,6 +79,12 @@ impl Parser {
     pub fn parse_program(&mut self) -> Result<Program, String> {
         let mut stmts = Vec::new();
         while !self.at(&Token::EndOfFile) {
+            while self.at(&Token::Newline) || self.at(&Token::Indent) || self.at(&Token::Dedent) {
+                self.next();
+            }
+            if self.at(&Token::EndOfFile) {
+                break;
+            }
             stmts.push(self.parse_stmt()?);
         }
         Ok(Program::Module(stmts))
@@ -360,7 +366,7 @@ impl Parser {
 
     fn parse_for(&mut self) -> Result<Stmt, String> {
         self.expect(&Token::For)?;
-        let target = self.parse_expr()?;
+        let target = self.parse_bitwise_or()?;
         self.expect(&Token::In)?;
         let iter = self.parse_expr()?;
         self.expect(&Token::Colon)?;

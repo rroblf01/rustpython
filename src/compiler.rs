@@ -5,6 +5,7 @@ use crate::bytecode::*;
 pub struct Compiler {
     code: CodeObject,
     labels: Vec<Vec<usize>>,
+    label_positions: Vec<usize>,
     label_stack: Vec<Vec<(usize, u32)>>,
     loop_stack: Vec<LoopInfo>,
     scope: ScopeType,
@@ -42,6 +43,7 @@ impl Compiler {
         Compiler {
             code: CodeObject::new("<module>".to_string()),
             labels: Vec::new(),
+            label_positions: Vec::new(),
             label_stack: Vec::new(),
             loop_stack: Vec::new(),
             scope: ScopeType::Module,
@@ -77,7 +79,7 @@ impl Compiler {
 
     fn enter_scope(&mut self, scope: ScopeType) {
         let info = ScopeInfo {
-            scope: scope.clone(),
+            scope: self.scope.clone(),
             global_names: std::mem::take(&mut self.global_names),
             nonlocal_names: std::mem::take(&mut self.nonlocal_names),
             varnames: std::mem::take(&mut self.code.varnames),
@@ -142,6 +144,7 @@ impl Compiler {
 
     fn new_label(&mut self) -> usize {
         self.labels.push(Vec::new());
+        self.label_positions.push(0);
         self.labels.len() - 1
     }
 
@@ -154,22 +157,20 @@ impl Compiler {
         self.labels[label].clear();
     }
 
-    fn fix_label_backward(&mut self, label: usize) {
-        let pos = self.code.instructions.len();
-        for &instr_pos in &self.labels[label] {
-            let offset = (pos as u32).wrapping_sub(self.code.instructions[instr_pos].arg);
-            self.code.instructions[instr_pos].arg = offset;
-        }
-        self.labels[label].clear();
-    }
-
     fn mark_label(&mut self, label: usize) {
-        self.labels[label].push(self.code.instructions.len());
+        self.label_positions[label] = self.code.instructions.len();
     }
 
     fn emit_jump(&mut self, op: Opcode, label: usize) {
         self.code.instructions.push(Instr::with_arg(op, 0));
         self.labels[label].push(self.code.instructions.len() - 1);
+    }
+
+    fn emit_backward_jump(&mut self, target_label: usize) {
+        let target = self.label_positions[target_label];
+        let jump_pos = self.code.instructions.len();
+        let offset = (jump_pos as u32).wrapping_sub(target as u32);
+        self.emit(Opcode::JUMP_BACKWARD, offset);
     }
 
     // ---- Statement compilation ----
@@ -197,7 +198,7 @@ impl Compiler {
             }
             Stmt::Continue => {
                 if let Some(loop_info) = self.loop_stack.last() {
-                    self.emit_jump(Opcode::JUMP, loop_info.start_label);
+                    self.emit_backward_jump(loop_info.start_label);
                 } else {
                     return Err("'continue' outside loop".to_string());
                 }
@@ -279,7 +280,7 @@ impl Compiler {
                 self.compile_expr(test)?;
                 self.emit_jump(Opcode::POP_JUMP_IF_FALSE, else_label);
                 self.compile_stmts(body)?;
-                self.emit_jump(Opcode::JUMP, start_label);
+                self.emit_backward_jump(start_label);
                 self.fix_label(else_label);
                 if !orelse.is_empty() {
                     self.compile_stmts(orelse)?;
@@ -298,11 +299,12 @@ impl Compiler {
                 self.emit_jump(Opcode::FOR_ITER, else_label);
                 self.compile_assign_target(target)?;
                 self.compile_stmts(body)?;
-                self.emit_jump(Opcode::JUMP, start_label);
+                self.emit_backward_jump(start_label);
                 self.fix_label(else_label);
                 if !orelse.is_empty() {
                     self.compile_stmts(orelse)?;
                 }
+                self.emit(Opcode::POP_ITER, 0);
                 self.fix_label(end_label);
                 self.loop_stack.pop();
             }

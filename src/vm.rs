@@ -868,6 +868,30 @@ impl VirtualMachine {
 
             Opcode::SETUP_ANNOTATIONS => {}
 
+            Opcode::POP_ITER => {
+                self.frames.last_mut().unwrap().pop()?;
+            }
+
+            Opcode::SETUP_WITH => {
+                // Simplified: just enter the context manager
+                let mgr = self.frames.last().unwrap().peek(0)?;
+                let exit_method = {
+                    let obj = mgr.borrow();
+                    obj.get_attribute("__exit__").ok()
+                };
+                let enter_method = {
+                    let obj = mgr.borrow();
+                    obj.get_attribute("__enter__").ok()
+                };
+                if let Some(enter) = enter_method {
+                    let result = self.call_function(enter, vec![])?;
+                    self.frames.last_mut().unwrap().push(result);
+                } else {
+                    // Enter and push None as result (simplified)
+                    self.frames.last_mut().unwrap().push(py_none());
+                }
+            }
+
             Opcode::YIELD_VALUE => {
                 let val = self.frames.last_mut().unwrap().pop()?;
                 return Ok(Some(val));

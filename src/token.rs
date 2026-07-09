@@ -363,8 +363,8 @@ impl Lexer {
         }
 
         if self.at_line_start && self.paren_level == 0 {
-            self.at_line_start = false;
             self.handle_indent();
+            self.at_line_start = false;
             if let Some(tok) = self.pending.pop() {
                 return tok;
             }
