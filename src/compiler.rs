@@ -55,6 +55,10 @@ impl Compiler {
 
     pub fn compile(&mut self, program: &Program, filename: &str) -> Result<CodeObject, String> {
         self.code.filename = filename.to_string();
+        // Ensure constant 0 is always None for module return
+        if self.code.consts.is_empty() || !matches!(&self.code.consts[0], ConstValue::None) {
+            self.code.consts.insert(0, ConstValue::None);
+        }
         match program {
             Program::Module(stmts) => {
                 self.compile_stmts(stmts)?;
@@ -65,10 +69,8 @@ impl Compiler {
             }
         }
         if self.scope == ScopeType::Module {
+            self.emit(Opcode::LOAD_CONST, 0);
             self.emit(Opcode::RETURN_VALUE, 0);
-            if self.code.consts.is_empty() || !matches!(&self.code.consts[0], ConstValue::None) {
-                self.code.consts.insert(0, ConstValue::None);
-            }
         }
         Ok(self.code.clone())
     }
