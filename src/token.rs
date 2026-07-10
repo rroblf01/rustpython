@@ -573,7 +573,7 @@ impl Lexer {
                         self.advance();
                         self.at_line_start = true;
                     }
-                    return;
+                    break;
                 }
                 Some('\n') => {
                     self.advance();
