@@ -668,7 +668,7 @@ impl VirtualMachine {
                             dict.get(&name).cloned().or_else(|| {
                                 let typ_ref = typ.borrow();
                                 if let PyObject::Type { dict: type_dict, mro, .. } = &*typ_ref {
-                                    type_dict.get(&name).cloned().or_else(|| {
+                                    let found = type_dict.get(&name).cloned().or_else(|| {
                                         for base in mro.iter().skip(1) {
                                             if let PyObject::Type { dict: base_dict, .. } = &*base.borrow() {
                                                 if let Some(val) = base_dict.get(&name) {
@@ -677,16 +677,38 @@ impl VirtualMachine {
                                             }
                                         }
                                         None
-                                    }).map(|val| {
-                                        if matches!(&*val.borrow(), PyObject::Function { .. }) {
-                                            PyObjectRef::new(PyObject::BoundMethod {
-                                                func: val,
-                                                self_obj: obj.clone(),
-                                            })
-                                        } else {
-                                            val
+                                    });
+                                    // Handle descriptor protocol for Property, StaticMethod, ClassMethod
+                                    if let Some(val) = found {
+                                        let val_borrowed = val.borrow();
+                                        match &*val_borrowed {
+                                            PyObject::Property { getter: Some(g), .. } => {
+                                                drop(typ_ref);
+                                                return Some(self.call_function(g.clone(), vec![obj.clone()]).unwrap_or_else(|_| val.clone()));
+                                            }
+                                            PyObject::StaticMethod { func } => {
+                                                return Some(func.clone());
+                                            }
+                                            PyObject::ClassMethod { func } => {
+                                                drop(typ_ref);
+                                                let cls = obj.borrow();
+                                                if let PyObject::Instance { typ: inst_typ, .. } = &*cls {
+                                                    return Some(self.call_function(func.clone(), vec![inst_typ.clone()]).unwrap_or_else(|_| val.clone()));
+                                                }
+                                                return Some(val.clone());
+                                            }
+                                            PyObject::Function { .. } => {
+                                                return Some(PyObjectRef::new(PyObject::BoundMethod {
+                                                    func: val.clone(),
+                                                    self_obj: obj.clone(),
+                                                }));
+                                            }
+                                            _ => {
+                                                return Some(val.clone());
+                                            }
                                         }
-                                    })
+                                    }
+                                    None
                                 } else {
                                     None
                                 }

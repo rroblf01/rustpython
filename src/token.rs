@@ -332,15 +332,12 @@ impl Lexer {
                             s.push('{');
                             self.advance();
                         } else {
-                            // Simple f-string: return literal string for now
-                            // Future: proper f-string parsing with FStringStart/Middle/End
                             s.push_str("{...}");
                             let mut depth = 1;
                             while depth > 0 {
                                 match self.advance() {
                                     Some('{') => depth += 1,
                                     Some('}') => depth -= 1,
-                                    Some(c) if c == quote => break,
                                     None => break,
                                     _ => {}
                                 }
