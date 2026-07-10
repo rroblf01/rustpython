@@ -8,16 +8,21 @@ use crate::bytecode::CodeObject;
 
 pub type BuiltinFunc = fn(&[PyObjectRef]) -> PyResult<PyObjectRef>;
 
-/// Temporary owned or Ref PyObject for inline values
+/// Temporary owned, Rc-held, or RefCell-referenced PyObject
 pub enum RefOrOwned<'a> {
     Ref(std::cell::Ref<'a, PyObject>),
+    RcRef(std::rc::Rc<PyObject>),
     Owned(PyObject),
 }
 
 impl<'a> std::ops::Deref for RefOrOwned<'a> {
     type Target = PyObject;
     fn deref(&self) -> &PyObject {
-        match self { RefOrOwned::Ref(r) => &**r, RefOrOwned::Owned(o) => o }
+        match self {
+            RefOrOwned::Ref(r) => &**r,
+            RefOrOwned::RcRef(r) => &**r,
+            RefOrOwned::Owned(o) => o,
+        }
     }
 }
 
@@ -26,12 +31,19 @@ pub enum PyObjectRef {
     SmallInt(i64),
     SmallBool(bool),
     None,
-    Obj(Rc<RefCell<PyObject>>),
+    Mut(Rc<RefCell<PyObject>>),  // Mutable: List, Dict, Set, Instance
+    Imm(Rc<PyObject>),           // Immutable: Int, Str, Float, Tuple, Bytes, ByteArray, Range, Slice, Code, Function
 }
 
 impl PyObjectRef {
+    /// Create a MUTABLE PyObjectRef (for List, Dict, Set, Instance)
     pub fn new(obj: PyObject) -> Self {
-        PyObjectRef::Obj(Rc::new(RefCell::new(obj)))
+        PyObjectRef::Mut(Rc::new(RefCell::new(obj)))
+    }
+
+    /// Create an IMMUTABLE PyObjectRef (for Int, Str, Float, etc.)
+    pub fn imm(obj: PyObject) -> Self {
+        PyObjectRef::Imm(Rc::new(obj))
     }
 
     pub fn borrow(&self) -> RefOrOwned<'_> {
@@ -39,15 +51,16 @@ impl PyObjectRef {
             PyObjectRef::SmallInt(n) => RefOrOwned::Owned(PyObject::Int(BigInt::from(*n))),
             PyObjectRef::SmallBool(b) => RefOrOwned::Owned(PyObject::Bool(*b)),
             PyObjectRef::None => RefOrOwned::Owned(PyObject::None),
-            PyObjectRef::Obj(rc) => RefOrOwned::Ref(rc.borrow()),
+            PyObjectRef::Mut(rc) => RefOrOwned::Ref(rc.borrow()),
+            PyObjectRef::Imm(rc) => RefOrOwned::RcRef(Rc::clone(rc)),
         }
     }
 
     pub fn borrow_mut(&self) -> std::cell::RefMut<'_, PyObject> {
-        match self { PyObjectRef::Obj(rc) => rc.borrow_mut(), _ => panic!("borrow_mut on inline value") }
+        match self { PyObjectRef::Mut(rc) => rc.borrow_mut(), _ => panic!("borrow_mut on non-mutable value") }
     }
 
-    /// Fast path: extract i64 without borrow() — avoids BigInt creation
+    /// Fast path: extract i64 without borrow()
     pub fn as_i64(&self) -> Option<i64> {
         match self {
             PyObjectRef::SmallInt(n) => Some(*n),
@@ -60,7 +73,8 @@ impl PyObjectRef {
             (PyObjectRef::SmallInt(a), PyObjectRef::SmallInt(b)) => a == b,
             (PyObjectRef::SmallBool(a), PyObjectRef::SmallBool(b)) => a == b,
             (PyObjectRef::None, PyObjectRef::None) => true,
-            (PyObjectRef::Obj(a), PyObjectRef::Obj(b)) => Rc::ptr_eq(a, b),
+            (PyObjectRef::Mut(a), PyObjectRef::Mut(b)) => Rc::ptr_eq(a, b),
+            (PyObjectRef::Imm(a), PyObjectRef::Imm(b)) => Rc::ptr_eq(a, b),
             _ => false,
         }
     }
@@ -72,7 +86,8 @@ impl PyObjectRef {
             PyObjectRef::SmallInt(n) => *n != 0,
             PyObjectRef::SmallBool(b) => *b,
             PyObjectRef::None => false,
-            PyObjectRef::Obj(rc) => rc.borrow().truthy(),
+            PyObjectRef::Mut(rc) => rc.borrow().truthy(),
+            PyObjectRef::Imm(rc) => (**rc).truthy(),
         }
     }
     pub fn hash(&self) -> PyResult<usize> {
@@ -85,7 +100,8 @@ impl PyObjectRef {
             }
             PyObjectRef::SmallBool(b) => Ok(if *b { 1 } else { 0 }),
             PyObjectRef::None => Ok(0),
-            PyObjectRef::Obj(rc) => rc.borrow().hash(),
+            PyObjectRef::Mut(rc) => rc.borrow().hash(),
+            PyObjectRef::Imm(rc) => (**rc).hash(),
         }
     }
     pub fn equals(&self, other: &PyObjectRef) -> PyResult<bool> {
@@ -98,7 +114,8 @@ impl PyObjectRef {
 
     pub fn get_id(&self) -> usize {
         match self {
-            PyObjectRef::Obj(rc) => Rc::as_ptr(rc) as *const PyObject as usize,
+            PyObjectRef::Mut(rc) => Rc::as_ptr(rc) as *const PyObject as usize,
+            PyObjectRef::Imm(rc) => Rc::as_ptr(rc) as usize,
             inline => inline as *const PyObjectRef as usize,
         }
     }
@@ -753,7 +770,7 @@ pub fn py_int(i: impl Into<BigInt>) -> PyObjectRef {
     if let Some(n) = big.to_i64() {
         return PyObjectRef::SmallInt(n);
     }
-    PyObjectRef::new(PyObject::Int(big))
+    PyObjectRef::imm(PyObject::Int(big))
 }
 
 pub fn py_bool(b: bool) -> PyObjectRef {
@@ -765,11 +782,11 @@ pub fn py_none() -> PyObjectRef {
 }
 
 pub fn py_float(f: f64) -> PyObjectRef {
-    PyObjectRef::new(PyObject::Float(f))
+    PyObjectRef::imm(PyObject::Float(f))
 }
 
 pub fn py_str(s: &str) -> PyObjectRef {
-    PyObjectRef::new(PyObject::Str(s.to_string()))
+    PyObjectRef::imm(PyObject::Str(s.to_string()))
 }
 
 pub fn py_list(items: Vec<PyObjectRef>) -> PyObjectRef {
@@ -777,7 +794,7 @@ pub fn py_list(items: Vec<PyObjectRef>) -> PyObjectRef {
 }
 
 pub fn py_tuple(items: Vec<PyObjectRef>) -> PyObjectRef {
-    PyObjectRef::new(PyObject::Tuple(items))
+    PyObjectRef::imm(PyObject::Tuple(items))
 }
 
 pub fn py_dict() -> PyObjectRef {
@@ -1435,7 +1452,7 @@ pub fn builtin_type_of(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         return Err(PyError::type_error("type() takes exactly one argument"));
     }
     let name = args[0].borrow().type_name();
-    Ok(PyObjectRef::new(PyObject::Str(name)))
+    Ok(PyObjectRef::imm(PyObject::Str(name)))
 }
 
 pub fn builtin_int(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
@@ -1569,7 +1586,7 @@ pub fn builtin_set(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 }
 
 pub fn builtin_bytes(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.is_empty() { Ok(PyObjectRef::new(PyObject::Bytes(Vec::new()))) }
+    if args.is_empty() { Ok(PyObjectRef::imm(PyObject::Bytes(Vec::new()))) }
     else {
         let obj = args[0].borrow();
         match &*obj {
@@ -1578,11 +1595,11 @@ pub fn builtin_bytes(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 if n < 0 || n > 255 {
                     return Err(PyError::value_error("bytes() requires int in range 0-255"));
                 }
-                Ok(PyObjectRef::new(PyObject::Bytes(vec![n as u8])))
+                Ok(PyObjectRef::imm(PyObject::Bytes(vec![n as u8])))
             }
-            PyObject::Bytes(b) => Ok(PyObjectRef::new(PyObject::Bytes(b.clone()))),
-            PyObject::ByteArray(b) => Ok(PyObjectRef::new(PyObject::Bytes(b.clone()))),
-            PyObject::Str(s) => Ok(PyObjectRef::new(PyObject::Bytes(s.as_bytes().to_vec()))),
+            PyObject::Bytes(b) => Ok(PyObjectRef::imm(PyObject::Bytes(b.clone()))),
+            PyObject::ByteArray(b) => Ok(PyObjectRef::imm(PyObject::Bytes(b.clone()))),
+            PyObject::Str(s) => Ok(PyObjectRef::imm(PyObject::Bytes(s.as_bytes().to_vec()))),
             PyObject::List(v) => {
                 let mut result = Vec::new();
                 for item in v {
@@ -1597,7 +1614,7 @@ pub fn builtin_bytes(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                         return Err(PyError::type_error("bytes() argument must be an integer or iterable"));
                     }
                 }
-                Ok(PyObjectRef::new(PyObject::Bytes(result)))
+                Ok(PyObjectRef::imm(PyObject::Bytes(result)))
             }
             PyObject::Tuple(v) => {
                 let mut result = Vec::new();
@@ -1613,7 +1630,7 @@ pub fn builtin_bytes(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                         return Err(PyError::type_error("bytes() argument must be an integer or iterable"));
                     }
                 }
-                Ok(PyObjectRef::new(PyObject::Bytes(result)))
+                Ok(PyObjectRef::imm(PyObject::Bytes(result)))
             }
             _ => Err(PyError::type_error(format!("cannot convert '{}' to bytes", obj.type_name()))),
         }
@@ -1794,7 +1811,7 @@ pub fn builtin_slice(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         1 => {
             let stop = args[0].clone();
             let none = py_none();
-            Ok(PyObjectRef::new(PyObject::Slice {
+            Ok(PyObjectRef::imm(PyObject::Slice {
                 start: none.clone(),
                 stop,
                 step: none,
@@ -1804,14 +1821,14 @@ pub fn builtin_slice(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             let start = args[0].clone();
             let stop = args[1].clone();
             let none = py_none();
-            Ok(PyObjectRef::new(PyObject::Slice {
+            Ok(PyObjectRef::imm(PyObject::Slice {
                 start,
                 stop,
                 step: none,
             }))
         }
         3 => {
-            Ok(PyObjectRef::new(PyObject::Slice {
+            Ok(PyObjectRef::imm(PyObject::Slice {
                 start: args[0].clone(),
                 stop: args[1].clone(),
                 step: args[2].clone(),
@@ -2340,7 +2357,7 @@ pub fn builtin_reversed(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         }
         PyObject::Tuple(v) => {
             let mut rev = v.clone(); rev.reverse();
-            Ok(PyObjectRef::new(PyObject::Tuple(rev)))
+            Ok(PyObjectRef::imm(PyObject::Tuple(rev)))
         }
         PyObject::Str(s) => Ok(py_str(&s.chars().rev().collect::<String>())),
         _ => Err(PyError::type_error("argument to reversed() must be a sequence")),
@@ -2583,7 +2600,7 @@ impl ObjectAccess for PyObject {
             }
             PyObject::List(_v) => {
                 match name {
-                    "append" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "append" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "append".to_string(),
                         func: |args| {
                             if args.len() < 2 { return Err(PyError::type_error("append() takes exactly one argument")); }
@@ -2592,7 +2609,7 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
-                    "pop" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "pop" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "pop".to_string(),
                         func: |args| {
                             if let PyObject::List(list) = &mut *args[0].borrow_mut() { list.pop().ok_or_else(|| PyError::runtime_error("pop from empty list")) }
@@ -2600,7 +2617,7 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
-                    "extend" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "extend" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "extend".to_string(),
                         func: |args| {
                             if args.len() < 2 { return Err(PyError::type_error("extend() takes exactly one argument")); }
@@ -2611,7 +2628,7 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
-                    "clear" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "clear" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "clear".to_string(),
                         func: |args| {
                             if let PyObject::List(list) = &mut *args[0].borrow_mut() { list.clear(); Ok(py_none()) }
@@ -2619,7 +2636,7 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
-                    "reverse" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "reverse" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "reverse".to_string(),
                         func: |args| {
                             if let PyObject::List(list) = &mut *args[0].borrow_mut() { list.reverse(); Ok(py_none()) }
@@ -2632,7 +2649,7 @@ impl ObjectAccess for PyObject {
             }
             PyObject::Str(_s) => {
                 match name {
-                    "split" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "split" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "split".to_string(),
                         func: |args| {
                             let s = args[0].str();
@@ -2642,7 +2659,7 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
-                    "join" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "join" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "join".to_string(),
                         func: |args| {
                             if args.len() < 2 { return Err(PyError::type_error("join() takes exactly one argument")); }
@@ -2653,17 +2670,17 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
-                    "upper" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "upper" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "upper".to_string(),
                         func: |args| Ok(py_str(&args[0].str().to_uppercase())),
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
-                    "lower" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "lower" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "lower".to_string(),
                         func: |args| Ok(py_str(&args[0].str().to_lowercase())),
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
-                    "strip" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "strip" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "strip".to_string(),
                         func: |args| {
                             let chars = if args.len() > 1 { args[1].str() } else { " \t\n\r".to_string() };
@@ -2671,7 +2688,7 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
-                    "startswith" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "startswith" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "startswith".to_string(),
                         func: |args| {
                             if args.len() < 2 { return Err(PyError::type_error("startswith() takes exactly one argument")); }
@@ -2679,7 +2696,7 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
-                    "replace" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "replace" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "replace".to_string(),
                         func: |args| {
                             if args.len() < 3 { return Err(PyError::type_error("replace() takes exactly 2 arguments")); }
@@ -2692,7 +2709,7 @@ impl ObjectAccess for PyObject {
             }
             PyObject::Dict(_d) => {
                 match name {
-                    "keys" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "keys" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "keys".to_string(),
                         func: |args| {
                             let d = args[0].borrow();
@@ -2701,7 +2718,7 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
-                    "values" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "values" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "values".to_string(),
                         func: |args| {
                             let d = args[0].borrow();
@@ -2710,7 +2727,7 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
-                    "items" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "items" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "items".to_string(),
                         func: |args| {
                             let d = args[0].borrow();
@@ -2721,7 +2738,7 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
-                    "get" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "get" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "get".to_string(),
                         func: |args| {
                             if args.len() < 2 { return Err(PyError::type_error("get() takes at least 1 argument")); }
@@ -2732,7 +2749,7 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
-                    "pop" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "pop" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "pop".to_string(),
                         func: |args| {
                             if args.len() < 2 { return Err(PyError::type_error("pop() takes at least 1 argument")); }
@@ -2741,7 +2758,7 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
-                    "clear" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "clear" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "clear".to_string(),
                         func: |args| {
                             if let PyObject::Dict(d) = &mut *args[0].borrow_mut() { d.clear(); Ok(py_none()) }
@@ -2749,7 +2766,7 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
-                    "update" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "update" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "update".to_string(),
                         func: |args| {
                             if args.len() < 2 { return Err(PyError::type_error("update() takes at least 1 argument")); }
@@ -2763,7 +2780,7 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
-                    "setdefault" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "setdefault" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "setdefault".to_string(),
                         func: |args| {
                             if args.len() < 2 { return Err(PyError::type_error("setdefault() takes at least 1 argument")); }
@@ -2780,7 +2797,7 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
-                    "copy" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "copy" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "copy".to_string(),
                         func: |args| {
                             let d = args[0].borrow();
@@ -2797,7 +2814,7 @@ impl ObjectAccess for PyObject {
             }
             PyObject::Set(s) => {
                 match name {
-                    "add" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "add" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "add".to_string(),
                         func: |args| {
                             if args.len() < 2 { return Err(PyError::type_error("add() takes exactly one argument")); }
@@ -2806,7 +2823,7 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
-                    "remove" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "remove" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "remove".to_string(),
                         func: |args| {
                             if args.len() < 2 { return Err(PyError::type_error("remove() takes exactly one argument")); }
@@ -2815,7 +2832,7 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
-                    "discard" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "discard" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "discard".to_string(),
                         func: |args| {
                             if args.len() < 2 { return Err(PyError::type_error("discard() takes exactly one argument")); }
@@ -2825,7 +2842,7 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
-                    "pop" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "pop" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "pop".to_string(),
                         func: |args| {
                             if let PyObject::Set(set) = &mut *args[0].borrow_mut() { set.pop().ok_or_else(|| PyError::key_error("pop from an empty set")) }
@@ -2833,7 +2850,7 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
-                    "clear" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "clear" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "clear".to_string(),
                         func: |args| {
                             if let PyObject::Set(set) = &mut *args[0].borrow_mut() { set.clear(); Ok(py_none()) }
@@ -2841,7 +2858,7 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
-                    "copy" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "copy" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "copy".to_string(),
                         func: |args| {
                             let s = args[0].borrow();
@@ -2850,7 +2867,7 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
-                    "union" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "union" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "union".to_string(),
                         func: |args| {
                             if args.len() < 2 { return Err(PyError::type_error("union() takes at least 1 argument")); }
@@ -2868,7 +2885,7 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
-                    "intersection" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "intersection" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "intersection".to_string(),
                         func: |args| {
                             if args.len() < 2 { return Err(PyError::type_error("intersection() takes at least 1 argument")); }
@@ -2888,7 +2905,7 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
-                    "difference" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "difference" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "difference".to_string(),
                         func: |args| {
                             if args.len() < 2 { return Err(PyError::type_error("difference() takes at least 1 argument")); }
@@ -2908,7 +2925,7 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
-                    "symmetric_difference" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "symmetric_difference" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "symmetric_difference".to_string(),
                         func: |args| {
                             if args.len() < 2 { return Err(PyError::type_error("symmetric_difference() takes exactly one argument")); }
@@ -2925,7 +2942,7 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
-                    "issubset" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "issubset" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "issubset".to_string(),
                         func: |args| {
                             if args.len() < 2 { return Err(PyError::type_error("issubset() takes exactly one argument")); }
@@ -2939,7 +2956,7 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
-                    "issuperset" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "issuperset" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "issuperset".to_string(),
                         func: |args| {
                             if args.len() < 2 { return Err(PyError::type_error("issuperset() takes exactly one argument")); }
@@ -2953,7 +2970,7 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
-                    "isdisjoint" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "isdisjoint" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "isdisjoint".to_string(),
                         func: |args| {
                             if args.len() < 2 { return Err(PyError::type_error("isdisjoint() takes exactly one argument")); }
@@ -2967,7 +2984,7 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
-                    "update" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "update" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "update".to_string(),
                         func: |args| {
                             if args.len() < 2 { return Err(PyError::type_error("update() takes at least 1 argument")); }
@@ -2983,7 +3000,7 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
-                    "intersection_update" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "intersection_update" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "intersection_update".to_string(),
                         func: |args| {
                             if args.len() < 2 { return Err(PyError::type_error("intersection_update() takes at least 1 argument")); }
@@ -3002,7 +3019,7 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
-                    "difference_update" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "difference_update" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "difference_update".to_string(),
                         func: |args| {
                             if args.len() < 2 { return Err(PyError::type_error("difference_update() takes at least 1 argument")); }
@@ -3021,7 +3038,7 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
-                    "symmetric_difference_update" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "symmetric_difference_update" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "symmetric_difference_update".to_string(),
                         func: |args| {
                             if args.len() < 2 { return Err(PyError::type_error("symmetric_difference_update() takes exactly one argument")); }
@@ -3046,7 +3063,7 @@ impl ObjectAccess for PyObject {
             }
             PyObject::Generator { frame: gen_frame } => {
                 match name {
-                    "__next__" | "send" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "__next__" | "send" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: name.to_string(),
                         func: move |args| {
                             let gen = args[0].borrow();
@@ -3087,7 +3104,7 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
-                    "throw" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "throw" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "throw".to_string(),
                         func: |args| {
                             if args.len() < 2 { return Err(PyError::type_error("throw() needs at least 1 argument")); }
@@ -3095,7 +3112,7 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
-                    "close" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "close" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "close".to_string(),
                         func: |args| {
                             let gen = args[0].borrow();
@@ -3107,7 +3124,7 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
-                    "__iter__" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "__iter__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "__iter__".to_string(),
                         func: |args| Ok(args[0].clone()),
                         self_obj: PyObjectRef::new(PyObject::None),
@@ -3117,7 +3134,7 @@ impl ObjectAccess for PyObject {
             }
             PyObject::File { file: _ } => {
                 match name {
-                    "read" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "read" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "read".to_string(),
                         func: |args| {
                             use std::io::Read;
@@ -3129,7 +3146,7 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
-                    "write" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "write" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "write".to_string(),
                         func: |args| {
                             use std::io::Write;
@@ -3142,7 +3159,7 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
-                    "close" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "close" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "close".to_string(),
                         func: |args| {
                             if let PyObject::File { file } = &mut *args[0].borrow_mut() {
@@ -3153,12 +3170,12 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
-                    "__enter__" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "__enter__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "__enter__".to_string(),
                         func: |args| Ok(args[0].clone()),
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
-                    "__exit__" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                    "__exit__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "__exit__".to_string(),
                         func: |_| Ok(py_none()),
                         self_obj: PyObjectRef::new(PyObject::None),
@@ -3340,7 +3357,7 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                     if i < 0 || i >= len {
                         return Err(PyError::index_error("bytes index out of range"));
                     }
-                    Ok(PyObjectRef::new(PyObject::Bytes(vec![b[i as usize]])))
+                    Ok(PyObjectRef::imm(PyObject::Bytes(vec![b[i as usize]])))
                 }
                 PyObject::Slice { start, stop, step } => {
                     let len = b.len();
@@ -3366,7 +3383,7 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                             i += step_val;
                         }
                     }
-                    Ok(PyObjectRef::new(PyObject::Bytes(result)))
+                    Ok(PyObjectRef::imm(PyObject::Bytes(result)))
                 }
                 _ => Err(PyError::type_error("bytes indices must be integers or slices")),
             }
@@ -3507,7 +3524,7 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     builtins.insert("None".to_string(), py_none());
     builtins.insert("True".to_string(), py_bool(true));
     builtins.insert("False".to_string(), py_bool(false));
-    builtins.insert("Ellipsis".to_string(), PyObjectRef::new(PyObject::Str("...".to_string())));
+    builtins.insert("Ellipsis".to_string(), PyObjectRef::imm(PyObject::Str("...".to_string())));
 
     macro_rules! add_func {
         ($name:expr, $func:expr) => {

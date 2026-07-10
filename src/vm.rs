@@ -196,7 +196,7 @@ impl VirtualMachine {
                         ConstValue::Bool(b) => py_bool(*b),
                         ConstValue::Int(s) => {
                             if let Ok(n) = s.parse::<i64>() { py_int(n) }
-                            else { let n: num_bigint::BigInt = s.parse().ok()?; PyObjectRef::new(PyObject::Int(n)) }
+                            else { let n: num_bigint::BigInt = s.parse().ok()?; PyObjectRef::imm(PyObject::Int(n)) }
                         }
                         ConstValue::Float(s) => py_float(s.parse().ok()?),
                         ConstValue::String(s) => py_str(s),
@@ -279,7 +279,7 @@ impl VirtualMachine {
                             let n: BigInt = s.parse().map_err(|_| {
                                 PyError::value_error(format!("invalid integer: {}", s))
                             })?;
-                            PyObjectRef::new(PyObject::Int(n))
+                            PyObjectRef::imm(PyObject::Int(n))
                         }
                     }
                     ConstValue::Float(s) => {
@@ -289,9 +289,9 @@ impl VirtualMachine {
                         py_float(f)
                     }
                     ConstValue::String(s) => py_str(&s),
-                    ConstValue::Bytes(b) => PyObjectRef::new(PyObject::Bytes(b)),
+                    ConstValue::Bytes(b) => PyObjectRef::imm(PyObject::Bytes(b)),
                     ConstValue::Code(code) => {
-                        PyObjectRef::new(PyObject::Code(code))
+                        PyObjectRef::imm(PyObject::Code(code))
                     }
                 };
                 self.frames[fi].push(obj);
@@ -572,7 +572,7 @@ impl VirtualMachine {
                 let step = if nargs >= 3 { Some(self.frames[fi].pop()?) } else { None };
                 let stop = if nargs >= 2 { Some(self.frames[fi].pop()?) } else { None };
                 let start = if nargs >= 1 { Some(self.frames[fi].pop()?) } else { None };
-                self.frames[fi].push(PyObjectRef::new(PyObject::Slice {
+                self.frames[fi].push(PyObjectRef::imm(PyObject::Slice {
                     start: start.unwrap_or(py_none()),
                     stop: stop.unwrap_or(py_none()),
                     step: step.unwrap_or(py_none()),
@@ -745,7 +745,7 @@ impl VirtualMachine {
                                 (name.clone(), *func)
                             } else { return Err(PyError::runtime_error("expected __next__ method")) }
                         };
-                        let fixed = PyObjectRef::new(PyObject::BuiltinMethod {
+                        let fixed = PyObjectRef::imm(PyObject::BuiltinMethod {
                             name: n,
                             func: f,
                             self_obj: gen.clone(),
@@ -844,7 +844,7 @@ impl VirtualMachine {
                                                 return Some(val.clone());
                                             }
                                             PyObject::Function { .. } => {
-                                                return Some(PyObjectRef::new(PyObject::BoundMethod {
+                                                return Some(PyObjectRef::imm(PyObject::BoundMethod {
                                                     func: val.clone(),
                                                     self_obj: obj.clone(),
                                                 }));
@@ -866,7 +866,7 @@ impl VirtualMachine {
                             let cached = ATTR_CACHE.with(|c| c.borrow().get(&(type_name.clone(), name.clone())).copied());
                             if let Some(func) = cached {
                                 drop(obj_borrowed);
-                                Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                                Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                                     name: name.clone(),
                                     func,
                                     self_obj: obj.clone(),
@@ -887,13 +887,13 @@ impl VirtualMachine {
                                     };
                                     // Cache for next time
                                     ATTR_CACHE.with(|c| { c.borrow_mut().insert((type_name.clone(), n.clone()), func); });
-                                    Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                                    Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                                         name: n,
                                         func,
                                         self_obj: obj.clone(),
                                     }))
                                 } else if is_function {
-                                    Ok(PyObjectRef::new(PyObject::BoundMethod {
+                                    Ok(PyObjectRef::imm(PyObject::BoundMethod {
                                         func: attr,
                                         self_obj: obj.clone(),
                                     }))
@@ -1100,7 +1100,7 @@ impl VirtualMachine {
             }
 
             Opcode::LOAD_BUILD_CLASS => {
-                self.frames[fi].push(PyObjectRef::new(PyObject::BuildClass));
+                self.frames[fi].push(PyObjectRef::imm(PyObject::BuildClass));
             }
 
             Opcode::LOAD_CLOSURE => {
@@ -1485,7 +1485,7 @@ impl VirtualMachine {
                         }
                         _ => "Exception".to_string(),
                     };
-                    PyObjectRef::new(PyObject::Exception {
+                    PyObjectRef::imm(PyObject::Exception {
                         typ,
                         args: vec![py_str(&error.message())],
                         cause: None,
