@@ -510,7 +510,30 @@ pub fn py_set() -> PyObjectRef {
 
 // ---- Binary Operations ----
 
+fn try_dunder_binop(a: &PyObjectRef, b: &PyObjectRef, method: &str) -> PyResult<Option<PyObjectRef>> {
+    let f = {
+        let a_borrowed = a.borrow();
+        match &*a_borrowed {
+            PyObject::Instance { typ, .. } => {
+                let typ_ref = typ.borrow();
+                match &*typ_ref {
+                    PyObject::Type { dict: type_dict, .. } => type_dict.get(method).cloned(),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    };
+    if let Some(f) = f {
+        let result = call_bound_method(f, a.clone(), vec![b.clone()])?;
+        Ok(Some(result))
+    } else {
+        Ok(None)
+    }
+}
+
 pub fn py_add(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
+    if let Some(r) = try_dunder_binop(a, b, "__add__")? { return Ok(r); }
     let a_obj = a.borrow();
     let b_obj = b.borrow();
     match (&*a_obj, &*b_obj) {
@@ -535,6 +558,7 @@ pub fn py_add(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
 }
 
 pub fn py_sub(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
+    if let Some(r) = try_dunder_binop(a, b, "__sub__")? { return Ok(r); }
     let a_obj = a.borrow();
     let b_obj = b.borrow();
     match (&*a_obj, &*b_obj) {
@@ -548,6 +572,7 @@ pub fn py_sub(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
 }
 
 pub fn py_mul(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
+    if let Some(r) = try_dunder_binop(a, b, "__mul__")? { return Ok(r); }
     let a_obj = a.borrow();
     let b_obj = b.borrow();
     match (&*a_obj, &*b_obj) {
@@ -597,6 +622,7 @@ pub fn py_mul(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
 }
 
 pub fn py_div(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
+    if let Some(r) = try_dunder_binop(a, b, "__truediv__")? { return Ok(r); }
     let a_obj = a.borrow();
     let b_obj = b.borrow();
     match (&*a_obj, &*b_obj) {
@@ -622,6 +648,7 @@ pub fn py_div(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
 }
 
 pub fn py_floor_div(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
+    if let Some(r) = try_dunder_binop(a, b, "__floordiv__")? { return Ok(r); }
     let a_obj = a.borrow();
     let b_obj = b.borrow();
     match (&*a_obj, &*b_obj) {
@@ -652,6 +679,7 @@ pub fn py_floor_div(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
 }
 
 pub fn py_mod(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
+    if let Some(r) = try_dunder_binop(a, b, "__mod__")? { return Ok(r); }
     let a_obj = a.borrow();
     let b_obj = b.borrow();
     match (&*a_obj, &*b_obj) {
@@ -674,6 +702,7 @@ pub fn py_mod(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
 }
 
 pub fn py_pow(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
+    if let Some(r) = try_dunder_binop(a, b, "__pow__")? { return Ok(r); }
     let a_obj = a.borrow();
     let b_obj = b.borrow();
     match (&*a_obj, &*b_obj) {
@@ -700,6 +729,7 @@ pub fn py_pow(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
 }
 
 pub fn py_lshift(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
+    if let Some(r) = try_dunder_binop(a, b, "__lshift__")? { return Ok(r); }
     let a_obj = a.borrow();
     let b_obj = b.borrow();
     match (&*a_obj, &*b_obj) {
@@ -713,6 +743,7 @@ pub fn py_lshift(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
 }
 
 pub fn py_rshift(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
+    if let Some(r) = try_dunder_binop(a, b, "__rshift__")? { return Ok(r); }
     let a_obj = a.borrow();
     let b_obj = b.borrow();
     match (&*a_obj, &*b_obj) {
@@ -726,6 +757,7 @@ pub fn py_rshift(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
 }
 
 pub fn py_bit_or(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
+    if let Some(r) = try_dunder_binop(a, b, "__or__")? { return Ok(r); }
     let a_obj = a.borrow();
     let b_obj = b.borrow();
     match (&*a_obj, &*b_obj) {
@@ -736,6 +768,7 @@ pub fn py_bit_or(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
 }
 
 pub fn py_bit_xor(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
+    if let Some(r) = try_dunder_binop(a, b, "__xor__")? { return Ok(r); }
     let a_obj = a.borrow();
     let b_obj = b.borrow();
     match (&*a_obj, &*b_obj) {
@@ -746,6 +779,7 @@ pub fn py_bit_xor(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
 }
 
 pub fn py_bit_and(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
+    if let Some(r) = try_dunder_binop(a, b, "__and__")? { return Ok(r); }
     let a_obj = a.borrow();
     let b_obj = b.borrow();
     match (&*a_obj, &*b_obj) {
@@ -850,6 +884,24 @@ impl Compare for PyObject {
 // ---- Containment ----
 
 pub fn contains_op(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<bool> {
+    // Check for __contains__ on instances
+    let f = {
+        let container = a.borrow();
+        match &*container {
+            PyObject::Instance { typ, .. } => {
+                let typ_ref = typ.borrow();
+                match &*typ_ref {
+                    PyObject::Type { dict: type_dict, .. } => type_dict.get("__contains__").cloned(),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    };
+    if let Some(f) = f {
+        let result = call_bound_method(f, a.clone(), vec![b.clone()])?;
+        return Ok(result.truthy());
+    }
     let container = a.borrow();
     match &*container {
         PyObject::Str(s) => {
@@ -1322,7 +1374,23 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() != 1 {
         return Err(PyError::type_error("iter() takes exactly one argument"));
     }
-    // For now, return the list itself as iterator (simplified)
+    // Check for __iter__ on instances
+    let f = {
+        let obj = args[0].borrow();
+        match &*obj {
+            PyObject::Instance { typ, .. } => {
+                let typ_ref = typ.borrow();
+                match &*typ_ref {
+                    PyObject::Type { dict: type_dict, .. } => type_dict.get("__iter__").cloned(),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    };
+    if let Some(f) = f {
+        return call_bound_method(f, args[0].clone(), vec![]);
+    }
     Ok(args[0].clone())
 }
 
@@ -1330,7 +1398,24 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() < 1 {
         return Err(PyError::type_error("next() takes at least 1 argument"));
     }
-    // For now, only work with lists as iterators
+    // Check for __next__ on instances
+    let f = {
+        let obj = args[0].borrow();
+        match &*obj {
+            PyObject::Instance { typ, .. } => {
+                let typ_ref = typ.borrow();
+                match &*typ_ref {
+                    PyObject::Type { dict: type_dict, .. } => type_dict.get("__next__").cloned(),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    };
+    if let Some(f) = f {
+        return call_bound_method(f, args[0].clone(), vec![]);
+    }
+    // Fallback to list-based iteration
     let mut obj = args[0].borrow_mut();
     match &mut *obj {
         PyObject::List(v) => {
