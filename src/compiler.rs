@@ -626,7 +626,7 @@ impl Compiler {
                     // Match subject, compare with pattern value (simple match value only)
                     match &case.pattern {
                         Pattern::MatchValue(val) => {
-                            self.emit(Opcode::COPY, 1);
+                            self.emit(Opcode::DUP_TOP, 0);
                             self.compile_expr(val)?;
                             self.emit(Opcode::COMPARE_OP, 2); // ==
                             if case.guard.is_some() {
@@ -640,17 +640,24 @@ impl Compiler {
                                 self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_case);
                             }
                         }
-                        Pattern::MatchAs { pattern: _, name: Some(n) } => {
+                        Pattern::MatchAs { name: Some(n), .. } => {
                             let idx = self.add_varname(n) as u32;
-                            self.emit(Opcode::COPY, 1);
+                            self.emit(Opcode::DUP_TOP, 0);
                             self.emit(Opcode::STORE_FAST, idx);
                             if let Some(guard) = &case.guard {
                                 self.compile_expr(guard)?;
                                 self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_case);
                             }
                         }
+                        Pattern::MatchAs { name: None, .. } => {
+                            // Wildcard: always matches
+                            if let Some(guard) = &case.guard {
+                                self.compile_expr(guard)?;
+                                self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_case);
+                            }
+                        }
                         Pattern::MatchSingleton(s) => {
-                            self.emit(Opcode::COPY, 1);
+                            self.emit(Opcode::DUP_TOP, 0);
                             let const_idx = self.get_const_index(match s.as_str() {
                                 "None" => ConstValue::None,
                                 "True" => ConstValue::Bool(true),

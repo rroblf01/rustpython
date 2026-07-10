@@ -458,7 +458,7 @@ impl Parser {
     fn parse_match_cases(&mut self) -> Result<Vec<MatchCase>, String> {
         let mut cases = Vec::new();
         loop {
-            self.skip_over_blank_lines();
+            while self.eat(&Token::Newline) || self.eat(&Token::Indent) || self.eat(&Token::Dedent) {}
             if !self.eat(&Token::Case) {
                 break;
             }
