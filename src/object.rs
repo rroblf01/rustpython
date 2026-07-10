@@ -416,6 +416,32 @@ impl PyObject {
                 }
                 Ok(h)
             }
+            PyObject::Instance { typ, dict } => {
+                // Check for __hash__ method
+                let f = {
+                    let typ_ref = typ.borrow();
+                    match &*typ_ref {
+                        PyObject::Type { dict: type_dict, .. } => type_dict.get("__hash__").cloned(),
+                        _ => None,
+                    }
+                };
+                if let Some(f) = f {
+                    let result = call_bound_method(f, PyObjectRef::new(PyObject::Instance { typ: typ.clone(), dict: dict.clone() }), vec![])?;
+                    let n = result.borrow();
+                    if let PyObject::Int(i) = &*n {
+                        let bytes = i.to_signed_bytes_le();
+                        let mut h: usize = 0;
+                        for (j, &b) in bytes.iter().enumerate() {
+                            h ^= (b as usize) << ((j % (std::mem::size_of::<usize>())) * 8);
+                        }
+                        Ok(h)
+                    } else {
+                        Err(PyError::type_error("__hash__ should return an integer"))
+                    }
+                } else {
+                    Err(PyError::type_error(format!("unhashable type: '{}'", self.type_name())))
+                }
+            }
             _ => Err(PyError::type_error(format!("unhashable type: '{}'", self.type_name()))),
         }
     }

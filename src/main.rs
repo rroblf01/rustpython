@@ -43,6 +43,8 @@ fn run_repl() {
 
     let mut source_buf = String::new();
     let mut vm = VirtualMachine::new();
+    let mut history: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+    const MAX_HISTORY: usize = 100;
 
     loop {
         let prompt = if source_buf.is_empty() { ">>> " } else { "... " };
@@ -60,9 +62,16 @@ fn run_repl() {
                 if trimmed == "exit()" || trimmed == "quit()" {
                     break;
                 }
+                if !trimmed.is_empty() {
+                    if history.back().map_or(true, |last| last != trimmed) {
+                        history.push_back(trimmed.to_string());
+                        if history.len() > MAX_HISTORY {
+                            history.pop_front();
+                        }
+                    }
+                }
                 if trimmed.is_empty() && !source_buf.is_empty() {
                     source_buf.push('\n');
-                    // Execute
                     match run_source_in_vm(&mut vm, &source_buf, "<stdin>") {
                         Ok(val) => {
                             if !matches!(&*val.borrow(), object::PyObject::None) {
@@ -76,7 +85,6 @@ fn run_repl() {
                     source_buf.clear();
                 } else {
                     source_buf.push_str(&line);
-                    // Check if it's a complete statement
                     if is_complete_statement(&source_buf) {
                         match run_source_in_vm(&mut vm, &source_buf, "<stdin>") {
                             Ok(val) => {

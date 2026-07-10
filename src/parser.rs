@@ -1250,7 +1250,30 @@ impl Parser {
                         first
                     }
                 } else {
-                    let first = self.parse_expr()?;
+                    let first = self.parse_bitwise_or()?;
+                    if self.eat(&Token::For) {
+                        // Generator expression: (expr for x in iter)
+                        let target = self.parse_bitwise_or()?;
+                        self.expect(&Token::In)?;
+                        let iter = self.parse_or_expr()?;
+                        let mut generators = vec![Comprehension { target: Box::new(target), iter: Box::new(iter), ifs: Vec::new(), is_async: false }];
+                        while self.eat(&Token::For) {
+                            let t = self.parse_bitwise_or()?;
+                            self.expect(&Token::In)?;
+                            let i = self.parse_or_expr()?;
+                            generators.push(Comprehension { target: Box::new(t), iter: Box::new(i), ifs: Vec::new(), is_async: false });
+                        }
+                        if self.eat(&Token::If) {
+                            if let Some(last) = generators.last_mut() {
+                                last.ifs.push(self.parse_or_expr()?);
+                                while self.eat(&Token::If) {
+                                    last.ifs.push(self.parse_or_expr()?);
+                                }
+                            }
+                        }
+                        self.expect(&Token::RightParen)?;
+                        return Ok(Expr::GeneratorExp { elt: Box::new(first), generators });
+                    }
                     if self.eat(&Token::Comma) {
                         let mut elts = vec![first];
                         loop {
