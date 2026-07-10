@@ -234,7 +234,7 @@ impl Parser {
     // ---- Compound statements ----
 
     fn parse_function_def(&mut self) -> Result<Stmt, String> {
-        let mut decorator_list = Vec::new();
+        let decorator_list = Vec::new();
         if self.at(&Token::Async) {
             self.next(); // async
         }
@@ -1233,11 +1233,11 @@ impl Parser {
                     // Single-element tuple or named expression
                     let first = self.parse_expr()?;
                     if self.eat(&Token::Comma) {
-                        let mut elts = vec![first];
+                        let elts = vec![first];
                         while self.eat(&Token::Comma) {}
                         self.expect(&Token::RightParen)?;
                         Expr::Tuple(elts)
-                    } else if self.eat(&Token::Equal) {
+                    } else if self.eat(&Token::Walrus) {
                         // Walrus operator (:=)
                         let value = self.parse_expr()?;
                         self.expect(&Token::RightParen)?;
@@ -1272,9 +1272,16 @@ impl Parser {
                             }
                         }
                         self.expect(&Token::RightParen)?;
-                        return Ok(Expr::GeneratorExp { elt: Box::new(first), generators });
-                    }
-                    if self.eat(&Token::Comma) {
+                        Expr::GeneratorExp { elt: Box::new(first), generators }
+                    } else if self.eat(&Token::Walrus) {
+                        // Walrus operator: (x := expr)
+                        let value = self.parse_expr()?;
+                        self.expect(&Token::RightParen)?;
+                        Expr::NamedExpr {
+                            target: Box::new(first),
+                            value: Box::new(value),
+                        }
+                    } else if self.eat(&Token::Comma) {
                         let mut elts = vec![first];
                         loop {
                             if self.at(&Token::RightParen) { break; }

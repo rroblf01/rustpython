@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use crate::ast::*;
 use crate::bytecode::*;
 
@@ -583,7 +583,7 @@ impl Compiler {
                 self.emit(Opcode::POP_TOP, 0);
             }
             Stmt::With { items, body } => {
-                for (i, item) in items.iter().enumerate() {
+                for (_i, item) in items.iter().enumerate() {
                     self.compile_expr(&item.context_expr)?;
                     self.emit(Opcode::SETUP_WITH, 0);
                     if let Some(var) = &item.optional_vars {
@@ -932,7 +932,7 @@ impl Compiler {
                     BoolOp::And => (Opcode::POP_JUMP_IF_FALSE, ConstValue::Bool(false)),
                     BoolOp::Or => (Opcode::POP_JUMP_IF_TRUE, ConstValue::Bool(true)),
                 };
-                let short_val_idx = self.get_const_index(short_circuit) as u32;
+                let _short_val_idx = self.get_const_index(short_circuit) as u32;
                 for (i, val) in values.iter().enumerate() {
                     if i > 0 {
                         // Emit target: NOP label
@@ -977,7 +977,7 @@ impl Compiler {
                     self.compile_expr(arg)?;
                 }
                 for kw in keywords {
-                    if let Some(name) = &kw.arg {
+                    if let Some(_name) = &kw.arg {
                         // Keyword argument
                         self.compile_expr(&kw.value)?;
                     } else {
@@ -1116,7 +1116,7 @@ impl Compiler {
             }
             Expr::NamedExpr { target, value } => {
                 self.compile_expr(value)?;
-                self.emit(Opcode::COPY, 1);
+                self.emit(Opcode::DUP_TOP, 0);
                 self.compile_assign_target(target)?;
             }
             Expr::DictComp { .. } => {
@@ -1142,7 +1142,7 @@ impl Compiler {
             self.emit(Opcode::BUILD_LIST, 0);
         }
 
-        let start_label = self.new_label();
+        let _start_label = self.new_label();
         let end_label = self.new_label();
         let comp_start_label = self.new_label();
 

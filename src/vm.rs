@@ -978,7 +978,7 @@ impl VirtualMachine {
 
             Opcode::LOAD_CLOSURE => {
                 let idx = instr.arg as usize;
-                let (name, cell) = {
+                let (_name, cell) = {
                     let f = &self.frames[self.frames.len() - 1];
                     let name = if idx < f.code.cellvars.len() {
                         f.code.cellvars[idx].clone()
@@ -999,7 +999,7 @@ impl VirtualMachine {
             }
 
             Opcode::FORMAT_WITH_SPEC => {
-                let spec = self.frames.last_mut().unwrap().pop()?;
+                let _spec = self.frames.last_mut().unwrap().pop()?;
                 let val = self.frames.last_mut().unwrap().pop()?;
                 self.frames.last_mut().unwrap().push(py_str(&val.str()));
             }
@@ -1029,7 +1029,7 @@ impl VirtualMachine {
             Opcode::SETUP_WITH => {
                 // Simplified: just enter the context manager
                 let mgr = self.frames.last().unwrap().peek(0)?;
-                let exit_method = {
+                let _exit_method = {
                     let obj = mgr.borrow();
                     obj.get_attribute("__exit__").ok()
                 };
@@ -1176,7 +1176,7 @@ impl VirtualMachine {
             match &*func.borrow() {
                 PyObject::Function { code, .. } => {
                     let code = code.clone();
-                    let mut new_frame = Frame::new(code, namespace.clone(), self.builtins.clone());
+                    let new_frame = Frame::new(code, namespace.clone(), self.builtins.clone());
                     self.frames.push(new_frame);
                     self.execute()?;
                     self.frames.pop();

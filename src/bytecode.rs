@@ -1,6 +1,7 @@
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(non_camel_case_types)]
 pub enum Opcode {
     // Actual opcodes matching CPython
     BINARY_OP = 42,

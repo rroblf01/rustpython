@@ -2,7 +2,7 @@ use std::rc::Rc;
 use std::cell::RefCell;
 use std::fmt;
 use std::collections::HashMap;
-use num_bigint::{BigInt, Sign, ToBigInt};
+use num_bigint::{BigInt, Sign};
 use num_traits::{Zero, One, ToPrimitive, float::FloatCore, Signed};
 use crate::bytecode::CodeObject;
 
@@ -16,11 +16,11 @@ impl PyObjectRef {
         PyObjectRef(Rc::new(RefCell::new(obj)))
     }
 
-    pub fn borrow(&self) -> std::cell::Ref<PyObject> {
+    pub fn borrow(&self) -> std::cell::Ref<'_, PyObject> {
         self.0.borrow()
     }
 
-    pub fn borrow_mut(&self) -> std::cell::RefMut<PyObject> {
+    pub fn borrow_mut(&self) -> std::cell::RefMut<'_, PyObject> {
         self.0.borrow_mut()
     }
 
@@ -378,6 +378,23 @@ impl PyObject {
             PyObject::Tuple(v) => !v.is_empty(),
             PyObject::Dict(d) => !d.is_empty(),
             PyObject::Set(s) => !s.is_empty(),
+            PyObject::Instance { typ, .. } => {
+                // Check for __bool__ method
+                // If no __bool__, objects are truthy by default
+                let f = {
+                    let typ_ref = typ.borrow();
+                    match &*typ_ref {
+                        PyObject::Type { dict: type_dict, .. } => type_dict.get("__bool__").cloned(),
+                        _ => None,
+                    }
+                };
+                if let Some(f) = f {
+                    if let Ok(result) = call_bound_method(f, PyObjectRef::new(PyObject::Instance { typ: typ.clone(), dict: HashMap::new() }), vec![]) {
+                        return result.truthy();
+                    }
+                }
+                true
+            }
             _ => true,
         }
     }
@@ -1183,7 +1200,7 @@ pub fn builtin_tuple(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
 }
 
-pub fn builtin_dict(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+pub fn builtin_dict(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Ok(py_dict())
 }
 
@@ -1723,6 +1740,33 @@ pub fn builtin_help(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Ok(py_none())
 }
 
+pub fn builtin_eval(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() {
+        return Err(PyError::type_error("eval() requires at least 1 argument"));
+    }
+    let source = args[0].str();
+    let mut parser = crate::parser::Parser::new(&source);
+    let program = parser.parse_program().map_err(|e| PyError::type_error(format!("eval parse error: {}", e)))?;
+    let mut compiler = crate::compiler::Compiler::new();
+    let code = compiler.compile(&program, "<eval>").map_err(|e| PyError::type_error(format!("eval compile error: {}", e)))?;
+    let mut vm = crate::vm::VirtualMachine::new();
+    vm.run(code).map_err(|e| PyError::type_error(format!("eval error: {}", e)))
+}
+
+pub fn builtin_exec(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() {
+        return Err(PyError::type_error("exec() requires at least 1 argument"));
+    }
+    let source = args[0].str();
+    let mut parser = crate::parser::Parser::new(&source);
+    let program = parser.parse_program().map_err(|e| PyError::type_error(format!("exec parse error: {}", e)))?;
+    let mut compiler = crate::compiler::Compiler::new();
+    let code = compiler.compile(&program, "<exec>").map_err(|e| PyError::type_error(format!("exec compile error: {}", e)))?;
+    let mut vm = crate::vm::VirtualMachine::new();
+    vm.run(code).map_err(|e| PyError::type_error(format!("exec error: {}", e)))?;
+    Ok(py_none())
+}
+
 pub fn builtin_super(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // super() with no args or super(class, instance)
     if args.len() == 2 {
@@ -1872,7 +1916,7 @@ impl ObjectAccess for PyObject {
                     }
                 }).ok_or_else(|| PyError::attribute_error(format!("instance has no attribute '{}'", name)))
             }
-            PyObject::List(v) => {
+            PyObject::List(_v) => {
                 match name {
                     "append" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
                         name: "append".to_string(),
@@ -1921,7 +1965,7 @@ impl ObjectAccess for PyObject {
                     _ => Err(PyError::attribute_error(format!("'list' object has no attribute '{}'", name))),
                 }
             }
-            PyObject::Str(s) => {
+            PyObject::Str(_s) => {
                 match name {
                     "split" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
                         name: "split".to_string(),
@@ -1981,7 +2025,7 @@ impl ObjectAccess for PyObject {
                     _ => Err(PyError::attribute_error(format!("'str' object has no attribute '{}'", name))),
                 }
             }
-            PyObject::Dict(d) => {
+            PyObject::Dict(_d) => {
                 match name {
                     "keys" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
                         name: "keys".to_string(),
@@ -2051,7 +2095,7 @@ impl ObjectAccess for PyObject {
             PyObject::Function { dict, .. } => {
                 dict.get(name).cloned().ok_or_else(|| PyError::attribute_error(format!("'function' object has no attribute '{}'", name)))
             }
-            PyObject::Generator { frame } => {
+            PyObject::Generator { frame: _ } => {
                 match name {
                     "__next__" | "send" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
                         name: name.to_string(),
@@ -2101,7 +2145,7 @@ impl ObjectAccess for PyObject {
                     _ => Err(PyError::attribute_error(format!("'generator' object has no attribute '{}'", name))),
                 }
             }
-            PyObject::File { file } => {
+            PyObject::File { file: _ } => {
                 match name {
                     "read" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
                         name: "read".to_string(),
@@ -2460,6 +2504,8 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     add_func!("reversed", builtin_reversed);
     add_func!("issubclass", builtin_issubclass);
     add_func!("help", builtin_help);
+    add_func!("eval", builtin_eval);
+    add_func!("exec", builtin_exec);
     add_func!("super", builtin_super);
     add_func!("map", builtin_map);
     add_func!("filter", builtin_filter);

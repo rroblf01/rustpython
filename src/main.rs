@@ -23,7 +23,7 @@ fn run_source(source: &str, filename: &str) -> Result<(), String> {
 
     let mut vm = VirtualMachine::new();
     match vm.run(code) {
-        Ok(val) => {
+        Ok(_val) => {
             // Module execution results in None at end
             Ok(())
         }
