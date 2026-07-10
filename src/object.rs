@@ -8,48 +8,94 @@ use crate::bytecode::CodeObject;
 
 pub type BuiltinFunc = fn(&[PyObjectRef]) -> PyResult<PyObjectRef>;
 
+/// Temporary owned or Ref PyObject for inline values
+pub enum RefOrOwned<'a> {
+    Ref(std::cell::Ref<'a, PyObject>),
+    Owned(PyObject),
+}
+
+impl<'a> std::ops::Deref for RefOrOwned<'a> {
+    type Target = PyObject;
+    fn deref(&self) -> &PyObject {
+        match self { RefOrOwned::Ref(r) => &**r, RefOrOwned::Owned(o) => o }
+    }
+}
+
 #[derive(Clone)]
-pub struct PyObjectRef(pub Rc<RefCell<PyObject>>);
+pub enum PyObjectRef {
+    SmallInt(i64),
+    SmallBool(bool),
+    None,
+    Obj(Rc<RefCell<PyObject>>),
+}
 
 impl PyObjectRef {
     pub fn new(obj: PyObject) -> Self {
-        PyObjectRef(Rc::new(RefCell::new(obj)))
+        PyObjectRef::Obj(Rc::new(RefCell::new(obj)))
     }
 
-    pub fn borrow(&self) -> std::cell::Ref<'_, PyObject> {
-        self.0.borrow()
+    pub fn borrow(&self) -> RefOrOwned<'_> {
+        match self {
+            PyObjectRef::SmallInt(n) => RefOrOwned::Owned(PyObject::Int(BigInt::from(*n))),
+            PyObjectRef::SmallBool(b) => RefOrOwned::Owned(PyObject::Bool(*b)),
+            PyObjectRef::None => RefOrOwned::Owned(PyObject::None),
+            PyObjectRef::Obj(rc) => RefOrOwned::Ref(rc.borrow()),
+        }
     }
 
     pub fn borrow_mut(&self) -> std::cell::RefMut<'_, PyObject> {
-        self.0.borrow_mut()
+        match self { PyObjectRef::Obj(rc) => rc.borrow_mut(), _ => panic!("borrow_mut on inline value") }
+    }
+
+    /// Fast path: extract i64 without borrow() — avoids BigInt creation
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            PyObjectRef::SmallInt(n) => Some(*n),
+            _ => None,
+        }
     }
 
     pub fn is(&self, other: &PyObjectRef) -> bool {
-        Rc::ptr_eq(&self.0, &other.0)
+        match (self, other) {
+            (PyObjectRef::SmallInt(a), PyObjectRef::SmallInt(b)) => a == b,
+            (PyObjectRef::SmallBool(a), PyObjectRef::SmallBool(b)) => a == b,
+            (PyObjectRef::None, PyObjectRef::None) => true,
+            (PyObjectRef::Obj(a), PyObjectRef::Obj(b)) => Rc::ptr_eq(a, b),
+            _ => false,
+        }
     }
 
-    pub fn repr(&self) -> String {
-        self.borrow().repr()
-    }
-
-    pub fn str(&self) -> String {
-        self.borrow().str()
-    }
-
+    pub fn repr(&self) -> String { self.borrow().repr() }
+    pub fn str(&self) -> String { self.borrow().str() }
     pub fn truthy(&self) -> bool {
-        self.borrow().truthy()
+        match self {
+            PyObjectRef::SmallInt(n) => *n != 0,
+            PyObjectRef::SmallBool(b) => *b,
+            PyObjectRef::None => false,
+            PyObjectRef::Obj(rc) => rc.borrow().truthy(),
+        }
     }
-
     pub fn hash(&self) -> PyResult<usize> {
-        self.borrow().hash()
+        match self {
+            PyObjectRef::SmallInt(n) => {
+                let mut h: usize = 0;
+                let bytes = BigInt::from(*n).to_signed_bytes_le();
+                for (j, &b) in bytes.iter().enumerate() { h ^= (b as usize) << ((j % 8) * 8); }
+                Ok(h)
+            }
+            PyObjectRef::SmallBool(b) => Ok(if *b { 1 } else { 0 }),
+            PyObjectRef::None => Ok(0),
+            PyObjectRef::Obj(rc) => rc.borrow().hash(),
+        }
     }
+    pub fn equals(&self, other: &PyObjectRef) -> PyResult<bool> { self.borrow().equals(other) }
+    pub fn get_type_name(&self) -> String { self.borrow().type_name() }
 
-    pub fn equals(&self, other: &PyObjectRef) -> PyResult<bool> {
-        self.borrow().equals(other)
-    }
-
-    pub fn get_type_name(&self) -> String {
-        self.borrow().type_name()
+    pub fn get_id(&self) -> usize {
+        match self {
+            PyObjectRef::Obj(rc) => Rc::as_ptr(rc) as *const PyObject as usize,
+            inline => inline as *const PyObjectRef as usize,
+        }
     }
 }
 
@@ -628,35 +674,24 @@ fn escape_string(s: &str) -> String {
 
 // ---- Builtin Object Constructors ----
 
-pub fn py_none() -> PyObjectRef {
-    PyObjectRef::new(PyObject::None)
-}
-
-pub fn py_bool(b: bool) -> PyObjectRef {
-    PyObjectRef::new(PyObject::Bool(b))
-}
-
 thread_local! {
-    static SMALL_INT_CACHE: std::cell::RefCell<Option<Vec<PyObjectRef>>> = std::cell::RefCell::new(None);
     pub static VM_PTR: std::cell::RefCell<Option<*mut super::vm::VirtualMachine>> = std::cell::RefCell::new(None);
 }
 
 pub fn py_int(i: impl Into<BigInt>) -> PyObjectRef {
     let big = i.into();
     if let Some(n) = big.to_i64() {
-        if n >= -5 && n <= 999 {
-            return SMALL_INT_CACHE.with(|cache| {
-                let mut cache = cache.borrow_mut();
-                if cache.is_none() {
-                    let mut v = Vec::with_capacity(1005);
-                    for i in -5i64..=999 { v.push(PyObjectRef::new(PyObject::Int(BigInt::from(i)))); }
-                    *cache = Some(v);
-                }
-                cache.as_ref().unwrap()[(n + 5) as usize].clone()
-            });
-        }
+        return PyObjectRef::SmallInt(n);
     }
     PyObjectRef::new(PyObject::Int(big))
+}
+
+pub fn py_bool(b: bool) -> PyObjectRef {
+    PyObjectRef::SmallBool(b)
+}
+
+pub fn py_none() -> PyObjectRef {
+    PyObjectRef::None
 }
 
 pub fn py_float(f: f64) -> PyObjectRef {
@@ -708,6 +743,9 @@ fn try_dunder_binop(a: &PyObjectRef, b: &PyObjectRef, method: &str) -> PyResult<
 }
 
 pub fn py_add(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
+    if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
+        return Ok(py_int(ai + bi));
+    }
     if let Some(r) = try_dunder_binop(a, b, "__add__")? { return Ok(r); }
     let a_obj = a.borrow();
     let b_obj = b.borrow();
@@ -733,6 +771,9 @@ pub fn py_add(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
 }
 
 pub fn py_sub(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
+    if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
+        return Ok(py_int(ai - bi));
+    }
     if let Some(r) = try_dunder_binop(a, b, "__sub__")? { return Ok(r); }
     let a_obj = a.borrow();
     let b_obj = b.borrow();
@@ -748,6 +789,9 @@ pub fn py_sub(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
 }
 
 pub fn py_mul(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
+    if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
+        return Ok(py_int(ai * bi));
+    }
     if let Some(r) = try_dunder_binop(a, b, "__mul__")? { return Ok(r); }
     let a_obj = a.borrow();
     let b_obj = b.borrow();
@@ -824,6 +868,11 @@ pub fn py_div(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
 }
 
 pub fn py_floor_div(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
+    if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
+        if bi == 0 { return Err(PyError::zero_division()); }
+        let q = ai / bi; let r = ai % bi;
+        return if r != 0 && ((ai < 0) != (bi < 0)) { Ok(py_int(q - 1)) } else { Ok(py_int(q)) };
+    }
     if let Some(r) = try_dunder_binop(a, b, "__floordiv__")? { return Ok(r); }
     let a_obj = a.borrow();
     let b_obj = b.borrow();
@@ -831,7 +880,6 @@ pub fn py_floor_div(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
         (PyObject::Int(a), PyObject::Int(b)) => {
             if b.is_zero() { return Err(PyError::zero_division()); }
             if a.sign() == Sign::Minus && &(a % b) != &BigInt::zero() {
-                // Python floor division rounds toward negative infinity
                 Ok(py_int((a / b) - 1))
             } else {
                 Ok(py_int(a / b))
@@ -855,6 +903,11 @@ pub fn py_floor_div(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
 }
 
 pub fn py_mod(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
+    if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
+        if bi == 0 { return Err(PyError::zero_division()); }
+        let rem = ai % bi;
+        return if rem < 0 { Ok(py_int(rem + bi)) } else { Ok(py_int(rem)) };
+    }
     if let Some(r) = try_dunder_binop(a, b, "__mod__")? { return Ok(r); }
     let a_obj = a.borrow();
     let b_obj = b.borrow();
@@ -2051,8 +2104,7 @@ pub fn builtin_id(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() != 1 {
         return Err(PyError::type_error("id() takes exactly one argument"));
     }
-    let ptr = &*args[0].0 as *const _ as usize;
-    Ok(py_int(ptr as i64))
+    Ok(py_int(args[0].get_id() as i64))
 }
 
 pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
