@@ -1326,14 +1326,32 @@ impl ObjectAccess for PyObject {
             PyObject::Module { dict, .. } => {
                 dict.get(name).cloned().ok_or_else(|| PyError::attribute_error(format!("module has no attribute '{}'", name)))
             }
-            PyObject::Type { dict, .. } => {
-                dict.get(name).cloned().ok_or_else(|| PyError::attribute_error(format!("type has no attribute '{}'", name)))
+            PyObject::Type { dict, mro, .. } => {
+                dict.get(name).cloned().or_else(|| {
+                    for base in mro.iter().skip(1) {
+                        if let PyObject::Type { dict: base_dict, .. } = &*base.borrow() {
+                            if let Some(val) = base_dict.get(name) {
+                                return Some(val.clone());
+                            }
+                        }
+                    }
+                    None
+                }).ok_or_else(|| PyError::attribute_error(format!("type has no attribute '{}'", name)))
             }
             PyObject::Instance { dict, typ } => {
                 dict.get(name).cloned().or_else(|| {
                     let typ_ref = typ.borrow();
-                    if let PyObject::Type { dict: type_dict, .. } = &*typ_ref {
-                        type_dict.get(name).cloned()
+                    if let PyObject::Type { dict: type_dict, mro, .. } = &*typ_ref {
+                        type_dict.get(name).cloned().or_else(|| {
+                            for base in mro.iter().skip(1) {
+                                if let PyObject::Type { dict: base_dict, .. } = &*base.borrow() {
+                                    if let Some(val) = base_dict.get(name) {
+                                        return Some(val.clone());
+                                    }
+                                }
+                            }
+                            None
+                        })
                     } else {
                         None
                     }

@@ -632,8 +632,17 @@ impl VirtualMachine {
                         PyObject::Instance { dict, typ } => {
                             dict.get(&name).cloned().or_else(|| {
                                 let typ_ref = typ.borrow();
-                                if let PyObject::Type { dict: type_dict, .. } = &*typ_ref {
-                                    type_dict.get(&name).cloned().map(|val| {
+                                if let PyObject::Type { dict: type_dict, mro, .. } = &*typ_ref {
+                                    type_dict.get(&name).cloned().or_else(|| {
+                                        for base in mro.iter().skip(1) {
+                                            if let PyObject::Type { dict: base_dict, .. } = &*base.borrow() {
+                                                if let Some(val) = base_dict.get(&name) {
+                                                    return Some(val.clone());
+                                                }
+                                            }
+                                        }
+                                        None
+                                    }).map(|val| {
                                         if matches!(&*val.borrow(), PyObject::Function { .. }) {
                                             PyObjectRef::new(PyObject::BoundMethod {
                                                 func: val,
@@ -970,12 +979,22 @@ impl VirtualMachine {
             return result;
         }
 
-        if let PyObject::Type { dict, .. } = &*callable.borrow() {
+        if let PyObject::Type { dict, mro, .. } = &*callable.borrow() {
             let instance = PyObjectRef::new(PyObject::Instance {
                 typ: callable.clone(),
                 dict: HashMap::new(),
             });
-            if let Some(init_func) = dict.get("__init__") {
+            let init_func = dict.get("__init__").cloned().or_else(|| {
+                for base in mro.iter().skip(1) {
+                    if let PyObject::Type { dict: base_dict, .. } = &*base.borrow() {
+                        if let Some(val) = base_dict.get("__init__") {
+                            return Some(val.clone());
+                        }
+                    }
+                }
+                None
+            });
+            if let Some(init_func) = init_func {
                 let init_borrowed = init_func.borrow();
                 match &*init_borrowed {
                     PyObject::BuiltinFunction { func, .. } => {
