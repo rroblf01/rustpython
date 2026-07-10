@@ -174,6 +174,7 @@ pub enum PyObject {
     Float(f64),
     Str(String),
     Bytes(Vec<u8>),
+    ByteArray(Vec<u8>),
     List(Vec<PyObjectRef>),
     Tuple(Vec<PyObjectRef>),
     Dict(HashMap<String, PyObjectRef>),
@@ -265,6 +266,7 @@ impl PyObject {
             PyObject::Float(_) => "float",
             PyObject::Str(_) => "str",
             PyObject::Bytes(_) => "bytes",
+            PyObject::ByteArray(_) => "bytearray",
             PyObject::List(_) => "list",
             PyObject::Tuple(_) => "tuple",
             PyObject::Dict(_) => "dict",
@@ -308,6 +310,7 @@ impl PyObject {
             }
             PyObject::Str(s) => format!("'{}'", escape_string(s)),
             PyObject::Bytes(b) => format!("b'{}'", String::from_utf8_lossy(b)),
+            PyObject::ByteArray(b) => format!("bytearray(b'{}')", String::from_utf8_lossy(b)),
             PyObject::List(items) => {
                 let items: Vec<String> = items.iter().map(|x| x.repr()).collect();
                 format!("[{}]", items.join(", "))
@@ -475,6 +478,7 @@ impl PyObject {
             (PyObject::Float(a), PyObject::Float(b)) => a == b,
             (PyObject::Str(a), PyObject::Str(b)) => a == b,
             (PyObject::Bytes(a), PyObject::Bytes(b)) => a == b,
+            (PyObject::ByteArray(a), PyObject::ByteArray(b)) => a == b,
             (PyObject::Dict(a), PyObject::Dict(b)) => {
                 let mut eq = true;
                 if a.len() != b.len() { eq = false; }
@@ -1022,6 +1026,7 @@ pub fn builtin_len(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         PyObject::Dict(d) => Ok(py_int(d.len())),
         PyObject::Set(s) => Ok(py_int(s.len())),
         PyObject::Bytes(b) => Ok(py_int(b.len())),
+        PyObject::ByteArray(b) => Ok(py_int(b.len())),
         PyObject::Instance { typ, .. } => {
             let f = {
                 let typ_ref = typ.borrow();
@@ -1233,6 +1238,299 @@ pub fn builtin_set(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             _ => Err(PyError::type_error(format!("cannot convert '{}' to set", obj.type_name()))),
         }
     }
+}
+
+pub fn builtin_bytes(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() { Ok(PyObjectRef::new(PyObject::Bytes(Vec::new()))) }
+    else {
+        let obj = args[0].borrow();
+        match &*obj {
+            PyObject::Int(i) => {
+                let n = i.to_i64().ok_or_else(|| PyError::value_error("bytes() requires int in range 0-255"))?;
+                if n < 0 || n > 255 {
+                    return Err(PyError::value_error("bytes() requires int in range 0-255"));
+                }
+                Ok(PyObjectRef::new(PyObject::Bytes(vec![n as u8])))
+            }
+            PyObject::Bytes(b) => Ok(PyObjectRef::new(PyObject::Bytes(b.clone()))),
+            PyObject::ByteArray(b) => Ok(PyObjectRef::new(PyObject::Bytes(b.clone()))),
+            PyObject::Str(s) => Ok(PyObjectRef::new(PyObject::Bytes(s.as_bytes().to_vec()))),
+            PyObject::List(v) => {
+                let mut result = Vec::new();
+                for item in v {
+                    let item = item.borrow();
+                    if let PyObject::Int(i) = &*item {
+                        let n = i.to_i64().ok_or_else(|| PyError::value_error("bytes() requires int in range 0-255"))?;
+                        if n < 0 || n > 255 {
+                            return Err(PyError::value_error("bytes() requires int in range 0-255"));
+                        }
+                        result.push(n as u8);
+                    } else {
+                        return Err(PyError::type_error("bytes() argument must be an integer or iterable"));
+                    }
+                }
+                Ok(PyObjectRef::new(PyObject::Bytes(result)))
+            }
+            PyObject::Tuple(v) => {
+                let mut result = Vec::new();
+                for item in v {
+                    let item = item.borrow();
+                    if let PyObject::Int(i) = &*item {
+                        let n = i.to_i64().ok_or_else(|| PyError::value_error("bytes() requires int in range 0-255"))?;
+                        if n < 0 || n > 255 {
+                            return Err(PyError::value_error("bytes() requires int in range 0-255"));
+                        }
+                        result.push(n as u8);
+                    } else {
+                        return Err(PyError::type_error("bytes() argument must be an integer or iterable"));
+                    }
+                }
+                Ok(PyObjectRef::new(PyObject::Bytes(result)))
+            }
+            _ => Err(PyError::type_error(format!("cannot convert '{}' to bytes", obj.type_name()))),
+        }
+    }
+}
+
+pub fn builtin_bytearray(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() { Ok(PyObjectRef::new(PyObject::ByteArray(Vec::new()))) }
+    else {
+        let obj = args[0].borrow();
+        match &*obj {
+            PyObject::Int(i) => {
+                let n = i.to_i64().ok_or_else(|| PyError::value_error("bytearray() requires int in range 0-255"))?;
+                if n < 0 || n > 255 {
+                    return Err(PyError::value_error("bytearray() requires int in range 0-255"));
+                }
+                Ok(PyObjectRef::new(PyObject::ByteArray(vec![n as u8])))
+            }
+            PyObject::Bytes(b) => Ok(PyObjectRef::new(PyObject::ByteArray(b.clone()))),
+            PyObject::ByteArray(b) => Ok(PyObjectRef::new(PyObject::ByteArray(b.clone()))),
+            PyObject::Str(s) => Ok(PyObjectRef::new(PyObject::ByteArray(s.as_bytes().to_vec()))),
+            PyObject::List(v) => {
+                let mut result = Vec::new();
+                for item in v {
+                    let item = item.borrow();
+                    if let PyObject::Int(i) = &*item {
+                        let n = i.to_i64().ok_or_else(|| PyError::value_error("bytearray() requires int in range 0-255"))?;
+                        if n < 0 || n > 255 {
+                            return Err(PyError::value_error("bytearray() requires int in range 0-255"));
+                        }
+                        result.push(n as u8);
+                    } else {
+                        return Err(PyError::type_error("bytearray() argument must be an integer or iterable"));
+                    }
+                }
+                Ok(PyObjectRef::new(PyObject::ByteArray(result)))
+            }
+            PyObject::Tuple(v) => {
+                let mut result = Vec::new();
+                for item in v {
+                    let item = item.borrow();
+                    if let PyObject::Int(i) = &*item {
+                        let n = i.to_i64().ok_or_else(|| PyError::value_error("bytearray() requires int in range 0-255"))?;
+                        if n < 0 || n > 255 {
+                            return Err(PyError::value_error("bytearray() requires int in range 0-255"));
+                        }
+                        result.push(n as u8);
+                    } else {
+                        return Err(PyError::type_error("bytearray() argument must be an integer or iterable"));
+                    }
+                }
+                Ok(PyObjectRef::new(PyObject::ByteArray(result)))
+            }
+            _ => Err(PyError::type_error(format!("cannot convert '{}' to bytearray", obj.type_name()))),
+        }
+    }
+}
+
+pub fn builtin_format(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    match args.len() {
+        0 => Err(PyError::type_error("format() requires at least 1 argument")),
+        1 => Ok(py_str(&args[0].str())),
+        2 => {
+            let val = args[0].str();
+            let spec = args[1].str();
+            if spec.trim().is_empty() {
+                return Ok(py_str(&val));
+            }
+            // Basic format: fill, align, width
+            let spec = spec.trim();
+            let s: Vec<char> = spec.chars().collect();
+            let mut idx = 0;
+            let fill_char = if idx < s.len() && !matches!(s[idx], '<' | '>' | '^' | '=') {
+                let c = s[idx]; idx += 1; c
+            } else { ' ' };
+            let align = if idx < s.len() && matches!(s[idx], '<' | '>' | '^' | '=') {
+                let c = s[idx]; idx += 1; Some(c)
+            } else { None };
+            let width_str: String = s[idx..].iter().take_while(|c| c.is_ascii_digit()).collect();
+            let width: usize = width_str.parse().unwrap_or(0);
+            if width > 0 {
+                let padding = width.saturating_sub(val.len());
+                match align {
+                    Some('<') | None => Ok(py_str(&format!("{}{}", val, fill_char.to_string().repeat(padding)))),
+                    Some('>') => Ok(py_str(&format!("{}{}", fill_char.to_string().repeat(padding), val))),
+                    Some('^') => {
+                        let left = padding / 2;
+                        let right = padding - left;
+                        Ok(py_str(&format!("{}{}{}", fill_char.to_string().repeat(left), val, fill_char.to_string().repeat(right))))
+                    }
+                    Some('=') => Ok(py_str(&val)),
+                    _ => Ok(py_str(&val)),
+                }
+            } else {
+                Ok(py_str(&val))
+            }
+        }
+        _ => Err(PyError::type_error("format() takes at most 2 arguments")),
+    }
+}
+
+pub fn builtin_object(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    // Create a new bare object instance
+    let object_type = PyObjectRef::new(PyObject::Type {
+        name: "object".to_string(),
+        dict: HashMap::new(),
+        bases: vec![],
+        mro: vec![],
+    });
+    Ok(PyObjectRef::new(PyObject::Instance {
+        typ: object_type,
+        dict: HashMap::new(),
+    }))
+}
+
+pub fn builtin_hash(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() != 1 {
+        return Err(PyError::type_error("hash() takes exactly one argument"));
+    }
+    let obj = args[0].borrow();
+    match &*obj {
+        PyObject::Int(i) => {
+            // Hash of int is the int itself (CPython behavior for small ints)
+            let i64_val = i.to_i64().unwrap_or(0);
+            Ok(py_int(i64_val))
+        }
+        PyObject::Float(f) => Ok(py_int(f.to_bits() as i64)),
+        PyObject::Bool(b) => Ok(py_int(if *b { 1 } else { 0 })),
+        PyObject::Str(s) => {
+            // Simple FNV-1a hash
+            let mut hash: u64 = 14695981039346656037;
+            for byte in s.bytes() {
+                hash ^= byte as u64;
+                hash = hash.wrapping_mul(1099511628211);
+            }
+            Ok(py_int(hash as i64))
+        }
+        PyObject::Bytes(b) => {
+            let mut hash: u64 = 14695981039346656037;
+            for byte in b {
+                hash ^= *byte as u64;
+                hash = hash.wrapping_mul(1099511628211);
+            }
+            Ok(py_int(hash as i64))
+        }
+        PyObject::ByteArray(b) => {
+            let mut hash: u64 = 14695981039346656037;
+            for byte in b {
+                hash ^= *byte as u64;
+                hash = hash.wrapping_mul(1099511628211);
+            }
+            Ok(py_int(hash as i64))
+        }
+        PyObject::Tuple(v) => {
+            let mut hash: u64 = 14695981039346656037;
+            for item in v {
+                let item_hash = builtin_hash(&[item.clone()])?;
+                let h = item_hash.borrow().clone();
+                if let PyObject::Int(i) = &h {
+                    let i64_val = i.to_i64().unwrap_or(0);
+                    hash ^= i64_val as u64;
+                    hash = hash.wrapping_mul(1099511628211);
+                }
+            }
+            Ok(py_int(hash as i64))
+        }
+        PyObject::None => Ok(py_int(123456789)),
+        _ => {
+            // For objects without a hash, use the pointer as hash
+            let ptr = &*obj as *const PyObject as usize;
+            Ok(py_int(ptr as i64))
+        }
+    }
+}
+
+pub fn builtin_slice(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    match args.len() {
+        1 => {
+            let stop = args[0].clone();
+            let none = py_none();
+            Ok(PyObjectRef::new(PyObject::Slice {
+                start: none.clone(),
+                stop,
+                step: none,
+            }))
+        }
+        2 => {
+            let start = args[0].clone();
+            let stop = args[1].clone();
+            let none = py_none();
+            Ok(PyObjectRef::new(PyObject::Slice {
+                start,
+                stop,
+                step: none,
+            }))
+        }
+        3 => {
+            Ok(PyObjectRef::new(PyObject::Slice {
+                start: args[0].clone(),
+                stop: args[1].clone(),
+                step: args[2].clone(),
+            }))
+        }
+        _ => Err(PyError::type_error("slice() takes at most 3 arguments")),
+    }
+}
+
+pub fn builtin_dir(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() {
+        return Ok(py_list(Vec::new()));
+    }
+    let obj = args[0].borrow();
+    let mut names = Vec::new();
+    match &*obj {
+        PyObject::Instance { dict, .. } | PyObject::Module { dict, .. } => {
+            for key in dict.keys() {
+                names.push(py_str(key));
+            }
+        }
+        PyObject::Type { dict, .. } => {
+            for key in dict.keys() {
+                names.push(py_str(key));
+            }
+        }
+        _ => {}
+    }
+    // Add basic attributes for all types
+    names.push(py_str("__class__"));
+    names.push(py_str("__dir__"));
+    names.sort_by(|a, b| {
+        let a = a.borrow();
+        let b = b.borrow();
+        if let (PyObject::Str(a), PyObject::Str(b)) = (&*a, &*b) {
+            a.cmp(b)
+        } else { std::cmp::Ordering::Equal }
+    });
+    Ok(py_list(names))
+}
+
+pub fn builtin_globals(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    Ok(py_dict())
+}
+
+pub fn builtin_locals(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    Ok(py_dict())
 }
 
 pub fn builtin_abs(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
@@ -2574,6 +2872,15 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     add_func!("property", builtin_property);
     add_func!("staticmethod", builtin_staticmethod);
     add_func!("classmethod", builtin_classmethod);
+    add_func!("bytes", builtin_bytes);
+    add_func!("bytearray", builtin_bytearray);
+    add_func!("format", builtin_format);
+    add_func!("object", builtin_object);
+    add_func!("hash", builtin_hash);
+    add_func!("slice", builtin_slice);
+    add_func!("dir", builtin_dir);
+    add_func!("globals", builtin_globals);
+    add_func!("locals", builtin_locals);
 
     macro_rules! add_exc_type {
         ($name:expr, $func:expr) => {

@@ -469,7 +469,6 @@ impl Lexer {
                         "yield" => Token::Yield,
                         "match" => Token::Match,
                         "case" => Token::Case,
-                        "type" => Token::TypeKw,
                         "_" => Token::Underscore,
                         _ => Token::Name(name),
                     };
