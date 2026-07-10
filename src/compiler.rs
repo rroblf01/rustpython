@@ -928,17 +928,14 @@ impl Compiler {
             }
             Expr::BoolOp { op, values } => {
                 let end_label = self.new_label();
-                let (jump_op, short_circuit) = match op {
-                    BoolOp::And => (Opcode::POP_JUMP_IF_FALSE, ConstValue::Bool(false)),
-                    BoolOp::Or => (Opcode::POP_JUMP_IF_TRUE, ConstValue::Bool(true)),
-                };
-                let _short_val_idx = self.get_const_index(short_circuit) as u32;
                 for (i, val) in values.iter().enumerate() {
-                    if i > 0 {
-                        // Emit target: NOP label
-                    }
                     self.compile_expr(val)?;
                     if i < values.len() - 1 {
+                        self.emit(Opcode::DUP_TOP, 0);
+                        let jump_op = match op {
+                            BoolOp::And => Opcode::POP_JUMP_IF_FALSE,
+                            BoolOp::Or => Opcode::POP_JUMP_IF_TRUE,
+                        };
                         self.emit_jump(jump_op, end_label);
                         self.emit(Opcode::POP_TOP, 0);
                     }

@@ -94,6 +94,9 @@ impl VirtualMachine {
          let sys_dict = create_sys_dict();
          modules.insert("sys".to_string(), create_module("sys", sys_dict.clone()));
          builtins.extend(sys_dict);
+
+         let os_dict = create_os_dict();
+         modules.insert("os".to_string(), create_module("os", os_dict.clone()));
  
          VirtualMachine {
              frames: Vec::new(),
@@ -1202,9 +1205,8 @@ impl VirtualMachine {
             });
 
             let mut mro = vec![class.clone()];
-            for base in &bases_vec {
-                mro.push(base.clone());
-            }
+            // C3 linearization for proper method resolution
+            mro.extend(c3_linearize(&bases_vec));
             if let PyObject::Type { mro: mro_field, .. } = &mut *class.borrow_mut() {
                 *mro_field = mro;
             }
@@ -1266,4 +1268,52 @@ impl VirtualMachine {
         }
         false
     }
+}
+
+fn c3_linearize(bases: &[PyObjectRef]) -> Vec<PyObjectRef> {
+    if bases.is_empty() { return vec![]; }
+    let mut result: Vec<PyObjectRef> = Vec::new();
+    let mut remaining: Vec<Vec<PyObjectRef>> = Vec::new();
+    for base in bases {
+        let mut base_mro = vec![base.clone()];
+        if let PyObject::Type { mro, .. } = &*base.borrow() {
+            for cls in mro.iter() {
+                if !result.iter().any(|c| c.borrow().type_name() == cls.borrow().type_name()) {
+                    if !base_mro.iter().any(|c| c.borrow().type_name() == cls.borrow().type_name()) {
+                        base_mro.push(cls.clone());
+                    }
+                }
+            }
+        }
+        remaining.push(base_mro);
+    }
+    while !remaining.is_empty() {
+        let mut found = false;
+        for i in 0..remaining.len() {
+            if remaining[i].is_empty() { continue; }
+            let candidate = remaining[i][0].clone();
+            let candidate_name = candidate.borrow().type_name();
+            let mut bad = false;
+            for j in 0..remaining.len() {
+                if i == j { continue; }
+                if remaining[j].len() > 1 {
+                    for k in 1..remaining[j].len() {
+                        if remaining[j][k].borrow().type_name() == candidate_name { bad = true; break; }
+                    }
+                }
+                if bad { break; }
+            }
+            if !bad {
+                result.push(candidate);
+                for list in &mut remaining {
+                    if !list.is_empty() && list[0].borrow().type_name() == candidate_name { list.remove(0); }
+                }
+                found = true;
+                break;
+            }
+        }
+        if !found { break; }
+        remaining.retain(|l| !l.is_empty());
+    }
+    result
 }

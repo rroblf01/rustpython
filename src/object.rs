@@ -2095,7 +2095,7 @@ impl ObjectAccess for PyObject {
             PyObject::Function { dict, .. } => {
                 dict.get(name).cloned().ok_or_else(|| PyError::attribute_error(format!("'function' object has no attribute '{}'", name)))
             }
-            PyObject::Generator { frame: _ } => {
+            PyObject::Generator { frame: gen_frame } => {
                 match name {
                     "__next__" | "send" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
                         name: name.to_string(),
@@ -2104,21 +2104,22 @@ impl ObjectAccess for PyObject {
                             if let PyObject::Generator { frame } = &*gen {
                                 let mut frame_opt = frame.borrow_mut();
                                 if let Some(f) = frame_opt.as_mut() {
+                                    // For send(), push the sent value onto the stack
+                                    if args.len() > 1 && args[1].borrow().type_name() != "function" {
+                                        f.stack.push(args[1].clone());
+                                    }
                                     let mut vm = super::vm::VirtualMachine::new();
                                     vm.frames.push(f.clone());
                                     match vm.execute() {
                                         Ok(val) => {
-                                        let modified = vm.frames.pop().unwrap();
-                                        // Check if the PREVIOUS instruction was YIELD_VALUE (meaning generator suspended)
-                                        if modified.ip > 0 && matches!(&modified.code.instructions[modified.ip - 1].op, crate::bytecode::Opcode::YIELD_VALUE) {
-                                            // Generator yielded a value — save frame and return
-                                            *f = modified;
-                                            Ok(val)
-                                        } else {
-                                            // Generator completed
-                                            *frame_opt = None;
-                                            Err(crate::object::PyError::StopIteration)
-                                        }
+                                            let modified = vm.frames.pop().unwrap();
+                                            if modified.ip > 0 && matches!(&modified.code.instructions[modified.ip - 1].op, crate::bytecode::Opcode::YIELD_VALUE) {
+                                                *f = modified;
+                                                Ok(val)
+                                            } else {
+                                                *frame_opt = None;
+                                                Err(crate::object::PyError::StopIteration)
+                                            }
                                         }
                                         Err(e) => {
                                             *frame_opt = None;
@@ -2134,6 +2135,26 @@ impl ObjectAccess for PyObject {
                             } else {
                                 Err(PyError::runtime_error("__next__ on non-generator"))
                             }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "throw" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                        name: "throw".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("throw() needs at least 1 argument")); }
+                            Err(PyError::runtime_error("generator throw not implemented"))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "close" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                        name: "close".to_string(),
+                        func: |args| {
+                            let gen = args[0].borrow();
+                            if let PyObject::Generator { frame } = &*gen {
+                                let mut frame_opt = frame.borrow_mut();
+                                *frame_opt = None;
+                            }
+                            Ok(py_none())
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -2611,6 +2632,53 @@ pub fn create_sys_dict() -> HashMap<String, PyObjectRef> {
         Err(PyError::SystemExit(code))
     });
     d.insert("argv".to_string(), py_list(vec![]));
+    d
+}
+
+pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! os_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+    os_func!("getcwd", |_| {
+        match std::env::current_dir() {
+            Ok(p) => Ok(py_str(&p.to_string_lossy())),
+            Err(e) => Err(PyError::OsError(format!("{}", e))),
+        }
+    });
+    os_func!("listdir", |args| {
+        let path = if args.len() > 0 { args[0].str() } else { ".".to_string() };
+        match std::fs::read_dir(&path) {
+            Ok(entries) => {
+                let names: Vec<PyObjectRef> = entries.filter_map(|e| e.ok()).map(|e| py_str(&e.file_name().to_string_lossy())).collect();
+                Ok(py_list(names))
+            }
+            Err(e) => Err(PyError::OsError(format!("{}", e))),
+        }
+    });
+    os_func!("mkdir", |args| {
+        if args.is_empty() { return Err(PyError::type_error("mkdir() takes at least 1 argument")); }
+        match std::fs::create_dir(&args[0].str()) {
+            Ok(()) => Ok(py_none()),
+            Err(e) => Err(PyError::OsError(format!("{}", e))),
+        }
+    });
+    os_func!("remove", |args| {
+        if args.is_empty() { return Err(PyError::type_error("remove() takes at least 1 argument")); }
+        match std::fs::remove_file(&args[0].str()) {
+            Ok(()) => Ok(py_none()),
+            Err(e) => Err(PyError::OsError(format!("{}", e))),
+        }
+    });
+    os_func!("rename", |args| {
+        if args.len() < 2 { return Err(PyError::type_error("rename() takes 2 arguments")); }
+        match std::fs::rename(&args[0].str(), &args[1].str()) {
+            Ok(()) => Ok(py_none()),
+            Err(e) => Err(PyError::OsError(format!("{}", e))),
+        }
+    });
     d
 }
 

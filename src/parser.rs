@@ -794,7 +794,13 @@ impl Parser {
 
     fn parse_block(&mut self) -> Result<Vec<Stmt>, String> {
         let mut stmts = Vec::new();
-        self.eat(&Token::Newline);
+        if !self.eat(&Token::Newline) {
+            // Single-statement body (same line after colon)
+            if !self.at(&Token::Dedent) && !self.at(&Token::EndOfFile) {
+                stmts.push(self.parse_stmt()?);
+            }
+            return Ok(stmts);
+        }
         if self.eat(&Token::Indent) {
             loop {
                 match &self.current {
@@ -876,7 +882,7 @@ impl Parser {
         if self.at(&Token::Less) || self.at(&Token::Greater) || self.at(&Token::LessEqual)
             || self.at(&Token::GreaterEqual) || self.at(&Token::EqualEqual)
             || self.at(&Token::NotEqual) || self.at(&Token::Is)
-            || self.at(&Token::In)
+            || self.at(&Token::In) || self.at(&Token::Not)
         {
             let mut ops = Vec::new();
             let mut comparators = Vec::new();
@@ -1233,8 +1239,11 @@ impl Parser {
                     // Single-element tuple or named expression
                     let first = self.parse_expr()?;
                     if self.eat(&Token::Comma) {
-                        let elts = vec![first];
-                        while self.eat(&Token::Comma) {}
+                        let mut elts = vec![first];
+                        while !self.at(&Token::RightParen) && !self.at(&Token::EndOfFile) {
+                            elts.push(self.parse_expr()?);
+                            if !self.eat(&Token::Comma) { break; }
+                        }
                         self.expect(&Token::RightParen)?;
                         Expr::Tuple(elts)
                     } else if self.eat(&Token::Walrus) {

@@ -24,14 +24,14 @@ fn run_source(source: &str, filename: &str) -> Result<(), String> {
     let mut vm = VirtualMachine::new();
     match vm.run(code) {
         Ok(_val) => {
-            // Module execution results in None at end
             Ok(())
         }
         Err(e) => {
             if let PyError::SystemExit(code) = &e {
                 std::process::exit(*code);
             }
-            Err(format!("Runtime error: {}", e))
+            let msg = format!("{}", e);
+            Err(format!("Traceback (most recent call last):\n  File \"{}\", line ???\n{}\n{}", filename, msg, msg))
         }
     }
 }
