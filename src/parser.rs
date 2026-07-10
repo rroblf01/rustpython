@@ -1166,20 +1166,31 @@ impl Parser {
 
     fn parse_slice_or_expr(&mut self) -> Result<Expr, String> {
         if self.eat(&Token::Colon) {
-            let upper = if !self.at(&Token::RightBracket) && !self.at(&Token::Comma) {
-                Some(Box::new(self.parse_expr()?))
-            } else {
-                None
-            };
-            let step = if self.eat(&Token::Colon) {
-                if !self.at(&Token::RightBracket) && !self.at(&Token::Comma) {
+            let mut upper = None;
+            let mut step = None;
+            // Check for ::
+            if self.eat(&Token::Colon) {
+                step = if !self.at(&Token::RightBracket) && !self.at(&Token::Comma) {
                     Some(Box::new(self.parse_expr()?))
                 } else {
                     None
-                }
+                };
             } else {
-                None
-            };
+                upper = if !self.at(&Token::RightBracket) && !self.at(&Token::Comma) {
+                    Some(Box::new(self.parse_expr()?))
+                } else {
+                    None
+                };
+                step = if self.eat(&Token::Colon) {
+                    if !self.at(&Token::RightBracket) && !self.at(&Token::Comma) {
+                        Some(Box::new(self.parse_expr()?))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+            }
             return Ok(Expr::Slice { lower: None, upper, step });
         }
         let lower = self.parse_expr()?;

@@ -2632,18 +2632,20 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                     let s = start.borrow();
                     let e = stop.borrow();
                     let st = step.borrow();
-                    let start_val = if let PyObject::Int(i) = &*s { i.to_isize().unwrap_or(0) } else { 0 };
-                    let stop_val = if let PyObject::Int(i) = &*e { i.to_isize().unwrap_or(len as isize) } else { len as isize };
                     let step_val = if let PyObject::Int(i) = &*st { i.to_isize().unwrap_or(1) } else { 1 };
                     if step_val > 0 {
+                        let start_val = if let PyObject::Int(i) = &*s { i.to_isize().unwrap_or(0) } else { 0 };
+                        let stop_val = if let PyObject::Int(i) = &*e { i.to_isize().unwrap_or(len as isize) } else { len as isize };
                         let mut i = start_val;
                         while i < stop_val && i < len as isize {
                             result.push(items[i as usize].clone());
                             i += step_val;
                         }
                     } else {
-                        let mut i = if stop_val < 0 { stop_val } else { stop_val - 1 };
-                        while i > start_val - 1 && i >= 0 {
+                        let start_val = if let PyObject::Int(i) = &*s { i.to_isize().unwrap_or((len as isize) - 1) } else { (len as isize) - 1 };
+                        let stop_val = if let PyObject::Int(i) = &*e { i.to_isize().unwrap_or(-1) } else { -1 };
+                        let mut i = start_val;
+                        while i > stop_val && i >= 0 {
                             result.push(items[i as usize].clone());
                             i += step_val;
                         }
@@ -2687,19 +2689,21 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                     let s = start.borrow();
                     let e = stop.borrow();
                     let st = step.borrow();
-                    let start_val = if let PyObject::Int(i) = &*s { i.to_isize().unwrap_or(0) } else { 0 };
-                    let stop_val = if let PyObject::Int(i) = &*e { i.to_isize().unwrap_or(len as isize) } else { len as isize };
                     let step_val = if let PyObject::Int(i) = &*st { i.to_isize().unwrap_or(1) } else { 1 };
                     let mut result = String::new();
                     if step_val > 0 {
+                        let start_val = if let PyObject::Int(i) = &*s { i.to_isize().unwrap_or(0) } else { 0 };
+                        let stop_val = if let PyObject::Int(i) = &*e { i.to_isize().unwrap_or(len as isize) } else { len as isize };
                         let mut i = start_val;
                         while i < stop_val && i < len as isize {
                             result.push(chars[i as usize]);
                             i += step_val;
                         }
                     } else {
-                        let mut i = start_val.max(0);
-                        while i >= stop_val.max(0) && i < len as isize {
+                        let start_val = if let PyObject::Int(i) = &*s { i.to_isize().unwrap_or((len as isize) - 1) } else { (len as isize) - 1 };
+                        let stop_val = if let PyObject::Int(i) = &*e { i.to_isize().unwrap_or(-1) } else { -1 };
+                        let mut i = start_val;
+                        while i > stop_val && i >= 0 {
                             result.push(chars[i as usize]);
                             i += step_val;
                         }
@@ -2712,6 +2716,88 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
         PyObject::Dict(d) => {
             let key_str = index.str();
             d.get(&key_str).cloned().ok_or_else(|| PyError::key_error(key_str))
+        }
+        PyObject::Bytes(b) => {
+            let idx = index.borrow();
+            match &*idx {
+                PyObject::Int(i) => {
+                    let i = i.to_isize().ok_or_else(|| PyError::index_error("bytes index out of range"))?;
+                    let len = b.len() as isize;
+                    let i = if i < 0 { len + i } else { i };
+                    if i < 0 || i >= len {
+                        return Err(PyError::index_error("bytes index out of range"));
+                    }
+                    Ok(PyObjectRef::new(PyObject::Bytes(vec![b[i as usize]])))
+                }
+                PyObject::Slice { start, stop, step } => {
+                    let len = b.len();
+                    let s = start.borrow();
+                    let e = stop.borrow();
+                    let st = step.borrow();
+                    let step_val = if let PyObject::Int(i) = &*st { i.to_isize().unwrap_or(1) } else { 1 };
+                    let mut result = Vec::new();
+                    if step_val > 0 {
+                        let start_val = if let PyObject::Int(i) = &*s { i.to_isize().unwrap_or(0) } else { 0 };
+                        let stop_val = if let PyObject::Int(i) = &*e { i.to_isize().unwrap_or(len as isize) } else { len as isize };
+                        let mut i = start_val;
+                        while i < stop_val && i < len as isize {
+                            result.push(b[i as usize]);
+                            i += step_val;
+                        }
+                    } else {
+                        let start_val = if let PyObject::Int(i) = &*s { i.to_isize().unwrap_or((len as isize) - 1) } else { (len as isize) - 1 };
+                        let stop_val = if let PyObject::Int(i) = &*e { i.to_isize().unwrap_or(-1) } else { -1 };
+                        let mut i = start_val;
+                        while i > stop_val && i >= 0 {
+                            result.push(b[i as usize]);
+                            i += step_val;
+                        }
+                    }
+                    Ok(PyObjectRef::new(PyObject::Bytes(result)))
+                }
+                _ => Err(PyError::type_error("bytes indices must be integers or slices")),
+            }
+        }
+        PyObject::ByteArray(b) => {
+            let idx = index.borrow();
+            match &*idx {
+                PyObject::Int(i) => {
+                    let i = i.to_isize().ok_or_else(|| PyError::index_error("bytearray index out of range"))?;
+                    let len = b.len() as isize;
+                    let i = if i < 0 { len + i } else { i };
+                    if i < 0 || i >= len {
+                        return Err(PyError::index_error("bytearray index out of range"));
+                    }
+                    Ok(PyObjectRef::new(PyObject::ByteArray(vec![b[i as usize]])))
+                }
+                PyObject::Slice { start, stop, step } => {
+                    let len = b.len();
+                    let s = start.borrow();
+                    let e = stop.borrow();
+                    let st = step.borrow();
+                    let step_val = if let PyObject::Int(i) = &*st { i.to_isize().unwrap_or(1) } else { 1 };
+                    let mut result = Vec::new();
+                    if step_val > 0 {
+                        let start_val = if let PyObject::Int(i) = &*s { i.to_isize().unwrap_or(0) } else { 0 };
+                        let stop_val = if let PyObject::Int(i) = &*e { i.to_isize().unwrap_or(len as isize) } else { len as isize };
+                        let mut i = start_val;
+                        while i < stop_val && i < len as isize {
+                            result.push(b[i as usize]);
+                            i += step_val;
+                        }
+                    } else {
+                        let start_val = if let PyObject::Int(i) = &*s { i.to_isize().unwrap_or((len as isize) - 1) } else { (len as isize) - 1 };
+                        let stop_val = if let PyObject::Int(i) = &*e { i.to_isize().unwrap_or(-1) } else { -1 };
+                        let mut i = start_val;
+                        while i > stop_val && i >= 0 {
+                            result.push(b[i as usize]);
+                            i += step_val;
+                        }
+                    }
+                    Ok(PyObjectRef::new(PyObject::ByteArray(result)))
+                }
+                _ => Err(PyError::type_error("bytearray indices must be integers or slices")),
+            }
         }
         _ => Err(PyError::type_error(format!("'{}' object is not subscriptable", o.type_name()))),
     }

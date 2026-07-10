@@ -493,9 +493,9 @@ impl VirtualMachine {
 
             Opcode::BUILD_SLICE => {
                 let nargs = instr.arg as usize;
+                let step = if nargs >= 3 { Some(self.frames.last_mut().unwrap().pop()?) } else { None };
                 let stop = if nargs >= 2 { Some(self.frames.last_mut().unwrap().pop()?) } else { None };
                 let start = if nargs >= 1 { Some(self.frames.last_mut().unwrap().pop()?) } else { None };
-                let step = if nargs >= 3 { Some(self.frames.last_mut().unwrap().pop()?) } else { None };
                 self.frames.last_mut().unwrap().push(PyObjectRef::new(PyObject::Slice {
                     start: start.unwrap_or(py_none()),
                     stop: stop.unwrap_or(py_none()),

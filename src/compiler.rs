@@ -1099,9 +1099,8 @@ impl Compiler {
                 else { self.emit(Opcode::LOAD_CONST, const_none); }
                 if let Some(u) = upper { self.compile_expr(u)?; }
                 else { self.emit(Opcode::LOAD_CONST, const_none); }
-                if let Some(s) = step { self.compile_expr(s)?; }
-                else { self.emit(Opcode::LOAD_CONST, const_none); }
                 if step.is_some() {
+                    if let Some(s) = step { self.compile_expr(s)?; }
                     self.emit(Opcode::BUILD_SLICE, 3);
                 } else {
                     self.emit(Opcode::BUILD_SLICE, 2);
