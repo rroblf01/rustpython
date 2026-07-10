@@ -501,7 +501,7 @@ impl VirtualMachine {
                 defaults.reverse();
                 let code_obj = self.frames[fi].pop()?;
                 let code = match &*code_obj.borrow() {
-                    PyObject::Code(c) => Rc::new(c.as_ref().clone()),
+                    PyObject::Code(c) => c.as_ref().clone(),
                     _ => return Err(PyError::runtime_error("MAKE_FUNCTION: expected code object")),
                 };
                 let globals = self.frames[fi].globals.clone();
@@ -547,7 +547,7 @@ impl VirtualMachine {
                     items.push(self.frames[fi].pop()?);
                 }
                 items.reverse();
-                self.frames[fi].push(PyObjectRef::new(PyObject::Set(items)));
+                self.frames[fi].push(PyObjectRef::new(PyObject::Set(PySet::from_vec(items)?)));
             }
 
             Opcode::BUILD_STRING => {
@@ -710,7 +710,7 @@ impl VirtualMachine {
                         self.frames[fi].push(PyObjectRef::new(PyObject::ListIter { list: chars, index: 0 }));
                     }
                     PyObject::Set(s) => {
-                        self.frames[fi].push(PyObjectRef::new(PyObject::ListIter { list: s.clone(), index: 0 }));
+                        self.frames[fi].push(PyObjectRef::new(PyObject::ListIter { list: s.to_vec(), index: 0 }));
                     }
                     PyObject::Generator { .. } => {
                         drop(obj);
@@ -919,7 +919,7 @@ impl VirtualMachine {
                 let set = self.frames[fi].peek(arg as usize)?;
                 let mut obj = set.borrow_mut();
                 if let PyObject::Set(v) = &mut *obj {
-                    v.push(val);
+                    v.add(val)?;
                 } else {
                     return Err(PyError::runtime_error("SET_ADD on non-set"));
                 }
@@ -1206,10 +1206,11 @@ impl VirtualMachine {
                     return result;
                 }
             }
-            let code = code.clone();
             let func_globals = func_globals.clone();
             let defaults = defaults.clone();
-            let mut new_frame = Frame::new(code.clone(), func_globals, Rc::clone(&self.builtins));
+            let code_rc = Rc::new(code.clone());
+            let mut new_frame = Frame::new(Rc::clone(&code_rc), func_globals, Rc::clone(&self.builtins));
+            let code = code;
 
             let npos = args.len();
             let named_params = if code.vararg_name.is_some() || code.kwarg_name.is_some() {
@@ -1326,7 +1327,7 @@ impl VirtualMachine {
                         let code = code.clone();
                         let func_globals = func_globals.clone();
                         drop(init_borrowed);
-                        let mut new_frame = Frame::new(code, func_globals, Rc::clone(&self.builtins));
+                        let mut new_frame = Frame::new(Rc::new(code), func_globals, Rc::clone(&self.builtins));
                         new_frame.locals.insert(new_frame.code.varnames[0].clone(), instance.clone());
                         for (i, arg_name) in new_frame.code.varnames.iter().enumerate().skip(1) {
                             if i - 1 < args.len() {
@@ -1363,7 +1364,7 @@ impl VirtualMachine {
             match &*func.borrow() {
                 PyObject::Function { code, .. } => {
                     let code = code.clone();
-                    let new_frame = Frame::new(code, namespace.clone(), Rc::clone(&self.builtins));
+                    let new_frame = Frame::new(Rc::new(code), namespace.clone(), Rc::clone(&self.builtins));
                     self.frames.push(new_frame);
                     self.execute()?;
                     self.frames.pop();

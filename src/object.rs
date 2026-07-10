@@ -164,7 +164,7 @@ impl fmt::Display for PyError {
 
 pub type PyResult<T> = Result<T, PyError>;
 
-// ---- Core Object Enum ----
+// ---- PySet: hash-based set for O(1) membership ----
 
 #[derive(Clone)]
 pub struct PySet {
@@ -177,31 +177,28 @@ impl PySet {
     pub fn is_empty(&self) -> bool { self.size == 0 }
     pub fn len(&self) -> usize { self.size }
     pub fn clear(&mut self) { self.buckets.clear(); self.size = 0; }
-    fn get_bucket(&self, key: &PyObjectRef) -> PyResult<Option<&Vec<PyObjectRef>>> {
+    fn bucket(&self, key: &PyObjectRef) -> PyResult<Option<&Vec<PyObjectRef>>> {
         let h = key.hash()?; Ok(self.buckets.get(&h))
     }
-    fn get_bucket_mut(&mut self, key: &PyObjectRef) -> PyResult<&mut Vec<PyObjectRef>> {
+    fn bucket_mut(&mut self, key: &PyObjectRef) -> PyResult<&mut Vec<PyObjectRef>> {
         let h = key.hash()?; Ok(self.buckets.entry(h).or_default())
     }
-    fn find_entry(bucket: &[PyObjectRef], key: &PyObjectRef) -> Option<usize> {
+    fn find(bucket: &[PyObjectRef], key: &PyObjectRef) -> Option<usize> {
         bucket.iter().position(|k| k.equals(key).unwrap_or(false))
     }
     pub fn contains(&self, key: &PyObjectRef) -> PyResult<bool> {
-        match self.get_bucket(key)? {
-            Some(bucket) => Ok(Self::find_entry(bucket, key).is_some()),
-            None => Ok(false),
-        }
+        match self.bucket(key)? { Some(b) => Ok(Self::find(b, key).is_some()), None => Ok(false) }
     }
     pub fn add(&mut self, key: PyObjectRef) -> PyResult<()> {
         let h = key.hash()?;
         let bucket = self.buckets.entry(h).or_default();
-        if !Self::find_entry(bucket, &key).is_some() { bucket.push(key); self.size += 1; }
+        if !Self::find(bucket, &key).is_some() { bucket.push(key); self.size += 1; }
         Ok(())
     }
     pub fn remove(&mut self, key: &PyObjectRef) -> PyResult<PyObjectRef> {
         let h = key.hash()?;
         let bucket = self.buckets.get_mut(&h).ok_or_else(|| PyError::key_error(key.str()))?;
-        let pos = Self::find_entry(bucket, key).ok_or_else(|| PyError::key_error(key.str()))?;
+        let pos = Self::find(bucket, key).ok_or_else(|| PyError::key_error(key.str()))?;
         self.size -= 1; Ok(bucket.swap_remove(pos))
     }
     pub fn pop(&mut self) -> Option<PyObjectRef> {
@@ -212,6 +209,11 @@ impl PySet {
     }
     pub fn to_vec(&self) -> Vec<PyObjectRef> {
         self.buckets.values().flat_map(|b| b.clone()).collect()
+    }
+    pub fn from_vec(vec: Vec<PyObjectRef>) -> PyResult<Self> {
+        let mut set = PySet::new();
+        for item in vec { set.add(item)?; }
+        Ok(set)
     }
 }
 
@@ -228,6 +230,20 @@ pub enum PyObject {
     Tuple(Vec<PyObjectRef>),
     Dict(HashMap<String, PyObjectRef>),
     Set(PySet),
+    Range {
+        start: i64,
+        stop: i64,
+        step: i64,
+    },
+    RangeIter {
+        current: i64,
+        stop: i64,
+        step: i64,
+    },
+    ListIter {
+        list: Vec<PyObjectRef>,
+        index: usize,
+    },
     Slice {
         start: PyObjectRef,
         stop: PyObjectRef,
@@ -320,6 +336,9 @@ impl PyObject {
             PyObject::Tuple(_) => "tuple",
             PyObject::Dict(_) => "dict",
             PyObject::Set(_) => "set",
+            PyObject::Range { .. } => "range",
+            PyObject::RangeIter { .. } => "range_iterator",
+            PyObject::ListIter { .. } => "list_iterator",
             PyObject::Slice { .. } => "slice",
             PyObject::Code(_) => "code",
             PyObject::Function { .. } => "function",
@@ -379,9 +398,16 @@ impl PyObject {
                 format!("{{{}}}", items.join(", "))
             }
             PyObject::Set(items) => {
-                let items: Vec<String> = items.to_vec().iter().map(|x| x.repr()).collect();
+                let vec = items.to_vec();
+                let items: Vec<String> = vec.iter().map(|x| x.repr()).collect();
                 format!("{{{}}}", items.join(", "))
             }
+            PyObject::Range { start, stop, step } => {
+                if *step == 1 { format!("range({}, {})", start, stop) }
+                else { format!("range({}, {}, {})", start, stop, step) }
+            }
+            PyObject::RangeIter { .. } => "<range_iterator object>".to_string(),
+            PyObject::ListIter { .. } => "<list_iterator object>".to_string(),
             PyObject::Slice { start, stop, step } => {
                 format!("slice({}, {}, {})", start.repr(), stop.repr(), step.repr())
             }
@@ -430,6 +456,8 @@ impl PyObject {
             PyObject::Tuple(v) => !v.is_empty(),
             PyObject::Dict(d) => !d.is_empty(),
             PyObject::Set(s) => !s.is_empty(),
+            PyObject::Range { start, stop, step } => *step > 0 && *start < *stop || *step < 0 && *start > *stop,
+            PyObject::RangeIter { current, stop, step } => *step > 0 && *current < *stop || *step < 0 && *current > *stop,
             PyObject::Instance { typ, .. } => {
                 // Check for __bool__ method
                 // If no __bool__, objects are truthy by default
@@ -476,6 +504,18 @@ impl PyObject {
                 for c in s.chars() {
                     h = h.wrapping_mul(1000003).wrapping_add(c as usize);
                 }
+                Ok(h)
+            }
+            PyObject::Bytes(b) => {
+                let mut h: usize = 0;
+                for &byte in b { h = h.wrapping_mul(1000003).wrapping_add(byte as usize); }
+                Ok(h)
+            }
+            PyObject::Range { start, stop, step } => {
+                let mut h: usize = 0x123456;
+                h = h.wrapping_mul(1000003).wrapping_add(*start as usize);
+                h = h.wrapping_mul(1000003).wrapping_add(*stop as usize);
+                h = h.wrapping_mul(1000003).wrapping_add(*step as usize);
                 Ok(h)
             }
             PyObject::Tuple(items) => {
@@ -596,8 +636,27 @@ pub fn py_bool(b: bool) -> PyObjectRef {
     PyObjectRef::new(PyObject::Bool(b))
 }
 
+thread_local! {
+    static SMALL_INT_CACHE: std::cell::RefCell<Option<Vec<PyObjectRef>>> = std::cell::RefCell::new(None);
+    pub static VM_PTR: std::cell::RefCell<Option<*mut super::vm::VirtualMachine>> = std::cell::RefCell::new(None);
+}
+
 pub fn py_int(i: impl Into<BigInt>) -> PyObjectRef {
-    PyObjectRef::new(PyObject::Int(i.into()))
+    let big = i.into();
+    if let Some(n) = big.to_i64() {
+        if n >= -5 && n <= 999 {
+            return SMALL_INT_CACHE.with(|cache| {
+                let mut cache = cache.borrow_mut();
+                if cache.is_none() {
+                    let mut v = Vec::with_capacity(1005);
+                    for i in -5i64..=999 { v.push(PyObjectRef::new(PyObject::Int(BigInt::from(i)))); }
+                    *cache = Some(v);
+                }
+                cache.as_ref().unwrap()[(n + 5) as usize].clone()
+            });
+        }
+    }
+    PyObjectRef::new(PyObject::Int(big))
 }
 
 pub fn py_float(f: f64) -> PyObjectRef {
@@ -1047,6 +1106,14 @@ pub fn contains_op(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<bool> {
         }
         PyObject::Set(items) => {
             items.contains(b)
+        }
+        PyObject::Range { start, stop, step } => {
+            let item = b.borrow();
+            if let PyObject::Int(n) = &*item {
+                let n = n.to_i64().unwrap_or(0);
+                if *step > 0 { Ok(n >= *start && n < *stop && (n - *start) % *step == 0) }
+                else { Ok(n <= *start && n > *stop && (n - *start) % *step == 0) }
+            } else { Ok(false) }
         }
         _ => Err(PyError::type_error(format!("argument of type '{}' is not iterable", container.type_name()))),
     }
@@ -1728,7 +1795,7 @@ fn call_bound_method(func: PyObjectRef, self_obj: PyObjectRef, args: Vec<PyObjec
             f(&all_args)
         }
         PyObject::Function { code, globals: g, defaults, .. } => {
-            let mut frame = super::vm::Frame::new(code.clone(), g.clone(), create_builtins());
+            let mut frame = super::vm::Frame::new(std::rc::Rc::new(code.clone()), g.clone(), std::rc::Rc::new(create_builtins()));
             frame.locals.insert("self".to_string(), self_obj);
             let code = code.clone();
             let defaults = defaults.clone();
@@ -2483,6 +2550,252 @@ impl ObjectAccess for PyObject {
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
                     _ => Err(PyError::attribute_error(format!("'dict' object has no attribute '{}'", name))),
+                }
+            }
+            PyObject::Set(s) => {
+                match name {
+                    "add" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                        name: "add".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("add() takes exactly one argument")); }
+                            if let PyObject::Set(set) = &mut *args[0].borrow_mut() { set.add(args[1].clone())?; Ok(py_none()) }
+                            else { Err(PyError::runtime_error("add on non-set")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "remove" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                        name: "remove".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("remove() takes exactly one argument")); }
+                            if let PyObject::Set(set) = &mut *args[0].borrow_mut() { set.remove(&args[1]) }
+                            else { Err(PyError::runtime_error("remove on non-set")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "discard" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                        name: "discard".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("discard() takes exactly one argument")); }
+                            if let PyObject::Set(set) = &mut *args[0].borrow_mut() {
+                                let _ = set.remove(&args[1]); Ok(py_none())
+                            } else { Err(PyError::runtime_error("discard on non-set")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "pop" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                        name: "pop".to_string(),
+                        func: |args| {
+                            if let PyObject::Set(set) = &mut *args[0].borrow_mut() { set.pop().ok_or_else(|| PyError::key_error("pop from an empty set")) }
+                            else { Err(PyError::runtime_error("pop on non-set")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "clear" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                        name: "clear".to_string(),
+                        func: |args| {
+                            if let PyObject::Set(set) = &mut *args[0].borrow_mut() { set.clear(); Ok(py_none()) }
+                            else { Err(PyError::runtime_error("clear on non-set")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "copy" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                        name: "copy".to_string(),
+                        func: |args| {
+                            let s = args[0].borrow();
+                            if let PyObject::Set(set) = &*s { Ok(PyObjectRef::new(PyObject::Set(set.clone()))) }
+                            else { Err(PyError::runtime_error("copy on non-set")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "union" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                        name: "union".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("union() takes at least 1 argument")); }
+                            let s = args[0].borrow();
+                            if let PyObject::Set(set) = &*s {
+                                let mut result = set.clone();
+                                for other_arg in &args[1..] {
+                                    let other = other_arg.borrow();
+                                    if let PyObject::Set(other_set) = &*other {
+                                        for item in other_set.to_vec() { result.add(item)?; }
+                                    }
+                                }
+                                Ok(PyObjectRef::new(PyObject::Set(result)))
+                            } else { Err(PyError::runtime_error("union on non-set")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "intersection" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                        name: "intersection".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("intersection() takes at least 1 argument")); }
+                            let s = args[0].borrow();
+                            if let PyObject::Set(set) = &*s {
+                                let mut result = PySet::new();
+                                for item in set.to_vec() {
+                                    let in_all = args[1..].iter().all(|other_arg| {
+                                        let other = other_arg.borrow();
+                                        if let PyObject::Set(other_set) = &*other { other_set.contains(&item).unwrap_or(false) }
+                                        else { false }
+                                    });
+                                    if in_all { result.add(item)?; }
+                                }
+                                Ok(PyObjectRef::new(PyObject::Set(result)))
+                            } else { Err(PyError::runtime_error("intersection on non-set")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "difference" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                        name: "difference".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("difference() takes at least 1 argument")); }
+                            let s = args[0].borrow();
+                            if let PyObject::Set(set) = &*s {
+                                let mut result = PySet::new();
+                                for item in set.to_vec() {
+                                    let in_any = args[1..].iter().any(|other_arg| {
+                                        let other = other_arg.borrow();
+                                        if let PyObject::Set(other_set) = &*other { other_set.contains(&item).unwrap_or(false) }
+                                        else { false }
+                                    });
+                                    if !in_any { result.add(item)?; }
+                                }
+                                Ok(PyObjectRef::new(PyObject::Set(result)))
+                            } else { Err(PyError::runtime_error("difference on non-set")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "symmetric_difference" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                        name: "symmetric_difference".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("symmetric_difference() takes exactly one argument")); }
+                            let s = args[0].borrow();
+                            if let PyObject::Set(set) = &*s {
+                                let other = args[1].borrow();
+                                if let PyObject::Set(other_set) = &*other {
+                                    let mut result = PySet::new();
+                                    for item in set.to_vec() { if !other_set.contains(&item).unwrap_or(false) { result.add(item)?; } }
+                                    for item in other_set.to_vec() { if !set.contains(&item).unwrap_or(false) { result.add(item)?; } }
+                                    Ok(PyObjectRef::new(PyObject::Set(result)))
+                                } else { Err(PyError::type_error("symmetric_difference() argument must be a set")) }
+                            } else { Err(PyError::runtime_error("symmetric_difference on non-set")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "issubset" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                        name: "issubset".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("issubset() takes exactly one argument")); }
+                            let s = args[0].borrow();
+                            if let PyObject::Set(set) = &*s {
+                                let other = args[1].borrow();
+                                if let PyObject::Set(other_set) = &*other {
+                                    Ok(py_bool(set.to_vec().iter().all(|item| other_set.contains(item).unwrap_or(false))))
+                                } else { Err(PyError::type_error("issubset() argument must be a set")) }
+                            } else { Err(PyError::runtime_error("issubset on non-set")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "issuperset" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                        name: "issuperset".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("issuperset() takes exactly one argument")); }
+                            let s = args[0].borrow();
+                            if let PyObject::Set(set) = &*s {
+                                let other = args[1].borrow();
+                                if let PyObject::Set(other_set) = &*other {
+                                    Ok(py_bool(other_set.to_vec().iter().all(|item| set.contains(item).unwrap_or(false))))
+                                } else { Err(PyError::type_error("issuperset() argument must be a set")) }
+                            } else { Err(PyError::runtime_error("issuperset on non-set")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "isdisjoint" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                        name: "isdisjoint".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("isdisjoint() takes exactly one argument")); }
+                            let s = args[0].borrow();
+                            if let PyObject::Set(set) = &*s {
+                                let other = args[1].borrow();
+                                if let PyObject::Set(other_set) = &*other {
+                                    Ok(py_bool(!set.to_vec().iter().any(|item| other_set.contains(item).unwrap_or(false))))
+                                } else { Err(PyError::type_error("isdisjoint() argument must be a set")) }
+                            } else { Err(PyError::runtime_error("isdisjoint on non-set")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "update" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                        name: "update".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("update() takes at least 1 argument")); }
+                            if let PyObject::Set(set) = &mut *args[0].borrow_mut() {
+                                for other_arg in &args[1..] {
+                                    let other = other_arg.borrow();
+                                    if let PyObject::Set(other_set) = &*other {
+                                        for item in other_set.to_vec() { set.add(item)?; }
+                                    }
+                                }
+                                Ok(py_none())
+                            } else { Err(PyError::runtime_error("update on non-set")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "intersection_update" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                        name: "intersection_update".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("intersection_update() takes at least 1 argument")); }
+                            if let PyObject::Set(set) = &mut *args[0].borrow_mut() {
+                                let items: Vec<PyObjectRef> = set.to_vec().iter().filter(|item| {
+                                    args[1..].iter().all(|other_arg| {
+                                        let other = other_arg.borrow();
+                                        if let PyObject::Set(other_set) = &*other { other_set.contains(item).unwrap_or(false) }
+                                        else { false }
+                                    })
+                                }).cloned().collect();
+                                set.clear();
+                                for item in items { set.add(item)?; }
+                                Ok(py_none())
+                            } else { Err(PyError::runtime_error("intersection_update on non-set")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "difference_update" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                        name: "difference_update".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("difference_update() takes at least 1 argument")); }
+                            if let PyObject::Set(set) = &mut *args[0].borrow_mut() {
+                                let items: Vec<PyObjectRef> = set.to_vec().iter().filter(|item| {
+                                    !args[1..].iter().any(|other_arg| {
+                                        let other = other_arg.borrow();
+                                        if let PyObject::Set(other_set) = &*other { other_set.contains(item).unwrap_or(false) }
+                                        else { false }
+                                    })
+                                }).cloned().collect();
+                                set.clear();
+                                for item in items { set.add(item)?; }
+                                Ok(py_none())
+                            } else { Err(PyError::runtime_error("difference_update on non-set")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "symmetric_difference_update" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                        name: "symmetric_difference_update".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("symmetric_difference_update() takes exactly one argument")); }
+                            if let PyObject::Set(set) = &mut *args[0].borrow_mut() {
+                                let other = args[1].borrow();
+                                if let PyObject::Set(other_set) = &*other {
+                                    for item in other_set.to_vec() {
+                                        if set.contains(&item).unwrap_or(false) { set.remove(&item)?; }
+                                        else { set.add(item)?; }
+                                    }
+                                    Ok(py_none())
+                                } else { Err(PyError::type_error("symmetric_difference_update() argument must be a set")) }
+                            } else { Err(PyError::runtime_error("symmetric_difference_update on non-set")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    _ => Err(PyError::attribute_error(format!("'set' object has no attribute '{}'", name))),
                 }
             }
             PyObject::Function { dict, .. } => {

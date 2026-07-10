@@ -67,7 +67,7 @@ All times measured with `/usr/bin/time`, memory via `/proc/self/status`.
 
 | Benchmark | CPython 3.14 | RustPython | Ratio |
 |-----------|-------------|------------|-------|
-| Total wall time (arithmetic, lists, dicts, strings, functions, loops, comprehensions, sets) | **0.55s** | **3.73s** | **~6.8×** |
+| Total wall time (arithmetic, lists, dicts, strings, functions, loops, comprehensions, sets) | **0.53s** | **3.00s** | **~5.7×** |
 
 *Individual section timings not available for RustPython — the `time` module is not implemented.*
 
