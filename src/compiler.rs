@@ -567,7 +567,7 @@ impl Compiler {
                 self.emit(Opcode::POP_TOP, 0);
             }
             Stmt::With { items, body } => {
-                for item in items {
+                for (i, item) in items.iter().enumerate() {
                     self.compile_expr(&item.context_expr)?;
                     self.emit(Opcode::SETUP_WITH, 0);
                     if let Some(var) = &item.optional_vars {
@@ -576,7 +576,40 @@ impl Compiler {
                         self.emit(Opcode::POP_TOP, 0);
                     }
                 }
-                self.compile_stmts(body)?;
+                if items.len() == 1 {
+                    // Use try/finally to ensure __exit__ is called on exception
+                    let finally_label = self.new_label();
+                    let end_label = self.new_label();
+                    self.emit_jump(Opcode::SETUP_FINALLY, finally_label);
+                    self.compile_stmts(body)?;
+                    self.emit(Opcode::POP_BLOCK, 0);
+                    self.compile_expr(&items[0].context_expr)?;
+                    let exit_name_idx = self.get_name_index("__exit__") as u32;
+                    self.emit(Opcode::LOAD_ATTR, exit_name_idx);
+                    let const_none = self.get_const_index(ConstValue::None) as u32;
+                    for _ in 0..3 {
+                        self.emit(Opcode::LOAD_CONST, const_none);
+                    }
+                    self.emit(Opcode::CALL, 3);
+                    self.emit(Opcode::POP_TOP, 0);
+                    self.emit_jump(Opcode::JUMP, end_label);
+                    self.fix_label(finally_label);
+                    self.emit(Opcode::PUSH_EXC_INFO, 0);
+                    self.compile_expr(&items[0].context_expr)?;
+                    let exit_idx = self.get_name_index("__exit__") as u32;
+                    self.emit(Opcode::LOAD_ATTR, exit_idx);
+                    let const_none = self.get_const_index(ConstValue::None) as u32;
+                    for _ in 0..3 {
+                        self.emit(Opcode::LOAD_CONST, const_none);
+                    }
+                    self.emit(Opcode::CALL, 3);
+                    self.emit(Opcode::POP_TOP, 0);
+                    self.emit(Opcode::POP_EXCEPT, 0);
+                    self.emit(Opcode::RERAISE, 0);
+                    self.fix_label(end_label);
+                } else {
+                    self.compile_stmts(body)?;
+                }
             }
             Stmt::AnnAssign { target, annotation: _, value } => {
                 if let Some(val) = value {
