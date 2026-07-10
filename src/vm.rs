@@ -8,10 +8,11 @@ use crate::object::ObjectAccess;
 
 #[derive(Clone)]
 pub struct Frame {
-    pub code: CodeObject,
+    pub code: Rc<CodeObject>,
     pub locals: HashMap<String, PyObjectRef>,
+    pub fast_locals: Vec<Option<PyObjectRef>>,
     pub globals: Rc<RefCell<HashMap<String, PyObjectRef>>>,
-    pub builtins: HashMap<String, PyObjectRef>,
+    pub builtins: Rc<HashMap<String, PyObjectRef>>,
     pub stack: Vec<PyObjectRef>,
     pub ip: usize,
     pub base_sp: usize,
@@ -34,11 +35,12 @@ pub enum HandlerType {
 
 impl Frame {
     pub fn new(
-        code: CodeObject,
+        code: Rc<CodeObject>,
         globals: Rc<RefCell<HashMap<String, PyObjectRef>>>,
-        builtins: HashMap<String, PyObjectRef>,
+        builtins: Rc<HashMap<String, PyObjectRef>>,
     ) -> Self {
         Frame {
+            fast_locals: vec![None; code.nlocals],
             code,
             locals: HashMap::new(),
             globals,
@@ -73,7 +75,7 @@ impl Frame {
 
 pub struct VirtualMachine {
     pub frames: Vec<Frame>,
-    pub builtins: HashMap<String, PyObjectRef>,
+    pub builtins: Rc<HashMap<String, PyObjectRef>>,
     pub modules: HashMap<String, PyObjectRef>,
     pub globals: Rc<RefCell<HashMap<String, PyObjectRef>>>,
 }
@@ -99,18 +101,18 @@ impl VirtualMachine {
          modules.insert("os".to_string(), create_module("os", os_dict.clone()));
  
          VirtualMachine {
-             frames: Vec::new(),
-             builtins,
-             modules,
-             globals,
-         }
+              frames: Vec::new(),
+              builtins: Rc::new(builtins),
+              modules,
+              globals,
+          }
     }
 
     pub fn run(&mut self, code: CodeObject) -> PyResult<PyObjectRef> {
         let frame = Frame::new(
-            code,
+            Rc::new(code),
             self.globals.clone(),
-            self.builtins.clone(),
+            Rc::clone(&self.builtins),
         );
         self.frames.push(frame);
         let result = self.execute();
@@ -120,7 +122,7 @@ impl VirtualMachine {
 
     pub fn exec_code(&mut self, code: CodeObject, globals: Option<Rc<RefCell<HashMap<String, PyObjectRef>>>>) -> PyResult<PyObjectRef> {
         let g = globals.unwrap_or_else(|| self.globals.clone());
-        let frame = Frame::new(code, g, self.builtins.clone());
+        let frame = Frame::new(Rc::new(code), g, Rc::clone(&self.builtins));
         self.frames.push(frame);
         let result = self.execute();
         self.frames.pop();
@@ -155,7 +157,73 @@ impl VirtualMachine {
         Err(format!("Module '{}' not found", name))
     }
 
+    /// Try to execute a simple function without creating a Frame.
+    /// Returns Some(result) if the function was simple enough, None otherwise.
+    fn try_exec_simple(code: &CodeObject, args: &[PyObjectRef]) -> Option<PyResult<PyObjectRef>> {
+        if code.vararg_name.is_some() || code.kwarg_name.is_some() || code.num_defaults > 0 {
+            return None;
+        }
+        let instrs = &code.instructions;
+        if instrs.is_empty() || instrs.len() > 6 {
+            return None;
+        }
+        // Pre-allocate local variables from arguments
+        let mut locals: Vec<Option<PyObjectRef>> = vec![None; code.varnames.len()];
+        for (i, arg) in args.iter().enumerate() {
+            if i < locals.len() {
+                locals[i] = Some(arg.clone());
+            }
+        }
+        let mut stack: Vec<PyObjectRef> = Vec::with_capacity(4);
+        for instr in instrs {
+            match instr.op {
+                Opcode::LOAD_FAST => {
+                    let idx = instr.arg as usize;
+                    let val = locals.get(idx)?.clone()?;
+                    stack.push(val);
+                }
+                Opcode::LOAD_CONST => {
+                    let const_val = code.consts.get(instr.arg as usize)?;
+                    let obj = match const_val {
+                        ConstValue::None => py_none(),
+                        ConstValue::Bool(b) => py_bool(*b),
+                        ConstValue::Int(s) => {
+                            if let Ok(n) = s.parse::<i64>() { py_int(n) }
+                            else { let n: num_bigint::BigInt = s.parse().ok()?; PyObjectRef::new(PyObject::Int(n)) }
+                        }
+                        ConstValue::Float(s) => py_float(s.parse().ok()?),
+                        ConstValue::String(s) => py_str(s),
+                        _ => return None,
+                    };
+                    stack.push(obj);
+                }
+                Opcode::BINARY_OP => {
+                    let right = stack.pop()?;
+                    let left = stack.pop()?;
+                    let result = match instr.arg {
+                        0 => py_add(&left, &right),
+                        1 => py_sub(&left, &right),
+                        2 => py_mul(&left, &right),
+                        3 => py_div(&left, &right),
+                        _ => return None,
+                    };
+                    match result { Ok(v) => stack.push(v), Err(e) => return Some(Err(e)) }
+                }
+                Opcode::RETURN_VALUE => return Some(Ok(stack.pop()?)),
+                _ => return None,
+            }
+        }
+        None
+    }
+
     pub fn execute(&mut self) -> PyResult<PyObjectRef> {
+        crate::object::VM_PTR.with(|p| *p.borrow_mut() = Some(self as *mut VirtualMachine));
+        let result = self.execute_inner();
+        crate::object::VM_PTR.with(|p| *p.borrow_mut() = None);
+        result
+    }
+
+    fn execute_inner(&mut self) -> PyResult<PyObjectRef> {
         loop {
             let result = self.execute_instruction();
             match result {
@@ -174,32 +242,35 @@ impl VirtualMachine {
     }
 
     fn execute_instruction(&mut self) -> PyResult<Option<PyObjectRef>> {
-        let (instr, _) = {
-            let f = &self.frames[self.frames.len() - 1];
-            let ip = f.ip;
-            if ip >= f.code.instructions.len() {
-                return Err(PyError::runtime_error("execution reached end of code"));
-            }
-            (f.code.instructions[ip].clone(), ip)
-        };
-        self.frames.last_mut().unwrap().ip += 1;
+        let fi = self.frames.len() - 1;
+        let ip = self.frames[fi].ip;
+        if ip >= self.frames[fi].code.instructions.len() {
+            return Err(PyError::runtime_error("execution reached end of code"));
+        }
+        let op = self.frames[fi].code.instructions[ip].op;
+        let arg = self.frames[fi].code.instructions[ip].arg;
+        self.frames[fi].ip = ip + 1;
 
-        match instr.op {
+        match op {
             Opcode::NOP => {}
 
             Opcode::LOAD_CONST => {
-                let const_idx = instr.arg as usize;
-                let const_val = self.frames.last().unwrap().code.consts.get(const_idx).ok_or_else(|| {
+                let const_idx = arg as usize;
+                let const_val = self.frames[fi].code.consts.get(const_idx).ok_or_else(|| {
                     PyError::runtime_error(format!("constant index out of range: {}", const_idx))
                 })?.clone();
                 let obj = match const_val {
                     ConstValue::None => py_none(),
                     ConstValue::Bool(b) => py_bool(b),
                     ConstValue::Int(s) => {
-                        let n: BigInt = s.parse().map_err(|_| {
-                            PyError::value_error(format!("invalid integer: {}", s))
-                        })?;
-                        PyObjectRef::new(PyObject::Int(n))
+                        if let Ok(n) = s.parse::<i64>() {
+                            py_int(n)  // uses small int cache
+                        } else {
+                            let n: BigInt = s.parse().map_err(|_| {
+                                PyError::value_error(format!("invalid integer: {}", s))
+                            })?;
+                            PyObjectRef::new(PyObject::Int(n))
+                        }
                     }
                     ConstValue::Float(s) => {
                         let f: f64 = s.parse().map_err(|_| {
@@ -208,16 +279,17 @@ impl VirtualMachine {
                         py_float(f)
                     }
                     ConstValue::String(s) => py_str(&s),
+                    ConstValue::Bytes(b) => PyObjectRef::new(PyObject::Bytes(b)),
                     ConstValue::Code(code) => {
                         PyObjectRef::new(PyObject::Code(code))
                     }
                 };
-                self.frames.last_mut().unwrap().push(obj);
+                self.frames[fi].push(obj);
             }
 
             Opcode::LOAD_NAME => {
-                let name_idx = instr.arg as usize;
-                let name = self.frames.last().unwrap().code.names.get(name_idx).ok_or_else(|| {
+                let name_idx = arg as usize;
+                let name = self.frames[fi].code.names.get(name_idx).ok_or_else(|| {
                     PyError::runtime_error("name index out of range")
                 })?.clone();
                 let val = {
@@ -227,52 +299,49 @@ impl VirtualMachine {
                         .or_else(|| f.builtins.get(&name).cloned())
                 };
                 match val {
-                    Some(v) => self.frames.last_mut().unwrap().push(v),
+                    Some(v) => self.frames[fi].push(v),
                     None => return Err(PyError::name_error(format!("name '{}' is not defined", name))),
                 }
             }
 
             Opcode::STORE_NAME => {
-                let name_idx = instr.arg as usize;
-                let name = self.frames.last().unwrap().code.names.get(name_idx).ok_or_else(|| {
+                let name_idx = arg as usize;
+                let name = self.frames[fi].code.names.get(name_idx).ok_or_else(|| {
                     PyError::runtime_error("name index out of range")
                 })?.clone();
-                let val = self.frames.last_mut().unwrap().pop()?;
-                self.frames.last_mut().unwrap().globals.borrow_mut().insert(name, val);
+                let val = self.frames[fi].pop()?;
+                self.frames[fi].globals.borrow_mut().insert(name, val);
             }
 
             Opcode::LOAD_FAST => {
-                let var_idx = instr.arg as usize;
-                let name = self.frames.last().unwrap().code.varnames.get(var_idx).ok_or_else(|| {
-                    PyError::runtime_error("varname index out of range")
-                })?.clone();
+                let var_idx = arg as usize;
                 let val = {
                     let f = &self.frames[self.frames.len() - 1];
-                    f.locals.get(&name).cloned().or_else(|| {
-                        for (k, v) in &f.locals {
-                            if k == &name { return Some(v.clone()); }
-                        }
-                        None
-                    })
+                    f.fast_locals.get(var_idx).and_then(|v| v.clone())
                 };
                 match val {
-                    Some(v) => self.frames.last_mut().unwrap().push(v),
-                    None => return Err(PyError::name_error(format!("local variable '{}' referenced before assignment", name))),
+                    Some(v) => self.frames[fi].push(v),
+                    None => return Err(PyError::name_error(format!("local variable '{}' referenced before assignment", 
+                        self.frames[fi].code.varnames.get(var_idx).map_or("?", |s| &**s)))),
                 }
             }
 
             Opcode::STORE_FAST => {
-                let var_idx = instr.arg as usize;
-                let name = self.frames.last().unwrap().code.varnames.get(var_idx).ok_or_else(|| {
+                let var_idx = arg as usize;
+                let val = self.frames[fi].pop()?;
+                let frame = &mut self.frames[fi];
+                if var_idx < frame.fast_locals.len() {
+                    frame.fast_locals[var_idx] = Some(val.clone());
+                }
+                let name = frame.code.varnames.get(var_idx).ok_or_else(|| {
                     PyError::runtime_error("varname index out of range")
                 })?.clone();
-                let val = self.frames.last_mut().unwrap().pop()?;
-                self.frames.last_mut().unwrap().locals.insert(name, val);
+                frame.locals.insert(name, val);
             }
 
             Opcode::LOAD_GLOBAL => {
-                let name_idx = instr.arg as usize;
-                let name = self.frames.last().unwrap().code.names.get(name_idx).ok_or_else(|| {
+                let name_idx = arg as usize;
+                let name = self.frames[fi].code.names.get(name_idx).ok_or_else(|| {
                     PyError::runtime_error("name index out of range")
                 })?.clone();
                 let val = {
@@ -281,22 +350,22 @@ impl VirtualMachine {
                         .or_else(|| f.builtins.get(&name).cloned())
                 };
                 match val {
-                    Some(v) => self.frames.last_mut().unwrap().push(v),
+                    Some(v) => self.frames[fi].push(v),
                     None => return Err(PyError::name_error(format!("name '{}' is not defined", name))),
                 }
             }
 
             Opcode::STORE_GLOBAL => {
-                let name_idx = instr.arg as usize;
-                let name = self.frames.last().unwrap().code.names.get(name_idx).ok_or_else(|| {
+                let name_idx = arg as usize;
+                let name = self.frames[fi].code.names.get(name_idx).ok_or_else(|| {
                     PyError::runtime_error("name index out of range")
                 })?.clone();
-                let val = self.frames.last_mut().unwrap().pop()?;
-                self.frames.last_mut().unwrap().globals.borrow_mut().insert(name, val);
+                let val = self.frames[fi].pop()?;
+                self.frames[fi].globals.borrow_mut().insert(name, val);
             }
 
             Opcode::LOAD_DEREF => {
-                let var_idx = instr.arg as usize;
+                let var_idx = arg as usize;
                 let (name, val) = {
                     let f = &self.frames[self.frames.len() - 1];
                     let name = if var_idx < f.code.cellvars.len() {
@@ -320,14 +389,14 @@ impl VirtualMachine {
                                 _ => v.clone(),
                             }
                         };
-                        self.frames.last_mut().unwrap().push(push_val);
+                        self.frames[fi].push(push_val);
                     }
                     None => return Err(PyError::name_error(format!("variable '{}' not found", name))),
                 }
             }
 
             Opcode::STORE_DEREF => {
-                let var_idx = instr.arg as usize;
+                let var_idx = arg as usize;
                 let name = {
                     let f = &self.frames[self.frames.len() - 1];
                     if var_idx < f.code.cellvars.len() {
@@ -336,7 +405,7 @@ impl VirtualMachine {
                         f.code.freevars[var_idx - f.code.cellvars.len()].clone()
                     }
                 };
-                let val = self.frames.last_mut().unwrap().pop()?;
+                let val = self.frames[fi].pop()?;
                 let cell = {
                     let f = &self.frames[self.frames.len() - 1];
                     f.locals.get(&name).cloned()
@@ -348,61 +417,61 @@ impl VirtualMachine {
                     }
                 } else {
                     let cell_obj = PyObjectRef::new(PyObject::Cell { value: Some(val) });
-                    self.frames.last_mut().unwrap().locals.insert(name, cell_obj);
+                    self.frames[fi].locals.insert(name, cell_obj);
                 }
             }
 
             Opcode::DELETE_FAST => {
-                let var_idx = instr.arg as usize;
-                let name = self.frames.last().unwrap().code.varnames[var_idx].clone();
-                self.frames.last_mut().unwrap().locals.remove(&name);
+                let var_idx = arg as usize;
+                let name = self.frames[fi].code.varnames[var_idx].clone();
+                self.frames[fi].locals.remove(&name);
             }
 
             Opcode::DELETE_NAME => {
-                let name_idx = instr.arg as usize;
-                let name = self.frames.last().unwrap().code.names[name_idx].clone();
-                self.frames.last_mut().unwrap().globals.borrow_mut().remove(&name);
+                let name_idx = arg as usize;
+                let name = self.frames[fi].code.names[name_idx].clone();
+                self.frames[fi].globals.borrow_mut().remove(&name);
             }
 
             Opcode::POP_TOP => {
-                self.frames.last_mut().unwrap().pop()?;
+                self.frames[fi].pop()?;
             }
 
             Opcode::DUP_TOP => {
-                let val = self.frames.last().unwrap().peek(0)?;
-                self.frames.last_mut().unwrap().push(val);
+                let val = self.frames[fi].peek(0)?;
+                self.frames[fi].push(val);
             }
 
             Opcode::COPY => {
-                let depth = instr.arg as usize;
-                let val = self.frames.last().unwrap().peek(depth)?;
-                self.frames.last_mut().unwrap().push(val);
+                let depth = arg as usize;
+                let val = self.frames[fi].peek(depth)?;
+                self.frames[fi].push(val);
             }
 
             Opcode::SWAP => {
-                let i = instr.arg as usize;
-                let len = self.frames.last().unwrap().stack.len();
+                let i = arg as usize;
+                let len = self.frames[fi].stack.len();
                 if i > 0 && i < len {
-                    self.frames.last_mut().unwrap().stack.swap(len - 1, len - 1 - i);
+                    self.frames[fi].stack.swap(len - 1, len - 1 - i);
                 }
             }
 
             Opcode::RETURN_VALUE => {
-                let val = self.frames.last_mut().unwrap().pop()?;
+                let val = self.frames[fi].pop()?;
                 return Ok(Some(val));
             }
 
             Opcode::PUSH_NULL => {
-                self.frames.last_mut().unwrap().push(py_none());
+                self.frames[fi].push(py_none());
             }
 
             Opcode::CALL => {
-                let npos = instr.arg as usize & 0xFF;
-                let nkw = (instr.arg as usize >> 8) & 0xFF;
+                let npos = arg as usize & 0xFF;
+                let nkw = (arg as usize >> 8) & 0xFF;
                 let total = npos + 2 * nkw;
                 let mut items = Vec::with_capacity(total);
                 for _ in 0..total {
-                    items.push(self.frames.last_mut().unwrap().pop()?);
+                    items.push(self.frames[fi].pop()?);
                 }
                 items.reverse();
                 let mut args = Vec::with_capacity(npos + nkw);
@@ -418,24 +487,24 @@ impl VirtualMachine {
                     let value = items[npos + 2 * i + 1].clone();
                     keywords.push((name, value));
                 }
-                let callable = self.frames.last_mut().unwrap().pop()?;
+                let callable = self.frames[fi].pop()?;
                 let result = self.call_function(callable, args, keywords)?;
-                self.frames.last_mut().unwrap().push(result);
+                self.frames[fi].push(result);
             }
 
             Opcode::MAKE_FUNCTION => {
-                let n_defaults = instr.arg as usize;
+                let n_defaults = arg as usize;
                 let mut defaults = Vec::new();
                 for _ in 0..n_defaults {
-                    defaults.push(self.frames.last_mut().unwrap().pop()?);
+                    defaults.push(self.frames[fi].pop()?);
                 }
                 defaults.reverse();
-                let code_obj = self.frames.last_mut().unwrap().pop()?;
+                let code_obj = self.frames[fi].pop()?;
                 let code = match &*code_obj.borrow() {
-                    PyObject::Code(c) => c.as_ref().clone(),
+                    PyObject::Code(c) => Rc::new(c.as_ref().clone()),
                     _ => return Err(PyError::runtime_error("MAKE_FUNCTION: expected code object")),
                 };
-                let globals = self.frames.last().unwrap().globals.clone();
+                let globals = self.frames[fi].globals.clone();
                 let func = PyObjectRef::new(PyObject::Function {
                     code,
                     globals,
@@ -444,59 +513,59 @@ impl VirtualMachine {
                     closure: Vec::new(),
                     dict: HashMap::new(),
                 });
-                self.frames.last_mut().unwrap().push(func);
+                self.frames[fi].push(func);
             }
 
             Opcode::BUILD_LIST => {
-                let count = instr.arg as usize;
+                let count = arg as usize;
                 let mut items = Vec::with_capacity(count);
                 for _ in 0..count {
-                    items.push(self.frames.last_mut().unwrap().pop()?);
+                    items.push(self.frames[fi].pop()?);
                 }
                 items.reverse();
-                self.frames.last_mut().unwrap().push(py_list(items));
+                self.frames[fi].push(py_list(items));
             }
 
             Opcode::BUILD_TUPLE => {
-                let count = instr.arg as usize;
+                let count = arg as usize;
                 let mut items = Vec::with_capacity(count);
                 for _ in 0..count {
-                    items.push(self.frames.last_mut().unwrap().pop()?);
+                    items.push(self.frames[fi].pop()?);
                 }
                 items.reverse();
-                self.frames.last_mut().unwrap().push(py_tuple(items));
+                self.frames[fi].push(py_tuple(items));
             }
 
             Opcode::BUILD_MAP => {
-                self.frames.last_mut().unwrap().push(py_dict());
+                self.frames[fi].push(py_dict());
             }
 
             Opcode::BUILD_SET => {
-                let count = instr.arg as usize;
+                let count = arg as usize;
                 let mut items = Vec::with_capacity(count);
                 for _ in 0..count {
-                    items.push(self.frames.last_mut().unwrap().pop()?);
+                    items.push(self.frames[fi].pop()?);
                 }
                 items.reverse();
-                self.frames.last_mut().unwrap().push(PyObjectRef::new(PyObject::Set(items)));
+                self.frames[fi].push(PyObjectRef::new(PyObject::Set(items)));
             }
 
             Opcode::BUILD_STRING => {
-                let count = instr.arg as usize;
+                let count = arg as usize;
                 let mut parts = Vec::with_capacity(count);
                 for _ in 0..count {
-                    parts.push(self.frames.last_mut().unwrap().pop()?.str());
+                    parts.push(self.frames[fi].pop()?.str());
                 }
                 parts.reverse();
-                self.frames.last_mut().unwrap().push(py_str(&parts.join("")));
+                self.frames[fi].push(py_str(&parts.join("")));
             }
 
             Opcode::BUILD_SLICE => {
-                let nargs = instr.arg as usize;
-                let step = if nargs >= 3 { Some(self.frames.last_mut().unwrap().pop()?) } else { None };
-                let stop = if nargs >= 2 { Some(self.frames.last_mut().unwrap().pop()?) } else { None };
-                let start = if nargs >= 1 { Some(self.frames.last_mut().unwrap().pop()?) } else { None };
-                self.frames.last_mut().unwrap().push(PyObjectRef::new(PyObject::Slice {
+                let nargs = arg as usize;
+                let step = if nargs >= 3 { Some(self.frames[fi].pop()?) } else { None };
+                let stop = if nargs >= 2 { Some(self.frames[fi].pop()?) } else { None };
+                let start = if nargs >= 1 { Some(self.frames[fi].pop()?) } else { None };
+                self.frames[fi].push(PyObjectRef::new(PyObject::Slice {
                     start: start.unwrap_or(py_none()),
                     stop: stop.unwrap_or(py_none()),
                     step: step.unwrap_or(py_none()),
@@ -504,9 +573,9 @@ impl VirtualMachine {
             }
 
             Opcode::BINARY_OP => {
-                let op = instr.arg;
-                let right = self.frames.last_mut().unwrap().pop()?;
-                let left = self.frames.last_mut().unwrap().pop()?;
+                let op = arg;
+                let right = self.frames[fi].pop()?;
+                let left = self.frames[fi].pop()?;
                 let result = match op {
                     0 => py_add(&left, &right),
                     1 => py_sub(&left, &right),
@@ -523,48 +592,48 @@ impl VirtualMachine {
                     13 => py_getitem(&left, &right),
                     _ => return Err(PyError::runtime_error(format!("unknown binary op: {}", op))),
                 }?;
-                self.frames.last_mut().unwrap().push(result);
+                self.frames[fi].push(result);
             }
 
             Opcode::COMPARE_OP => {
-                let op = instr.arg;
-                let right = self.frames.last_mut().unwrap().pop()?;
-                let left = self.frames.last_mut().unwrap().pop()?;
+                let op = arg;
+                let right = self.frames[fi].pop()?;
+                let left = self.frames[fi].pop()?;
                 let result = py_compare(&left, &right, op)?;
-                self.frames.last_mut().unwrap().push(result);
+                self.frames[fi].push(result);
             }
 
             Opcode::IS_OP => {
-                let invert = instr.arg != 0;
-                let right = self.frames.last_mut().unwrap().pop()?;
-                let left = self.frames.last_mut().unwrap().pop()?;
+                let invert = arg != 0;
+                let right = self.frames[fi].pop()?;
+                let left = self.frames[fi].pop()?;
                 let is_same = left.is(&right);
                 let result = if invert { !is_same } else { is_same };
-                self.frames.last_mut().unwrap().push(py_bool(result));
+                self.frames[fi].push(py_bool(result));
             }
 
             Opcode::CONTAINS_OP => {
-                let invert = instr.arg != 0;
-                let right = self.frames.last_mut().unwrap().pop()?;
-                let left = self.frames.last_mut().unwrap().pop()?;
+                let invert = arg != 0;
+                let right = self.frames[fi].pop()?;
+                let left = self.frames[fi].pop()?;
                 let result = contains_op(&right, &left)?;
                 let result = if invert { !result } else { result };
-                self.frames.last_mut().unwrap().push(py_bool(result));
+                self.frames[fi].push(py_bool(result));
             }
 
             Opcode::UNARY_NEGATIVE => {
-                let val = self.frames.last_mut().unwrap().pop()?;
+                let val = self.frames[fi].pop()?;
                 let result = py_sub(&py_int(0), &val)?;
-                self.frames.last_mut().unwrap().push(result);
+                self.frames[fi].push(result);
             }
 
             Opcode::UNARY_NOT => {
-                let val = self.frames.last_mut().unwrap().pop()?;
-                self.frames.last_mut().unwrap().push(py_bool(!val.truthy()));
+                let val = self.frames[fi].pop()?;
+                self.frames[fi].push(py_bool(!val.truthy()));
             }
 
             Opcode::UNARY_INVERT => {
-                let val = self.frames.last_mut().unwrap().pop()?;
+                let val = self.frames[fi].pop()?;
                 let result = {
                     let obj = val.borrow();
                     match &*obj {
@@ -572,89 +641,90 @@ impl VirtualMachine {
                         _ => return Err(PyError::type_error("bad operand type for unary ~")),
                     }
                 };
-                self.frames.last_mut().unwrap().push(result);
+                self.frames[fi].push(result);
             }
 
             Opcode::JUMP_FORWARD | Opcode::JUMP | Opcode::JUMP_BACKWARD => {
-                let offset = instr.arg as usize;
-                match instr.op {
+                let offset = arg as usize;
+                match op {
                     Opcode::JUMP_FORWARD => {
-                        self.frames.last_mut().unwrap().ip += offset;
+                        self.frames[fi].ip += offset;
                     }
                     Opcode::JUMP => {
-                        self.frames.last_mut().unwrap().ip = offset;
+                        self.frames[fi].ip = offset;
                     }
                     Opcode::JUMP_BACKWARD => {
-                        let cur_ip = self.frames.last().unwrap().ip;
-                        self.frames.last_mut().unwrap().ip = cur_ip.wrapping_sub(offset).wrapping_sub(1);
+                        let cur_ip = self.frames[fi].ip;
+                        self.frames[fi].ip = cur_ip.wrapping_sub(offset).wrapping_sub(1);
                     }
                     _ => unreachable!(),
                 }
             }
 
             Opcode::POP_JUMP_IF_FALSE => {
-                let val = self.frames.last_mut().unwrap().pop()?;
+                let val = self.frames[fi].pop()?;
                 if !val.truthy() {
-                    self.frames.last_mut().unwrap().ip = instr.arg as usize;
+                    self.frames[fi].ip = arg as usize;
                 }
             }
 
             Opcode::POP_JUMP_IF_TRUE => {
-                let val = self.frames.last_mut().unwrap().pop()?;
+                let val = self.frames[fi].pop()?;
                 if val.truthy() {
-                    self.frames.last_mut().unwrap().ip = instr.arg as usize;
+                    self.frames[fi].ip = arg as usize;
                 }
             }
 
             Opcode::POP_JUMP_IF_NONE => {
-                let val = self.frames.last_mut().unwrap().pop()?;
+                let val = self.frames[fi].pop()?;
                 let is_none = {
                     matches!(&*val.borrow(), PyObject::None)
                 };
                 if is_none {
-                    self.frames.last_mut().unwrap().ip = instr.arg as usize;
+                    self.frames[fi].ip = arg as usize;
                 }
             }
 
             Opcode::POP_JUMP_IF_NOT_NONE => {
-                let val = self.frames.last_mut().unwrap().pop()?;
+                let val = self.frames[fi].pop()?;
                 let is_not_none = {
                     !matches!(&*val.borrow(), PyObject::None)
                 };
                 if is_not_none {
-                    self.frames.last_mut().unwrap().ip = instr.arg as usize;
+                    self.frames[fi].ip = arg as usize;
                 }
             }
 
             Opcode::GET_ITER => {
-                let val = self.frames.last_mut().unwrap().pop()?;
+                let val = self.frames[fi].pop()?;
                 let obj = val.borrow();
                 match &*obj {
                     PyObject::List(v) => {
-                        let iter = PyObjectRef::new(PyObject::List(v.clone()));
-                        self.frames.last_mut().unwrap().push(iter);
+                        self.frames[fi].push(PyObjectRef::new(PyObject::ListIter { list: v.clone(), index: 0 }));
                     }
                     PyObject::Tuple(v) => {
-                        let iter = PyObjectRef::new(PyObject::List(v.clone()));
-                        self.frames.last_mut().unwrap().push(iter);
+                        self.frames[fi].push(PyObjectRef::new(PyObject::ListIter { list: v.clone(), index: 0 }));
                     }
                     PyObject::Str(s) => {
                         let chars: Vec<PyObjectRef> = s.chars().map(|c| py_str(&c.to_string())).collect();
-                        self.frames.last_mut().unwrap().push(py_list(chars));
+                        self.frames[fi].push(PyObjectRef::new(PyObject::ListIter { list: chars, index: 0 }));
                     }
                     PyObject::Set(s) => {
-                        self.frames.last_mut().unwrap().push(py_list(s.clone()));
+                        self.frames[fi].push(PyObjectRef::new(PyObject::ListIter { list: s.clone(), index: 0 }));
                     }
                     PyObject::Generator { .. } => {
                         drop(obj);
-                        self.frames.last_mut().unwrap().push(val);
+                        self.frames[fi].push(val);
+                    }
+                    PyObject::Range { start, stop, step } => {
+                        self.frames[fi].push(PyObjectRef::new(PyObject::RangeIter { current: *start, stop: *stop, step: *step }));
                     }
                     _ => return Err(PyError::type_error(format!("'{}' object is not iterable", obj.type_name()))),
                 }
             }
 
             Opcode::FOR_ITER => {
-                let iter_val = self.frames.last().unwrap().peek(0)?;
+                let iter_val = self.frames[fi].peek(0)?;
                 let is_generator = matches!(&*iter_val.borrow(), PyObject::Generator { .. });
                 if is_generator {
                     // Call __next__ on generator
@@ -675,48 +745,61 @@ impl VirtualMachine {
                         });
                         match self.call_function(fixed, vec![], vec![]) {
                             Ok(val) => {
-                                self.frames.last_mut().unwrap().push(val);
+                                self.frames[fi].push(val);
                             }
                             Err(e) if matches!(&e, PyError::StopIteration) => {
-                                self.frames.last_mut().unwrap().ip = instr.arg as usize;
+                                self.frames[fi].ip = arg as usize;
                             }
                             Err(e) => return Err(e),
                         }
                     } else {
-                        self.frames.last_mut().unwrap().ip = instr.arg as usize;
+                        self.frames[fi].ip = arg as usize;
                     }
                 } else {
-                let is_empty = {
+                let is_exhausted = {
                     let obj = iter_val.borrow();
                     match &*obj {
                         PyObject::List(v) => v.is_empty(),
+                        PyObject::ListIter { list, index } => *index >= list.len(),
+                        PyObject::RangeIter { current, stop, step } => {
+                            if *step > 0 { *current >= *stop } else { *current <= *stop }
+                        }
                         _ => return Err(PyError::type_error("for_iter on non-iterable")),
                     }
                 };
-                if is_empty {
-                    self.frames.last_mut().unwrap().ip = instr.arg as usize;
+                if is_exhausted {
+                    self.frames[fi].ip = arg as usize;
                 } else {
-                    let val = self.frames.last_mut().unwrap().pop()?;
+                    let val = self.frames[fi].pop()?;
                     let item = {
                         let mut obj = val.borrow_mut();
-                        if let PyObject::List(list) = &mut *obj {
-                            list.remove(0)
-                        } else {
-                            unreachable!()
+                        match &mut *obj {
+                            PyObject::List(list) => list.remove(0),
+                            PyObject::ListIter { list, index } => {
+                                let v = list[*index].clone();
+                                *index += 1;
+                                v
+                            }
+                            PyObject::RangeIter { current, stop, step } => {
+                                let v = py_int(*current);
+                                *current += *step;
+                                v
+                            }
+                            _ => unreachable!()
                         }
                     };
-                    self.frames.last_mut().unwrap().push(val);
-                    self.frames.last_mut().unwrap().push(item);
+                    self.frames[fi].push(val);
+                    self.frames[fi].push(item);
                 }
                 }
             }
 
             Opcode::LOAD_ATTR => {
-                let name_idx = instr.arg as usize;
-                let name = self.frames.last().unwrap().code.names.get(name_idx).ok_or_else(|| {
+                let name_idx = arg as usize;
+                let name = self.frames[fi].code.names.get(name_idx).ok_or_else(|| {
                     PyError::runtime_error("name index out of range")
                 })?.clone();
-                let obj = self.frames.last_mut().unwrap().pop()?;
+                let obj = self.frames[fi].pop()?;
                 let result = {
                     let obj_borrowed = obj.borrow();
                     match &*obj_borrowed {
@@ -800,29 +883,29 @@ impl VirtualMachine {
                         }
                     }
                 }?;
-                self.frames.last_mut().unwrap().push(result);
+                self.frames[fi].push(result);
             }
 
             Opcode::STORE_ATTR => {
-                let name_idx = instr.arg as usize;
-                let name = self.frames.last().unwrap().code.names.get(name_idx).ok_or_else(|| {
+                let name_idx = arg as usize;
+                let name = self.frames[fi].code.names.get(name_idx).ok_or_else(|| {
                     PyError::runtime_error("name index out of range")
                 })?.clone();
-                let val = self.frames.last_mut().unwrap().pop()?;
-                let obj = self.frames.last_mut().unwrap().pop()?;
+                let val = self.frames[fi].pop()?;
+                let obj = self.frames[fi].pop()?;
                 obj.borrow_mut().set_attribute(&name, val)?;
             }
 
             Opcode::STORE_SUBSCR => {
-                let val = self.frames.last_mut().unwrap().pop()?;
-                let index = self.frames.last_mut().unwrap().pop()?;
-                let obj = self.frames.last_mut().unwrap().pop()?;
+                let val = self.frames[fi].pop()?;
+                let index = self.frames[fi].pop()?;
+                let obj = self.frames[fi].pop()?;
                 py_setitem(&obj, &index, val)?;
             }
 
             Opcode::LIST_APPEND => {
-                let val = self.frames.last_mut().unwrap().pop()?;
-                let list = self.frames.last().unwrap().peek(instr.arg as usize)?;
+                let val = self.frames[fi].pop()?;
+                let list = self.frames[fi].peek(arg as usize)?;
                 let mut obj = list.borrow_mut();
                 if let PyObject::List(v) = &mut *obj {
                     v.push(val);
@@ -832,8 +915,8 @@ impl VirtualMachine {
             }
 
             Opcode::SET_ADD => {
-                let val = self.frames.last_mut().unwrap().pop()?;
-                let set = self.frames.last().unwrap().peek(instr.arg as usize)?;
+                let val = self.frames[fi].pop()?;
+                let set = self.frames[fi].peek(arg as usize)?;
                 let mut obj = set.borrow_mut();
                 if let PyObject::Set(v) = &mut *obj {
                     v.push(val);
@@ -843,9 +926,9 @@ impl VirtualMachine {
             }
 
             Opcode::MAP_ADD => {
-                let val = self.frames.last_mut().unwrap().pop()?;
-                let key = self.frames.last_mut().unwrap().pop()?;
-                let map = self.frames.last().unwrap().peek(instr.arg as usize)?;
+                let val = self.frames[fi].pop()?;
+                let key = self.frames[fi].pop()?;
+                let map = self.frames[fi].peek(arg as usize)?;
                 let mut obj = map.borrow_mut();
                 if let PyObject::Dict(d) = &mut *obj {
                     let key_str = key.str();
@@ -856,8 +939,8 @@ impl VirtualMachine {
             }
 
             Opcode::UNPACK_SEQUENCE => {
-                let count = instr.arg as usize;
-                let seq = self.frames.last_mut().unwrap().pop()?;
+                let count = arg as usize;
+                let seq = self.frames[fi].pop()?;
                 let items = {
                     let obj = seq.borrow();
                     match &*obj {
@@ -873,43 +956,43 @@ impl VirtualMachine {
                     }
                 };
                 for item in items.into_iter().rev() {
-                    self.frames.last_mut().unwrap().push(item);
+                    self.frames[fi].push(item);
                 }
             }
 
             Opcode::SETUP_FINALLY => {
-                let stack_depth = self.frames.last().unwrap().stack.len();
+                let stack_depth = self.frames[fi].stack.len();
                 let handler = ExceptionHandler {
-                    instr_addr: instr.arg as usize,
+                    instr_addr: arg as usize,
                     stack_depth,
                     handler_type: HandlerType::Except,
                 };
-                self.frames.last_mut().unwrap().exception_handlers.push(handler);
+                self.frames[fi].exception_handlers.push(handler);
             }
 
             Opcode::SETUP_CLEANUP => {
-                let stack_depth = self.frames.last().unwrap().stack.len();
+                let stack_depth = self.frames[fi].stack.len();
                 let handler = ExceptionHandler {
-                    instr_addr: instr.arg as usize,
+                    instr_addr: arg as usize,
                     stack_depth,
                     handler_type: HandlerType::Finally,
                 };
-                self.frames.last_mut().unwrap().exception_handlers.push(handler);
+                self.frames[fi].exception_handlers.push(handler);
             }
 
             Opcode::POP_BLOCK => {
-                self.frames.last_mut().unwrap().exception_handlers.pop();
+                self.frames[fi].exception_handlers.pop();
             }
 
             Opcode::PUSH_EXC_INFO => {}
 
             Opcode::POP_EXCEPT => {
-                self.frames.last_mut().unwrap().pop()?;
+                self.frames[fi].pop()?;
             }
 
             Opcode::CHECK_EXC_MATCH => {
-                let expected = self.frames.last_mut().unwrap().pop()?;
-                let exc = self.frames.last_mut().unwrap().pop()?;
+                let expected = self.frames[fi].pop()?;
+                let exc = self.frames[fi].pop()?;
                 let expected_name = match &*expected.borrow() {
                     PyObject::Str(s) => s.clone(),
                     PyObject::Type { name, .. } => name.clone(),
@@ -920,7 +1003,7 @@ impl VirtualMachine {
                     PyObject::Exception { typ, .. } => typ == &expected_name,
                     _ => false,
                 };
-                self.frames.last_mut().unwrap().push(py_bool(matched));
+                self.frames[fi].push(py_bool(matched));
             }
 
             Opcode::RERAISE => {
@@ -928,11 +1011,11 @@ impl VirtualMachine {
             }
 
             Opcode::RAISE_VARARGS => {
-                let nargs = instr.arg;
+                let nargs = arg;
                 match nargs {
                     0 => return Err(PyError::runtime_error("re-raise")),
                     1 => {
-                        let exc = self.frames.last_mut().unwrap().pop()?;
+                        let exc = self.frames[fi].pop()?;
                         let msg = match &*exc.borrow() {
                             PyObject::Str(s) => s.clone(),
                             PyObject::Exception { args, .. } => {
@@ -943,8 +1026,8 @@ impl VirtualMachine {
                         return Err(PyError::Exception(msg, exc));
                     }
                     2 => {
-                        let cause = self.frames.last_mut().unwrap().pop()?;
-                        let exc = self.frames.last_mut().unwrap().pop()?;
+                        let cause = self.frames[fi].pop()?;
+                        let exc = self.frames[fi].pop()?;
                         return Err(PyError::Exception(format!("{} (caused by {})", exc.str(), cause.str()), exc));
                     }
                     _ => return Err(PyError::runtime_error("invalid RAISE_VARARGS count")),
@@ -952,44 +1035,44 @@ impl VirtualMachine {
             }
 
             Opcode::IMPORT_NAME => {
-                let name_idx = instr.arg as usize;
-                let name = self.frames.last().unwrap().code.names.get(name_idx).ok_or_else(|| {
+                let name_idx = arg as usize;
+                let name = self.frames[fi].code.names.get(name_idx).ok_or_else(|| {
                     PyError::runtime_error("name index out of range")
                 })?.clone();
-                self.frames.last_mut().unwrap().pop()?;
-                self.frames.last_mut().unwrap().pop()?;
+                self.frames[fi].pop()?;
+                self.frames[fi].pop()?;
                 if self.modules.contains_key(&name) {
-                    self.frames.last_mut().unwrap().push(self.modules[&name].clone());
+                    self.frames[fi].push(self.modules[&name].clone());
                 } else {
                     // Try to load from file
                     let module = self.import_module_from_file(&name);
                     match module {
                         Ok(m) => {
                             self.modules.insert(name.clone(), m.clone());
-                            self.frames.last_mut().unwrap().push(m);
+                            self.frames[fi].push(m);
                         }
                         Err(_) => {
                             let module = create_module(&name, HashMap::new());
                             self.modules.insert(name.clone(), module.clone());
-                            self.frames.last_mut().unwrap().push(module);
+                            self.frames[fi].push(module);
                         }
                     }
                 }
             }
 
             Opcode::IMPORT_FROM => {
-                let name_idx = instr.arg as usize;
-                let name = self.frames.last().unwrap().code.names.get(name_idx).ok_or_else(|| {
+                let name_idx = arg as usize;
+                let name = self.frames[fi].code.names.get(name_idx).ok_or_else(|| {
                     PyError::runtime_error("name index out of range")
                 })?.clone();
-                let module = self.frames.last().unwrap().peek(0)?;
+                let module = self.frames[fi].peek(0)?;
                 let obj = module.borrow();
                 match &*obj {
                     PyObject::Module { dict, .. } => {
                         if let Some(val) = dict.get(&name) {
-                            self.frames.last_mut().unwrap().push(val.clone());
+                            self.frames[fi].push(val.clone());
                         } else {
-                            self.frames.last_mut().unwrap().push(py_none());
+                            self.frames[fi].push(py_none());
                         }
                     }
                     _ => return Err(PyError::runtime_error("IMPORT_FROM on non-module")),
@@ -997,11 +1080,11 @@ impl VirtualMachine {
             }
 
             Opcode::LOAD_BUILD_CLASS => {
-                self.frames.last_mut().unwrap().push(PyObjectRef::new(PyObject::BuildClass));
+                self.frames[fi].push(PyObjectRef::new(PyObject::BuildClass));
             }
 
             Opcode::LOAD_CLOSURE => {
-                let idx = instr.arg as usize;
+                let idx = arg as usize;
                 let (_name, cell) = {
                     let f = &self.frames[self.frames.len() - 1];
                     let name = if idx < f.code.cellvars.len() {
@@ -1014,45 +1097,45 @@ impl VirtualMachine {
                     });
                     (name, cell)
                 };
-                self.frames.last_mut().unwrap().push(cell);
+                self.frames[fi].push(cell);
             }
 
             Opcode::FORMAT_SIMPLE => {
-                let val = self.frames.last_mut().unwrap().pop()?;
-                self.frames.last_mut().unwrap().push(py_str(&val.str()));
+                let val = self.frames[fi].pop()?;
+                self.frames[fi].push(py_str(&val.str()));
             }
 
             Opcode::FORMAT_WITH_SPEC => {
-                let _spec = self.frames.last_mut().unwrap().pop()?;
-                let val = self.frames.last_mut().unwrap().pop()?;
-                self.frames.last_mut().unwrap().push(py_str(&val.str()));
+                let _spec = self.frames[fi].pop()?;
+                let val = self.frames[fi].pop()?;
+                self.frames[fi].push(py_str(&val.str()));
             }
 
             Opcode::CONVERT_VALUE => {
-                let conversion = instr.arg;
-                let val = self.frames.last_mut().unwrap().pop()?;
+                let conversion = arg;
+                let val = self.frames[fi].pop()?;
                 let result = match conversion {
                     0 => py_str(&val.str()),
                     1 => py_str(&val.repr()),
                     2 => py_str(&val.str()),
                     _ => return Err(PyError::runtime_error("unknown conversion type")),
                 };
-                self.frames.last_mut().unwrap().push(result);
+                self.frames[fi].push(result);
             }
 
             Opcode::LOAD_LOCALS => {
-                self.frames.last_mut().unwrap().push(py_dict());
+                self.frames[fi].push(py_dict());
             }
 
             Opcode::SETUP_ANNOTATIONS => {}
 
             Opcode::POP_ITER => {
-                self.frames.last_mut().unwrap().pop()?;
+                self.frames[fi].pop()?;
             }
 
             Opcode::SETUP_WITH => {
                 // Simplified: just enter the context manager
-                let mgr = self.frames.last().unwrap().peek(0)?;
+                let mgr = self.frames[fi].peek(0)?;
                 let _exit_method = {
                     let obj = mgr.borrow();
                     obj.get_attribute("__exit__").ok()
@@ -1063,23 +1146,23 @@ impl VirtualMachine {
                 };
                 if let Some(enter) = enter_method {
                     let result = self.call_function(enter, vec![], vec![])?;
-                    self.frames.last_mut().unwrap().push(result);
+                    self.frames[fi].push(result);
                 } else {
                     // Enter and push None as result (simplified)
-                    self.frames.last_mut().unwrap().push(py_none());
+                    self.frames[fi].push(py_none());
                 }
             }
 
             Opcode::YIELD_VALUE => {
-                let val = self.frames.last_mut().unwrap().pop()?;
+                let val = self.frames[fi].pop()?;
                 // Push sent value (None for next()) so execution can continue
-                self.frames.last_mut().unwrap().push(py_none());
+                self.frames[fi].push(py_none());
                 return Ok(Some(val));
             }
 
             Opcode::RETURN_GENERATOR => {
                 // Create a Generator wrapping current frame (IP already incremented past this instruction)
-                let frame = self.frames.last().unwrap().clone();
+                let frame = self.frames[fi].clone();
                 let gen = PyObjectRef::new(PyObject::Generator {
                     frame: std::cell::RefCell::new(Some(frame)),
                 });
@@ -1087,7 +1170,7 @@ impl VirtualMachine {
                 return Ok(Some(gen));
             }
 
-            _ => return Err(PyError::runtime_error(format!("unimplemented opcode: {:?}", instr.op))),
+            _ => return Err(PyError::runtime_error(format!("unimplemented opcode: {:?}", op))),
         }
         Ok(None)
     }
@@ -1117,10 +1200,16 @@ impl VirtualMachine {
         }
 
         if let PyObject::Function { code, globals: func_globals, defaults, .. } = &*callable.borrow() {
+            // Try simple execution without Frame creation
+            if defaults.is_empty() && keywords.is_empty() {
+                if let Some(result) = Self::try_exec_simple(code, &args) {
+                    return result;
+                }
+            }
             let code = code.clone();
             let func_globals = func_globals.clone();
             let defaults = defaults.clone();
-            let mut new_frame = Frame::new(code.clone(), func_globals, self.builtins.clone());
+            let mut new_frame = Frame::new(code.clone(), func_globals, Rc::clone(&self.builtins));
 
             let npos = args.len();
             let named_params = if code.vararg_name.is_some() || code.kwarg_name.is_some() {
@@ -1135,6 +1224,9 @@ impl VirtualMachine {
             for i in 0..npos.min(named_params) {
                 let arg_name = &new_frame.code.varnames[i];
                 new_frame.locals.insert(arg_name.clone(), args[i].clone());
+                if i < new_frame.fast_locals.len() {
+                    new_frame.fast_locals[i] = Some(args[i].clone());
+                }
             }
 
             // Pack excess positional args into *args
@@ -1143,7 +1235,13 @@ impl VirtualMachine {
                 for i in named_params..npos {
                     extra.push(args[i].clone());
                 }
-                new_frame.locals.insert(vararg_name.clone(), py_tuple(extra));
+                let vararg_val = py_tuple(extra);
+                if let Some(idx) = new_frame.code.varnames.iter().position(|n| n == vararg_name) {
+                    if idx < new_frame.fast_locals.len() {
+                        new_frame.fast_locals[idx] = Some(vararg_val.clone());
+                    }
+                }
+                new_frame.locals.insert(vararg_name.clone(), vararg_val);
             }
 
             // Apply defaults for missing positional params
@@ -1151,12 +1249,15 @@ impl VirtualMachine {
                 let num_defaults = code.num_defaults;
                 for i in npos..named_params {
                     let default_idx = num_defaults - (named_params - i);
-                    if default_idx < defaults.len() {
-                        let arg_name = &new_frame.code.varnames[i];
-                        new_frame.locals.insert(arg_name.clone(), defaults[default_idx].clone());
+                    let arg_name = &new_frame.code.varnames[i];
+                    let val = if default_idx < defaults.len() {
+                        defaults[default_idx].clone()
                     } else {
-                        let arg_name = &new_frame.code.varnames[i];
-                        new_frame.locals.insert(arg_name.clone(), py_none());
+                        py_none()
+                    };
+                    new_frame.locals.insert(arg_name.clone(), val.clone());
+                    if i < new_frame.fast_locals.len() {
+                        new_frame.fast_locals[i] = Some(val);
                     }
                 }
             }
@@ -1167,10 +1268,18 @@ impl VirtualMachine {
                 for (key, value) in &keywords {
                     if let Some(idx) = new_frame.code.varnames.iter().position(|n| n == key) {
                         new_frame.locals.insert(key.clone(), value.clone());
+                        if idx < new_frame.fast_locals.len() {
+                            new_frame.fast_locals[idx] = Some(value.clone());
+                        }
                     } else {
                         if let PyObject::Dict(ref mut dict) = &mut *kw_dict.borrow_mut() {
                             dict.insert(key.clone(), value.clone());
                         }
+                    }
+                }
+                if let Some(idx) = new_frame.code.varnames.iter().position(|n| n == kwarg_name) {
+                    if idx < new_frame.fast_locals.len() {
+                        new_frame.fast_locals[idx] = Some(kw_dict.clone());
                     }
                 }
                 new_frame.locals.insert(kwarg_name.clone(), kw_dict);
@@ -1217,7 +1326,7 @@ impl VirtualMachine {
                         let code = code.clone();
                         let func_globals = func_globals.clone();
                         drop(init_borrowed);
-                        let mut new_frame = Frame::new(code, func_globals, self.builtins.clone());
+                        let mut new_frame = Frame::new(code, func_globals, Rc::clone(&self.builtins));
                         new_frame.locals.insert(new_frame.code.varnames[0].clone(), instance.clone());
                         for (i, arg_name) in new_frame.code.varnames.iter().enumerate().skip(1) {
                             if i - 1 < args.len() {
@@ -1254,7 +1363,7 @@ impl VirtualMachine {
             match &*func.borrow() {
                 PyObject::Function { code, .. } => {
                     let code = code.clone();
-                    let new_frame = Frame::new(code, namespace.clone(), self.builtins.clone());
+                    let new_frame = Frame::new(code, namespace.clone(), Rc::clone(&self.builtins));
                     self.frames.push(new_frame);
                     self.execute()?;
                     self.frames.pop();

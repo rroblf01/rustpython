@@ -5,6 +5,7 @@ pub enum Token {
     Name(String),
     Number(String),
     String(String),
+    Bytes(Vec<u8>),
     FStringStart,
     FStringMiddle(String),
     FStringEnd,
@@ -114,6 +115,7 @@ impl fmt::Display for Token {
             Token::Name(s) => write!(f, "NAME({})", s),
             Token::Number(s) => write!(f, "NUMBER({})", s),
             Token::String(s) => write!(f, "STRING({:?})", s),
+            Token::Bytes(b) => write!(f, "BYTES({:?})", String::from_utf8_lossy(b)),
             t => write!(f, "{:?}", t),
         }
     }
@@ -265,6 +267,91 @@ impl Lexer {
         Token::Number(s)
     }
 
+    fn read_bytes(&mut self, quote: char) -> Token {
+        let mut bytes = Vec::new();
+        let triple = self.peek() == Some(quote)
+            && self.peek_ahead(1) == Some(quote);
+
+        if triple {
+            self.advance();
+            self.advance();
+            loop {
+                match self.advance() {
+                    None => break,
+                    Some(c) if c == '\\' => {
+                        let next = self.advance();
+                        match next {
+                            Some('n') => bytes.push(b'\n'),
+                            Some('t') => bytes.push(b'\t'),
+                            Some('r') => bytes.push(b'\r'),
+                            Some('\\') => bytes.push(b'\\'),
+                            Some('\'') => bytes.push(b'\''),
+                            Some('"') => bytes.push(b'"'),
+                            Some('x') => {
+                                let h1 = self.advance().unwrap_or('0');
+                                let h2 = self.advance().unwrap_or('0');
+                                let val = u8::from_str_radix(&format!("{}{}", h1, h2), 16).unwrap_or(0);
+                                bytes.push(val);
+                            }
+                            Some(c) if c == '\n' => {}
+                            Some(c) => {
+                                bytes.push(b'\\');
+                                bytes.push(c as u8);
+                            }
+                            None => bytes.push(b'\\'),
+                        }
+                    }
+                    Some(c) if c == quote => {
+                        if self.peek() == Some(quote) && self.peek_ahead(1) == Some(quote) {
+                            self.advance();
+                            self.advance();
+                            break;
+                        }
+                        bytes.push(c as u8);
+                    }
+                    Some(c) => {
+                        bytes.push(c as u8);
+                    }
+                }
+            }
+        } else {
+            loop {
+                match self.advance() {
+                    None => break,
+                    Some(c) if c == '\\' => {
+                        let next = self.advance();
+                        match next {
+                            Some('n') => bytes.push(b'\n'),
+                            Some('t') => bytes.push(b'\t'),
+                            Some('r') => bytes.push(b'\r'),
+                            Some('\\') => bytes.push(b'\\'),
+                            Some('\'') => bytes.push(b'\''),
+                            Some('"') => bytes.push(b'"'),
+                            Some('x') => {
+                                let h1 = self.advance().unwrap_or('0');
+                                let h2 = self.advance().unwrap_or('0');
+                                let val = u8::from_str_radix(&format!("{}{}", h1, h2), 16).unwrap_or(0);
+                                bytes.push(val);
+                            }
+                            Some(c) if c == '\n' => {}
+                            Some(c) => {
+                                bytes.push(b'\\');
+                                bytes.push(c as u8);
+                            }
+                            None => bytes.push(b'\\'),
+                        }
+                    }
+                    Some(c) if c == quote => break,
+                    Some(c) => {
+                        bytes.push(c as u8);
+                    }
+                }
+            }
+        }
+
+        Token::Bytes(bytes)
+    }
+
     fn read_string(&mut self, quote: char, raw: bool, fstring: bool) -> Token {
         let mut s = String::new();
         let triple = self.peek() == Some(quote)
@@ -277,9 +364,41 @@ impl Lexer {
                 match self.advance() {
                     None => break,
                     Some(c) if c == '\\' && !raw => {
-                        s.push(c);
-                        if let Some(next) = self.advance() {
-                            s.push(next);
+                        let next = self.advance();
+                        match next {
+                            Some('n') => s.push('\n'),
+                            Some('t') => s.push('\t'),
+                            Some('r') => s.push('\r'),
+                            Some('\\') => s.push('\\'),
+                            Some('\'') => s.push('\''),
+                            Some('"') => s.push('"'),
+                            Some('0') => s.push('\0'),
+                            Some('a') => s.push('\x07'),
+                            Some('b') => s.push('\x08'),
+                            Some('f') => s.push('\x0c'),
+                            Some('v') => s.push('\x0b'),
+                            Some('x') => {
+                                let h1 = self.advance().unwrap_or('0');
+                                let h2 = self.advance().unwrap_or('0');
+                                let val = u8::from_str_radix(&format!("{}{}", h1, h2), 16).unwrap_or(0);
+                                s.push(val as char);
+                            }
+                            Some('u') => {
+                                let digits: String = (0..4).map(|_| self.advance().unwrap_or('0')).collect();
+                                let val = u32::from_str_radix(&digits, 16).unwrap_or(0xFFFD);
+                                s.push(std::char::from_u32(val).unwrap_or('\u{FFFD}'));
+                            }
+                            Some('U') => {
+                                let digits: String = (0..8).map(|_| self.advance().unwrap_or('0')).collect();
+                                let val = u32::from_str_radix(&digits, 16).unwrap_or(0xFFFD);
+                                s.push(std::char::from_u32(val).unwrap_or('\u{FFFD}'));
+                            }
+                            Some(c) if c == '\n' => {}
+                            Some(c) => {
+                                s.push('\\');
+                                s.push(c);
+                            }
+                            None => s.push('\\'),
                         }
                     }
                     Some(c) if c == quote => {
@@ -318,6 +437,16 @@ impl Lexer {
                                 let h2 = self.advance().unwrap_or('0');
                                 let val = u8::from_str_radix(&format!("{}{}", h1, h2), 16).unwrap_or(0);
                                 s.push(val as char);
+                            }
+                            Some('u') => {
+                                let digits: String = (0..4).map(|_| self.advance().unwrap_or('0')).collect();
+                                let val = u32::from_str_radix(&digits, 16).unwrap_or(0xFFFD);
+                                s.push(std::char::from_u32(val).unwrap_or('\u{FFFD}'));
+                            }
+                            Some('U') => {
+                                let digits: String = (0..8).map(|_| self.advance().unwrap_or('0')).collect();
+                                let val = u32::from_str_radix(&digits, 16).unwrap_or(0xFFFD);
+                                s.push(std::char::from_u32(val).unwrap_or('\u{FFFD}'));
                             }
                             Some(c) if c == '\n' => {}
                             Some(c) => {
@@ -430,6 +559,11 @@ impl Lexer {
                     if (name == "f" || name == "F") && (self.peek() == Some('"') || self.peek() == Some('\'')) {
                         let quote = self.advance().unwrap();
                         return self.read_string(quote, false, true);
+                    }
+                    // Check for bytes literals (b"..." or b'...')
+                    if (name == "b" || name == "B") && (self.peek() == Some('"') || self.peek() == Some('\'')) {
+                        let quote = self.advance().unwrap();
+                        return self.read_bytes(quote);
                     }
                     return match name.as_str() {
                         "False" => Token::False,

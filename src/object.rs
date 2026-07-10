@@ -167,6 +167,55 @@ pub type PyResult<T> = Result<T, PyError>;
 // ---- Core Object Enum ----
 
 #[derive(Clone)]
+pub struct PySet {
+    buckets: std::collections::HashMap<usize, Vec<PyObjectRef>>,
+    size: usize,
+}
+
+impl PySet {
+    pub fn new() -> Self { PySet { buckets: std::collections::HashMap::new(), size: 0 } }
+    pub fn is_empty(&self) -> bool { self.size == 0 }
+    pub fn len(&self) -> usize { self.size }
+    pub fn clear(&mut self) { self.buckets.clear(); self.size = 0; }
+    fn get_bucket(&self, key: &PyObjectRef) -> PyResult<Option<&Vec<PyObjectRef>>> {
+        let h = key.hash()?; Ok(self.buckets.get(&h))
+    }
+    fn get_bucket_mut(&mut self, key: &PyObjectRef) -> PyResult<&mut Vec<PyObjectRef>> {
+        let h = key.hash()?; Ok(self.buckets.entry(h).or_default())
+    }
+    fn find_entry(bucket: &[PyObjectRef], key: &PyObjectRef) -> Option<usize> {
+        bucket.iter().position(|k| k.equals(key).unwrap_or(false))
+    }
+    pub fn contains(&self, key: &PyObjectRef) -> PyResult<bool> {
+        match self.get_bucket(key)? {
+            Some(bucket) => Ok(Self::find_entry(bucket, key).is_some()),
+            None => Ok(false),
+        }
+    }
+    pub fn add(&mut self, key: PyObjectRef) -> PyResult<()> {
+        let h = key.hash()?;
+        let bucket = self.buckets.entry(h).or_default();
+        if !Self::find_entry(bucket, &key).is_some() { bucket.push(key); self.size += 1; }
+        Ok(())
+    }
+    pub fn remove(&mut self, key: &PyObjectRef) -> PyResult<PyObjectRef> {
+        let h = key.hash()?;
+        let bucket = self.buckets.get_mut(&h).ok_or_else(|| PyError::key_error(key.str()))?;
+        let pos = Self::find_entry(bucket, key).ok_or_else(|| PyError::key_error(key.str()))?;
+        self.size -= 1; Ok(bucket.swap_remove(pos))
+    }
+    pub fn pop(&mut self) -> Option<PyObjectRef> {
+        let bucket = self.buckets.values_mut().next()?;
+        let val = bucket.pop()?;
+        if bucket.is_empty() { self.buckets.retain(|_, v| !v.is_empty()); }
+        self.size -= 1; Some(val)
+    }
+    pub fn to_vec(&self) -> Vec<PyObjectRef> {
+        self.buckets.values().flat_map(|b| b.clone()).collect()
+    }
+}
+
+#[derive(Clone)]
 pub enum PyObject {
     None,
     Bool(bool),
@@ -178,7 +227,7 @@ pub enum PyObject {
     List(Vec<PyObjectRef>),
     Tuple(Vec<PyObjectRef>),
     Dict(HashMap<String, PyObjectRef>),
-    Set(Vec<PyObjectRef>),
+    Set(PySet),
     Slice {
         start: PyObjectRef,
         stop: PyObjectRef,
@@ -330,7 +379,7 @@ impl PyObject {
                 format!("{{{}}}", items.join(", "))
             }
             PyObject::Set(items) => {
-                let items: Vec<String> = items.iter().map(|x| x.repr()).collect();
+                let items: Vec<String> = items.to_vec().iter().map(|x| x.repr()).collect();
                 format!("{{{}}}", items.join(", "))
             }
             PyObject::Slice { start, stop, step } => {
@@ -572,7 +621,7 @@ pub fn py_dict() -> PyObjectRef {
 }
 
 pub fn py_set() -> PyObjectRef {
-    PyObjectRef::new(PyObject::Set(Vec::new()))
+    PyObjectRef::new(PyObject::Set(PySet::new()))
 }
 
 // ---- Binary Operations ----
@@ -997,10 +1046,7 @@ pub fn contains_op(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<bool> {
             }
         }
         PyObject::Set(items) => {
-            for item in items {
-                if item.equals(b)? { return Ok(true); }
-            }
-            Ok(false)
+            items.contains(b)
         }
         _ => Err(PyError::type_error(format!("argument of type '{}' is not iterable", container.type_name()))),
     }
@@ -1025,6 +1071,15 @@ pub fn builtin_len(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         PyObject::Tuple(v) => Ok(py_int(v.len())),
         PyObject::Dict(d) => Ok(py_int(d.len())),
         PyObject::Set(s) => Ok(py_int(s.len())),
+        PyObject::Range { start, stop, step } => {
+            if *step > 0 && *start >= *stop { Ok(py_int(0)) }
+            else if *step < 0 && *start <= *stop { Ok(py_int(0)) }
+            else {
+                let len = ((*stop - *start) / *step) as i64;
+                if (*stop - *start) % *step != 0 { Ok(py_int(len.abs() + 1)) }
+                else { Ok(py_int(len.abs())) }
+            }
+        }
         PyObject::Bytes(b) => Ok(py_int(b.len())),
         PyObject::ByteArray(b) => Ok(py_int(b.len())),
         PyObject::Instance { typ, .. } => {
@@ -1202,7 +1257,7 @@ pub fn builtin_list(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 let items: Vec<PyObjectRef> = s.chars().map(|c| py_str(&c.to_string())).collect();
                 Ok(py_list(items))
             }
-            PyObject::Set(s) => Ok(py_list(s.clone())),
+            PyObject::Set(s) => Ok(py_list(s.to_vec())),
             _ => Err(PyError::type_error(format!("cannot convert '{}' to list", obj.type_name()))),
         }
     }
@@ -1233,8 +1288,8 @@ pub fn builtin_set(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     else {
         let obj = args[0].borrow();
         match &*obj {
-            PyObject::List(v) => Ok(PyObjectRef::new(PyObject::Set(v.clone()))),
-            PyObject::Tuple(v) => Ok(PyObjectRef::new(PyObject::Set(v.clone()))),
+            PyObject::List(v) => Ok(PyObjectRef::new(PyObject::Set(PySet::from_vec(v.clone())?))),
+            PyObject::Tuple(v) => Ok(PyObjectRef::new(PyObject::Set(PySet::from_vec(v.clone())?))),
             _ => Err(PyError::type_error(format!("cannot convert '{}' to set", obj.type_name()))),
         }
     }

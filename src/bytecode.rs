@@ -266,5 +266,6 @@ pub enum ConstValue {
     Int(String),
     Float(String),
     String(String),
+    Bytes(Vec<u8>),
     Code(Box<CodeObject>),
 }

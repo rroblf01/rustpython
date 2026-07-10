@@ -130,6 +130,7 @@ impl Compiler {
                 (ConstValue::Int(a), ConstValue::Int(b)) => a == b,
                 (ConstValue::Float(a), ConstValue::Float(b)) => a == b,
                 (ConstValue::String(a), ConstValue::String(b)) => a == b,
+                (ConstValue::Bytes(a), ConstValue::Bytes(b)) => a == b,
                 _ => false,
             }
         }) {
@@ -908,7 +909,7 @@ impl Compiler {
                     Constant::Float(s) => ConstValue::Float(s.clone()),
                     Constant::String(s) => ConstValue::String(s.clone()),
                     Constant::Ellipsis => ConstValue::String("...".to_string()),
-                    Constant::Bytes(_) => ConstValue::None,
+                    Constant::Bytes(b) => ConstValue::Bytes(b.clone()),
                     Constant::Complex { real: _, imag: _ } => ConstValue::None,
                 };
                 let idx = self.get_const_index(const_value) as u32;

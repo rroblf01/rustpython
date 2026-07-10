@@ -3,6 +3,12 @@ name = "rustpython"
 version = "0.1.0"
 edition = "2021"
 
+[profile.release]
+lto = "fat"
+codegen-units = 1
+opt-level = 3
+panic = "abort"
+
 [dependencies]
 num-bigint = "0.4"
 num-traits = "0.2"

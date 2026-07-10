@@ -1254,6 +1254,12 @@ impl Parser {
                 }
             }
 
+            Token::Bytes(b) => {
+                let b = b.clone();
+                self.next();
+                Ok(Expr::Constant(Constant::Bytes(b)))
+            }
+
             Token::FStringStart => {
                 self.parse_fstring()
             }
@@ -1462,25 +1468,22 @@ impl Parser {
                         }
                     }
                     // Parse remaining elements
-                    if values.len() == 1 && !is_dict {
-                        // Already handled single expression above
-                    } else {
-                        while self.eat(&Token::Comma) {
-                            if self.eat(&Token::DoubleStar) {
-                                let expr = self.parse_expr()?;
-                                keys.push(None);
-                                values.push(expr);
+                    while self.eat(&Token::Comma) {
+                        if self.at(&Token::RightBrace) { break; }
+                        if self.eat(&Token::DoubleStar) {
+                            let expr = self.parse_expr()?;
+                            keys.push(None);
+                            values.push(expr);
+                            is_dict = true;
+                        } else {
+                            let k = self.parse_expr()?;
+                            if self.eat(&Token::Colon) {
+                                let v = self.parse_expr()?;
+                                keys.push(Some(k));
+                                values.push(v);
                                 is_dict = true;
                             } else {
-                                let k = self.parse_expr()?;
-                                if self.eat(&Token::Colon) {
-                                    let v = self.parse_expr()?;
-                                    keys.push(Some(k));
-                                    values.push(v);
-                                    is_dict = true;
-                                } else {
-                                    values.push(k);
-                                }
+                                values.push(k);
                             }
                         }
                     }
