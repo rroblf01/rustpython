@@ -981,17 +981,13 @@ impl Compiler {
             Expr::Dict { keys, values } => {
                 self.emit(Opcode::BUILD_MAP, keys.len() as u32);
                 for (key, value) in keys.iter().zip(values.iter()) {
-                    self.emit(Opcode::COPY, 1);
-                    let const_none = self.get_const_index(ConstValue::None) as u32;
-                    self.emit(Opcode::LOAD_CONST, const_none);
-                    self.emit(Opcode::LOAD_CONST, const_none);
-                    self.emit(Opcode::CALL, 0);
+                    self.emit(Opcode::DUP_TOP, 0);
                     match key {
                         Some(k) => self.compile_expr(k)?,
                         None => return Err("Dict key expected".to_string()),
                     }
                     self.compile_expr(value)?;
-                    self.emit(Opcode::MAP_ADD, 2);
+                    self.emit(Opcode::MAP_ADD, 1);
                 }
             }
             Expr::Set(elts) => {

@@ -234,6 +234,22 @@ pub enum PyObject {
     File {
         file: std::rc::Rc<std::cell::RefCell<std::fs::File>>,
     },
+    Super {
+        cls: PyObjectRef,
+        obj: PyObjectRef,
+    },
+    Property {
+        getter: Option<PyObjectRef>,
+        setter: Option<PyObjectRef>,
+        deleter: Option<PyObjectRef>,
+        doc: Option<String>,
+    },
+    StaticMethod {
+        func: PyObjectRef,
+    },
+    ClassMethod {
+        func: PyObjectRef,
+    },
 }
 
 impl PyObject {
@@ -263,6 +279,10 @@ impl PyObject {
             PyObject::BuildClass => "builtin_function_or_method",
             PyObject::BoundMethod { .. } => "method",
             PyObject::File { .. } => "file",
+            PyObject::Super { .. } => "super",
+            PyObject::Property { .. } => "property",
+            PyObject::StaticMethod { .. } => "staticmethod",
+            PyObject::ClassMethod { .. } => "classmethod",
         }.to_string()
     }
 
@@ -327,6 +347,10 @@ impl PyObject {
             PyObject::BuildClass => "<builtin function __build_class__>".to_string(),
             PyObject::BoundMethod { func, .. } => format!("<bound method {}>", func.borrow().type_name()),
             PyObject::File { .. } => format!("<_io.FileIO '...'>"),
+            PyObject::Super { .. } => format!("<super object>"),
+            PyObject::Property { .. } => format!("<property object>"),
+            PyObject::StaticMethod { .. } => format!("<staticmethod object>"),
+            PyObject::ClassMethod { .. } => format!("<classmethod object>"),
         }
     }
 
@@ -1312,9 +1336,24 @@ pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() != 2 {
         return Err(PyError::type_error("isinstance() takes exactly 2 arguments"));
     }
-    let obj_type = args[0].borrow().type_name();
-    let class_name = args[1].str();
-    Ok(py_bool(obj_type == class_name || class_name == "object"))
+    let obj = args[0].borrow();
+    let class = args[1].borrow();
+    match (&*obj, &*class) {
+        (PyObject::Instance { typ, .. }, PyObject::Type { mro, .. }) => {
+            let typ_name = typ.borrow().type_name();
+            for c in mro {
+                if c.borrow().type_name() == typ_name {
+                    return Ok(py_bool(true));
+                }
+            }
+            Ok(py_bool(false))
+        }
+        (PyObject::Instance { typ, .. }, _) => {
+            let class_name = class.str();
+            Ok(py_bool(typ.borrow().type_name() == class_name || class_name == "object"))
+        }
+        _ => Ok(py_bool(args[0].borrow().type_name() == class.str())),
+    }
 }
 
 pub fn builtin_open(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
@@ -1426,6 +1465,110 @@ pub fn builtin_issubclass(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
 }
 
+pub fn builtin_super(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    // super() with no args or super(class, instance)
+    if args.len() == 2 {
+        let cls = args[0].clone();
+        let obj = args[1].clone();
+        Ok(PyObjectRef::new(PyObject::Super { cls, obj }))
+    } else {
+        Err(PyError::type_error("super() requires 2 arguments"))
+    }
+}
+
+pub fn builtin_map(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() < 2 {
+        return Err(PyError::type_error("map() requires at least 2 arguments"));
+    }
+    let func = args[0].clone();
+    let iter = builtin_iter(&[args[1].clone()])?;
+    let mut results = Vec::new();
+    loop {
+        match builtin_next(&[iter.clone()]) {
+            Ok(val) => {
+                let mapped = builtin_call(&func, &[val])?;
+                results.push(mapped);
+            }
+            Err(PyError::StopIteration) => break,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(py_list(results))
+}
+
+pub fn builtin_filter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() != 2 {
+        return Err(PyError::type_error("filter() requires exactly 2 arguments"));
+    }
+    let func = args[0].clone();
+    let iter = builtin_iter(&[args[1].clone()])?;
+    let mut results = Vec::new();
+    loop {
+        match builtin_next(&[iter.clone()]) {
+            Ok(val) => {
+                let keep = if matches!(&*func.borrow(), PyObject::None) {
+                    val.truthy()
+                } else {
+                    builtin_call(&func, &[val.clone()])?.truthy()
+                };
+                if keep { results.push(val); }
+            }
+            Err(PyError::StopIteration) => break,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(py_list(results))
+}
+
+pub fn builtin_zip(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() {
+        return Err(PyError::type_error("zip() requires at least 1 argument"));
+    }
+    let mut iters: Vec<PyObjectRef> = args.iter().map(|a| builtin_iter(&[a.clone()])).collect::<PyResult<Vec<_>>>()?;
+    let mut results = Vec::new();
+    loop {
+        let mut group = Vec::new();
+        for it in iters.iter_mut() {
+            match builtin_next(&[it.clone()]) {
+                Ok(val) => group.push(val),
+                Err(PyError::StopIteration) => return Ok(py_list(results)),
+                Err(e) => return Err(e),
+            }
+        }
+        results.push(py_tuple(group));
+    }
+}
+
+fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    match &*func.borrow() {
+        PyObject::BuiltinFunction { func: f, .. } => f(args),
+        _ => Err(PyError::type_error("object is not callable")),
+    }
+}
+
+// ---- Descriptor types ----
+
+pub fn builtin_property(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    let getter = if args.len() > 0 { Some(args[0].clone()) } else { None };
+    let setter = if args.len() > 1 { Some(args[1].clone()) } else { None };
+    Ok(PyObjectRef::new(PyObject::Property {
+        getter,
+        setter,
+        deleter: None,
+        doc: None,
+    }))
+}
+
+pub fn builtin_staticmethod(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() { return Err(PyError::type_error("staticmethod() requires at least 1 argument")); }
+    Ok(PyObjectRef::new(PyObject::StaticMethod { func: args[0].clone() }))
+}
+
+pub fn builtin_classmethod(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() { return Err(PyError::type_error("classmethod() requires at least 1 argument")); }
+    Ok(PyObjectRef::new(PyObject::ClassMethod { func: args[0].clone() }))
+}
+
 // ---- Attribute access ----
 
 pub trait ObjectAccess {
@@ -1476,18 +1619,44 @@ impl ObjectAccess for PyObject {
                     "append" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
                         name: "append".to_string(),
                         func: |args| {
-                            if args.len() != 1 {
-                                return Err(PyError::type_error("append() takes exactly one argument"));
-                            }
-                            // This should operate on the list, but we need self reference
-                            Err(PyError::runtime_error("method call not fully implemented"))
+                            if args.len() < 2 { return Err(PyError::type_error("append() takes exactly one argument")); }
+                            if let PyObject::List(list) = &mut *args[0].borrow_mut() { list.push(args[1].clone()); Ok(py_none()) }
+                            else { Err(PyError::runtime_error("append on non-list")) }
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
                     "pop" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
                         name: "pop".to_string(),
                         func: |args| {
-                            Err(PyError::runtime_error("method call not fully implemented"))
+                            if let PyObject::List(list) = &mut *args[0].borrow_mut() { list.pop().ok_or_else(|| PyError::runtime_error("pop from empty list")) }
+                            else { Err(PyError::runtime_error("pop on non-list")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "extend" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                        name: "extend".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("extend() takes exactly one argument")); }
+                            if let PyObject::List(list) = &mut *args[0].borrow_mut() {
+                                let it = builtin_iter(&[args[1].clone()])?;
+                                loop { match builtin_next(&[it.clone()]) { Ok(v) => list.push(v), Err(PyError::StopIteration) => return Ok(py_none()), Err(e) => return Err(e) } }
+                            } else { Err(PyError::runtime_error("extend on non-list")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "clear" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                        name: "clear".to_string(),
+                        func: |args| {
+                            if let PyObject::List(list) = &mut *args[0].borrow_mut() { list.clear(); Ok(py_none()) }
+                            else { Err(PyError::runtime_error("clear on non-list")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "reverse" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                        name: "reverse".to_string(),
+                        func: |args| {
+                            if let PyObject::List(list) = &mut *args[0].borrow_mut() { list.reverse(); Ok(py_none()) }
+                            else { Err(PyError::runtime_error("reverse on non-list")) }
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -1499,42 +1668,55 @@ impl ObjectAccess for PyObject {
                     "split" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
                         name: "split".to_string(),
                         func: |args| {
-                            Err(PyError::runtime_error("method call not fully implemented"))
+                            let s = args[0].str();
+                            let sep = if args.len() > 1 { Some(args[1].str()) } else { None };
+                            let parts: Vec<PyObjectRef> = if let Some(sep) = sep { s.split(&sep).map(|p| py_str(p)).collect() } else { s.split_whitespace().map(|p| py_str(p)).collect() };
+                            Ok(py_list(parts))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
                     "join" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
                         name: "join".to_string(),
                         func: |args| {
-                            Err(PyError::runtime_error("method call not fully implemented"))
+                            if args.len() < 2 { return Err(PyError::type_error("join() takes exactly one argument")); }
+                            let sep = args[0].str();
+                            let items = args[1].borrow();
+                            let parts: Vec<String> = if let PyObject::List(v) = &*items { v.iter().map(|x| x.str()).collect() } else { return Err(PyError::type_error("join() argument must be a list")) };
+                            Ok(py_str(&parts.join(&sep)))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
                     "upper" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
                         name: "upper".to_string(),
-                        func: |args| {
-                            Err(PyError::runtime_error("method call not fully implemented"))
-                        },
+                        func: |args| Ok(py_str(&args[0].str().to_uppercase())),
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
                     "lower" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
                         name: "lower".to_string(),
-                        func: |args| {
-                            Err(PyError::runtime_error("method call not fully implemented"))
-                        },
+                        func: |args| Ok(py_str(&args[0].str().to_lowercase())),
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
                     "strip" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
                         name: "strip".to_string(),
                         func: |args| {
-                            Err(PyError::runtime_error("method call not fully implemented"))
+                            let chars = if args.len() > 1 { args[1].str() } else { " \t\n\r".to_string() };
+                            Ok(py_str(args[0].str().trim_matches(|c: char| chars.contains(c))))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
                     "startswith" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
                         name: "startswith".to_string(),
                         func: |args| {
-                            Err(PyError::runtime_error("method call not fully implemented"))
+                            if args.len() < 2 { return Err(PyError::type_error("startswith() takes exactly one argument")); }
+                            Ok(py_bool(args[0].str().starts_with(&args[1].str())))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "replace" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                        name: "replace".to_string(),
+                        func: |args| {
+                            if args.len() < 3 { return Err(PyError::type_error("replace() takes exactly 2 arguments")); }
+                            Ok(py_str(&args[0].str().replace(&args[1].str(), &args[2].str())))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -1543,28 +1725,120 @@ impl ObjectAccess for PyObject {
             }
             PyObject::Dict(d) => {
                 match name {
-                    "keys" => {
-                        let keys: Vec<PyObjectRef> = d.keys().map(|k| py_str(k)).collect();
-                        Ok(py_list(keys))
-                    }
-                    "values" => {
-                        let vals: Vec<PyObjectRef> = d.values().cloned().collect();
-                        Ok(py_list(vals))
-                    }
-                    "items" => {
-                        let items: Vec<PyObjectRef> = d.iter()
-                            .map(|(k, v)| py_tuple(vec![py_str(k), v.clone()]))
-                            .collect();
-                        Ok(py_list(items))
-                    }
+                    "keys" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                        name: "keys".to_string(),
+                        func: |args| {
+                            let d = args[0].borrow();
+                            if let PyObject::Dict(dict) = &*d {
+                                Ok(py_list(dict.keys().map(|k| py_str(k)).collect()))
+                            } else { Err(PyError::runtime_error("keys on non-dict")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "values" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                        name: "values".to_string(),
+                        func: |args| {
+                            let d = args[0].borrow();
+                            if let PyObject::Dict(dict) = &*d {
+                                Ok(py_list(dict.values().cloned().collect()))
+                            } else { Err(PyError::runtime_error("values on non-dict")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "items" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                        name: "items".to_string(),
+                        func: |args| {
+                            let d = args[0].borrow();
+                            if let PyObject::Dict(dict) = &*d {
+                                let items: Vec<PyObjectRef> = dict.iter().map(|(k, v)| py_tuple(vec![py_str(k), v.clone()])).collect();
+                                Ok(py_list(items))
+                            } else { Err(PyError::runtime_error("items on non-dict")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     "get" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
                         name: "get".to_string(),
                         func: |args| {
-                            Err(PyError::runtime_error("method call not fully implemented"))
+                            if args.len() < 2 { return Err(PyError::type_error("get() takes at least 1 argument")); }
+                            let key = args[1].str();
+                            let dict = &*args[0].borrow();
+                            if let PyObject::Dict(d) = dict {
+                                Ok(d.get(&key).cloned().unwrap_or_else(|| if args.len() > 2 { args[2].clone() } else { py_none() }))
+                            } else { Err(PyError::runtime_error("get on non-dict")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "pop" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                        name: "pop".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("pop() takes at least 1 argument")); }
+                            let key = args[1].str();
+                            if let PyObject::Dict(d) = &mut *args[0].borrow_mut() {
+                                d.remove(&key).ok_or_else(|| PyError::key_error(key))
+                            } else { Err(PyError::runtime_error("pop on non-dict")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "clear" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                        name: "clear".to_string(),
+                        func: |args| {
+                            if let PyObject::Dict(d) = &mut *args[0].borrow_mut() { d.clear(); Ok(py_none()) }
+                            else { Err(PyError::runtime_error("clear on non-dict")) }
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
                     _ => Err(PyError::attribute_error(format!("'dict' object has no attribute '{}'", name))),
+                }
+            }
+            PyObject::File { file } => {
+                match name {
+                    "read" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                        name: "read".to_string(),
+                        func: |args| {
+                            use std::io::Read;
+                            if let PyObject::File { file } = &*args[0].borrow() {
+                                let mut buf = String::new();
+                                file.borrow_mut().read_to_string(&mut buf).map_err(|e| PyError::OsError(format!("{}", e)))?;
+                                Ok(py_str(&buf))
+                            } else { Err(PyError::runtime_error("read on non-file")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "write" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                        name: "write".to_string(),
+                        func: |args| {
+                            use std::io::Write;
+                            if args.len() < 2 { return Err(PyError::type_error("write() takes exactly one argument")); }
+                            if let PyObject::File { file } = &*args[0].borrow() {
+                                let text = args[1].str();
+                                file.borrow_mut().write_all(text.as_bytes()).map_err(|e| PyError::OsError(format!("{}", e)))?;
+                                Ok(py_int(text.len() as i64))
+                            } else { Err(PyError::runtime_error("write on non-file")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "close" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                        name: "close".to_string(),
+                        func: |args| {
+                            if let PyObject::File { file } = &mut *args[0].borrow_mut() {
+                                // Flush and drop by replacing with a closed file
+                                let _ = std::mem::replace(&mut *file.borrow_mut(), std::fs::File::create("/dev/null").unwrap_or(std::fs::File::open("/dev/null").unwrap_or_else(|_| panic!())));
+                                Ok(py_none())
+                            } else { Err(PyError::runtime_error("close on non-file")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__enter__" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                        name: "__enter__".to_string(),
+                        func: |args| Ok(args[0].clone()),
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__exit__" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                        name: "__exit__".to_string(),
+                        func: |_| Ok(py_none()),
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    _ => Err(PyError::attribute_error(format!("'file' object has no attribute '{}'", name))),
                 }
             }
             _ => Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", self.type_name(), name))),
@@ -1835,6 +2109,13 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     add_func!("pow", builtin_pow);
     add_func!("reversed", builtin_reversed);
     add_func!("issubclass", builtin_issubclass);
+    add_func!("super", builtin_super);
+    add_func!("map", builtin_map);
+    add_func!("filter", builtin_filter);
+    add_func!("zip", builtin_zip);
+    add_func!("property", builtin_property);
+    add_func!("staticmethod", builtin_staticmethod);
+    add_func!("classmethod", builtin_classmethod);
 
     macro_rules! add_exc_type {
         ($name:expr, $func:expr) => {

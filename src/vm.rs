@@ -659,9 +659,32 @@ impl VirtualMachine {
                             }).ok_or_else(|| PyError::attribute_error(format!("'{}' object has no attribute '{}'", obj_borrowed.type_name(), name)))
                         }
                         _ => {
-                            obj_borrowed.get_attribute(&name).or_else(|_| {
+                            let attr = obj_borrowed.get_attribute(&name).or_else(|_| {
                                 Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", obj_borrowed.type_name(), name)))
-                            })
+                            })?;
+                            drop(obj_borrowed);
+                            let is_builtin_method = matches!(&*attr.borrow(), PyObject::BuiltinMethod { .. });
+                            let is_function = matches!(&*attr.borrow(), PyObject::Function { .. });
+                            if is_builtin_method {
+                                let (n, func) = {
+                                    let b = attr.borrow();
+                                    if let PyObject::BuiltinMethod { name: n, func, .. } = &*b {
+                                        (n.clone(), *func)
+                                    } else { unreachable!() }
+                                };
+                                Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                                    name: n,
+                                    func,
+                                    self_obj: obj.clone(),
+                                }))
+                            } else if is_function {
+                                Ok(PyObjectRef::new(PyObject::BoundMethod {
+                                    func: attr,
+                                    self_obj: obj.clone(),
+                                }))
+                            } else {
+                                Ok(attr)
+                            }
                         }
                     }
                 }?;
