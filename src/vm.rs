@@ -369,6 +369,7 @@ impl VirtualMachine {
                 for _ in 0..nargs {
                     args.push(self.frames.last_mut().unwrap().pop()?);
                 }
+                args.reverse();
                 let callable = self.frames.last_mut().unwrap().pop()?;
                 let result = self.call_function(callable, args)?;
                 self.frames.last_mut().unwrap().push(result);
@@ -975,11 +976,32 @@ impl VirtualMachine {
                 dict: HashMap::new(),
             });
             if let Some(init_func) = dict.get("__init__") {
-                if let PyObject::BuiltinFunction { func, .. } = &*init_func.borrow() {
-                    let func = *func;
-                    let mut init_args = vec![instance.clone()];
-                    init_args.extend(args);
-                    func(&init_args)?;
+                let init_borrowed = init_func.borrow();
+                match &*init_borrowed {
+                    PyObject::BuiltinFunction { func, .. } => {
+                        let func = *func;
+                        let mut init_args = vec![instance.clone()];
+                        init_args.extend(args);
+                        func(&init_args)?;
+                    }
+                    PyObject::Function { code, globals: func_globals, .. } => {
+                        let code = code.clone();
+                        let func_globals = func_globals.clone();
+                        drop(init_borrowed);
+                        let mut new_frame = Frame::new(code, func_globals, self.builtins.clone());
+                        new_frame.locals.insert(new_frame.code.varnames[0].clone(), instance.clone());
+                        for (i, arg_name) in new_frame.code.varnames.iter().enumerate().skip(1) {
+                            if i - 1 < args.len() {
+                                new_frame.locals.insert(arg_name.clone(), args[i - 1].clone());
+                            } else {
+                                new_frame.locals.insert(arg_name.clone(), py_none());
+                            }
+                        }
+                        self.frames.push(new_frame);
+                        self.execute()?;
+                        self.frames.pop();
+                    }
+                    _ => {}
                 }
             }
             return Ok(instance);
@@ -989,11 +1011,9 @@ impl VirtualMachine {
             if args.len() < 3 {
                 return Err(PyError::type_error("__build_class__: need at least 3 arguments"));
             }
-            // Stack before CALL: [BuildClass, func, name, bases]
-            // CALL pops: args = [bases, name, func], callable = BuildClass
-            let func = args[2].clone();
+            let func = args[0].clone();
             let name = args[1].clone();
-            let bases = args[0].clone();
+            let bases = args[2].clone();
 
             let name_str = match &*name.borrow() {
                 PyObject::Str(s) => s.clone(),
