@@ -2028,7 +2028,7 @@ fn call_bound_method(func: PyObjectRef, self_obj: PyObjectRef, args: Vec<PyObjec
             if npos < named_params - 1 {
                 let num_defaults = code.num_defaults;
                 for i in npos..named_params - 1 {
-                    let default_idx = num_defaults - (named_params - 1 - i);
+                    let default_idx = num_defaults.saturating_sub(named_params.saturating_sub(1) - i);
                     if default_idx < defaults.len() {
                         frame.locals.insert(code.varnames[i + 1].clone(), defaults[default_idx].clone());
                     }

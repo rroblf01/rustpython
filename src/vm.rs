@@ -1293,7 +1293,7 @@ impl VirtualMachine {
             if npos < named_params {
                 let num_defaults = code.num_defaults;
                 for i in npos..named_params {
-                    let default_idx = num_defaults - (named_params - i);
+                    let default_idx = num_defaults.saturating_sub(named_params - i);
                     let arg_name = &new_frame.code.varnames[i];
                     let val = if default_idx < defaults.len() {
                         defaults[default_idx].clone()
