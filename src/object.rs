@@ -231,6 +231,9 @@ pub enum PyObject {
         func: PyObjectRef,
         self_obj: PyObjectRef,
     },
+    File {
+        file: std::rc::Rc<std::cell::RefCell<std::fs::File>>,
+    },
 }
 
 impl PyObject {
@@ -259,6 +262,7 @@ impl PyObject {
             PyObject::Exception { .. } => "Exception",
             PyObject::BuildClass => "builtin_function_or_method",
             PyObject::BoundMethod { .. } => "method",
+            PyObject::File { .. } => "file",
         }.to_string()
     }
 
@@ -322,6 +326,7 @@ impl PyObject {
             }
             PyObject::BuildClass => "<builtin function __build_class__>".to_string(),
             PyObject::BoundMethod { func, .. } => format!("<bound method {}>", func.borrow().type_name()),
+            PyObject::File { .. } => format!("<_io.FileIO '...'>"),
         }
     }
 
@@ -1312,6 +1317,115 @@ pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Ok(py_bool(obj_type == class_name || class_name == "object"))
 }
 
+pub fn builtin_open(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() {
+        return Err(PyError::type_error("open() missing required argument 'file'"));
+    }
+    let filename = args[0].str();
+    let mode = if args.len() > 1 { args[1].str() } else { "r".to_string() };
+    let file = std::fs::File::options()
+        .read(mode.contains('r'))
+        .write(mode.contains('w') || mode.contains('a'))
+        .append(mode.contains('a'))
+        .create(mode.contains('w') || mode.contains('a'))
+        .truncate(mode.contains('w'))
+        .open(&filename)
+        .map_err(|e| PyError::OsError(format!("{}", e)))?;
+    Ok(PyObjectRef::new(PyObject::File { file: std::rc::Rc::new(std::cell::RefCell::new(file)) }))
+}
+
+pub fn builtin_any(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() {
+        return Err(PyError::type_error("any() requires at least 1 argument"));
+    }
+    let iterable = builtin_iter(&[args[0].clone()])?;
+    loop {
+        match builtin_next(&[iterable.clone()]) {
+            Ok(val) => if val.truthy() { return Ok(py_bool(true)); },
+            Err(PyError::StopIteration) => return Ok(py_bool(false)),
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+pub fn builtin_all(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() {
+        return Err(PyError::type_error("all() requires at least 1 argument"));
+    }
+    let iterable = builtin_iter(&[args[0].clone()])?;
+    loop {
+        match builtin_next(&[iterable.clone()]) {
+            Ok(val) => if !val.truthy() { return Ok(py_bool(false)); },
+            Err(PyError::StopIteration) => return Ok(py_bool(true)),
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+pub fn builtin_callable(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() != 1 {
+        return Err(PyError::type_error("callable() takes exactly one argument"));
+    }
+    let obj = args[0].borrow();
+    let is_callable = matches!(&*obj,
+        PyObject::Function { .. } | PyObject::BuiltinFunction { .. } |
+        PyObject::BuiltinMethod { .. } | PyObject::Type { .. } | PyObject::BuildClass |
+        PyObject::BoundMethod { .. }
+    );
+    Ok(py_bool(is_callable))
+}
+
+pub fn builtin_pow(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() < 2 {
+        return Err(PyError::type_error("pow() requires at least 2 arguments"));
+    }
+    let result = py_pow(&args[0], &args[1])?;
+    if args.len() == 3 {
+        py_mod(&result, &args[2])
+    } else {
+        Ok(result)
+    }
+}
+
+pub fn builtin_reversed(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() != 1 {
+        return Err(PyError::type_error("reversed() takes exactly one argument"));
+    }
+    let obj = args[0].borrow();
+    match &*obj {
+        PyObject::List(v) => {
+            let mut rev = v.clone(); rev.reverse();
+            Ok(PyObjectRef::new(PyObject::List(rev)))
+        }
+        PyObject::Tuple(v) => {
+            let mut rev = v.clone(); rev.reverse();
+            Ok(PyObjectRef::new(PyObject::Tuple(rev)))
+        }
+        PyObject::Str(s) => Ok(py_str(&s.chars().rev().collect::<String>())),
+        _ => Err(PyError::type_error("argument to reversed() must be a sequence")),
+    }
+}
+
+pub fn builtin_issubclass(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() != 2 {
+        return Err(PyError::type_error("issubclass() takes exactly 2 arguments"));
+    }
+    let cls = args[0].borrow();
+    let base = args[1].borrow();
+    match (&*cls, &*base) {
+        (PyObject::Type { mro: cls_mro, .. }, PyObject::Type { .. }) => {
+            let base_tn = base.type_name();
+            for c in cls_mro {
+                if c.borrow().type_name() == base_tn {
+                    return Ok(py_bool(true));
+                }
+            }
+            Ok(py_bool(false))
+        }
+        _ => Err(PyError::type_error("issubclass() arg 1 must be a class")),
+    }
+}
+
 // ---- Attribute access ----
 
 pub trait ObjectAccess {
@@ -1714,6 +1828,13 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     add_func!("min", builtin_min);
     add_func!("id", builtin_id);
     add_func!("isinstance", builtin_isinstance);
+    add_func!("open", builtin_open);
+    add_func!("any", builtin_any);
+    add_func!("all", builtin_all);
+    add_func!("callable", builtin_callable);
+    add_func!("pow", builtin_pow);
+    add_func!("reversed", builtin_reversed);
+    add_func!("issubclass", builtin_issubclass);
 
     macro_rules! add_exc_type {
         ($name:expr, $func:expr) => {
@@ -1739,7 +1860,60 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     add_exc_type!("OSError", builtin_make_exception_oserror);
     add_exc_type!("ImportError", builtin_make_exception_importerror);
 
+    let math_module = PyObjectRef::new(PyObject::Module {
+        name: "math".to_string(),
+        dict: create_math_dict(),
+    });
+    builtins.insert("math".to_string(), math_module.clone());
+
     builtins
+}
+
+pub fn create_math_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! math_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+    math_func!("sqrt", |args| {
+        if args.len() != 1 { return Err(PyError::type_error("sqrt() takes exactly one argument")); }
+        let v = args[0].borrow();
+        match &*v { PyObject::Int(i) => Ok(py_float(i.to_f64().unwrap_or(0.0).sqrt())), PyObject::Float(f) => Ok(py_float(f.sqrt())), _ => Err(PyError::type_error("sqrt() argument must be a number")) }
+    });
+    math_func!("sin", |args| {
+        if args.len() != 1 { return Err(PyError::type_error("sin() takes exactly one argument")); }
+        let v = args[0].borrow();
+        match &*v { PyObject::Int(i) => Ok(py_float(i.to_f64().unwrap_or(0.0).sin())), PyObject::Float(f) => Ok(py_float(f.sin())), _ => Err(PyError::type_error("sin() argument must be a number")) }
+    });
+    math_func!("cos", |args| {
+        if args.len() != 1 { return Err(PyError::type_error("cos() takes exactly one argument")); }
+        let v = args[0].borrow();
+        match &*v { PyObject::Int(i) => Ok(py_float(i.to_f64().unwrap_or(0.0).cos())), PyObject::Float(f) => Ok(py_float(f.cos())), _ => Err(PyError::type_error("cos() argument must be a number")) }
+    });
+    math_func!("tan", |args| {
+        if args.len() != 1 { return Err(PyError::type_error("tan() takes exactly one argument")); }
+        let v = args[0].borrow();
+        match &*v { PyObject::Int(i) => Ok(py_float(i.to_f64().unwrap_or(0.0).tan())), PyObject::Float(f) => Ok(py_float(f.tan())), _ => Err(PyError::type_error("tan() argument must be a number")) }
+    });
+    math_func!("floor", |args| {
+        if args.len() != 1 { return Err(PyError::type_error("floor() takes exactly one argument")); }
+        let v = args[0].borrow();
+        match &*v { PyObject::Int(i) => Ok(py_int(i.clone())), PyObject::Float(f) => Ok(py_int(f.floor() as i64)), _ => Err(PyError::type_error("floor() argument must be a number")) }
+    });
+    math_func!("ceil", |args| {
+        if args.len() != 1 { return Err(PyError::type_error("ceil() takes exactly one argument")); }
+        let v = args[0].borrow();
+        match &*v { PyObject::Int(i) => Ok(py_int(i.clone())), PyObject::Float(f) => Ok(py_int(f.ceil() as i64)), _ => Err(PyError::type_error("ceil() argument must be a number")) }
+    });
+    math_func!("exp", |args| {
+        if args.len() != 1 { return Err(PyError::type_error("exp() takes exactly one argument")); }
+        let v = args[0].borrow();
+        match &*v { PyObject::Int(i) => Ok(py_float(i.to_f64().unwrap_or(0.0).exp())), PyObject::Float(f) => Ok(py_float(f.exp())), _ => Err(PyError::type_error("exp() argument must be a number")) }
+    });
+    d.insert("pi".to_string(), py_float(std::f64::consts::PI));
+    d.insert("e".to_string(), py_float(std::f64::consts::E));
+    d
 }
 
 pub fn create_module(name: &str, dict: HashMap<String, PyObjectRef>) -> PyObjectRef {

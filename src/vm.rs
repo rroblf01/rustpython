@@ -89,6 +89,7 @@ impl VirtualMachine {
  
          let mut modules = HashMap::new();
          modules.insert("builtins".to_string(), create_module("builtins", builtins.clone()));
+         modules.insert("math".to_string(), create_module("math", create_math_dict()));
  
          VirtualMachine {
              frames: Vec::new(),
