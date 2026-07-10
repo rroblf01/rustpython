@@ -595,9 +595,21 @@ impl VirtualMachine {
                     8 => py_rshift(&left, &right),
                     9 => py_bit_or(&left, &right),
                     10 => py_bit_xor(&left, &right),
-                    11 => py_bit_and(&left, &right),
-                    13 => py_getitem(&left, &right),
-                    _ => return Err(PyError::runtime_error(format!("unknown binary op: {}", op))),
+                     11 => py_bit_and(&left, &right),
+                     12 => {
+                         (|| -> PyResult<PyObjectRef> {
+                             if let Some(r) = crate::object::try_dunder_binop(&left, &right, "__matmul__")? {
+                                 return Ok(r);
+                             }
+                             if let Some(r) = crate::object::try_dunder_binop(&right, &left, "__rmatmul__")? {
+                                 return Ok(r);
+                             }
+                             Err(PyError::type_error(format!("unsupported operand type(s) for @: '{}' and '{}'",
+                                 left.borrow().type_name(), right.borrow().type_name())))
+                         })()
+                     }
+                     13 => py_getitem(&left, &right),
+                     _ => return Err(PyError::runtime_error(format!("unknown binary op: {}", op))),
                 }?;
                 self.frames[fi].push(result);
             }

@@ -807,7 +807,7 @@ pub fn py_set() -> PyObjectRef {
 
 // ---- Binary Operations ----
 
-fn try_dunder_binop(a: &PyObjectRef, b: &PyObjectRef, method: &str) -> PyResult<Option<PyObjectRef>> {
+pub fn try_dunder_binop(a: &PyObjectRef, b: &PyObjectRef, method: &str) -> PyResult<Option<PyObjectRef>> {
     let f = {
         let a_borrowed = a.borrow();
         match &*a_borrowed {
@@ -2755,6 +2755,19 @@ impl ObjectAccess for PyObject {
                             if args.len() < 2 { return Err(PyError::type_error("pop() takes at least 1 argument")); }
                             if let PyObject::Dict(d) = &mut *args[0].borrow_mut() { d.remove(&args[1]) }
                             else { Err(PyError::runtime_error("pop on non-dict")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "popitem" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "popitem".to_string(),
+                        func: |args| {
+                            if let PyObject::Dict(d) = &mut *args[0].borrow_mut() {
+                                let items = d.items();
+                                if items.is_empty() { return Err(PyError::key_error("popitem(): dictionary is empty")); }
+                                let (k, v) = items.into_iter().next().unwrap();
+                                d.remove(&k)?;
+                                Ok(py_tuple(vec![k, v]))
+                            } else { Err(PyError::runtime_error("popitem on non-dict")) }
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
