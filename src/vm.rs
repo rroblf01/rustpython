@@ -389,6 +389,7 @@ impl VirtualMachine {
                     name: "<function>".to_string(),
                     defaults: Vec::new(),
                     closure: Vec::new(),
+                    dict: HashMap::new(),
                 });
                 self.frames.last_mut().unwrap().push(func);
             }
@@ -696,8 +697,8 @@ impl VirtualMachine {
                 let name = self.frames.last().unwrap().code.names.get(name_idx).ok_or_else(|| {
                     PyError::runtime_error("name index out of range")
                 })?.clone();
-                let obj = self.frames.last_mut().unwrap().pop()?;
                 let val = self.frames.last_mut().unwrap().pop()?;
+                let obj = self.frames.last_mut().unwrap().pop()?;
                 obj.borrow_mut().set_attribute(&name, val)?;
             }
 

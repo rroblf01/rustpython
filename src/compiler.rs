@@ -323,6 +323,14 @@ impl Compiler {
                 self.emit(Opcode::STORE_NAME, name_idx);
             }
             Stmt::ClassDef { name, bases, keywords: kw, body, decorator_list: _ } => {
+                // Extract docstring from first statement if present
+                let docstring = body.first().and_then(|s| {
+                    if let Stmt::Expr(expr) = s {
+                        if let Expr::Constant(Constant::String(doc)) = expr.as_ref() {
+                            Some(doc.clone())
+                        } else { None }
+                    } else { None }
+                });
                 self.emit(Opcode::LOAD_BUILD_CLASS, 0);
                 self.compile_class_body(name.clone(), body)?;
                 let class_name_idx = self.get_const_index(ConstValue::String(name.clone())) as u32;
@@ -343,6 +351,14 @@ impl Compiler {
                     self.compile_expr(&k.value)?;
                 }
                 self.emit(Opcode::CALL, 3 + kw_count);
+                // Set __doc__ on class if present
+                if let Some(doc) = docstring {
+                    self.emit(Opcode::DUP_TOP, 0);
+                    let doc_idx = self.get_const_index(ConstValue::String(doc)) as u32;
+                    self.emit(Opcode::LOAD_CONST, doc_idx);
+                    let doc_attr_idx = self.get_name_index("__doc__") as u32;
+                    self.emit(Opcode::STORE_ATTR, doc_attr_idx);
+                }
                 let name_idx = self.get_name_index(name) as u32;
                 self.emit(Opcode::STORE_NAME, name_idx);
             }
@@ -726,6 +742,16 @@ impl Compiler {
     }
 
     fn compile_function(&mut self, name: String, args: &[Arg], body: &[Stmt]) -> Result<(), String> {
+        // Extract docstring from first statement if present
+        let docstring = body.first().and_then(|s| {
+            if let Stmt::Expr(expr) = s {
+                if let Expr::Constant(Constant::String(doc)) = expr.as_ref() {
+                    Some(doc.clone())
+                } else { None }
+            } else { None }
+        });
+        let body = if docstring.is_some() { &body[1..] } else { body };
+
         self.enter_scope(ScopeType::Function);
 
         let old_code = std::mem::replace(&mut self.code, CodeObject::new(name.clone()));
@@ -761,6 +787,15 @@ impl Compiler {
         self.emit(Opcode::LOAD_CONST, code_const_idx);
         self.emit(Opcode::MAKE_FUNCTION, 0);
 
+        // Set __doc__ if there was a docstring
+        if let Some(doc) = docstring {
+            self.emit(Opcode::DUP_TOP, 0);
+            let doc_idx = self.get_const_index(ConstValue::String(doc)) as u32;
+            self.emit(Opcode::LOAD_CONST, doc_idx);
+            let doc_attr_idx = self.get_name_index("__doc__") as u32;
+            self.emit(Opcode::STORE_ATTR, doc_attr_idx);
+        }
+
         // Handle closure cells if needed
         let cell_count = self.code.cellvars.len() as u32;
         if cell_count > 0 {
@@ -779,6 +814,13 @@ impl Compiler {
     }
 
     fn compile_class_body(&mut self, name: String, body: &[Stmt]) -> Result<(), String> {
+        // Skip docstring if first statement is a string literal
+        let body = if let Some(Stmt::Expr(expr)) = body.first() {
+            if matches!(expr.as_ref(), Expr::Constant(Constant::String(_))) {
+                &body[1..]
+            } else { body }
+        } else { body };
+
         self.enter_scope(ScopeType::ClassBody);
 
         let old_code = std::mem::replace(&mut self.code, CodeObject::new(name.clone()));

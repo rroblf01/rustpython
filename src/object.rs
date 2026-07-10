@@ -190,6 +190,7 @@ pub enum PyObject {
         name: String,
         defaults: Vec<PyObjectRef>,
         closure: Vec<PyObjectRef>,
+        dict: HashMap<String, PyObjectRef>,
     },
     BuiltinFunction {
         name: String,
@@ -1957,6 +1958,9 @@ impl ObjectAccess for PyObject {
                     _ => Err(PyError::attribute_error(format!("'dict' object has no attribute '{}'", name))),
                 }
             }
+            PyObject::Function { dict, .. } => {
+                dict.get(name).cloned().ok_or_else(|| PyError::attribute_error(format!("'function' object has no attribute '{}'", name)))
+            }
             PyObject::File { file } => {
                 match name {
                     "read" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
@@ -2023,6 +2027,10 @@ impl ObjectAccess for PyObject {
                 Ok(())
             }
             PyObject::Type { dict, .. } => {
+                dict.insert(name.to_string(), value);
+                Ok(())
+            }
+            PyObject::Function { dict, .. } => {
                 dict.insert(name.to_string(), value);
                 Ok(())
             }
