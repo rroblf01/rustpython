@@ -252,7 +252,7 @@ pub enum PyObject {
         func: PyObjectRef,
     },
     Generator {
-        frame: std::cell::RefCell<super::vm::Frame>,
+        frame: std::cell::RefCell<Option<super::vm::Frame>>,
     },
 }
 
@@ -1301,6 +1301,12 @@ pub fn builtin_exit(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 
 fn call_bound_method(func: PyObjectRef, self_obj: PyObjectRef, args: Vec<PyObjectRef>) -> PyResult<PyObjectRef> {
     match &*func.borrow() {
+        PyObject::BuiltinMethod { func: f, self_obj: s, .. } => {
+            let mut all_args = vec![s.clone()];
+            all_args.push(self_obj);
+            all_args.extend(args);
+            f(&all_args)
+        }
         PyObject::BuiltinFunction { func: f, .. } => {
             let mut all_args = vec![self_obj];
             all_args.extend(args);
@@ -1386,6 +1392,10 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     _ => None,
                 }
             }
+            PyObject::Generator { .. } => {
+                // Generators are their own iterator (return self)
+                return Ok(args[0].clone());
+            }
             _ => None,
         }
     };
@@ -1409,6 +1419,22 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     PyObject::Type { dict: type_dict, .. } => type_dict.get("__next__").cloned(),
                     _ => None,
                 }
+            }
+            PyObject::Generator { .. } => {
+                // Generator's __next__ is handled via get_attribute
+                let next_func = args[0].borrow().get_attribute("__next__")?;
+                let (n, f) = {
+                    let b = next_func.borrow();
+                    if let PyObject::BuiltinMethod { name, func, .. } = &*b {
+                        (name.clone(), *func)
+                    } else { return Err(PyError::runtime_error("expected __next__ method")) }
+                };
+                let fixed = PyObjectRef::new(PyObject::BuiltinMethod {
+                    name: n,
+                    func: f,
+                    self_obj: args[0].clone(),
+                });
+                return call_bound_method(fixed, args[0].clone(), vec![]);
             }
             _ => None,
         }
@@ -1960,6 +1986,56 @@ impl ObjectAccess for PyObject {
             }
             PyObject::Function { dict, .. } => {
                 dict.get(name).cloned().ok_or_else(|| PyError::attribute_error(format!("'function' object has no attribute '{}'", name)))
+            }
+            PyObject::Generator { frame } => {
+                match name {
+                    "__next__" | "send" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                        name: name.to_string(),
+                        func: move |args| {
+                            let gen = args[0].borrow();
+                            if let PyObject::Generator { frame } = &*gen {
+                                let mut frame_opt = frame.borrow_mut();
+                                if let Some(f) = frame_opt.as_mut() {
+                                    let mut vm = super::vm::VirtualMachine::new();
+                                    vm.frames.push(f.clone());
+                                    match vm.execute() {
+                                        Ok(val) => {
+                                        let modified = vm.frames.pop().unwrap();
+                                        // Check if the PREVIOUS instruction was YIELD_VALUE (meaning generator suspended)
+                                        if modified.ip > 0 && matches!(&modified.code.instructions[modified.ip - 1].op, crate::bytecode::Opcode::YIELD_VALUE) {
+                                            // Generator yielded a value — save frame and return
+                                            *f = modified;
+                                            Ok(val)
+                                        } else {
+                                            // Generator completed
+                                            *frame_opt = None;
+                                            Err(crate::object::PyError::StopIteration)
+                                        }
+                                        }
+                                        Err(e) => {
+                                            *frame_opt = None;
+                                            if matches!(&e, crate::object::PyError::StopIteration) {
+                                                return Err(e);
+                                            }
+                                            Err(e)
+                                        }
+                                    }
+                                } else {
+                                    Err(PyError::StopIteration)
+                                }
+                            } else {
+                                Err(PyError::runtime_error("__next__ on non-generator"))
+                            }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__iter__" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                        name: "__iter__".to_string(),
+                        func: |args| Ok(args[0].clone()),
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    _ => Err(PyError::attribute_error(format!("'generator' object has no attribute '{}'", name))),
+                }
             }
             PyObject::File { file } => {
                 match name {

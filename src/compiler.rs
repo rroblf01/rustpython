@@ -721,6 +721,8 @@ impl Compiler {
             }
             Expr::Attribute { value, attr } => {
                 self.compile_expr(value)?;
+                // Stack is [..., val, obj] — swap to [..., obj, val] for STORE_ATTR
+                self.emit(Opcode::SWAP, 1);
                 let idx = self.get_name_index(attr) as u32;
                 self.emit(Opcode::STORE_ATTR, idx);
             }
@@ -763,6 +765,12 @@ impl Compiler {
             self.add_varname(&arg.arg);
         }
         self.code.arg_count = args.len();
+
+        // Check if function contains yield (generator)
+        let has_yield = contains_yield_in_stmts(body);
+        if has_yield {
+            self.emit(Opcode::RETURN_GENERATOR, 0);
+        }
 
         self.compile_stmts(body)?;
 
@@ -1167,5 +1175,42 @@ impl Compiler {
         self.loop_stack.pop();
 
         Ok(())
+    }
+}
+
+fn contains_yield_in_stmts(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(|s| match s {
+        Stmt::Expr(expr) | Stmt::Return(Some(expr)) | Stmt::Assign { value: expr, .. } | Stmt::AugAssign { value: expr, .. } => contains_yield_in_expr(expr),
+        Stmt::If { test, body, orelse } => contains_yield_in_expr(test) || contains_yield_in_stmts(body) || contains_yield_in_stmts(orelse),
+        Stmt::While { test, body, orelse } => contains_yield_in_expr(test) || contains_yield_in_stmts(body) || contains_yield_in_stmts(orelse),
+        Stmt::For { iter, body, orelse, .. } => contains_yield_in_expr(iter) || contains_yield_in_stmts(body) || contains_yield_in_stmts(orelse),
+        Stmt::With { items, body } => items.iter().any(|i| contains_yield_in_expr(&i.context_expr)) || contains_yield_in_stmts(body),
+        Stmt::Try { body, handlers, orelse, finalbody } => {
+            contains_yield_in_stmts(body) || handlers.iter().any(|h| contains_yield_in_stmts(&h.body)) || contains_yield_in_stmts(orelse) || contains_yield_in_stmts(finalbody)
+        }
+        Stmt::FunctionDef { body, .. } | Stmt::ClassDef { body, .. } => contains_yield_in_stmts(body),
+        _ => false,
+    })
+}
+
+fn contains_yield_in_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::Yield(_) => true,
+        Expr::YieldFrom(_) => true,
+        Expr::BinOp { left, right, .. } => contains_yield_in_expr(left) || contains_yield_in_expr(right),
+        Expr::BoolOp { values, .. } => values.iter().any(contains_yield_in_expr),
+        Expr::Compare { left, comparators, .. } => contains_yield_in_expr(left) || comparators.iter().any(contains_yield_in_expr),
+        Expr::UnaryOp { operand, .. } => contains_yield_in_expr(operand),
+        Expr::IfExp { test, body, orelse } => contains_yield_in_expr(test) || contains_yield_in_expr(body) || contains_yield_in_expr(orelse),
+        Expr::Lambda { body, .. } => contains_yield_in_expr(body),
+        Expr::Call { func, args, keywords } => {
+            contains_yield_in_expr(func) || args.iter().any(contains_yield_in_expr) || keywords.iter().any(|k| contains_yield_in_expr(&k.value))
+        }
+        Expr::Attribute { value, .. } => contains_yield_in_expr(value),
+        Expr::Subscript { value, slice } => contains_yield_in_expr(value) || contains_yield_in_expr(slice),
+        Expr::List(elts) | Expr::Tuple(elts) => elts.iter().any(contains_yield_in_expr),
+        Expr::Dict { keys, values } => keys.iter().any(|k| k.as_ref().map_or(false, |e| contains_yield_in_expr(e))) || values.iter().any(contains_yield_in_expr),
+        Expr::Starred(expr) => contains_yield_in_expr(expr),
+        _ => false,
     }
 }

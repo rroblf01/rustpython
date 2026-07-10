@@ -130,9 +130,6 @@ impl VirtualMachine {
                     if matches!(&e, PyError::SystemExit(_)) {
                         return Err(e);
                     }
-                    if matches!(&e, PyError::StopIteration) {
-                        return Err(e);
-                    }
                     if !self.handle_exception(&e) {
                         return Err(e);
                     }
@@ -592,12 +589,47 @@ impl VirtualMachine {
                     PyObject::Set(s) => {
                         self.frames.last_mut().unwrap().push(py_list(s.clone()));
                     }
+                    PyObject::Generator { .. } => {
+                        drop(obj);
+                        self.frames.last_mut().unwrap().push(val);
+                    }
                     _ => return Err(PyError::type_error(format!("'{}' object is not iterable", obj.type_name()))),
                 }
             }
 
             Opcode::FOR_ITER => {
                 let iter_val = self.frames.last().unwrap().peek(0)?;
+                let is_generator = matches!(&*iter_val.borrow(), PyObject::Generator { .. });
+                if is_generator {
+                    // Call __next__ on generator
+                    let gen = iter_val.clone();
+                    let next_func = gen.borrow().get_attribute("__next__");
+                    if let Ok(next_func) = next_func {
+                        // Fix self_obj by extracting name and func
+                        let (n, f) = {
+                            let b = next_func.borrow();
+                            if let PyObject::BuiltinMethod { name, func, .. } = &*b {
+                                (name.clone(), *func)
+                            } else { return Err(PyError::runtime_error("expected __next__ method")) }
+                        };
+                        let fixed = PyObjectRef::new(PyObject::BuiltinMethod {
+                            name: n,
+                            func: f,
+                            self_obj: gen.clone(),
+                        });
+                        match self.call_function(fixed, vec![]) {
+                            Ok(val) => {
+                                self.frames.last_mut().unwrap().push(val);
+                            }
+                            Err(e) if matches!(&e, PyError::StopIteration) => {
+                                self.frames.last_mut().unwrap().ip = instr.arg as usize;
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    } else {
+                        self.frames.last_mut().unwrap().ip = instr.arg as usize;
+                    }
+                } else {
                 let is_empty = {
                     let obj = iter_val.borrow();
                     match &*obj {
@@ -619,6 +651,7 @@ impl VirtualMachine {
                     };
                     self.frames.last_mut().unwrap().push(val);
                     self.frames.last_mut().unwrap().push(item);
+                }
                 }
             }
 
@@ -951,11 +984,19 @@ impl VirtualMachine {
 
             Opcode::YIELD_VALUE => {
                 let val = self.frames.last_mut().unwrap().pop()?;
+                // Push sent value (None for next()) so execution can continue
+                self.frames.last_mut().unwrap().push(py_none());
                 return Ok(Some(val));
             }
 
             Opcode::RETURN_GENERATOR => {
-                self.frames.last_mut().unwrap().push(py_none());
+                // Create a Generator wrapping current frame (IP already incremented past this instruction)
+                let frame = self.frames.last().unwrap().clone();
+                let gen = PyObjectRef::new(PyObject::Generator {
+                    frame: std::cell::RefCell::new(Some(frame)),
+                });
+                // Push gen and return as if RETURN_VALUE — this exits execute()
+                return Ok(Some(gen));
             }
 
             _ => return Err(PyError::runtime_error(format!("unimplemented opcode: {:?}", instr.op))),
@@ -1000,7 +1041,9 @@ impl VirtualMachine {
             }
             self.frames.push(new_frame);
             let result = self.execute();
-            self.frames.pop();
+            if !self.frames.is_empty() {
+                self.frames.pop();
+            }
             return result;
         }
 
