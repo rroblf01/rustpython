@@ -432,30 +432,47 @@ impl Compiler {
                 }
             }
             Stmt::Try { body, handlers, orelse, finalbody } => {
-                if !finalbody.is_empty() {
-                    let cleanup = self.new_label();
-                    self.emit_jump(Opcode::SETUP_FINALLY, cleanup);
-                    let body_start = self.code.instructions.len();
+                if !finalbody.is_empty() && handlers.is_empty() && orelse.is_empty() {
+                    // Simple try/finally
+                    let finally_label = self.new_label();
+                    let end_label = self.new_label();
+                    self.emit_jump(Opcode::SETUP_FINALLY, finally_label);
                     self.compile_stmts(body)?;
                     self.emit(Opcode::POP_BLOCK, 0);
-                    let orelse_start = self.new_label();
-                    self.emit_jump(Opcode::JUMP, orelse_start);
-                    self.fix_label(cleanup);
-                    // Exception handler entry - stack has [exc_info]
+                    self.compile_stmts(finalbody)?;
+                    self.emit_jump(Opcode::JUMP, end_label);
+                    self.fix_label(finally_label);
                     self.emit(Opcode::PUSH_EXC_INFO, 0);
+                    self.compile_stmts(finalbody)?;
+                    self.emit(Opcode::POP_EXCEPT, 0);
+                    self.emit(Opcode::RERAISE, 0);
+                    self.fix_label(end_label);
+                } else if !finalbody.is_empty() {
+                    // try/except/finally: wrap except handlers in a finally
+                    let finally_label = self.new_label();
+                    let end_label = self.new_label();
+                    self.emit_jump(Opcode::SETUP_FINALLY, finally_label);
+                    let cleanup = self.new_label();
+                    self.emit_jump(Opcode::SETUP_FINALLY, cleanup);
+                    let body_end = self.new_label();
                     let handler_done = self.new_label();
+                    self.compile_stmts(body)?;
+                    self.emit(Opcode::POP_BLOCK, 0);
+                    self.emit_jump(Opcode::JUMP, body_end);
+                    self.fix_label(cleanup);
+                    self.emit(Opcode::PUSH_EXC_INFO, 0);
                     for handler in handlers {
                         if let Some(typ) = &handler.typ {
-                    self.emit(Opcode::DUP_TOP, 0);
-                    self.compile_expr(typ)?;
-                    self.emit(Opcode::CHECK_EXC_MATCH, 0);
-                    let next_handler = self.new_label();
-                    self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_handler);
-                    if let Some(name) = &handler.name {
-                        let idx = self.add_varname(name) as u32;
-                        self.emit(Opcode::STORE_FAST, idx);
-                    }
-                    self.compile_stmts(&handler.body)?;
+                            self.emit(Opcode::DUP_TOP, 0);
+                            self.compile_expr(typ)?;
+                            self.emit(Opcode::CHECK_EXC_MATCH, 0);
+                            let next_handler = self.new_label();
+                            self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_handler);
+                            if let Some(name) = &handler.name {
+                                let idx = self.add_varname(name) as u32;
+                                self.emit(Opcode::STORE_FAST, idx);
+                            }
+                            self.compile_stmts(&handler.body)?;
                             self.emit_jump(Opcode::JUMP, handler_done);
                             self.fix_label(next_handler);
                         } else {
@@ -467,21 +484,22 @@ impl Compiler {
                             self.emit_jump(Opcode::JUMP, handler_done);
                         }
                     }
-                    // Re-raise if no handler matched
-                    self.emit(Opcode::RERAISE, 1);
+                    self.emit(Opcode::RERAISE, 0);
                     self.fix_label(handler_done);
                     self.emit(Opcode::POP_EXCEPT, 0);
-                    self.fix_label(orelse_start);
+                    self.fix_label(body_end);
                     if !orelse.is_empty() {
                         self.compile_stmts(orelse)?;
                     }
-                    self.mark_label(cleanup);
-                    let const_none = self.get_const_index(ConstValue::None) as u32;
-                    self.emit(Opcode::LOAD_CONST, const_none);
-                    self.emit(Opcode::YIELD_VALUE, 0);
+                    self.emit(Opcode::POP_BLOCK, 0);
+                    self.compile_stmts(finalbody)?;
+                    self.emit_jump(Opcode::JUMP, end_label);
+                    self.fix_label(finally_label);
+                    self.emit(Opcode::PUSH_EXC_INFO, 0);
+                    self.compile_stmts(finalbody)?;
                     self.emit(Opcode::POP_EXCEPT, 0);
-                    // Actually this is wrong for finally. Let's simplify:
-                    // For now, compile body + finally inline
+                    self.emit(Opcode::RERAISE, 0);
+                    self.fix_label(end_label);
                 } else if !handlers.is_empty() {
                     let cleanup = self.new_label();
                     self.emit_jump(Opcode::SETUP_FINALLY, cleanup);
