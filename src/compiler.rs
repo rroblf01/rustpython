@@ -225,8 +225,17 @@ impl Compiler {
             }
             Stmt::Assign { targets, value } => {
                 if targets.len() == 1 {
-                    self.compile_expr(value)?;
-                    self.compile_assign_target(&targets[0])?;
+                    let target = &targets[0];
+                    // For subscript assignment, compile obj and index before value
+                    if let Expr::Subscript { value: obj, slice } = target {
+                        self.compile_expr(obj)?;
+                        self.compile_expr(slice)?;
+                        self.compile_expr(value)?;
+                        self.emit(Opcode::STORE_SUBSCR, 0);
+                    } else {
+                        self.compile_expr(value)?;
+                        self.compile_assign_target(target)?;
+                    }
                 } else {
                     // Multiple targets: a = b = c
                     self.compile_expr(value)?;

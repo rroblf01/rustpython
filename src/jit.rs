@@ -129,10 +129,10 @@ impl JitCompiler {
         for i in 0..code.arg_count.min(code.nlocals) {
             let src = builder.ins().iadd_imm(args_ptr, (i * 16) as i64);
             let dst = builder.ins().stack_addr(types::I64, locals_slot, (i * 16) as i32);
-            let lo = builder.ins().load(types::I64, cranelift::codegen::ir::MemFlags::trusted(), src, 0);
-            let hi = builder.ins().load(types::I64, cranelift::codegen::ir::MemFlags::trusted(), src, 8);
-            builder.ins().store(cranelift::codegen::ir::MemFlags::trusted(), lo, dst, 0);
-            builder.ins().store(cranelift::codegen::ir::MemFlags::trusted(), hi, dst, 8);
+            let lo = builder.ins().load(types::I64, cranelift::codegen::ir::MemFlags::new(), src, 0);
+            let hi = builder.ins().load(types::I64, cranelift::codegen::ir::MemFlags::new(), src, 8);
+            builder.ins().store(cranelift::codegen::ir::MemFlags::new(), lo, dst, 0);
+            builder.ins().store(cranelift::codegen::ir::MemFlags::new(), hi, dst, 8);
         }
 
         // Evaluation stack
@@ -148,20 +148,20 @@ impl JitCompiler {
                     let idx = instr.arg as i32;
                     let src = builder.ins().stack_addr(types::I64, locals_slot, idx * 16);
                     let dst = builder.ins().stack_addr(types::I64, stack_slot, sp);
-                    let lo = builder.ins().load(types::I64, cranelift::codegen::ir::MemFlags::trusted(), src, 0);
-                    let hi = builder.ins().load(types::I64, cranelift::codegen::ir::MemFlags::trusted(), src, 8);
-                    builder.ins().store(cranelift::codegen::ir::MemFlags::trusted(), lo, dst, 0);
-                    builder.ins().store(cranelift::codegen::ir::MemFlags::trusted(), hi, dst, 8);
+                    let lo = builder.ins().load(types::I64, cranelift::codegen::ir::MemFlags::new(), src, 0);
+                    let hi = builder.ins().load(types::I64, cranelift::codegen::ir::MemFlags::new(), src, 8);
+                    builder.ins().store(cranelift::codegen::ir::MemFlags::new(), lo, dst, 0);
+                    builder.ins().store(cranelift::codegen::ir::MemFlags::new(), hi, dst, 8);
                     sp += 16;
                 }
                 crate::bytecode::Opcode::LOAD_CONST => {
                     let idx = instr.arg as i32;
                     let src = builder.ins().iadd_imm(consts_ptr, (idx * 16) as i64);
                     let dst = builder.ins().stack_addr(types::I64, stack_slot, sp);
-                    let lo = builder.ins().load(types::I64, cranelift::codegen::ir::MemFlags::trusted(), src, 0);
-                    let hi = builder.ins().load(types::I64, cranelift::codegen::ir::MemFlags::trusted(), src, 8);
-                    builder.ins().store(cranelift::codegen::ir::MemFlags::trusted(), lo, dst, 0);
-                    builder.ins().store(cranelift::codegen::ir::MemFlags::trusted(), hi, dst, 8);
+                    let lo = builder.ins().load(types::I64, cranelift::codegen::ir::MemFlags::new(), src, 0);
+                    let hi = builder.ins().load(types::I64, cranelift::codegen::ir::MemFlags::new(), src, 8);
+                    builder.ins().store(cranelift::codegen::ir::MemFlags::new(), lo, dst, 0);
+                    builder.ins().store(cranelift::codegen::ir::MemFlags::new(), hi, dst, 8);
                     sp += 16;
                 }
                 crate::bytecode::Opcode::BINARY_OP => {
@@ -178,18 +178,18 @@ impl JitCompiler {
                     let idx = instr.arg as i32;
                     let src = builder.ins().stack_addr(types::I64, stack_slot, sp);
                     let dst = builder.ins().stack_addr(types::I64, locals_slot, idx * 16);
-                    let lo = builder.ins().load(types::I64, cranelift::codegen::ir::MemFlags::trusted(), src, 0);
-                    let hi = builder.ins().load(types::I64, cranelift::codegen::ir::MemFlags::trusted(), src, 8);
-                    builder.ins().store(cranelift::codegen::ir::MemFlags::trusted(), lo, dst, 0);
-                    builder.ins().store(cranelift::codegen::ir::MemFlags::trusted(), hi, dst, 8);
+                    let lo = builder.ins().load(types::I64, cranelift::codegen::ir::MemFlags::new(), src, 0);
+                    let hi = builder.ins().load(types::I64, cranelift::codegen::ir::MemFlags::new(), src, 8);
+                    builder.ins().store(cranelift::codegen::ir::MemFlags::new(), lo, dst, 0);
+                    builder.ins().store(cranelift::codegen::ir::MemFlags::new(), hi, dst, 8);
                 }
                 crate::bytecode::Opcode::DUP_TOP => {
                     let src = builder.ins().stack_addr(types::I64, stack_slot, sp - 16);
                     let dst = builder.ins().stack_addr(types::I64, stack_slot, sp);
-                    let lo = builder.ins().load(types::I64, cranelift::codegen::ir::MemFlags::trusted(), src, 0);
-                    let hi = builder.ins().load(types::I64, cranelift::codegen::ir::MemFlags::trusted(), src, 8);
-                    builder.ins().store(cranelift::codegen::ir::MemFlags::trusted(), lo, dst, 0);
-                    builder.ins().store(cranelift::codegen::ir::MemFlags::trusted(), hi, dst, 8);
+                    let lo = builder.ins().load(types::I64, cranelift::codegen::ir::MemFlags::new(), src, 0);
+                    let hi = builder.ins().load(types::I64, cranelift::codegen::ir::MemFlags::new(), src, 8);
+                    builder.ins().store(cranelift::codegen::ir::MemFlags::new(), lo, dst, 0);
+                    builder.ins().store(cranelift::codegen::ir::MemFlags::new(), hi, dst, 8);
                     sp += 16;
                 }
                 crate::bytecode::Opcode::POP_TOP => {
@@ -198,10 +198,10 @@ impl JitCompiler {
                 crate::bytecode::Opcode::RETURN_VALUE => {
                     sp -= 16;
                     let src = builder.ins().stack_addr(types::I64, stack_slot, sp);
-                    let lo = builder.ins().load(types::I64, cranelift::codegen::ir::MemFlags::trusted(), src, 0);
-                    let hi = builder.ins().load(types::I64, cranelift::codegen::ir::MemFlags::trusted(), src, 8);
-                    builder.ins().store(cranelift::codegen::ir::MemFlags::trusted(), lo, result_ptr, 0);
-                    builder.ins().store(cranelift::codegen::ir::MemFlags::trusted(), hi, result_ptr, 8);
+                    let lo = builder.ins().load(types::I64, cranelift::codegen::ir::MemFlags::new(), src, 0);
+                    let hi = builder.ins().load(types::I64, cranelift::codegen::ir::MemFlags::new(), src, 8);
+                    builder.ins().store(cranelift::codegen::ir::MemFlags::new(), lo, result_ptr, 0);
+                    builder.ins().store(cranelift::codegen::ir::MemFlags::new(), hi, result_ptr, 8);
                     builder.ins().return_(&[]);
                     builder.finalize();
                     self.module.define_function(func, &mut ctx).ok()?;

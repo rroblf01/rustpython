@@ -952,8 +952,7 @@ impl VirtualMachine {
                 let map = self.frames[fi].peek(arg as usize)?;
                 let mut obj = map.borrow_mut();
                 if let PyObject::Dict(d) = &mut *obj {
-                    let key_str = key.str();
-                    d.insert(key_str, val);
+                    d.set(key, val)?;
                 } else {
                     return Err(PyError::runtime_error("MAP_ADD on non-dict"));
                 }
@@ -1319,7 +1318,7 @@ impl VirtualMachine {
                         }
                     } else {
                         if let PyObject::Dict(ref mut dict) = &mut *kw_dict.borrow_mut() {
-                            dict.insert(key.clone(), value.clone());
+                            dict.set(py_str(key), value.clone())?;
                         }
                     }
                 }

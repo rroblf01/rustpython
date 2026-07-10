@@ -268,6 +268,60 @@ impl PySet {
     }
 }
 
+// ---- PyDict: hash-based dict with arbitrary hashable keys ----
+
+#[derive(Clone)]
+pub struct PyDict {
+    buckets: std::collections::HashMap<usize, Vec<(PyObjectRef, PyObjectRef)>>,
+    size: usize,
+}
+
+impl PyDict {
+    pub fn new() -> Self { PyDict { buckets: std::collections::HashMap::new(), size: 0 } }
+    pub fn is_empty(&self) -> bool { self.size == 0 }
+    pub fn len(&self) -> usize { self.size }
+    pub fn clear(&mut self) { self.buckets.clear(); self.size = 0; }
+    fn bucket(&self, key: &PyObjectRef) -> PyResult<Option<&Vec<(PyObjectRef, PyObjectRef)>>> {
+        let h = key.hash()?; Ok(self.buckets.get(&h))
+    }
+    fn bucket_mut(&mut self, key: &PyObjectRef) -> PyResult<&mut Vec<(PyObjectRef, PyObjectRef)>> {
+        let h = key.hash()?; Ok(self.buckets.entry(h).or_default())
+    }
+    fn find(bucket: &[(PyObjectRef, PyObjectRef)], key: &PyObjectRef) -> Option<usize> {
+        bucket.iter().position(|(k, _)| k.equals(key).unwrap_or(false))
+    }
+    pub fn contains(&self, key: &PyObjectRef) -> PyResult<bool> {
+        match self.bucket(key)? { Some(b) => Ok(Self::find(b, key).is_some()), None => Ok(false) }
+    }
+    pub fn get(&self, key: &PyObjectRef) -> PyResult<Option<PyObjectRef>> {
+        match self.bucket(key)? { Some(b) => Ok(Self::find(b, key).map(|i| b[i].1.clone())), None => Ok(None) }
+    }
+    pub fn set(&mut self, key: PyObjectRef, value: PyObjectRef) -> PyResult<()> {
+        let h = key.hash()?;
+        let bucket = self.buckets.entry(h).or_default();
+        match Self::find(bucket, &key) {
+            Some(i) => bucket[i].1 = value,
+            None => { bucket.push((key, value)); self.size += 1; }
+        }
+        Ok(())
+    }
+    pub fn remove(&mut self, key: &PyObjectRef) -> PyResult<PyObjectRef> {
+        let h = key.hash()?;
+        let bucket = self.buckets.get_mut(&h).ok_or_else(|| PyError::key_error(key.str()))?;
+        let pos = Self::find(bucket, key).ok_or_else(|| PyError::key_error(key.str()))?;
+        self.size -= 1; Ok(bucket.swap_remove(pos).1)
+    }
+    pub fn keys(&self) -> Vec<PyObjectRef> {
+        self.buckets.values().flat_map(|b| b.iter().map(|(k, _)| k.clone())).collect()
+    }
+    pub fn values(&self) -> Vec<PyObjectRef> {
+        self.buckets.values().flat_map(|b| b.iter().map(|(_, v)| v.clone())).collect()
+    }
+    pub fn items(&self) -> Vec<(PyObjectRef, PyObjectRef)> {
+        self.buckets.values().flat_map(|b| b.clone()).collect()
+    }
+}
+
 #[derive(Clone)]
 pub enum PyObject {
     None,
@@ -279,7 +333,7 @@ pub enum PyObject {
     ByteArray(Vec<u8>),
     List(Vec<PyObjectRef>),
     Tuple(Vec<PyObjectRef>),
-    Dict(HashMap<String, PyObjectRef>),
+    Dict(PyDict),
     Set(PySet),
     Range {
         start: i64,
@@ -444,8 +498,8 @@ impl PyObject {
                 }
             }
             PyObject::Dict(d) => {
-                let items: Vec<String> = d.iter()
-                    .map(|(k, v)| format!("{}: {}", k, v.repr()))
+                let items: Vec<String> = d.items().iter()
+                    .map(|(k, v)| format!("{}: {}", k.repr(), v.repr()))
                     .collect();
                 format!("{{{}}}", items.join(", "))
             }
@@ -621,17 +675,17 @@ impl PyObject {
             (PyObject::Bytes(a), PyObject::Bytes(b)) => a == b,
             (PyObject::ByteArray(a), PyObject::ByteArray(b)) => a == b,
             (PyObject::Dict(a), PyObject::Dict(b)) => {
-                let mut eq = true;
-                if a.len() != b.len() { eq = false; }
-                if eq {
-                    for (k, va) in a.iter() {
-                        match b.get(k) {
-                            Some(vb) => { if !va.equals(vb)? { eq = false; break; } }
-                            None => { eq = false; break; }
+                if a.len() != b.len() { false }
+                else {
+                    let mut eq = true;
+                    for (k, va) in a.items() {
+                        match b.get(&k) {
+                            Ok(Some(vb)) => { if !va.equals(&vb).unwrap_or(false) { eq = false; break; } }
+                            _ => { eq = false; break; }
                         }
                     }
+                    eq
                 }
-                eq
             }
             (PyObject::List(a), PyObject::List(b)) => {
                 let mut eq = true;
@@ -717,7 +771,7 @@ pub fn py_tuple(items: Vec<PyObjectRef>) -> PyObjectRef {
 }
 
 pub fn py_dict() -> PyObjectRef {
-    PyObjectRef::new(PyObject::Dict(HashMap::new()))
+    PyObjectRef::new(PyObject::Dict(PyDict::new()))
 }
 
 pub fn py_set() -> PyObjectRef {
@@ -1223,13 +1277,7 @@ pub fn contains_op(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<bool> {
             Ok(false)
         }
         PyObject::Dict(d) => {
-            match &*b.borrow() {
-                PyObject::Str(s) => Ok(d.contains_key(s)),
-                _ => {
-                    let key_str = b.str();
-                    Ok(d.contains_key(&key_str))
-                }
-            }
+            d.contains(b)
         }
         PyObject::Set(items) => {
             items.contains(b)
@@ -2617,9 +2665,8 @@ impl ObjectAccess for PyObject {
                         name: "keys".to_string(),
                         func: |args| {
                             let d = args[0].borrow();
-                            if let PyObject::Dict(dict) = &*d {
-                                Ok(py_list(dict.keys().map(|k| py_str(k)).collect()))
-                            } else { Err(PyError::runtime_error("keys on non-dict")) }
+                            if let PyObject::Dict(dict) = &*d { Ok(py_list(dict.keys())) }
+                            else { Err(PyError::runtime_error("keys on non-dict")) }
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -2627,9 +2674,8 @@ impl ObjectAccess for PyObject {
                         name: "values".to_string(),
                         func: |args| {
                             let d = args[0].borrow();
-                            if let PyObject::Dict(dict) = &*d {
-                                Ok(py_list(dict.values().cloned().collect()))
-                            } else { Err(PyError::runtime_error("values on non-dict")) }
+                            if let PyObject::Dict(dict) = &*d { Ok(py_list(dict.values())) }
+                            else { Err(PyError::runtime_error("values on non-dict")) }
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -2638,7 +2684,7 @@ impl ObjectAccess for PyObject {
                         func: |args| {
                             let d = args[0].borrow();
                             if let PyObject::Dict(dict) = &*d {
-                                let items: Vec<PyObjectRef> = dict.iter().map(|(k, v)| py_tuple(vec![py_str(k), v.clone()])).collect();
+                                let items: Vec<PyObjectRef> = dict.items().iter().map(|(k, v)| py_tuple(vec![k.clone(), v.clone()])).collect();
                                 Ok(py_list(items))
                             } else { Err(PyError::runtime_error("items on non-dict")) }
                         },
@@ -2648,10 +2694,9 @@ impl ObjectAccess for PyObject {
                         name: "get".to_string(),
                         func: |args| {
                             if args.len() < 2 { return Err(PyError::type_error("get() takes at least 1 argument")); }
-                            let key = args[1].str();
                             let dict = &*args[0].borrow();
                             if let PyObject::Dict(d) = dict {
-                                Ok(d.get(&key).cloned().unwrap_or_else(|| if args.len() > 2 { args[2].clone() } else { py_none() }))
+                                Ok(d.get(&args[1])?.unwrap_or_else(|| if args.len() > 2 { args[2].clone() } else { py_none() }))
                             } else { Err(PyError::runtime_error("get on non-dict")) }
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
@@ -2660,10 +2705,8 @@ impl ObjectAccess for PyObject {
                         name: "pop".to_string(),
                         func: |args| {
                             if args.len() < 2 { return Err(PyError::type_error("pop() takes at least 1 argument")); }
-                            let key = args[1].str();
-                            if let PyObject::Dict(d) = &mut *args[0].borrow_mut() {
-                                d.remove(&key).ok_or_else(|| PyError::key_error(key))
-                            } else { Err(PyError::runtime_error("pop on non-dict")) }
+                            if let PyObject::Dict(d) = &mut *args[0].borrow_mut() { d.remove(&args[1]) }
+                            else { Err(PyError::runtime_error("pop on non-dict")) }
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -2672,6 +2715,49 @@ impl ObjectAccess for PyObject {
                         func: |args| {
                             if let PyObject::Dict(d) = &mut *args[0].borrow_mut() { d.clear(); Ok(py_none()) }
                             else { Err(PyError::runtime_error("clear on non-dict")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "update" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                        name: "update".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("update() takes at least 1 argument")); }
+                            let other = args[1].borrow();
+                            if let PyObject::Dict(d) = &mut *args[0].borrow_mut() {
+                                if let PyObject::Dict(other_dict) = &*other {
+                                    for (k, v) in other_dict.items() { d.set(k, v)?; }
+                                    Ok(py_none())
+                                } else { Err(PyError::type_error("update() argument must be a dict")) }
+                            } else { Err(PyError::runtime_error("update on non-dict")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "setdefault" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                        name: "setdefault".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("setdefault() takes at least 1 argument")); }
+                            let key = args[1].clone();
+                            if let PyObject::Dict(d) = &mut *args[0].borrow_mut() {
+                                match d.get(&key)? {
+                                    Some(val) => Ok(val.clone()),
+                                    None => {
+                                        let val = if args.len() > 2 { args[2].clone() } else { py_none() };
+                                        d.set(key, val.clone())?; Ok(val)
+                                    }
+                                }
+                            } else { Err(PyError::runtime_error("setdefault on non-dict")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "copy" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                        name: "copy".to_string(),
+                        func: |args| {
+                            let d = args[0].borrow();
+                            if let PyObject::Dict(dict) = &*d {
+                                let mut new_dict = PyDict::new();
+                                for (k, v) in dict.items() { new_dict.set(k, v)?; }
+                                Ok(PyObjectRef::new(PyObject::Dict(new_dict)))
+                            } else { Err(PyError::runtime_error("copy on non-dict")) }
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -3208,8 +3294,10 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
             }
         }
         PyObject::Dict(d) => {
-            let key_str = index.str();
-            d.get(&key_str).cloned().ok_or_else(|| PyError::key_error(key_str))
+            match d.get(index)? {
+                Some(val) => Ok(val),
+                None => Err(PyError::key_error(index.str())),
+            }
         }
         PyObject::Bytes(b) => {
             let idx = index.borrow();
@@ -3334,9 +3422,7 @@ pub fn py_setitem(obj: &PyObjectRef, index: &PyObjectRef, value: PyObjectRef) ->
             }
         }
         PyObject::Dict(d) => {
-            let key_str = index.str();
-            d.insert(key_str, value);
-            Ok(())
+            d.set(index.clone(), value)
         }
         _ => Err(PyError::type_error(format!("'{}' object does not support item assignment", o.type_name()))),
     }
