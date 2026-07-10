@@ -1228,10 +1228,13 @@ impl VirtualMachine {
             // Try JIT execution: if we have compiled code, use it directly
             let jit_fn: usize = jit_ptr.get();
             if jit_fn != 0 {
-                let func: extern "C" fn(*const PyObjectRef, usize, *const std::ffi::c_void) -> PyObjectRef = 
+                let func: extern "C" fn(*const PyObjectRef, usize, *const PyObjectRef, *mut PyObjectRef) = 
                     unsafe { std::mem::transmute(jit_fn) };
-                let consts_ptr = &code.consts as *const _ as *const std::ffi::c_void;
-                return Ok(func(args.as_ptr(), args.len(), consts_ptr));
+                let jit_consts = crate::jit::JitCompiler::precompute_consts(code);
+                let mut result = crate::object::py_none();
+                func(args.as_ptr(), args.len(), jit_consts.as_ptr(), &mut result as *mut PyObjectRef);
+                std::mem::forget(jit_consts);
+                return Ok(result);
             }
             // Try simple execution without Frame creation
             if defaults.is_empty() && keywords.is_empty() {
@@ -1245,8 +1248,11 @@ impl VirtualMachine {
                 let fn_ptr = compiled as *const () as usize;
                 drop(jit);
                 jit_ptr.set(fn_ptr);
-                let consts_ptr = &code.consts as *const _ as *const std::ffi::c_void;
-                return Ok(compiled(args.as_ptr(), args.len(), consts_ptr));
+                let jit_consts = crate::jit::JitCompiler::precompute_consts(code);
+                let mut result = crate::object::py_none();
+                compiled(args.as_ptr(), args.len(), jit_consts.as_ptr(), &mut result as *mut PyObjectRef);
+                std::mem::forget(jit_consts);
+                return Ok(result);
             }
             drop(jit);
             let func_globals = func_globals.clone();
