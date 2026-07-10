@@ -1107,13 +1107,11 @@ impl Compiler {
         self.emit_jump(Opcode::FOR_ITER, end_label);
         self.compile_assign_target(&gen.target)?;
 
-        // Ifs
+        // Ifs — if any condition is false, skip the elt (jump to next_iteration)
+        let next_iteration = self.new_label();
         for if_expr in &gen.ifs {
             self.compile_expr(if_expr)?;
-            let skip_label = self.new_label();
-            self.emit_jump(Opcode::POP_JUMP_IF_FALSE, skip_label);
-            self.emit_jump(Opcode::JUMP, end_label);
-            self.fix_label(skip_label);
+            self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_iteration);
         }
 
         self.compile_expr(elt)?;
@@ -1122,7 +1120,9 @@ impl Compiler {
         } else {
             self.emit(Opcode::LIST_APPEND, 1);
         }
-        self.emit_jump(Opcode::JUMP, comp_start_label);
+
+        self.fix_label(next_iteration);
+        self.emit_backward_jump(comp_start_label);
 
         self.fix_label(end_label);
         self.emit(Opcode::POP_ITER, 0);

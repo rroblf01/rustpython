@@ -997,6 +997,41 @@ impl Parser {
                     op: Operator::Sub,
                     right: Box::new(right),
                 };
+            } else if self.eat(&Token::Star) {
+                let right = self.parse_factor()?;
+                expr = Expr::BinOp {
+                    left: Box::new(expr),
+                    op: Operator::Mult,
+                    right: Box::new(right),
+                };
+            } else if self.eat(&Token::Slash) {
+                let right = self.parse_factor()?;
+                expr = Expr::BinOp {
+                    left: Box::new(expr),
+                    op: Operator::Div,
+                    right: Box::new(right),
+                };
+            } else if self.eat(&Token::DoubleSlash) {
+                let right = self.parse_factor()?;
+                expr = Expr::BinOp {
+                    left: Box::new(expr),
+                    op: Operator::FloorDiv,
+                    right: Box::new(right),
+                };
+            } else if self.eat(&Token::Percent) {
+                let right = self.parse_factor()?;
+                expr = Expr::BinOp {
+                    left: Box::new(expr),
+                    op: Operator::Mod,
+                    right: Box::new(right),
+                };
+            } else if self.eat(&Token::At) {
+                let right = self.parse_factor()?;
+                expr = Expr::BinOp {
+                    left: Box::new(expr),
+                    op: Operator::MatMult,
+                    right: Box::new(right),
+                };
             } else {
                 break;
             }
@@ -1005,44 +1040,7 @@ impl Parser {
     }
 
     fn parse_factor(&mut self) -> Result<Expr, String> {
-        if self.eat(&Token::Star) {
-            let right = self.parse_factor()?;
-            Ok(Expr::BinOp {
-                left: Box::new(Expr::Constant(Constant::int_from_str("1"))),
-                op: Operator::Mult,
-                right: Box::new(right),
-            })
-        } else if self.eat(&Token::Slash) {
-            let right = self.parse_factor()?;
-            Ok(Expr::BinOp {
-                left: Box::new(Expr::Constant(Constant::int_from_str("1"))),
-                op: Operator::Div,
-                right: Box::new(right),
-            })
-        } else if self.eat(&Token::DoubleSlash) {
-            let right = self.parse_factor()?;
-            Ok(Expr::BinOp {
-                left: Box::new(Expr::Constant(Constant::int_from_str("1"))),
-                op: Operator::FloorDiv,
-                right: Box::new(right),
-            })
-        } else if self.eat(&Token::Percent) {
-            let right = self.parse_factor()?;
-            Ok(Expr::BinOp {
-                left: Box::new(Expr::Constant(Constant::int_from_str("1"))),
-                op: Operator::Mod,
-                right: Box::new(right),
-            })
-        } else if self.eat(&Token::At) {
-            let right = self.parse_factor()?;
-            Ok(Expr::BinOp {
-                left: Box::new(Expr::Constant(Constant::int_from_str("1"))),
-                op: Operator::MatMult,
-                right: Box::new(right),
-            })
-        } else {
-            self.parse_unary()
-        }
+        self.parse_unary()
     }
 
     fn parse_unary(&mut self) -> Result<Expr, String> {
@@ -1275,10 +1273,37 @@ impl Parser {
                             let expr = self.parse_expr()?;
                             elts.push(Expr::Starred(Box::new(expr)));
                         } else {
-                            elts.push(self.parse_expr()?);
+                            elts.push(self.parse_bitwise_or()?);
                         }
                         if !self.eat(&Token::Comma) { break; }
                     }
+                }
+                // Check for list comprehension: [expr for ...]
+                if elts.len() == 1 && self.eat(&Token::For) {
+                    let target = self.parse_bitwise_or()?;
+                    self.expect(&Token::In)?;
+                    let iter = self.parse_or_expr()?;
+                    let mut generators = vec![Comprehension { target: Box::new(target), iter: Box::new(iter), ifs: Vec::new(), is_async: false }];
+                    while self.eat(&Token::For) {
+                        let t = self.parse_bitwise_or()?;
+                        self.expect(&Token::In)?;
+                        let i = self.parse_or_expr()?;
+                        generators.push(Comprehension { target: Box::new(t), iter: Box::new(i), ifs: Vec::new(), is_async: false });
+                    }
+                    // Optional if clauses
+                    if self.eat(&Token::If) {
+                        if let Some(last) = generators.last_mut() {
+                            last.ifs.push(self.parse_or_expr()?);
+                            while self.eat(&Token::If) {
+                                last.ifs.push(self.parse_or_expr()?);
+                            }
+                        }
+                    }
+                    self.expect(&Token::RightBracket)?;
+                    return Ok(Expr::ListComp {
+                        elt: Box::new(elts.into_iter().next().unwrap()),
+                        generators,
+                    });
                 }
                 self.expect(&Token::RightBracket)?;
                 Ok(Expr::List(elts))
