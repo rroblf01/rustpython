@@ -1380,24 +1380,98 @@ impl Parser {
                 let mut values = Vec::new();
                 let mut is_dict = false;
                 if !self.at(&Token::RightBrace) {
-                    loop {
-                        if self.eat(&Token::DoubleStar) {
-                            let expr = self.parse_expr()?;
-                            keys.push(None);
-                            values.push(expr);
+                    // Parse first element to check for comprehension
+                    if self.eat(&Token::DoubleStar) {
+                        let expr = self.parse_expr()?;
+                        keys.push(None);
+                        values.push(expr);
+                        is_dict = true;
+                    } else {
+                        let key = self.parse_expr()?;
+                        if self.eat(&Token::Colon) {
+                            let value = self.parse_expr()?;
+                            // Check for dict comprehension: {k: v for ...}
+                            if self.eat(&Token::For) {
+                                let target = self.parse_bitwise_or()?;
+                                self.expect(&Token::In)?;
+                                let iter = self.parse_or_expr()?;
+                                let mut generators = vec![Comprehension { target: Box::new(target), iter: Box::new(iter), ifs: Vec::new(), is_async: false }];
+                                while self.eat(&Token::For) {
+                                    let t = self.parse_bitwise_or()?;
+                                    self.expect(&Token::In)?;
+                                    let i = self.parse_or_expr()?;
+                                    generators.push(Comprehension { target: Box::new(t), iter: Box::new(i), ifs: Vec::new(), is_async: false });
+                                }
+                                if self.eat(&Token::If) {
+                                    if let Some(last) = generators.last_mut() {
+                                        last.ifs.push(self.parse_or_expr()?);
+                                        while self.eat(&Token::If) {
+                                            last.ifs.push(self.parse_or_expr()?);
+                                        }
+                                    }
+                                }
+                                self.expect(&Token::RightBrace)?;
+                                return Ok(Expr::DictComp {
+                                    key: Box::new(key),
+                                    value: Box::new(value),
+                                    generators,
+                                });
+                            }
+                            keys.push(Some(key));
+                            values.push(value);
                             is_dict = true;
                         } else {
-                            let key = self.parse_expr()?;
-                            if self.eat(&Token::Colon) {
-                                let value = self.parse_expr()?;
-                                keys.push(Some(key));
-                                values.push(value);
+                            // Check for set comprehension: {expr for ...}
+                            if self.eat(&Token::For) {
+                                let target = self.parse_bitwise_or()?;
+                                self.expect(&Token::In)?;
+                                let iter = self.parse_or_expr()?;
+                                let mut generators = vec![Comprehension { target: Box::new(target), iter: Box::new(iter), ifs: Vec::new(), is_async: false }];
+                                while self.eat(&Token::For) {
+                                    let t = self.parse_bitwise_or()?;
+                                    self.expect(&Token::In)?;
+                                    let i = self.parse_or_expr()?;
+                                    generators.push(Comprehension { target: Box::new(t), iter: Box::new(i), ifs: Vec::new(), is_async: false });
+                                }
+                                if self.eat(&Token::If) {
+                                    if let Some(last) = generators.last_mut() {
+                                        last.ifs.push(self.parse_or_expr()?);
+                                        while self.eat(&Token::If) {
+                                            last.ifs.push(self.parse_or_expr()?);
+                                        }
+                                    }
+                                }
+                                self.expect(&Token::RightBrace)?;
+                                return Ok(Expr::SetComp {
+                                    elt: Box::new(key),
+                                    generators,
+                                });
+                            }
+                            values.push(key);
+                        }
+                    }
+                    // Parse remaining elements
+                    if values.len() == 1 && !is_dict {
+                        // Already handled single expression above
+                    } else {
+                        while self.eat(&Token::Comma) {
+                            if self.eat(&Token::DoubleStar) {
+                                let expr = self.parse_expr()?;
+                                keys.push(None);
+                                values.push(expr);
                                 is_dict = true;
                             } else {
-                                values.push(key);
+                                let k = self.parse_expr()?;
+                                if self.eat(&Token::Colon) {
+                                    let v = self.parse_expr()?;
+                                    keys.push(Some(k));
+                                    values.push(v);
+                                    is_dict = true;
+                                } else {
+                                    values.push(k);
+                                }
                             }
                         }
-                        if !self.eat(&Token::Comma) { break; }
                     }
                 }
                 self.expect(&Token::RightBrace)?;

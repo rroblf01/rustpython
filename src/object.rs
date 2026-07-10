@@ -1509,7 +1509,7 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 }
             }
             PyObject::Generator { .. } => {
-                // Generator's __next__ is handled via get_attribute
+                drop(obj);
                 let next_func = args[0].borrow().get_attribute("__next__")?;
                 let (n, f) = {
                     let b = next_func.borrow();
@@ -1517,12 +1517,7 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                         (name.clone(), *func)
                     } else { return Err(PyError::runtime_error("expected __next__ method")) }
                 };
-                let fixed = PyObjectRef::new(PyObject::BuiltinMethod {
-                    name: n,
-                    func: f,
-                    self_obj: args[0].clone(),
-                });
-                return call_bound_method(fixed, args[0].clone(), vec![]);
+                return f(&[args[0].clone()]);
             }
             _ => None,
         }

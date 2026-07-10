@@ -845,7 +845,7 @@ impl VirtualMachine {
             Opcode::MAP_ADD => {
                 let val = self.frames.last_mut().unwrap().pop()?;
                 let key = self.frames.last_mut().unwrap().pop()?;
-                let map = self.frames.last().unwrap().peek(0)?;
+                let map = self.frames.last().unwrap().peek(instr.arg as usize)?;
                 let mut obj = map.borrow_mut();
                 if let PyObject::Dict(d) = &mut *obj {
                     let key_str = key.str();

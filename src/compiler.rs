@@ -978,11 +978,13 @@ impl Compiler {
                 self.fix_label(end_label);
             }
             Expr::Compare { left, ops, comparators } => {
-                self.compile_expr(left)?;
+                let chained_end = self.new_label();
                 for (i, (op, right)) in ops.iter().zip(comparators.iter()).enumerate() {
                     if i > 0 {
-                        // For chained comparisons, need DUP and ROT
-                        return Err("Chained comparisons not yet supported".to_string());
+                        // Chained comparison: re-compile previous comparand as new left
+                        self.compile_expr(&comparators[i - 1])?;
+                    } else {
+                        self.compile_expr(left)?;
                     }
                     self.compile_expr(right)?;
                     let cmp_op = match op {
@@ -998,7 +1000,13 @@ impl Compiler {
                         CmpOp::NotIn => 7,
                     };
                     self.emit(Opcode::COMPARE_OP, cmp_op);
+                    if i < ops.len() - 1 {
+                        self.emit(Opcode::DUP_TOP, 0);
+                        self.emit_jump(Opcode::POP_JUMP_IF_FALSE, chained_end);
+                        self.emit(Opcode::POP_TOP, 0);
+                    }
                 }
+                self.fix_label(chained_end);
             }
             Expr::Call { func, args, keywords } => {
                 let npos = args.len();
@@ -1149,60 +1157,150 @@ impl Compiler {
                 self.emit(Opcode::DUP_TOP, 0);
                 self.compile_assign_target(target)?;
             }
-            Expr::DictComp { .. } => {
-                return Err("Dict comprehensions not yet supported".to_string());
+            Expr::DictComp { key, value, generators } => {
+                self.compile_dict_comprehension(key, value, generators)?;
             }
-            Expr::Await(_) | Expr::YieldFrom(_) => {
-                return Err("Await/yield from not supported yet".to_string());
+            Expr::YieldFrom(expr) => {
+                // Simple yield from: iterate and yield each value
+                self.compile_expr(expr)?;
+                self.emit(Opcode::GET_ITER, 0);
+                let end_label = self.new_label();
+                let loop_label = self.new_label();
+                self.mark_label(loop_label);
+                self.emit_jump(Opcode::FOR_ITER, end_label);
+                self.emit(Opcode::YIELD_VALUE, 0);
+                self.emit(Opcode::POP_TOP, 0);
+                self.emit_backward_jump(loop_label);
+                self.fix_label(end_label);
+                self.emit(Opcode::POP_ITER, 0);
+                let const_none = self.get_const_index(ConstValue::None) as u32;
+                self.emit(Opcode::LOAD_CONST, const_none);
+            }
+            Expr::Await(_) => {
+                return Err("Await not supported yet".to_string());
             }
         }
         Ok(())
     }
 
     fn compile_comprehension(&mut self, elt: &Expr, generators: &[Comprehension], is_set: bool) -> Result<(), String> {
-        if generators.len() != 1 {
-            return Err("Only single-generator comprehensions supported".to_string());
+        if generators.is_empty() {
+            return Err("Comprehension must have at least one generator".to_string());
         }
-        let gen = &generators[0];
 
-        // Build result container
         if is_set {
             self.emit(Opcode::BUILD_SET, 0);
         } else {
             self.emit(Opcode::BUILD_LIST, 0);
         }
 
-        let _start_label = self.new_label();
+        let num_gen = generators.len();
+        let mut start_labels = Vec::with_capacity(num_gen);
+        let mut continue_labels = Vec::with_capacity(num_gen);
         let end_label = self.new_label();
-        let comp_start_label = self.new_label();
 
-        self.compile_expr(&gen.iter)?;
-        self.emit(Opcode::GET_ITER, 0);
-        self.loop_stack.push(LoopInfo { start_label: comp_start_label, end_label });
-        self.mark_label(comp_start_label);
-        self.emit_jump(Opcode::FOR_ITER, end_label);
-        self.compile_assign_target(&gen.target)?;
+        for (i, gen) in generators.iter().enumerate() {
+            self.compile_expr(&gen.iter)?;
+            self.emit(Opcode::GET_ITER, 0);
+            let start_label = self.new_label();
+            start_labels.push(start_label);
+            self.mark_label(start_label);
 
-        // Ifs — if any condition is false, skip the elt (jump to next_iteration)
-        let next_iteration = self.new_label();
-        for if_expr in &gen.ifs {
-            self.compile_expr(if_expr)?;
-            self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_iteration);
+            if i == 0 {
+                // Outermost FOR_ITER — when exhausted, jump to end
+                self.emit_jump(Opcode::FOR_ITER, end_label);
+            } else {
+                // Inner FOR_ITER — when exhausted, pop this iter and go back to parent
+                let cont_label = self.new_label();
+                continue_labels.push(cont_label);
+                self.emit_jump(Opcode::FOR_ITER, cont_label);
+            }
+
+            self.compile_assign_target(&gen.target)?;
+
+            for if_expr in &gen.ifs {
+                let skip_label = self.new_label();
+                self.compile_expr(if_expr)?;
+                self.emit_jump(Opcode::POP_JUMP_IF_FALSE, skip_label);
+                self.emit(Opcode::NOP, 0);
+                self.fix_label(skip_label);
+            }
         }
 
         self.compile_expr(elt)?;
+        let depth = generators.len() as u32;
         if is_set {
-            self.emit(Opcode::SET_ADD, 1);
+            self.emit(Opcode::SET_ADD, depth);
         } else {
-            self.emit(Opcode::LIST_APPEND, 1);
+            self.emit(Opcode::LIST_APPEND, depth);
         }
 
-        self.fix_label(next_iteration);
-        self.emit_backward_jump(comp_start_label);
+        self.emit_backward_jump(*start_labels.last().unwrap());
+
+        for (j, label) in continue_labels.iter().enumerate().rev() {
+            self.fix_label(*label);
+            self.emit(Opcode::POP_ITER, 0);
+            self.emit_backward_jump(start_labels[j]);
+        }
 
         self.fix_label(end_label);
         self.emit(Opcode::POP_ITER, 0);
-        self.loop_stack.pop();
+
+        Ok(())
+    }
+
+    fn compile_dict_comprehension(&mut self, key: &Expr, value: &Expr, generators: &[Comprehension]) -> Result<(), String> {
+        if generators.is_empty() {
+            return Err("Comprehension must have at least one generator".to_string());
+        }
+
+        self.emit(Opcode::BUILD_MAP, 0);
+
+        let num_gen = generators.len();
+        let mut start_labels = Vec::with_capacity(num_gen);
+        let mut continue_labels = Vec::with_capacity(num_gen);
+        let end_label = self.new_label();
+
+        for (i, gen) in generators.iter().enumerate() {
+            self.compile_expr(&gen.iter)?;
+            self.emit(Opcode::GET_ITER, 0);
+            let start_label = self.new_label();
+            start_labels.push(start_label);
+            self.mark_label(start_label);
+
+            if i == 0 {
+                self.emit_jump(Opcode::FOR_ITER, end_label);
+            } else {
+                let cont_label = self.new_label();
+                continue_labels.push(cont_label);
+                self.emit_jump(Opcode::FOR_ITER, cont_label);
+            }
+
+            self.compile_assign_target(&gen.target)?;
+
+            for if_expr in &gen.ifs {
+                let skip_label = self.new_label();
+                self.compile_expr(if_expr)?;
+                self.emit_jump(Opcode::POP_JUMP_IF_FALSE, skip_label);
+                self.emit(Opcode::NOP, 0);
+                self.fix_label(skip_label);
+            }
+        }
+
+        self.compile_expr(key)?;
+        self.compile_expr(value)?;
+        self.emit(Opcode::MAP_ADD, generators.len() as u32);
+
+        self.emit_backward_jump(*start_labels.last().unwrap());
+
+        for (j, label) in continue_labels.iter().enumerate().rev() {
+            self.fix_label(*label);
+            self.emit(Opcode::POP_ITER, 0);
+            self.emit_backward_jump(start_labels[j]);
+        }
+
+        self.fix_label(end_label);
+        self.emit(Opcode::POP_ITER, 0);
 
         Ok(())
     }
@@ -1241,6 +1339,15 @@ fn contains_yield_in_expr(expr: &Expr) -> bool {
         Expr::List(elts) | Expr::Tuple(elts) => elts.iter().any(contains_yield_in_expr),
         Expr::Dict { keys, values } => keys.iter().any(|k| k.as_ref().map_or(false, |e| contains_yield_in_expr(e))) || values.iter().any(contains_yield_in_expr),
         Expr::Starred(expr) => contains_yield_in_expr(expr),
+        Expr::ListComp { elt, generators } | Expr::SetComp { elt, generators } => {
+            contains_yield_in_expr(elt) || generators.iter().any(|g| contains_yield_in_expr(&g.iter) || contains_yield_in_expr(&g.target) || g.ifs.iter().any(|e| contains_yield_in_expr(e)))
+        }
+        Expr::DictComp { key, value, generators } => {
+            contains_yield_in_expr(key) || contains_yield_in_expr(value) || generators.iter().any(|g| contains_yield_in_expr(&g.iter) || contains_yield_in_expr(&g.target) || g.ifs.iter().any(|e| contains_yield_in_expr(e)))
+        }
+        Expr::GeneratorExp { elt, generators } => {
+            contains_yield_in_expr(elt) || generators.iter().any(|g| contains_yield_in_expr(&g.iter) || contains_yield_in_expr(&g.target) || g.ifs.iter().any(|e| contains_yield_in_expr(e)))
+        }
         _ => false,
     }
 }
