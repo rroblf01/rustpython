@@ -10,5 +10,10 @@ opt-level = 3
 panic = "abort"
 
 [dependencies]
+cranelift = "0.109.0"
+cranelift-frontend = "0.109.0"
+cranelift-jit = "0.109.0"
+cranelift-module = "0.109.0"
+cranelift-native = "0.109.0"
 num-bigint = "0.4"
 num-traits = "0.2"

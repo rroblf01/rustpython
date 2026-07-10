@@ -5,6 +5,7 @@ use num_bigint::BigInt;
 use crate::bytecode::*;
 use crate::object::*;
 use crate::object::ObjectAccess;
+use crate::jit::JitCompiler;
 
 thread_local! {
     static ATTR_CACHE: std::cell::RefCell<HashMap<(String, String), crate::object::BuiltinFunc>> = std::cell::RefCell::new(HashMap::new());
@@ -82,6 +83,7 @@ pub struct VirtualMachine {
     pub builtins: Rc<HashMap<String, PyObjectRef>>,
     pub modules: HashMap<String, PyObjectRef>,
     pub globals: Rc<RefCell<HashMap<String, PyObjectRef>>>,
+    pub jit: RefCell<JitCompiler>,
 }
 
 impl VirtualMachine {
@@ -109,6 +111,7 @@ impl VirtualMachine {
               builtins: Rc::new(builtins),
               modules,
               globals,
+              jit: RefCell::new(JitCompiler::new()),
           }
     }
 
@@ -519,6 +522,7 @@ impl VirtualMachine {
                     defaults,
                     closure: Vec::new(),
                     dict: HashMap::new(),
+                    jit_ptr: std::cell::Cell::new(0),
                 });
                 self.frames[fi].push(func);
             }
@@ -1220,13 +1224,31 @@ impl VirtualMachine {
             return self.call_function(func, new_args, keywords);
         }
 
-        if let PyObject::Function { code, globals: func_globals, defaults, .. } = &*callable.borrow() {
+        if let PyObject::Function { code, globals: func_globals, defaults, jit_ptr, .. } = &*callable.borrow() {
+            // Try JIT execution: if we have compiled code, use it directly
+            let jit_fn: usize = jit_ptr.get();
+            if jit_fn != 0 {
+                let func: extern "C" fn(*const PyObjectRef, usize, *const std::ffi::c_void) -> PyObjectRef = 
+                    unsafe { std::mem::transmute(jit_fn) };
+                let consts_ptr = &code.consts as *const _ as *const std::ffi::c_void;
+                return Ok(func(args.as_ptr(), args.len(), consts_ptr));
+            }
             // Try simple execution without Frame creation
             if defaults.is_empty() && keywords.is_empty() {
                 if let Some(result) = Self::try_exec_simple(code, &args) {
                     return result;
                 }
             }
+            // Try JIT compilation on first call
+            let mut jit = self.jit.borrow_mut();
+            if let Some(compiled) = jit.compile(code) {
+                let fn_ptr = compiled as *const () as usize;
+                drop(jit);
+                jit_ptr.set(fn_ptr);
+                let consts_ptr = &code.consts as *const _ as *const std::ffi::c_void;
+                return Ok(compiled(args.as_ptr(), args.len(), consts_ptr));
+            }
+            drop(jit);
             let func_globals = func_globals.clone();
             let defaults = defaults.clone();
             let code_rc = Rc::new(code.clone());

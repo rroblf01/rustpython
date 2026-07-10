@@ -5,6 +5,7 @@ mod bytecode;
 mod compiler;
 mod object;
 mod vm;
+mod jit;
 
 use std::env;
 use std::fs;
