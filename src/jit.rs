@@ -52,7 +52,7 @@ impl JitCompiler {
     }
 
     /// Build a signature for binary ops: fn(*const PyObjectRef, *const PyObjectRef, *mut PyObjectRef)
-    pub fn is_enabled() -> bool { false } // Enable when more opcodes are supported
+    pub fn is_enabled() -> bool { true }
 
     pub fn precompute_consts(code: &crate::bytecode::CodeObject) -> Vec<PyObjectRef> {
         use crate::bytecode::ConstValue;
@@ -75,17 +75,17 @@ impl JitCompiler {
         code: &crate::bytecode::CodeObject,
     ) -> Option<extern "C" fn(*const PyObjectRef, usize, *const PyObjectRef, *mut PyObjectRef)> {
         if !Self::is_enabled() { return None; }
-        // Don't JIT functions with *args or **kwargs (handled specially by VM)
-        if code.vararg_name.is_some() || code.kwarg_name.is_some() { return None; }
+        // Skip functions with *args, **kwargs, or default args (locals set up differently by VM)
+        if code.vararg_name.is_some() || code.kwarg_name.is_some() || code.num_defaults > 0 { return None; }
         if code.instructions.is_empty() || code.instructions.len() > 100 {
             return None;
         }
         let supported: &[crate::bytecode::Opcode] = &[
             crate::bytecode::Opcode::LOAD_FAST, crate::bytecode::Opcode::LOAD_CONST,
-            crate::bytecode::Opcode::RETURN_VALUE, crate::bytecode::Opcode::STORE_FAST,
-            crate::bytecode::Opcode::DUP_TOP, crate::bytecode::Opcode::POP_TOP,
+            crate::bytecode::Opcode::BINARY_OP, crate::bytecode::Opcode::RETURN_VALUE,
+            crate::bytecode::Opcode::STORE_FAST, crate::bytecode::Opcode::DUP_TOP,
+            crate::bytecode::Opcode::POP_TOP,
         ];
-        // BINARY_OP not yet supported (needs cranelift FuncRef fix)
         for instr in &code.instructions {
             if !supported.contains(&instr.op) { return None; }
         }
@@ -102,6 +102,11 @@ impl JitCompiler {
         let mut ctx = cranelift::codegen::Context::new();
         ctx.func.signature = sig.clone();
         let func = self.module.declare_function("jit_fn", Linkage::Local, &sig).ok()?;
+
+        // Pre-compute FuncRef for jit_py_add BEFORE creating the builder
+        // (builder borrows ctx.func, so we need FuncRef first)
+        let add_func_ref = self.module.declare_func_in_func(self.add_func, &mut ctx.func);
+
         let mut builder = FunctionBuilder::new(&mut ctx.func, &mut self.builder_context);
 
         let entry = builder.create_block();
@@ -114,7 +119,7 @@ impl JitCompiler {
         let consts_ptr = builder.block_params(entry)[2];
         let result_ptr = builder.block_params(entry)[3];
 
-        // Allocate locals array on stack (16 bytes per PyObjectRef, up to nlocals slots)
+        // Allocate locals array on stack (16 bytes per PyObjectRef)
         let locals_size = (code.nlocals.max(1) * 16) as u32;
         let locals_slot = builder.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot, locals_size, 0,
@@ -130,11 +135,11 @@ impl JitCompiler {
             builder.ins().store(cranelift::codegen::ir::MemFlags::trusted(), hi, dst, 8);
         }
 
-        // Evaluation stack — allocate as stack memory
+        // Evaluation stack
         let stack_slot = builder.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot, 256, 0, // 16 slots × 16 bytes
+            StackSlotKind::ExplicitSlot, 256, 0,
         ));
-        let mut sp: i32 = 0; // stack pointer in bytes
+        let mut sp: i32 = 0;
 
         // Generate code for each instruction
         for instr in &code.instructions {
@@ -160,8 +165,13 @@ impl JitCompiler {
                     sp += 16;
                 }
                 crate::bytecode::Opcode::BINARY_OP => {
-                    // BINARY_OP not yet supported (cranelift FuncRef issue)
-                    // For now, fall back by returning None (not reaching here due to supported check)
+                    // Pop b (16 bytes), pop a (16 bytes), call jit_py_add(a, b, &result), push result
+                    sp -= 32;
+                    let a_addr = builder.ins().stack_addr(types::I64, stack_slot, sp);
+                    let b_addr = builder.ins().stack_addr(types::I64, stack_slot, sp + 16);
+                    let out_addr = builder.ins().stack_addr(types::I64, stack_slot, sp);
+                    let _call = builder.ins().call(add_func_ref, &[a_addr, b_addr, out_addr]);
+                    sp += 16;
                 }
                 crate::bytecode::Opcode::STORE_FAST => {
                     sp -= 16;
@@ -204,7 +214,6 @@ impl JitCompiler {
             }
         }
 
-        // If no RETURN_VALUE found, result is already py_none (set by caller)
         builder.ins().return_(&[]);
         builder.finalize();
         self.module.define_function(func, &mut ctx).ok()?;
