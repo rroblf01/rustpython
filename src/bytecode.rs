@@ -232,6 +232,9 @@ pub struct CodeObject {
     pub filename: String,
     pub first_lineno: usize,
     pub flags: u16,
+    pub vararg_name: Option<String>,
+    pub kwarg_name: Option<String>,
+    pub num_defaults: usize,
 }
 
 impl CodeObject {
@@ -249,6 +252,9 @@ impl CodeObject {
             filename: "<unknown>".to_string(),
             first_lineno: 1,
             flags: 0,
+            vararg_name: None,
+            kwarg_name: None,
+            num_defaults: 0,
         }
     }
 }

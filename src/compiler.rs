@@ -761,10 +761,35 @@ impl Compiler {
         let old_label_stack = std::mem::replace(&mut self.label_stack, Vec::new());
         let old_loop_stack = std::mem::replace(&mut self.loop_stack, Vec::new());
 
+        // Separate regular args, vararg, kwarg
+        let mut num_positional = 0;
+        let mut defaults_count = 0;
+        for arg in args {
+            if arg.is_vararg {
+                self.code.vararg_name = Some(arg.arg.clone());
+                self.code.arg_count = num_positional;
+                continue;
+            }
+            if arg.is_kwarg {
+                self.code.kwarg_name = Some(arg.arg.clone());
+                self.code.arg_count = num_positional;
+                continue;
+            }
+            if arg.default.is_some() {
+                defaults_count += 1;
+            }
+            num_positional += 1;
+        }
+        // Defaults are at the end of positional args, count them
+        self.code.num_defaults = defaults_count;
+
+        // Add all args to varnames (including vararg/kwarg at the end)
         for arg in args {
             self.add_varname(&arg.arg);
         }
-        self.code.arg_count = args.len();
+        if self.code.arg_count == 0 {
+            self.code.arg_count = args.len();
+        }
 
         // Check if function contains yield (generator)
         let has_yield = contains_yield_in_stmts(body);
@@ -793,7 +818,17 @@ impl Compiler {
 
         let code_const_idx = self.get_const_index(ConstValue::Code(Box::new(func_code))) as u32;
         self.emit(Opcode::LOAD_CONST, code_const_idx);
-        self.emit(Opcode::MAKE_FUNCTION, 0);
+
+        // Push defaults onto stack (in normal order, they'll be reversed in MAKE_FUNCTION)
+        if defaults_count > 0 {
+            for arg in args.iter().filter(|a| !a.is_vararg && !a.is_kwarg && a.default.is_some()) {
+                if let Some(default) = &arg.default {
+                    self.compile_expr(default)?;
+                }
+            }
+        }
+
+        self.emit(Opcode::MAKE_FUNCTION, defaults_count as u32);
 
         // Set __doc__ if there was a docstring
         if let Some(doc) = docstring {
@@ -966,7 +1001,8 @@ impl Compiler {
                 }
             }
             Expr::Call { func, args, keywords } => {
-                let total_args = args.len() + keywords.len();
+                let npos = args.len();
+                let nkw = keywords.len();
 
                 self.compile_expr(func)?;
 
@@ -974,20 +1010,17 @@ impl Compiler {
                     self.compile_expr(arg)?;
                 }
                 for kw in keywords {
-                    if let Some(_name) = &kw.arg {
-                        // Keyword argument
+                    if let Some(name) = &kw.arg {
+                        let name_idx = self.get_const_index(ConstValue::String(name.clone())) as u32;
+                        self.emit(Opcode::LOAD_CONST, name_idx);
                         self.compile_expr(&kw.value)?;
                     } else {
                         // **kwargs
                         self.compile_expr(&kw.value)?;
                     }
                 }
-                if keywords.is_empty() {
-                    self.emit(Opcode::CALL, total_args as u32);
-                } else {
-                    // For keywords, we need CALL_KW - for now do CALL with keyword args too
-                    self.emit(Opcode::CALL, total_args as u32);
-                }
+                let call_arg = npos | (nkw << 8);
+                self.emit(Opcode::CALL, call_arg as u32);
             }
             Expr::IfExp { test, body, orelse } => {
                 self.compile_expr(test)?;

@@ -468,30 +468,49 @@ impl PyObject {
         if std::mem::discriminant(self) != std::mem::discriminant(&*other) {
             return Ok(false);
         }
-        match (self, &*other) {
-            (PyObject::None, PyObject::None) => Ok(true),
-            (PyObject::Bool(a), PyObject::Bool(b)) => Ok(a == b),
-            (PyObject::Int(a), PyObject::Int(b)) => Ok(a == b),
-            (PyObject::Float(a), PyObject::Float(b)) => Ok(a == b),
-            (PyObject::Str(a), PyObject::Str(b)) => Ok(a == b),
-            (PyObject::Bytes(a), PyObject::Bytes(b)) => Ok(a == b),
-            (PyObject::List(a), PyObject::List(b)) => {
-                if a.len() != b.len() { return Ok(false); }
-                for (x, y) in a.iter().zip(b.iter()) {
-                    if !x.equals(y)? { return Ok(false); }
+        let result = match (self, &*other) {
+            (PyObject::None, PyObject::None) => true,
+            (PyObject::Bool(a), PyObject::Bool(b)) => a == b,
+            (PyObject::Int(a), PyObject::Int(b)) => a == b,
+            (PyObject::Float(a), PyObject::Float(b)) => a == b,
+            (PyObject::Str(a), PyObject::Str(b)) => a == b,
+            (PyObject::Bytes(a), PyObject::Bytes(b)) => a == b,
+            (PyObject::Dict(a), PyObject::Dict(b)) => {
+                let mut eq = true;
+                if a.len() != b.len() { eq = false; }
+                if eq {
+                    for (k, va) in a.iter() {
+                        match b.get(k) {
+                            Some(vb) => { if !va.equals(vb)? { eq = false; break; } }
+                            None => { eq = false; break; }
+                        }
+                    }
                 }
-                Ok(true)
+                eq
+            }
+            (PyObject::List(a), PyObject::List(b)) => {
+                let mut eq = true;
+                if a.len() != b.len() { eq = false; }
+                if eq {
+                    for (x, y) in a.iter().zip(b.iter()) {
+                        if !x.equals(y)? { eq = false; break; }
+                    }
+                }
+                eq
             }
             (PyObject::Tuple(a), PyObject::Tuple(b)) => {
-                if a.len() != b.len() { return Ok(false); }
-                for (x, y) in a.iter().zip(b.iter()) {
-                    if !x.equals(y)? { return Ok(false); }
+                let mut eq = true;
+                if a.len() != b.len() { eq = false; }
+                if eq {
+                    for (x, y) in a.iter().zip(b.iter()) {
+                        if !x.equals(y)? { eq = false; break; }
+                    }
                 }
-                Ok(true)
+                eq
             }
-            (PyObject::Str(a), PyObject::Str(b)) => Ok(a == b),
-            _ => Ok(false),
-        }
+            _ => false,
+        };
+        Ok(result)
     }
 }
 
@@ -1355,12 +1374,38 @@ fn call_bound_method(func: PyObjectRef, self_obj: PyObjectRef, args: Vec<PyObjec
             all_args.extend(args);
             f(&all_args)
         }
-        PyObject::Function { code, globals: g, .. } => {
+        PyObject::Function { code, globals: g, defaults, .. } => {
             let mut frame = super::vm::Frame::new(code.clone(), g.clone(), create_builtins());
             frame.locals.insert("self".to_string(), self_obj);
-            for (i, arg) in args.iter().enumerate() {
-                if i + 1 < frame.code.varnames.len() {
-                    frame.locals.insert(frame.code.varnames[i + 1].clone(), arg.clone());
+            let code = code.clone();
+            let defaults = defaults.clone();
+            let npos = args.len();
+            let named_params = if code.vararg_name.is_some() || code.kwarg_name.is_some() {
+                code.varnames.iter().position(|n| {
+                    Some(n.clone()) == code.vararg_name || Some(n.clone()) == code.kwarg_name
+                }).unwrap_or(code.varnames.len())
+            } else {
+                code.varnames.len()
+            };
+            for i in 0..npos.min(named_params - 1) {
+                if i + 1 < code.varnames.len() {
+                    frame.locals.insert(code.varnames[i + 1].clone(), args[i].clone());
+                }
+            }
+            if let Some(vararg_name) = &code.vararg_name {
+                let mut extra = Vec::new();
+                for i in (named_params - 1)..npos {
+                    extra.push(args[i].clone());
+                }
+                frame.locals.insert(vararg_name.clone(), py_tuple(extra));
+            }
+            if npos < named_params - 1 {
+                let num_defaults = code.num_defaults;
+                for i in npos..named_params - 1 {
+                    let default_idx = num_defaults - (named_params - 1 - i);
+                    if default_idx < defaults.len() {
+                        frame.locals.insert(code.varnames[i + 1].clone(), defaults[default_idx].clone());
+                    }
                 }
             }
             let mut vm = super::vm::VirtualMachine::new();

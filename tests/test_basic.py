@@ -117,4 +117,38 @@ if (x := 42) > 10:
     assert x == 42
 print("OK")
 
+print("=== *args ===")
+def va(*args):
+    return args
+assert va() == ()
+assert va(1) == (1,)
+assert va(1, 2, 3) == (1, 2, 3)
+print("OK")
+
+print("=== **kwargs ===")
+def kw(**kwargs):
+    return kwargs
+assert kw() == {}
+r = kw(a=1, b=2)
+assert r.get("a") == 1
+assert r.get("b") == 2
+print("OK")
+
+print("=== Defaults ===")
+def defaults(a, b=10, c=20):
+    return a + b + c
+assert defaults(1) == 31
+assert defaults(1, 2) == 23
+assert defaults(1, 2, 3) == 6
+print("OK")
+
+print("=== Mixed *args/**kwargs ===")
+def mixed(a, *args, **kwargs):
+    return (a, args, kwargs)
+r = mixed(1, 2, 3, x=4)
+assert r[0] == 1
+assert r[1] == (2, 3)
+assert r[2].get("x") == 4
+print("OK")
+
 print("ALL TESTS PASSED!")

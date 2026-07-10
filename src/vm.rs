@@ -397,18 +397,39 @@ impl VirtualMachine {
             }
 
             Opcode::CALL => {
-                let nargs = instr.arg as usize;
-                let mut args = Vec::with_capacity(nargs);
-                for _ in 0..nargs {
-                    args.push(self.frames.last_mut().unwrap().pop()?);
+                let npos = instr.arg as usize & 0xFF;
+                let nkw = (instr.arg as usize >> 8) & 0xFF;
+                let total = npos + 2 * nkw;
+                let mut items = Vec::with_capacity(total);
+                for _ in 0..total {
+                    items.push(self.frames.last_mut().unwrap().pop()?);
                 }
-                args.reverse();
+                items.reverse();
+                let mut args = Vec::with_capacity(npos + nkw);
+                for i in 0..npos {
+                    args.push(items[i].clone());
+                }
+                let mut keywords = Vec::new();
+                for i in 0..nkw {
+                    let name = match &*items[npos + 2 * i].borrow() {
+                        PyObject::Str(s) => s.clone(),
+                        _ => return Err(PyError::type_error("keyword must be a string")),
+                    };
+                    let value = items[npos + 2 * i + 1].clone();
+                    keywords.push((name, value));
+                }
                 let callable = self.frames.last_mut().unwrap().pop()?;
-                let result = self.call_function(callable, args)?;
+                let result = self.call_function(callable, args, keywords)?;
                 self.frames.last_mut().unwrap().push(result);
             }
 
             Opcode::MAKE_FUNCTION => {
+                let n_defaults = instr.arg as usize;
+                let mut defaults = Vec::new();
+                for _ in 0..n_defaults {
+                    defaults.push(self.frames.last_mut().unwrap().pop()?);
+                }
+                defaults.reverse();
                 let code_obj = self.frames.last_mut().unwrap().pop()?;
                 let code = match &*code_obj.borrow() {
                     PyObject::Code(c) => c.as_ref().clone(),
@@ -419,7 +440,7 @@ impl VirtualMachine {
                     code,
                     globals,
                     name: "<function>".to_string(),
-                    defaults: Vec::new(),
+                    defaults,
                     closure: Vec::new(),
                     dict: HashMap::new(),
                 });
@@ -652,7 +673,7 @@ impl VirtualMachine {
                             func: f,
                             self_obj: gen.clone(),
                         });
-                        match self.call_function(fixed, vec![]) {
+                        match self.call_function(fixed, vec![], vec![]) {
                             Ok(val) => {
                                 self.frames.last_mut().unwrap().push(val);
                             }
@@ -719,7 +740,7 @@ impl VirtualMachine {
                                         match &*val_borrowed {
                                             PyObject::Property { getter: Some(g), .. } => {
                                                 drop(typ_ref);
-                                                return Some(self.call_function(g.clone(), vec![obj.clone()]).unwrap_or_else(|_| val.clone()));
+                                                return Some(self.call_function(g.clone(), vec![obj.clone()], vec![]).unwrap_or_else(|_| val.clone()));
                                             }
                                             PyObject::StaticMethod { func } => {
                                                 return Some(func.clone());
@@ -728,7 +749,7 @@ impl VirtualMachine {
                                                 drop(typ_ref);
                                                 let cls = obj.borrow();
                                                 if let PyObject::Instance { typ: inst_typ, .. } = &*cls {
-                                                    return Some(self.call_function(func.clone(), vec![inst_typ.clone()]).unwrap_or_else(|_| val.clone()));
+                                                    return Some(self.call_function(func.clone(), vec![inst_typ.clone()], vec![]).unwrap_or_else(|_| val.clone()));
                                                 }
                                                 return Some(val.clone());
                                             }
@@ -1041,7 +1062,7 @@ impl VirtualMachine {
                     obj.get_attribute("__enter__").ok()
                 };
                 if let Some(enter) = enter_method {
-                    let result = self.call_function(enter, vec![])?;
+                    let result = self.call_function(enter, vec![], vec![])?;
                     self.frames.last_mut().unwrap().push(result);
                 } else {
                     // Enter and push None as result (simplified)
@@ -1071,7 +1092,7 @@ impl VirtualMachine {
         Ok(None)
     }
 
-    fn call_function(&mut self, callable: PyObjectRef, args: Vec<PyObjectRef>) -> PyResult<PyObjectRef> {
+    fn call_function(&mut self, callable: PyObjectRef, args: Vec<PyObjectRef>, keywords: Vec<(String, PyObjectRef)>) -> PyResult<PyObjectRef> {
         let type_name = callable.borrow().type_name();
 
         if let PyObject::BuiltinFunction { func, .. } = &*callable.borrow() {
@@ -1092,20 +1113,74 @@ impl VirtualMachine {
             let self_obj = self_obj.clone();
             let mut new_args = vec![self_obj];
             new_args.extend(args);
-            return self.call_function(func, new_args);
+            return self.call_function(func, new_args, keywords);
         }
 
-        if let PyObject::Function { code, globals: func_globals, .. } = &*callable.borrow() {
+        if let PyObject::Function { code, globals: func_globals, defaults, .. } = &*callable.borrow() {
             let code = code.clone();
             let func_globals = func_globals.clone();
-            let mut new_frame = Frame::new(code, func_globals, self.builtins.clone());
-            for (i, arg_name) in new_frame.code.varnames.iter().enumerate() {
-                if i < args.len() {
-                    new_frame.locals.insert(arg_name.clone(), args[i].clone());
-                } else {
-                    new_frame.locals.insert(arg_name.clone(), py_none());
+            let defaults = defaults.clone();
+            let mut new_frame = Frame::new(code.clone(), func_globals, self.builtins.clone());
+
+            let npos = args.len();
+            let named_params = if code.vararg_name.is_some() || code.kwarg_name.is_some() {
+                code.varnames.iter().position(|n| {
+                    Some(n.clone()) == code.vararg_name || Some(n.clone()) == code.kwarg_name
+                }).unwrap_or(code.varnames.len())
+            } else {
+                code.varnames.len()
+            };
+
+            // Assign positional args to named parameters
+            for i in 0..npos.min(named_params) {
+                let arg_name = &new_frame.code.varnames[i];
+                new_frame.locals.insert(arg_name.clone(), args[i].clone());
+            }
+
+            // Pack excess positional args into *args
+            if let Some(vararg_name) = &code.vararg_name {
+                let mut extra = Vec::new();
+                for i in named_params..npos {
+                    extra.push(args[i].clone());
+                }
+                new_frame.locals.insert(vararg_name.clone(), py_tuple(extra));
+            }
+
+            // Apply defaults for missing positional params
+            if npos < named_params {
+                let num_defaults = code.num_defaults;
+                for i in npos..named_params {
+                    let default_idx = num_defaults - (named_params - i);
+                    if default_idx < defaults.len() {
+                        let arg_name = &new_frame.code.varnames[i];
+                        new_frame.locals.insert(arg_name.clone(), defaults[default_idx].clone());
+                    } else {
+                        let arg_name = &new_frame.code.varnames[i];
+                        new_frame.locals.insert(arg_name.clone(), py_none());
+                    }
                 }
             }
+
+            // Handle **kwargs
+            if let Some(kwarg_name) = &code.kwarg_name {
+                let mut kw_dict = py_dict();
+                for (key, value) in &keywords {
+                    if let Some(idx) = new_frame.code.varnames.iter().position(|n| n == key) {
+                        new_frame.locals.insert(key.clone(), value.clone());
+                    } else {
+                        if let PyObject::Dict(ref mut dict) = &mut *kw_dict.borrow_mut() {
+                            dict.insert(key.clone(), value.clone());
+                        }
+                    }
+                }
+                new_frame.locals.insert(kwarg_name.clone(), kw_dict);
+            } else {
+                // No **kwargs, just set keyword args directly
+                for (key, value) in &keywords {
+                    new_frame.locals.insert(key.clone(), value.clone());
+                }
+            }
+
             self.frames.push(new_frame);
             let result = self.execute();
             if !self.frames.is_empty() {
@@ -1223,7 +1298,7 @@ impl VirtualMachine {
                 }
             };
             if let Some(f) = f {
-                return self.call_function(f, args);
+                return self.call_function(f, args, vec![]);
             }
         }
 

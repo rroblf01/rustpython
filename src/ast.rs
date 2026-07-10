@@ -96,6 +96,9 @@ pub enum Stmt {
 pub struct Arg {
     pub arg: Ident,
     pub annotation: Option<Box<Expr>>,
+    pub is_vararg: bool,
+    pub is_kwarg: bool,
+    pub default: Option<Box<Expr>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

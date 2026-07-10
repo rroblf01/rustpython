@@ -771,12 +771,29 @@ impl Parser {
         let mut args = Vec::new();
         if !self.at(&Token::RightParen) {
             loop {
-                if self.at(&Token::Star) || self.at(&Token::DoubleStar) {
-                    break;
+                if self.eat(&Token::DoubleStar) {
+                    let name = self.expect_name()?;
+                    let annotation = if self.eat(&Token::Colon) {
+                        Some(Box::new(self.parse_expr()?))
+                    } else { None };
+                    args.push(Arg { arg: name, annotation, is_vararg: false, is_kwarg: true, default: None });
+                    if !self.eat(&Token::Comma) { break; }
+                } else if self.eat(&Token::Star) {
+                    if self.at(&Token::RightParen) || self.at(&Token::Comma) {
+                        // bare * means keyword-only args follow
+                        continue;
+                    }
+                    let name = self.expect_name()?;
+                    let annotation = if self.eat(&Token::Colon) {
+                        Some(Box::new(self.parse_expr()?))
+                    } else { None };
+                    args.push(Arg { arg: name, annotation, is_vararg: true, is_kwarg: false, default: None });
+                    if !self.eat(&Token::Comma) { break; }
+                } else {
+                    let arg = self.parse_arg()?;
+                    args.push(arg);
+                    if !self.eat(&Token::Comma) { break; }
                 }
-                let arg = self.parse_arg()?;
-                args.push(arg);
-                if !self.eat(&Token::Comma) { break; }
             }
         }
         Ok(args)
@@ -789,7 +806,12 @@ impl Parser {
         } else {
             None
         };
-        Ok(Arg { arg, annotation })
+        let default = if self.eat(&Token::Equal) {
+            Some(Box::new(self.parse_expr()?))
+        } else {
+            None
+        };
+        Ok(Arg { arg, annotation, is_vararg: false, is_kwarg: false, default })
     }
 
     fn parse_block(&mut self) -> Result<Vec<Stmt>, String> {
@@ -1234,7 +1256,7 @@ impl Parser {
             Token::LeftParen => {
                 self.next();
                 let expr = if self.eat(&Token::RightParen) {
-                    Expr::Constant(Constant::None) // empty tuple
+                    Expr::Tuple(Vec::new()) // empty tuple
                 } else if self.peek() == &Token::Comma || (self.peek() == &Token::Equal && matches!(&self.current, Token::Name(_))) {
                     // Single-element tuple or named expression
                     let first = self.parse_expr()?;
@@ -1379,7 +1401,7 @@ impl Parser {
                     }
                 }
                 self.expect(&Token::RightBrace)?;
-                if is_dict {
+                if is_dict || values.is_empty() {
                     Ok(Expr::Dict { keys, values })
                 } else {
                     Ok(Expr::Set(values))
@@ -1455,8 +1477,19 @@ impl Parser {
         let mut args = Vec::new();
         loop {
             if self.at(&Token::Colon) { break; }
-            let name = self.expect_name()?;
-            args.push(Arg { arg: name, annotation: None });
+            if self.eat(&Token::Star) {
+                if self.at(&Token::Colon) || self.at(&Token::Comma) {
+                    continue;
+                }
+                let name = self.expect_name()?;
+                args.push(Arg { arg: name, annotation: None, is_vararg: true, is_kwarg: false, default: None });
+            } else if self.eat(&Token::DoubleStar) {
+                let name = self.expect_name()?;
+                args.push(Arg { arg: name, annotation: None, is_vararg: false, is_kwarg: true, default: None });
+            } else {
+                let name = self.expect_name()?;
+                args.push(Arg { arg: name, annotation: None, is_vararg: false, is_kwarg: false, default: None });
+            }
             if !self.eat(&Token::Comma) { break; }
         }
         Ok(args)
