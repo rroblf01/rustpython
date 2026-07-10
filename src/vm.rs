@@ -299,14 +299,12 @@ impl VirtualMachine {
 
             Opcode::LOAD_NAME => {
                 let name_idx = arg as usize;
-                let name = self.frames[fi].code.names.get(name_idx).ok_or_else(|| {
-                    PyError::runtime_error("name index out of range")
-                })?.clone();
+                let name = &self.frames[fi].code.names[name_idx];
                 let val = {
                     let f = &self.frames[self.frames.len() - 1];
-                    f.locals.get(&name).cloned()
-                        .or_else(|| f.globals.borrow().get(&name).cloned())
-                        .or_else(|| f.builtins.get(&name).cloned())
+                    f.locals.get(name).cloned()
+                        .or_else(|| f.globals.borrow().get(name).cloned())
+                        .or_else(|| f.builtins.get(name).cloned())
                 };
                 match val {
                     Some(v) => self.frames[fi].push(v),
@@ -351,13 +349,11 @@ impl VirtualMachine {
 
             Opcode::LOAD_GLOBAL => {
                 let name_idx = arg as usize;
-                let name = self.frames[fi].code.names.get(name_idx).ok_or_else(|| {
-                    PyError::runtime_error("name index out of range")
-                })?.clone();
+                let name = &self.frames[fi].code.names[name_idx];
                 let val = {
                     let f = &self.frames[self.frames.len() - 1];
-                    f.globals.borrow().get(&name).cloned()
-                        .or_else(|| f.builtins.get(&name).cloned())
+                    f.globals.borrow().get(name).cloned()
+                        .or_else(|| f.builtins.get(name).cloned())
                 };
                 match val {
                     Some(v) => self.frames[fi].push(v),
@@ -657,7 +653,7 @@ impl VirtualMachine {
 
             Opcode::JUMP_FORWARD | Opcode::JUMP | Opcode::JUMP_BACKWARD => {
                 let offset = arg as usize;
-                match op {
+        match op {
                     Opcode::JUMP_FORWARD => {
                         self.frames[fi].ip += offset;
                     }

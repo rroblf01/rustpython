@@ -88,7 +88,12 @@ impl PyObjectRef {
             PyObjectRef::Obj(rc) => rc.borrow().hash(),
         }
     }
-    pub fn equals(&self, other: &PyObjectRef) -> PyResult<bool> { self.borrow().equals(other) }
+    pub fn equals(&self, other: &PyObjectRef) -> PyResult<bool> {
+        if let (Some(ai), Some(bi)) = (self.as_i64(), other.as_i64()) {
+            return Ok(ai == bi);
+        }
+        self.borrow().equals(other)
+    }
     pub fn get_type_name(&self) -> String { self.borrow().type_name() }
 
     pub fn get_id(&self) -> usize {
@@ -843,6 +848,10 @@ pub fn py_mul(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
 }
 
 pub fn py_div(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
+    if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
+        if bi == 0 { return Err(PyError::zero_division()); }
+        return Ok(py_float(ai as f64 / bi as f64));
+    }
     if let Some(r) = try_dunder_binop(a, b, "__truediv__")? { return Ok(r); }
     let a_obj = a.borrow();
     let b_obj = b.borrow();
@@ -932,6 +941,14 @@ pub fn py_mod(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
 }
 
 pub fn py_pow(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
+    if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
+        if bi < 0 { return Ok(py_float((ai as f64).powi(bi as i32))); }
+        if bi == 0 { return Ok(py_int(1)); }
+        if bi == 1 { return Ok(py_int(ai)); }
+        let mut result: i64 = 1;
+        for _ in 0..bi { result = result.wrapping_mul(ai); }
+        return Ok(py_int(result));
+    }
     if let Some(r) = try_dunder_binop(a, b, "__pow__")? { return Ok(r); }
     let a_obj = a.borrow();
     let b_obj = b.borrow();
@@ -959,6 +976,10 @@ pub fn py_pow(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
 }
 
 pub fn py_lshift(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
+    if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
+        if bi < 0 { return Err(PyError::value_error("negative shift count")); }
+        return Ok(py_int(ai.wrapping_shl(bi as u32)));
+    }
     if let Some(r) = try_dunder_binop(a, b, "__lshift__")? { return Ok(r); }
     let a_obj = a.borrow();
     let b_obj = b.borrow();
@@ -973,6 +994,10 @@ pub fn py_lshift(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
 }
 
 pub fn py_rshift(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
+    if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
+        if bi < 0 { return Err(PyError::value_error("negative shift count")); }
+        return Ok(py_int(ai.wrapping_shr(bi as u32)));
+    }
     if let Some(r) = try_dunder_binop(a, b, "__rshift__")? { return Ok(r); }
     let a_obj = a.borrow();
     let b_obj = b.borrow();
@@ -1008,7 +1033,15 @@ fn set_symmetric_diff(a: &PySet, b: &PySet) -> PyResult<PyObjectRef> {
     Ok(PyObjectRef::new(PyObject::Set(result)))
 }
 
+fn i64_binop(a: &PyObjectRef, b: &PyObjectRef, f: impl Fn(i64, i64) -> i64) -> Option<PyResult<PyObjectRef>> {
+    if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
+        return Some(Ok(py_int(f(ai, bi))));
+    }
+    None
+}
+
 pub fn py_bit_or(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
+    if let Some(r) = i64_binop(a, b, |x, y| x | y) { return r; }
     if let Some(r) = try_dunder_binop(a, b, "__or__")? { return Ok(r); }
     let a_obj = a.borrow();
     let b_obj = b.borrow();
@@ -1021,6 +1054,7 @@ pub fn py_bit_or(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
 }
 
 pub fn py_bit_xor(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
+    if let Some(r) = i64_binop(a, b, |x, y| x ^ y) { return r; }
     if let Some(r) = try_dunder_binop(a, b, "__xor__")? { return Ok(r); }
     let a_obj = a.borrow();
     let b_obj = b.borrow();
@@ -1033,6 +1067,7 @@ pub fn py_bit_xor(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
 }
 
 pub fn py_bit_and(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
+    if let Some(r) = i64_binop(a, b, |x, y| x & y) { return r; }
     if let Some(r) = try_dunder_binop(a, b, "__and__")? { return Ok(r); }
     let a_obj = a.borrow();
     let b_obj = b.borrow();
@@ -1047,17 +1082,29 @@ pub fn py_bit_and(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
 // ---- Comparison Operations ----
 
 pub fn py_compare(a: &PyObjectRef, b: &PyObjectRef, op: u32) -> PyResult<PyObjectRef> {
+    // Fast path for small int comparisons — no borrow() needed
+    if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
+        return Ok(py_bool(match op {
+            0 => ai < bi,
+            1 => ai <= bi,
+            2 => ai == bi,
+            3 => ai >= bi,
+            4 => ai > bi,
+            5 => ai != bi,
+            _ => return Ok(py_bool(false)),
+        }));
+    }
     let result = match op {
-        0 => a.borrow().lt(b)?,  // <
-        1 => a.borrow().le(b)?,  // <=
-        2 => a.borrow().equals(b)?, // ==
-        3 => a.borrow().ge(b)?,  // >=
-        4 => a.borrow().gt(b)?,  // >
-        5 => a.borrow().ne(b)?,  // !=
-        6 => contains_op(b, a)?, // in
-        7 => !contains_op(b, a)?, // not in
-        8 => a.is(b),   // is
-        9 => !a.is(b),  // is not
+        0 => a.borrow().lt(b)?,
+        1 => a.borrow().le(b)?,
+        2 => a.borrow().equals(b)?,
+        3 => a.borrow().ge(b)?,
+        4 => a.borrow().gt(b)?,
+        5 => a.borrow().ne(b)?,
+        6 => contains_op(b, a)?,
+        7 => !contains_op(b, a)?,
+        8 => a.is(b),
+        9 => !a.is(b),
         _ => return Err(PyError::runtime_error("unknown comparison operator")),
     };
     Ok(py_bool(result))
