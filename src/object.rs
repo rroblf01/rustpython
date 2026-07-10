@@ -1659,6 +1659,44 @@ pub fn builtin_issubclass(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
 }
 
+pub fn builtin_help(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() {
+        println!("Welcome to RustPython 0.1.0!");
+        println!("For information about a specific object, type help(object)");
+    } else {
+        let obj = args[0].borrow();
+        match &*obj {
+            PyObject::Type { name, dict, .. } => {
+                println!("Help on class {}:", name);
+                if let Some(doc) = dict.get("__doc__") {
+                    println!("  {}", doc.str());
+                }
+                println!();
+                println!("Methods:");
+                for (key, val) in dict {
+                    if matches!(&*val.borrow(), PyObject::Function { .. } | PyObject::BuiltinFunction { .. }) {
+                        println!("  {}()", key);
+                    }
+                }
+            }
+            PyObject::Function { name, dict, .. } => {
+                println!("Help on function {}:", name);
+                if let Some(doc) = dict.get("__doc__") {
+                    println!("  {}", doc.str());
+                }
+            }
+            PyObject::BuiltinFunction { name, .. } => {
+                println!("Help on built-in function {}:", name);
+            }
+            _ => {
+                println!("Help on {}:", obj.type_name());
+                println!("  Type: {}", obj.type_name());
+            }
+        }
+    }
+    Ok(py_none())
+}
+
 pub fn builtin_super(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // super() with no args or super(class, instance)
     if args.len() == 2 {
@@ -2395,6 +2433,7 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     add_func!("pow", builtin_pow);
     add_func!("reversed", builtin_reversed);
     add_func!("issubclass", builtin_issubclass);
+    add_func!("help", builtin_help);
     add_func!("super", builtin_super);
     add_func!("map", builtin_map);
     add_func!("filter", builtin_filter);
@@ -2480,6 +2519,26 @@ pub fn create_math_dict() -> HashMap<String, PyObjectRef> {
     });
     d.insert("pi".to_string(), py_float(std::f64::consts::PI));
     d.insert("e".to_string(), py_float(std::f64::consts::E));
+    d
+}
+
+pub fn create_sys_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! sys_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+    sys_func!("exit", |args| {
+        let code = if args.len() > 0 {
+            match &*args[0].borrow() {
+                PyObject::Int(i) => i.to_i64().unwrap_or(0) as i32,
+                _ => 1,
+            }
+        } else { 0 };
+        Err(PyError::SystemExit(code))
+    });
+    d.insert("argv".to_string(), py_list(vec![]));
     d
 }
 

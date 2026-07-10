@@ -260,10 +260,14 @@ impl Parser {
     }
 
     fn parse_decorated(&mut self) -> Result<Stmt, String> {
+        self.next();
         let mut decorator_list = vec![self.parse_expr()?];
         while self.at(&Token::At) {
             self.next();
             decorator_list.push(self.parse_expr()?);
+        }
+        while self.at(&Token::Newline) || self.at(&Token::Indent) || self.at(&Token::Dedent) {
+            self.next();
         }
         let mut stmt = self.parse_stmt()?;
         match &mut stmt {

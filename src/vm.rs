@@ -80,7 +80,7 @@ pub struct VirtualMachine {
 
 impl VirtualMachine {
     pub fn new() -> Self {
-        let builtins = create_builtins();
+        let mut builtins = create_builtins();
         let globals_map = HashMap::from([
             ("__name__".to_string(), py_str("__main__")),
             ("__builtins__".to_string(), create_module("builtins", builtins.clone())),
@@ -90,6 +90,10 @@ impl VirtualMachine {
          let mut modules = HashMap::new();
          modules.insert("builtins".to_string(), create_module("builtins", builtins.clone()));
          modules.insert("math".to_string(), create_module("math", create_math_dict()));
+
+         let sys_dict = create_sys_dict();
+         modules.insert("sys".to_string(), create_module("sys", sys_dict.clone()));
+         builtins.extend(sys_dict);
  
          VirtualMachine {
              frames: Vec::new(),
@@ -118,6 +122,34 @@ impl VirtualMachine {
         let result = self.execute();
         self.frames.pop();
         result
+    }
+
+    fn import_module_from_file(&self, name: &str) -> Result<PyObjectRef, String> {
+        // Try to find and load a .py file from common paths
+        let paths = vec![
+            format!("./{}.py", name),
+            format!("./Lib/{}.py", name),
+            format!("/usr/lib/python3/{}.py", name),
+        ];
+        for path in &paths {
+            if let Ok(source) = std::fs::read_to_string(path) {
+                let mut parser = crate::parser::Parser::new(&source);
+                let program = parser.parse_program().map_err(|e| format!("Parse error in {}: {}", name, e))?;
+                let mut compiler = crate::compiler::Compiler::new();
+                let code = compiler.compile(&program, path).map_err(|e| format!("Compile error in {}: {}", name, e))?;
+                let mut vm = super::VirtualMachine::new();
+                let globals = std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new()));
+                let result = vm.exec_code(code, Some(globals.clone()));
+                match result {
+                    Ok(_) => {
+                        let module = create_module(name, globals.borrow().clone());
+                        return Ok(module);
+                    }
+                    Err(e) => return Err(format!("Error importing {}: {}", name, e)),
+                }
+            }
+        }
+        Err(format!("Module '{}' not found", name))
     }
 
     pub fn execute(&mut self) -> PyResult<PyObjectRef> {
@@ -905,9 +937,19 @@ impl VirtualMachine {
                 if self.modules.contains_key(&name) {
                     self.frames.last_mut().unwrap().push(self.modules[&name].clone());
                 } else {
-                    let module = create_module(&name, HashMap::new());
-                    self.modules.insert(name.clone(), module.clone());
-                    self.frames.last_mut().unwrap().push(module);
+                    // Try to load from file
+                    let module = self.import_module_from_file(&name);
+                    match module {
+                        Ok(m) => {
+                            self.modules.insert(name.clone(), m.clone());
+                            self.frames.last_mut().unwrap().push(m);
+                        }
+                        Err(_) => {
+                            let module = create_module(&name, HashMap::new());
+                            self.modules.insert(name.clone(), module.clone());
+                            self.frames.last_mut().unwrap().push(module);
+                        }
+                    }
                 }
             }
 
