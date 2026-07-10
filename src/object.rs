@@ -707,6 +707,16 @@ impl PyObject {
                 }
                 eq
             }
+            (PyObject::Set(a), PyObject::Set(b)) => {
+                if a.len() != b.len() { false }
+                else {
+                    let mut eq = true;
+                    for item in a.to_vec() {
+                        if !b.contains(&item).unwrap_or(false) { eq = false; break; }
+                    }
+                    eq
+                }
+            }
             _ => false,
         };
         Ok(result)
@@ -1184,6 +1194,12 @@ impl Compare for PyObject {
             (PyObject::Bool(a), PyObject::Bool(b)) => Ok(a < b),
             (PyObject::Bool(a), PyObject::Int(b)) => Ok((*a as i32) < b.to_i32().unwrap_or(0)),
             (PyObject::Int(a), PyObject::Bool(b)) => Ok(a.to_i32().unwrap_or(0) < (*b as i32)),
+            (PyObject::Set(a), PyObject::Set(b)) => {
+                // a < b: proper subset (a <= b and a != b)
+                if a.len() >= b.len() { return Ok(false); }
+                for item in a.to_vec() { if !b.contains(&item)? { return Ok(false); } }
+                Ok(true)
+            }
             (PyObject::None, PyObject::None) => Ok(false),
             _ => Err(PyError::type_error(format!("'<' not supported between instances of '{}' and '{}'",
                 self.type_name(), other.type_name()))),
@@ -1199,6 +1215,11 @@ impl Compare for PyObject {
             (PyObject::Float(a), PyObject::Int(b)) => Ok(*a <= b.to_f64().unwrap()),
             (PyObject::Str(a), PyObject::Str(b)) => Ok(a <= b),
             (PyObject::Bool(a), PyObject::Bool(b)) => Ok(a <= b),
+            (PyObject::Set(a), PyObject::Set(b)) => {
+                if a.len() > b.len() { return Ok(false); }
+                for item in a.to_vec() { if !b.contains(&item)? { return Ok(false); } }
+                Ok(true)
+            }
             _ => Err(PyError::type_error(format!("'<=' not supported between instances of '{}' and '{}'",
                 self.type_name(), other.type_name()))),
         }
@@ -1213,6 +1234,11 @@ impl Compare for PyObject {
             (PyObject::Float(a), PyObject::Int(b)) => Ok(*a > b.to_f64().unwrap()),
             (PyObject::Str(a), PyObject::Str(b)) => Ok(a > b),
             (PyObject::Bool(a), PyObject::Bool(b)) => Ok(a > b),
+            (PyObject::Set(a), PyObject::Set(b)) => {
+                if a.len() <= b.len() { return Ok(false); }
+                for item in b.to_vec() { if !a.contains(&item)? { return Ok(false); } }
+                Ok(true)
+            }
             _ => Err(PyError::type_error(format!("'>' not supported between instances of '{}' and '{}'",
                 self.type_name(), other.type_name()))),
         }
@@ -1227,6 +1253,11 @@ impl Compare for PyObject {
             (PyObject::Float(a), PyObject::Int(b)) => Ok(*a >= b.to_f64().unwrap()),
             (PyObject::Str(a), PyObject::Str(b)) => Ok(a >= b),
             (PyObject::Bool(a), PyObject::Bool(b)) => Ok(a >= b),
+            (PyObject::Set(a), PyObject::Set(b)) => {
+                if a.len() < b.len() { return Ok(false); }
+                for item in b.to_vec() { if !a.contains(&item)? { return Ok(false); } }
+                Ok(true)
+            }
             _ => Err(PyError::type_error(format!("'>=' not supported between instances of '{}' and '{}'",
                 self.type_name(), other.type_name()))),
         }
