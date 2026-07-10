@@ -1397,7 +1397,7 @@ impl Parser {
         let args = if self.eat(&Token::Colon) {
             Vec::new()
         } else {
-            let args = self.parse_args()?;
+            let args = self.parse_lambda_args()?;
             self.expect(&Token::Colon)?;
             args
         };
@@ -1406,6 +1406,17 @@ impl Parser {
             args,
             body: Box::new(body),
         })
+    }
+
+    fn parse_lambda_args(&mut self) -> Result<Vec<Arg>, String> {
+        let mut args = Vec::new();
+        loop {
+            if self.at(&Token::Colon) { break; }
+            let name = self.expect_name()?;
+            args.push(Arg { arg: name, annotation: None });
+            if !self.eat(&Token::Comma) { break; }
+        }
+        Ok(args)
     }
 
     fn parse_yield_expr(&mut self) -> Result<Expr, String> {

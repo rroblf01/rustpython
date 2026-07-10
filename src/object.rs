@@ -250,6 +250,9 @@ pub enum PyObject {
     ClassMethod {
         func: PyObjectRef,
     },
+    Generator {
+        frame: std::cell::RefCell<super::vm::Frame>,
+    },
 }
 
 impl PyObject {
@@ -271,7 +274,7 @@ impl PyObject {
             PyObject::BuiltinFunction { .. } => "builtin_function_or_method",
             PyObject::BuiltinMethod { .. } => "builtin_method",
             PyObject::Module { .. } => "module",
-            PyObject::Type { .. } => "type",
+            PyObject::Type { name, .. } => name,
             PyObject::Instance { .. } => "instance",
             PyObject::Cell { .. } => "cell",
             PyObject::Capsule { .. } => "capsule",
@@ -283,6 +286,7 @@ impl PyObject {
             PyObject::Property { .. } => "property",
             PyObject::StaticMethod { .. } => "staticmethod",
             PyObject::ClassMethod { .. } => "classmethod",
+            PyObject::Generator { .. } => "generator",
         }.to_string()
     }
 
@@ -351,6 +355,7 @@ impl PyObject {
             PyObject::Property { .. } => format!("<property object>"),
             PyObject::StaticMethod { .. } => format!("<staticmethod object>"),
             PyObject::ClassMethod { .. } => format!("<classmethod object>"),
+            PyObject::Generator { .. } => format!("<generator object>"),
         }
     }
 
@@ -895,16 +900,31 @@ pub fn builtin_len(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         return Err(PyError::type_error("len() takes exactly one argument"));
     }
     let obj = args[0].borrow();
-    let len = match &*obj {
-        PyObject::Str(s) => s.chars().count(),
-        PyObject::List(v) => v.len(),
-        PyObject::Tuple(v) => v.len(),
-        PyObject::Dict(d) => d.len(),
-        PyObject::Set(s) => s.len(),
-        PyObject::Bytes(b) => b.len(),
-        _ => return Err(PyError::type_error(format!("object of type '{}' has no len()", obj.type_name()))),
-    };
-    Ok(py_int(len))
+    match &*obj {
+        PyObject::Str(s) => Ok(py_int(s.chars().count())),
+        PyObject::List(v) => Ok(py_int(v.len())),
+        PyObject::Tuple(v) => Ok(py_int(v.len())),
+        PyObject::Dict(d) => Ok(py_int(d.len())),
+        PyObject::Set(s) => Ok(py_int(s.len())),
+        PyObject::Bytes(b) => Ok(py_int(b.len())),
+        PyObject::Instance { typ, .. } => {
+            let f = {
+                let typ_ref = typ.borrow();
+                match &*typ_ref {
+                    PyObject::Type { dict: type_dict, .. } => type_dict.get("__len__").cloned(),
+                    _ => None,
+                }
+            };
+            if let Some(f) = f {
+                let result = call_bound_method(f, args[0].clone(), vec![])?;
+                let n = result.borrow();
+                if let PyObject::Int(i) = &*n { return Ok(py_int(i.clone())) }
+                return Err(PyError::type_error("__len__() should return an int"))
+            }
+            Err(PyError::type_error(format!("object of type '{}' has no len()", obj.type_name())))
+        }
+        _ => Err(PyError::type_error(format!("object of type '{}' has no len()", obj.type_name()))),
+    }
 }
 
 pub fn builtin_range(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
@@ -1001,7 +1021,48 @@ pub fn builtin_float(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 
 pub fn builtin_str(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() { Ok(py_str("")) }
-    else { Ok(py_str(&args[0].str())) }
+    else {
+        let f = {
+            let obj_borrowed = args[0].borrow();
+            match &*obj_borrowed {
+                PyObject::Instance { typ, .. } => {
+                    let typ_ref = typ.borrow();
+                    match &*typ_ref {
+                        PyObject::Type { dict: type_dict, .. } => type_dict.get("__str__").cloned(),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            }
+        };
+        if let Some(f) = f {
+            return call_bound_method(f, args[0].clone(), vec![]);
+        }
+        Ok(py_str(&args[0].str()))
+    }
+}
+
+pub fn builtin_repr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() != 1 {
+        return Err(PyError::type_error("repr() takes exactly one argument"));
+    }
+    let f = {
+        let obj_borrowed = args[0].borrow();
+        match &*obj_borrowed {
+            PyObject::Instance { typ, .. } => {
+                let typ_ref = typ.borrow();
+                match &*typ_ref {
+                    PyObject::Type { dict: type_dict, .. } => type_dict.get("__repr__").cloned(),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    };
+    if let Some(f) = f {
+        return call_bound_method(f, args[0].clone(), vec![]);
+    }
+    Ok(py_str(&args[0].repr()))
 }
 
 pub fn builtin_bool(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
@@ -1185,11 +1246,32 @@ pub fn builtin_exit(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Err(PyError::SystemExit(code))
 }
 
-pub fn builtin_repr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.len() != 1 {
-        return Err(PyError::type_error("repr() takes exactly one argument"));
+fn call_bound_method(func: PyObjectRef, self_obj: PyObjectRef, args: Vec<PyObjectRef>) -> PyResult<PyObjectRef> {
+    match &*func.borrow() {
+        PyObject::BuiltinFunction { func: f, .. } => {
+            let mut all_args = vec![self_obj];
+            all_args.extend(args);
+            f(&all_args)
+        }
+        PyObject::Function { code, globals: g, .. } => {
+            let mut frame = super::vm::Frame::new(code.clone(), g.clone(), create_builtins());
+            frame.locals.insert("self".to_string(), self_obj);
+            for (i, arg) in args.iter().enumerate() {
+                if i + 1 < frame.code.varnames.len() {
+                    frame.locals.insert(frame.code.varnames[i + 1].clone(), arg.clone());
+                }
+            }
+            let mut vm = super::vm::VirtualMachine::new();
+            vm.frames.push(frame);
+            vm.execute()
+        }
+        PyObject::BoundMethod { func, .. } => {
+            let mut all_args = vec![self_obj.clone()];
+            all_args.extend(args);
+            call_bound_method(func.clone(), self_obj, all_args)
+        }
+        _ => Err(PyError::type_error("object is not callable")),
     }
-    Ok(py_str(&args[0].repr()))
 }
 
 pub fn builtin_sorted(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
@@ -1877,6 +1959,23 @@ impl ObjectAccess for PyObject {
 // ---- Subscript access ----
 
 pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRef> {
+    // Check for __getitem__ on custom classes
+    let f = {
+        let o = obj.borrow();
+        match &*o {
+            PyObject::Instance { typ, .. } => {
+                let typ_ref = typ.borrow();
+                match &*typ_ref {
+                    PyObject::Type { dict: type_dict, .. } => type_dict.get("__getitem__").cloned(),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    };
+    if let Some(f) = f {
+        return call_bound_method(f, obj.clone(), vec![index.clone()]);
+    }
     let o = obj.borrow();
     match &*o {
         PyObject::List(items) => {
@@ -1983,6 +2082,24 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
 }
 
 pub fn py_setitem(obj: &PyObjectRef, index: &PyObjectRef, value: PyObjectRef) -> PyResult<()> {
+    // Check for __setitem__ on custom classes
+    let f = {
+        let o = obj.borrow();
+        match &*o {
+            PyObject::Instance { typ, .. } => {
+                let typ_ref = typ.borrow();
+                match &*typ_ref {
+                    PyObject::Type { dict: type_dict, .. } => type_dict.get("__setitem__").cloned(),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    };
+    if let Some(f) = f {
+        call_bound_method(f, obj.clone(), vec![index.clone(), value])?;
+        return Ok(());
+    }
     let mut o = obj.borrow_mut();
     match &mut *o {
         PyObject::List(items) => {

@@ -120,7 +120,7 @@ impl VirtualMachine {
         result
     }
 
-    fn execute(&mut self) -> PyResult<PyObjectRef> {
+    pub fn execute(&mut self) -> PyResult<PyObjectRef> {
         loop {
             let result = self.execute_instruction();
             match result {
@@ -1102,6 +1102,19 @@ impl VirtualMachine {
             }
 
             return Ok(class);
+        }
+
+        if let PyObject::Instance { typ, .. } = &*callable.borrow() {
+            let f = {
+                let typ_ref = typ.borrow();
+                match &*typ_ref {
+                    PyObject::Type { dict: type_dict, .. } => type_dict.get("__call__").cloned(),
+                    _ => None,
+                }
+            };
+            if let Some(f) = f {
+                return self.call_function(f, args);
+            }
         }
 
         Err(PyError::type_error(format!("'{}' object is not callable", type_name)))
