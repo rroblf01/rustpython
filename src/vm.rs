@@ -221,10 +221,12 @@ impl VirtualMachine {
     }
 
     pub fn execute(&mut self) -> PyResult<PyObjectRef> {
-        crate::object::VM_PTR.with(|p| *p.borrow_mut() = Some(self as *mut VirtualMachine));
-        let result = self.execute_inner();
-        crate::object::VM_PTR.with(|p| *p.borrow_mut() = None);
-        result
+        crate::object::VM_PTR.with(|p| {
+            if p.borrow().is_none() {
+                *p.borrow_mut() = Some(self as *mut VirtualMachine);
+            }
+        });
+        self.execute_inner()
     }
 
     fn execute_inner(&mut self) -> PyResult<PyObjectRef> {

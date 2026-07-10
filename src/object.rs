@@ -741,6 +741,7 @@ pub fn py_sub(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
         (PyObject::Float(a), PyObject::Float(b)) => Ok(py_float(a - b)),
         (PyObject::Int(a), PyObject::Float(b)) => Ok(py_float(a.to_f64().unwrap() - b)),
         (PyObject::Float(a), PyObject::Int(b)) => Ok(py_float(a - b.to_f64().unwrap())),
+        (PyObject::Set(a), PyObject::Set(b)) => set_difference(a, b),
         _ => Err(PyError::type_error(format!("unsupported operand type(s) for -: '{}' and '{}'",
             a_obj.type_name(), b_obj.type_name()))),
     }
@@ -931,12 +932,35 @@ pub fn py_rshift(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     }
 }
 
+fn set_union(a: &PySet, b: &PySet) -> PyResult<PyObjectRef> {
+    let mut result = a.clone();
+    for item in b.to_vec() { result.add(item)?; }
+    Ok(PyObjectRef::new(PyObject::Set(result)))
+}
+fn set_intersection(a: &PySet, b: &PySet) -> PyResult<PyObjectRef> {
+    let mut result = PySet::new();
+    for item in a.to_vec() { if b.contains(&item)? { result.add(item)?; } }
+    Ok(PyObjectRef::new(PyObject::Set(result)))
+}
+fn set_difference(a: &PySet, b: &PySet) -> PyResult<PyObjectRef> {
+    let mut result = PySet::new();
+    for item in a.to_vec() { if !b.contains(&item)? { result.add(item)?; } }
+    Ok(PyObjectRef::new(PyObject::Set(result)))
+}
+fn set_symmetric_diff(a: &PySet, b: &PySet) -> PyResult<PyObjectRef> {
+    let mut result = PySet::new();
+    for item in a.to_vec() { if !b.contains(&item)? { result.add(item)?; } }
+    for item in b.to_vec() { if !a.contains(&item)? { result.add(item)?; } }
+    Ok(PyObjectRef::new(PyObject::Set(result)))
+}
+
 pub fn py_bit_or(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     if let Some(r) = try_dunder_binop(a, b, "__or__")? { return Ok(r); }
     let a_obj = a.borrow();
     let b_obj = b.borrow();
     match (&*a_obj, &*b_obj) {
         (PyObject::Int(a), PyObject::Int(b)) => Ok(py_int(a.clone() | b)),
+        (PyObject::Set(a), PyObject::Set(b)) => set_union(a, b),
         _ => Err(PyError::type_error(format!("unsupported operand type(s) for |: '{}' and '{}'",
             a_obj.type_name(), b_obj.type_name()))),
     }
@@ -948,6 +972,7 @@ pub fn py_bit_xor(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     let b_obj = b.borrow();
     match (&*a_obj, &*b_obj) {
         (PyObject::Int(a), PyObject::Int(b)) => Ok(py_int(a.clone() ^ b)),
+        (PyObject::Set(a), PyObject::Set(b)) => set_symmetric_diff(a, b),
         _ => Err(PyError::type_error(format!("unsupported operand type(s) for ^: '{}' and '{}'",
             a_obj.type_name(), b_obj.type_name()))),
     }
@@ -959,6 +984,7 @@ pub fn py_bit_and(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     let b_obj = b.borrow();
     match (&*a_obj, &*b_obj) {
         (PyObject::Int(a), PyObject::Int(b)) => Ok(py_int(a.clone() & b)),
+        (PyObject::Set(a), PyObject::Set(b)) => set_intersection(a, b),
         _ => Err(PyError::type_error(format!("unsupported operand type(s) for &: '{}' and '{}'",
             a_obj.type_name(), b_obj.type_name()))),
     }
