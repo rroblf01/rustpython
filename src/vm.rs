@@ -6,6 +6,10 @@ use crate::bytecode::*;
 use crate::object::*;
 use crate::object::ObjectAccess;
 
+thread_local! {
+    static ATTR_CACHE: std::cell::RefCell<HashMap<(String, String), crate::object::BuiltinFunc>> = std::cell::RefCell::new(HashMap::new());
+}
+
 #[derive(Clone)]
 pub struct Frame {
     pub code: Rc<CodeObject>,
@@ -241,6 +245,7 @@ impl VirtualMachine {
         }
     }
 
+    #[inline(always)]
     fn execute_instruction(&mut self) -> PyResult<Option<PyObjectRef>> {
         let fi = self.frames.len() - 1;
         let ip = self.frames[fi].ip;
@@ -854,31 +859,45 @@ impl VirtualMachine {
                             }).ok_or_else(|| PyError::attribute_error(format!("'{}' object has no attribute '{}'", obj_borrowed.type_name(), name)))
                         }
                         _ => {
-                            let attr = obj_borrowed.get_attribute(&name).or_else(|_| {
-                                Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", obj_borrowed.type_name(), name)))
-                            })?;
-                            drop(obj_borrowed);
-                            let is_builtin_method = matches!(&*attr.borrow(), PyObject::BuiltinMethod { .. });
-                            let is_function = matches!(&*attr.borrow(), PyObject::Function { .. });
-                            if is_builtin_method {
-                                let (n, func) = {
-                                    let b = attr.borrow();
-                                    if let PyObject::BuiltinMethod { name: n, func, .. } = &*b {
-                                        (n.clone(), *func)
-                                    } else { unreachable!() }
-                                };
+                            let type_name = obj_borrowed.type_name();
+                            // Check inline cache first
+                            let cached = ATTR_CACHE.with(|c| c.borrow().get(&(type_name.clone(), name.clone())).copied());
+                            if let Some(func) = cached {
+                                drop(obj_borrowed);
                                 Ok(PyObjectRef::new(PyObject::BuiltinMethod {
-                                    name: n,
+                                    name: name.clone(),
                                     func,
                                     self_obj: obj.clone(),
                                 }))
-                            } else if is_function {
-                                Ok(PyObjectRef::new(PyObject::BoundMethod {
-                                    func: attr,
-                                    self_obj: obj.clone(),
-                                }))
                             } else {
-                                Ok(attr)
+                                let attr = obj_borrowed.get_attribute(&name).or_else(|_| {
+                                    Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", obj_borrowed.type_name(), name)))
+                                })?;
+                                drop(obj_borrowed);
+                                let is_builtin_method = matches!(&*attr.borrow(), PyObject::BuiltinMethod { .. });
+                                let is_function = matches!(&*attr.borrow(), PyObject::Function { .. });
+                                if is_builtin_method {
+                                    let (n, func) = {
+                                        let b = attr.borrow();
+                                        if let PyObject::BuiltinMethod { name: n, func, .. } = &*b {
+                                            (n.clone(), *func)
+                                        } else { unreachable!() }
+                                    };
+                                    // Cache for next time
+                                    ATTR_CACHE.with(|c| { c.borrow_mut().insert((type_name.clone(), n.clone()), func); });
+                                    Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                                        name: n,
+                                        func,
+                                        self_obj: obj.clone(),
+                                    }))
+                                } else if is_function {
+                                    Ok(PyObjectRef::new(PyObject::BoundMethod {
+                                        func: attr,
+                                        self_obj: obj.clone(),
+                                    }))
+                                } else {
+                                    Ok(attr)
+                                }
                             }
                         }
                     }
