@@ -1129,26 +1129,22 @@ impl Compiler {
                 self.emit(Opcode::YIELD_VALUE, 0);
             }
             Expr::FString(parts) => {
-                let mut parts_to_build = Vec::new();
+                let mut count = 0usize;
                 for part in parts {
                     match part {
                         FStringPart::String(s) => {
-                            parts_to_build.push(Expr::Constant(Constant::String(s.clone())));
+                            self.compile_expr(&Expr::Constant(Constant::String(s.clone())))?;
+                            count += 1;
                         }
                         FStringPart::Expr(expr) => {
                             self.compile_expr(expr)?;
-                            parts_to_build.push(Expr::Constant(Constant::String("".to_string())));
+                            self.emit(Opcode::FORMAT_SIMPLE, 0);
+                            count += 1;
                         }
                     }
                 }
-                // Build concatenated string
-                if parts_to_build.len() == 1 {
-                    self.compile_expr(&parts_to_build[0])?;
-                } else {
-                    for part in &parts_to_build {
-                        self.compile_expr(part)?;
-                    }
-                    self.emit(Opcode::BUILD_STRING, parts_to_build.len() as u32);
+                if count > 1 {
+                    self.emit(Opcode::BUILD_STRING, count as u32);
                 }
             }
             Expr::JoinedStr(parts) => {

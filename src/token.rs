@@ -131,6 +131,10 @@ pub struct Lexer {
     at_line_start: bool,
     paren_level: usize,
     source: String,
+    fstring_quote: Option<char>,
+    fstring_parts: Vec<(String, String)>, // (literal, expr_text)
+    fstring_part_idx: usize,
+    fstring_expr_pending: Vec<Token>,
 }
 
 impl Lexer {
@@ -146,6 +150,10 @@ impl Lexer {
             at_line_start: true,
             paren_level: 0,
             source: source.to_string(),
+            fstring_quote: None,
+            fstring_parts: Vec::new(),
+            fstring_part_idx: 0,
+            fstring_expr_pending: Vec::new(),
         }
     }
 
@@ -489,6 +497,46 @@ impl Lexer {
     }
 
     pub fn next_token(&mut self) -> Token {
+        // If we have pending f-string expression tokens, return them
+        if let Some(tok) = self.fstring_expr_pending.pop() {
+            return tok;
+        }
+        // Check if we're in the middle of emitting f-string parts
+        if let Some(_quote) = self.fstring_quote {
+            if self.fstring_part_idx < self.fstring_parts.len() {
+                let (ref literal, ref expr_text) = self.fstring_parts[self.fstring_part_idx];
+                self.fstring_part_idx += 1;
+                // to_push holds tokens in OUTPUT order (first to last)
+                let mut to_push: Vec<Token> = Vec::new();
+                // Push literal text (if any) — this should come FIRST
+                if !literal.is_empty() {
+                    to_push.push(Token::FStringMiddle(literal.clone()));
+                }
+                // Push expression tokens (if any) — these come AFTER the literal
+                if !expr_text.is_empty() {
+                    let expr_tokens = self.tokenize_fstring_expr(expr_text);
+                    to_push.extend(expr_tokens);
+                }
+                // If this is the last part, end the f-string
+                let is_last = self.fstring_part_idx >= self.fstring_parts.len()
+                    || self.fstring_parts[self.fstring_part_idx..].iter().all(|(l, e)| l.is_empty() && e.is_empty());
+                if is_last {
+                    to_push.push(Token::FStringEnd);
+                    self.fstring_quote = None;
+                }
+                // Push to pending stack in REVERSE (so they come out in correct order)
+                for t in to_push.into_iter().rev() {
+                    self.fstring_expr_pending.push(t);
+                }
+                return self.next_token();
+            }
+            // Cleanup if we somehow reach here without emitting FStringEnd
+            self.fstring_quote = None;
+            self.fstring_parts = Vec::new();
+            self.fstring_part_idx = 0;
+            return self.next_token(); // Try again with fstring_quote cleared
+        }
+
         if let Some(tok) = self.pending.pop() {
             return tok;
         }
@@ -558,7 +606,7 @@ impl Lexer {
                     // Check for f-prefixed strings (f"..." or f'...')
                     if (name == "f" || name == "F") && (self.peek() == Some('"') || self.peek() == Some('\'')) {
                         let quote = self.advance().unwrap();
-                        return self.read_string(quote, false, true);
+                        return self.tokenize_fstring(quote);
                     }
                     // Check for bytes literals (b"..." or b'...')
                     if (name == "b" || name == "B") && (self.peek() == Some('"') || self.peek() == Some('\'')) {
@@ -749,6 +797,84 @@ impl Lexer {
                 self.pending.push(Token::Dedent);
             }
         }
+    }
+
+    fn tokenize_fstring(&mut self, quote: char) -> Token {
+        // Read the entire f-string, splitting into literal and expression parts
+        let mut parts: Vec<(String, String)> = Vec::new();
+        let mut literal = String::new();
+        loop {
+            match self.advance() {
+                None => break,
+                Some(c) if c == '\\' => {
+                    let next = self.advance();
+                    literal.push(match next {
+                        Some('n') => '\n',
+                        Some('t') => '\t',
+                        Some('r') => '\r',
+                        Some('\\') => '\\',
+                        Some('\'') => '\'',
+                        Some('"') => '"',
+                        Some('{') => '{',
+                        Some('}') => '}',
+                        Some(c) => c,
+                        None => '\\',
+                    });
+                }
+                Some(c) if c == '{' => {
+                    if self.peek() == Some('{') {
+                        self.advance();
+                        literal.push('{');
+                    } else {
+                        // Start of expression
+                        let mut depth = 1;
+                        let mut expr = String::new();
+                        while depth > 0 {
+                            match self.advance() {
+                                Some('{') => { depth += 1; if depth > 1 { expr.push('{'); } }
+                                Some('}') => { depth -= 1; if depth > 0 { expr.push('}'); } }
+                                Some(c) => expr.push(c),
+                                None => break,
+                            }
+                        }
+                        parts.push((std::mem::take(&mut literal), expr));
+                    }
+                }
+                Some(c) if c == '}' => {
+                    if self.peek() == Some('}') {
+                        self.advance();
+                        literal.push('}');
+                    }
+                }
+                Some(c) if c == quote => break,
+                Some(c) => literal.push(c),
+            }
+        }
+        parts.push((literal, String::new()));
+
+        self.fstring_quote = Some(quote);
+        self.fstring_parts = parts;
+        self.fstring_part_idx = 0;
+        self.fstring_expr_pending = Vec::new();
+
+        Token::FStringStart
+    }
+
+    fn tokenize_fstring_expr(&self, text: &str) -> Vec<Token> {
+        // Tokenize an f-string expression text
+        let mut lex = Lexer::new(text);
+        let mut tokens = Vec::new();
+        loop {
+            let tok = lex.next_token();
+            if tok == Token::EndOfFile {
+                break;
+            }
+            if tok == Token::Newline {
+                continue;
+            }
+            tokens.push(tok);
+        }
+        tokens
     }
 
     pub fn get_line_col(&self) -> (usize, usize) {
