@@ -3006,6 +3006,22 @@ impl ObjectAccess for PyObject {
                     "fget" => getter.clone().ok_or_else(|| PyError::attribute_error("property has no getter".to_string())),
                     "fset" => setter.clone().ok_or_else(|| PyError::attribute_error("property has no setter".to_string())),
                     "fdel" => deleter.clone().ok_or_else(|| PyError::attribute_error("property has no deleter".to_string())),
+                    "__set__" => {
+                        if let Some(_) = setter {
+                            Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                                name: "__set__".to_string(),
+                                func: |args| {
+                                    if args.len() < 4 { return Err(PyError::type_error("__set__() takes 2 positional arguments")); }
+                                    // args: [self_obj, descriptor, instance, value]
+                                    let s = args[1].borrow();
+                                    if let PyObject::Property { setter: Some(setter_fn), .. } = &*s {
+                                        call_bound_method(setter_fn.clone(), args[2].clone(), vec![args[3].clone()])
+                                    } else { Err(PyError::runtime_error("property has no setter")) }
+                                },
+                                self_obj: PyObjectRef::new(PyObject::None),
+                            }))
+                        } else { Err(PyError::attribute_error("property has no setter".to_string())) }
+                    }
                     "setter" | "deleter" | "getter" => {
                         let is_setter = name == "setter";
                         let prop_obj = PyObjectRef::new(match self {

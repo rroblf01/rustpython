@@ -1293,6 +1293,34 @@ impl VirtualMachine {
                 })?.clone();
                 let val = self.frames[fi].pop()?;
                 let obj = self.frames[fi].pop()?;
+                // Check for __set__ descriptor protocol on Instance types
+                let descriptor_clone = {
+                    let obj_borrowed = obj.borrow();
+                    if let PyObject::Instance { typ, .. } = &*obj_borrowed {
+                        let typ_ref = typ.borrow();
+                        if let PyObject::Type { dict: type_dict, .. } = &*typ_ref {
+                            type_dict.get(&name).cloned()
+                        } else { None }
+                    } else { None }
+                };
+                if let Some(descriptor) = descriptor_clone {
+                    let setter_method = {
+                        descriptor.borrow().get_attribute("__set__").ok()
+                    };
+                    if let Some(setter_method) = setter_method {
+                        let (setter_func, setter_self) = {
+                            let b = setter_method.borrow();
+                            match &*b {
+                                PyObject::BuiltinMethod { func, self_obj, .. } => (func.clone(), self_obj.clone()),
+                                _ => return Err(PyError::runtime_error("expected __set__ method")),
+                            }
+                        };
+                        setter_func(&[setter_self, descriptor, obj.clone(), val])?;
+                        return Ok(None);
+                    } else {
+                        // Descriptor exists but no __set__ (non-data descriptor), fall through
+                    }
+                }
                 obj.borrow_mut().set_attribute(&name, val)?;
             }
 
