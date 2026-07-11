@@ -380,6 +380,7 @@ pub enum PyObject {
         closure: Vec<PyObjectRef>,
         dict: HashMap<String, PyObjectRef>,
         jit_ptr: std::cell::Cell<usize>,
+        jit_consts: std::cell::RefCell<Vec<PyObjectRef>>,
     },
     BuiltinFunction {
         name: String,

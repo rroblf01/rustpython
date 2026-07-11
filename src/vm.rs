@@ -660,6 +660,7 @@ impl VirtualMachine {
                     closure,
                     dict: HashMap::new(),
                     jit_ptr: std::cell::Cell::new(0),
+                    jit_consts: std::cell::RefCell::new(Vec::new()),
                 });
                 self.frames[fi].push(func);
             }
@@ -1448,16 +1449,18 @@ impl VirtualMachine {
             return self.call_function(func, all_args, keywords);
         }
 
-        if let PyObject::Function { code, globals: func_globals, defaults, jit_ptr, closure, .. } = &*callable.borrow() {
+        if let PyObject::Function { code, globals: func_globals, defaults, jit_ptr, closure, jit_consts, .. } = &*callable.borrow() {
             // Try JIT execution: if we have compiled code, use it directly
             let jit_fn: usize = jit_ptr.get();
             if jit_fn != 0 {
                 let func: extern "C" fn(*const PyObjectRef, usize, *const PyObjectRef, *mut PyObjectRef) = 
                     unsafe { std::mem::transmute(jit_fn) };
-                let jit_consts = crate::jit::JitCompiler::precompute_consts(code);
+                let mut const_cache = jit_consts.borrow_mut();
+                if const_cache.is_empty() {
+                    *const_cache = crate::jit::JitCompiler::precompute_consts(code);
+                }
                 let mut result = crate::object::py_none();
-                func(args.as_ptr(), args.len(), jit_consts.as_ptr(), &mut result as *mut PyObjectRef);
-                std::mem::forget(jit_consts);
+                func(args.as_ptr(), args.len(), const_cache.as_ptr(), &mut result as *mut PyObjectRef);
                 return Ok(result);
             }
             // Try simple execution without Frame creation
@@ -1472,10 +1475,11 @@ impl VirtualMachine {
                 let fn_ptr = compiled as *const () as usize;
                 drop(jit);
                 jit_ptr.set(fn_ptr);
-                let jit_consts = crate::jit::JitCompiler::precompute_consts(code);
+                let jit_consts_compiled = crate::jit::JitCompiler::precompute_consts(code);
                 let mut result = crate::object::py_none();
-                compiled(args.as_ptr(), args.len(), jit_consts.as_ptr(), &mut result as *mut PyObjectRef);
-                std::mem::forget(jit_consts);
+                compiled(args.as_ptr(), args.len(), jit_consts_compiled.as_ptr(), &mut result as *mut PyObjectRef);
+                let mut const_cache = jit_consts.borrow_mut();
+                *const_cache = jit_consts_compiled;
                 return Ok(result);
             }
             drop(jit);
