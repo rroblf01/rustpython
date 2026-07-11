@@ -176,6 +176,400 @@ impl Compiler {
         self.emit(Opcode::JUMP_BACKWARD, offset);
     }
 
+    // ---- Closure analysis ----
+
+    /// Find all Name expressions in a body of statements
+    fn collect_names_in_stmts(stmts: &[Stmt]) -> HashSet<String> {
+        let mut names = HashSet::new();
+        Self::collect_names_stmts_inner(stmts, &mut names);
+        names
+    }
+
+    fn collect_names_stmts_inner(stmts: &[Stmt], names: &mut HashSet<String>) {
+        for stmt in stmts {
+            match stmt {
+                Stmt::Expr(expr) => Self::collect_names_expr(expr, names),
+                Stmt::Pass | Stmt::Break | Stmt::Continue => {}
+                Stmt::Return(Some(expr)) => Self::collect_names_expr(expr, names),
+                Stmt::Return(None) => {}
+                Stmt::Assign { targets, value } => {
+                    Self::collect_names_expr(value, names);
+                    for t in targets { Self::collect_names_expr(t, names); }
+                }
+                Stmt::AugAssign { target, value, .. } => {
+                    Self::collect_names_expr(target, names);
+                    Self::collect_names_expr(value, names);
+                }
+                Stmt::AnnAssign { target, value, .. } => {
+                    Self::collect_names_expr(target, names);
+                    if let Some(v) = value { Self::collect_names_expr(v, names); }
+                }
+                Stmt::If { test, body, orelse } => {
+                    Self::collect_names_expr(test, names);
+                    Self::collect_names_stmts_inner(body, names);
+                    Self::collect_names_stmts_inner(orelse, names);
+                }
+                Stmt::While { test, body, orelse } => {
+                    Self::collect_names_expr(test, names);
+                    Self::collect_names_stmts_inner(body, names);
+                    Self::collect_names_stmts_inner(orelse, names);
+                }
+                Stmt::For { target, iter, body, orelse } => {
+                    Self::collect_names_expr(target, names);
+                    Self::collect_names_expr(iter, names);
+                    Self::collect_names_stmts_inner(body, names);
+                    Self::collect_names_stmts_inner(orelse, names);
+                }
+                Stmt::FunctionDef { body, .. } => {
+                    Self::collect_names_stmts_inner(body, names);
+                }
+                Stmt::ClassDef { body, .. } => {
+                    Self::collect_names_stmts_inner(body, names);
+                }
+                Stmt::With { items, body } => {
+                    for item in items {
+                        Self::collect_names_expr(&item.context_expr, names);
+                        if let Some(var) = &item.optional_vars {
+                            Self::collect_names_expr(var, names);
+                        }
+                    }
+                    Self::collect_names_stmts_inner(body, names);
+                }
+                Stmt::Match { subject, cases } => {
+                    Self::collect_names_expr(subject, names);
+                    for case in cases { Self::collect_names_stmts_inner(&case.body, names); }
+                }
+                Stmt::Raise { exc, cause } => {
+                    if let Some(e) = exc { Self::collect_names_expr(e, names); }
+                    if let Some(c) = cause { Self::collect_names_expr(c, names); }
+                }
+                Stmt::Try { body, handlers, orelse, finalbody } => {
+                    Self::collect_names_stmts_inner(body, names);
+                    for h in handlers { Self::collect_names_stmts_inner(&h.body, names); }
+                    Self::collect_names_stmts_inner(orelse, names);
+                    Self::collect_names_stmts_inner(finalbody, names);
+                }
+                Stmt::Assert { test, msg } => {
+                    Self::collect_names_expr(test, names);
+                    if let Some(m) = msg { Self::collect_names_expr(m, names); }
+                }
+                Stmt::Delete(targets) => {
+                    for t in targets { Self::collect_names_expr(t, names); }
+                }
+                Stmt::Import(names_list) => {
+                    for alias in names_list {
+                        names.insert(alias.name.clone());
+                    }
+                }
+                Stmt::ImportFrom { module: _, names: names_list, .. } => {
+                    for alias in names_list {
+                        names.insert(alias.name.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn collect_names_expr(expr: &Expr, names: &mut HashSet<String>) {
+        match expr {
+            Expr::Name(n) => { names.insert(n.clone()); }
+            Expr::Constant(_) | Expr::FString(_) | Expr::JoinedStr(_) => {}
+            Expr::BinOp { left, right, .. } => {
+                Self::collect_names_expr(left, names);
+                Self::collect_names_expr(right, names);
+            }
+            Expr::UnaryOp { operand, .. } => Self::collect_names_expr(operand, names),
+            Expr::BoolOp { values, .. } => {
+                for v in values { Self::collect_names_expr(v, names); }
+            }
+            Expr::Compare { left, comparators, .. } => {
+                Self::collect_names_expr(left, names);
+                for c in comparators { Self::collect_names_expr(c, names); }
+            }
+            Expr::Call { func, args, keywords } => {
+                Self::collect_names_expr(func, names);
+                for a in args { Self::collect_names_expr(a, names); }
+                for kw in keywords { Self::collect_names_expr(&kw.value, names); }
+            }
+            Expr::IfExp { test, body, orelse } => {
+                Self::collect_names_expr(test, names);
+                Self::collect_names_expr(body, names);
+                Self::collect_names_expr(orelse, names);
+            }
+            Expr::Attribute { value, .. } => Self::collect_names_expr(value, names),
+            Expr::Subscript { value, slice } => {
+                Self::collect_names_expr(value, names);
+                Self::collect_names_expr(slice, names);
+            }
+            Expr::Starred(expr) => Self::collect_names_expr(expr, names),
+            Expr::List(elts) | Expr::Tuple(elts) | Expr::Set(elts) => {
+                for e in elts { Self::collect_names_expr(e, names); }
+            }
+            Expr::Dict { keys, values } => {
+                for k in keys.iter().flatten() { Self::collect_names_expr(k, names); }
+                for v in values { Self::collect_names_expr(v, names); }
+            }
+            Expr::Slice { lower, upper, step } => {
+                for s in [lower, upper, step].iter().filter_map(|s| s.as_ref()) { Self::collect_names_expr(s, names); }
+            }
+            Expr::Lambda { body, .. } => Self::collect_names_expr(body, names),
+            Expr::Yield(Some(e)) | Expr::YieldFrom(e) | Expr::Await(e) => Self::collect_names_expr(e, names),
+            Expr::Yield(None) => {}
+            Expr::ListComp { elt, generators } | Expr::SetComp { elt, generators } | Expr::GeneratorExp { elt, generators } => {
+                Self::collect_names_expr(elt, names);
+                for gen in generators {
+                    Self::collect_names_expr(&gen.target, names);
+                    Self::collect_names_expr(&gen.iter, names);
+                    for if_cond in &gen.ifs { Self::collect_names_expr(if_cond, names); }
+                }
+            }
+            Expr::DictComp { key, value, generators } => {
+                Self::collect_names_expr(key, names);
+                Self::collect_names_expr(value, names);
+                for gen in generators {
+                    Self::collect_names_expr(&gen.target, names);
+                    Self::collect_names_expr(&gen.iter, names);
+                    for if_cond in &gen.ifs { Self::collect_names_expr(if_cond, names); }
+                }
+            }
+            Expr::NamedExpr { target, value } => {
+                Self::collect_names_expr(target, names);
+                Self::collect_names_expr(value, names);
+            }
+        }
+    }
+
+    /// Find names assigned in a body (targets of =, for, function defs, etc.)
+    fn collect_assigned_names(stmts: &[Stmt]) -> HashSet<String> {
+        let mut assigned = HashSet::new();
+        Self::collect_assigned_inner(stmts, &mut assigned);
+        assigned
+    }
+
+    fn collect_assigned_inner(stmts: &[Stmt], assigned: &mut HashSet<String>) {
+        for stmt in stmts {
+            match stmt {
+                Stmt::Assign { targets, .. } => {
+                    for t in targets { Self::collect_assign_target_names(t, assigned); }
+                }
+                Stmt::AugAssign { target, .. } => {
+                    Self::collect_assign_target_names(target, assigned);
+                }
+                Stmt::AnnAssign { target, value: Some(_), .. } => {
+                    Self::collect_assign_target_names(target, assigned);
+                }
+                Stmt::For { target, body, orelse, .. } => {
+                    Self::collect_assign_target_names(target, assigned);
+                    Self::collect_assigned_inner(body, assigned);
+                    Self::collect_assigned_inner(orelse, assigned);
+                }
+                Stmt::FunctionDef { name, .. } => {
+                    assigned.insert(name.clone());
+                }
+                Stmt::ClassDef { name, .. } => {
+                    assigned.insert(name.clone());
+                }
+                Stmt::If { body, orelse, .. } => {
+                    Self::collect_assigned_inner(body, assigned);
+                    Self::collect_assigned_inner(orelse, assigned);
+                }
+                Stmt::While { body, orelse, .. } => {
+                    Self::collect_assigned_inner(body, assigned);
+                    Self::collect_assigned_inner(orelse, assigned);
+                }
+                Stmt::With { items, body } => {
+                    for item in items {
+                        if let Some(var) = &item.optional_vars {
+                            Self::collect_assign_target_names(var, assigned);
+                        }
+                    }
+                    Self::collect_assigned_inner(body, assigned);
+                }
+                Stmt::Match { cases, .. } => {
+                    for case in cases { Self::collect_assigned_inner(&case.body, assigned); }
+                }
+                Stmt::Try { body, handlers, orelse, finalbody } => {
+                    Self::collect_assigned_inner(body, assigned);
+                    for h in handlers { Self::collect_assigned_inner(&h.body, assigned); }
+                    Self::collect_assigned_inner(orelse, assigned);
+                    Self::collect_assigned_inner(finalbody, assigned);
+                }
+                Stmt::Import(names_list) => {
+                    for alias in names_list {
+                        assigned.insert(alias.asname.clone().unwrap_or_else(|| alias.name.clone()));
+                    }
+                }
+                Stmt::ImportFrom { names: names_list, .. } => {
+                    for alias in names_list {
+                        assigned.insert(alias.asname.clone().unwrap_or_else(|| alias.name.clone()));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn collect_assign_target_names(target: &Expr, assigned: &mut HashSet<String>) {
+        match target {
+            Expr::Name(n) => { assigned.insert(n.clone()); }
+            Expr::List(elts) | Expr::Tuple(elts) => {
+                for e in elts { Self::collect_assign_target_names(e, assigned); }
+            }
+            Expr::Starred(e) => Self::collect_assign_target_names(e, assigned),
+            _ => {}
+        }
+    }
+
+    /// Collect names referenced in the current function's own body (NOT nested function bodies).
+    fn collect_own_referenced_names(stmts: &[Stmt]) -> HashSet<String> {
+        let mut names = HashSet::new();
+        for stmt in stmts {
+            match stmt {
+                Stmt::Expr(expr) => Self::collect_names_expr(expr, &mut names),
+                Stmt::Return(Some(expr)) => Self::collect_names_expr(expr, &mut names),
+                Stmt::Assign { targets, value } => {
+                    Self::collect_names_expr(value, &mut names);
+                }
+                Stmt::AugAssign { target, value, .. } => {
+                    Self::collect_names_expr(target, &mut names);
+                    Self::collect_names_expr(value, &mut names);
+                }
+                Stmt::If { test, .. } => Self::collect_names_expr(test, &mut names),
+                Stmt::While { test, .. } => Self::collect_names_expr(test, &mut names),
+                Stmt::For { iter, .. } => Self::collect_names_expr(iter, &mut names),
+                Stmt::Raise { exc, cause } => {
+                    if let Some(e) = exc { Self::collect_names_expr(e, &mut names); }
+                    if let Some(c) = cause { Self::collect_names_expr(c, &mut names); }
+                }
+                Stmt::Assert { test, msg } => {
+                    Self::collect_names_expr(test, &mut names);
+                    if let Some(m) = msg { Self::collect_names_expr(m, &mut names); }
+                }
+                Stmt::With { items, .. } => {
+                    for item in items { Self::collect_names_expr(&item.context_expr, &mut names); }
+                }
+                Stmt::Match { subject, .. } => { Self::collect_names_expr(subject, &mut names); }
+                Stmt::FunctionDef { .. } | Stmt::ClassDef { .. } => {}
+                _ => {}
+            }
+        }
+        names
+    }
+
+    /// Pre-analyze a function body to determine cell variables and free variables.
+    /// Returns (cellvars, freevars)
+    fn analyze_function(
+        args: &[Arg],
+        body: &[Stmt],
+        global_names: &HashSet<String>,
+        nonlocal_names: &HashSet<String>,
+    ) -> (Vec<String>, Vec<String>) {
+        // Find nonlocal declarations within this function's body
+        let (body_globals, body_nonlocals) = Self::scan_global_nonlocal_decls(body);
+        let mut effective_global = global_names.clone();
+        let mut effective_nonlocal = nonlocal_names.clone();
+        effective_global.extend(body_globals);
+        effective_nonlocal.extend(body_nonlocals);
+
+        // Collect all names assigned locally (including params)
+        let mut local_names = Self::collect_assigned_names(body);
+        for arg in args {
+            local_names.insert(arg.arg.clone());
+        }
+        for n in &effective_nonlocal { local_names.remove(n); }
+        for n in &effective_global { local_names.remove(n); }
+
+        // Collect names referenced in THIS function's own body
+        let own_refs = Self::collect_own_referenced_names(body);
+
+        // Collect names referenced in nested function definitions
+        let nested_refs = Self::collect_nested_references(body, &local_names, &effective_global, &effective_nonlocal);
+
+        // All names from outer scope = own_refs (not local) + nested_refs
+        let mut all_outer_refs = nested_refs.clone();
+        for name in &own_refs {
+            if !local_names.contains(name) && !effective_global.contains(name) {
+                all_outer_refs.insert(name.clone());
+            }
+        }
+
+        // cell_vars = local_names ∩ (names from nested functions that reference our locals)
+        let mut cell_vars: Vec<String> = local_names.intersection(&nested_refs)
+            .filter(|n| !effective_global.contains(*n))
+            .cloned()
+            .collect();
+        cell_vars.sort();
+
+        // free_vars = nested_refs - local_names (names that nested functions need from us)
+        // + nonlocal declarations (names explicitly requested from outer scope)
+        let mut free_vars: Vec<String> = nested_refs.difference(&local_names)
+            .filter(|n| !effective_global.contains(*n))
+            .cloned()
+            .collect();
+        for n in &effective_nonlocal {
+            if !free_vars.contains(n) && !effective_global.contains(n) {
+                free_vars.push(n.clone());
+            }
+        }
+        free_vars.sort();
+
+        (cell_vars, free_vars)
+    }
+
+    /// Recursively find names referenced in nested function bodies that are NOT
+    /// assigned within those nested functions.
+    fn collect_nested_references(
+        stmts: &[Stmt],
+        local_names: &HashSet<String>,
+        global_names: &HashSet<String>,
+        nonlocal_names: &HashSet<String>,
+    ) -> HashSet<String> {
+        let mut refs = HashSet::new();
+        Self::collect_nested_refs_inner(stmts, local_names, global_names, nonlocal_names, &mut refs);
+        refs
+    }
+
+    fn collect_nested_refs_inner(
+        stmts: &[Stmt],
+        local_names: &HashSet<String>,
+        global_names: &HashSet<String>,
+        nonlocal_names: &HashSet<String>,
+        refs: &mut HashSet<String>,
+    ) {
+        for stmt in stmts {
+            match stmt {
+                Stmt::FunctionDef { args, body, .. } => {
+                    let (inner_globals, inner_nonlocals) = Self::scan_global_nonlocal_decls(body);
+                    let mut inner_local = Self::collect_assigned_names(body);
+                    for arg in args { inner_local.insert(arg.arg.clone()); }
+                    for n in &inner_nonlocals { inner_local.remove(n); }
+                    for n in &inner_globals { inner_local.remove(n); }
+                    let all_inner_names = Self::collect_names_in_stmts(body);
+                    for name in &all_inner_names {
+                        if !inner_local.contains(name) && !inner_globals.contains(name) {
+                            refs.insert(name.clone());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn scan_global_nonlocal_decls(body: &[Stmt]) -> (HashSet<String>, HashSet<String>) {
+        let mut globals = HashSet::new();
+        let mut nonlocals = HashSet::new();
+        for stmt in body {
+            match stmt {
+                Stmt::Global(names) => { for n in names { globals.insert(n.clone()); } }
+                Stmt::Nonlocal(names) => { for n in names { nonlocals.insert(n.clone()); } }
+                _ => {}
+            }
+        }
+        (globals, nonlocals)
+    }
+
     // ---- Statement compilation ----
 
     fn compile_stmts(&mut self, stmts: &[Stmt]) -> Result<(), String> {
@@ -758,6 +1152,15 @@ impl Compiler {
                 if self.scope == ScopeType::Module || self.scope == ScopeType::ClassBody || self.global_names.contains(name) {
                     let idx = self.get_name_index(name) as u32;
                     self.emit(Opcode::STORE_NAME, idx);
+                } else if self.scope == ScopeType::Function && self.code.cellvars.contains(name) {
+                    // Cell variable: use STORE_DEREF
+                    let idx = self.code.cellvars.iter().position(|n| n == name).unwrap() as u32;
+                    self.emit(Opcode::STORE_DEREF, idx);
+                } else if self.scope == ScopeType::Function && self.code.freevars.contains(name) {
+                    // Free variable (nonlocal): use STORE_DEREF
+                    let fv_idx = self.code.freevars.iter().position(|n| n == name).unwrap();
+                    let idx = (self.code.cellvars.len() + fv_idx) as u32;
+                    self.emit(Opcode::STORE_DEREF, idx);
                 } else {
                     let idx = self.add_varname(name) as u32;
                     self.emit(Opcode::STORE_FAST, idx);
@@ -798,12 +1201,18 @@ impl Compiler {
         });
         let body = if docstring.is_some() { &body[1..] } else { body };
 
-        self.enter_scope(ScopeType::Function);
-
+        // Save outer code BEFORE enter_scope (which takes cellvars/freevars from self.code)
         let old_code = std::mem::replace(&mut self.code, CodeObject::new(name.clone()));
         let old_labels = std::mem::replace(&mut self.labels, Vec::new());
         let old_label_stack = std::mem::replace(&mut self.label_stack, Vec::new());
         let old_loop_stack = std::mem::replace(&mut self.loop_stack, Vec::new());
+
+        self.enter_scope(ScopeType::Function);
+
+        // Pre-analyze the function to determine cell vars and free vars
+        let (cell_vars, free_vars) = Self::analyze_function(args, body, &self.global_names, &self.nonlocal_names);
+        self.code.cellvars = cell_vars;
+        self.code.freevars = free_vars;
 
         // Separate regular args, vararg, kwarg
         let mut num_positional = 0;
@@ -835,6 +1244,13 @@ impl Compiler {
             self.code.arg_count = args.len();
         }
 
+        // Add cell vars to varnames too (so they get fast_locals slots)
+        for cell_var in self.code.cellvars.clone() {
+            if self.get_var_index(&cell_var).is_none() {
+                self.add_varname(&cell_var);
+            }
+        }
+
         // Check if function contains yield (generator)
         let has_yield = contains_yield_in_stmts(body);
         if has_yield {
@@ -851,15 +1267,55 @@ impl Compiler {
             self.emit(Opcode::RETURN_VALUE, 0);
         }
 
+        // Remember inner function's free vars for closure building
+        let inner_free_vars = self.code.freevars.clone();
+        let inner_cell_vars = self.code.cellvars.clone();
+        let source_cell_vars = self.code.cellvars.clone();
+        let source_free_vars = self.code.freevars.clone();
+
         self.code.nlocals = self.code.varnames.len();
         self.code.name = name.clone();
         self.code.first_lineno = 1;
+
+        self.code.cellvars = inner_cell_vars;
+        self.code.freevars = inner_free_vars.clone();
 
         let func_code = std::mem::replace(&mut self.code, old_code);
         self.labels = old_labels;
         self.label_stack = old_label_stack;
         self.loop_stack = old_loop_stack;
 
+        // Emit LOAD_CLOSURE for each free var of the inner function
+        // Use source_cell_vars/source_free_vars (the COMPILED function's scope before swap)
+        let mut nfree = 0usize;
+        for fv_name in &inner_free_vars {
+            let found = source_cell_vars.iter().any(|n| n == fv_name)
+                || source_free_vars.iter().any(|n| n == fv_name)
+                || self.get_var_index(fv_name).is_some();
+            if found {
+                if self.get_var_index(fv_name).is_some() && !self.code.cellvars.contains(fv_name) {
+                    self.code.cellvars.push(fv_name.clone());
+                    if self.get_var_index(fv_name).is_none() {
+                        self.add_varname(fv_name);
+                    }
+                }
+                if let Some(idx) = self.code.cellvars.iter().position(|n| n == fv_name) {
+                    self.emit(Opcode::LOAD_CLOSURE, idx as u32);
+                } else if let Some(idx) = self.code.freevars.iter().position(|n| n == fv_name) {
+                    let idx = self.code.cellvars.len() + idx;
+                    self.emit(Opcode::LOAD_CLOSURE, idx as u32);
+                }
+                nfree += 1;
+            }
+        }
+        if nfree > 0 {
+            self.emit(Opcode::BUILD_TUPLE, nfree as u32);
+        }
+
+        let mut make_func_arg = 0u32;
+        if nfree > 0 {
+            make_func_arg |= 1 << 8;
+        }
         let code_const_idx = self.get_const_index(ConstValue::Code(Box::new(func_code))) as u32;
         self.emit(Opcode::LOAD_CONST, code_const_idx);
 
@@ -872,7 +1328,7 @@ impl Compiler {
             }
         }
 
-        self.emit(Opcode::MAKE_FUNCTION, defaults_count as u32);
+        self.emit(Opcode::MAKE_FUNCTION, make_func_arg);
 
         // Set __doc__ if there was a docstring
         if let Some(doc) = docstring {
@@ -881,19 +1337,6 @@ impl Compiler {
             self.emit(Opcode::LOAD_CONST, doc_idx);
             let doc_attr_idx = self.get_name_index("__doc__") as u32;
             self.emit(Opcode::STORE_ATTR, doc_attr_idx);
-        }
-
-        // Handle closure cells if needed
-        let cell_count = self.code.cellvars.len() as u32;
-        if cell_count > 0 {
-            for i in 0..cell_count {
-                self.emit(Opcode::LOAD_CLOSURE, i);
-            }
-            self.emit(Opcode::BUILD_TUPLE, cell_count);
-            let const_none = self.get_const_index(ConstValue::None) as u32;
-            self.emit(Opcode::LOAD_CONST, const_none);
-            self.emit(Opcode::LOAD_CONST, const_none);
-            self.emit(Opcode::CALL, 3);
         }
 
         self.leave_scope();
@@ -962,12 +1405,16 @@ impl Compiler {
                 if self.scope == ScopeType::Module || self.scope == ScopeType::ClassBody || self.global_names.contains(name) {
                     let name_idx = self.get_name_index(name) as u32;
                     self.emit(Opcode::LOAD_NAME, name_idx);
-                } else if self.scope == ScopeType::Function && self.get_var_index(name).is_some() {
-                    let idx = self.get_var_index(name).unwrap() as u32;
-                    self.emit(Opcode::LOAD_FAST, idx);
+                } else if self.scope == ScopeType::Function && self.code.freevars.contains(name) {
+                    let fv_idx = self.code.freevars.iter().position(|n| n == name).unwrap();
+                    let idx = self.code.cellvars.len() + fv_idx;
+                    self.emit(Opcode::LOAD_DEREF, idx as u32);
                 } else if self.scope == ScopeType::Function && self.code.cellvars.contains(name) {
                     let idx = self.code.cellvars.iter().position(|n| n == name).unwrap() as u32;
                     self.emit(Opcode::LOAD_DEREF, idx);
+                } else if self.scope == ScopeType::Function && self.get_var_index(name).is_some() {
+                    let idx = self.get_var_index(name).unwrap() as u32;
+                    self.emit(Opcode::LOAD_FAST, idx);
                 } else if self.scope == ScopeType::Function {
                     let name_idx = self.get_name_index(name) as u32;
                     self.emit(Opcode::LOAD_GLOBAL, name_idx);

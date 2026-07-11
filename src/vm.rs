@@ -23,6 +23,7 @@ pub struct Frame {
     pub base_sp: usize,
     pub exception_handlers: Vec<ExceptionHandler>,
     pub return_value: Option<PyResult<PyObjectRef>>,
+    pub closure: Vec<PyObjectRef>,
 }
 
 #[derive(Clone)]
@@ -55,6 +56,7 @@ impl Frame {
             base_sp: 0,
             exception_handlers: Vec::new(),
             return_value: None,
+            closure: Vec::new(),
         }
     }
 
@@ -413,59 +415,89 @@ impl VirtualMachine {
             }
 
             Opcode::LOAD_DEREF => {
-                let var_idx = arg as usize;
-                let (name, val) = {
-                    let f = &self.frames[self.frames.len() - 1];
-                    let name = if var_idx < f.code.cellvars.len() {
-                        f.code.cellvars[var_idx].clone()
+                let idx = arg as usize;
+                let (cell_ref, is_freevar, name_str): (Option<PyObjectRef>, bool, String) = {
+                    let f = &self.frames[fi];
+                    let code = &f.code;
+                    if idx < code.cellvars.len() {
+                        let name = &code.cellvars[idx];
+                        let var_idx = code.varnames.iter().position(|n| n == name)
+                            .ok_or_else(|| PyError::name_error(format!("variable '{}' not found", name)))?;
+                        (f.fast_locals[var_idx].clone(), false, name.clone())
                     } else {
-                        let fv_idx = var_idx - f.code.cellvars.len();
-                        f.code.freevars.get(fv_idx).ok_or_else(|| {
-                            PyError::runtime_error("freevar index out of range")
-                        })?.clone()
-                    };
-                    let val = f.locals.get(&name).cloned();
-                    (name, val)
-                };
-                match val {
-                    Some(v) => {
-                        let push_val = {
-                            let obj = v.borrow();
-                            match &*obj {
-                                PyObject::Cell { value: Some(inner) } => inner.clone(),
-                                PyObject::Cell { value: None } => return Err(PyError::name_error(format!("variable '{}' referenced before assignment", name))),
-                                _ => v.clone(),
-                            }
-                        };
-                        self.frames[fi].push(push_val);
+                        let fv_idx = idx - code.cellvars.len();
+                        let name = code.freevars.get(fv_idx)
+                            .ok_or_else(|| PyError::runtime_error("freevar index out of range"))?;
+                        (f.closure.get(fv_idx).cloned(), true, name.clone())
                     }
-                    None => return Err(PyError::name_error(format!("variable '{}' not found", name))),
+                };
+                if let Some(cell) = cell_ref {
+                    let val = {
+                        let obj = cell.borrow();
+                        match &*obj {
+                            PyObject::Cell { value: Some(inner) } => inner.clone(),
+                            PyObject::Cell { value: None } => {
+                                return Err(PyError::name_error(format!("variable '{}' referenced before assignment", name_str)));
+                            }
+                            _ => cell.clone(),
+                        }
+                    };
+                    self.frames[fi].push(val);
+                } else if is_freevar {
+                    let val = {
+                        let globals = self.frames[fi].globals.borrow();
+                        globals.get(&name_str).cloned()
+                    };
+                    if let Some(v) = val {
+                        self.frames[fi].push(v);
+                    } else {
+                        let val = self.frames[fi].builtins.get(&name_str).cloned();
+                        if let Some(v) = val {
+                            self.frames[fi].push(v);
+                        } else {
+                            return Err(PyError::name_error(format!("variable '{}' not found", name_str)));
+                        }
+                    }
+                } else {
+                    return Err(PyError::name_error(format!("variable '{}' not found", name_str)));
                 }
             }
 
             Opcode::STORE_DEREF => {
-                let var_idx = arg as usize;
-                let name = {
-                    let f = &self.frames[self.frames.len() - 1];
-                    if var_idx < f.code.cellvars.len() {
-                        f.code.cellvars[var_idx].clone()
-                    } else {
-                        f.code.freevars[var_idx - f.code.cellvars.len()].clone()
-                    }
-                };
+                let idx = arg as usize;
                 let val = self.frames[fi].pop()?;
-                let cell = {
-                    let f = &self.frames[self.frames.len() - 1];
-                    f.locals.get(&name).cloned()
-                };
-                if let Some(cell) = cell {
-                    let mut cell = cell.borrow_mut();
-                    if let PyObject::Cell { value } = &mut *cell {
-                        *value = Some(val);
+                let has_cellvars = idx < self.frames[fi].code.cellvars.len();
+                if has_cellvars {
+                    let name = &self.frames[fi].code.cellvars[idx];
+                    let var_idx = self.frames[fi].code.varnames.iter().position(|n| n == name)
+                        .ok_or_else(|| PyError::runtime_error("variable not found"))?;
+                    if var_idx < self.frames[fi].fast_locals.len() {
+                        if let Some(cell) = self.frames[fi].fast_locals[var_idx].clone() {
+                            let mut cell_val = cell.borrow_mut();
+                            if let PyObject::Cell { value } = &mut *cell_val {
+                                *value = Some(val);
+                            }
+                        } else {
+                            let new_cell = PyObjectRef::new(PyObject::Cell { value: Some(val) });
+                            self.frames[fi].fast_locals[var_idx] = Some(new_cell);
+                        }
+                    } else {
+                        let new_cell = PyObjectRef::new(PyObject::Cell { value: Some(val) });
+                        self.frames[fi].fast_locals.push(Some(new_cell));
                     }
                 } else {
-                    let cell_obj = PyObjectRef::new(PyObject::Cell { value: Some(val) });
-                    self.frames[fi].locals.insert(name, cell_obj);
+                    let fv_idx = idx - self.frames[fi].code.cellvars.len();
+                    if let Some(cell) = self.frames[fi].closure.get(fv_idx).cloned() {
+                        let mut cell_val = cell.borrow_mut();
+                        if let PyObject::Cell { value } = &mut *cell_val {
+                            *value = Some(val);
+                        }
+                    } else {
+                        return Err(PyError::name_error(
+                            format!("variable '{}' not found", 
+                                self.frames[fi].code.freevars.get(fv_idx).map(|s| s.as_str()).unwrap_or("?"))
+                        ));
+                    }
                 }
             }
 
@@ -561,7 +593,8 @@ impl VirtualMachine {
             }
 
             Opcode::MAKE_FUNCTION => {
-                let n_defaults = arg as usize;
+                let has_closure = (arg & 0x100) != 0;
+                let n_defaults = (arg & 0xFF) as usize;
                 let mut defaults = Vec::new();
                 for _ in 0..n_defaults {
                     defaults.push(self.frames[fi].pop()?);
@@ -572,13 +605,29 @@ impl VirtualMachine {
                     PyObject::Code(c) => c.as_ref().clone(),
                     _ => return Err(PyError::runtime_error("MAKE_FUNCTION: expected code object")),
                 };
+                let closure = if has_closure {
+                    let closure_tuple = self.frames[fi].pop()?;
+                    let items = closure_tuple.borrow();
+                    if let PyObject::Tuple(items) = &*items {
+                        items.clone()
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    Vec::new()
+                };
+                let name = if !code.name.is_empty() {
+                    code.name.clone()
+                } else {
+                    "<function>".to_string()
+                };
                 let globals = self.frames[fi].globals.clone();
                 let func = PyObjectRef::new(PyObject::Function {
                     code,
                     globals,
-                    name: "<function>".to_string(),
+                    name,
                     defaults,
-                    closure: Vec::new(),
+                    closure,
                     dict: HashMap::new(),
                     jit_ptr: std::cell::Cell::new(0),
                 });
@@ -1303,7 +1352,7 @@ impl VirtualMachine {
             return self.call_function(func, new_args, keywords);
         }
 
-        if let PyObject::Function { code, globals: func_globals, defaults, jit_ptr, .. } = &*callable.borrow() {
+        if let PyObject::Function { code, globals: func_globals, defaults, jit_ptr, closure, .. } = &*callable.borrow() {
             // Try JIT execution: if we have compiled code, use it directly
             let jit_fn: usize = jit_ptr.get();
             if jit_fn != 0 {
@@ -1338,6 +1387,7 @@ impl VirtualMachine {
             let defaults = defaults.clone();
             let code_rc = Rc::new(code.clone());
             let mut new_frame = Frame::new(Rc::clone(&code_rc), func_globals, Rc::clone(&self.builtins));
+            new_frame.closure = closure.clone();
             let code = code;
 
             let npos = args.len();
