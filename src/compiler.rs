@@ -1,6 +1,6 @@
-use std::collections::HashSet;
 use crate::ast::*;
 use crate::bytecode::*;
+use std::collections::HashSet;
 
 pub struct Compiler {
     code: CodeObject,
@@ -115,16 +115,14 @@ impl Compiler {
     }
 
     fn get_const_index(&mut self, c: ConstValue) -> usize {
-        if let Some(idx) = self.code.consts.iter().position(|x| {
-            match (x, &c) {
-                (ConstValue::None, ConstValue::None) => true,
-                (ConstValue::Bool(a), ConstValue::Bool(b)) => a == b,
-                (ConstValue::Int(a), ConstValue::Int(b)) => a == b,
-                (ConstValue::Float(a), ConstValue::Float(b)) => a == b,
-                (ConstValue::String(a), ConstValue::String(b)) => a == b,
-                (ConstValue::Bytes(a), ConstValue::Bytes(b)) => a == b,
-                _ => false,
-            }
+        if let Some(idx) = self.code.consts.iter().position(|x| match (x, &c) {
+            (ConstValue::None, ConstValue::None) => true,
+            (ConstValue::Bool(a), ConstValue::Bool(b)) => a == b,
+            (ConstValue::Int(a), ConstValue::Int(b)) => a == b,
+            (ConstValue::Float(a), ConstValue::Float(b)) => a == b,
+            (ConstValue::String(a), ConstValue::String(b)) => a == b,
+            (ConstValue::Bytes(a), ConstValue::Bytes(b)) => a == b,
+            _ => false,
         }) {
             return idx;
         }
@@ -185,7 +183,9 @@ impl Compiler {
                 Stmt::Return(None) => {}
                 Stmt::Assign { targets, value } => {
                     Self::collect_names_expr(value, names);
-                    for t in targets { Self::collect_names_expr(t, names); }
+                    for t in targets {
+                        Self::collect_names_expr(t, names);
+                    }
                 }
                 Stmt::AugAssign { target, value, .. } => {
                     Self::collect_names_expr(target, names);
@@ -193,7 +193,9 @@ impl Compiler {
                 }
                 Stmt::AnnAssign { target, value, .. } => {
                     Self::collect_names_expr(target, names);
-                    if let Some(v) = value { Self::collect_names_expr(v, names); }
+                    if let Some(v) = value {
+                        Self::collect_names_expr(v, names);
+                    }
                 }
                 Stmt::If { test, body, orelse } => {
                     Self::collect_names_expr(test, names);
@@ -205,7 +207,13 @@ impl Compiler {
                     Self::collect_names_stmts_inner(body, names);
                     Self::collect_names_stmts_inner(orelse, names);
                 }
-                Stmt::For { target, iter, body, orelse } => {
+                Stmt::For {
+                    target,
+                    iter,
+                    body,
+                    orelse,
+                    ..
+                } => {
                     Self::collect_names_expr(target, names);
                     Self::collect_names_expr(iter, names);
                     Self::collect_names_stmts_inner(body, names);
@@ -217,7 +225,7 @@ impl Compiler {
                 Stmt::ClassDef { body, .. } => {
                     Self::collect_names_stmts_inner(body, names);
                 }
-                Stmt::With { items, body } => {
+                Stmt::With { items, body, .. } => {
                     for item in items {
                         Self::collect_names_expr(&item.context_expr, names);
                         if let Some(var) = &item.optional_vars {
@@ -228,31 +236,52 @@ impl Compiler {
                 }
                 Stmt::Match { subject, cases } => {
                     Self::collect_names_expr(subject, names);
-                    for case in cases { Self::collect_names_stmts_inner(&case.body, names); }
+                    for case in cases {
+                        Self::collect_names_stmts_inner(&case.body, names);
+                    }
                 }
                 Stmt::Raise { exc, cause } => {
-                    if let Some(e) = exc { Self::collect_names_expr(e, names); }
-                    if let Some(c) = cause { Self::collect_names_expr(c, names); }
+                    if let Some(e) = exc {
+                        Self::collect_names_expr(e, names);
+                    }
+                    if let Some(c) = cause {
+                        Self::collect_names_expr(c, names);
+                    }
                 }
-                Stmt::Try { body, handlers, orelse, finalbody } => {
+                Stmt::Try {
+                    body,
+                    handlers,
+                    orelse,
+                    finalbody,
+                } => {
                     Self::collect_names_stmts_inner(body, names);
-                    for h in handlers { Self::collect_names_stmts_inner(&h.body, names); }
+                    for h in handlers {
+                        Self::collect_names_stmts_inner(&h.body, names);
+                    }
                     Self::collect_names_stmts_inner(orelse, names);
                     Self::collect_names_stmts_inner(finalbody, names);
                 }
                 Stmt::Assert { test, msg } => {
                     Self::collect_names_expr(test, names);
-                    if let Some(m) = msg { Self::collect_names_expr(m, names); }
+                    if let Some(m) = msg {
+                        Self::collect_names_expr(m, names);
+                    }
                 }
                 Stmt::Delete(targets) => {
-                    for t in targets { Self::collect_names_expr(t, names); }
+                    for t in targets {
+                        Self::collect_names_expr(t, names);
+                    }
                 }
                 Stmt::Import(names_list) => {
                     for alias in names_list {
                         names.insert(alias.name.clone());
                     }
                 }
-                Stmt::ImportFrom { module: _, names: names_list, .. } => {
+                Stmt::ImportFrom {
+                    module: _,
+                    names: names_list,
+                    ..
+                } => {
                     for alias in names_list {
                         names.insert(alias.name.clone());
                     }
@@ -264,7 +293,9 @@ impl Compiler {
 
     fn collect_names_expr(expr: &Expr, names: &mut HashSet<String>) {
         match expr {
-            Expr::Name(n) => { names.insert(n.clone()); }
+            Expr::Name(n) => {
+                names.insert(n.clone());
+            }
             Expr::Constant(_) | Expr::FString(_) | Expr::JoinedStr(_) => {}
             Expr::BinOp { left, right, .. } => {
                 Self::collect_names_expr(left, names);
@@ -272,16 +303,30 @@ impl Compiler {
             }
             Expr::UnaryOp { operand, .. } => Self::collect_names_expr(operand, names),
             Expr::BoolOp { values, .. } => {
-                for v in values { Self::collect_names_expr(v, names); }
+                for v in values {
+                    Self::collect_names_expr(v, names);
+                }
             }
-            Expr::Compare { left, comparators, .. } => {
+            Expr::Compare {
+                left, comparators, ..
+            } => {
                 Self::collect_names_expr(left, names);
-                for c in comparators { Self::collect_names_expr(c, names); }
+                for c in comparators {
+                    Self::collect_names_expr(c, names);
+                }
             }
-            Expr::Call { func, args, keywords } => {
+            Expr::Call {
+                func,
+                args,
+                keywords,
+            } => {
                 Self::collect_names_expr(func, names);
-                for a in args { Self::collect_names_expr(a, names); }
-                for kw in keywords { Self::collect_names_expr(&kw.value, names); }
+                for a in args {
+                    Self::collect_names_expr(a, names);
+                }
+                for kw in keywords {
+                    Self::collect_names_expr(&kw.value, names);
+                }
             }
             Expr::IfExp { test, body, orelse } => {
                 Self::collect_names_expr(test, names);
@@ -295,33 +340,53 @@ impl Compiler {
             }
             Expr::Starred(expr) => Self::collect_names_expr(expr, names),
             Expr::List(elts) | Expr::Tuple(elts) | Expr::Set(elts) => {
-                for e in elts { Self::collect_names_expr(e, names); }
+                for e in elts {
+                    Self::collect_names_expr(e, names);
+                }
             }
             Expr::Dict { keys, values } => {
-                for k in keys.iter().flatten() { Self::collect_names_expr(k, names); }
-                for v in values { Self::collect_names_expr(v, names); }
+                for k in keys.iter().flatten() {
+                    Self::collect_names_expr(k, names);
+                }
+                for v in values {
+                    Self::collect_names_expr(v, names);
+                }
             }
             Expr::Slice { lower, upper, step } => {
-                for s in [lower, upper, step].iter().filter_map(|s| s.as_ref()) { Self::collect_names_expr(s, names); }
+                for s in [lower, upper, step].iter().filter_map(|s| s.as_ref()) {
+                    Self::collect_names_expr(s, names);
+                }
             }
             Expr::Lambda { body, .. } => Self::collect_names_expr(body, names),
-            Expr::Yield(Some(e)) | Expr::YieldFrom(e) | Expr::Await(e) => Self::collect_names_expr(e, names),
+            Expr::Yield(Some(e)) | Expr::YieldFrom(e) | Expr::Await(e) => {
+                Self::collect_names_expr(e, names)
+            }
             Expr::Yield(None) => {}
-            Expr::ListComp { elt, generators } | Expr::SetComp { elt, generators } | Expr::GeneratorExp { elt, generators } => {
+            Expr::ListComp { elt, generators }
+            | Expr::SetComp { elt, generators }
+            | Expr::GeneratorExp { elt, generators } => {
                 Self::collect_names_expr(elt, names);
                 for gen in generators {
                     Self::collect_names_expr(&gen.target, names);
                     Self::collect_names_expr(&gen.iter, names);
-                    for if_cond in &gen.ifs { Self::collect_names_expr(if_cond, names); }
+                    for if_cond in &gen.ifs {
+                        Self::collect_names_expr(if_cond, names);
+                    }
                 }
             }
-            Expr::DictComp { key, value, generators } => {
+            Expr::DictComp {
+                key,
+                value,
+                generators,
+            } => {
                 Self::collect_names_expr(key, names);
                 Self::collect_names_expr(value, names);
                 for gen in generators {
                     Self::collect_names_expr(&gen.target, names);
                     Self::collect_names_expr(&gen.iter, names);
-                    for if_cond in &gen.ifs { Self::collect_names_expr(if_cond, names); }
+                    for if_cond in &gen.ifs {
+                        Self::collect_names_expr(if_cond, names);
+                    }
                 }
             }
             Expr::NamedExpr { target, value } => {
@@ -342,15 +407,26 @@ impl Compiler {
         for stmt in stmts {
             match stmt {
                 Stmt::Assign { targets, .. } => {
-                    for t in targets { Self::collect_assign_target_names(t, assigned); }
+                    for t in targets {
+                        Self::collect_assign_target_names(t, assigned);
+                    }
                 }
                 Stmt::AugAssign { target, .. } => {
                     Self::collect_assign_target_names(target, assigned);
                 }
-                Stmt::AnnAssign { target, value: Some(_), .. } => {
+                Stmt::AnnAssign {
+                    target,
+                    value: Some(_),
+                    ..
+                } => {
                     Self::collect_assign_target_names(target, assigned);
                 }
-                Stmt::For { target, body, orelse, .. } => {
+                Stmt::For {
+                    target,
+                    body,
+                    orelse,
+                    ..
+                } => {
                     Self::collect_assign_target_names(target, assigned);
                     Self::collect_assigned_inner(body, assigned);
                     Self::collect_assigned_inner(orelse, assigned);
@@ -369,7 +445,7 @@ impl Compiler {
                     Self::collect_assigned_inner(body, assigned);
                     Self::collect_assigned_inner(orelse, assigned);
                 }
-                Stmt::With { items, body } => {
+                Stmt::With { items, body, .. } => {
                     for item in items {
                         if let Some(var) = &item.optional_vars {
                             Self::collect_assign_target_names(var, assigned);
@@ -378,11 +454,20 @@ impl Compiler {
                     Self::collect_assigned_inner(body, assigned);
                 }
                 Stmt::Match { cases, .. } => {
-                    for case in cases { Self::collect_assigned_inner(&case.body, assigned); }
+                    for case in cases {
+                        Self::collect_assigned_inner(&case.body, assigned);
+                    }
                 }
-                Stmt::Try { body, handlers, orelse, finalbody } => {
+                Stmt::Try {
+                    body,
+                    handlers,
+                    orelse,
+                    finalbody,
+                } => {
                     Self::collect_assigned_inner(body, assigned);
-                    for h in handlers { Self::collect_assigned_inner(&h.body, assigned); }
+                    for h in handlers {
+                        Self::collect_assigned_inner(&h.body, assigned);
+                    }
                     Self::collect_assigned_inner(orelse, assigned);
                     Self::collect_assigned_inner(finalbody, assigned);
                 }
@@ -391,7 +476,9 @@ impl Compiler {
                         assigned.insert(alias.asname.clone().unwrap_or_else(|| alias.name.clone()));
                     }
                 }
-                Stmt::ImportFrom { names: names_list, .. } => {
+                Stmt::ImportFrom {
+                    names: names_list, ..
+                } => {
                     for alias in names_list {
                         assigned.insert(alias.asname.clone().unwrap_or_else(|| alias.name.clone()));
                     }
@@ -403,9 +490,13 @@ impl Compiler {
 
     fn collect_assign_target_names(target: &Expr, assigned: &mut HashSet<String>) {
         match target {
-            Expr::Name(n) => { assigned.insert(n.clone()); }
+            Expr::Name(n) => {
+                assigned.insert(n.clone());
+            }
             Expr::List(elts) | Expr::Tuple(elts) => {
-                for e in elts { Self::collect_assign_target_names(e, assigned); }
+                for e in elts {
+                    Self::collect_assign_target_names(e, assigned);
+                }
             }
             Expr::Starred(e) => Self::collect_assign_target_names(e, assigned),
             _ => {}
@@ -430,17 +521,27 @@ impl Compiler {
                 Stmt::While { test, .. } => Self::collect_names_expr(test, &mut names),
                 Stmt::For { iter, .. } => Self::collect_names_expr(iter, &mut names),
                 Stmt::Raise { exc, cause } => {
-                    if let Some(e) = exc { Self::collect_names_expr(e, &mut names); }
-                    if let Some(c) = cause { Self::collect_names_expr(c, &mut names); }
+                    if let Some(e) = exc {
+                        Self::collect_names_expr(e, &mut names);
+                    }
+                    if let Some(c) = cause {
+                        Self::collect_names_expr(c, &mut names);
+                    }
                 }
                 Stmt::Assert { test, msg } => {
                     Self::collect_names_expr(test, &mut names);
-                    if let Some(m) = msg { Self::collect_names_expr(m, &mut names); }
+                    if let Some(m) = msg {
+                        Self::collect_names_expr(m, &mut names);
+                    }
                 }
                 Stmt::With { items, .. } => {
-                    for item in items { Self::collect_names_expr(&item.context_expr, &mut names); }
+                    for item in items {
+                        Self::collect_names_expr(&item.context_expr, &mut names);
+                    }
                 }
-                Stmt::Match { subject, .. } => { Self::collect_names_expr(subject, &mut names); }
+                Stmt::Match { subject, .. } => {
+                    Self::collect_names_expr(subject, &mut names);
+                }
                 Stmt::FunctionDef { .. } | Stmt::ClassDef { .. } => {}
                 _ => {}
             }
@@ -468,14 +569,23 @@ impl Compiler {
         for arg in args {
             local_names.insert(arg.arg.clone());
         }
-        for n in &effective_nonlocal { local_names.remove(n); }
-        for n in &effective_global { local_names.remove(n); }
+        for n in &effective_nonlocal {
+            local_names.remove(n);
+        }
+        for n in &effective_global {
+            local_names.remove(n);
+        }
 
         // Collect names referenced in THIS function's own body
         let own_refs = Self::collect_own_referenced_names(body);
 
         // Collect names referenced in nested function definitions
-        let nested_refs = Self::collect_nested_references(body, &local_names, &effective_global, &effective_nonlocal);
+        let nested_refs = Self::collect_nested_references(
+            body,
+            &local_names,
+            &effective_global,
+            &effective_nonlocal,
+        );
 
         // All names from outer scope = own_refs (not local) + nested_refs
         let mut all_outer_refs = nested_refs.clone();
@@ -486,20 +596,25 @@ impl Compiler {
         }
 
         // cell_vars = local_names ∩ (names from nested functions that reference our locals)
-        let mut cell_vars: Vec<String> = local_names.intersection(&nested_refs)
+        let mut cell_vars: Vec<String> = local_names
+            .intersection(&nested_refs)
             .filter(|n| !effective_global.contains(*n))
             .cloned()
             .collect();
         cell_vars.sort();
 
         // free_vars = all_outer_refs - local_names (excluding global)
-        let mut free_vars: Vec<String> = all_outer_refs.difference(&local_names)
+        let mut free_vars: Vec<String> = all_outer_refs
+            .difference(&local_names)
             .filter(|n| !effective_global.contains(*n))
             .cloned()
             .collect();
         // Also include name referenced directly in this function that aren't local
         for name in &own_refs {
-            if !local_names.contains(name) && !free_vars.contains(name) && !effective_global.contains(name) {
+            if !local_names.contains(name)
+                && !free_vars.contains(name)
+                && !effective_global.contains(name)
+            {
                 free_vars.push(name.clone());
             }
         }
@@ -523,7 +638,13 @@ impl Compiler {
         nonlocal_names: &HashSet<String>,
     ) -> HashSet<String> {
         let mut refs = HashSet::new();
-        Self::collect_nested_refs_inner(stmts, local_names, global_names, nonlocal_names, &mut refs);
+        Self::collect_nested_refs_inner(
+            stmts,
+            local_names,
+            global_names,
+            nonlocal_names,
+            &mut refs,
+        );
         refs
     }
 
@@ -539,9 +660,15 @@ impl Compiler {
                 Stmt::FunctionDef { args, body, .. } => {
                     let (inner_globals, inner_nonlocals) = Self::scan_global_nonlocal_decls(body);
                     let mut inner_local = Self::collect_assigned_names(body);
-                    for arg in args { inner_local.insert(arg.arg.clone()); }
-                    for n in &inner_nonlocals { inner_local.remove(n); }
-                    for n in &inner_globals { inner_local.remove(n); }
+                    for arg in args {
+                        inner_local.insert(arg.arg.clone());
+                    }
+                    for n in &inner_nonlocals {
+                        inner_local.remove(n);
+                    }
+                    for n in &inner_globals {
+                        inner_local.remove(n);
+                    }
                     let all_inner_names = Self::collect_names_in_stmts(body);
                     for name in &all_inner_names {
                         if !inner_local.contains(name) && !inner_globals.contains(name) {
@@ -559,8 +686,16 @@ impl Compiler {
         let mut nonlocals = HashSet::new();
         for stmt in body {
             match stmt {
-                Stmt::Global(names) => { for n in names { globals.insert(n.clone()); } }
-                Stmt::Nonlocal(names) => { for n in names { nonlocals.insert(n.clone()); } }
+                Stmt::Global(names) => {
+                    for n in names {
+                        globals.insert(n.clone());
+                    }
+                }
+                Stmt::Nonlocal(names) => {
+                    for n in names {
+                        nonlocals.insert(n.clone());
+                    }
+                }
                 _ => {}
             }
         }
@@ -642,7 +777,7 @@ impl Compiler {
                 self.compile_expr(target)?;
                 self.compile_expr(value)?;
                 let bin_op = match op {
-                    Operator::Add => 0,  // BINARY_OP + 
+                    Operator::Add => 0, // BINARY_OP +
                     Operator::Sub => 1,
                     Operator::Mult => 2,
                     Operator::Div => 3,
@@ -679,7 +814,10 @@ impl Compiler {
                 let else_label = self.new_label();
                 let end_label = self.new_label();
                 self.mark_label(start_label);
-                self.loop_stack.push(LoopInfo { start_label, end_label });
+                self.loop_stack.push(LoopInfo {
+                    start_label,
+                    end_label,
+                });
                 self.compile_expr(test)?;
                 self.emit_jump(Opcode::POP_JUMP_IF_FALSE, else_label);
                 self.compile_stmts(body)?;
@@ -691,13 +829,22 @@ impl Compiler {
                 self.fix_label(end_label);
                 self.loop_stack.pop();
             }
-            Stmt::For { target, iter, body, orelse } => {
+            Stmt::For {
+                target,
+                iter,
+                body,
+                orelse,
+                ..
+            } => {
                 self.compile_expr(iter)?;
                 self.emit(Opcode::GET_ITER, 0);
                 let start_label = self.new_label();
                 let else_label = self.new_label();
                 let end_label = self.new_label();
-                self.loop_stack.push(LoopInfo { start_label, end_label });
+                self.loop_stack.push(LoopInfo {
+                    start_label,
+                    end_label,
+                });
                 self.mark_label(start_label);
                 self.emit_jump(Opcode::FOR_ITER, else_label);
                 self.compile_assign_target(target)?;
@@ -711,7 +858,14 @@ impl Compiler {
                 self.fix_label(end_label);
                 self.loop_stack.pop();
             }
-            Stmt::FunctionDef { name, args, body, decorator_list, returns: _, is_async: _ } => {
+            Stmt::FunctionDef {
+                name,
+                args,
+                body,
+                decorator_list,
+                returns: _,
+                is_async: _,
+            } => {
                 for decorator in decorator_list {
                     self.compile_expr(decorator)?;
                 }
@@ -724,14 +878,24 @@ impl Compiler {
                 let name_idx = self.get_name_index(name) as u32;
                 self.emit(Opcode::STORE_NAME, name_idx);
             }
-            Stmt::ClassDef { name, bases, keywords: kw, body, decorator_list } => {
+            Stmt::ClassDef {
+                name,
+                bases,
+                keywords: kw,
+                body,
+                decorator_list,
+            } => {
                 // Extract docstring from first statement if present
                 let docstring = body.first().and_then(|s| {
                     if let Stmt::Expr(expr) = s {
                         if let Expr::Constant(Constant::String(doc)) = expr.as_ref() {
                             Some(doc.clone())
-                        } else { None }
-                    } else { None }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
                 });
                 self.emit(Opcode::LOAD_BUILD_CLASS, 0);
                 self.compile_class_body(name.clone(), body)?;
@@ -790,7 +954,11 @@ impl Compiler {
                     }
                 }
             }
-            Stmt::ImportFrom { module, names, level: _ } => {
+            Stmt::ImportFrom {
+                module,
+                names,
+                level: _,
+            } => {
                 let module_name = module.clone().unwrap_or_default();
                 let name_idx = self.get_name_index(&module_name) as u32;
                 let const_none = self.get_const_index(ConstValue::None) as u32;
@@ -862,7 +1030,12 @@ impl Compiler {
                     self.emit(Opcode::RAISE_VARARGS, 0);
                 }
             }
-            Stmt::Try { body, handlers, orelse, finalbody } => {
+            Stmt::Try {
+                body,
+                handlers,
+                orelse,
+                finalbody,
+            } => {
                 if !finalbody.is_empty() && handlers.is_empty() && orelse.is_empty() {
                     // Simple try/finally
                     let finally_label = self.new_label();
@@ -996,7 +1169,8 @@ impl Compiler {
                 }
             }
             Stmt::Assert { test, msg } => {
-                let assertion_error_idx = self.get_const_index(ConstValue::String("AssertionError".to_string())) as u32;
+                let assertion_error_idx =
+                    self.get_const_index(ConstValue::String("AssertionError".to_string())) as u32;
                 self.emit(Opcode::LOAD_CONST, assertion_error_idx);
                 self.compile_expr(test)?;
                 let ok_label = self.new_label();
@@ -1017,7 +1191,7 @@ impl Compiler {
                 self.fix_label(ok_label);
                 self.emit(Opcode::POP_TOP, 0);
             }
-            Stmt::With { items, body } => {
+            Stmt::With { items, body, .. } => {
                 for (_i, item) in items.iter().enumerate() {
                     self.compile_expr(&item.context_expr)?;
                     self.emit(Opcode::SETUP_WITH, 0);
@@ -1057,7 +1231,11 @@ impl Compiler {
                     self.compile_stmts(body)?;
                 }
             }
-            Stmt::AnnAssign { target, annotation: _, value } => {
+            Stmt::AnnAssign {
+                target,
+                annotation: _,
+                value,
+            } => {
                 if let Some(val) = value {
                     self.compile_expr(val)?;
                     self.compile_assign_target(target)?;
@@ -1141,7 +1319,10 @@ impl Compiler {
     fn compile_assign_target(&mut self, target: &Expr) -> Result<(), String> {
         match target {
             Expr::Name(name) => {
-                if self.scope == ScopeType::Module || self.scope == ScopeType::ClassBody || self.global_names.contains(name) {
+                if self.scope == ScopeType::Module
+                    || self.scope == ScopeType::ClassBody
+                    || self.global_names.contains(name)
+                {
                     let idx = self.get_name_index(name) as u32;
                     self.emit(Opcode::STORE_NAME, idx);
                 } else if self.scope == ScopeType::Function && self.code.cellvars.contains(name) {
@@ -1182,16 +1363,29 @@ impl Compiler {
         Ok(())
     }
 
-    fn compile_function(&mut self, name: String, args: &[Arg], body: &[Stmt]) -> Result<(), String> {
+    fn compile_function(
+        &mut self,
+        name: String,
+        args: &[Arg],
+        body: &[Stmt],
+    ) -> Result<(), String> {
         // Extract docstring from first statement if present
         let docstring = body.first().and_then(|s| {
             if let Stmt::Expr(expr) = s {
                 if let Expr::Constant(Constant::String(doc)) = expr.as_ref() {
                     Some(doc.clone())
-                } else { None }
-            } else { None }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
         });
-        let body = if docstring.is_some() { &body[1..] } else { body };
+        let body = if docstring.is_some() {
+            &body[1..]
+        } else {
+            body
+        };
 
         // Save outer code BEFORE enter_scope (which takes cellvars/freevars from self.code)
         let old_code = std::mem::replace(&mut self.code, CodeObject::new(name.clone()));
@@ -1202,7 +1396,8 @@ impl Compiler {
         self.enter_scope(ScopeType::Function);
 
         // Pre-analyze the function to determine cell vars and free vars
-        let (cell_vars, free_vars) = Self::analyze_function(args, body, &self.global_names, &self.nonlocal_names);
+        let (cell_vars, free_vars) =
+            Self::analyze_function(args, body, &self.global_names, &self.nonlocal_names);
         self.code.cellvars = cell_vars;
         self.code.freevars = free_vars;
 
@@ -1317,7 +1512,10 @@ impl Compiler {
 
         // Push defaults onto stack (in normal order, they'll be reversed in MAKE_FUNCTION)
         if defaults_count > 0 {
-            for arg in args.iter().filter(|a| !a.is_vararg && !a.is_kwarg && a.default.is_some()) {
+            for arg in args
+                .iter()
+                .filter(|a| !a.is_vararg && !a.is_kwarg && a.default.is_some())
+            {
                 if let Some(default) = &arg.default {
                     self.compile_expr(default)?;
                 }
@@ -1344,8 +1542,12 @@ impl Compiler {
         let body = if let Some(Stmt::Expr(expr)) = body.first() {
             if matches!(expr.as_ref(), Expr::Constant(Constant::String(_))) {
                 &body[1..]
-            } else { body }
-        } else { body };
+            } else {
+                body
+            }
+        } else {
+            body
+        };
 
         self.enter_scope(ScopeType::ClassBody);
 
@@ -1398,7 +1600,10 @@ impl Compiler {
                 self.emit(Opcode::LOAD_CONST, idx);
             }
             Expr::Name(name) => {
-                if self.scope == ScopeType::Module || self.scope == ScopeType::ClassBody || self.global_names.contains(name) {
+                if self.scope == ScopeType::Module
+                    || self.scope == ScopeType::ClassBody
+                    || self.global_names.contains(name)
+                {
                     let name_idx = self.get_name_index(name) as u32;
                     self.emit(Opcode::LOAD_NAME, name_idx);
                 } else if self.scope == ScopeType::Function && self.code.freevars.contains(name) {
@@ -1464,7 +1669,11 @@ impl Compiler {
                 }
                 self.fix_label(end_label);
             }
-            Expr::Compare { left, ops, comparators } => {
+            Expr::Compare {
+                left,
+                ops,
+                comparators,
+            } => {
                 let chained_end = self.new_label();
                 for (i, (op, right)) in ops.iter().zip(comparators.iter()).enumerate() {
                     if i > 0 {
@@ -1495,7 +1704,11 @@ impl Compiler {
                 }
                 self.fix_label(chained_end);
             }
-            Expr::Call { func, args, keywords } => {
+            Expr::Call {
+                func,
+                args,
+                keywords,
+            } => {
                 let npos = args.len();
                 let nkw = keywords.len();
 
@@ -1506,7 +1719,8 @@ impl Compiler {
                 }
                 for kw in keywords {
                     if let Some(name) = &kw.arg {
-                        let name_idx = self.get_const_index(ConstValue::String(name.clone())) as u32;
+                        let name_idx =
+                            self.get_const_index(ConstValue::String(name.clone())) as u32;
                         self.emit(Opcode::LOAD_CONST, name_idx);
                         self.compile_expr(&kw.value)?;
                     } else {
@@ -1529,7 +1743,11 @@ impl Compiler {
                 self.fix_label(end_label);
             }
             Expr::Lambda { args, body } => {
-                self.compile_function("<lambda>".to_string(), args, &[Stmt::Return(Some(body.clone()))])?;
+                self.compile_function(
+                    "<lambda>".to_string(),
+                    args,
+                    &[Stmt::Return(Some(body.clone()))],
+                )?;
             }
             Expr::Attribute { value, attr } => {
                 self.compile_expr(value)?;
@@ -1582,12 +1800,20 @@ impl Compiler {
             }
             Expr::Slice { lower, upper, step } => {
                 let const_none = self.get_const_index(ConstValue::None) as u32;
-                if let Some(l) = lower { self.compile_expr(l)?; }
-                else { self.emit(Opcode::LOAD_CONST, const_none); }
-                if let Some(u) = upper { self.compile_expr(u)?; }
-                else { self.emit(Opcode::LOAD_CONST, const_none); }
+                if let Some(l) = lower {
+                    self.compile_expr(l)?;
+                } else {
+                    self.emit(Opcode::LOAD_CONST, const_none);
+                }
+                if let Some(u) = upper {
+                    self.compile_expr(u)?;
+                } else {
+                    self.emit(Opcode::LOAD_CONST, const_none);
+                }
                 if step.is_some() {
-                    if let Some(s) = step { self.compile_expr(s)?; }
+                    if let Some(s) = step {
+                        self.compile_expr(s)?;
+                    }
                     self.emit(Opcode::BUILD_SLICE, 3);
                 } else {
                     self.emit(Opcode::BUILD_SLICE, 2);
@@ -1639,7 +1865,11 @@ impl Compiler {
                 self.emit(Opcode::DUP_TOP, 0);
                 self.compile_assign_target(target)?;
             }
-            Expr::DictComp { key, value, generators } => {
+            Expr::DictComp {
+                key,
+                value,
+                generators,
+            } => {
                 self.compile_dict_comprehension(key, value, generators)?;
             }
             Expr::YieldFrom(expr) => {
@@ -1666,7 +1896,12 @@ impl Compiler {
         Ok(())
     }
 
-    fn compile_comprehension(&mut self, elt: &Expr, generators: &[Comprehension], is_set: bool) -> Result<(), String> {
+    fn compile_comprehension(
+        &mut self,
+        elt: &Expr,
+        generators: &[Comprehension],
+        is_set: bool,
+    ) -> Result<(), String> {
         if generators.is_empty() {
             return Err("Comprehension must have at least one generator".to_string());
         }
@@ -1732,7 +1967,12 @@ impl Compiler {
         Ok(())
     }
 
-    fn compile_dict_comprehension(&mut self, key: &Expr, value: &Expr, generators: &[Comprehension]) -> Result<(), String> {
+    fn compile_dict_comprehension(
+        &mut self,
+        key: &Expr,
+        value: &Expr,
+        generators: &[Comprehension],
+    ) -> Result<(), String> {
         if generators.is_empty() {
             return Err("Comprehension must have at least one generator".to_string());
         }
@@ -1791,15 +2031,47 @@ impl Compiler {
 
 fn contains_yield_in_stmts(stmts: &[Stmt]) -> bool {
     stmts.iter().any(|s| match s {
-        Stmt::Expr(expr) | Stmt::Return(Some(expr)) | Stmt::Assign { value: expr, .. } | Stmt::AugAssign { value: expr, .. } => contains_yield_in_expr(expr),
-        Stmt::If { test, body, orelse } => contains_yield_in_expr(test) || contains_yield_in_stmts(body) || contains_yield_in_stmts(orelse),
-        Stmt::While { test, body, orelse } => contains_yield_in_expr(test) || contains_yield_in_stmts(body) || contains_yield_in_stmts(orelse),
-        Stmt::For { iter, body, orelse, .. } => contains_yield_in_expr(iter) || contains_yield_in_stmts(body) || contains_yield_in_stmts(orelse),
-        Stmt::With { items, body } => items.iter().any(|i| contains_yield_in_expr(&i.context_expr)) || contains_yield_in_stmts(body),
-        Stmt::Try { body, handlers, orelse, finalbody } => {
-            contains_yield_in_stmts(body) || handlers.iter().any(|h| contains_yield_in_stmts(&h.body)) || contains_yield_in_stmts(orelse) || contains_yield_in_stmts(finalbody)
+        Stmt::Expr(expr)
+        | Stmt::Return(Some(expr))
+        | Stmt::Assign { value: expr, .. }
+        | Stmt::AugAssign { value: expr, .. } => contains_yield_in_expr(expr),
+        Stmt::If { test, body, orelse } => {
+            contains_yield_in_expr(test)
+                || contains_yield_in_stmts(body)
+                || contains_yield_in_stmts(orelse)
         }
-        Stmt::FunctionDef { body, .. } | Stmt::ClassDef { body, .. } => contains_yield_in_stmts(body),
+        Stmt::While { test, body, orelse } => {
+            contains_yield_in_expr(test)
+                || contains_yield_in_stmts(body)
+                || contains_yield_in_stmts(orelse)
+        }
+        Stmt::For {
+            iter, body, orelse, ..
+        } => {
+            contains_yield_in_expr(iter)
+                || contains_yield_in_stmts(body)
+                || contains_yield_in_stmts(orelse)
+        }
+        Stmt::With { items, body, .. } => {
+            items
+                .iter()
+                .any(|i| contains_yield_in_expr(&i.context_expr))
+                || contains_yield_in_stmts(body)
+        }
+        Stmt::Try {
+            body,
+            handlers,
+            orelse,
+            finalbody,
+        } => {
+            contains_yield_in_stmts(body)
+                || handlers.iter().any(|h| contains_yield_in_stmts(&h.body))
+                || contains_yield_in_stmts(orelse)
+                || contains_yield_in_stmts(finalbody)
+        }
+        Stmt::FunctionDef { body, .. } | Stmt::ClassDef { body, .. } => {
+            contains_yield_in_stmts(body)
+        }
         _ => false,
     })
 }
@@ -1808,28 +2080,68 @@ fn contains_yield_in_expr(expr: &Expr) -> bool {
     match expr {
         Expr::Yield(_) => true,
         Expr::YieldFrom(_) => true,
-        Expr::BinOp { left, right, .. } => contains_yield_in_expr(left) || contains_yield_in_expr(right),
+        Expr::BinOp { left, right, .. } => {
+            contains_yield_in_expr(left) || contains_yield_in_expr(right)
+        }
         Expr::BoolOp { values, .. } => values.iter().any(contains_yield_in_expr),
-        Expr::Compare { left, comparators, .. } => contains_yield_in_expr(left) || comparators.iter().any(contains_yield_in_expr),
+        Expr::Compare {
+            left, comparators, ..
+        } => contains_yield_in_expr(left) || comparators.iter().any(contains_yield_in_expr),
         Expr::UnaryOp { operand, .. } => contains_yield_in_expr(operand),
-        Expr::IfExp { test, body, orelse } => contains_yield_in_expr(test) || contains_yield_in_expr(body) || contains_yield_in_expr(orelse),
+        Expr::IfExp { test, body, orelse } => {
+            contains_yield_in_expr(test)
+                || contains_yield_in_expr(body)
+                || contains_yield_in_expr(orelse)
+        }
         Expr::Lambda { body, .. } => contains_yield_in_expr(body),
-        Expr::Call { func, args, keywords } => {
-            contains_yield_in_expr(func) || args.iter().any(contains_yield_in_expr) || keywords.iter().any(|k| contains_yield_in_expr(&k.value))
+        Expr::Call {
+            func,
+            args,
+            keywords,
+        } => {
+            contains_yield_in_expr(func)
+                || args.iter().any(contains_yield_in_expr)
+                || keywords.iter().any(|k| contains_yield_in_expr(&k.value))
         }
         Expr::Attribute { value, .. } => contains_yield_in_expr(value),
-        Expr::Subscript { value, slice } => contains_yield_in_expr(value) || contains_yield_in_expr(slice),
+        Expr::Subscript { value, slice } => {
+            contains_yield_in_expr(value) || contains_yield_in_expr(slice)
+        }
         Expr::List(elts) | Expr::Tuple(elts) => elts.iter().any(contains_yield_in_expr),
-        Expr::Dict { keys, values } => keys.iter().any(|k| k.as_ref().map_or(false, |e| contains_yield_in_expr(e))) || values.iter().any(contains_yield_in_expr),
+        Expr::Dict { keys, values } => {
+            keys.iter()
+                .any(|k| k.as_ref().map_or(false, |e| contains_yield_in_expr(e)))
+                || values.iter().any(contains_yield_in_expr)
+        }
         Expr::Starred(expr) => contains_yield_in_expr(expr),
         Expr::ListComp { elt, generators } | Expr::SetComp { elt, generators } => {
-            contains_yield_in_expr(elt) || generators.iter().any(|g| contains_yield_in_expr(&g.iter) || contains_yield_in_expr(&g.target) || g.ifs.iter().any(|e| contains_yield_in_expr(e)))
+            contains_yield_in_expr(elt)
+                || generators.iter().any(|g| {
+                    contains_yield_in_expr(&g.iter)
+                        || contains_yield_in_expr(&g.target)
+                        || g.ifs.iter().any(|e| contains_yield_in_expr(e))
+                })
         }
-        Expr::DictComp { key, value, generators } => {
-            contains_yield_in_expr(key) || contains_yield_in_expr(value) || generators.iter().any(|g| contains_yield_in_expr(&g.iter) || contains_yield_in_expr(&g.target) || g.ifs.iter().any(|e| contains_yield_in_expr(e)))
+        Expr::DictComp {
+            key,
+            value,
+            generators,
+        } => {
+            contains_yield_in_expr(key)
+                || contains_yield_in_expr(value)
+                || generators.iter().any(|g| {
+                    contains_yield_in_expr(&g.iter)
+                        || contains_yield_in_expr(&g.target)
+                        || g.ifs.iter().any(|e| contains_yield_in_expr(e))
+                })
         }
         Expr::GeneratorExp { elt, generators } => {
-            contains_yield_in_expr(elt) || generators.iter().any(|g| contains_yield_in_expr(&g.iter) || contains_yield_in_expr(&g.target) || g.ifs.iter().any(|e| contains_yield_in_expr(e)))
+            contains_yield_in_expr(elt)
+                || generators.iter().any(|g| {
+                    contains_yield_in_expr(&g.iter)
+                        || contains_yield_in_expr(&g.target)
+                        || g.ifs.iter().any(|e| contains_yield_in_expr(e))
+                })
         }
         _ => false,
     }

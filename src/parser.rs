@@ -146,10 +146,18 @@ impl Parser {
             return self.parse_while();
         }
         if self.at(&Token::For) {
-            return self.parse_for();
+            return self.parse_for(false);
         }
         if self.at(&Token::With) {
-            return self.parse_with();
+            return self.parse_with(false);
+        }
+        if self.at(&Token::Async) && self.peek() == &Token::For {
+            self.next(); // consume async
+            return self.parse_for(true);
+        }
+        if self.at(&Token::Async) && self.peek() == &Token::With {
+            self.next(); // consume async
+            return self.parse_with(true);
         }
         if self.at(&Token::Try) {
             return self.parse_try();
@@ -370,7 +378,7 @@ impl Parser {
         })
     }
 
-    fn parse_for(&mut self) -> Result<Stmt, String> {
+    fn parse_for(&mut self, is_async: bool) -> Result<Stmt, String> {
         self.expect(&Token::For)?;
         let target = self.parse_bitwise_or()?;
         self.expect(&Token::In)?;
@@ -387,10 +395,11 @@ impl Parser {
             iter: Box::new(iter),
             body,
             orelse,
+            is_async,
         })
     }
 
-    fn parse_with(&mut self) -> Result<Stmt, String> {
+    fn parse_with(&mut self, is_async: bool) -> Result<Stmt, String> {
         self.expect(&Token::With)?;
         let mut items = Vec::new();
         loop {
@@ -408,7 +417,7 @@ impl Parser {
         }
         self.expect(&Token::Colon)?;
         let body = self.parse_block()?;
-        Ok(Stmt::With { items, body })
+        Ok(Stmt::With { items, body, is_async })
     }
 
     fn parse_try(&mut self) -> Result<Stmt, String> {

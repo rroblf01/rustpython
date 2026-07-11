@@ -46,6 +46,7 @@ pub enum Stmt {
         iter: Box<Expr>,
         body: Vec<Stmt>,
         orelse: Vec<Stmt>,
+        is_async: bool,
     },
     While {
         test: Box<Expr>,
@@ -60,6 +61,7 @@ pub enum Stmt {
     With {
         items: Vec<WithItem>,
         body: Vec<Stmt>,
+        is_async: bool,
     },
     Match {
         subject: Box<Expr>,
