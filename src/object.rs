@@ -3763,7 +3763,22 @@ impl ObjectAccess for PyObject {
                     })),
                     "__exit__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "__exit__".to_string(),
-                        func: |_| Ok(py_none()),
+                        func: |args| {
+                            // args[0] = self_obj (py_none), args[1] = file_obj (via BoundMethod)
+                            if args.len() > 1 {
+                                let is_file = matches!(&*args[1].borrow(), PyObject::File { .. });
+                                if is_file {
+                                    if let PyObject::File { file } = &mut *args[1].borrow_mut() {
+                                        use std::io::Write;
+                                        let _ = file.borrow_mut().flush();
+                                        let _ = std::mem::replace(&mut *file.borrow_mut(), std::fs::File::open("/dev/null").unwrap_or_else(|_| {
+                                            std::fs::File::create("/dev/null").unwrap()
+                                        }));
+                                    }
+                                }
+                            }
+                            Ok(py_none())
+                        },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
                     _ => Err(PyError::attribute_error(format!("'file' object has no attribute '{}'", name))),

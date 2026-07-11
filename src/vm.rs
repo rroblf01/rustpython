@@ -1664,7 +1664,12 @@ impl VirtualMachine {
                 };
                 let exit_method = mgr.borrow().get_attribute("__exit__")
                     .map_err(|_| PyError::attribute_error("context manager has no __exit__"))?;
-                let result = self.call_function(exit_method, vec![typ_str, val, py_none()], vec![])?;
+                // Bind the manager as self so __exit__ can access it
+                let bound = PyObjectRef::imm(PyObject::BoundMethod {
+                    func: exit_method,
+                    self_obj: mgr,
+                });
+                let result = self.call_function(bound, vec![typ_str, val, py_none()], vec![])?;
                 self.frames[fi].push(result);
             }
 
