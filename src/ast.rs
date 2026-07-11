@@ -16,6 +16,7 @@ pub enum Stmt {
         body: Vec<Stmt>,
         decorator_list: Vec<Expr>,
         returns: Option<Box<Expr>>,
+        is_async: bool,
     },
     ClassDef {
         name: Ident,

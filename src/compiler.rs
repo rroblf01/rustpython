@@ -711,7 +711,7 @@ impl Compiler {
                 self.fix_label(end_label);
                 self.loop_stack.pop();
             }
-            Stmt::FunctionDef { name, args, body, decorator_list, returns: _ } => {
+            Stmt::FunctionDef { name, args, body, decorator_list, returns: _, is_async: _ } => {
                 for decorator in decorator_list {
                     self.compile_expr(decorator)?;
                 }

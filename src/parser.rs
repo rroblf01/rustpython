@@ -235,7 +235,8 @@ impl Parser {
 
     fn parse_function_def(&mut self) -> Result<Stmt, String> {
         let decorator_list = Vec::new();
-        if self.at(&Token::Async) {
+        let async_token = self.at(&Token::Async);
+        if async_token {
             self.next(); // async
         }
         self.expect(&Token::Def)?;
@@ -256,6 +257,7 @@ impl Parser {
             body,
             decorator_list,
             returns,
+            is_async: async_token,
         })
     }
 
