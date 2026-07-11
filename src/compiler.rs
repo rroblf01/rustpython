@@ -1034,7 +1034,8 @@ impl Compiler {
                     self.emit_jump(Opcode::SETUP_FINALLY, finally_label);
                     self.compile_stmts(body)?;
                     self.emit(Opcode::POP_BLOCK, 0);
-                    self.compile_expr(&items[0].context_expr)?;
+                    // Manager is still on the stack from SETUP_WITH
+                    self.emit(Opcode::DUP_TOP, 0);
                     let exit_name_idx = self.get_name_index("__exit__") as u32;
                     self.emit(Opcode::LOAD_ATTR, exit_name_idx);
                     let const_none = self.get_const_index(ConstValue::None) as u32;
@@ -1046,7 +1047,8 @@ impl Compiler {
                     self.emit_jump(Opcode::JUMP, end_label);
                     self.fix_label(finally_label);
                     self.emit(Opcode::PUSH_EXC_INFO, 0);
-                    self.compile_expr(&items[0].context_expr)?;
+                    // Manager is on the stack from SETUP_WITH — duplicate it for WITH_EXIT
+                    self.emit(Opcode::DUP_TOP, 0);
                     self.emit(Opcode::WITH_EXIT, 0);
                     self.emit(Opcode::POP_TOP, 0);
                     self.emit(Opcode::RERAISE, 0);

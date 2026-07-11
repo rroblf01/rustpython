@@ -3764,18 +3764,21 @@ impl ObjectAccess for PyObject {
                     "__exit__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "__exit__".to_string(),
                         func: |args| {
-                            // args[0] = self_obj (py_none), args[1] = file_obj (via BoundMethod)
-                            if args.len() > 1 {
-                                let is_file = matches!(&*args[1].borrow(), PyObject::File { .. });
-                                if is_file {
-                                    if let PyObject::File { file } = &mut *args[1].borrow_mut() {
-                                        use std::io::Write;
-                                        let _ = file.borrow_mut().flush();
-                                        let _ = std::mem::replace(&mut *file.borrow_mut(), std::fs::File::open("/dev/null").unwrap_or_else(|_| {
-                                            std::fs::File::create("/dev/null").unwrap()
-                                        }));
-                                    }
-                                }
+                            // args[0] = file_obj (normal path via LOAD_ATTR) or py_none (exception path via WITH_EXIT)
+                            // args[1] = exc_type (normal) or file_obj (exception via BoundMethod wrapper)
+                            // Find the file object: check args[0], then args[1]
+                            let file_obj_idx = if args.len() > 0 && matches!(&*args[0].borrow(), PyObject::File { .. }) { 0 }
+                                              else if args.len() > 1 && matches!(&*args[1].borrow(), PyObject::File { .. }) { 1 }
+                                              else { return Ok(py_none()) };
+                            // Sync and flush data to disk
+                            if let PyObject::File { file } = &*args[file_obj_idx].borrow() {
+                                let _ = file.borrow().sync_all();
+                            }
+                            // Replace with /dev/null to close the actual file descriptor
+                            if let PyObject::File { file } = &mut *args[file_obj_idx].borrow_mut() {
+                                let _ = std::mem::replace(&mut *file.borrow_mut(), std::fs::File::open("/dev/null").unwrap_or_else(|_| {
+                                    std::fs::File::create("/dev/null").unwrap()
+                                }));
                             }
                             Ok(py_none())
                         },

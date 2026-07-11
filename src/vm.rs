@@ -1408,7 +1408,10 @@ impl VirtualMachine {
             }
 
             Opcode::POP_BLOCK => {
-                self.frames[fi].exception_handlers.pop();
+                // Restore stack to the depth before the handler was set up
+                if let Some(handler) = self.frames[fi].exception_handlers.pop() {
+                    self.frames[fi].stack.truncate(handler.stack_depth);
+                }
             }
 
             Opcode::PUSH_EXC_INFO => {
