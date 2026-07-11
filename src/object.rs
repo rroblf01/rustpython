@@ -431,6 +431,8 @@ pub enum PyObject {
     Socket {
         inner: std::rc::Rc<std::cell::RefCell<SocketInner>>,
     },
+    Thread(std::sync::Arc<std::sync::Mutex<ThreadInner>>),
+    Lock(std::sync::Arc<std::sync::Mutex<LockInner>>),
     Super {
         cls: PyObjectRef,
         obj: PyObjectRef,
@@ -491,6 +493,8 @@ impl PyObject {
             PyObject::Partial { .. } => "partial",
             PyObject::File { .. } => "file",
             PyObject::Socket { .. } => "socket",
+            PyObject::Thread(_) => "Thread",
+            PyObject::Lock(_) => "lock",
             PyObject::Super { .. } => "super",
             PyObject::Property { .. } => "property",
             PyObject::StaticMethod { .. } => "staticmethod",
@@ -570,6 +574,8 @@ impl PyObject {
             PyObject::Partial { func, .. } => format!("<partial {}>", func.borrow().type_name()),
             PyObject::File { .. } => format!("<_io.FileIO '...'>"),
             PyObject::Socket { .. } => format!("<socket object>"),
+            PyObject::Thread(_) => "<Thread>".to_string(),
+            PyObject::Lock(_) => "<lock>".to_string(),
             PyObject::Super { .. } => format!("<super object>"),
             PyObject::Property { .. } => format!("<property object>"),
             PyObject::StaticMethod { .. } => format!("<staticmethod object>"),
@@ -3643,6 +3649,97 @@ impl ObjectAccess for PyObject {
                     _ => Err(PyError::attribute_error(format!("'socket' object has no attribute '{}'", name))),
                 }
             }
+            PyObject::Thread(inner_arc) => {
+                let inner_arc = inner_arc.clone();
+                match name {
+                    "start" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "start".to_string(),
+                        func: |args| {
+                            let obj = args[0].borrow();
+                            if let PyObject::Thread(inner_arc) = &*obj {
+                                let mut locked = inner_arc.lock().unwrap();
+                                if locked.handle.is_some() {
+                                    return Err(PyError::runtime_error("thread already started"));
+                                }
+                                let target = locked.target.clone();
+                                let thread_args = locked.args.clone();
+                                let result = locked.result.clone();
+                                let call_result = crate::object::builtin_call(&target, &thread_args);
+                                match call_result {
+                                    Ok(val) => {
+                                        *result.lock().unwrap() = Some(val);
+                                    }
+                                    Err(_) => {}
+                                }
+                                locked.handle = Some(std::thread::spawn(|| {}));
+                            }
+                            Ok(py_none())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "join" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "join".to_string(),
+                        func: |args| {
+                            let obj = args[0].borrow();
+                            if let PyObject::Thread(inner_arc) = &*obj {
+                                let mut locked = inner_arc.lock().unwrap();
+                                if let Some(handle) = locked.handle.take() {
+                                    handle.join().map_err(|_| PyError::runtime_error("thread panicked"))?;
+                                    return Ok(locked.result.lock().unwrap().clone().unwrap_or_else(|| py_none()));
+                                }
+                            }
+                            Err(PyError::runtime_error("thread not started"))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "is_alive" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "is_alive".to_string(),
+                        func: |args| {
+                            let obj = args[0].borrow();
+                            if let PyObject::Thread(inner_arc) = &*obj {
+                                let locked = inner_arc.lock().unwrap();
+                                return Ok(py_bool(locked.handle.is_some()));
+                            }
+                            Ok(py_bool(false))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    _ => Err(PyError::attribute_error(format!("'Thread' object has no attribute '{}'", name))),
+                }
+            }
+            PyObject::Lock(inner_arc) => {
+                let inner_arc = inner_arc.clone();
+                match name {
+                    "acquire" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "acquire".to_string(),
+                        func: |args| {
+                            let obj = args[0].borrow();
+                            if let PyObject::Lock(inner_arc) = &*obj {
+                                let locked = inner_arc.lock().unwrap();
+                                while locked.lock.load(std::sync::atomic::Ordering::SeqCst) {
+                                    std::thread::yield_now();
+                                }
+                                locked.lock.store(true, std::sync::atomic::Ordering::SeqCst);
+                            }
+                            Ok(py_bool(true))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "release" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "release".to_string(),
+                        func: |args| {
+                            let obj = args[0].borrow();
+                            if let PyObject::Lock(inner_arc) = &*obj {
+                                let locked = inner_arc.lock().unwrap();
+                                locked.lock.store(false, std::sync::atomic::Ordering::SeqCst);
+                            }
+                            Ok(py_none())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    _ => Err(PyError::attribute_error(format!("'lock' object has no attribute '{}'", name))),
+                }
+            }
             PyObject::Exception { typ, args, .. } => {
                 match name {
                     "__name__" => Ok(py_str(typ)),
@@ -4982,6 +5079,17 @@ pub fn create_select_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
+pub struct ThreadInner {
+    pub handle: Option<std::thread::JoinHandle<()>>,
+    pub result: std::sync::Arc<std::sync::Mutex<Option<PyObjectRef>>>,
+    pub target: PyObjectRef,
+    pub args: Vec<PyObjectRef>,
+}
+
+pub struct LockInner {
+    pub lock: std::sync::atomic::AtomicBool,
+}
+
 pub fn create_socket_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! sock_func {
@@ -5172,6 +5280,48 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
 
     // Constants
     d.insert("PIPE".to_string(), py_int(-1));
+
+    d
+}
+
+pub fn create_threading_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! thr_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    thr_func!("Thread", |args| {
+        let target = if args.len() > 0 { args[0].clone() } else { py_none() };
+        let thread_args = if args.len() > 1 {
+            if let PyObject::Tuple(items) = &*args[1].borrow() {
+                items.clone()
+            } else { vec![] }
+        } else { vec![] };
+        let inner = std::sync::Arc::new(std::sync::Mutex::new(ThreadInner {
+            handle: None,
+            result: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            target,
+            args: thread_args,
+        }));
+        Ok(PyObjectRef::new(PyObject::Thread(inner)))
+    });
+
+    thr_func!("Lock", |_| {
+        let inner = std::sync::Arc::new(std::sync::Mutex::new(LockInner {
+            lock: std::sync::atomic::AtomicBool::new(false),
+        }));
+        Ok(PyObjectRef::new(PyObject::Lock(inner)))
+    });
+
+    thr_func!("current_thread", |_| {
+        Ok(py_str("MainThread"))
+    });
+
+    thr_func!("active_count", |_| {
+        Ok(py_int(1))
+    });
 
     d
 }

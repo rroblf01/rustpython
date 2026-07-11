@@ -139,6 +139,9 @@ impl VirtualMachine {
           let subprocess_dict = create_subprocess_dict();
           modules.insert("subprocess".to_string(), create_module("subprocess", subprocess_dict));
 
+          let threading_dict = create_threading_dict();
+          modules.insert("threading".to_string(), create_module("threading", threading_dict));
+
           // Populate sys.path with default search paths
          if let PyObject::List(path_list) = &mut *sys_dict.get("path").unwrap().borrow_mut() {
              path_list.push(py_str("."));
