@@ -9,6 +9,10 @@ codegen-units = 1
 opt-level = 3
 panic = "abort"
 
+[features]
+default = []
+profile = []  # Enable execution profiling for PGO JIT
+
 [dependencies]
 cranelift = "0.109.1"
 cranelift-frontend = "0.109.1"

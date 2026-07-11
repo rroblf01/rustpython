@@ -9,6 +9,7 @@ mod jit;
 mod interner;
 mod gc;
 mod ffi_bridge;
+mod sync;
 
 use std::env;
 use std::fs;

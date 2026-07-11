@@ -100,6 +100,10 @@ pub struct VirtualMachine {
     pub globals: Rc<RefCell<HashMap<String, PyObjectRef>>>,
     pub jit: RefCell<JitCompiler>,
     pub sys_path: Vec<String>,
+    /// Execution profile counters — how many times each instruction ran.
+    /// Indexed by (function_id, instruction_offset). Used by JIT to
+    /// identify hot paths for native compilation.
+    pub profile: RefCell<HashMap<usize, Vec<u32>>>,
 }
 
 impl VirtualMachine {
@@ -174,6 +178,7 @@ impl VirtualMachine {
               globals,
               jit: RefCell::new(JitCompiler::new()),
               sys_path: vec!["./".to_string(), "./Lib/".to_string()],
+              profile: RefCell::new(HashMap::new()),
           }
     }
 
@@ -347,6 +352,17 @@ impl VirtualMachine {
         let op = self.frames[fi].code.instructions[ip].op;
         let arg = self.frames[fi].code.instructions[ip].arg;
         self.frames[fi].ip = ip + 1;
+
+        // Profile: increment counter for this instruction
+        // Only in profile mode (disabled by default for speed)
+        if cfg!(feature = "profile") {
+            let func_id = fi; // use frame index as function identifier
+            let mut prof = self.profile.borrow_mut();
+            let counters = prof.entry(func_id).or_insert_with(|| vec![0u32; self.frames[fi].code.instructions.len()]);
+            if ip < counters.len() {
+                counters[ip] = counters[ip].saturating_add(1);
+            }
+        }
 
         match op {
             Opcode::NOP => {}
