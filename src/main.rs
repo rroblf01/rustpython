@@ -8,6 +8,7 @@ mod vm;
 mod jit;
 mod interner;
 mod gc;
+mod ffi_bridge;
 
 use std::env;
 use std::fs;
