@@ -428,6 +428,9 @@ pub enum PyObject {
     File {
         file: std::rc::Rc<std::cell::RefCell<std::fs::File>>,
     },
+    Socket {
+        inner: std::rc::Rc<std::cell::RefCell<SocketInner>>,
+    },
     Super {
         cls: PyObjectRef,
         obj: PyObjectRef,
@@ -447,6 +450,12 @@ pub enum PyObject {
     Generator {
         frame: std::cell::RefCell<Option<super::vm::Frame>>,
     },
+}
+
+pub enum SocketInner {
+    TcpListener(std::net::TcpListener),
+    TcpStream(std::net::TcpStream),
+    Uninitialized,
 }
 
 impl PyObject {
@@ -481,6 +490,7 @@ impl PyObject {
             PyObject::BoundMethod { .. } => "method",
             PyObject::Partial { .. } => "partial",
             PyObject::File { .. } => "file",
+            PyObject::Socket { .. } => "socket",
             PyObject::Super { .. } => "super",
             PyObject::Property { .. } => "property",
             PyObject::StaticMethod { .. } => "staticmethod",
@@ -559,6 +569,7 @@ impl PyObject {
             PyObject::BoundMethod { func, .. } => format!("<bound method {}>", func.borrow().type_name()),
             PyObject::Partial { func, .. } => format!("<partial {}>", func.borrow().type_name()),
             PyObject::File { .. } => format!("<_io.FileIO '...'>"),
+            PyObject::Socket { .. } => format!("<socket object>"),
             PyObject::Super { .. } => format!("<super object>"),
             PyObject::Property { .. } => format!("<property object>"),
             PyObject::StaticMethod { .. } => format!("<staticmethod object>"),
@@ -3457,6 +3468,181 @@ impl ObjectAccess for PyObject {
                     _ => Err(PyError::attribute_error(format!("'file' object has no attribute '{}'", name))),
                 }
             }
+            PyObject::Socket { inner } => {
+                match name {
+                    "bind" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "bind".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("bind() takes exactly 1 argument")); }
+                            let addr = socket_addr_to_string(&args[1])?;
+                            let socket = &*args[0].borrow();
+                            if let PyObject::Socket { inner } = socket {
+                                let mut inner = inner.borrow_mut();
+                                match &*inner {
+                                    SocketInner::Uninitialized => {
+                                        let listener = std::net::TcpListener::bind(&addr)
+                                            .map_err(|e| PyError::OsError(format!("{}", e)))?;
+                                        listener.set_nonblocking(true).ok();
+                                        *inner = SocketInner::TcpListener(listener);
+                                        Ok(py_none())
+                                    }
+                                    _ => Err(PyError::runtime_error("socket already bound or connected")),
+                                }
+                            } else { Err(PyError::runtime_error("bind on non-socket")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "listen" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "listen".to_string(),
+                        func: |args| {
+                            let backlog = if args.len() > 1 { args[1].as_i64().unwrap_or(5) as i32 } else { 5 };
+                            let _ = backlog;
+                            let socket = &*args[0].borrow();
+                            if let PyObject::Socket { inner } = socket {
+                                let inner = inner.borrow();
+                                match &*inner {
+                                    SocketInner::TcpListener(_listener) => {
+                                        Ok(py_none())
+                                    }
+                                    _ => Err(PyError::runtime_error("listen on non-listener")),
+                                }
+                            } else { Err(PyError::runtime_error("listen on non-socket")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "accept" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "accept".to_string(),
+                        func: |args| {
+                            let socket = &*args[0].borrow();
+                            if let PyObject::Socket { inner } = socket {
+                                let mut inner = inner.borrow_mut();
+                                let old = std::mem::replace(&mut *inner, SocketInner::Uninitialized);
+                                match old {
+                                    SocketInner::TcpListener(listener) => {
+                                        match listener.accept() {
+                                            Ok((stream, addr)) => {
+                                                *inner = SocketInner::TcpListener(listener);
+                                                let client = PyObjectRef::new(PyObject::Socket {
+                                                    inner: std::rc::Rc::new(std::cell::RefCell::new(SocketInner::TcpStream(stream))),
+                                                });
+                                                Ok(py_tuple(vec![client, py_str(&addr.to_string())]))
+                                            }
+                                            Err(e) => {
+                                                *inner = SocketInner::TcpListener(listener);
+                                                Err(PyError::OsError(format!("{}", e)))
+                                            }
+                                        }
+                                    }
+                                    other => {
+                                        *inner = other;
+                                        Err(PyError::runtime_error("accept on non-listener"))
+                                    }
+                                }
+                            } else { Err(PyError::runtime_error("accept on non-socket")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "connect" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "connect".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("connect() takes exactly 1 argument")); }
+                            let addr = socket_addr_to_string(&args[1])?;
+                            let socket = &*args[0].borrow();
+                            if let PyObject::Socket { inner } = socket {
+                                let mut inner = inner.borrow_mut();
+                                match &*inner {
+                                    SocketInner::Uninitialized => {
+                                        match std::net::TcpStream::connect(&addr) {
+                                            Ok(stream) => {
+                                                stream.set_nonblocking(true).ok();
+                                                *inner = SocketInner::TcpStream(stream);
+                                                Ok(py_none())
+                                            }
+                                            Err(e) => Err(PyError::OsError(format!("{}", e))),
+                                        }
+                                    }
+                                    _ => Err(PyError::runtime_error("socket already connected or listening")),
+                                }
+                            } else { Err(PyError::runtime_error("connect on non-socket")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "send" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "send".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("send() takes exactly 1 argument")); }
+                            let data = args[1].str();
+                            let socket = &*args[0].borrow();
+                            if let PyObject::Socket { inner } = socket {
+                                let mut inner = inner.borrow_mut();
+                                match &mut *inner {
+                                    SocketInner::TcpStream(stream) => {
+                                        use std::io::Write;
+                                        match stream.write_all(data.as_bytes()) {
+                                            Ok(()) => Ok(py_int(data.len() as i64)),
+                                            Err(e) => Err(PyError::OsError(format!("{}", e))),
+                                        }
+                                    }
+                                    _ => Err(PyError::runtime_error("send on non-stream")),
+                                }
+                            } else { Err(PyError::runtime_error("send on non-socket")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "recv" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "recv".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("recv() takes exactly 1 argument")); }
+                            let bufsize = args[1].as_i64().unwrap_or(4096) as usize;
+                            let socket = &*args[0].borrow();
+                            if let PyObject::Socket { inner } = socket {
+                                let mut inner = inner.borrow_mut();
+                                match &mut *inner {
+                                    SocketInner::TcpStream(stream) => {
+                                        use std::io::Read;
+                                        let mut buf = vec![0u8; bufsize.min(65536)];
+                                        match stream.read(&mut buf) {
+                                            Ok(0) => Ok(py_str("")),
+                                            Ok(n) => {
+                                                buf.truncate(n);
+                                                match String::from_utf8(buf) {
+                                                    Ok(s) => Ok(py_str(&s)),
+                                                    Err(_) => Ok(py_str("<binary>")),
+                                                }
+                                            }
+                                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                                Ok(py_none())
+                                            }
+                                            Err(e) => Err(PyError::OsError(format!("{}", e))),
+                                        }
+                                    }
+                                    _ => Err(PyError::runtime_error("recv on non-stream")),
+                                }
+                            } else { Err(PyError::runtime_error("recv on non-socket")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "close" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "close".to_string(),
+                        func: |args| {
+                            let socket = &*args[0].borrow();
+                            if let PyObject::Socket { inner } = socket {
+                                let mut inner = inner.borrow_mut();
+                                let old = std::mem::replace(&mut *inner, SocketInner::Uninitialized);
+                                drop(old);
+                                Ok(py_none())
+                            } else { Err(PyError::runtime_error("close on non-socket")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "setsockopt" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "setsockopt".to_string(),
+                        func: |_| Ok(py_none()),
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    _ => Err(PyError::attribute_error(format!("'socket' object has no attribute '{}'", name))),
+                }
+            }
             PyObject::Exception { typ, args, .. } => {
                 match name {
                     "__name__" => Ok(py_str(typ)),
@@ -4698,6 +4884,51 @@ pub fn create_datetime_dict() -> HashMap<String, PyObjectRef> {
             .unwrap_or_default();
         Ok(py_float(s.as_secs_f64()))
     });
+
+    d
+}
+
+fn socket_addr_to_string(addr: &PyObjectRef) -> PyResult<String> {
+    let borrowed = addr.borrow();
+    match &*borrowed {
+        PyObject::Tuple(items) if items.len() == 2 => {
+            let host = items[0].str();
+            let port = items[1].as_i64().ok_or_else(|| PyError::type_error("port must be int"))?;
+            Ok(format!("{}:{}", host, port))
+        }
+        PyObject::Str(s) => Ok(s.clone()),
+        _ => {
+            // Fallback: use str representation
+            Ok(addr.str())
+        }
+    }
+}
+
+pub fn create_socket_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! sock_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    sock_func!("socket", |args| {
+        let family = if args.len() > 0 { args[0].as_i64().unwrap_or(2) } else { 2 };
+        let _sock_type = if args.len() > 1 { args[1].as_i64().unwrap_or(1) } else { 1 };
+        let _proto = if args.len() > 2 { args[2].as_i64().unwrap_or(0) } else { 0 };
+        if family != 2 {
+            return Err(PyError::runtime_error("Only AF_INET sockets are supported"));
+        }
+        Ok(PyObjectRef::new(PyObject::Socket {
+            inner: std::rc::Rc::new(std::cell::RefCell::new(SocketInner::Uninitialized)),
+        }))
+    });
+
+    d.insert("AF_INET".to_string(), py_int(2));
+    d.insert("SOCK_STREAM".to_string(), py_int(1));
+    d.insert("SOCK_DGRAM".to_string(), py_int(2));
+    d.insert("SOL_SOCKET".to_string(), py_int(1));
+    d.insert("SO_REUSEADDR".to_string(), py_int(2));
 
     d
 }

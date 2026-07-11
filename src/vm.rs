@@ -127,6 +127,9 @@ impl VirtualMachine {
           let datetime_dict = create_datetime_dict();
           modules.insert("datetime".to_string(), create_module("datetime", datetime_dict));
 
+          let socket_dict = create_socket_dict();
+          modules.insert("socket".to_string(), create_module("socket", socket_dict));
+
           // Populate sys.path with default search paths
          if let PyObject::List(path_list) = &mut *sys_dict.get("path").unwrap().borrow_mut() {
              path_list.push(py_str("."));
@@ -1201,7 +1204,19 @@ impl VirtualMachine {
                     2 => {
                         let cause = self.frames[fi].pop()?;
                         let exc = self.frames[fi].pop()?;
-                        return Err(PyError::Exception(format!("{} (caused by {})", exc.str(), cause.str()), exc));
+                        let exc_msg = match &*exc.borrow() {
+                            PyObject::Exception { args, .. } => {
+                                if !args.is_empty() { args[0].str() } else { exc.str() }
+                            }
+                            _ => exc.str(),
+                        };
+                        let cause_msg = match &*cause.borrow() {
+                            PyObject::Exception { args, .. } => {
+                                if !args.is_empty() { args[0].str() } else { cause.str() }
+                            }
+                            _ => cause.str(),
+                        };
+                        return Err(PyError::Exception(format!("{} (caused by: {})", exc_msg, cause_msg), exc));
                     }
                     _ => return Err(PyError::runtime_error("invalid RAISE_VARARGS count")),
                 }
