@@ -1422,6 +1422,40 @@ impl VirtualMachine {
                 // No-op to match PUSH_EXC_INFO — balance the pair
             }
 
+            Opcode::GET_AITER => {
+                // async for: call __aiter__ on the top of stack
+                let obj = self.frames[fi].peek(0)?;
+                let aiter_method = obj.borrow().get_attribute("__aiter__")
+                    .map_err(|_| PyError::type_error("object does not support async iteration"))?;
+                let result = self.call_function(aiter_method, vec![], vec![])?;
+                self.frames[fi].pop();
+                self.frames[fi].push(result);
+            }
+
+            Opcode::GET_ANEXT => {
+                // async for: get __anext__ method from the async iterator
+                let obj = self.frames[fi].peek(0)?;
+                let anext_method = obj.borrow().get_attribute("__anext__")
+                    .map_err(|_| PyError::type_error("async iterator has no __anext__"))?;
+                self.frames[fi].pop();
+                self.frames[fi].push(anext_method);
+            }
+
+            Opcode::END_FOR => {
+                // Pop the iterator/async-iterator after a for loop
+                let _ = self.frames[fi].pop();
+            }
+
+            Opcode::BEFORE_ASYNC_WITH => {
+                // async with: call __aenter__ and push __aexit__ for later
+                let mgr = self.frames[fi].pop()?;
+                let aenter_method = mgr.borrow().get_attribute("__aenter__")
+                    .map_err(|_| PyError::attribute_error("async context manager has no __aenter__"))?;
+                let result = self.call_function(aenter_method, vec![], vec![])?;
+                self.frames[fi].push(mgr);
+                self.frames[fi].push(result);
+            }
+
             Opcode::CHECK_EXC_MATCH => {
                 let expected = self.frames[fi].pop()?;
                 let exc = self.frames[fi].pop()?;

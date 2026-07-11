@@ -834,10 +834,15 @@ impl Compiler {
                 iter,
                 body,
                 orelse,
-                ..
+                is_async,
             } => {
                 self.compile_expr(iter)?;
-                self.emit(Opcode::GET_ITER, 0);
+                if *is_async {
+                    self.emit(Opcode::GET_AITER, 0);
+                    self.emit(Opcode::GET_ANEXT, 0);
+                } else {
+                    self.emit(Opcode::GET_ITER, 0);
+                }
                 let start_label = self.new_label();
                 let else_label = self.new_label();
                 let end_label = self.new_label();
@@ -846,7 +851,7 @@ impl Compiler {
                     end_label,
                 });
                 self.mark_label(start_label);
-                self.emit_jump(Opcode::FOR_ITER, else_label);
+                self.emit_jump(if *is_async { Opcode::FOR_ITER } else { Opcode::FOR_ITER }, else_label);
                 self.compile_assign_target(target)?;
                 self.compile_stmts(body)?;
                 self.emit_backward_jump(start_label);
@@ -854,7 +859,7 @@ impl Compiler {
                 if !orelse.is_empty() {
                     self.compile_stmts(orelse)?;
                 }
-                self.emit(Opcode::POP_ITER, 0);
+                self.emit(Opcode::END_FOR, 0);
                 self.fix_label(end_label);
                 self.loop_stack.pop();
             }
@@ -1191,7 +1196,7 @@ impl Compiler {
                 self.fix_label(ok_label);
                 self.emit(Opcode::POP_TOP, 0);
             }
-            Stmt::With { items, body, .. } => {
+            Stmt::With { items, body, is_async } => {
                 for (_i, item) in items.iter().enumerate() {
                     self.compile_expr(&item.context_expr)?;
                     self.emit(Opcode::SETUP_WITH, 0);
@@ -1202,7 +1207,7 @@ impl Compiler {
                     }
                 }
                 if items.len() == 1 {
-                    // Use try/finally to ensure __exit__ is called on exception
+                    // Use try/finally to ensure __exit__/__aexit__ is called on exception
                     let finally_label = self.new_label();
                     let end_label = self.new_label();
                     self.emit_jump(Opcode::SETUP_FINALLY, finally_label);
@@ -1210,7 +1215,8 @@ impl Compiler {
                     self.emit(Opcode::POP_BLOCK, 0);
                     // Manager is still on the stack from SETUP_WITH
                     self.emit(Opcode::DUP_TOP, 0);
-                    let exit_name_idx = self.get_name_index("__exit__") as u32;
+                    let exit_name = if *is_async { "__aexit__" } else { "__exit__" };
+                    let exit_name_idx = self.get_name_index(exit_name) as u32;
                     self.emit(Opcode::LOAD_ATTR, exit_name_idx);
                     let const_none = self.get_const_index(ConstValue::None) as u32;
                     for _ in 0..3 {
