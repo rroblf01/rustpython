@@ -2049,6 +2049,32 @@ pub fn builtin_locals(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
 }
 
+pub fn builtin_divmod(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() != 2 { return Err(PyError::type_error("divmod() takes exactly 2 arguments")); }
+    let a = args[0].as_i64().ok_or_else(|| PyError::type_error("divmod() arg must be int"))?;
+    let b = args[1].as_i64().ok_or_else(|| PyError::type_error("divmod() arg must be int"))?;
+    if b == 0 { return Err(PyError::value_error("division by zero")); }
+    Ok(PyObjectRef::new(PyObject::Tuple(vec![py_int(a / b), py_int(a % b)])))
+}
+
+pub fn builtin_round(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() < 1 || args.len() > 2 { return Err(PyError::type_error("round() takes 1 or 2 arguments")); }
+    let val = {
+        let obj = args[0].borrow();
+        match &*obj {
+            PyObject::Int(i) => i.to_f64().unwrap_or(0.0),
+            PyObject::Float(f) => *f,
+            _ => return Err(PyError::type_error("round() arg must be numeric")),
+        }
+    };
+    if args.len() == 2 {
+        let n = args[1].as_i64().ok_or_else(|| PyError::type_error("ndigits must be int"))? as i32;
+        Ok(py_float((val * 10_f64.powi(n)).round() / 10_f64.powi(n)))
+    } else {
+        Ok(py_int(val.round() as i64))
+    }
+}
+
 pub fn builtin_abs(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() != 1 {
         return Err(PyError::type_error("abs() takes exactly one argument"));
@@ -4459,6 +4485,8 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     add_func!("object", builtin_object);
     add_func!("hash", builtin_hash);
     add_func!("slice", builtin_slice);
+    add_func!("divmod", builtin_divmod);
+    add_func!("round", builtin_round);
     add_func!("dir", builtin_dir);
     add_func!("globals", builtin_globals);
     add_func!("locals", builtin_locals);
