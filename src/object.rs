@@ -27,6 +27,7 @@ impl<'a> std::ops::Deref for RefOrOwned<'a> {
 }
 
 #[derive(Clone)]
+#[repr(C)]
 pub enum PyObjectRef {
     SmallInt(i64),
     SmallBool(bool),

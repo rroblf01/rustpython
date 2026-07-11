@@ -262,13 +262,64 @@ impl JitCompiler {
                     let a_addr = builder.ins().stack_addr(types::I64, stack_slot, sp);
                     let b_addr = builder.ins().stack_addr(types::I64, stack_slot, sp + 16);
                     let out_addr = builder.ins().stack_addr(types::I64, stack_slot, sp);
+
+                    let memflags = cranelift::codegen::ir::MemFlags::new();
+                    let a_tag = builder.ins().load(types::I32, memflags, a_addr, 0);
+                    let b_tag = builder.ins().load(types::I32, memflags, b_addr, 0);
+
+                    let zero = builder.ins().iconst(types::I32, 0);
+                    let a_small = builder.ins().icmp(IntCC::Equal, a_tag, zero);
+                    let b_small = builder.ins().icmp(IntCC::Equal, b_tag, zero);
+                    let both_small = builder.ins().band(a_small, b_small);
+
+                    let fast_block = builder.create_block();
+                    let fallback_block = builder.create_block();
+                    let merge_block = builder.create_block();
+
+                    builder.append_block_param(fast_block, types::I64);
+                    builder.append_block_param(fast_block, types::I64);
+                    builder.append_block_param(fast_block, types::I64);
+                    builder.append_block_param(fallback_block, types::I64);
+                    builder.append_block_param(fallback_block, types::I64);
+                    builder.append_block_param(fallback_block, types::I64);
+
+                    builder.ins().brif(both_small, fast_block, &[a_addr, b_addr, out_addr],
+                                                fallback_block, &[a_addr, b_addr, out_addr]);
+
+                    builder.seal_block(fast_block);
+                    builder.switch_to_block(fast_block);
+                    let a_fast = builder.block_params(fast_block)[0];
+                    let b_fast = builder.block_params(fast_block)[1];
+                    let out_fast = builder.block_params(fast_block)[2];
+                    let a_val = builder.ins().load(types::I64, memflags, a_fast, 8);
+                    let b_val = builder.ins().load(types::I64, memflags, b_fast, 8);
+                    let result_val = match instr.arg {
+                        0 => builder.ins().iadd(a_val, b_val),
+                        1 => builder.ins().isub(a_val, b_val),
+                        2 => builder.ins().imul(a_val, b_val),
+                        _ => return None,
+                    };
+                    builder.ins().store(memflags, zero, out_fast, 0);
+                    builder.ins().store(memflags, result_val, out_fast, 8);
+                    builder.ins().jump(merge_block, &[]);
+
+                    builder.seal_block(fallback_block);
+                    builder.switch_to_block(fallback_block);
+                    let a_fall = builder.block_params(fallback_block)[0];
+                    let b_fall = builder.block_params(fallback_block)[1];
+                    let out_fall = builder.block_params(fallback_block)[2];
                     let func_ref = match instr.arg {
                         0 => add_func_ref,
                         1 => sub_func_ref,
                         2 => mul_func_ref,
                         _ => return None,
                     };
-                    builder.ins().call(func_ref, &[a_addr, b_addr, out_addr]);
+                    builder.ins().call(func_ref, &[a_fall, b_fall, out_fall]);
+                    builder.ins().jump(merge_block, &[]);
+
+                    builder.seal_block(merge_block);
+                    builder.switch_to_block(merge_block);
+
                     sp += 16;
                 }
                 Opcode::COMPARE_OP => {
