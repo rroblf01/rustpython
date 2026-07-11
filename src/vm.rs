@@ -1028,6 +1028,15 @@ impl VirtualMachine {
 
             Opcode::GET_ITER => {
                 let val = self.frames[fi].pop()?;
+                // Check for user-class instance (needs __iter__ protocol)
+                let is_instance = val.borrow().type_name() == "instance";
+                if is_instance {
+                    use crate::object::ObjectAccess;
+                    let iter_method = val.borrow().get_attribute("__iter__")
+                        .map_err(|_| PyError::type_error(format!("'{}' object is not iterable", val.borrow().type_name())))?;
+                    let result = self.call_function(iter_method, vec![], vec![])?;
+                    self.frames[fi].push(result);
+                } else {
                 let obj = val.borrow();
                 match &*obj {
                     PyObject::List(v) => {
@@ -1051,6 +1060,7 @@ impl VirtualMachine {
                         self.frames[fi].push(PyObjectRef::new(PyObject::RangeIter { current: *start, stop: *stop, step: *step }));
                     }
                     _ => return Err(PyError::type_error(format!("'{}' object is not iterable", obj.type_name()))),
+                }
                 }
             }
 
@@ -1095,7 +1105,13 @@ impl VirtualMachine {
                         PyObject::RangeIter { current, stop, step } => {
                             if *step > 0 { *current >= *stop } else { *current <= *stop }
                         }
-                        _ => return Err(PyError::type_error("for_iter on non-iterable")),
+                        _ => {
+                            // Not a built-in iterator — check for __next__ protocol
+                            if obj.type_name() == "instance" {
+                                return self.for_iter_next(iter_val.clone(), arg);
+                            }
+                            return Err(PyError::type_error("for_iter on non-iterable"))
+                        },
                     }
                 };
                 if is_exhausted {
@@ -1955,4 +1971,29 @@ fn c3_linearize(bases: &[PyObjectRef]) -> Vec<PyObjectRef> {
         remaining.retain(|l| !l.is_empty());
     }
     result
+}
+
+impl VirtualMachine {
+    /// Call __next__ on a user-class iterator. Used by FOR_ITER for Instance types.
+    fn for_iter_next(&mut self, iter_val: PyObjectRef, jump_offset: u32) -> PyResult<Option<PyObjectRef>> {
+        use crate::object::ObjectAccess;
+        let next_method = iter_val.borrow().get_attribute("__next__");
+        if let Ok(func) = next_method {
+            match self.call_function(func, vec![], vec![]) {
+                Ok(val) => {
+                    self.frames.last_mut().unwrap().push(iter_val);
+                    self.frames.last_mut().unwrap().push(val);
+                    Ok(None)
+                }
+                Err(e) if matches!(&e, PyError::StopIteration) => {
+                    self.frames.last_mut().unwrap().ip = jump_offset as usize;
+                    Ok(None)
+                }
+                Err(e) => Err(e),
+            }
+        } else {
+            self.frames.last_mut().unwrap().ip = jump_offset as usize;
+            Ok(None)
+        }
+    }
 }
