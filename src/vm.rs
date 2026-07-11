@@ -54,7 +54,6 @@ impl Frame {
         globals: Rc<RefCell<HashMap<String, PyObjectRef>>>,
         builtins: Rc<HashMap<String, PyObjectRef>>,
     ) -> Self {
-        let instr_count = code.instructions.len();
         Frame {
             fast_locals: vec![None; code.nlocals],
             code,
@@ -67,9 +66,9 @@ impl Frame {
             exception_handlers: Vec::new(),
             return_value: None,
             closure: Vec::new(),
-            attr_cache: vec![None; instr_count],
-            global_cache: vec![None; instr_count],
-            registers: vec![None; 256],
+            attr_cache: Vec::new(),
+            global_cache: Vec::new(),
+            registers: Vec::new(),
         }
     }
 
@@ -263,7 +262,7 @@ impl VirtualMachine {
             return None;
         }
         let instrs = &code.instructions;
-        if instrs.is_empty() || instrs.len() > 6 {
+        if instrs.is_empty() || instrs.len() > 12 {
             return None;
         }
         // Pre-allocate local variables from arguments
@@ -273,13 +272,23 @@ impl VirtualMachine {
                 locals[i] = Some(arg.clone());
             }
         }
-        let mut stack: SmallVec<[PyObjectRef; 4]> = SmallVec::new();
-        for instr in instrs {
+        let mut stack: SmallVec<[PyObjectRef; 8]> = SmallVec::new();
+        let mut ip: usize = 0;
+        let n_instrs = instrs.len();
+        loop {
+            if ip >= n_instrs { return None; }
+            let instr = &instrs[ip];
+            ip += 1;
             match instr.op {
                 Opcode::LOAD_FAST => {
                     let idx = instr.arg as usize;
                     let val = locals.get(idx)?.clone()?;
                     stack.push(val);
+                }
+                Opcode::STORE_FAST => {
+                    let idx = instr.arg as usize;
+                    let val = stack.pop()?;
+                    if idx < locals.len() { locals[idx] = Some(val); }
                 }
                 Opcode::LOAD_CONST => {
                     let const_val = code.consts.get(instr.arg as usize)?;
@@ -304,15 +313,39 @@ impl VirtualMachine {
                         1 => py_sub(&left, &right),
                         2 => py_mul(&left, &right),
                         3 => py_div(&left, &right),
+                        4 => py_floor_div(&left, &right),
+                        5 => py_mod(&left, &right),
+                        6 => py_pow(&left, &right),
+                        7 => py_lshift(&left, &right),
+                        8 => py_rshift(&left, &right),
+                        9 => py_bit_or(&left, &right),
+                        10 => py_bit_and(&left, &right),
+                        11 => py_bit_xor(&left, &right),
+                        13 => py_getitem(&left, &right),
                         _ => return None,
                     };
                     match result { Ok(v) => stack.push(v), Err(e) => return Some(Err(e)) }
+                }
+                Opcode::COMPARE_OP => {
+                    let right = stack.pop()?;
+                    let left = stack.pop()?;
+                    let result = py_compare(&left, &right, instr.arg);
+                    match result { Ok(v) => stack.push(v), Err(e) => return Some(Err(e)) }
+                }
+                Opcode::POP_JUMP_IF_FALSE => {
+                    let val = stack.pop()?;
+                    if !val.truthy() { ip = instr.arg as usize; }
+                }
+                Opcode::JUMP_FORWARD => {
+                    ip = ip + instr.arg as usize;
+                }
+                Opcode::JUMP_BACKWARD => {
+                    ip = ip - (instr.arg as usize + 1);
                 }
                 Opcode::RETURN_VALUE => return Some(Ok(stack.pop()?)),
                 _ => return None,
             }
         }
-        None
     }
 
     pub fn execute(&mut self) -> PyResult<PyObjectRef> {
@@ -614,6 +647,10 @@ impl VirtualMachine {
 
             // ── Register-based instructions ─────────────────────────
             Opcode::REG_MOV => {
+                // Lazily initialize registers
+                if self.frames[fi].registers.is_empty() {
+                    self.frames[fi].registers = vec![None; 256];
+                }
                 let dst = (arg >> 4) as usize;
                 let src = (arg & 0xF) as usize;
                 let val = self.frames[fi].registers[src].clone()
