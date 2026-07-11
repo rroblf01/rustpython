@@ -103,6 +103,14 @@ impl PyObjectRef {
         }
     }
 
+    pub fn as_f64(&self) -> Option<f64> {
+        match self {
+            PyObjectRef::SmallFloat(f) => Some(*f),
+            PyObjectRef::SmallInt(n) => Some(*n as f64),
+            _ => None,
+        }
+    }
+
     pub fn is(&self, other: &PyObjectRef) -> bool {
         match (self, other) {
             (PyObjectRef::SmallInt(a), PyObjectRef::SmallInt(b)) => a == b,
@@ -960,6 +968,9 @@ pub fn py_add(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
         return Ok(py_int(ai + bi));
     }
+    if let (Some(af), Some(bf)) = (a.as_f64(), b.as_f64()) {
+        return Ok(py_float(af + bf));
+    }
     if let Some(r) = try_dunder_binop(a, b, "__add__")? { return Ok(r); }
     let a_obj = a.borrow();
     let b_obj = b.borrow();
@@ -988,6 +999,9 @@ pub fn py_sub(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
         return Ok(py_int(ai - bi));
     }
+    if let (Some(af), Some(bf)) = (a.as_f64(), b.as_f64()) {
+        return Ok(py_float(af - bf));
+    }
     if let Some(r) = try_dunder_binop(a, b, "__sub__")? { return Ok(r); }
     let a_obj = a.borrow();
     let b_obj = b.borrow();
@@ -1005,6 +1019,9 @@ pub fn py_sub(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
 pub fn py_mul(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
         return Ok(py_int(ai * bi));
+    }
+    if let (Some(af), Some(bf)) = (a.as_f64(), b.as_f64()) {
+        return Ok(py_float(af * bf));
     }
     if let Some(r) = try_dunder_binop(a, b, "__mul__")? { return Ok(r); }
     let a_obj = a.borrow();
