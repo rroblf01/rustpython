@@ -2759,14 +2759,36 @@ pub fn builtin_exec(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
         return Err(PyError::type_error("exec() requires at least 1 argument"));
     }
-    let source = args[0].str();
-    let mut parser = crate::parser::Parser::new(&source);
-    let program = parser.parse_program().map_err(|e| PyError::type_error(format!("exec parse error: {}", e)))?;
-    let mut compiler = crate::compiler::Compiler::new();
-    let code = compiler.compile(&program, "<exec>").map_err(|e| PyError::type_error(format!("exec compile error: {}", e)))?;
+    // Check if first arg is a code object (compile() result)
+    let code = match &*args[0].borrow() {
+        PyObject::Code(c) => (*c).clone(),
+        _ => Box::new(
+            (|| -> Result<CodeObject, String> {
+                let source = args[0].str();
+                let mut parser = crate::parser::Parser::new(&source);
+                let program = parser.parse_program()?;
+                let mut compiler = crate::compiler::Compiler::new();
+                compiler.compile(&program, "<exec>")
+            })().map_err(|e| PyError::type_error(format!("exec error: {}", e)))?
+        ),
+    };
     let mut vm = crate::vm::VirtualMachine::new();
-    vm.run(code).map_err(|e| PyError::type_error(format!("exec error: {}", e)))?;
+    vm.run(*code).map_err(|e| PyError::type_error(format!("exec error: {}", e)))?;
     Ok(py_none())
+}
+
+pub fn builtin_compile(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() < 3 {
+        return Err(PyError::type_error("compile() requires 3 arguments (source, filename, mode)"));
+    }
+    let source = args[0].str();
+    let filename = args[1].str();
+    let mode = args[2].str();
+    let mut parser = crate::parser::Parser::new(&source);
+    let program = parser.parse_program().map_err(|e| PyError::type_error(format!("SyntaxError: {}", e)))?;
+    let mut compiler = crate::compiler::Compiler::new();
+    let code = compiler.compile(&program, &filename).map_err(|e| PyError::type_error(format!("compile error: {}", e)))?;
+    Ok(PyObjectRef::new(PyObject::Code(Box::new(code))))
 }
 
 pub fn builtin_super(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
@@ -4563,6 +4585,7 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     add_func!("help", builtin_help);
     add_func!("eval", builtin_eval);
     add_func!("exec", builtin_exec);
+    add_func!("compile", builtin_compile);
     add_func!("super", builtin_super);
     add_func!("map", builtin_map);
     add_func!("filter", builtin_filter);
