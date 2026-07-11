@@ -1032,10 +1032,15 @@ impl VirtualMachine {
                 let is_instance = val.borrow().type_name() == "instance";
                 if is_instance {
                     use crate::object::ObjectAccess;
-                    let iter_method = val.borrow().get_attribute("__iter__")
+                    let raw_method = val.borrow().get_attribute("__iter__")
                         .map_err(|_| PyError::type_error(format!("'{}' object is not iterable", val.borrow().type_name())))?;
+                    let val_clone = val.clone();
+                    let iter_method = PyObjectRef::imm(PyObject::BoundMethod {
+                        func: raw_method,
+                        self_obj: val_clone,
+                    });
                     let iterator = self.call_function(iter_method, vec![], vec![])?;
-                    // Eagerly consume the iterator into a List so FOR_ITER works
+                    // Eagerly consume via BoundMethod wrapping (binds self properly)
                     let mut items: Vec<PyObjectRef> = Vec::new();
                     loop {
                         let next_result = {
