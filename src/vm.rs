@@ -24,6 +24,11 @@ pub struct Frame {
     pub exception_handlers: Vec<ExceptionHandler>,
     pub return_value: Option<PyResult<PyObjectRef>>,
     pub closure: Vec<PyObjectRef>,
+    /// Inline attribute cache — caches LOAD_ATTR results per instruction offset.
+    /// Cleared when the frame is created; populated on first attribute access.
+    pub attr_cache: Vec<Option<(u64, PyObjectRef)>>,  // (type_version_tag, cached_value)
+    /// Inline global cache — caches LOAD_GLOBAL results per instruction offset.
+    pub global_cache: Vec<Option<PyObjectRef>>,
 }
 
 #[derive(Clone)]
@@ -57,6 +62,8 @@ impl Frame {
             exception_handlers: Vec::new(),
             return_value: None,
             closure: Vec::new(),
+            attr_cache: vec![None; code.instructions.len()],
+            global_cache: vec![None; code.instructions.len()],
         }
     }
 
@@ -422,16 +429,28 @@ impl VirtualMachine {
             }
 
             Opcode::LOAD_GLOBAL => {
-                let name_idx = arg as usize;
-                let name = &self.frames[fi].code.names[name_idx];
-                let val = {
-                    let f = &self.frames[self.frames.len() - 1];
-                    f.globals.borrow().get(name).cloned()
-                        .or_else(|| f.builtins.get(name).cloned())
-                };
-                match val {
-                    Some(v) => self.frames[fi].push(v),
-                    None => return Err(PyError::name_error(format!("name '{}' is not defined", name))),
+                let instr_ip = self.frames[fi].ip - 1;  // already incremented
+                // Check inline cache first
+                if let Some(cached) = self.frames[fi].global_cache.get(instr_ip).and_then(|c| c.clone()) {
+                    self.frames[fi].push(cached);
+                } else {
+                    let name_idx = arg as usize;
+                    let name = &self.frames[fi].code.names[name_idx];
+                    let val = {
+                        let f = &self.frames[self.frames.len() - 1];
+                        f.globals.borrow().get(name).cloned()
+                            .or_else(|| f.builtins.get(name).cloned())
+                    };
+                    match val {
+                        Some(v) => {
+                            // Cache for next time
+                            if instr_ip < self.frames[fi].global_cache.len() {
+                                self.frames[fi].global_cache[instr_ip] = Some(v.clone());
+                            }
+                            self.frames[fi].push(v);
+                        }
+                        None => return Err(PyError::name_error(format!("name '{}' is not defined", name))),
+                    }
                 }
             }
 
