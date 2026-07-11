@@ -3069,6 +3069,30 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
+                    "index" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "index".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("index() takes at least 1 argument")); }
+                            if let PyObject::List(list) = &*args[0].borrow() {
+                                for (i, item) in list.iter().enumerate() {
+                                    if item.is(&args[1]) { return Ok(py_int(i as i64)); }
+                                }
+                                Err(PyError::value_error(format!("{} is not in list", args[1].str())))
+                            } else { Err(PyError::runtime_error("index on non-list")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "count" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "count".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("count() takes at least 1 argument")); }
+                            if let PyObject::List(list) = &*args[0].borrow() {
+                                let c = list.iter().filter(|item| item.is(&args[1])).count();
+                                Ok(py_int(c as i64))
+                            } else { Err(PyError::runtime_error("count on non-list")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     "sort" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "sort".to_string(),
                         func: |args| {
@@ -3179,6 +3203,22 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
+                    "isdigit" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "isdigit".to_string(), func: |a| Ok(py_bool(a[0].str().chars().all(|c| c.is_ascii_digit()))), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "isalpha" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "isalpha".to_string(), func: |a| Ok(py_bool(a[0].str().chars().all(|c| c.is_ascii_alphabetic()))), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "isalnum" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "isalnum".to_string(), func: |a| Ok(py_bool(a[0].str().chars().all(|c| c.is_ascii_alphanumeric()))), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "isspace" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "isspace".to_string(), func: |a| Ok(py_bool(a[0].str().chars().all(|c| c.is_ascii_whitespace()))), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "islower" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "islower".to_string(), func: |a| Ok(py_bool(a[0].str() == a[0].str().to_lowercase())), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "isupper" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "isupper".to_string(), func: |a| Ok(py_bool(a[0].str() == a[0].str().to_uppercase())), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "istitle" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "istitle".to_string(), func: |a| { let s = a[0].str(); let mut prev_is_letter = false; let mut is_title = true; for c in s.chars() { if c.is_ascii_uppercase() { if prev_is_letter { is_title = false; break; } prev_is_letter = true; } else if c.is_ascii_lowercase() { if !prev_is_letter { is_title = false; break; } prev_is_letter = true; } else { prev_is_letter = false; } } Ok(py_bool(is_title && !s.is_empty())) }, self_obj: PyObjectRef::new(PyObject::None) })),
+                    "title" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "title".to_string(), func: |a| Ok(py_str(&a[0].str().split_whitespace().map(|w| { let mut c = w.chars(); match c.next() { Some(f) => f.to_uppercase().collect::<String>() + &c.as_str().to_lowercase(), None => String::new() } }).collect::<Vec<_>>().join(" "))), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "capitalize" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "capitalize".to_string(), func: |a| { let s = a[0].str(); let mut c = s.chars(); Ok(py_str(&match c.next() { Some(f) => f.to_uppercase().collect::<String>() + &c.as_str().to_lowercase(), None => String::new() })) }, self_obj: PyObjectRef::new(PyObject::None) })),
+                    "swapcase" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "swapcase".to_string(), func: |a| Ok(py_str(&a[0].str().chars().map(|c| if c.is_uppercase() { c.to_lowercase().to_string() } else { c.to_uppercase().to_string() }).collect::<String>())), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "zfill" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "zfill".to_string(), func: |a| if a.len() < 2 { return Err(PyError::type_error("zfill() takes exactly 1 argument")); } else { let w = a[1].as_i64().unwrap_or(0) as usize; let s = a[0].str(); if w > s.len() { Ok(py_str(&format!("{:0>width$}", s, width=w))) } else { Ok(py_str(&s)) } }, self_obj: PyObjectRef::new(PyObject::None) })),
+                    "ljust" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "ljust".to_string(), func: |a| if a.len() < 2 { return Err(PyError::type_error("ljust() takes exactly 1 argument")); } else { let w = a[1].as_i64().unwrap_or(0) as usize; let fill = if a.len() > 2 { let f = a[2].str(); f.chars().next().unwrap_or(' ') } else { ' ' }; let s = a[0].str(); let padding = if w > s.len() { fill.to_string().repeat(w - s.len()) } else { String::new() }; Ok(py_str(&(s.to_string() + &padding))) }, self_obj: PyObjectRef::new(PyObject::None) })),
+                    "rjust" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "rjust".to_string(), func: |a| if a.len() < 2 { return Err(PyError::type_error("rjust() takes exactly 1 argument")); } else { let w = a[1].as_i64().unwrap_or(0) as usize; let s = a[0].str(); let padding = if w > s.len() { " ".repeat(w - s.len()) } else { String::new() }; Ok(py_str(&(padding + &s))) }, self_obj: PyObjectRef::new(PyObject::None) })),
+                    "center" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "center".to_string(), func: |a| if a.len() < 2 { return Err(PyError::type_error("center() takes exactly 1 argument")); } else { let w = a[1].as_i64().unwrap_or(0) as usize; let s = a[0].str(); if w <= s.len() { Ok(py_str(&s)) } else { let pad = w - s.len(); let left = pad / 2; let right = pad - left; Ok(py_str(&(" ".repeat(left) + &s + &" ".repeat(right)))) } }, self_obj: PyObjectRef::new(PyObject::None) })),
+                    "removeprefix" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "removeprefix".to_string(), func: |a| if a.len() < 2 { return Err(PyError::type_error("removeprefix() takes exactly 1 argument")); } else { let s = a[0].str(); let p = a[1].str(); Ok(py_str(if s.starts_with(&p) { &s[p.len()..] } else { &s })) }, self_obj: PyObjectRef::new(PyObject::None) })),
+                    "removesuffix" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "removesuffix".to_string(), func: |a| if a.len() < 2 { return Err(PyError::type_error("removesuffix() takes exactly 1 argument")); } else { let s = a[0].str(); let p = a[1].str(); Ok(py_str(if s.ends_with(&p) { &s[..s.len()-p.len()] } else { &s })) }, self_obj: PyObjectRef::new(PyObject::None) })),
                     _ => Err(PyError::attribute_error(format!("'str' object has no attribute '{}'", name))),
                 }
             }
