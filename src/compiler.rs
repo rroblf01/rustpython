@@ -25,9 +25,6 @@ struct ScopeInfo {
     scope: ScopeType,
     global_names: HashSet<String>,
     nonlocal_names: HashSet<String>,
-    varnames: Vec<String>,
-    cellvars: Vec<String>,
-    freevars: Vec<String>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -84,9 +81,6 @@ impl Compiler {
             scope: self.scope.clone(),
             global_names: std::mem::take(&mut self.global_names),
             nonlocal_names: std::mem::take(&mut self.nonlocal_names),
-            varnames: std::mem::take(&mut self.code.varnames),
-            cellvars: std::mem::take(&mut self.code.cellvars),
-            freevars: std::mem::take(&mut self.code.freevars),
         };
         self.scope_stack.push(info);
         self.scope = scope;
@@ -97,9 +91,6 @@ impl Compiler {
             self.scope = info.scope;
             self.global_names = info.global_names;
             self.nonlocal_names = info.nonlocal_names;
-            self.code.varnames = info.varnames;
-            self.code.cellvars = info.cellvars;
-            self.code.freevars = info.freevars;
         }
     }
 
@@ -1251,6 +1242,13 @@ impl Compiler {
             }
         }
 
+        // Emit MAKE_CELL for each cell var at function start
+        for cell_var in &self.code.cellvars.clone() {
+            if let Some(idx) = self.get_var_index(cell_var) {
+                self.emit(Opcode::MAKE_CELL, idx as u32);
+            }
+        }
+
         // Check if function contains yield (generator)
         let has_yield = contains_yield_in_stmts(body);
         if has_yield {
@@ -1270,8 +1268,6 @@ impl Compiler {
         // Remember inner function's free vars for closure building
         let inner_free_vars = self.code.freevars.clone();
         let inner_cell_vars = self.code.cellvars.clone();
-        let source_cell_vars = self.code.cellvars.clone();
-        let source_free_vars = self.code.freevars.clone();
 
         self.code.nlocals = self.code.varnames.len();
         self.code.name = name.clone();
@@ -1286,11 +1282,10 @@ impl Compiler {
         self.loop_stack = old_loop_stack;
 
         // Emit LOAD_CLOSURE for each free var of the inner function
-        // Use source_cell_vars/source_free_vars (the COMPILED function's scope before swap)
         let mut nfree = 0usize;
         for fv_name in &inner_free_vars {
-            let found = source_cell_vars.iter().any(|n| n == fv_name)
-                || source_free_vars.iter().any(|n| n == fv_name)
+            let found = self.code.cellvars.iter().any(|n| n == fv_name)
+                || self.code.freevars.iter().any(|n| n == fv_name)
                 || self.get_var_index(fv_name).is_some();
             if found {
                 if self.get_var_index(fv_name).is_some() && !self.code.cellvars.contains(fv_name) {
@@ -1312,7 +1307,7 @@ impl Compiler {
             self.emit(Opcode::BUILD_TUPLE, nfree as u32);
         }
 
-        let mut make_func_arg = 0u32;
+        let mut make_func_arg = defaults_count as u32;
         if nfree > 0 {
             make_func_arg |= 1 << 8;
         }
