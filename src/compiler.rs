@@ -1656,8 +1656,9 @@ impl Compiler {
                 let const_none = self.get_const_index(ConstValue::None) as u32;
                 self.emit(Opcode::LOAD_CONST, const_none);
             }
-            Expr::Await(_) => {
-                return Err("Await not supported yet".to_string());
+            Expr::Await(expr) => {
+                self.compile_expr(expr)?;
+                self.emit(Opcode::GET_AWAITABLE, 0);
             }
         }
         Ok(())
