@@ -2217,7 +2217,26 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 if args.len() >= 2 { Ok(args[1].clone()) }
                 else { Err(PyError::stop_iteration()) }
             } else {
-                Ok(v.remove(0))
+                // Convert to ListIter for O(1) iteration
+                let list = std::mem::take(v);
+                *obj = PyObject::ListIter { list, index: 0 };
+                drop(obj);
+                let mut obj = args[0].borrow_mut();
+                if let PyObject::ListIter { list, index } = &mut *obj {
+                    let v = list[*index].clone();
+                    *index += 1;
+                    Ok(v)
+                } else { unreachable!() }
+            }
+        }
+        PyObject::ListIter { list, index } => {
+            if *index >= list.len() {
+                if args.len() >= 2 { Ok(args[1].clone()) }
+                else { Err(PyError::stop_iteration()) }
+            } else {
+                let v = list[*index].clone();
+                *index += 1;
+                Ok(v)
             }
         }
         _ => Err(PyError::type_error(format!("'{}' is not an iterator", obj.type_name()))),

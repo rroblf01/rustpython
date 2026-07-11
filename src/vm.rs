@@ -791,9 +791,17 @@ impl VirtualMachine {
                 } else {
                     let val = self.frames[fi].pop()?;
                     let item = {
+                        // Convert plain List to ListIter for O(1) iteration
+                        let is_plain_list = matches!(&*val.borrow(), PyObject::List(..));
+                        if is_plain_list {
+                            let list_clone = {
+                                let obj = val.borrow();
+                                if let PyObject::List(v) = &*obj { v.clone() } else { unreachable!() }
+                            };
+                            *val.borrow_mut() = PyObject::ListIter { list: list_clone, index: 0 };
+                        }
                         let mut obj = val.borrow_mut();
                         match &mut *obj {
-                            PyObject::List(list) => list.remove(0),
                             PyObject::ListIter { list, index } => {
                                 let v = list[*index].clone();
                                 *index += 1;
