@@ -889,6 +889,46 @@ pub fn py_set() -> PyObjectRef {
     PyObjectRef::new(PyObject::Set(PySet::new()))
 }
 
+/// printf-style string interpolation (% operator)
+fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String, String> {
+    let mut result = String::new();
+    let mut chars = fmt.chars();
+
+    while let Some(ch) = chars.next() {
+        if ch == '%' {
+            match chars.next() {
+                None => return Err("incomplete format: trailing %".to_string()),
+                Some('%') => result.push('%'),
+                Some('s') => {
+                    let val = arg.str();
+                    result.push_str(&val);
+                }
+                Some('d') | Some('i') => {
+                    let val = if let Some(i) = arg.as_i64() {
+                        i.to_string()
+                    } else {
+                        arg.str()
+                    };
+                    result.push_str(&val);
+                }
+                Some('r') => {
+                    let val = format!("'{}'", arg.str());
+                    result.push_str(&val);
+                }
+                Some('f') => {
+                    let val = arg.str();
+                    result.push_str(&val);
+                }
+                Some(c) => return Err(format!("unsupported format character '{}'", c)),
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+
+    Ok(result)
+}
+
 // ---- Binary Operations ----
 
 pub fn try_dunder_binop(a: &PyObjectRef, b: &PyObjectRef, method: &str) -> PyResult<Option<PyObjectRef>> {
@@ -902,7 +942,10 @@ pub fn try_dunder_binop(a: &PyObjectRef, b: &PyObjectRef, method: &str) -> PyRes
                     _ => None,
                 }
             }
-            _ => None,
+            _ => {
+                // Try dunder method directly on the object (for builtin types like str, list, etc.)
+                a_borrowed.get_attribute(method).ok()
+            }
         }
     };
     if let Some(f) = f {
@@ -1213,6 +1256,16 @@ pub fn py_bit_or(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     match (&*a_obj, &*b_obj) {
         (PyObject::Int(a), PyObject::Int(b)) => Ok(py_int(a.clone() | b)),
         (PyObject::Set(a), PyObject::Set(b)) => set_union(a, b),
+        (PyObject::Dict(a), PyObject::Dict(b)) => {
+            let mut merged = PyDict::new();
+            for k in a.keys() {
+                if let Ok(Some(v)) = a.get(&k) { merged.set(k, v)?; }
+            }
+            for k in b.keys() {
+                if let Ok(Some(v)) = b.get(&k) { merged.set(k, v)?; }
+            }
+            Ok(PyObjectRef::new(PyObject::Dict(merged)))
+        }
         _ => Err(PyError::type_error(format!("unsupported operand type(s) for |: '{}' and '{}'",
             a_obj.type_name(), b_obj.type_name()))),
     }
@@ -3286,6 +3339,17 @@ impl ObjectAccess for PyObject {
                     "center" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "center".to_string(), func: |a| if a.len() < 2 { return Err(PyError::type_error("center() takes exactly 1 argument")); } else { let w = a[1].as_i64().unwrap_or(0) as usize; let s = a[0].str(); if w <= s.len() { Ok(py_str(&s)) } else { let pad = w - s.len(); let left = pad / 2; let right = pad - left; Ok(py_str(&(" ".repeat(left) + &s + &" ".repeat(right)))) } }, self_obj: PyObjectRef::new(PyObject::None) })),
                     "removeprefix" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "removeprefix".to_string(), func: |a| if a.len() < 2 { return Err(PyError::type_error("removeprefix() takes exactly 1 argument")); } else { let s = a[0].str(); let p = a[1].str(); Ok(py_str(if s.starts_with(&p) { &s[p.len()..] } else { &s })) }, self_obj: PyObjectRef::new(PyObject::None) })),
                     "removesuffix" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "removesuffix".to_string(), func: |a| if a.len() < 2 { return Err(PyError::type_error("removesuffix() takes exactly 1 argument")); } else { let s = a[0].str(); let p = a[1].str(); Ok(py_str(if s.ends_with(&p) { &s[..s.len()-p.len()] } else { &s })) }, self_obj: PyObjectRef::new(PyObject::None) })),
+                    "__mod__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__mod__".to_string(),
+                        func: |args| {
+                            // args[0] = self_obj (py_none), args[1] = format string, args[2] = value
+                            if args.len() < 3 { return Err(PyError::type_error("__mod__() too few args")); }
+                            let fmt = args[1].str();
+                            let result = string_interpolate(&fmt, &args[2]).map_err(|e| PyError::runtime_error(e))?;
+                            Ok(py_str(&result))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     _ => Err(PyError::attribute_error(format!("'str' object has no attribute '{}'", name))),
                 }
             }
