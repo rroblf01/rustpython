@@ -470,7 +470,7 @@ pub enum PyObject {
     Exception {
         typ: String,
         args: Vec<PyObjectRef>,
-        cause: Option<Box<PyError>>,
+        cause: Option<PyObjectRef>,
     },
     BuildClass,
     BoundMethod {
@@ -2880,6 +2880,56 @@ pub fn builtin_property(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }))
 }
 
+/// Return a new Property with the given setter (used by @x.setter)
+pub fn property_setter(prop: &PyObjectRef, new_setter: PyObjectRef) -> PyObjectRef {
+    let (getter, deleter, doc) = {
+        let b = prop.borrow();
+        match &*b {
+            PyObject::Property { getter, deleter, doc, .. } => (getter.clone(), deleter.clone(), doc.clone()),
+            _ => return prop.clone(),
+        }
+    };
+    PyObjectRef::new(PyObject::Property {
+        getter,
+        setter: Some(new_setter),
+        deleter,
+        doc,
+    })
+}
+
+/// Return a new Property with the given deleter (used by @x.deleter)
+pub fn property_deleter(prop: &PyObjectRef, new_deleter: PyObjectRef) -> PyObjectRef {
+    let (getter, setter, doc) = {
+        let b = prop.borrow();
+        match &*b {
+            PyObject::Property { getter, setter, doc, .. } => (getter.clone(), setter.clone(), doc.clone()),
+            _ => return prop.clone(),
+        }
+    };
+    PyObjectRef::new(PyObject::Property {
+        getter,
+        setter,
+        deleter: Some(new_deleter),
+        doc,
+    })
+}
+
+/// Builtin for property.setter(func) — returns new Property with setter
+pub fn builtin_property_setter_fn(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() < 2 {
+        return Err(PyError::type_error("setter() requires at least the setter function"));
+    }
+    Ok(property_setter(&args[0], args[1].clone()))
+}
+
+/// Builtin for property.deleter(func) — returns new Property with deleter
+pub fn builtin_property_deleter_fn(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() < 2 {
+        return Err(PyError::type_error("deleter() requires at least the deleter function"));
+    }
+    Ok(property_deleter(&args[0], args[1].clone()))
+}
+
 pub fn builtin_staticmethod(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() { return Err(PyError::type_error("staticmethod() requires at least 1 argument")); }
     Ok(PyObjectRef::new(PyObject::StaticMethod { func: args[0].clone() }))
@@ -2934,6 +2984,44 @@ impl ObjectAccess for PyObject {
                         None
                     }
                 }).ok_or_else(|| PyError::attribute_error(format!("instance has no attribute '{}'", name)))
+            }
+            PyObject::Property { getter, setter, deleter, .. } => {
+                match name {
+                    "fget" => getter.clone().ok_or_else(|| PyError::attribute_error("property has no getter".to_string())),
+                    "fset" => setter.clone().ok_or_else(|| PyError::attribute_error("property has no setter".to_string())),
+                    "fdel" => deleter.clone().ok_or_else(|| PyError::attribute_error("property has no deleter".to_string())),
+                    "setter" | "deleter" | "getter" => {
+                        let is_setter = name == "setter";
+                        let prop_obj = PyObjectRef::new(match self {
+                            PyObject::Property { getter, setter, deleter, doc } => PyObject::Property {
+                                getter: getter.clone(),
+                                setter: setter.clone(),
+                                deleter: deleter.clone(),
+                                doc: doc.clone(),
+                            },
+                            _ => unreachable!(),
+                        });
+                        Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                            name: name.to_string(),
+                            func: if is_setter { builtin_property_setter_fn } else { builtin_property_deleter_fn },
+                            self_obj: prop_obj,
+                        }))
+                    }
+                    _ => Err(PyError::attribute_error(format!("'property' object has no attribute '{}'", name))),
+                }
+            }
+            PyObject::Exception { typ, args, cause } => {
+                match name {
+                    "__name__" => Ok(py_str(typ)),
+                    "args" => Ok(py_tuple(args.clone())),
+                    "__cause__" => {
+                        match cause {
+                            Some(cause_exc) => Ok(cause_exc.clone()),
+                            None => Ok(py_none()),
+                        }
+                    }
+                    _ => Err(PyError::attribute_error(format!("'Exception' object has no attribute '{}'", name))),
+                }
             }
             PyObject::List(_v) => {
                 match name {

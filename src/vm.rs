@@ -1467,6 +1467,10 @@ impl VirtualMachine {
                             }
                             _ => cause.str(),
                         };
+                        // Set __cause__ on the exception object (cause field changed to PyObjectRef)
+                        if let PyObject::Exception { cause: ref mut cause_field, .. } = &mut *exc.borrow_mut() {
+                            *cause_field = Some(cause.clone());
+                        }
                         return Err(PyError::Exception(format!("{} (caused by: {})", exc_msg, cause_msg), exc));
                     }
                     _ => return Err(PyError::runtime_error("invalid RAISE_VARARGS count")),
@@ -1943,30 +1947,31 @@ impl VirtualMachine {
                 frame.stack.truncate(handler.stack_depth);
                 frame.ip = handler.instr_addr;
                 let exc_obj = {
-                    let typ = match error {
-                        PyError::TypeError(_) => "TypeError".to_string(),
-                        PyError::ValueError(_) => "ValueError".to_string(),
-                        PyError::NameError(_) => "NameError".to_string(),
-                        PyError::AttributeError(_) => "AttributeError".to_string(),
-                        PyError::IndexError(_) => "IndexError".to_string(),
-                        PyError::KeyError(_) => "KeyError".to_string(),
-                        PyError::ZeroDivisionError(_) => "ZeroDivisionError".to_string(),
-                        PyError::RuntimeError(_) => "RuntimeError".to_string(),
-                        PyError::StopIteration => "StopIteration".to_string(),
-                        PyError::AssertionError(_) => "AssertionError".to_string(),
-                        PyError::ImportError(_) => "ImportError".to_string(),
+                    let (typ, cause) = match error {
+                        PyError::TypeError(_) => ("TypeError".to_string(), None),
+                        PyError::ValueError(_) => ("ValueError".to_string(), None),
+                        PyError::NameError(_) => ("NameError".to_string(), None),
+                        PyError::AttributeError(_) => ("AttributeError".to_string(), None),
+                        PyError::IndexError(_) => ("IndexError".to_string(), None),
+                        PyError::KeyError(_) => ("KeyError".to_string(), None),
+                        PyError::ZeroDivisionError(_) => ("ZeroDivisionError".to_string(), None),
+                        PyError::RuntimeError(_) => ("RuntimeError".to_string(), None),
+                        PyError::StopIteration => ("StopIteration".to_string(), None),
+                        PyError::AssertionError(_) => ("AssertionError".to_string(), None),
+                        PyError::ImportError(_) => ("ImportError".to_string(), None),
                         PyError::Exception(_, exc) => {
-                            match &*exc.borrow() {
-                                PyObject::Exception { typ, .. } => typ.clone(),
-                                _ => "Exception".to_string(),
+                            let exc_borrow = exc.borrow();
+                            match &*exc_borrow {
+                                PyObject::Exception { typ, cause, .. } => (typ.clone(), cause.clone()),
+                                _ => ("Exception".to_string(), None),
                             }
                         }
-                        _ => "Exception".to_string(),
+                        _ => ("Exception".to_string(), None),
                     };
                     PyObjectRef::imm(PyObject::Exception {
                         typ,
                         args: vec![py_str(&error.message())],
-                        cause: None,
+                        cause,
                     })
                 };
                 frame.push(exc_obj);
