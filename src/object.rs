@@ -1967,44 +1967,34 @@ pub fn builtin_chr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() != 1 {
         return Err(PyError::type_error("chr() takes exactly one argument"));
     }
-    let n = args[0].borrow();
-    if let PyObject::Int(i) = &*n {
-        let code = i.to_u32().ok_or_else(|| PyError::value_error("chr() arg not in range(0x110000)"))?;
-        let c = char::from_u32(code).ok_or_else(|| PyError::value_error("chr() arg not in range(0x110000)"))?;
-        Ok(py_str(&c.to_string()))
-    } else {
-        Err(PyError::type_error("chr() argument must be int"))
-    }
+    let n = to_index(&args[0])?;
+    let code = n.to_usize().ok_or_else(|| PyError::value_error("chr() arg not in range(0x110000)"))?;
+    let c = char::from_u32(code as u32).ok_or_else(|| PyError::value_error("chr() arg not in range(0x110000)"))?;
+    Ok(py_str(&c.to_string()))
 }
 
 pub fn builtin_hex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() != 1 {
         return Err(PyError::type_error("hex() takes exactly one argument"));
     }
-    match &*args[0].borrow() {
-        PyObject::Int(i) => Ok(py_str(&format!("0x{:x}", i))),
-        _ => Err(PyError::type_error("hex() argument must be int")),
-    }
+    let n = to_index(&args[0])?;
+    Ok(py_str(&format!("0x{:x}", n)))
 }
 
 pub fn builtin_oct(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() != 1 {
         return Err(PyError::type_error("oct() takes exactly one argument"));
     }
-    match &*args[0].borrow() {
-        PyObject::Int(i) => Ok(py_str(&format!("0o{:o}", i))),
-        _ => Err(PyError::type_error("oct() argument must be int")),
-    }
+    let n = to_index(&args[0])?;
+    Ok(py_str(&format!("0o{:o}", n)))
 }
 
 pub fn builtin_bin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() != 1 {
         return Err(PyError::type_error("bin() takes exactly one argument"));
     }
-    match &*args[0].borrow() {
-        PyObject::Int(i) => Ok(py_str(&format!("0b{:b}", i))),
-        _ => Err(PyError::type_error("bin() argument must be int")),
-    }
+    let n = to_index(&args[0])?;
+    Ok(py_str(&format!("0b{:b}", n)))
 }
 
 pub fn builtin_input(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
@@ -2042,9 +2032,13 @@ fn call_bound_method(func: PyObjectRef, self_obj: PyObjectRef, args: Vec<PyObjec
         }
         PyObject::Function { code, globals: g, defaults, .. } => {
             let mut frame = super::vm::Frame::new(std::rc::Rc::new(code.clone()), g.clone(), std::rc::Rc::new(create_builtins()));
-            frame.locals.insert("self".to_string(), self_obj);
             let code = code.clone();
             let defaults = defaults.clone();
+            // Set self at index 0
+            if !code.varnames.is_empty() {
+                frame.fast_locals[0] = Some(self_obj.clone());
+                frame.locals.insert(code.varnames[0].clone(), self_obj);
+            }
             let npos = args.len();
             let named_params = if code.vararg_name.is_some() || code.kwarg_name.is_some() {
                 code.varnames.iter().position(|n| {
@@ -2053,24 +2047,31 @@ fn call_bound_method(func: PyObjectRef, self_obj: PyObjectRef, args: Vec<PyObjec
             } else {
                 code.varnames.len()
             };
-            for i in 0..npos.min(named_params - 1) {
-                if i + 1 < code.varnames.len() {
-                    frame.locals.insert(code.varnames[i + 1].clone(), args[i].clone());
+            for i in 0..npos.min(named_params.saturating_sub(1)) {
+                let idx = i + 1;
+                if idx < code.varnames.len() {
+                    frame.fast_locals[idx] = Some(args[i].clone());
+                    frame.locals.insert(code.varnames[idx].clone(), args[i].clone());
                 }
             }
             if let Some(vararg_name) = &code.vararg_name {
                 let mut extra = Vec::new();
-                for i in (named_params - 1)..npos {
+                for i in (named_params.saturating_sub(1))..npos {
                     extra.push(args[i].clone());
                 }
                 frame.locals.insert(vararg_name.clone(), py_tuple(extra));
             }
-            if npos < named_params - 1 {
+            if npos < named_params.saturating_sub(1) {
                 let num_defaults = code.num_defaults;
-                for i in npos..named_params - 1 {
-                    let default_idx = num_defaults.saturating_sub(named_params.saturating_sub(1) - i);
-                    if default_idx < defaults.len() {
-                        frame.locals.insert(code.varnames[i + 1].clone(), defaults[default_idx].clone());
+                for i in npos..named_params.saturating_sub(1) {
+                    let idx = i + 1;
+                    if idx < code.varnames.len() {
+                        let default_idx = num_defaults.saturating_sub(named_params.saturating_sub(1) - i);
+                        if default_idx < defaults.len() {
+                            let val = defaults[default_idx].clone();
+                            frame.fast_locals[idx] = Some(val.clone());
+                            frame.locals.insert(code.varnames[idx].clone(), val);
+                        }
                     }
                 }
             }
@@ -2686,9 +2687,7 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
                     dict: std::collections::HashMap::new(),
                 });
                 if let Some(init) = type_dict.get("__init__").cloned() {
-                    let mut init_args = vec![instance.clone()];
-                    init_args.extend(a);
-                    call_bound_method(init, instance.clone(), init_args)?;
+                    call_bound_method(init, instance.clone(), a)?;
                 }
                 Ok(instance)
             } else { unreachable!() }
@@ -3408,6 +3407,40 @@ impl ObjectAccess for PyObject {
 }
 
 // ---- Subscript access ----
+
+pub fn to_index(obj: &PyObjectRef) -> PyResult<BigInt> {
+    let type_name = obj.get_type_name();
+    let is_instance = matches!(&*obj.borrow(), PyObject::Instance { .. });
+    if is_instance {
+        let f = {
+            let o = obj.borrow();
+            match &*o {
+                PyObject::Instance { typ, .. } => {
+                    let typ_ref = typ.borrow();
+                    match &*typ_ref {
+                        PyObject::Type { dict: type_dict, .. } => type_dict.get("__index__").cloned(),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            }
+        };
+        if let Some(f) = f {
+            let result = call_bound_method(f, obj.clone(), vec![])?;
+            let r = result.borrow();
+            if let PyObject::Int(i) = &*r { Ok(i.clone()) }
+            else { Err(PyError::type_error("__index__ must return int")) }
+        } else {
+            Err(PyError::type_error(format!("'{}' object cannot be interpreted as an integer", type_name)))
+        }
+    } else {
+        let o = obj.borrow();
+        match &*o {
+            PyObject::Int(i) => Ok(i.clone()),
+            _ => Err(PyError::type_error(format!("'{}' object cannot be interpreted as an integer", type_name))),
+        }
+    }
+}
 
 pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRef> {
     // Check for __getitem__ on custom classes

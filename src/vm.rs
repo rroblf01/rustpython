@@ -1392,11 +1392,17 @@ impl VirtualMachine {
                         let func_globals = func_globals.clone();
                         drop(init_borrowed);
                         let mut new_frame = Frame::new(Rc::new(code), func_globals, Rc::clone(&self.builtins));
-                        new_frame.locals.insert(new_frame.code.varnames[0].clone(), instance.clone());
+                        // Set self at index 0
+                        if !new_frame.code.varnames.is_empty() {
+                            new_frame.fast_locals[0] = Some(instance.clone());
+                            new_frame.locals.insert(new_frame.code.varnames[0].clone(), instance.clone());
+                        }
                         for (i, arg_name) in new_frame.code.varnames.iter().enumerate().skip(1) {
                             if i - 1 < args.len() {
+                                new_frame.fast_locals[i] = Some(args[i - 1].clone());
                                 new_frame.locals.insert(arg_name.clone(), args[i - 1].clone());
                             } else {
+                                new_frame.fast_locals[i] = Some(py_none());
                                 new_frame.locals.insert(arg_name.clone(), py_none());
                             }
                         }
