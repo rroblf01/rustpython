@@ -492,12 +492,18 @@ impl Compiler {
             .collect();
         cell_vars.sort();
 
-        // free_vars = nested_refs - local_names (names that nested functions need from us)
-        // + nonlocal declarations (names explicitly requested from outer scope)
-        let mut free_vars: Vec<String> = nested_refs.difference(&local_names)
+        // free_vars = all_outer_refs - local_names (excluding global)
+        let mut free_vars: Vec<String> = all_outer_refs.difference(&local_names)
             .filter(|n| !effective_global.contains(*n))
             .cloned()
             .collect();
+        // Also include name referenced directly in this function that aren't local
+        for name in &own_refs {
+            if !local_names.contains(name) && !free_vars.contains(name) && !effective_global.contains(name) {
+                free_vars.push(name.clone());
+            }
+        }
+        // Include explicit nonlocal declarations
         for n in &effective_nonlocal {
             if !free_vars.contains(n) && !effective_global.contains(n) {
                 free_vars.push(n.clone());

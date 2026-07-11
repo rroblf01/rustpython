@@ -1238,17 +1238,27 @@ impl VirtualMachine {
 
             Opcode::LOAD_CLOSURE => {
                 let idx = arg as usize;
-                let (_name, cell) = {
+                let cell = {
                     let f = &self.frames[self.frames.len() - 1];
-                    let name = if idx < f.code.cellvars.len() {
-                        f.code.cellvars[idx].clone()
+                    if idx < f.code.cellvars.len() {
+                        let name = &f.code.cellvars[idx];
+                        if let Some(var_idx) = f.code.varnames.iter().position(|n| n == name) {
+                            if let Some(val) = f.fast_locals.get(var_idx).and_then(|v| v.clone()) {
+                                val
+                            } else {
+                                PyObjectRef::new(PyObject::Cell { value: None })
+                            }
+                        } else {
+                            PyObjectRef::new(PyObject::Cell { value: None })
+                        }
                     } else {
-                        f.code.freevars[idx - f.code.cellvars.len()].clone()
-                    };
-                    let cell = f.locals.get(&name).cloned().unwrap_or_else(|| {
-                        PyObjectRef::new(PyObject::Cell { value: None })
-                    });
-                    (name, cell)
+                        let fv_idx = idx - f.code.cellvars.len();
+                        if let Some(cell) = f.closure.get(fv_idx).cloned() {
+                            cell
+                        } else {
+                            PyObjectRef::new(PyObject::Cell { value: None })
+                        }
+                    }
                 };
                 self.frames[fi].push(cell);
             }
