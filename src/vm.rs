@@ -133,6 +133,9 @@ impl VirtualMachine {
           let select_dict = create_select_dict();
           modules.insert("select".to_string(), create_module("select", select_dict));
 
+          let re_dict = create_re_dict();
+          modules.insert("re".to_string(), create_module("re", re_dict));
+
           // Populate sys.path with default search paths
          if let PyObject::List(path_list) = &mut *sys_dict.get("path").unwrap().borrow_mut() {
              path_list.push(py_str("."));

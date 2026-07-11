@@ -4961,6 +4961,113 @@ pub fn create_socket_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
+pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! re_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    re_func!("search", |args| {
+        if args.len() < 2 {
+            return Err(PyError::type_error("search() takes at least 2 arguments"));
+        }
+        let pattern = args[0].str();
+        let string = args[1].str();
+        match regex::Regex::new(&pattern) {
+            Ok(re) => {
+                match re.find(&string) {
+                    Some(m) => {
+                        let start = m.start();
+                        let end = m.end();
+                        let text = m.as_str().to_string();
+                        Ok(py_tuple(vec![py_int(start as i64), py_int(end as i64), py_str(&text)]))
+                    }
+                    None => Ok(py_none()),
+                }
+            }
+            Err(e) => Err(PyError::ValueError(format!("invalid regex: {}", e))),
+        }
+    });
+
+    re_func!("match", |args| {
+        if args.len() < 2 {
+            return Err(PyError::type_error("match() takes at least 2 arguments"));
+        }
+        let pattern = args[0].str();
+        let string = args[1].str();
+        match regex::Regex::new(&pattern) {
+            Ok(re) => {
+                match re.find_at(&string, 0) {
+                    Some(m) if m.start() == 0 => {
+                        let end = m.end();
+                        let text = m.as_str().to_string();
+                        Ok(py_tuple(vec![py_int(0), py_int(end as i64), py_str(&text)]))
+                    }
+                    _ => Ok(py_none()),
+                }
+            }
+            Err(e) => Err(PyError::ValueError(format!("invalid regex: {}", e))),
+        }
+    });
+
+    re_func!("findall", |args| {
+        if args.len() < 2 {
+            return Err(PyError::type_error("findall() takes at least 2 arguments"));
+        }
+        let pattern = args[0].str();
+        let string = args[1].str();
+        match regex::Regex::new(&pattern) {
+            Ok(re) => {
+                let results: Vec<PyObjectRef> = re.find_iter(&string)
+                    .map(|m| py_str(m.as_str()))
+                    .collect();
+                Ok(py_list(results))
+            }
+            Err(e) => Err(PyError::ValueError(format!("invalid regex: {}", e))),
+        }
+    });
+
+    re_func!("sub", |args| {
+        if args.len() < 3 {
+            return Err(PyError::type_error("sub() takes at least 3 arguments"));
+        }
+        let pattern = args[0].str();
+        let repl = args[1].str();
+        let string = args[2].str();
+        match regex::Regex::new(&pattern) {
+            Ok(re) => {
+                let result = re.replace_all(&string, repl.as_str());
+                Ok(py_str(&result))
+            }
+            Err(e) => Err(PyError::ValueError(format!("invalid regex: {}", e))),
+        }
+    });
+
+    re_func!("split", |args| {
+        if args.len() < 2 {
+            return Err(PyError::type_error("split() takes at least 2 arguments"));
+        }
+        let pattern = args[0].str();
+        let string = args[1].str();
+        let limit = if args.len() > 2 { args[2].as_i64().unwrap_or(0) as usize } else { 0 };
+        match regex::Regex::new(&pattern) {
+            Ok(re) => {
+                let parts: Vec<PyObjectRef> = if limit > 0 {
+                    re.splitn(&string, limit).map(|s| py_str(s)).collect()
+                } else {
+                    re.split(&string).map(|s| py_str(s)).collect()
+                };
+                Ok(py_list(parts))
+            }
+            Err(e) => Err(PyError::ValueError(format!("invalid regex: {}", e))),
+        }
+    });
+
+    d
+}
+
 pub fn create_module(name: &str, dict: HashMap<String, PyObjectRef>) -> PyObjectRef {
     PyObjectRef::new(PyObject::Module {
         name: name.to_string(),
