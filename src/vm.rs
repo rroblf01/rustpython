@@ -54,6 +54,7 @@ impl Frame {
         globals: Rc<RefCell<HashMap<String, PyObjectRef>>>,
         builtins: Rc<HashMap<String, PyObjectRef>>,
     ) -> Self {
+        let instr_count = code.instructions.len();
         Frame {
             fast_locals: vec![None; code.nlocals],
             code,
@@ -66,8 +67,8 @@ impl Frame {
             exception_handlers: Vec::new(),
             return_value: None,
             closure: Vec::new(),
-            attr_cache: Vec::new(),
-            global_cache: Vec::new(),
+            attr_cache: vec![None; instr_count],
+            global_cache: vec![None; instr_count],
             registers: Vec::new(),
         }
     }
@@ -378,6 +379,7 @@ impl VirtualMachine {
     #[inline(always)]
     fn execute_instruction(&mut self) -> PyResult<Option<PyObjectRef>> {
         let fi = self.frames.len() - 1;
+        // Borrow the frame local to avoid repeated Vec indexing
         let ip = self.frames[fi].ip;
         if ip >= self.frames[fi].code.instructions.len() {
             return Err(PyError::runtime_error("execution reached end of code"));
@@ -385,6 +387,11 @@ impl VirtualMachine {
         let op = self.frames[fi].code.instructions[ip].op;
         let arg = self.frames[fi].code.instructions[ip].arg;
         self.frames[fi].ip = ip + 1;
+
+        // Use a macro to quickly access current frame's stack
+        macro_rules! frame {
+            () => { &mut self.frames[fi] }
+        }
 
         // Profile: increment counter for this instruction
         // Only in profile mode (disabled by default for speed)
