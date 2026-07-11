@@ -1383,10 +1383,12 @@ impl VirtualMachine {
                 self.frames[fi].exception_handlers.pop();
             }
 
-            Opcode::PUSH_EXC_INFO => {}
+            Opcode::PUSH_EXC_INFO => {
+                // No-op on value stack — exc_obj stays on top for DUP_TOP below
+            }
 
             Opcode::POP_EXCEPT => {
-                self.frames[fi].pop()?;
+                // No-op to match PUSH_EXC_INFO — balance the pair
             }
 
             Opcode::CHECK_EXC_MATCH => {
