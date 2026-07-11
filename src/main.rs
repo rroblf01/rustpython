@@ -7,6 +7,7 @@ mod object;
 mod vm;
 mod jit;
 mod interner;
+mod gc;
 
 use std::env;
 use std::fs;
