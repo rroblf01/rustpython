@@ -347,7 +347,7 @@ impl VirtualMachine {
         let fi = self.frames.len() - 1;
         let ip = self.frames[fi].ip;
         if ip >= self.frames[fi].code.instructions.len() {
-            return Err(PyError::runtime_error("execution reached end of code"));
+            return Ok(None);  // Normal termination, not an error
         }
         let op = self.frames[fi].code.instructions[ip].op;
         let arg = self.frames[fi].code.instructions[ip].arg;
