@@ -4550,6 +4550,158 @@ pub fn create_itertools_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
+static RNG_STATE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn fast_random_u64() -> u64 {
+    RNG_STATE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407)
+}
+
+fn fast_random_f64() -> f64 {
+    (fast_random_u64() >> 11) as f64 * (1.0 / 9007199254740992.0)
+}
+
+pub fn create_random_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! rnd_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    rnd_func!("random", |args| {
+        Ok(py_float(fast_random_f64()))
+    });
+
+    rnd_func!("randint", |args| {
+        if args.len() < 2 {
+            return Err(PyError::type_error("randint() takes at least 2 arguments"));
+        }
+        let a = args[0].as_i64().ok_or_else(|| PyError::type_error("randint() argument must be int"))?;
+        let b = args[1].as_i64().ok_or_else(|| PyError::type_error("randint() argument must be int"))?;
+        if a > b {
+            return Err(PyError::ValueError("randint() empty range".to_string()));
+        }
+        let range = (b - a + 1) as u64;
+        let n = fast_random_u64() % range;
+        Ok(py_int(a + n as i64))
+    });
+
+    rnd_func!("choice", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("choice() takes at least 1 argument"));
+        }
+        let seq = &args[0];
+        let seq_borrowed = seq.borrow();
+        let len = match &*seq_borrowed {
+            PyObject::List(v) => v.len(),
+            PyObject::Tuple(v) => v.len(),
+            PyObject::Str(s) => s.len(),
+            _ => return Err(PyError::type_error("choice() argument must be a sequence")),
+        };
+        if len == 0 {
+            return Err(PyError::IndexError("cannot choose from an empty sequence".to_string()));
+        }
+        let idx = (fast_random_u64() % len as u64) as usize;
+        let val = match &*seq_borrowed {
+            PyObject::List(v) => v[idx].clone(),
+            PyObject::Tuple(v) => v[idx].clone(),
+            PyObject::Str(s) => py_str(&s[idx..=idx]),
+            _ => unreachable!(),
+        };
+        Ok(val)
+    });
+
+    rnd_func!("uniform", |args| {
+        if args.len() < 2 {
+            return Err(PyError::type_error("uniform() takes at least 2 arguments"));
+        }
+        let a = args[0].as_i64().unwrap_or(0) as f64;
+        let b = args[1].as_i64().unwrap_or(1) as f64;
+        Ok(py_float(a + (b - a) * fast_random_f64()))
+    });
+
+    d
+}
+
+pub fn create_datetime_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! dt_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    dt_func!("datetime", |args| {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let secs = now.as_secs() as i64;
+        let nanos = now.subsec_nanos();
+        // Format as ISO string
+        let seconds = secs % 60;
+        let minutes = (secs / 60) % 60;
+        let hours = (secs / 3600) % 24;
+        let days = secs / 86400;
+        // Approximate year/month/day from days since epoch
+        let mut y = 1970i64;
+        let mut remaining = days;
+        loop {
+            let year_days = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) { 366 } else { 365 };
+            if remaining < year_days { break; }
+            remaining -= year_days;
+            y += 1;
+        }
+        let is_leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+        let month_days = [31, if is_leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+        let mut m = 1usize;
+        for days_in_month in &month_days {
+            if remaining < *days_in_month { break; }
+            remaining -= days_in_month;
+            m += 1;
+        }
+        let d = remaining + 1;
+        let date_str = format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", y, m, d, hours, minutes, seconds);
+        Ok(py_str(&date_str))
+    });
+
+    dt_func!("date", |args| {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let secs = now.as_secs() as i64;
+        let days = secs / 86400;
+        let mut y = 1970i64;
+        let mut remaining = days;
+        loop {
+            let year_days = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) { 366 } else { 365 };
+            if remaining < year_days { break; }
+            remaining -= year_days;
+            y += 1;
+        }
+        let is_leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+        let month_days = [31, if is_leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+        let mut m = 1usize;
+        for days_in_month in &month_days {
+            if remaining < *days_in_month { break; }
+            remaining -= days_in_month;
+            m += 1;
+        }
+        let d = remaining + 1;
+        Ok(py_str(&format!("{:04}-{:02}-{:02}", y, m, d)))
+    });
+
+    dt_func!("now", |args| {
+        let s = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        Ok(py_float(s.as_secs_f64()))
+    });
+
+    d
+}
+
 pub fn create_module(name: &str, dict: HashMap<String, PyObjectRef>) -> PyObjectRef {
     PyObjectRef::new(PyObject::Module {
         name: name.to_string(),

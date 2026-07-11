@@ -121,6 +121,12 @@ impl VirtualMachine {
           let itertools_dict = create_itertools_dict();
           modules.insert("itertools".to_string(), create_module("itertools", itertools_dict));
 
+          let random_dict = create_random_dict();
+          modules.insert("random".to_string(), create_module("random", random_dict));
+
+          let datetime_dict = create_datetime_dict();
+          modules.insert("datetime".to_string(), create_module("datetime", datetime_dict));
+
           // Populate sys.path with default search paths
          if let PyObject::List(path_list) = &mut *sys_dict.get("path").unwrap().borrow_mut() {
              path_list.push(py_str("."));
