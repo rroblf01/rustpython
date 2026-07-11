@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::cell::RefCell;
 use num_bigint::BigInt;
+use smallvec::SmallVec;
 use crate::bytecode::*;
 use crate::object::*;
 use crate::object::ObjectAccess;
@@ -18,7 +19,7 @@ pub struct Frame {
     pub fast_locals: Vec<Option<PyObjectRef>>,
     pub globals: Rc<RefCell<HashMap<String, PyObjectRef>>>,
     pub builtins: Rc<HashMap<String, PyObjectRef>>,
-    pub stack: Vec<PyObjectRef>,
+    pub stack: SmallVec<[PyObjectRef; 8]>,
     pub ip: usize,
     pub base_sp: usize,
     pub exception_handlers: Vec<ExceptionHandler>,
@@ -57,7 +58,7 @@ impl Frame {
             locals: HashMap::new(),
             globals,
             builtins,
-            stack: Vec::new(),
+            stack: SmallVec::new(),
             ip: 0,
             base_sp: 0,
             exception_handlers: Vec::new(),
@@ -263,7 +264,7 @@ impl VirtualMachine {
                 locals[i] = Some(arg.clone());
             }
         }
-        let mut stack: Vec<PyObjectRef> = Vec::with_capacity(4);
+        let mut stack: SmallVec<[PyObjectRef; 4]> = SmallVec::new();
         for instr in instrs {
             match instr.op {
                 Opcode::LOAD_FAST => {

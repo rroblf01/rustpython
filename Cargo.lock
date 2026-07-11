@@ -396,6 +396,7 @@ dependencies = [
  "num-bigint",
  "num-traits",
  "regex",
+ "smallvec",
 ]
 
 [[package]]
