@@ -1871,11 +1871,34 @@ pub fn builtin_dir(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 }
 
 pub fn builtin_globals(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    Ok(py_dict())
+    let vm_ptr = VM_PTR.with(|p| *p.borrow());
+    if let Some(ptr) = vm_ptr {
+        let vm = unsafe { &*ptr };
+        let frame = vm.frames.last().ok_or_else(|| PyError::runtime_error("no frame"))?;
+        let globals = frame.globals.borrow();
+        let mut d = crate::object::PyDict::new();
+        for (k, v) in globals.iter() {
+            d.set(py_str(k), v.clone())?;
+        }
+        Ok(PyObjectRef::new(PyObject::Dict(d)))
+    } else {
+        Ok(py_dict())
+    }
 }
 
 pub fn builtin_locals(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    Ok(py_dict())
+    let vm_ptr = VM_PTR.with(|p| *p.borrow());
+    if let Some(ptr) = vm_ptr {
+        let vm = unsafe { &*ptr };
+        let frame = vm.frames.last().ok_or_else(|| PyError::runtime_error("no frame"))?;
+        let mut d = crate::object::PyDict::new();
+        for (k, v) in frame.locals.iter() {
+            d.set(py_str(k), v.clone())?;
+        }
+        Ok(PyObjectRef::new(PyObject::Dict(d)))
+    } else {
+        Ok(py_dict())
+    }
 }
 
 pub fn builtin_abs(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
