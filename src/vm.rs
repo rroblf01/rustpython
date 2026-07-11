@@ -498,6 +498,26 @@ impl VirtualMachine {
                 self.frames[fi].push(result);
             }
 
+            Opcode::MAKE_CELL => {
+                let idx = arg as usize;
+                let frame = &mut self.frames[fi];
+                if idx < frame.fast_locals.len() {
+                    let val = frame.fast_locals[idx].take();
+                    let cell = PyObjectRef::new(PyObject::Cell { value: val });
+                    frame.fast_locals[idx] = Some(cell);
+                }
+            }
+
+            Opcode::COPY_FREE_VARS => {
+                let nfree = arg as usize;
+                let mut cells = Vec::with_capacity(nfree);
+                for _ in 0..nfree {
+                    cells.push(self.frames[fi].pop()?);
+                }
+                // Store the closure tuple on the stack for MAKE_FUNCTION to consume
+                self.frames[fi].push(PyObjectRef::imm(PyObject::Tuple(cells)));
+            }
+
             Opcode::MAKE_FUNCTION => {
                 let n_defaults = arg as usize;
                 let mut defaults = Vec::new();

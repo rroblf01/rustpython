@@ -1175,6 +1175,17 @@ pub fn py_compare(a: &PyObjectRef, b: &PyObjectRef, op: u32) -> PyResult<PyObjec
             _ => return Ok(py_bool(false)),
         }));
     }
+    // Check for __eq__/__ne__ on Instance types
+    if op == 2 || op == 5 {
+        let is_a_instance = matches!(&*a.borrow(), PyObject::Instance { .. });
+        let is_b_instance = matches!(&*b.borrow(), PyObject::Instance { .. });
+        if is_a_instance || is_b_instance {
+            let method_name = if op == 2 { "__eq__" } else { "__ne__" };
+            if let Some(result) = try_dunder_comparison(a, b, method_name)? {
+                return Ok(py_bool(result));
+            }
+        }
+    }
     let result = match op {
         0 => a.borrow().lt(b)?,
         1 => a.borrow().le(b)?,
@@ -1189,6 +1200,38 @@ pub fn py_compare(a: &PyObjectRef, b: &PyObjectRef, op: u32) -> PyResult<PyObjec
         _ => return Err(PyError::runtime_error("unknown comparison operator")),
     };
     Ok(py_bool(result))
+}
+
+fn try_dunder_comparison(a: &PyObjectRef, b: &PyObjectRef, method: &str) -> PyResult<Option<bool>> {
+    // Try a.__eq__(b) first
+    let f_a = try_get_method(a, method);
+    if let Some(f) = f_a {
+        let result = call_bound_method(f, a.clone(), vec![b.clone()])?;
+        return Ok(Some(result.truthy()));
+    }
+    // Try b.__eq__(a) if different type
+    if a.get_type_name() != b.get_type_name() {
+        let f_b = try_get_method(b, method);
+        if let Some(f) = f_b {
+            let result = call_bound_method(f, b.clone(), vec![a.clone()])?;
+            return Ok(Some(result.truthy()));
+        }
+    }
+    Ok(None)
+}
+
+fn try_get_method(obj: &PyObjectRef, name: &str) -> Option<PyObjectRef> {
+    let obj_borrowed = obj.borrow();
+    match &*obj_borrowed {
+        PyObject::Instance { typ, .. } => {
+            let typ_ref = typ.borrow();
+            match &*typ_ref {
+                PyObject::Type { dict: type_dict, .. } => type_dict.get(name).cloned(),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 trait Compare {
