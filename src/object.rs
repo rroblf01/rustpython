@@ -3069,6 +3069,24 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
+                    "sort" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "sort".to_string(),
+                        func: |args| {
+                            if let PyObject::List(list) = &mut *args[0].borrow_mut() {
+                                list.sort_by(|a, b| {
+                                    let a_int = a.borrow();
+                                    let b_int = b.borrow();
+                                    match (&*a_int, &*b_int) {
+                                        (PyObject::Int(ai), PyObject::Int(bi)) => ai.cmp(bi),
+                                        (PyObject::Float(af), PyObject::Float(bf)) => af.partial_cmp(bf).unwrap_or(std::cmp::Ordering::Equal),
+                                        _ => a.str().cmp(&b.str()),
+                                    }
+                                });
+                                Ok(py_none())
+                            } else { Err(PyError::runtime_error("sort on non-list")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     "insert" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "insert".to_string(),
                         func: |args| {
@@ -3131,6 +3149,25 @@ impl ObjectAccess for PyObject {
                         func: |args| {
                             if args.len() < 2 { return Err(PyError::type_error("startswith() takes exactly one argument")); }
                             Ok(py_bool(args[0].str().starts_with(&args[1].str())))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "endswith" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "endswith".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("endswith() takes exactly one argument")); }
+                            Ok(py_bool(args[0].str().ends_with(&args[1].str())))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "find" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "find".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("find() takes at least 1 argument")); }
+                            match args[0].str().find(&args[1].str()) {
+                                Some(i) => Ok(py_int(i as i64)),
+                                None => Ok(py_int(-1)),
+                            }
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
