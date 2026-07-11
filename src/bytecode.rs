@@ -52,6 +52,8 @@ pub enum Opcode {
     STORE_ATTR = 106,
     STORE_DEREF = 107,
     STORE_FAST = 108,
+    DELETE_ATTR = 109,
+    DELETE_SUBSCR = 110,
     STORE_GLOBAL = 111,
     STORE_NAME = 112,
     SWAP = 113,
@@ -146,8 +148,10 @@ impl Opcode {
             103 => SET_ADD,
             106 => STORE_ATTR,
             107 => STORE_DEREF,
-            108 => STORE_FAST,
-            111 => STORE_GLOBAL,
+             108 => STORE_FAST,
+             109 => DELETE_ATTR,
+             110 => DELETE_SUBSCR,
+             111 => STORE_GLOBAL,
             112 => STORE_NAME,
             113 => SWAP,
             115 => UNPACK_SEQUENCE,
@@ -205,7 +209,7 @@ fn needs_arg(op: Opcode) -> bool {
         LOAD_GLOBAL | LOAD_NAME | MAKE_CELL | MAP_ADD | POP_JUMP_IF_FALSE |
         POP_JUMP_IF_NONE | POP_JUMP_IF_NOT_NONE | POP_JUMP_IF_TRUE |
         RAISE_VARARGS | RERAISE | SEND | SET_ADD | SET_FUNCTION_ATTRIBUTE |
-        SET_UPDATE | STORE_ATTR | STORE_DEREF | STORE_FAST | STORE_GLOBAL |
+        SET_UPDATE | STORE_ATTR | STORE_DEREF | STORE_FAST | DELETE_ATTR | DELETE_SUBSCR | STORE_GLOBAL |
         STORE_NAME | SWAP | UNPACK_EX | UNPACK_SEQUENCE | YIELD_VALUE |
         RESUME | JUMP | POP_BLOCK | SETUP_FINALLY | SETUP_CLEANUP | SETUP_WITH |
         MAKE_FUNCTION | LOAD_BUILD_CLASS | PUSH_NULL | RETURN_VALUE | UNARY_NEGATIVE |
@@ -222,6 +226,7 @@ fn needs_arg(op: Opcode) -> bool {
 pub struct CodeObject {
     pub name: String,
     pub arg_count: usize,
+    pub kwonlyarg_count: usize,
     pub nlocals: usize,
     pub instructions: Vec<Instr>,
     pub consts: Vec<ConstValue>,
@@ -242,6 +247,7 @@ impl CodeObject {
         CodeObject {
             name,
             arg_count: 0,
+            kwonlyarg_count: 0,
             nlocals: 0,
             instructions: Vec::new(),
             consts: Vec::new(),

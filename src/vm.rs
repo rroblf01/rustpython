@@ -84,6 +84,7 @@ pub struct VirtualMachine {
     pub modules: HashMap<String, PyObjectRef>,
     pub globals: Rc<RefCell<HashMap<String, PyObjectRef>>>,
     pub jit: RefCell<JitCompiler>,
+    pub sys_path: Vec<String>,
 }
 
 impl VirtualMachine {
@@ -99,12 +100,27 @@ impl VirtualMachine {
          modules.insert("builtins".to_string(), create_module("builtins", builtins.clone()));
          modules.insert("math".to_string(), create_module("math", create_math_dict()));
 
-         let sys_dict = create_sys_dict();
+         let sys_dict = create_sys_dict(std::env::args().collect());
          modules.insert("sys".to_string(), create_module("sys", sys_dict.clone()));
-         builtins.extend(sys_dict);
+          builtins.extend(sys_dict.clone());
 
          let os_dict = create_os_dict();
          modules.insert("os".to_string(), create_module("os", os_dict.clone()));
+
+         let json_dict = create_json_dict();
+         modules.insert("json".to_string(), create_module("json", json_dict));
+
+         // Populate sys.path with default search paths
+         if let PyObject::List(path_list) = &mut *sys_dict.get("path").unwrap().borrow_mut() {
+             path_list.push(py_str("."));
+             path_list.push(py_str("./Lib"));
+         }
+         // Populate sys.modules with already-loaded modules
+         if let PyObject::Dict(mod_dict) = &mut *sys_dict.get("modules").unwrap().borrow_mut() {
+             for (name, module) in &modules {
+                 mod_dict.set(py_str(name), module.clone()).ok();
+             }
+         }
  
          VirtualMachine {
               frames: Vec::new(),
@@ -112,6 +128,7 @@ impl VirtualMachine {
               modules,
               globals,
               jit: RefCell::new(JitCompiler::new()),
+              sys_path: vec!["./".to_string(), "./Lib/".to_string()],
           }
     }
 
@@ -136,32 +153,57 @@ impl VirtualMachine {
         result
     }
 
-    fn import_module_from_file(&self, name: &str) -> Result<PyObjectRef, String> {
-        // Try to find and load a .py file from common paths
-        let paths = vec![
-            format!("./{}.py", name),
-            format!("./Lib/{}.py", name),
-            format!("/usr/lib/python3/{}.py", name),
-        ];
-        for path in &paths {
-            if let Ok(source) = std::fs::read_to_string(path) {
-                let mut parser = crate::parser::Parser::new(&source);
-                let program = parser.parse_program().map_err(|e| format!("Parse error in {}: {}", name, e))?;
-                let mut compiler = crate::compiler::Compiler::new();
-                let code = compiler.compile(&program, path).map_err(|e| format!("Compile error in {}: {}", name, e))?;
-                let mut vm = super::VirtualMachine::new();
-                let globals = std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new()));
-                let result = vm.exec_code(code, Some(globals.clone()));
-                match result {
-                    Ok(_) => {
-                        let module = create_module(name, globals.borrow().clone());
-                        return Ok(module);
+    fn import_module_from_file(&mut self, name: &str) -> Result<PyObjectRef, String> {
+        let search_paths = self.get_sys_path();
+        for base in &search_paths {
+            let py_path = if base.ends_with('/') {
+                format!("{}{}.py", base, name)
+            } else {
+                format!("{}/{}.py", base, name)
+            };
+            if let Ok(source) = std::fs::read_to_string(&py_path) {
+                return self.exec_module_source(&source, &py_path, name);
+            }
+            let init_path = if base.ends_with('/') {
+                format!("{}{}/__init__.py", base, name)
+            } else {
+                format!("{}/{}/__init__.py", base, name)
+            };
+            if let Ok(source) = std::fs::read_to_string(&init_path) {
+                return self.exec_module_source(&source, &init_path, name);
+            }
+        }
+        Err(format!("No module named '{}'", name))
+    }
+
+    fn get_sys_path(&self) -> Vec<String> {
+        if let Some(sys_mod) = self.modules.get("sys") {
+            if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
+                if let Some(path_list) = dict.get("path") {
+                    if let PyObject::List(items) = &*path_list.borrow() {
+                        return items.iter().filter_map(|item| {
+                            if let PyObject::Str(s) = &*item.borrow() { Some(s.clone()) } else { None }
+                        }).collect();
                     }
-                    Err(e) => return Err(format!("Error importing {}: {}", name, e)),
                 }
             }
         }
-        Err(format!("Module '{}' not found", name))
+        vec![]
+    }
+
+    fn exec_module_source(&mut self, source: &str, path: &str, name: &str) -> Result<PyObjectRef, String> {
+        let mut parser = crate::parser::Parser::new(source);
+        let program = parser.parse_program().map_err(|e| format!("Parse error: {}", e))?;
+        let mut compiler = crate::compiler::Compiler::new();
+        let code = compiler.compile(&program, path).map_err(|e| format!("Compile error: {}", e))?;
+        let module_globals = Rc::new(RefCell::new(HashMap::from([
+            ("__name__".to_string(), py_str(name)),
+            ("__file__".to_string(), py_str(path)),
+            ("__builtins__".to_string(), create_module("builtins", self.builtins.as_ref().clone())),
+        ])));
+        self.exec_code(code, Some(Rc::clone(&module_globals))).map_err(|e| format!("{}", e))?;
+        let globals_copy = module_globals.borrow().clone();
+        Ok(create_module(name, globals_copy))
     }
 
     /// Try to execute a simple function without creating a Frame.
@@ -884,10 +926,15 @@ impl VirtualMachine {
                                                 return Some(val.clone());
                                             }
                                             PyObject::Function { .. } => {
-                                                return Some(PyObjectRef::imm(PyObject::BoundMethod {
-                                                    func: val.clone(),
-                                                    self_obj: obj.clone(),
-                                                }));
+                                                let is_instance_obj = matches!(&*obj.borrow(), PyObject::Instance { .. });
+                                                if is_instance_obj {
+                                                    return Some(PyObjectRef::imm(PyObject::BoundMethod {
+                                                        func: val.clone(),
+                                                        self_obj: obj.clone(),
+                                                    }));
+                                                } else {
+                                                    return Some(val.clone());
+                                                }
                                             }
                                             _ => {
                                                 return Some(val.clone());
@@ -933,10 +980,7 @@ impl VirtualMachine {
                                         self_obj: obj.clone(),
                                     }))
                                 } else if is_function {
-                                    Ok(PyObjectRef::imm(PyObject::BoundMethod {
-                                        func: attr,
-                                        self_obj: obj.clone(),
-                                    }))
+                                    Ok(attr)
                                 } else {
                                     Ok(attr)
                                 }
@@ -1101,22 +1145,21 @@ impl VirtualMachine {
                 })?.clone();
                 self.frames[fi].pop()?;
                 self.frames[fi].pop()?;
-                if self.modules.contains_key(&name) {
-                    self.frames[fi].push(self.modules[&name].clone());
-                } else {
-                    // Try to load from file
-                    let module = self.import_module_from_file(&name);
-                    match module {
-                        Ok(m) => {
-                            self.modules.insert(name.clone(), m.clone());
-                            self.frames[fi].push(m);
-                        }
-                        Err(_) => {
-                            let module = create_module(&name, HashMap::new());
-                            self.modules.insert(name.clone(), module.clone());
-                            self.frames[fi].push(module);
+                if let Some(module) = self.modules.get(&name) {
+                    self.frames[fi].push(module.clone());
+                } else if let Ok(module) = self.import_module_from_file(&name) {
+                    self.modules.insert(name.clone(), module.clone());
+                    // Also add to sys.modules if available
+                    if let Some(sys_mod) = self.modules.get("sys") {
+                        if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
+                            if let Some(mod_dict) = dict.get("modules") {
+                                mod_dict.borrow_mut().set_attribute(&name, module.clone()).ok();
+                            }
                         }
                     }
+                    self.frames[fi].push(module);
+                } else {
+                    return Err(PyError::ImportError(format!("No module named '{}'", name)));
                 }
             }
 
@@ -1132,7 +1175,8 @@ impl VirtualMachine {
                         if let Some(val) = dict.get(&name) {
                             self.frames[fi].push(val.clone());
                         } else {
-                            self.frames[fi].push(py_none());
+                            return Err(PyError::ImportError(format!("cannot import name '{}' from '{}'", name,
+                                module.borrow().type_name())));
                         }
                     }
                     _ => return Err(PyError::runtime_error("IMPORT_FROM on non-module")),

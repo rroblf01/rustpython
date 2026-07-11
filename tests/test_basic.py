@@ -52,6 +52,22 @@ assert c.inc() == 1
 assert c.inc() == 2
 print("OK")
 
+print("=== isinstance ===")
+assert isinstance(1, int)
+assert isinstance("hello", str)
+assert isinstance([], list)
+assert isinstance(True, bool)
+assert isinstance(1.5, float)
+assert isinstance({}, dict)
+assert isinstance((1,), tuple)
+assert isinstance({1,2}, set)
+assert isinstance(b"hi", bytes)
+class MyClass: pass
+obj = MyClass()
+assert isinstance(obj, MyClass)
+assert not isinstance(1, MyClass)
+print("OK")
+
 print("=== Comprehensions ===")
 assert [x * x for x in [1, 2, 3]] == [1, 4, 9]
 print("OK")

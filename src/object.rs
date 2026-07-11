@@ -1775,6 +1775,11 @@ pub fn builtin_format(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
 }
 
+pub fn py_format(val: &PyObjectRef, spec: &str) -> PyResult<PyObjectRef> {
+    let args = [val.clone(), py_str(spec)];
+    builtin_format(&args)
+}
+
 pub fn builtin_object(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // Create a new bare object instance
     let object_type = PyObjectRef::new(PyObject::Type {
@@ -2375,7 +2380,16 @@ pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             let class_name = class.str();
             Ok(py_bool(typ.borrow().type_name() == class_name || class_name == "object"))
         }
-        _ => Ok(py_bool(args[0].borrow().type_name() == class.str())),
+        _ => {
+            let obj_type = args[0].borrow().type_name();
+            let class_name = match &*class {
+                PyObject::BuiltinFunction { name, .. } => name.clone(),
+                PyObject::Str(s) => s.clone(),
+                PyObject::Type { name, .. } => name.clone(),
+                _ => class.str(),
+            };
+            Ok(py_bool(obj_type == class_name))
+        }
     }
 }
 
@@ -2857,6 +2871,19 @@ impl ObjectAccess for PyObject {
                         func: |args| {
                             if let PyObject::List(list) = &mut *args[0].borrow_mut() { list.reverse(); Ok(py_none()) }
                             else { Err(PyError::runtime_error("reverse on non-list")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "insert" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "insert".to_string(),
+                        func: |args| {
+                            if args.len() < 3 { return Err(PyError::type_error("insert() takes exactly 2 arguments")); }
+                            if let PyObject::List(list) = &mut *args[0].borrow_mut() {
+                                let idx = args[1].as_i64().unwrap_or(0) as usize;
+                                let idx = idx.min(list.len());
+                                list.insert(idx, args[2].clone());
+                                Ok(py_none())
+                            } else { Err(PyError::runtime_error("insert on non-list")) }
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -3412,6 +3439,13 @@ impl ObjectAccess for PyObject {
                     _ => Err(PyError::attribute_error(format!("'file' object has no attribute '{}'", name))),
                 }
             }
+            PyObject::Exception { typ, args, .. } => {
+                match name {
+                    "__name__" => Ok(py_str(typ)),
+                    "args" => Ok(py_tuple(args.clone())),
+                    _ => Err(PyError::attribute_error(format!("'Exception' object has no attribute '{}'", name))),
+                }
+            }
             _ => Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", self.type_name(), name))),
         }
     }
@@ -3939,7 +3973,7 @@ pub fn create_math_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
-pub fn create_sys_dict() -> HashMap<String, PyObjectRef> {
+pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! sys_func {
         ($name:expr, $func:expr) => {
@@ -3955,7 +3989,9 @@ pub fn create_sys_dict() -> HashMap<String, PyObjectRef> {
         } else { 0 };
         Err(PyError::SystemExit(code))
     });
-    d.insert("argv".to_string(), py_list(vec![]));
+    d.insert("argv".to_string(), py_list(argv.into_iter().map(|s| py_str(&s)).collect()));
+    d.insert("path".to_string(), py_list(vec![]));
+    d.insert("modules".to_string(), py_dict());
     d
 }
 
@@ -4003,6 +4039,294 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
             Err(e) => Err(PyError::OsError(format!("{}", e))),
         }
     });
+    // os.path sub-module
+    let mut path_dict = HashMap::new();
+    macro_rules! path_func {
+        ($name:expr, $func:expr) => {
+            path_dict.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+    path_func!("join", |args| {
+        let parts: Vec<String> = args.iter().map(|a| a.str()).collect();
+        if parts.is_empty() { return Ok(py_str("")); }
+        let result = parts.join("/");
+        Ok(py_str(&result))
+    });
+    path_func!("dirname", |args| {
+        if args.is_empty() { return Err(PyError::type_error("dirname() takes at least 1 argument")); }
+        let path = args[0].str();
+        let result = match path.rfind('/') {
+            Some(i) => if i == 0 { "/".to_string() } else { path[..i].to_string() },
+            None => ".".to_string(),
+        };
+        Ok(py_str(&result))
+    });
+    path_func!("basename", |args| {
+        if args.is_empty() { return Err(PyError::type_error("basename() takes at least 1 argument")); }
+        let path = args[0].str();
+        let result = match path.rfind('/') {
+            Some(i) => path[i+1..].to_string(),
+            None => path,
+        };
+        Ok(py_str(&result))
+    });
+    path_func!("split", |args| {
+        if args.is_empty() { return Err(PyError::type_error("split() takes at least 1 argument")); }
+        let path = args[0].str();
+        let (head, tail) = match path.rfind('/') {
+            Some(i) => {
+                let h = if i == 0 { "/".to_string() } else { path[..i].to_string() };
+                let t = path[i+1..].to_string();
+                (h, t)
+            }
+            None => (".".to_string(), path.clone()),
+        };
+        Ok(py_list(vec![py_str(&head), py_str(&tail)]))
+    });
+    path_func!("splitext", |args| {
+        if args.is_empty() { return Err(PyError::type_error("splitext() takes at least 1 argument")); }
+        let path = args[0].str();
+        let dot = path.rfind('.');
+        let (root, ext) = match dot {
+            Some(i) if i > path.rfind('/').map_or(0, |j| j + 1) => {
+                (path[..i].to_string(), path[i..].to_string())
+            }
+            _ => (path.clone(), "".to_string()),
+        };
+        Ok(py_list(vec![py_str(&root), py_str(&ext)]))
+    });
+    path_func!("exists", |args| {
+        if args.is_empty() { return Err(PyError::type_error("exists() takes at least 1 argument")); }
+        Ok(py_bool(std::path::Path::new(&args[0].str()).exists()))
+    });
+    path_func!("isfile", |args| {
+        if args.is_empty() { return Err(PyError::type_error("isfile() takes at least 1 argument")); }
+        Ok(py_bool(std::path::Path::new(&args[0].str()).is_file()))
+    });
+    path_func!("isdir", |args| {
+        if args.is_empty() { return Err(PyError::type_error("isdir() takes at least 1 argument")); }
+        Ok(py_bool(std::path::Path::new(&args[0].str()).is_dir()))
+    });
+    d.insert("path".to_string(), create_module("path", path_dict));
+    d
+}
+
+fn json_encode(val: &PyObjectRef) -> PyResult<PyObjectRef> {
+    match &*val.borrow() {
+        PyObject::None => Ok(py_str("null")),
+        PyObject::Bool(b) => Ok(py_str(if *b { "true" } else { "false" })),
+        PyObject::Int(i) => Ok(py_str(&i.to_string())),
+        PyObject::Float(f) => {
+            if f.is_nan() || f.is_infinite() {
+                return Err(PyError::ValueError("Out of range float values are not JSON compliant".to_string()));
+            }
+            Ok(py_str(&f.to_string()))
+        }
+        PyObject::Str(s) => Ok(py_str(&json_escape_string(s))),
+        PyObject::List(items) | PyObject::Tuple(items) => {
+            let mut parts = Vec::with_capacity(items.len());
+            for item in items {
+                let encoded = json_encode(item)?;
+                parts.push(encoded.str());
+            }
+            Ok(py_str(&format!("[{}]", parts.join(", "))))
+        }
+        PyObject::Dict(d) => {
+            let mut pairs = Vec::new();
+            for (key, val) in d.items() {
+                let k = json_encode(&key)?;
+                let v = json_encode(&val)?;
+                pairs.push(format!("{}: {}", k.str(), v.str()));
+            }
+            Ok(py_str(&format!("{{{}}}", pairs.join(", "))))
+        }
+        _ => Err(PyError::type_error(format!("Object of type '{}' is not JSON serializable", val.borrow().type_name()))),
+    }
+}
+
+fn json_escape_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\x08' => out.push_str("\\b"),
+            '\x0c' => out.push_str("\\f"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn json_decode(s: &str) -> PyResult<PyObjectRef> {
+    let s = s.trim();
+    let mut chars = s.chars().peekable();
+    json_parse_value(&mut chars)
+}
+
+fn json_parse_value<I: Iterator<Item = char>>(chars: &mut std::iter::Peekable<I>) -> PyResult<PyObjectRef> {
+    json_skip_ws(chars);
+    match chars.peek() {
+        None => Err(PyError::ValueError("Unexpected end of JSON input".to_string())),
+        Some('"') => json_parse_string(chars),
+        Some('t') | Some('f') => json_parse_bool(chars),
+        Some('n') => json_parse_null(chars),
+        Some('[') => json_parse_array(chars),
+        Some('{') => json_parse_object(chars),
+        Some(c) if c.is_ascii_digit() || *c == '-' => json_parse_number(chars),
+        Some(c) => Err(PyError::ValueError(format!("Unexpected character '{}'", c))),
+    }
+}
+
+fn json_skip_ws<I: Iterator<Item = char>>(chars: &mut std::iter::Peekable<I>) {
+    while let Some(&c) = chars.peek() {
+        if c.is_ascii_whitespace() { chars.next(); }
+        else { break; }
+    }
+}
+
+fn json_parse_string<I: Iterator<Item = char>>(chars: &mut std::iter::Peekable<I>) -> PyResult<PyObjectRef> {
+    chars.next();
+    let mut s = String::new();
+    loop {
+        match chars.next() {
+            None => return Err(PyError::ValueError("Unterminated JSON string".to_string())),
+            Some('"') => return Ok(py_str(&s)),
+            Some('\\') => {
+                match chars.next() {
+                    None => return Err(PyError::ValueError("Unexpected end of JSON string".to_string())),
+                    Some('"') => s.push('"'),
+                    Some('\\') => s.push('\\'),
+                    Some('/') => s.push('/'),
+                    Some('n') => s.push('\n'),
+                    Some('r') => s.push('\r'),
+                    Some('t') => s.push('\t'),
+                    Some('b') => s.push('\x08'),
+                    Some('f') => s.push('\x0c'),
+                    Some('u') => {
+                        let hex: String = (0..4).filter_map(|_| chars.next()).collect();
+                        if hex.len() < 4 { return Err(PyError::ValueError("Invalid Unicode escape".to_string())); }
+                        if let Ok(code) = u32::from_str_radix(&hex, 16) {
+                            if let Some(c) = char::from_u32(code) {
+                                s.push(c);
+                            }
+                        }
+                    }
+                    Some(c) => s.push(c),
+                }
+            }
+            Some(c) => s.push(c),
+        }
+    }
+}
+
+fn json_parse_bool<I: Iterator<Item = char>>(chars: &mut std::iter::Peekable<I>) -> PyResult<PyObjectRef> {
+    let s: String = chars.by_ref().take(5).collect();
+    if s.starts_with("true") { Ok(py_bool(true)) }
+    else if s.starts_with("false") { Ok(py_bool(false)) }
+    else { Err(PyError::ValueError(format!("Unexpected token '{}'", s))) }
+}
+
+fn json_parse_null<I: Iterator<Item = char>>(chars: &mut std::iter::Peekable<I>) -> PyResult<PyObjectRef> {
+    let s: String = chars.by_ref().take(4).collect();
+    if s.starts_with("null") { Ok(py_none()) }
+    else { Err(PyError::ValueError(format!("Unexpected token '{}'", s))) }
+}
+
+fn json_parse_number<I: Iterator<Item = char>>(chars: &mut std::iter::Peekable<I>) -> PyResult<PyObjectRef> {
+    let mut num = String::new();
+    if let Some(&'-') = chars.peek() { num.push(chars.next().unwrap()); }
+    while let Some(&c) = chars.peek() {
+        if c.is_ascii_digit() { num.push(chars.next().unwrap()); }
+        else { break; }
+    }
+    if let Some(&'.') = chars.peek() {
+        num.push(chars.next().unwrap());
+        while let Some(&c) = chars.peek() {
+            if c.is_ascii_digit() { num.push(chars.next().unwrap()); }
+            else { break; }
+        }
+        let peek_lower = chars.peek().map(|c| c.to_ascii_lowercase());
+        if peek_lower == Some('e') {
+            num.push(chars.next().unwrap());
+            if let Some(&'+') | Some(&'-') = chars.peek() { num.push(chars.next().unwrap()); }
+            while let Some(&c) = chars.peek() {
+                if c.is_ascii_digit() { num.push(chars.next().unwrap()); }
+                else { break; }
+            }
+        }
+        Ok(py_float(num.parse::<f64>().map_err(|_| PyError::ValueError(format!("Invalid number: {}", num)))?))
+    } else {
+        Ok(py_int(num.parse::<i64>().map_err(|_| PyError::ValueError(format!("Invalid integer: {}", num)))?))
+    }
+}
+
+fn json_parse_array<I: Iterator<Item = char>>(chars: &mut std::iter::Peekable<I>) -> PyResult<PyObjectRef> {
+    chars.next();
+    let mut items = Vec::new();
+    loop {
+        json_skip_ws(chars);
+        match chars.peek() {
+            None => return Err(PyError::ValueError("Unterminated JSON array".to_string())),
+            Some(&']') => { chars.next(); return Ok(py_list(items)); }
+            Some(&',') => { chars.next(); continue; }
+            _ => { items.push(json_parse_value(chars)?); }
+        }
+    }
+}
+
+fn json_parse_object<I: Iterator<Item = char>>(chars: &mut std::iter::Peekable<I>) -> PyResult<PyObjectRef> {
+    chars.next();
+    let dict = py_dict();
+    loop {
+        json_skip_ws(chars);
+        match chars.peek() {
+            None => return Err(PyError::ValueError("Unterminated JSON object".to_string())),
+            Some(&'}') => { chars.next(); return Ok(dict); }
+            Some(&',') => { chars.next(); continue; }
+            Some(&'"') => {
+                let key = json_parse_string(chars)?;
+                json_skip_ws(chars);
+                match chars.next() {
+                    Some(':') => {}
+                    Some(c) => return Err(PyError::ValueError(format!("Expected ':' got '{}'", c))),
+                    None => return Err(PyError::ValueError("Unexpected end of JSON object".to_string())),
+                }
+                let val = json_parse_value(chars)?;
+                if let PyObject::Dict(d) = &mut *dict.borrow_mut() {
+                    d.set(key, val)?;
+                }
+            }
+            Some(c) => return Err(PyError::ValueError(format!("Unexpected token '{}' in object", c))),
+        }
+    }
+}
+
+pub fn create_json_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! json_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    json_func!("dumps", |args| {
+        if args.is_empty() { return Err(PyError::type_error("dumps() missing required argument")); }
+        json_encode(&args[0])
+    });
+
+    json_func!("loads", |args| {
+        if args.is_empty() { return Err(PyError::type_error("loads() missing required argument")); }
+        let s = args[0].str();
+        json_decode(&s)
+    });
+
     d
 }
 

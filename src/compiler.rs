@@ -72,6 +72,7 @@ impl Compiler {
             }
         }
         if self.scope == ScopeType::Module {
+            self.code.nlocals = self.code.varnames.len();
             self.emit(Opcode::LOAD_CONST, 0);
             self.emit(Opcode::RETURN_VALUE, 0);
         }
@@ -332,7 +333,7 @@ impl Compiler {
                 let name_idx = self.get_name_index(name) as u32;
                 self.emit(Opcode::STORE_NAME, name_idx);
             }
-            Stmt::ClassDef { name, bases, keywords: kw, body, decorator_list: _ } => {
+            Stmt::ClassDef { name, bases, keywords: kw, body, decorator_list } => {
                 // Extract docstring from first statement if present
                 let docstring = body.first().and_then(|s| {
                     if let Stmt::Expr(expr) = s {
@@ -370,6 +371,9 @@ impl Compiler {
                     self.emit(Opcode::STORE_ATTR, doc_attr_idx);
                 }
                 let name_idx = self.get_name_index(name) as u32;
+                for _ in decorator_list {
+                    self.emit(Opcode::CALL, 1);
+                }
                 self.emit(Opcode::STORE_NAME, name_idx);
             }
             Stmt::Import(names) => {
@@ -428,6 +432,16 @@ impl Compiler {
             Stmt::Delete(targets) => {
                 for target in targets {
                     match target {
+                        Expr::Subscript { value, slice } => {
+                            self.compile_expr(value)?;
+                            self.compile_expr(slice)?;
+                            self.emit(Opcode::DELETE_SUBSCR, 0);
+                        }
+                        Expr::Attribute { value, attr } => {
+                            self.compile_expr(value)?;
+                            let name_idx = self.get_name_index(attr) as u32;
+                            self.emit(Opcode::DELETE_ATTR, name_idx);
+                        }
                         Expr::Name(name) => {
                             if self.scope == ScopeType::Module {
                                 let idx = self.get_name_index(name) as u32;
@@ -437,7 +451,7 @@ impl Compiler {
                                 self.emit(Opcode::DELETE_FAST, idx);
                             }
                         }
-                        _ => return Err("Can only delete simple names".to_string()),
+                        _ => return Err("cannot delete expression".to_string()),
                     }
                 }
             }
@@ -495,16 +509,26 @@ impl Compiler {
                             let next_handler = self.new_label();
                             self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_handler);
                             if let Some(name) = &handler.name {
-                                let idx = self.add_varname(name) as u32;
-                                self.emit(Opcode::STORE_FAST, idx);
+                                if self.scope == ScopeType::Module {
+                                    let name_idx = self.get_name_index(name) as u32;
+                                    self.emit(Opcode::STORE_NAME, name_idx);
+                                } else {
+                                    let idx = self.add_varname(name) as u32;
+                                    self.emit(Opcode::STORE_FAST, idx);
+                                }
                             }
                             self.compile_stmts(&handler.body)?;
                             self.emit_jump(Opcode::JUMP, handler_done);
                             self.fix_label(next_handler);
                         } else {
                             if let Some(name) = &handler.name {
-                                let idx = self.add_varname(name) as u32;
-                                self.emit(Opcode::STORE_FAST, idx);
+                                if self.scope == ScopeType::Module {
+                                    let name_idx = self.get_name_index(name) as u32;
+                                    self.emit(Opcode::STORE_NAME, name_idx);
+                                } else {
+                                    let idx = self.add_varname(name) as u32;
+                                    self.emit(Opcode::STORE_FAST, idx);
+                                }
                             }
                             self.compile_stmts(&handler.body)?;
                             self.emit_jump(Opcode::JUMP, handler_done);
@@ -544,16 +568,26 @@ impl Compiler {
                             let next_handler = self.new_label();
                             self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_handler);
                             if let Some(name) = &handler.name {
-                                let idx = self.add_varname(name) as u32;
-                                self.emit(Opcode::STORE_FAST, idx);
+                                if self.scope == ScopeType::Module {
+                                    let name_idx = self.get_name_index(name) as u32;
+                                    self.emit(Opcode::STORE_NAME, name_idx);
+                                } else {
+                                    let idx = self.add_varname(name) as u32;
+                                    self.emit(Opcode::STORE_FAST, idx);
+                                }
                             }
                             self.compile_stmts(&handler.body)?;
                             self.emit_jump(Opcode::JUMP, handler_done);
                             self.fix_label(next_handler);
                         } else {
                             if let Some(name) = &handler.name {
-                                let idx = self.add_varname(name) as u32;
-                                self.emit(Opcode::STORE_FAST, idx);
+                                if self.scope == ScopeType::Module {
+                                    let name_idx = self.get_name_index(name) as u32;
+                                    self.emit(Opcode::STORE_NAME, name_idx);
+                                } else {
+                                    let idx = self.add_varname(name) as u32;
+                                    self.emit(Opcode::STORE_FAST, idx);
+                                }
                             }
                             self.compile_stmts(&handler.body)?;
                             self.emit_jump(Opcode::JUMP, handler_done);
