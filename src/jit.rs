@@ -219,10 +219,7 @@ impl JitCompiler {
         }
 
         // Evaluation stack
-        let stack_slot = builder.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot, 256, 0,
-        ));
-        let mut sp: i32 = 0;
+        let mut eval_stack: Vec<[Value; 2]> = Vec::new();
 
         // Generate code for each instruction
         for i in 0..code.instructions.len() {
@@ -239,34 +236,46 @@ impl JitCompiler {
             match instr.op {
                 Opcode::LOAD_FAST => {
                     let idx = instr.arg as i32;
+                    let memflags = cranelift::codegen::ir::MemFlags::new();
                     let src = builder.ins().stack_addr(types::I64, locals_slot, idx * 16);
-                    let dst = builder.ins().stack_addr(types::I64, stack_slot, sp);
-                    let lo = builder.ins().load(types::I64, cranelift::codegen::ir::MemFlags::new(), src, 0);
-                    let hi = builder.ins().load(types::I64, cranelift::codegen::ir::MemFlags::new(), src, 8);
-                    builder.ins().store(cranelift::codegen::ir::MemFlags::new(), lo, dst, 0);
-                    builder.ins().store(cranelift::codegen::ir::MemFlags::new(), hi, dst, 8);
-                    sp += 16;
+                    let lo = builder.ins().load(types::I64, memflags, src, 0);
+                    let hi = builder.ins().load(types::I64, memflags, src, 8);
+                    eval_stack.push([lo, hi]);
                 }
                 Opcode::LOAD_CONST => {
                     let idx = instr.arg as i32;
+                    let memflags = cranelift::codegen::ir::MemFlags::new();
                     let src = builder.ins().iadd_imm(consts_ptr, (idx * 16) as i64);
-                    let dst = builder.ins().stack_addr(types::I64, stack_slot, sp);
-                    let lo = builder.ins().load(types::I64, cranelift::codegen::ir::MemFlags::new(), src, 0);
-                    let hi = builder.ins().load(types::I64, cranelift::codegen::ir::MemFlags::new(), src, 8);
-                    builder.ins().store(cranelift::codegen::ir::MemFlags::new(), lo, dst, 0);
-                    builder.ins().store(cranelift::codegen::ir::MemFlags::new(), hi, dst, 8);
-                    sp += 16;
+                    let lo = builder.ins().load(types::I64, memflags, src, 0);
+                    let hi = builder.ins().load(types::I64, memflags, src, 8);
+                    eval_stack.push([lo, hi]);
                 }
                 Opcode::BINARY_OP => {
-                    sp -= 32;
-                    let a_addr = builder.ins().stack_addr(types::I64, stack_slot, sp);
-                    let b_addr = builder.ins().stack_addr(types::I64, stack_slot, sp + 16);
-                    let out_addr = builder.ins().stack_addr(types::I64, stack_slot, sp);
-
+                    let b = eval_stack.pop().unwrap();
+                    let a = eval_stack.pop().unwrap();
                     let memflags = cranelift::codegen::ir::MemFlags::new();
+
+                    let tmp_a = builder.create_sized_stack_slot(StackSlotData::new(
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                    ));
+                    let tmp_b = builder.create_sized_stack_slot(StackSlotData::new(
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                    ));
+                    let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                    ));
+
+                    let a_addr = builder.ins().stack_addr(types::I64, tmp_a, 0);
+                    let b_addr = builder.ins().stack_addr(types::I64, tmp_b, 0);
+                    let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
+
+                    builder.ins().store(memflags, a[0], a_addr, 0);
+                    builder.ins().store(memflags, a[1], a_addr, 8);
+                    builder.ins().store(memflags, b[0], b_addr, 0);
+                    builder.ins().store(memflags, b[1], b_addr, 8);
+
                     let a_tag = builder.ins().load(types::I32, memflags, a_addr, 0);
                     let b_tag = builder.ins().load(types::I32, memflags, b_addr, 0);
-
                     let zero = builder.ins().iconst(types::I32, 0);
                     let a_small = builder.ins().icmp(IntCC::Equal, a_tag, zero);
                     let b_small = builder.ins().icmp(IntCC::Equal, b_tag, zero);
@@ -320,42 +329,67 @@ impl JitCompiler {
                     builder.seal_block(merge_block);
                     builder.switch_to_block(merge_block);
 
-                    sp += 16;
+                    let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
+                    let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
+                    eval_stack.push([res_lo, res_hi]);
                 }
                 Opcode::COMPARE_OP => {
-                    sp -= 32;
-                    let a_addr = builder.ins().stack_addr(types::I64, stack_slot, sp);
-                    let b_addr = builder.ins().stack_addr(types::I64, stack_slot, sp + 16);
-                    let out_addr = builder.ins().stack_addr(types::I64, stack_slot, sp);
+                    let b = eval_stack.pop().unwrap();
+                    let a = eval_stack.pop().unwrap();
+                    let memflags = cranelift::codegen::ir::MemFlags::new();
+
+                    let tmp_a = builder.create_sized_stack_slot(StackSlotData::new(
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                    ));
+                    let tmp_b = builder.create_sized_stack_slot(StackSlotData::new(
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                    ));
+                    let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                    ));
+
+                    let a_addr = builder.ins().stack_addr(types::I64, tmp_a, 0);
+                    let b_addr = builder.ins().stack_addr(types::I64, tmp_b, 0);
+                    let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
+
+                    builder.ins().store(memflags, a[0], a_addr, 0);
+                    builder.ins().store(memflags, a[1], a_addr, 8);
+                    builder.ins().store(memflags, b[0], b_addr, 0);
+                    builder.ins().store(memflags, b[1], b_addr, 8);
                     let op_val = builder.ins().iconst(types::I64, instr.arg as i64);
                     builder.ins().call(cmp_func_ref, &[a_addr, b_addr, op_val, out_addr]);
-                    sp += 16;
+
+                    let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
+                    let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
+                    eval_stack.push([res_lo, res_hi]);
                 }
                 Opcode::STORE_FAST => {
-                    sp -= 16;
                     let idx = instr.arg as i32;
-                    let src = builder.ins().stack_addr(types::I64, stack_slot, sp);
+                    let memflags = cranelift::codegen::ir::MemFlags::new();
+                    let val = eval_stack.pop().unwrap();
                     let dst = builder.ins().stack_addr(types::I64, locals_slot, idx * 16);
-                    let lo = builder.ins().load(types::I64, cranelift::codegen::ir::MemFlags::new(), src, 0);
-                    let hi = builder.ins().load(types::I64, cranelift::codegen::ir::MemFlags::new(), src, 8);
-                    builder.ins().store(cranelift::codegen::ir::MemFlags::new(), lo, dst, 0);
-                    builder.ins().store(cranelift::codegen::ir::MemFlags::new(), hi, dst, 8);
+                    builder.ins().store(memflags, val[0], dst, 0);
+                    builder.ins().store(memflags, val[1], dst, 8);
                 }
                 Opcode::DUP_TOP => {
-                    let src = builder.ins().stack_addr(types::I64, stack_slot, sp - 16);
-                    let dst = builder.ins().stack_addr(types::I64, stack_slot, sp);
-                    let lo = builder.ins().load(types::I64, cranelift::codegen::ir::MemFlags::new(), src, 0);
-                    let hi = builder.ins().load(types::I64, cranelift::codegen::ir::MemFlags::new(), src, 8);
-                    builder.ins().store(cranelift::codegen::ir::MemFlags::new(), lo, dst, 0);
-                    builder.ins().store(cranelift::codegen::ir::MemFlags::new(), hi, dst, 8);
-                    sp += 16;
+                    let val = eval_stack.last().unwrap();
+                    eval_stack.push([val[0], val[1]]);
                 }
                 Opcode::POP_TOP => {
-                    sp -= 16;
+                    eval_stack.pop();
                 }
                 Opcode::POP_JUMP_IF_FALSE => {
-                    sp -= 16;
-                    let val_addr = builder.ins().stack_addr(types::I64, stack_slot, sp);
+                    let val = eval_stack.pop().unwrap();
+                    let memflags = cranelift::codegen::ir::MemFlags::new();
+
+                    let tmp_val = builder.create_sized_stack_slot(StackSlotData::new(
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                    ));
+
+                    let val_addr = builder.ins().stack_addr(types::I64, tmp_val, 0);
+
+                    builder.ins().store(memflags, val[0], val_addr, 0);
+                    builder.ins().store(memflags, val[1], val_addr, 8);
                     let truthy_inst = builder.ins().call(truthy_func_ref, &[val_addr]);
                     let truthy = builder.inst_results(truthy_inst)[0];
                     let zero = builder.ins().iconst(types::I64, 0);
@@ -373,12 +407,10 @@ impl JitCompiler {
                     builder.ins().jump(target_block, &[]);
                 }
                 Opcode::RETURN_VALUE => {
-                    sp -= 16;
-                    let src = builder.ins().stack_addr(types::I64, stack_slot, sp);
-                    let lo = builder.ins().load(types::I64, cranelift::codegen::ir::MemFlags::new(), src, 0);
-                    let hi = builder.ins().load(types::I64, cranelift::codegen::ir::MemFlags::new(), src, 8);
-                    builder.ins().store(cranelift::codegen::ir::MemFlags::new(), lo, result_ptr, 0);
-                    builder.ins().store(cranelift::codegen::ir::MemFlags::new(), hi, result_ptr, 8);
+                    let val = eval_stack.pop().unwrap();
+                    let memflags = cranelift::codegen::ir::MemFlags::new();
+                    builder.ins().store(memflags, val[0], result_ptr, 0);
+                    builder.ins().store(memflags, val[1], result_ptr, 8);
                     builder.ins().return_(&[]);
                 }
                 _ => return None,
