@@ -168,6 +168,26 @@ impl JitCompiler {
         }).collect()
     }
 
+    /// Precompute constants AND resolve globals for JIT.
+    /// Returns [consts..., globals...] so LOAD_GLOBAL can index past consts.
+    pub fn precompute_with_globals(
+        code: &CodeObject,
+        globals: &std::collections::HashMap<String, crate::object::PyObjectRef>,
+        builtins: &std::collections::HashMap<String, crate::object::PyObjectRef>,
+    ) -> Vec<crate::object::PyObjectRef> {
+        let mut result = Self::precompute_consts(code);
+        let base = result.len();
+        result.resize(base + code.names.len(), crate::object::py_none());
+        for (i, name) in code.names.iter().enumerate() {
+            let val = globals.get(name)
+                .or_else(|| builtins.get(name))
+                .cloned()
+                .unwrap_or_else(crate::object::py_none);
+            result[base + i] = val;
+        }
+        result
+    }
+
     /// Build a Cranelift function that implements the given bytecode.
     /// Supports straight-line code, loops (via JUMP_BACKWARD), and conditional branches.
     pub fn compile(
@@ -186,6 +206,7 @@ impl JitCompiler {
             Opcode::STORE_FAST, Opcode::DUP_TOP,
             Opcode::POP_TOP, Opcode::COMPARE_OP,
             Opcode::POP_JUMP_IF_FALSE, Opcode::JUMP_BACKWARD,
+            Opcode::LOAD_GLOBAL,
         ];
         for instr in &code.instructions {
             if !supported.contains(&instr.op) { return None; }
@@ -316,6 +337,16 @@ impl JitCompiler {
                 }
                 Opcode::LOAD_CONST => {
                     let idx = instr.arg as i32;
+                    let memflags = cranelift::codegen::ir::MemFlags::new();
+                    let src = builder.ins().iadd_imm(consts_ptr, (idx * 16) as i64);
+                    let lo = builder.ins().load(types::I64, memflags, src, 0);
+                    let hi = builder.ins().load(types::I64, memflags, src, 8);
+                    eval_stack.push([lo, hi]);
+                }
+                Opcode::LOAD_GLOBAL => {
+                    let name_idx = instr.arg as i32;
+                    let consts_count = code.consts.len() as i64;
+                    let idx = name_idx as i64 + consts_count;
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let src = builder.ins().iadd_imm(consts_ptr, (idx * 16) as i64);
                     let lo = builder.ins().load(types::I64, memflags, src, 0);

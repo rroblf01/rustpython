@@ -1833,7 +1833,7 @@ impl VirtualMachine {
                 let fn_ptr = compiled as *const () as usize;
                 drop(jit);
                 jit_ptr.set(fn_ptr);
-                let jit_consts_compiled = crate::jit::JitCompiler::precompute_consts(code);
+                let jit_consts_compiled = crate::jit::JitCompiler::precompute_with_globals(code, &func_globals.borrow(), &self.builtins);
                 let mut result = crate::object::py_none();
                 compiled(args.as_ptr(), args.len(), jit_consts_compiled.as_ptr(), &mut result as *mut PyObjectRef);
                 let mut const_cache = jit_consts.borrow_mut();
