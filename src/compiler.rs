@@ -1047,15 +1047,8 @@ impl Compiler {
                     self.fix_label(finally_label);
                     self.emit(Opcode::PUSH_EXC_INFO, 0);
                     self.compile_expr(&items[0].context_expr)?;
-                    let exit_idx = self.get_name_index("__exit__") as u32;
-                    self.emit(Opcode::LOAD_ATTR, exit_idx);
-                    let const_none = self.get_const_index(ConstValue::None) as u32;
-                    for _ in 0..3 {
-                        self.emit(Opcode::LOAD_CONST, const_none);
-                    }
-                    self.emit(Opcode::CALL, 3);
+                    self.emit(Opcode::WITH_EXIT, 0);
                     self.emit(Opcode::POP_TOP, 0);
-                    self.emit(Opcode::POP_EXCEPT, 0);
                     self.emit(Opcode::RERAISE, 0);
                     self.fix_label(end_label);
                 } else {

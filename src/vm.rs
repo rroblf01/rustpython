@@ -1160,7 +1160,12 @@ impl VirtualMachine {
             }
 
             Opcode::RERAISE => {
-                return Err(PyError::runtime_error("re-raise"));
+                match self.frames[fi].pop() {
+                    Ok(exc) => {
+                        return Err(PyError::Exception(format!("re-raise"), exc));
+                    }
+                    Err(_) => return Err(PyError::runtime_error("re-raise")),
+                }
             }
 
             Opcode::RAISE_VARARGS => {
@@ -1297,23 +1302,55 @@ impl VirtualMachine {
             }
 
             Opcode::SETUP_WITH => {
-                // Simplified: just enter the context manager
+                // Look up __enter__ and call it, keeping manager on stack
                 let mgr = self.frames[fi].peek(0)?;
-                let _exit_method = {
-                    let obj = mgr.borrow();
-                    obj.get_attribute("__exit__").ok()
-                };
-                let enter_method = {
-                    let obj = mgr.borrow();
-                    obj.get_attribute("__enter__").ok()
-                };
-                if let Some(enter) = enter_method {
+                let _exit_method = mgr.borrow().get_attribute("__exit__").ok();
+                let enter_raw = mgr.borrow().get_attribute("__enter__").ok();
+                if let Some(enter_raw) = enter_raw {
+                    let is_builtin = matches!(&*enter_raw.borrow(), PyObject::BuiltinMethod { .. });
+                    let enter = if is_builtin {
+                        let b = enter_raw.borrow();
+                        match &*b {
+                            PyObject::BuiltinMethod { name, func, .. } => {
+                                PyObjectRef::imm(PyObject::BuiltinMethod {
+                                    name: name.clone(),
+                                    func: *func,
+                                    self_obj: mgr.clone(),
+                                })
+                            }
+                            _ => unreachable!(),
+                        }
+                    } else {
+                        PyObjectRef::imm(PyObject::BoundMethod {
+                            func: enter_raw,
+                            self_obj: mgr.clone(),
+                        })
+                    };
                     let result = self.call_function(enter, vec![], vec![])?;
                     self.frames[fi].push(result);
                 } else {
-                    // Enter and push None as result (simplified)
                     self.frames[fi].push(py_none());
                 }
+            }
+
+            Opcode::WITH_EXIT => {
+                // Stack: [..., exception_obj, manager]
+                // Call manager.__exit__(exc_type, exc_val, traceback)
+                let mgr = self.frames[fi].pop()?;
+                let (typ_str, val) = {
+                    let exc = self.frames[fi].peek(0)?;
+                    let exc_borrowed = exc.borrow();
+                    match &*exc_borrowed {
+                        PyObject::Exception { typ, args, .. } => {
+                            (py_str(typ), args.first().cloned().unwrap_or_else(|| py_none()))
+                        }
+                        _ => (py_str("Exception"), py_none()),
+                    }
+                };
+                let exit_method = mgr.borrow().get_attribute("__exit__")
+                    .map_err(|_| PyError::attribute_error("context manager has no __exit__"))?;
+                let result = self.call_function(exit_method, vec![typ_str, val, py_none()], vec![])?;
+                self.frames[fi].push(result);
             }
 
             Opcode::YIELD_VALUE => {

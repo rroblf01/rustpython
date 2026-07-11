@@ -68,6 +68,7 @@ pub enum Opcode {
     SETUP_FINALLY = 264,
     SETUP_CLEANUP = 263,
     SETUP_WITH = 265,
+    WITH_EXIT = 266,
 
     DUP_TOP = 26,
     POP_ITER = 28,
