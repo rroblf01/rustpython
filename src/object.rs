@@ -4206,12 +4206,6 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
             d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
         };
     }
-    os_func!("getcwd", |_| {
-        match std::env::current_dir() {
-            Ok(p) => Ok(py_str(&p.to_string_lossy())),
-            Err(e) => Err(PyError::OsError(format!("{}", e))),
-        }
-    });
     os_func!("listdir", |args| {
         let path = if args.len() > 0 { args[0].str() } else { ".".to_string() };
         match std::fs::read_dir(&path) {
@@ -4243,6 +4237,62 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
             Err(e) => Err(PyError::OsError(format!("{}", e))),
         }
     });
+
+    os_func!("system", |args| {
+        if args.is_empty() { return Err(PyError::type_error("system() takes at least 1 argument")); }
+        let cmd = args[0].str();
+        match std::process::Command::new("sh").arg("-c").arg(&cmd).status() {
+            Ok(status) => Ok(py_int(status.code().unwrap_or(0) as i64)),
+            Err(e) => Err(PyError::OsError(format!("{}", e))),
+        }
+    });
+
+    os_func!("chdir", |args| {
+        if args.is_empty() { return Err(PyError::type_error("chdir() takes at least 1 argument")); }
+        match std::env::set_current_dir(&args[0].str()) {
+            Ok(()) => Ok(py_none()),
+            Err(e) => Err(PyError::OsError(format!("{}", e))),
+        }
+    });
+
+    os_func!("getcwd", |_| {
+        match std::env::current_dir() {
+            Ok(p) => Ok(py_str(&p.to_string_lossy())),
+            Err(e) => Err(PyError::OsError(format!("{}", e))),
+        }
+    });
+
+    os_func!("getenv", |args| {
+        if args.is_empty() { return Ok(py_none()); }
+        let key = args[0].str();
+        match std::env::var(&key) {
+            Ok(val) => Ok(py_str(&val)),
+            Err(_) => {
+                if args.len() > 1 { Ok(args[1].clone()) }
+                else { Ok(py_none()) }
+            }
+        }
+    });
+
+    os_func!("putenv", |args| {
+        if args.len() < 2 { return Err(PyError::type_error("putenv() takes exactly 2 arguments")); }
+        std::env::set_var(args[0].str(), args[1].str());
+        Ok(py_none())
+    });
+
+    os_func!("unsetenv", |args| {
+        if args.is_empty() { return Err(PyError::type_error("unsetenv() takes at least 1 argument")); }
+        std::env::remove_var(args[0].str());
+        Ok(py_none())
+    });
+
+    // environ dict
+    let mut environ_dict = HashMap::new();
+    for (key, val) in std::env::vars() {
+        environ_dict.insert(key, py_str(&val));
+    }
+    d.insert("environ".to_string(), create_module("environ", environ_dict));
+
     // os.path sub-module
     let mut path_dict = HashMap::new();
     macro_rules! path_func {
@@ -5064,6 +5114,64 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
             Err(e) => Err(PyError::ValueError(format!("invalid regex: {}", e))),
         }
     });
+
+    d
+}
+
+pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! sub_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    sub_func!("run", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("run() missing required argument"));
+        }
+        let cmd_args: Vec<String> = if let PyObject::List(items) = &*args[0].borrow() {
+            items.iter().map(|a| a.str()).collect()
+        } else {
+            vec![args[0].str()]
+        };
+        if cmd_args.is_empty() {
+            return Err(PyError::ValueError("empty command".to_string()));
+        }
+        let output = std::process::Command::new(&cmd_args[0])
+            .args(&cmd_args[1..])
+            .output()
+            .map_err(|e| PyError::OsError(format!("{}", e)))?;
+        let returncode = output.status.code().unwrap_or(-1) as i64;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        Ok(py_dict())
+    });
+
+    sub_func!("check_output", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("check_output() missing required argument"));
+        }
+        let cmd_args: Vec<String> = if let PyObject::List(items) = &*args[0].borrow() {
+            items.iter().map(|a| a.str()).collect()
+        } else {
+            vec![args[0].str()]
+        };
+        if cmd_args.is_empty() {
+            return Err(PyError::ValueError("empty command".to_string()));
+        }
+        let output = std::process::Command::new(&cmd_args[0])
+            .args(&cmd_args[1..])
+            .output()
+            .map_err(|e| PyError::OsError(format!("{}", e)))?;
+        if !output.status.success() {
+            return Err(PyError::runtime_error(format!("Command returned non-zero exit status")));
+        }
+        Ok(py_str(&String::from_utf8_lossy(&output.stdout)))
+    });
+
+    // Constants
+    d.insert("PIPE".to_string(), py_int(-1));
 
     d
 }

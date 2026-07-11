@@ -136,6 +136,9 @@ impl VirtualMachine {
           let re_dict = create_re_dict();
           modules.insert("re".to_string(), create_module("re", re_dict));
 
+          let subprocess_dict = create_subprocess_dict();
+          modules.insert("subprocess".to_string(), create_module("subprocess", subprocess_dict));
+
           // Populate sys.path with default search paths
          if let PyObject::List(path_list) = &mut *sys_dict.get("path").unwrap().borrow_mut() {
              path_list.push(py_str("."));
