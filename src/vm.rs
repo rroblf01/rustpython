@@ -331,6 +331,22 @@ impl VirtualMachine {
                 Ok(None) => continue,
                 Ok(Some(val)) => return Ok(val),
                 Err(e) => {
+                    // StopIteration must propagate immediately (not handled as normal exception)
+                    if matches!(&e, PyError::StopIteration) {
+                        return Err(e);
+                    }
+                    // Check if a raised Exception is actually StopIteration
+                    if let PyError::Exception(ref _msg, ref exc) = e {
+                        let exc_borrowed = exc.borrow();
+                        let is_stop = match &*exc_borrowed {
+                            PyObject::Exception { ref typ, .. } if typ == "StopIteration" => true,
+                            PyObject::Type { name, .. } if name == "StopIteration" => true,
+                            _ => false,
+                        };
+                        if is_stop {
+                            return Err(PyError::StopIteration);
+                        }
+                    }
                     if matches!(&e, PyError::SystemExit(_)) {
                         return Err(e);
                     }
@@ -1034,8 +1050,32 @@ impl VirtualMachine {
                     use crate::object::ObjectAccess;
                     let iter_method = val.borrow().get_attribute("__iter__")
                         .map_err(|_| PyError::type_error(format!("'{}' object is not iterable", val.borrow().type_name())))?;
-                    let result = self.call_function(iter_method, vec![], vec![])?;
-                    self.frames[fi].push(result);
+                    let iterator = self.call_function(iter_method, vec![], vec![])?;
+                    // Eagerly consume the iterator into a List so FOR_ITER works
+                    let mut items: Vec<PyObjectRef> = Vec::new();
+                    loop {
+                        let next_result = {
+                            let next_attr = iterator.borrow().get_attribute("__next__");
+                            match next_attr {
+                                Ok(f) => {
+                                    // Need to wrap as BoundMethod for self-binding
+                                    let obj_clone = iterator.clone();
+                                    let bound = PyObjectRef::imm(PyObject::BoundMethod {
+                                        func: f.clone(),
+                                        self_obj: obj_clone,
+                                    });
+                                    self.call_function(bound, vec![], vec![])
+                                }
+                                Err(_) => break,
+                            }
+                        };
+                        match next_result {
+                            Ok(val) => items.push(val),
+                            Err(PyError::StopIteration) => break,
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    self.frames[fi].push(PyObjectRef::new(PyObject::ListIter { list: items, index: 0 }));
                 } else {
                 let obj = val.borrow();
                 match &*obj {
@@ -1398,6 +1438,18 @@ impl VirtualMachine {
                             }
                             _ => return Err(PyError::type_error("exceptions must be str or Exception instances")),
                         };
+                        // raise StopIteration → PyError::StopIteration (needed by for_iter/next protocol)
+                        if msg.is_empty() {
+                            let exc_borrowed = exc.borrow();
+                            let is_stop = match &*exc_borrowed {
+                                PyObject::Exception { ref typ, .. } if typ == "StopIteration" => true,
+                                PyObject::Type { name, .. } if name == "StopIteration" => true,
+                                _ => false,
+                            };
+                            if is_stop {
+                                return Err(PyError::StopIteration);
+                            }
+                        }
                         return Err(PyError::Exception(msg, exc));
                     }
                     2 => {
