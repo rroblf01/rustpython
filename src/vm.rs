@@ -1982,7 +1982,7 @@ impl VirtualMachine {
 
             let class = PyObjectRef::new(PyObject::Type {
                 name: name_str,
-                dict: namespace_dict,
+                dict: namespace_dict.clone(),
                 bases: bases_vec.clone(),
                 mro: vec![],
             });
@@ -1992,6 +1992,22 @@ impl VirtualMachine {
             mro.extend(c3_linearize(&bases_vec));
             if let PyObject::Type { mro: mro_field, .. } = &mut *class.borrow_mut() {
                 *mro_field = mro;
+            }
+
+            // __set_name__ protocol: for each descriptor in the class dict that has __set_name__, call it
+            for (attr_name, value) in namespace_dict.iter() {
+                let has_set_name = value.borrow().get_attribute("__set_name__").is_ok();
+                if has_set_name {
+                    let set_name_method = value.borrow().get_attribute("__set_name__").unwrap();
+                    let _ = self.call_function(set_name_method, vec![class.clone(), py_str(attr_name)], vec![]);
+                }
+            }
+
+            // __init_subclass__ protocol: call on each base class
+            for base in &bases_vec {
+                if let Ok(init_subclass) = base.borrow().get_attribute("__init_subclass__") {
+                    let _ = self.call_function(init_subclass, vec![class.clone()], vec![]);
+                }
             }
 
             return Ok(class);

@@ -3080,7 +3080,16 @@ impl ObjectAccess for PyObject {
                 }
                 dict.get(name).cloned().ok_or_else(|| PyError::attribute_error(format!("module has no attribute '{}'", name)))
             }
-            PyObject::Type { dict, mro, .. } => {
+            PyObject::Type { dict, mro, bases, name: type_name } => {
+                if name == "__mro__" {
+                    return Ok(PyObjectRef::new(PyObject::Tuple(mro.clone())));
+                }
+                if name == "__bases__" {
+                    return Ok(PyObjectRef::new(PyObject::Tuple(bases.clone())));
+                }
+                if name == "__name__" {
+                    return Ok(py_str(type_name));
+                }
                 dict.get(name).cloned().or_else(|| {
                     for base in mro.iter().skip(1) {
                         if let PyObject::Type { dict: base_dict, .. } = &*base.borrow() {
@@ -4793,6 +4802,87 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
         std::env::remove_var(args[0].str());
         Ok(py_none())
     });
+
+    // File descriptor operations
+    os_func!("open", |args| {
+        if args.len() < 2 { return Err(PyError::type_error("open() requires at least 2 arguments")); }
+        let path = args[0].str();
+        let flags = args[1].as_i64().unwrap_or(0) as i32;
+        let mut opts = std::fs::OpenOptions::new();
+        // O_RDONLY=0, O_WRONLY=1, O_RDWR=2 — check access mode
+        let access_mode = flags & 3;
+        if access_mode == 0 { opts.read(true); }     // O_RDONLY
+        if access_mode == 1 { opts.write(true); }    // O_WRONLY
+        if access_mode == 2 { opts.write(true); opts.read(true); } // O_RDWR
+        if flags & 64 != 0 { opts.create(true); }       // O_CREAT = 64
+        if flags & 512 != 0 { opts.truncate(true); }    // O_TRUNC = 512
+        if flags & 1024 != 0 { opts.append(true); }     // O_APPEND = 1024
+        match opts.open(&path) {
+            Ok(file) => {
+                use std::os::unix::io::IntoRawFd;
+                Ok(py_int(file.into_raw_fd() as i64))
+            }
+            Err(e) => Err(PyError::OsError(format!("{}", e))),
+        }
+    });
+    os_func!("read", |args| {
+        if args.len() < 2 { return Err(PyError::type_error("read() requires at least 2 arguments")); }
+        let fd = args[0].as_i64().unwrap_or(-1) as i32;
+        let n = args[1].as_i64().unwrap_or(0) as usize;
+        use std::os::unix::io::FromRawFd;
+        let mut buf = vec![0u8; n];
+        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+        use std::io::Read;
+        match file.read(&mut buf) {
+            Ok(count) => {
+                buf.truncate(count);
+                std::mem::forget(file); // Don't close the fd
+                Ok(PyObjectRef::new(PyObject::Bytes(buf)))
+            }
+            Err(e) => {
+                std::mem::forget(file);
+                Err(PyError::OsError(format!("{}", e)))
+            }
+        }
+    });
+    os_func!("write", |args| {
+        if args.len() < 2 { return Err(PyError::type_error("write() requires at least 2 arguments")); }
+        let fd = args[0].as_i64().unwrap_or(-1) as i32;
+        let data = match &*args[1].borrow() {
+            PyObject::Bytes(b) => b.clone(),
+            PyObject::Str(s) => s.as_bytes().to_vec(),
+            _ => return Err(PyError::type_error("write() argument 2 must be bytes or str")),
+        };
+        use std::os::unix::io::FromRawFd;
+        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+        use std::io::Write;
+        match file.write(&data) {
+            Ok(count) => {
+                std::mem::forget(file);
+                Ok(py_int(count as i64))
+            }
+            Err(e) => {
+                std::mem::forget(file);
+                Err(PyError::OsError(format!("{}", e)))
+            }
+        }
+    });
+    os_func!("close", |args| {
+        if args.is_empty() { return Err(PyError::type_error("close() requires at least 1 argument")); }
+        let fd = args[0].as_i64().unwrap_or(-1) as i32;
+        use std::os::unix::io::FromRawFd;
+        let file = unsafe { std::fs::File::from_raw_fd(fd) };
+        drop(file); // Closes the fd
+        Ok(py_none())
+    });
+
+    // OS flags for open()
+    d.insert("O_RDONLY".to_string(), py_int(0));
+    d.insert("O_WRONLY".to_string(), py_int(1));
+    d.insert("O_RDWR".to_string(), py_int(2));
+    d.insert("O_CREAT".to_string(), py_int(64));
+    d.insert("O_TRUNC".to_string(), py_int(512));
+    d.insert("O_APPEND".to_string(), py_int(1024));
 
     // environ dict
     let mut environ_dict = HashMap::new();
