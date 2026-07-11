@@ -107,6 +107,19 @@ pub enum Opcode {
     SETUP_ANNOTATIONS = 34,
     POP_EXCEPT = 27,
     UNPACK_SEQUENCE_TWO_TUPLE = 218,
+    // ── Register-based instructions (prefix 0xC0, non-standard) ──────
+    // These encode virtual register operands instead of using a stack.
+    // The upper 4 bits of `arg` encode dst register, lower encode src(s).
+    REG_MOV = 0xC0,          // r[dst] = r[src]
+    REG_LOAD_CONST = 0xC1,   // r[dst] = consts[arg2]
+    REG_LOAD_FAST = 0xC2,    // r[dst] = fast_locals[arg2]
+    REG_STORE_FAST = 0xC3,   // fast_locals[arg2] = r[src]
+    REG_BINARY_OP = 0xC4,    // r[dst] = r[a] OP r[b]
+    REG_LOAD_GLOBAL = 0xC5,  // r[dst] = globals/builtins[name_idx]
+    REG_CALL = 0xC6,         // r[dst] = call(r[func], r[args...])
+    REG_RETURN = 0xC7,       // return r[src]
+    REG_JUMP_IF_FALSE = 0xC8, // if !r[src]: pc += offset
+    REG_BUILD_LIST = 0xC9,   // r[dst] = [r[arg0], r[arg1], ...]
 }
 
 impl Opcode {
