@@ -15,6 +15,33 @@ extern "C" fn jit_py_sub(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut
 extern "C" fn jit_py_mul(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
     unsafe { std::ptr::write(out, crate::object::py_mul(&*a, &*b).unwrap_or_else(|_| crate::object::py_none())); }
 }
+extern "C" fn jit_py_div(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
+    unsafe { std::ptr::write(out, crate::object::py_div(&*a, &*b).unwrap_or_else(|_| crate::object::py_none())); }
+}
+extern "C" fn jit_py_floor_div(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
+    unsafe { std::ptr::write(out, crate::object::py_floor_div(&*a, &*b).unwrap_or_else(|_| crate::object::py_none())); }
+}
+extern "C" fn jit_py_mod(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
+    unsafe { std::ptr::write(out, crate::object::py_mod(&*a, &*b).unwrap_or_else(|_| crate::object::py_none())); }
+}
+extern "C" fn jit_py_pow(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
+    unsafe { std::ptr::write(out, crate::object::py_pow(&*a, &*b).unwrap_or_else(|_| crate::object::py_none())); }
+}
+extern "C" fn jit_py_lshift(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
+    unsafe { std::ptr::write(out, crate::object::py_lshift(&*a, &*b).unwrap_or_else(|_| crate::object::py_none())); }
+}
+extern "C" fn jit_py_rshift(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
+    unsafe { std::ptr::write(out, crate::object::py_rshift(&*a, &*b).unwrap_or_else(|_| crate::object::py_none())); }
+}
+extern "C" fn jit_py_bit_and(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
+    unsafe { std::ptr::write(out, crate::object::py_bit_and(&*a, &*b).unwrap_or_else(|_| crate::object::py_none())); }
+}
+extern "C" fn jit_py_bit_or(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
+    unsafe { std::ptr::write(out, crate::object::py_bit_or(&*a, &*b).unwrap_or_else(|_| crate::object::py_none())); }
+}
+extern "C" fn jit_py_bit_xor(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
+    unsafe { std::ptr::write(out, crate::object::py_bit_xor(&*a, &*b).unwrap_or_else(|_| crate::object::py_none())); }
+}
 extern "C" fn jit_py_compare(a: *const PyObjectRef, b: *const PyObjectRef, op: i64, out: *mut PyObjectRef) {
     unsafe { std::ptr::write(out, crate::object::py_compare(&*a, &*b, op as u32).unwrap_or_else(|_| crate::object::py_bool(false))); }
 }
@@ -28,6 +55,15 @@ pub struct JitCompiler {
     add_func: cranelift_module::FuncId,
     sub_func: cranelift_module::FuncId,
     mul_func: cranelift_module::FuncId,
+    div_func: cranelift_module::FuncId,
+    floor_div_func: cranelift_module::FuncId,
+    mod_func: cranelift_module::FuncId,
+    pow_func: cranelift_module::FuncId,
+    lshift_func: cranelift_module::FuncId,
+    rshift_func: cranelift_module::FuncId,
+    bit_and_func: cranelift_module::FuncId,
+    bit_or_func: cranelift_module::FuncId,
+    bit_xor_func: cranelift_module::FuncId,
     cmp_func: cranelift_module::FuncId,
     truthy_func: cranelift_module::FuncId,
 }
@@ -42,6 +78,15 @@ impl JitCompiler {
         builder.symbol("jit_py_add", jit_py_add as *const u8);
         builder.symbol("jit_py_sub", jit_py_sub as *const u8);
         builder.symbol("jit_py_mul", jit_py_mul as *const u8);
+        builder.symbol("jit_py_div", jit_py_div as *const u8);
+        builder.symbol("jit_py_floor_div", jit_py_floor_div as *const u8);
+        builder.symbol("jit_py_mod", jit_py_mod as *const u8);
+        builder.symbol("jit_py_pow", jit_py_pow as *const u8);
+        builder.symbol("jit_py_lshift", jit_py_lshift as *const u8);
+        builder.symbol("jit_py_rshift", jit_py_rshift as *const u8);
+        builder.symbol("jit_py_bit_and", jit_py_bit_and as *const u8);
+        builder.symbol("jit_py_bit_or", jit_py_bit_or as *const u8);
+        builder.symbol("jit_py_bit_xor", jit_py_bit_xor as *const u8);
         builder.symbol("jit_py_compare", jit_py_compare as *const u8);
         builder.symbol("jit_is_true", jit_is_true as *const u8);
         let mut module = JITModule::new(builder);
@@ -51,6 +96,15 @@ impl JitCompiler {
         let add_func = module.declare_function("jit_py_add", Linkage::Import, &binop_sig).unwrap();
         let sub_func = module.declare_function("jit_py_sub", Linkage::Import, &binop_sig).unwrap();
         let mul_func = module.declare_function("jit_py_mul", Linkage::Import, &binop_sig).unwrap();
+        let div_func = module.declare_function("jit_py_div", Linkage::Import, &binop_sig).unwrap();
+        let floor_div_func = module.declare_function("jit_py_floor_div", Linkage::Import, &binop_sig).unwrap();
+        let mod_func = module.declare_function("jit_py_mod", Linkage::Import, &binop_sig).unwrap();
+        let pow_func = module.declare_function("jit_py_pow", Linkage::Import, &binop_sig).unwrap();
+        let lshift_func = module.declare_function("jit_py_lshift", Linkage::Import, &binop_sig).unwrap();
+        let rshift_func = module.declare_function("jit_py_rshift", Linkage::Import, &binop_sig).unwrap();
+        let bit_and_func = module.declare_function("jit_py_bit_and", Linkage::Import, &binop_sig).unwrap();
+        let bit_or_func = module.declare_function("jit_py_bit_or", Linkage::Import, &binop_sig).unwrap();
+        let bit_xor_func = module.declare_function("jit_py_bit_xor", Linkage::Import, &binop_sig).unwrap();
         let cmp_func = module.declare_function("jit_py_compare", Linkage::Import, &cmp_sig).unwrap();
         let truthy_func = module.declare_function("jit_is_true", Linkage::Import, &truthy_sig).unwrap();
         JitCompiler {
@@ -59,6 +113,15 @@ impl JitCompiler {
             add_func,
             sub_func,
             mul_func,
+            div_func,
+            floor_div_func,
+            mod_func,
+            pow_func,
+            lshift_func,
+            rshift_func,
+            bit_and_func,
+            bit_or_func,
+            bit_xor_func,
             cmp_func,
             truthy_func,
         }
@@ -143,6 +206,15 @@ impl JitCompiler {
         let add_func_ref = self.module.declare_func_in_func(self.add_func, &mut ctx.func);
         let sub_func_ref = self.module.declare_func_in_func(self.sub_func, &mut ctx.func);
         let mul_func_ref = self.module.declare_func_in_func(self.mul_func, &mut ctx.func);
+        let div_func_ref = self.module.declare_func_in_func(self.div_func, &mut ctx.func);
+        let floor_div_func_ref = self.module.declare_func_in_func(self.floor_div_func, &mut ctx.func);
+        let mod_func_ref = self.module.declare_func_in_func(self.mod_func, &mut ctx.func);
+        let pow_func_ref = self.module.declare_func_in_func(self.pow_func, &mut ctx.func);
+        let lshift_func_ref = self.module.declare_func_in_func(self.lshift_func, &mut ctx.func);
+        let rshift_func_ref = self.module.declare_func_in_func(self.rshift_func, &mut ctx.func);
+        let bit_and_func_ref = self.module.declare_func_in_func(self.bit_and_func, &mut ctx.func);
+        let bit_or_func_ref = self.module.declare_func_in_func(self.bit_or_func, &mut ctx.func);
+        let bit_xor_func_ref = self.module.declare_func_in_func(self.bit_xor_func, &mut ctx.func);
         let cmp_func_ref = self.module.declare_func_in_func(self.cmp_func, &mut ctx.func);
         let truthy_func_ref = self.module.declare_func_in_func(self.truthy_func, &mut ctx.func);
 
@@ -306,11 +378,22 @@ impl JitCompiler {
                         0 => builder.ins().iadd(a_val, b_val),
                         1 => builder.ins().isub(a_val, b_val),
                         2 => builder.ins().imul(a_val, b_val),
+                        7 => builder.ins().ishl(a_val, b_val),
+                        8 => builder.ins().ushr(a_val, b_val),
+                        9 => builder.ins().bor(a_val, b_val),
+                        10 => builder.ins().band(a_val, b_val),
+                        11 => builder.ins().bxor(a_val, b_val),
+                        // div(3), floor_div(4), mod(5), pow(6) — use fallback
                         _ => return None,
                     };
-                    builder.ins().store(memflags, zero, out_fast, 0);
-                    builder.ins().store(memflags, result_val, out_fast, 8);
-                    builder.ins().jump(merge_block, &[]);
+                    if instr.arg <= 2 || instr.arg >= 7 {
+                        // Bitwise ops (7-11) and add/sub/mul can use native i64 directly
+                        builder.ins().store(memflags, zero, out_fast, 0);
+                        builder.ins().store(memflags, result_val, out_fast, 8);
+                        builder.ins().jump(merge_block, &[]);
+                    } else {
+                        return None;
+                    }
 
                     builder.seal_block(fallback_block);
                     builder.switch_to_block(fallback_block);
@@ -321,6 +404,15 @@ impl JitCompiler {
                         0 => add_func_ref,
                         1 => sub_func_ref,
                         2 => mul_func_ref,
+                        3 => div_func_ref,
+                        4 => floor_div_func_ref,
+                        5 => mod_func_ref,
+                        6 => pow_func_ref,
+                        7 => lshift_func_ref,
+                        8 => rshift_func_ref,
+                        9 => bit_or_func_ref,
+                        10 => bit_and_func_ref,
+                        11 => bit_xor_func_ref,
                         _ => return None,
                     };
                     builder.ins().call(func_ref, &[a_fall, b_fall, out_fall]);

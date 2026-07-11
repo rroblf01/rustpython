@@ -6,6 +6,7 @@ mod compiler;
 mod object;
 mod vm;
 mod jit;
+mod interner;
 
 use std::env;
 use std::fs;
