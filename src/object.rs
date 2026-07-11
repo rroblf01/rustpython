@@ -26,11 +26,43 @@ impl<'a> std::ops::Deref for RefOrOwned<'a> {
     }
 }
 
+/// Inline storage for short strings (<16 bytes).
+/// Avoids heap allocation and Rc overhead for small strings.
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub struct SmallStr {
+    data: [u8; 15],
+    len: u8,
+}
+
+impl SmallStr {
+    pub fn new(s: &str) -> Option<Self> {
+        let bytes = s.as_bytes();
+        if bytes.len() > 15 {
+            return None;
+        }
+        let mut data = [0u8; 15];
+        data[..bytes.len()].copy_from_slice(bytes);
+        Some(SmallStr { data, len: bytes.len() as u8 })
+    }
+
+    pub fn as_str(&self) -> &str {
+        // Safe: we only store valid UTF-8
+        unsafe { std::str::from_utf8_unchecked(&self.data[..self.len as usize]) }
+    }
+
+    pub fn to_string(&self) -> String {
+        self.as_str().to_string()
+    }
+}
+
 #[derive(Clone)]
 #[repr(C)]
 pub enum PyObjectRef {
     SmallInt(i64),
     SmallBool(bool),
+    SmallFloat(f64),     // Inline f64 — avoids Rc + heap alloc
+    SmallStr(SmallStr),  // Inline short string (<16 bytes)
     None,
     Mut(Rc<RefCell<PyObject>>),  // Mutable: List, Dict, Set, Instance
     Imm(Rc<PyObject>),           // Immutable: Int, Str, Float, Tuple, Bytes, ByteArray, Range, Slice, Code, Function
@@ -51,6 +83,8 @@ impl PyObjectRef {
         match self {
             PyObjectRef::SmallInt(n) => RefOrOwned::Owned(PyObject::Int(BigInt::from(*n))),
             PyObjectRef::SmallBool(b) => RefOrOwned::Owned(PyObject::Bool(*b)),
+            PyObjectRef::SmallFloat(f) => RefOrOwned::Owned(PyObject::Float(*f)),
+            PyObjectRef::SmallStr(s) => RefOrOwned::Owned(PyObject::Str(s.to_string())),
             PyObjectRef::None => RefOrOwned::Owned(PyObject::None),
             PyObjectRef::Mut(rc) => RefOrOwned::Ref(rc.borrow()),
             PyObjectRef::Imm(rc) => RefOrOwned::RcRef(Rc::clone(rc)),
@@ -86,6 +120,8 @@ impl PyObjectRef {
         match self {
             PyObjectRef::SmallInt(n) => *n != 0,
             PyObjectRef::SmallBool(b) => *b,
+            PyObjectRef::SmallFloat(f) => *f != 0.0,
+            PyObjectRef::SmallStr(s) => !s.as_str().is_empty(),
             PyObjectRef::None => false,
             PyObjectRef::Mut(rc) => rc.borrow().truthy(),
             PyObjectRef::Imm(rc) => (**rc).truthy(),
@@ -100,6 +136,16 @@ impl PyObjectRef {
                 Ok(h)
             }
             PyObjectRef::SmallBool(b) => Ok(if *b { 1 } else { 0 }),
+            PyObjectRef::SmallFloat(f) => {
+                let bits = f.to_bits();
+                Ok(bits as usize ^ (bits >> 32) as usize)
+            }
+            PyObjectRef::SmallStr(s) => {
+                let bytes = s.as_str().as_bytes();
+                let mut h: usize = 0;
+                for &b in bytes { h = h.wrapping_mul(31).wrapping_add(b as usize); }
+                Ok(h)
+            }
             PyObjectRef::None => Ok(0),
             PyObjectRef::Mut(rc) => rc.borrow().hash(),
             PyObjectRef::Imm(rc) => (**rc).hash(),
@@ -108,6 +154,14 @@ impl PyObjectRef {
     pub fn equals(&self, other: &PyObjectRef) -> PyResult<bool> {
         if let (Some(ai), Some(bi)) = (self.as_i64(), other.as_i64()) {
             return Ok(ai == bi);
+        }
+        // Fast path for inline floats
+        if let (PyObjectRef::SmallFloat(a), PyObjectRef::SmallFloat(b)) = (self, other) {
+            return Ok(a == b);
+        }
+        // Fast path for inline strings
+        if let (PyObjectRef::SmallStr(a), PyObjectRef::SmallStr(b)) = (self, other) {
+            return Ok(a.as_str() == b.as_str());
         }
         self.borrow().equals(other)
     }
@@ -807,10 +861,15 @@ pub fn py_none() -> PyObjectRef {
 }
 
 pub fn py_float(f: f64) -> PyObjectRef {
-    PyObjectRef::imm(PyObject::Float(f))
+    // Use inline SmallFloat to avoid Rc + heap alloc
+    PyObjectRef::SmallFloat(f)
 }
 
 pub fn py_str(s: &str) -> PyObjectRef {
+    // Use inline SmallStr for strings < 16 bytes to avoid Rc + heap alloc
+    if let Some(small) = SmallStr::new(s) {
+        return PyObjectRef::SmallStr(small);
+    }
     PyObjectRef::imm(PyObject::Str(s.to_string()))
 }
 
