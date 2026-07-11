@@ -112,7 +112,16 @@ impl VirtualMachine {
          let json_dict = create_json_dict();
          modules.insert("json".to_string(), create_module("json", json_dict));
 
-         // Populate sys.path with default search paths
+         let collections_dict = create_collections_dict();
+          modules.insert("collections".to_string(), create_module("collections", collections_dict));
+
+          let functools_dict = create_functools_dict();
+          modules.insert("functools".to_string(), create_module("functools", functools_dict));
+
+          let itertools_dict = create_itertools_dict();
+          modules.insert("itertools".to_string(), create_module("itertools", itertools_dict));
+
+          // Populate sys.path with default search paths
          if let PyObject::List(path_list) = &mut *sys_dict.get("path").unwrap().borrow_mut() {
              path_list.push(py_str("."));
              path_list.push(py_str("./Lib"));
@@ -1397,6 +1406,13 @@ impl VirtualMachine {
             let mut new_args = vec![self_obj];
             new_args.extend(args);
             return self.call_function(func, new_args, keywords);
+        }
+
+        if let PyObject::Partial { func, args: partial_args } = &*callable.borrow() {
+            let func = func.clone();
+            let mut all_args = partial_args.clone();
+            all_args.extend(args);
+            return self.call_function(func, all_args, keywords);
         }
 
         if let PyObject::Function { code, globals: func_globals, defaults, jit_ptr, closure, .. } = &*callable.borrow() {

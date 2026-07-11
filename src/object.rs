@@ -421,6 +421,10 @@ pub enum PyObject {
         func: PyObjectRef,
         self_obj: PyObjectRef,
     },
+    Partial {
+        func: PyObjectRef,
+        args: Vec<PyObjectRef>,
+    },
     File {
         file: std::rc::Rc<std::cell::RefCell<std::fs::File>>,
     },
@@ -475,6 +479,7 @@ impl PyObject {
             PyObject::Exception { .. } => "Exception",
             PyObject::BuildClass => "builtin_function_or_method",
             PyObject::BoundMethod { .. } => "method",
+            PyObject::Partial { .. } => "partial",
             PyObject::File { .. } => "file",
             PyObject::Super { .. } => "super",
             PyObject::Property { .. } => "property",
@@ -552,6 +557,7 @@ impl PyObject {
             }
             PyObject::BuildClass => "<builtin function __build_class__>".to_string(),
             PyObject::BoundMethod { func, .. } => format!("<bound method {}>", func.borrow().type_name()),
+            PyObject::Partial { func, .. } => format!("<partial {}>", func.borrow().type_name()),
             PyObject::File { .. } => format!("<_io.FileIO '...'>"),
             PyObject::Super { .. } => format!("<super object>"),
             PyObject::Property { .. } => format!("<property object>"),
@@ -2446,7 +2452,7 @@ pub fn builtin_callable(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let is_callable = matches!(&*obj,
         PyObject::Function { .. } | PyObject::BuiltinFunction { .. } |
         PyObject::BuiltinMethod { .. } | PyObject::Type { .. } | PyObject::BuildClass |
-        PyObject::BoundMethod { .. }
+        PyObject::BoundMethod { .. } | PyObject::Partial { .. }
     );
     Ok(py_bool(is_callable))
 }
@@ -2666,7 +2672,8 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
             PyObject::BoundMethod { .. } => 3,
             PyObject::Type { .. } => 4,
             PyObject::BuildClass => 5,
-            _ => 6,
+            PyObject::Partial { .. } => 6,
+            _ => 7,
         }
     };
     match kind {
@@ -2755,6 +2762,17 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
                 dict: std::collections::HashMap::new(),
             });
             Ok(instance)
+        }
+        6 => {
+            let (func, partial_args) = {
+                let obj = f.borrow();
+                if let PyObject::Partial { func: bf, args: pa } = &*obj {
+                    (bf.clone(), pa.clone())
+                } else { return Err(PyError::type_error("not a partial")); }
+            };
+            let mut all_args = partial_args.clone();
+            all_args.extend(a);
+            builtin_call(&func, &all_args)
         }
         _ => Err(PyError::type_error(format!("'{}' object is not callable", type_name))),
     }
@@ -4325,6 +4343,208 @@ pub fn create_json_dict() -> HashMap<String, PyObjectRef> {
         if args.is_empty() { return Err(PyError::type_error("loads() missing required argument")); }
         let s = args[0].str();
         json_decode(&s)
+    });
+
+    d
+}
+
+pub fn create_collections_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! coll_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    // deque: double-ended queue
+    coll_func!("deque", |args| {
+        let iterable = if args.len() > 0 { Some(args[0].clone()) } else { None };
+        let mut deque = std::collections::VecDeque::new();
+        if let Some(iter) = iterable {
+            // Iterate over the iterable and add items
+            if let Ok(it) = crate::object::builtin_iter(&[iter]) {
+                loop {
+                    match crate::object::builtin_next(&[it.clone()]) {
+                        Ok(v) => deque.push_back(v),
+                        Err(crate::object::PyError::StopIteration) => break,
+                        Err(e) => return Err(e),
+                    }
+                }
+            }
+        }
+        Ok(PyObjectRef::new(PyObject::List(deque.into_iter().collect())))
+    });
+
+    // Counter: count hashable objects
+    coll_func!("Counter", |args| {
+        if args.is_empty() {
+            return Ok(crate::object::py_dict());
+        }
+        let iterable = &args[0];
+        let mut counts = std::collections::HashMap::<usize, (PyObjectRef, i64)>::new();
+        let mut order = Vec::new();
+        if let Ok(it) = crate::object::builtin_iter(&[iterable.clone()]) {
+            loop {
+                match crate::object::builtin_next(&[it.clone()]) {
+                    Ok(item) => {
+                        let hash = item.hash()?;
+                        let entry = counts.entry(hash).or_insert_with(|| {
+                            order.push(hash);
+                            (item.clone(), 0)
+                        });
+                        entry.1 += 1;
+                    }
+                    Err(crate::object::PyError::StopIteration) => break,
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        let dict = crate::object::py_dict();
+        for hash in &order {
+            if let Some((item, count)) = counts.get(hash) {
+                let count_val = crate::object::py_int(*count);
+                if let crate::object::PyObject::Dict(d) = &mut *dict.borrow_mut() {
+                    d.set(item.clone(), count_val)?;
+                }
+            }
+        }
+        Ok(dict)
+    });
+
+    d
+}
+
+fn call_function(func: &PyObjectRef, args: Vec<PyObjectRef>) -> PyResult<PyObjectRef> {
+    let f = func.borrow();
+    match &*f {
+        PyObject::BuiltinFunction { func: bf, .. } => {
+            return bf(&args);
+        }
+        _ => {}
+    }
+    drop(f);
+    Err(PyError::type_error(format!("'{}' object is not callable", func.borrow().type_name())))
+}
+
+pub fn create_functools_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! ft_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    ft_func!("reduce", |args| {
+        if args.len() < 2 {
+            return Err(PyError::type_error("reduce() takes at least 2 arguments"));
+        }
+        let func = args[0].clone();
+        let iterable = &args[1];
+        let it = builtin_iter(&[iterable.clone()])?;
+        let mut acc = match builtin_next(&[it.clone()]) {
+            Ok(v) => v,
+            Err(PyError::StopIteration) => {
+                if args.len() >= 3 { return Ok(args[2].clone()); }
+                return Err(PyError::type_error("reduce() of empty sequence with no initial value"));
+            }
+            Err(e) => return Err(e),
+        };
+        loop {
+            match builtin_next(&[it.clone()]) {
+                Ok(v) => {
+                    let result = builtin_call(&func, &[acc, v])?;
+                    acc = result;
+                }
+                Err(PyError::StopIteration) => break,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(acc)
+    });
+
+    ft_func!("partial", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("partial() takes at least 1 argument"));
+        }
+        let func = args[0].clone();
+        let partial_args: Vec<PyObjectRef> = args[1..].to_vec();
+        Ok(PyObjectRef::new(PyObject::Partial { func, args: partial_args }))
+    });
+
+    d
+}
+
+pub fn create_itertools_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! it_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    it_func!("chain", |args| {
+        let mut items = Vec::new();
+        for arg in args {
+            if let Ok(it) = builtin_iter(&[arg.clone()]) {
+                loop {
+                    match builtin_next(&[it.clone()]) {
+                        Ok(v) => items.push(v),
+                        Err(PyError::StopIteration) => break,
+                        Err(e) => return Err(e),
+                    }
+                }
+            }
+        }
+        Ok(py_list(items))
+    });
+
+    it_func!("count", |args| {
+        let start = if args.len() > 0 {
+            if let Some(n) = args[0].as_i64() { n } else { 0i64 }
+        } else { 0i64 };
+        let step = if args.len() > 1 {
+            if let Some(n) = args[1].as_i64() { n } else { 1i64 }
+        } else { 1i64 };
+        let mut current = start;
+        let mut items = Vec::new();
+        for _ in 0..10000 {
+            items.push(py_int(current));
+            current += step;
+        }
+        Ok(py_list(items))
+    });
+
+    it_func!("product", |args| {
+        if args.is_empty() {
+            return Ok(py_list(vec![py_tuple(vec![])]));
+        }
+        let mut pools: Vec<Vec<PyObjectRef>> = Vec::new();
+        for arg in args {
+            let mut pool = Vec::new();
+            if let Ok(it) = builtin_iter(&[arg.clone()]) {
+                loop {
+                    match builtin_next(&[it.clone()]) {
+                        Ok(v) => pool.push(v),
+                        Err(PyError::StopIteration) => break,
+                        Err(e) => return Err(e),
+                    }
+                }
+            }
+            pools.push(pool);
+        }
+        let mut result = vec![vec![]];
+        for pool in &pools {
+            let mut new_result = Vec::new();
+            for prefix in &result {
+                for item in pool {
+                    let mut new_prefix = prefix.clone();
+                    new_prefix.push(item.clone());
+                    new_result.push(new_prefix);
+                }
+            }
+            result = new_result;
+        }
+        Ok(py_list(result.into_iter().map(|v| py_tuple(v)).collect()))
     });
 
     d
