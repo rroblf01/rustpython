@@ -2068,43 +2068,55 @@ pub fn builtin_sorted(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
         return Err(PyError::type_error("sorted() takes at least 1 argument"));
     }
-    let obj = args[0].borrow();
-    match &*obj {
-        PyObject::List(v) => {
-            let mut v = v.clone();
-            // Simple sort (bubble sort for now)
-            let len = v.len();
-            for i in 0..len {
-                for j in 0..len - 1 - i {
-                    if v[j].borrow().gt(&v[j + 1])? {
-                        v.swap(j, j + 1);
-                    }
-                }
-            }
-            Ok(py_list(v))
+    let mut v = Vec::new();
+    let iterable = builtin_iter(&[args[0].clone()])?;
+    loop {
+        match builtin_next(&[iterable.clone()]) {
+            Ok(val) => v.push(val),
+            Err(PyError::StopIteration) => break,
+            Err(e) => return Err(e),
         }
-        _ => Err(PyError::type_error(format!("cannot sort '{}'", obj.type_name()))),
     }
+    // Use Rust's stable sort (O(n log n))
+    let len = v.len();
+    if len > 1 {
+        // Simple insertion sort for small, merge sort for large
+        // Actually, let's use Rust's sort_by with our comparison
+        v.sort_by(|a, b| {
+            match a.borrow().gt(b) {
+                Ok(true) => std::cmp::Ordering::Greater,
+                Ok(false) => match a.borrow().lt(b) {
+                    Ok(true) => std::cmp::Ordering::Less,
+                    _ => std::cmp::Ordering::Equal,
+                },
+                Err(_) => std::cmp::Ordering::Equal,
+            }
+        });
+    }
+    Ok(py_list(v))
 }
 
 pub fn builtin_enumerate(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
         return Err(PyError::type_error("enumerate() takes at least 1 argument"));
     }
-    let obj = args[0].borrow();
-    let start = if args.len() > 1 {
+    let start: usize = if args.len() > 1 {
         if let PyObject::Int(i) = &*args[1].borrow() {
             i.to_usize().unwrap_or(0)
         } else { 0 }
     } else { 0 };
-    match &*obj {
-        PyObject::List(v) => {
-            let items: Vec<PyObjectRef> = v.iter().enumerate()
-                .map(|(i, item)| py_tuple(vec![py_int((start + i) as i64), item.clone()]))
-                .collect();
-            Ok(py_list(items))
+    let mut index = start;
+    let mut items = Vec::new();
+    let iterable = builtin_iter(&[args[0].clone()])?;
+    loop {
+        match builtin_next(&[iterable.clone()]) {
+            Ok(val) => {
+                items.push(py_tuple(vec![py_int(index as i64), val]));
+                index += 1;
+            }
+            Err(PyError::StopIteration) => return Ok(py_list(items)),
+            Err(e) => return Err(e),
         }
-        _ => Err(PyError::type_error(format!("cannot enumerate '{}'", obj.type_name()))),
     }
 }
 
@@ -2133,7 +2145,13 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if let Some(f) = f {
         return call_bound_method(f, args[0].clone(), vec![]);
     }
-    Ok(args[0].clone())
+    let obj = args[0].borrow();
+    match &*obj {
+        PyObject::Tuple(v) => Ok(py_list(v.clone())),
+        PyObject::Str(s) => Ok(py_list(s.chars().map(|c| py_str(&c.to_string())).collect())),
+        PyObject::Set(s) => Ok(py_list(s.to_vec())),
+        _ => Ok(args[0].clone()),
+    }
 }
 
 pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
@@ -2173,11 +2191,8 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     match &mut *obj {
         PyObject::List(v) => {
             if v.is_empty() {
-                if args.len() >= 2 {
-                    Ok(args[1].clone())
-                } else {
-                    Err(PyError::stop_iteration())
-                }
+                if args.len() >= 2 { Ok(args[1].clone()) }
+                else { Err(PyError::stop_iteration()) }
             } else {
                 Ok(v.remove(0))
             }
@@ -2191,23 +2206,14 @@ pub fn builtin_sum(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         return Err(PyError::type_error("sum() takes at least 1 argument"));
     }
     let start = if args.len() >= 2 { args[1].clone() } else { py_int(0) };
-    let obj = args[0].borrow();
-    match &*obj {
-        PyObject::List(v) => {
-            let mut total = start;
-            for item in v {
-                total = py_add(&total, item)?;
-            }
-            Ok(total)
+    let mut total = start;
+    let iterable = builtin_iter(&[args[0].clone()])?;
+    loop {
+        match builtin_next(&[iterable.clone()]) {
+            Ok(val) => { total = py_add(&total, &val)?; }
+            Err(PyError::StopIteration) => return Ok(total),
+            Err(e) => return Err(e),
         }
-        PyObject::Tuple(v) => {
-            let mut total = start;
-            for item in v {
-                total = py_add(&total, item)?;
-            }
-            Ok(total)
-        }
-        _ => Err(PyError::type_error(format!("cannot sum '{}'", obj.type_name()))),
     }
 }
 
@@ -2219,12 +2225,18 @@ fn compare_gt(a: &PyObjectRef, b: &PyObjectRef) -> std::cmp::Ordering {
 }
 
 pub fn builtin_max(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    let items = if args.len() == 1 {
-        let obj = args[0].borrow();
-        match &*obj {
-            PyObject::List(v) => v.clone(),
-            _ => return Err(PyError::type_error("argument to max() must be iterable")),
+    if args.is_empty() { return Err(PyError::type_error("max() requires at least 1 argument")); }
+    let items: Vec<PyObjectRef> = if args.len() == 1 {
+        let mut v = Vec::new();
+        let iterable = builtin_iter(&[args[0].clone()])?;
+        loop {
+            match builtin_next(&[iterable.clone()]) {
+                Ok(val) => v.push(val),
+                Err(PyError::StopIteration) => break,
+                Err(e) => return Err(e),
+            }
         }
+        v
     } else {
         args.to_vec()
     };
@@ -2232,12 +2244,18 @@ pub fn builtin_max(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 }
 
 pub fn builtin_min(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    let items = if args.len() == 1 {
-        let obj = args[0].borrow();
-        match &*obj {
-            PyObject::List(v) => v.clone(),
-            _ => return Err(PyError::type_error("argument to min() must be iterable")),
+    if args.is_empty() { return Err(PyError::type_error("min() requires at least 1 argument")); }
+    let items: Vec<PyObjectRef> = if args.len() == 1 {
+        let mut v = Vec::new();
+        let iterable = builtin_iter(&[args[0].clone()])?;
+        loop {
+            match builtin_next(&[iterable.clone()]) {
+                Ok(val) => v.push(val),
+                Err(PyError::StopIteration) => break,
+                Err(e) => return Err(e),
+            }
         }
+        v
     } else {
         args.to_vec()
     };
@@ -2360,7 +2378,19 @@ pub fn builtin_reversed(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             Ok(PyObjectRef::imm(PyObject::Tuple(rev)))
         }
         PyObject::Str(s) => Ok(py_str(&s.chars().rev().collect::<String>())),
-        _ => Err(PyError::type_error("argument to reversed() must be a sequence")),
+        _ => {
+            let mut v = Vec::new();
+            let iterable = builtin_iter(&[args[0].clone()])?;
+            loop {
+                match builtin_next(&[iterable.clone()]) {
+                    Ok(val) => v.push(val),
+                    Err(PyError::StopIteration) => break,
+                    Err(e) => return Err(e),
+                }
+            }
+            v.reverse();
+            Ok(PyObjectRef::new(PyObject::List(v)))
+        }
     }
 }
 
@@ -2523,10 +2553,112 @@ pub fn builtin_zip(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
 }
 
-fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    match &*func.borrow() {
-        PyObject::BuiltinFunction { func: f, .. } => f(args),
-        _ => Err(PyError::type_error("object is not callable")),
+pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    let f = func.clone();
+    let a = args.to_vec();
+    let type_name = f.get_type_name();
+    let kind = {
+        let obj = f.borrow();
+        match &*obj {
+            PyObject::BuiltinFunction { .. } => 0,
+            PyObject::BuiltinMethod { .. } => 1,
+            PyObject::Function { .. } => 2,
+            PyObject::BoundMethod { .. } => 3,
+            PyObject::Type { .. } => 4,
+            PyObject::BuildClass => 5,
+            _ => 6,
+        }
+    };
+    match kind {
+        0 => {
+            if let PyObject::BuiltinFunction { func: bf, .. } = &*f.borrow() { bf(&a) } else { unreachable!() }
+        }
+        1 => {
+            if let PyObject::BuiltinMethod { func: bf, self_obj: s, .. } = &*f.borrow() {
+                let mut all_args = vec![s.clone()];
+                all_args.extend(a);
+                bf(&all_args)
+            } else { unreachable!() }
+        }
+        2 => {
+            if let PyObject::Function { code, globals: g, defaults, .. } = &*f.borrow() {
+                let code = code.clone();
+                let g = g.clone();
+                let defaults = defaults.clone();
+                let npos = a.len();
+                let named_params = if code.vararg_name.is_some() || code.kwarg_name.is_some() {
+                    code.varnames.iter().position(|n| {
+                        Some(n.clone()) == code.vararg_name || Some(n.clone()) == code.kwarg_name
+                    }).unwrap_or(code.varnames.len())
+                } else {
+                    code.varnames.len()
+                };
+                let mut frame = super::vm::Frame::new(std::rc::Rc::new(code.clone()), g.clone(), std::rc::Rc::new(create_builtins()));
+                for i in 0..npos.min(named_params) {
+                    if i < code.varnames.len() {
+                        frame.fast_locals[i] = Some(a[i].clone());
+                        frame.locals.insert(code.varnames[i].clone(), a[i].clone());
+                    }
+                }
+                if let Some(vararg_name) = &code.vararg_name {
+                    let mut extra = Vec::new();
+                    for i in named_params..npos {
+                        extra.push(a[i].clone());
+                    }
+                    frame.locals.insert(vararg_name.clone(), py_tuple(extra));
+                }
+                if npos < named_params {
+                    let num_defaults = code.num_defaults;
+                    for i in npos..named_params {
+                        let default_idx = num_defaults.saturating_sub(named_params - i);
+                        if default_idx < defaults.len() {
+                            frame.locals.insert(code.varnames[i].clone(), defaults[default_idx].clone());
+                        }
+                    }
+                }
+                if let Some(kwarg_name) = &code.kwarg_name {
+                    if !frame.locals.contains_key(kwarg_name) {
+                        frame.locals.insert(kwarg_name.clone(), py_dict());
+                    }
+                }
+                let mut vm = super::vm::VirtualMachine::new();
+                vm.frames.push(frame);
+                vm.execute()
+            } else { unreachable!() }
+        }
+        3 => {
+            let bf = {
+                let obj = f.borrow();
+                if let PyObject::BoundMethod { func: bf, .. } = &*obj {
+                    bf.clone()
+                } else { return Err(PyError::type_error("not a bound method")); }
+            };
+            let mut all_args = vec![];
+            all_args.extend(a);
+            builtin_call(&bf, &all_args)
+        }
+        4 => {
+            if let PyObject::Type { dict: type_dict, .. } = &*f.borrow() {
+                let instance = PyObjectRef::new(PyObject::Instance {
+                    typ: f.clone(),
+                    dict: std::collections::HashMap::new(),
+                });
+                if let Some(init) = type_dict.get("__init__").cloned() {
+                    let mut init_args = vec![instance.clone()];
+                    init_args.extend(a);
+                    call_bound_method(init, instance.clone(), init_args)?;
+                }
+                Ok(instance)
+            } else { unreachable!() }
+        }
+        5 => {
+            let instance = PyObjectRef::new(PyObject::Instance {
+                typ: f.clone(),
+                dict: std::collections::HashMap::new(),
+            });
+            Ok(instance)
+        }
+        _ => Err(PyError::type_error(format!("'{}' object is not callable", type_name))),
     }
 }
 
