@@ -4904,6 +4904,34 @@ fn socket_addr_to_string(addr: &PyObjectRef) -> PyResult<String> {
     }
 }
 
+pub fn create_select_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! sel_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    sel_func!("select", |args| {
+        if args.len() < 3 {
+            return Err(PyError::type_error("select() takes at least 3 arguments"));
+        }
+        let rlist = &args[0];
+        let _wlist = &args[1];
+        let _xlist = &args[2];
+        let mut readable = Vec::new();
+        let rlist_b = rlist.borrow();
+        if let PyObject::List(items) = &*rlist_b {
+            for item in items {
+                readable.push(item.clone());
+            }
+        }
+        Ok(py_tuple(vec![py_list(readable), py_list(vec![]), py_list(vec![])]))
+    });
+
+    d
+}
+
 pub fn create_socket_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! sock_func {

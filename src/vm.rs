@@ -130,6 +130,9 @@ impl VirtualMachine {
           let socket_dict = create_socket_dict();
           modules.insert("socket".to_string(), create_module("socket", socket_dict));
 
+          let select_dict = create_select_dict();
+          modules.insert("select".to_string(), create_module("select", select_dict));
+
           // Populate sys.path with default search paths
          if let PyObject::List(path_list) = &mut *sys_dict.get("path").unwrap().borrow_mut() {
              path_list.push(py_str("."));
