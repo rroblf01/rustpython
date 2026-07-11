@@ -183,6 +183,25 @@ impl VirtualMachine {
     }
 
     pub fn run(&mut self, code: CodeObject) -> PyResult<PyObjectRef> {
+        // Try JIT compilation for module-level code
+        let mut jit = self.jit.borrow_mut();
+        if let Some(compiled) = jit.compile(&code) {
+            let jit_consts = crate::jit::JitCompiler::precompute_with_globals(
+                &code,
+                &self.globals.borrow(),
+                &self.builtins,
+            );
+            drop(jit);
+            let mut result = crate::object::py_none();
+            compiled(
+                std::ptr::null(),
+                0,
+                jit_consts.as_ptr(),
+                &mut result as *mut PyObjectRef,
+            );
+            return Ok(result);
+        }
+        drop(jit);
         let frame = Frame::new(
             Rc::new(code),
             self.globals.clone(),
