@@ -2340,7 +2340,18 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         }
     };
     if let Some(f) = f {
-        return call_bound_method(f, args[0].clone(), vec![]);
+        let result = call_bound_method(f, args[0].clone(), vec![]);
+        // Convert raise StopIteration into PyError::StopIteration for next() protocol
+        if let Err(PyError::Exception(_, ref exc)) = result {
+            let is_stop = match &*exc.borrow() {
+                PyObject::Exception { typ, .. } if typ == "StopIteration" => true,
+                _ => false,
+            };
+            if is_stop {
+                return Err(PyError::StopIteration);
+            }
+        }
+        return result;
     }
     // Fallback to list-based iteration
     let mut obj = args[0].borrow_mut();

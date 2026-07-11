@@ -331,22 +331,6 @@ impl VirtualMachine {
                 Ok(None) => continue,
                 Ok(Some(val)) => return Ok(val),
                 Err(e) => {
-                    // StopIteration must propagate immediately (not handled as normal exception)
-                    if matches!(&e, PyError::StopIteration) {
-                        return Err(e);
-                    }
-                    // Check if a raised Exception is actually StopIteration
-                    if let PyError::Exception(ref _msg, ref exc) = e {
-                        let exc_borrowed = exc.borrow();
-                        let is_stop = match &*exc_borrowed {
-                            PyObject::Exception { ref typ, .. } if typ == "StopIteration" => true,
-                            PyObject::Type { name, .. } if name == "StopIteration" => true,
-                            _ => false,
-                        };
-                        if is_stop {
-                            return Err(PyError::StopIteration);
-                        }
-                    }
                     if matches!(&e, PyError::SystemExit(_)) {
                         return Err(e);
                     }
@@ -1431,6 +1415,17 @@ impl VirtualMachine {
                     0 => return Err(PyError::runtime_error("re-raise")),
                     1 => {
                         let exc = self.frames[fi].pop()?;
+                        // If the raised value is a callable (class/factory), call it first
+                        let is_callable = !matches!(&*exc.borrow(), PyObject::Str(_) | PyObject::Exception { .. });
+                        let exc = if is_callable {
+                            let exc_clone = exc.clone();
+                            match self.call_function(exc_clone, vec![], vec![]) {
+                                Ok(instance) => instance,
+                                Err(_) => return Err(PyError::type_error("exceptions must be str or Exception instances")),
+                            }
+                        } else {
+                            exc
+                        };
                         let msg = match &*exc.borrow() {
                             PyObject::Str(s) => s.clone(),
                             PyObject::Exception { args, .. } => {
