@@ -1675,7 +1675,23 @@ pub fn builtin_list(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 Ok(py_list(items))
             }
             PyObject::Set(s) => Ok(py_list(s.to_vec())),
-            _ => Err(PyError::type_error(format!("cannot convert '{}' to list", obj.type_name()))),
+            _ => {
+                drop(obj);
+                // Try general iteration protocol via iter() + next()
+                let it = match builtin_iter(&[args[0].clone()]) {
+                    Ok(it) => it,
+                    Err(_) => return Err(PyError::type_error(format!("cannot convert '{}' object to list", args[0].borrow().type_name()))),
+                };
+                let mut collected = Vec::new();
+                loop {
+                    match builtin_next(&[it.clone()]) {
+                        Ok(val) => collected.push(val),
+                        Err(PyError::StopIteration) => break,
+                        Err(e) => return Err(e),
+                    }
+                }
+                Ok(py_list(collected))
+            }
         }
     }
 }
