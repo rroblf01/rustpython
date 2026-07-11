@@ -2994,6 +2994,15 @@ impl ObjectAccess for PyObject {
     fn get_attribute(&self, name: &str) -> PyResult<PyObjectRef> {
         match self {
             PyObject::Module { dict, .. } => {
+                if name == "__dict__" {
+                    // Convert module's HashMap to a PyDict
+                    use crate::object::ObjectAccess;
+                    let mut pd = PyDict::new();
+                    for (k, v) in dict.iter() {
+                        let _ = pd.set(py_str(k), v.clone());
+                    }
+                    return Ok(PyObjectRef::new(PyObject::Dict(pd)));
+                }
                 dict.get(name).cloned().ok_or_else(|| PyError::attribute_error(format!("module has no attribute '{}'", name)))
             }
             PyObject::Type { dict, mro, .. } => {
