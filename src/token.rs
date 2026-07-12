@@ -9,6 +9,8 @@ pub enum Token {
     FStringStart,
     FStringMiddle(String),
     FStringEnd,
+    FORMAT_SPEC(String),
+    FStringConversion(u8),
     Indent,
     Dedent,
     Newline,
@@ -132,7 +134,7 @@ pub struct Lexer {
     paren_level: usize,
     source: String,
     fstring_quote: Option<char>,
-    fstring_parts: Vec<(String, String)>, // (literal, expr_text)
+    fstring_parts: Vec<(String, String, String, u8)>, // (literal, expr_text, format_spec, conversion)
     fstring_part_idx: usize,
     fstring_expr_pending: Vec<Token>,
 }
@@ -504,7 +506,7 @@ impl Lexer {
         // Check if we're in the middle of emitting f-string parts
         if let Some(_quote) = self.fstring_quote {
             if self.fstring_part_idx < self.fstring_parts.len() {
-                let (ref literal, ref expr_text) = self.fstring_parts[self.fstring_part_idx];
+                let (ref literal, ref expr_text, ref format_spec, conversion) = self.fstring_parts[self.fstring_part_idx];
                 self.fstring_part_idx += 1;
                 // to_push holds tokens in OUTPUT order (first to last)
                 let mut to_push: Vec<Token> = Vec::new();
@@ -516,10 +518,18 @@ impl Lexer {
                 if !expr_text.is_empty() {
                     let expr_tokens = self.tokenize_fstring_expr(expr_text);
                     to_push.extend(expr_tokens);
+                    // If there's a conversion, push the FStringConversion token
+                    if conversion != 0 {
+                        to_push.push(Token::FStringConversion(conversion));
+                    }
+                    // If there's a format spec, push the FORMAT_SPEC token
+                    if !format_spec.is_empty() {
+                        to_push.push(Token::FORMAT_SPEC(format_spec.clone()));
+                    }
                 }
                 // If this is the last part, end the f-string
                 let is_last = self.fstring_part_idx >= self.fstring_parts.len()
-                    || self.fstring_parts[self.fstring_part_idx..].iter().all(|(l, e)| l.is_empty() && e.is_empty());
+                    || self.fstring_parts[self.fstring_part_idx..].iter().all(|(l, e, fs, c)| l.is_empty() && e.is_empty() && fs.is_empty() && *c == 0);
                 if is_last {
                     to_push.push(Token::FStringEnd);
                     self.fstring_quote = None;
@@ -801,7 +811,8 @@ impl Lexer {
 
     fn tokenize_fstring(&mut self, quote: char) -> Token {
         // Read the entire f-string, splitting into literal and expression parts
-        let mut parts: Vec<(String, String)> = Vec::new();
+        // Each part: (literal_text, expr_text, format_spec_text, conversion)
+        let mut parts: Vec<(String, String, String, u8)> = Vec::new();
         let mut literal = String::new();
         loop {
             match self.advance() {
@@ -826,18 +837,55 @@ impl Lexer {
                         self.advance();
                         literal.push('{');
                     } else {
-                        // Start of expression
+                        // Start of expression — read until matching '}'
                         let mut depth = 1;
                         let mut expr = String::new();
+                        let mut conversion: u8 = 0;
+                        let mut format_spec = String::new();
+                        let mut state: u8 = 0; // 0=expr, 1=after_conv_marker, 2=format_spec
                         while depth > 0 {
                             match self.advance() {
-                                Some('{') => { depth += 1; if depth > 1 { expr.push('{'); } }
-                                Some('}') => { depth -= 1; if depth > 0 { expr.push('}'); } }
-                                Some(c) => expr.push(c),
+                                Some('{') => {
+                                    if state == 0 { depth += 1; }
+                                    if depth > 1 || state > 0 { 
+                                        if state == 2 { format_spec.push('{'); }
+                                        else { expr.push('{'); }
+                                    }
+                                }
+                                Some('}') => {
+                                    depth -= 1;
+                                    if depth > 0 { 
+                                        if state == 2 { format_spec.push('}'); }
+                                        else { expr.push('}'); }
+                                    }
+                                }
+                                Some('!') if depth == 1 && state == 0 => {
+                                    // Check for !r, !s, !a
+                                    state = 1;
+                                }
+                                Some('r') if state == 1 => { conversion = 1; state = 0; }
+                                Some('s') if state == 1 => { conversion = 2; state = 0; }
+                                Some('a') if state == 1 => { conversion = 3; state = 0; }
+                                Some(':') if depth == 1 && state == 0 => {
+                                    // Start of format spec
+                                    state = 2;
+                                }
+                                Some(c) => {
+                                    if state == 1 {
+                                        // '!' was not followed by r/s/a — treat as part of expr
+                                        expr.push('!');
+                                        expr.push(c);
+                                        state = 0;
+                                    } else if state == 2 {
+                                        format_spec.push(c);
+                                    } else {
+                                        expr.push(c);
+                                    }
+                                }
                                 None => break,
                             }
                         }
-                        parts.push((std::mem::take(&mut literal), expr));
+                        parts.push((std::mem::take(&mut literal), expr, format_spec, conversion));
                     }
                 }
                 Some(c) if c == '}' => {
@@ -850,7 +898,7 @@ impl Lexer {
                 Some(c) => literal.push(c),
             }
         }
-        parts.push((literal, String::new()));
+        parts.push((literal, String::new(), String::new(), 0));
 
         self.fstring_quote = Some(quote);
         self.fstring_parts = parts;

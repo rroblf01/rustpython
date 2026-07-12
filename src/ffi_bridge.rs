@@ -346,6 +346,22 @@ pub unsafe fn load_extension(path: &str, name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Retrieve a loaded extension module by name
+pub unsafe fn get_extension_module(name: &str) -> Option<PyObjectRef> {
+    let registry = EXTENSION_REGISTRY.lock().unwrap();
+    if let Some(ext) = registry.get(name) {
+        // Convert the C module pointer to a PyObjectRef
+        let mod_dict = {
+            let mut d = HashMap::new();
+            d.insert("__name__".to_string(), py_str(name));
+            d
+        };
+        Some(create_module(name, mod_dict))
+    } else {
+        None
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

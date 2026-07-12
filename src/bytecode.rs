@@ -106,6 +106,9 @@ pub enum Opcode {
     RETURN_GENERATOR = 32,
     SETUP_ANNOTATIONS = 34,
     POP_EXCEPT = 27,
+    END_FINALLY = 117,
+    ELSE = 118,
+    POP_EXCEPT_AND_EXECUTE_FINALLY = 119,
     UNPACK_SEQUENCE_TWO_TUPLE = 218,
     // ── Register-based instructions (prefix 0xC0, non-standard) ──────
     // These encode virtual register operands instead of using a stack.
@@ -169,6 +172,7 @@ impl Opcode {
             112 => STORE_NAME,
             113 => SWAP,
             115 => UNPACK_SEQUENCE,
+            114 => UNPACK_EX,
             116 => YIELD_VALUE,
             25 => NOP,
             29 => POP_TOP,

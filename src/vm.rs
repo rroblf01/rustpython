@@ -159,10 +159,46 @@ impl VirtualMachine {
           let threading_dict = create_threading_dict();
           modules.insert("threading".to_string(), create_module("threading", threading_dict));
 
+          // Native C extension replacements for CPython stdlib compatibility
+          let weakref_dict = create_weakref_dict();
+          modules.insert("_weakref".to_string(), create_module("_weakref", weakref_dict.clone()));
+
+          let collections_abc_dict = create_collections_abc_dict();
+          modules.insert("_collections_abc".to_string(), create_module("_collections_abc", collections_abc_dict));
+
+          // Native weakref module (replaces CPython weakref.py)
+          let mut weakref_mod_dict = weakref_dict; // Start from _weakref
+          // Add WeakValueDictionary and WeakKeyDictionary as dict-like stubs
+          weakref_mod_dict.insert("WeakValueDictionary".to_string(), create_weakref_weak_val_dict());
+          weakref_mod_dict.insert("WeakKeyDictionary".to_string(), create_weakref_weak_key_dict());
+          weakref_mod_dict.insert("WeakSet".to_string(), create_weakref_weak_set());
+          weakref_mod_dict.insert("WeakMethod".to_string(), py_str("WeakMethod"));
+          weakref_mod_dict.insert("finalize".to_string(), py_none());
+          modules.insert("weakref".to_string(), create_module("weakref", weakref_mod_dict));
+
+          // Native copy module (replaces CPython copy.py which uses unsupported syntax)
+          modules.insert("copy".to_string(), create_module("copy", create_copy_dict()));
+
+          // Native types module (replaces CPython types.py)
+          modules.insert("types".to_string(), create_module("types", create_types_dict()));
+
+          // Native struct module for binary packing
+          modules.insert("struct".to_string(), create_module("struct", create_struct_dict()));
+
+          // Also register the 'operator' module if not already present
+          if !modules.contains_key("operator") {
+              let mut op_dict = HashMap::new();
+              // Some operators used by CPython's operator.py
+              op_dict.insert("__import__".to_string(), py_bool(true));
+              modules.insert("operator".to_string(), create_module("operator", op_dict));
+          }
+
           // Populate sys.path with default search paths
          if let PyObject::List(path_list) = &mut *sys_dict.get("path").unwrap().borrow_mut() {
              path_list.push(py_str("."));
              path_list.push(py_str("./Lib"));
+             // Add CPython stdlib path for importing .py files from the system
+             path_list.push(py_str("/usr/lib/python3.13/"));
          }
          // Populate sys.modules with already-loaded modules
          if let PyObject::Dict(mod_dict) = &mut *sys_dict.get("modules").unwrap().borrow_mut() {
@@ -177,7 +213,7 @@ impl VirtualMachine {
               modules,
               globals,
               jit: RefCell::new(JitCompiler::new()),
-              sys_path: vec!["./".to_string(), "./Lib/".to_string()],
+              sys_path: vec!["./".to_string(), "./Lib/".to_string(), "/usr/lib/python3.13/".to_string()],
               profile: RefCell::new(HashMap::new()),
           }
     }
@@ -222,7 +258,7 @@ impl VirtualMachine {
         result
     }
 
-    fn import_module_from_file(&mut self, name: &str) -> Result<PyObjectRef, String> {
+    pub fn import_module_from_file(&mut self, name: &str) -> Result<PyObjectRef, String> {
         let search_paths = self.get_sys_path();
         for base in &search_paths {
             let py_path = if base.ends_with('/') {
@@ -240,6 +276,23 @@ impl VirtualMachine {
             };
             if let Ok(source) = std::fs::read_to_string(&init_path) {
                 return self.exec_module_source(&source, &init_path, name);
+            }
+            // Try loading as a .so C extension
+            let so_path = if base.ends_with('/') {
+                format!("{}{}.cpython-313-x86_64-linux-gnu.so", base, name)
+            } else {
+                format!("{}/{}.cpython-313-x86_64-linux-gnu.so", base, name)
+            };
+            if std::path::Path::new(&so_path).exists() {
+                match unsafe { crate::ffi_bridge::load_extension(&so_path, name) } {
+                    Ok(()) => {
+                        // Try to get the module from the extension registry
+                        if let Some(mod_obj) = unsafe { crate::ffi_bridge::get_extension_module(name) } {
+                            return Ok(mod_obj);
+                        }
+                    }
+                    Err(_) => {}
+                }
             }
         }
         Err(format!("No module named '{}'", name))
@@ -1455,7 +1508,7 @@ impl VirtualMachine {
                 let handler = ExceptionHandler {
                     instr_addr: arg as usize,
                     stack_depth,
-                    handler_type: HandlerType::Except,
+                    handler_type: HandlerType::Finally,
                 };
                 self.frames[fi].exception_handlers.push(handler);
             }
@@ -1482,7 +1535,14 @@ impl VirtualMachine {
             }
 
             Opcode::POP_EXCEPT => {
-                // No-op to match PUSH_EXC_INFO — balance the pair
+                // Pop the exception object from the value stack.
+                // In CPython this operates on a separate block stack for
+                // exception info (type, value, traceback). Since RustPython
+                // places the exception directly on the value stack, we pop
+                // it here. The exception may already have been consumed by
+                // STORE_NAME/STORE_FAST (handler with 'as e'), or it may
+                // still be on the stack (handler without 'as e').
+                self.frames[fi].stack.pop();
             }
 
             Opcode::GET_AITER => {
@@ -1529,7 +1589,7 @@ impl VirtualMachine {
                     _ => return Err(PyError::type_error("exceptions must derive from BaseException")),
                 };
                 let matched = match &*exc.borrow() {
-                    PyObject::Exception { typ, .. } => typ == &expected_name,
+                    PyObject::Exception { typ, .. } => is_exception_subclass(typ, &expected_name),
                     _ => false,
                 };
                 self.frames[fi].push(py_bool(matched));
@@ -1547,7 +1607,15 @@ impl VirtualMachine {
             Opcode::RAISE_VARARGS => {
                 let nargs = arg;
                 match nargs {
-                    0 => return Err(PyError::runtime_error("re-raise")),
+                    0 => {
+                        // Bare raise: re-raise the current exception from the stack
+                        match self.frames[fi].stack.pop() {
+                            Some(exc) => {
+                                return Err(PyError::Exception(format!("re-raise"), exc));
+                            }
+                            None => return Err(PyError::runtime_error("No active exception to re-raise")),
+                        }
+                    }
                     1 => {
                         let exc = self.frames[fi].pop()?;
                         // If the raised value is a callable (class/factory), call it first
@@ -1781,13 +1849,108 @@ impl VirtualMachine {
             }
 
             Opcode::RETURN_GENERATOR => {
-                // Create a Generator wrapping current frame (IP already incremented past this instruction)
+                // Create a Generator or Coroutine wrapping current frame
+                let is_coroutine = self.frames[fi].code.flags & 0x100 != 0;
                 let frame = self.frames[fi].clone();
-                let gen = PyObjectRef::new(PyObject::Generator {
-                    frame: std::cell::RefCell::new(Some(frame)),
-                });
-                // Push gen and return as if RETURN_VALUE — this exits execute()
-                return Ok(Some(gen));
+                if is_coroutine {
+                    let gen = PyObjectRef::new(PyObject::Coroutine {
+                        frame: std::cell::RefCell::new(Some(frame)),
+                    });
+                    return Ok(Some(gen));
+                } else {
+                    let gen = PyObjectRef::new(PyObject::Generator {
+                        frame: std::cell::RefCell::new(Some(frame)),
+                    });
+                    return Ok(Some(gen));
+                }
+            }
+
+            Opcode::GET_AWAITABLE => {
+                // Call __await__ on the object to get an iterator
+                let obj = self.frames[fi].pop()?;
+                let await_method = obj.borrow().get_attribute("__await__")
+                    .map_err(|_| PyError::type_error("object does not support __await__"))?;
+                let result = self.call_function(await_method, vec![], vec![])?;
+                self.frames[fi].push(result);
+            }
+
+            Opcode::SEND => {
+                // Send value into generator/coroutine: pop value, peek iterator
+                let val = self.frames[fi].pop()?;
+                let iter_val = self.frames[fi].peek(0)?;
+                let is_gen = matches!(&*iter_val.borrow(), PyObject::Generator { .. });
+                let is_coro = matches!(&*iter_val.borrow(), PyObject::Coroutine { .. });
+                if is_gen || is_coro {
+                    let method_name = if is_gen { "send" } else { "send" };
+                    let send_method = iter_val.borrow().get_attribute(method_name)
+                        .map_err(|_| PyError::attribute_error("object has no send method"))?;
+                    // Bind the method to the iterator
+                    let bound = PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "send".to_string(),
+                        func: {
+                            let b = send_method.borrow();
+                            match &*b {
+                                PyObject::BuiltinMethod { func, .. } => *func,
+                                _ => return Err(PyError::runtime_error("expected BuiltinMethod")),
+                            }
+                        },
+                        self_obj: iter_val.clone(),
+                    });
+                    match self.call_function(bound, vec![val], vec![]) {
+                        Ok(val) => {
+                            self.frames[fi].push(val);
+                        }
+                        Err(e) if matches!(&e, PyError::StopIteration) => {
+                            self.frames[fi].push(py_none());
+                        }
+                        Err(e) => return Err(e),
+                    }
+                } else {
+                    return Err(PyError::type_error("SEND on non-generator/coroutine"));
+                }
+            }
+
+            Opcode::END_SEND => {
+                // Pop the result and the iterator from the stack
+                self.frames[fi].pop()?; // result
+                self.frames[fi].pop()?; // iterator
+            }
+
+            Opcode::CLEANUP_THROW => {
+                // Cleanup after a throw into a generator
+                // For now, just a no-op that handles cleanup
+                self.frames[fi].pop()?;
+            }
+
+            Opcode::ELSE => {
+                // No-op marker: separates except handlers from else block.
+                // The compiler emits this so the exception table knows where
+                // the else block starts.
+            }
+
+            Opcode::END_FINALLY => {
+                // End of finally block. The stack has either:
+                //   [..., value]  — normal execution (no exception)
+                //   [..., exc]    — exception was handled, just re-raise
+                //   [..., None]   — exception was suppressed/returned
+                // We pop the top value. If it's an exception object, re-raise.
+                match self.frames[fi].pop() {
+                    Ok(val) => {
+                        let is_exception = matches!(&*val.borrow(), PyObject::Exception { .. });
+                        if is_exception {
+                            return Err(PyError::Exception("".to_string(), val));
+                        }
+                        // Otherwise it was a normal value (or None) — continue
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+
+            Opcode::POP_EXCEPT_AND_EXECUTE_FINALLY => {
+                // Popped from POP_EXCEPT: the exception info was already popped.
+                // Jump to the finally block address (stored in arg).
+                // The finally block address is stored in the `arg` field.
+                self.frames[fi].ip = arg as usize;
             }
 
             _ => return Err(PyError::runtime_error(format!("unimplemented opcode: {:?}", op))),
@@ -1834,7 +1997,7 @@ impl VirtualMachine {
                     unsafe { std::mem::transmute(jit_fn) };
                 let mut const_cache = jit_consts.borrow_mut();
                 if const_cache.is_empty() {
-                    *const_cache = crate::jit::JitCompiler::precompute_consts(code);
+                    *const_cache = crate::jit::JitCompiler::precompute_with_names(code);
                 }
                 let mut result = crate::object::py_none();
                 func(args.as_ptr(), args.len(), const_cache.as_ptr(), &mut result as *mut PyObjectRef);
@@ -2093,8 +2256,10 @@ impl VirtualMachine {
     }
 
     fn handle_exception(&mut self, error: &PyError) -> bool {
+        // Search all frames for exception handlers
         for frame in self.frames.iter_mut().rev() {
             while let Some(handler) = frame.exception_handlers.pop() {
+                // For any handler (Except or Finally), restore stack and transfer control
                 frame.stack.truncate(handler.stack_depth);
                 frame.ip = handler.instr_addr;
                 let exc_obj = {
@@ -2126,6 +2291,13 @@ impl VirtualMachine {
                     })
                 };
                 frame.push(exc_obj);
+                // For Finally handlers, we always execute them.
+                // For Except handlers, we also execute them — the code at the
+                // handler address will check CHECK_EXC_MATCH to decide.
+                // The key difference: after a Finally handler finishes, the
+                // exception is re-raised via RERAISE (by the code the compiler
+                // emits after the finally block). After an Except handler
+                // finishes, there's no RERAISE — the exception was handled.
                 return true;
             }
         }
@@ -2203,5 +2375,40 @@ impl VirtualMachine {
             self.frames.last_mut().unwrap().ip = jump_offset as usize;
             Ok(None)
         }
+    }
+}
+
+/// Checks if `child_type` is a subclass of (or the same type as) `parent_type`.
+/// Defines the standard Python exception type hierarchy for the simplified
+/// string-based type system used by this RustPython implementation.
+/// Each exception type maps to its parent; walking up the chain determines
+/// subclass relationships. Unknown types default to children of Exception.
+fn is_exception_subclass(child_type: &str, parent_type: &str) -> bool {
+    if child_type == parent_type {
+        return true;
+    }
+    // Map each exception type to its direct parent in the hierarchy.
+    // BaseException is the root — it has no parent.
+    let parent: Option<&str> = match child_type {
+        "BaseException" => None,
+        "Exception" => Some("BaseException"),
+        "TypeError" | "ValueError" | "ZeroDivisionError" | "NameError" |
+        "AttributeError" | "IndexError" | "KeyError" | "RuntimeError" |
+        "StopIteration" | "AssertionError" | "ImportError" | "OSError" |
+        "OsError" | "MatchError" => Some("Exception"),
+        "SystemExit" => Some("BaseException"),
+        // For any exception type we don't know about (e.g. user-defined),
+        // assume it's a subclass of Exception (standard Python behavior).
+        _ => Some("Exception"),
+    };
+    match parent {
+        Some(p) => {
+            if p == parent_type {
+                true
+            } else {
+                is_exception_subclass(p, parent_type)
+            }
+        }
+        None => false,
     }
 }

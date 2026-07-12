@@ -101,6 +101,7 @@ pub struct Arg {
     pub annotation: Option<Box<Expr>>,
     pub is_vararg: bool,
     pub is_kwarg: bool,
+    pub is_posonlyarg: bool,
     pub default: Option<Box<Expr>>,
 }
 
@@ -249,7 +250,11 @@ pub enum Expr {
 #[derive(Debug, Clone, PartialEq)]
 pub enum FStringPart {
     String(String),
-    Expr(Box<Expr>),
+    Expr {
+        expr: Box<Expr>,
+        conversion: u8,  // 0=none, 1=repr(!r), 2=str(!s), 3=ascii(!a)
+        format_spec: Option<Box<Expr>>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

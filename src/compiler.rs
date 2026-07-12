@@ -869,13 +869,13 @@ impl Compiler {
                 body,
                 decorator_list,
                 returns: _,
-                is_async: _,
+                is_async,
             } => {
                 for decorator in decorator_list {
                     self.compile_expr(decorator)?;
                 }
 
-                self.compile_function(name.clone(), args, body)?;
+                self.compile_function(name.clone(), args, body, *is_async)?;
 
                 for _ in decorator_list {
                     self.emit(Opcode::CALL, 1);
@@ -1121,6 +1121,8 @@ impl Compiler {
                     self.fix_label(end_label);
                 } else if !handlers.is_empty() {
                     let cleanup = self.new_label();
+                    let else_label = self.new_label();
+                    let end_label = self.new_label();
                     self.emit_jump(Opcode::SETUP_FINALLY, cleanup);
                     let body_end = self.new_label();
                     let handler_done = self.new_label();
@@ -1167,8 +1169,10 @@ impl Compiler {
                     self.emit(Opcode::POP_EXCEPT, 0);
                     self.fix_label(body_end);
                     if !orelse.is_empty() {
+                        self.emit(Opcode::ELSE, 0);
                         self.compile_stmts(orelse)?;
                     }
+                    self.fix_label(end_label);
                 } else {
                     self.compile_stmts(body)?;
                 }
@@ -1374,6 +1378,7 @@ impl Compiler {
         name: String,
         args: &[Arg],
         body: &[Stmt],
+        is_async: bool,
     ) -> Result<(), String> {
         // Extract docstring from first statement if present
         let docstring = body.first().and_then(|s| {
@@ -1451,10 +1456,14 @@ impl Compiler {
             }
         }
 
-        // Check if function contains yield (generator)
-        let has_yield = contains_yield_in_stmts(body);
+        // Check if function contains yield or is async (generator/coroutine)
+        let has_yield = contains_yield_in_stmts(body) || is_async;
         if has_yield {
             self.emit(Opcode::RETURN_GENERATOR, 0);
+        }
+        // Set CO_COROUTINE flag (0x100) for async functions
+        if is_async {
+            self.code.flags |= 0x100;
         }
 
         self.compile_stmts(body)?;
@@ -1753,6 +1762,7 @@ impl Compiler {
                     "<lambda>".to_string(),
                     args,
                     &[Stmt::Return(Some(body.clone()))],
+                    false,
                 )?;
             }
             Expr::Attribute { value, attr } => {
@@ -1845,9 +1855,17 @@ impl Compiler {
                             self.compile_expr(&Expr::Constant(Constant::String(s.clone())))?;
                             count += 1;
                         }
-                        FStringPart::Expr(expr) => {
-                            self.compile_expr(expr)?;
-                            self.emit(Opcode::FORMAT_SIMPLE, 0);
+                        FStringPart::Expr { expr, conversion, format_spec } => {
+                            self.compile_expr(&expr)?;
+                            if *conversion != 0 {
+                                self.emit(Opcode::CONVERT_VALUE, *conversion as u32);
+                            }
+                            if let Some(spec) = format_spec {
+                                self.compile_expr(&spec)?;
+                                self.emit(Opcode::FORMAT_WITH_SPEC, 0);
+                            } else if *conversion == 0 {
+                                self.emit(Opcode::FORMAT_SIMPLE, 0);
+                            }
                             count += 1;
                         }
                     }
@@ -2086,6 +2104,7 @@ fn contains_yield_in_expr(expr: &Expr) -> bool {
     match expr {
         Expr::Yield(_) => true,
         Expr::YieldFrom(_) => true,
+        Expr::Await(_) => true,
         Expr::BinOp { left, right, .. } => {
             contains_yield_in_expr(left) || contains_yield_in_expr(right)
         }

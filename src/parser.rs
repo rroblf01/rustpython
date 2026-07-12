@@ -181,7 +181,18 @@ impl Parser {
 
     fn parse_stmt_tail(&mut self, expr: Expr) -> Result<Stmt, String> {
         if self.eat(&Token::Equal) {
-            let value = self.parse_expr()?;
+            let mut value = self.parse_expr()?;
+            // Handle tuple assignment without parens: a = 1, 2, 3
+            if self.at(&Token::Comma) && !self.at(&Token::Semicolon) && !self.at(&Token::Newline) {
+                let mut elts = vec![value];
+                while self.eat(&Token::Comma) {
+                    if self.at(&Token::Newline) || self.at(&Token::Semicolon) || self.at(&Token::EndOfFile) {
+                        break;
+                    }
+                    elts.push(self.parse_expr()?);
+                }
+                value = Expr::Tuple(elts);
+            }
             let mut targets = vec![expr];
             while self.eat(&Token::Equal) {
                 targets.push(self.parse_expr()?);
@@ -737,7 +748,12 @@ impl Parser {
             None
         };
         self.expect(&Token::Import)?;
+        // Handle `from X import (a, b, c)` — parenthesized import names
+        let has_paren = self.eat(&Token::LeftParen);
         let names = self.parse_import_names()?;
+        if has_paren {
+            self.expect(&Token::RightParen)?;
+        }
         self.expect_newline_or_eof();
         Ok(Stmt::ImportFrom { module, names, level })
     }
@@ -787,7 +803,7 @@ impl Parser {
                     let annotation = if self.eat(&Token::Colon) {
                         Some(Box::new(self.parse_expr()?))
                     } else { None };
-                    args.push(Arg { arg: name, annotation, is_vararg: false, is_kwarg: true, default: None });
+                    args.push(Arg { arg: name, annotation, is_vararg: false, is_kwarg: true, is_posonlyarg: false, default: None });
                     if !self.eat(&Token::Comma) { break; }
                 } else if self.eat(&Token::Star) {
                     if self.at(&Token::RightParen) || self.at(&Token::Comma) {
@@ -798,8 +814,28 @@ impl Parser {
                     let annotation = if self.eat(&Token::Colon) {
                         Some(Box::new(self.parse_expr()?))
                     } else { None };
-                    args.push(Arg { arg: name, annotation, is_vararg: true, is_kwarg: false, default: None });
+                    args.push(Arg { arg: name, annotation, is_vararg: true, is_kwarg: false, is_posonlyarg: false, default: None });
                     if !self.eat(&Token::Comma) { break; }
+                } else if self.eat(&Token::Slash) {
+                    // Positional-only parameter separator '/' — marks end of positional-only params.
+                    // All args parsed before this are already marked as positional-only.
+                    // After '/', there's usually a comma, and then the next args are regular params.
+                    if !args.is_empty() {
+                        // Mark all existing args (that are not *vararg or **kwarg) as positional-only
+                        for arg in args.iter_mut() {
+                            if !arg.is_vararg && !arg.is_kwarg {
+                                arg.is_posonlyarg = true;
+                            }
+                        }
+                    }
+                    if self.at(&Token::Comma) {
+                        self.next();
+                    }
+                    // Continue parsing remaining params
+                    if self.at(&Token::RightParen) {
+                        break;
+                    }
+                    continue;
                 } else {
                     let arg = self.parse_arg()?;
                     args.push(arg);
@@ -822,7 +858,7 @@ impl Parser {
         } else {
             None
         };
-        Ok(Arg { arg, annotation, is_vararg: false, is_kwarg: false, default })
+        Ok(Arg { arg, annotation, is_vararg: false, is_kwarg: false, is_posonlyarg: false, default })
     }
 
     fn parse_block(&mut self) -> Result<Vec<Stmt>, String> {
@@ -1549,7 +1585,38 @@ impl Parser {
                         break;
                     }
                     let expr = self.parse_expr()?;
-                    parts.push(FStringPart::Expr(Box::new(expr)));
+                    let mut conversion: u8 = 0;
+                    let mut format_spec: Option<Box<Expr>> = None;
+                    // Check for FStringConversion token
+                    if let Token::FStringConversion(c) = &self.current {
+                        conversion = *c;
+                        self.next();
+                    }
+                    // Check for FORMAT_SPEC token
+                    if let Token::FORMAT_SPEC(spec_text) = &self.current {
+                        let spec = spec_text.clone();
+                        self.next();
+                        // Parse the format spec as a string constant (simple cases)
+                        if spec.contains('{') {
+                            // Nested format spec — parse as f-string
+                            let mut nested_lex =
+                                crate::token::Lexer::new(&format!("f\"{}\"", spec));
+                            let first_tok = nested_lex.next_token();
+                            if first_tok == Token::FStringStart {
+                                let mut nested_parser = Parser::new(&format!("f\"{}\"", spec));
+                                if let Ok(Expr::FString(inner)) = nested_parser.parse_expr() {
+                                    format_spec = Some(Box::new(Expr::FString(inner)));
+                                } else {
+                                    format_spec = Some(Box::new(Expr::Constant(Constant::String(spec))));
+                                }
+                            } else {
+                                format_spec = Some(Box::new(Expr::Constant(Constant::String(spec))));
+                            }
+                        } else {
+                            format_spec = Some(Box::new(Expr::Constant(Constant::String(spec))));
+                        }
+                    }
+                    parts.push(FStringPart::Expr { expr: Box::new(expr), conversion, format_spec });
                 }
             }
         }
@@ -1581,13 +1648,13 @@ impl Parser {
                     continue;
                 }
                 let name = self.expect_name()?;
-                args.push(Arg { arg: name, annotation: None, is_vararg: true, is_kwarg: false, default: None });
+                args.push(Arg { arg: name, annotation: None, is_vararg: true, is_kwarg: false, is_posonlyarg: false, default: None });
             } else if self.eat(&Token::DoubleStar) {
                 let name = self.expect_name()?;
-                args.push(Arg { arg: name, annotation: None, is_vararg: false, is_kwarg: true, default: None });
+                args.push(Arg { arg: name, annotation: None, is_vararg: false, is_kwarg: true, is_posonlyarg: false, default: None });
             } else {
                 let name = self.expect_name()?;
-                args.push(Arg { arg: name, annotation: None, is_vararg: false, is_kwarg: false, default: None });
+                args.push(Arg { arg: name, annotation: None, is_vararg: false, is_kwarg: false, is_posonlyarg: false, default: None });
             }
             if !self.eat(&Token::Comma) { break; }
         }
