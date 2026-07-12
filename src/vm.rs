@@ -283,6 +283,18 @@ impl VirtualMachine {
           // Native json.tool module
           modules.insert("json.tool".to_string(), create_module("json.tool", create_json_tool_dict()));
 
+          // Native cmath module (complex math: sqrt, sin, cos)
+          modules.insert("cmath".to_string(), create_module("cmath", create_cmath_dict()));
+
+          // Native gzip module
+          modules.insert("gzip".to_string(), create_module("gzip", create_gzip_dict()));
+
+          // Native tarfile module
+          modules.insert("tarfile".to_string(), create_module("tarfile", create_tarfile_dict()));
+
+          // Native hashlib_extra module
+          modules.insert("hashlib_extra".to_string(), create_module("hashlib_extra", create_hashlib_extra_dict()));
+
           // Also register the 'operator' module if not already present
           if !modules.contains_key("operator") {
               let mut op_dict = HashMap::new();

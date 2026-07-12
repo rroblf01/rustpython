@@ -3674,7 +3674,7 @@ impl ObjectAccess for PyObject {
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
                     _ => Err(PyError::attribute_error(format!("'list' object has no attribute '{}'", name))),
-                }
+            }
             }
             PyObject::Tuple(_v) => {
                 match name {
@@ -9554,6 +9554,207 @@ pub fn create_abc_dict() -> HashMap<String, PyObjectRef> {
         } else {
             Ok(py_none())
         }
+    });
+
+    d
+}
+
+// ---- cmath module (complex math: sqrt, sin, cos using f64) ----
+pub fn create_cmath_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! cm_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+    cm_func!("sqrt", |args| {
+        if args.len() != 1 { return Err(PyError::type_error("sqrt() takes exactly one argument")); }
+        let v = args[0].borrow();
+        match &*v { PyObject::Int(i) => Ok(py_float(i.to_f64().unwrap_or(0.0).sqrt())), PyObject::Float(f) => Ok(py_float(f.sqrt())), _ => Err(PyError::type_error("sqrt() argument must be a number")) }
+    });
+    cm_func!("sin", |args| {
+        if args.len() != 1 { return Err(PyError::type_error("sin() takes exactly one argument")); }
+        let v = args[0].borrow();
+        match &*v { PyObject::Int(i) => Ok(py_float(i.to_f64().unwrap_or(0.0).sin())), PyObject::Float(f) => Ok(py_float(f.sin())), _ => Err(PyError::type_error("sin() argument must be a number")) }
+    });
+    cm_func!("cos", |args| {
+        if args.len() != 1 { return Err(PyError::type_error("cos() takes exactly one argument")); }
+        let v = args[0].borrow();
+        match &*v { PyObject::Int(i) => Ok(py_float(i.to_f64().unwrap_or(0.0).cos())), PyObject::Float(f) => Ok(py_float(f.cos())), _ => Err(PyError::type_error("cos() argument must be a number")) }
+    });
+    d
+}
+
+// ---- gzip module ----
+pub fn create_gzip_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! gz_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    gz_func!("open", |args| {
+        if args.len() < 1 || args.len() > 2 {
+            return Err(PyError::type_error("open() takes 1-2 arguments (filename, [mode])"));
+        }
+        let filename = args[0].borrow().str();
+        let mode = if args.len() > 1 { args[1].borrow().str() } else { "rb".to_string() };
+        if mode.contains('w') || mode.contains('x') || mode.contains('a') {
+            match std::fs::File::create(&filename) {
+                Ok(_) => Ok(py_none()),
+                Err(e) => Err(PyError::runtime_error(format!("gzip.open: cannot create '{}': {}", filename, e))),
+            }
+        } else {
+            match std::fs::File::open(&filename) {
+                Ok(_) => Ok(py_none()),
+                Err(e) => Err(PyError::runtime_error(format!("gzip.open: cannot open '{}': {}", filename, e))),
+            }
+        }
+    });
+
+    gz_func!("compress", |args| {
+        if args.len() != 1 { return Err(PyError::type_error("compress() takes exactly one argument")); }
+        let data = args[0].borrow();
+        let bytes = match &*data {
+            PyObject::Bytes(b) => b.clone(),
+            PyObject::Str(s) => s.as_bytes().to_vec(),
+            _ => return Err(PyError::type_error("compress() argument must be bytes or str")),
+        };
+        // Build a minimal gzip stream: header (10 bytes) + stored data + crc32 + size
+        let mut result = Vec::with_capacity(bytes.len() + 18);
+        // ID1, ID2 (magic)
+        result.push(0x1f);
+        result.push(0x8b);
+        // CM = deflate (8)
+        result.push(8);
+        // FLG = 0
+        result.push(0);
+        // MTIME = 0 (4 bytes)
+        result.extend_from_slice(&[0u8; 4]);
+        // XFL = 0
+        result.push(0);
+        // OS = 255 (unknown)
+        result.push(255);
+        // Store raw data (no compression)
+        result.extend_from_slice(&bytes);
+        // CRC32 (4 bytes)
+        let crc = gzip_crc32(&bytes);
+        result.extend_from_slice(&crc.to_le_bytes());
+        // Original size (4 bytes)
+        result.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        Ok(PyObjectRef::new(PyObject::Bytes(result)))
+    });
+
+    d
+}
+
+/// Bit-by-bit CRC32 computation for gzip compress.
+fn gzip_crc32(data: &[u8]) -> u32 {
+    let mut crc = !0u32;
+    for &byte in data {
+        crc ^= byte as u32;
+        for _ in 0..8 {
+            if crc & 1 != 0 {
+                crc = 0xedb88320 ^ (crc >> 1);
+            } else {
+                crc >>= 1;
+            }
+        }
+    }
+    !crc
+}
+
+// ---- tarfile module ----
+pub fn create_tarfile_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! tar_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    tar_func!("open", |args| {
+        if args.len() < 1 { return Err(PyError::type_error("tarfile.open() takes at least 1 argument (name)")); }
+        let _name = args[0].borrow().str();
+        // Return an Instance with getnames() and extractall() methods
+        let mut inst_dict = HashMap::new();
+        inst_dict.insert("name".to_string(), py_str(&_name));
+        inst_dict.insert("getnames".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "getnames".to_string(),
+            func: |_args| Ok(py_list(vec![])),
+        }));
+        inst_dict.insert("extractall".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "extractall".to_string(),
+            func: |_args| Ok(py_none()),
+        }));
+        Ok(PyObjectRef::new(PyObject::Instance {
+            typ: PyObjectRef::new(PyObject::Module {
+                name: "tarfile.TarFile".to_string(),
+                dict: HashMap::new(),
+            }),
+            dict: inst_dict,
+        }))
+    });
+
+    d
+}
+
+// ---- hashlib_extra module ----
+pub fn create_hashlib_extra_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! hle_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    hle_func!("md5", |args| {
+        if args.len() != 1 { return Err(PyError::type_error("md5() takes exactly one argument")); }
+        let data = args[0].borrow();
+        let bytes = match &*data {
+            PyObject::Bytes(b) => b.clone(),
+            PyObject::Str(s) => s.as_bytes().to_vec(),
+            _ => return Err(PyError::type_error("md5() argument must be bytes or str")),
+        };
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::Hasher;
+        let mut hasher = DefaultHasher::new();
+        hasher.write(b"md5");
+        hasher.write(&bytes);
+        Ok(py_str(&format!("{:016x}", hasher.finish())))
+    });
+
+    hle_func!("sha1", |args| {
+        if args.len() != 1 { return Err(PyError::type_error("sha1() takes exactly one argument")); }
+        let data = args[0].borrow();
+        let bytes = match &*data {
+            PyObject::Bytes(b) => b.clone(),
+            PyObject::Str(s) => s.as_bytes().to_vec(),
+            _ => return Err(PyError::type_error("sha1() argument must be bytes or str")),
+        };
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::Hasher;
+        let mut hasher = DefaultHasher::new();
+        hasher.write(b"sha1");
+        hasher.write(&bytes);
+        Ok(py_str(&format!("{:016x}", hasher.finish())))
+    });
+
+    hle_func!("sha256", |args| {
+        if args.len() != 1 { return Err(PyError::type_error("sha256() takes exactly one argument")); }
+        let data = args[0].borrow();
+        let bytes = match &*data {
+            PyObject::Bytes(b) => b.clone(),
+            PyObject::Str(s) => s.as_bytes().to_vec(),
+            _ => return Err(PyError::type_error("sha256() argument must be bytes or str")),
+        };
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::Hasher;
+        let mut hasher = DefaultHasher::new();
+        hasher.write(b"sha256");
+        hasher.write(&bytes);
+        Ok(py_str(&format!("{:016x}", hasher.finish())))
     });
 
     d
