@@ -1524,6 +1524,46 @@ impl VirtualMachine {
                 }
             }
 
+            Opcode::UNPACK_EX => {
+                let before = (arg >> 8) as usize;
+                let after = (arg & 0xFF) as usize;
+                let total = before + after + 1; // +1 for the starred item
+                let seq = self.frames[fi].pop()?;
+                let items = {
+                    let obj = seq.borrow();
+                    match &*obj {
+                        PyObject::List(v) | PyObject::Tuple(v) => {
+                            if v.len() < total {
+                                return Err(PyError::value_error(format!(
+                                    "cannot unpack {} items into {} values", v.len(), total
+                                )));
+                            }
+                            v.clone()
+                        }
+                        _ => return Err(PyError::type_error("cannot unpack non-iterable")),
+                    }
+                };
+                let n = items.len();
+                // Push order (bottom of stack = first to be stored):
+                //   before items, star list, after items
+                // So we push in reverse: after items first (on top), then star list, then before items
+                // Push after-star items (last N) in reverse
+                for i in (n - after)..n {
+                    self.frames[fi].push(items[i].clone());
+                }
+                // Push starred item (everything between before and after) as a list
+                let star_count = n - before - after;
+                let mut star_items: Vec<PyObjectRef> = Vec::new();
+                for i in before..(before + star_count) {
+                    star_items.push(items[i].clone());
+                }
+                self.frames[fi].push(py_list(star_items));
+                // Push before-star items (first N) in reverse so first comes out on bottom
+                for i in (0..before).rev() {
+                    self.frames[fi].push(items[i].clone());
+                }
+            }
+
             Opcode::SETUP_FINALLY => {
                 let stack_depth = self.frames[fi].stack.len();
                 let handler = ExceptionHandler {

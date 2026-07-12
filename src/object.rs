@@ -3464,6 +3464,22 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
+                    "lstrip" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "lstrip".to_string(),
+                        func: |args| {
+                            let chars = if args.len() > 1 { args[1].str() } else { " \t\n\r".to_string() };
+                            Ok(py_str(args[0].str().trim_start_matches(|c: char| chars.contains(c))))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "rstrip" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "rstrip".to_string(),
+                        func: |args| {
+                            let chars = if args.len() > 1 { args[1].str() } else { " \t\n\r".to_string() };
+                            Ok(py_str(args[0].str().trim_end_matches(|c: char| chars.contains(c))))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     "startswith" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "startswith".to_string(),
                         func: |args| {

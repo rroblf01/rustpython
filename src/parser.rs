@@ -175,8 +175,52 @@ impl Parser {
             return self.parse_function_def();
         }
 
-        let expr = self.parse_expr()?;
-        self.parse_stmt_tail(expr)
+        // Parse assignment target(s) which may include star unpacking
+        let first = if self.at(&Token::Star) {
+            self.next(); // consume *
+            Expr::Starred(Box::new(self.parse_expr()?))
+        } else {
+            self.parse_expr()?
+        };
+
+        // Check for tuple target with comma-separated items or starred unpacking
+        if self.at(&Token::Comma) {
+            let mut elts = vec![first];
+            loop {
+                if !self.eat(&Token::Comma) {
+                    break;
+                }
+                if self.at(&Token::Newline) || self.at(&Token::Semicolon) || self.at(&Token::EndOfFile) {
+                    break;
+                }
+                if self.at(&Token::Star) {
+                    self.next(); // consume *
+                    elts.push(Expr::Starred(Box::new(self.parse_expr()?)));
+                } else if self.at(&Token::Equal) {
+                    // Bare comma before = means trailing comma on single-element tuple
+                    break;
+                } else {
+                    elts.push(self.parse_expr()?);
+                }
+            }
+            if self.at(&Token::Equal) || self.at(&Token::PlusEqual) || self.at(&Token::MinusEqual)
+                || self.at(&Token::StarEqual) || self.at(&Token::SlashEqual)
+                || self.at(&Token::DoubleStarEqual) || self.at(&Token::DoubleSlashEqual)
+                || self.at(&Token::PercentEqual) || self.at(&Token::PipeEqual)
+                || self.at(&Token::AmpersandEqual) || self.at(&Token::CaretEqual)
+                || self.at(&Token::LeftShiftEqual) || self.at(&Token::RightShiftEqual)
+                || self.at(&Token::AtEqual)
+            {
+                let tuple_expr = Expr::Tuple(elts);
+                return self.parse_stmt_tail(tuple_expr);
+            }
+            // Not followed by assignment — treat as expression statement.
+            // Reconstruct expression from the tuple elements.
+            let tuple_expr = Expr::Tuple(elts);
+            return self.parse_stmt_tail(tuple_expr);
+        } else {
+            self.parse_stmt_tail(first)
+        }
     }
 
     fn parse_stmt_tail(&mut self, expr: Expr) -> Result<Stmt, String> {

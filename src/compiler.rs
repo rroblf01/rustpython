@@ -1310,7 +1310,145 @@ impl Compiler {
                                 self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_case);
                             }
                         }
-                        _ => return Err("Match pattern not supported yet".to_string()),
+                        Pattern::MatchSequence(patterns) => {
+                            // MatchSequence: check length and match elements
+                            self.emit(Opcode::DUP_TOP, 0);
+                            // Try to get len(subject)
+                            let const_none = self.get_const_index(ConstValue::None) as u32;
+                            let const_zero = self.get_const_index(ConstValue::Int("0".to_string())) as u32;
+                            // Simple approach: check if subject has expected length
+                            // For now, just unpack and compare each element
+                            if !patterns.is_empty() {
+                                // Use BUILD_TUPLE to store subject elements for comparison
+                                self.emit(Opcode::DUP_TOP, 0);
+                                let count = patterns.len() as u32;
+                                // Get length of subject
+                                let len_name_idx = self.get_name_index("len") as u32;
+                                self.emit(Opcode::LOAD_GLOBAL, len_name_idx);
+                                self.emit(Opcode::SWAP, 1);
+                                self.emit(Opcode::CALL, 1);
+                                let length_const = self.get_const_index(ConstValue::Int(patterns.len().to_string())) as u32;
+                                self.emit(Opcode::LOAD_CONST, length_const);
+                                self.emit(Opcode::COMPARE_OP, 2); // ==
+                                self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_case);
+                                // Now check each element
+                                // For simplicity, load each element via subscript
+                                for (i, pat) in patterns.iter().enumerate() {
+                                    let idx_const = self.get_const_index(ConstValue::Int(i.to_string())) as u32;
+                                    self.emit(Opcode::DUP_TOP, 0);
+                                    self.emit(Opcode::LOAD_CONST, idx_const);
+                                    self.emit(Opcode::BINARY_OP, 6); // BINARY_SUBSCR
+                                    match pat {
+                                        Pattern::MatchValue(val) => {
+                                            self.compile_expr(val)?;
+                                            self.emit(Opcode::COMPARE_OP, 2); // ==
+                                            self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_case);
+                                        }
+                                        Pattern::MatchAs { name: Some(n), .. } => {
+                                            let idx = self.add_varname(n) as u32;
+                                            self.emit(Opcode::STORE_FAST, idx);
+                                        }
+                                        Pattern::MatchAs { name: None, .. } => {
+                                            self.emit(Opcode::POP_TOP, 0);
+                                        }
+                                        _ => return Err("Sequence pattern sub-pattern not supported".to_string()),
+                                    }
+                                }
+                            }
+                            if let Some(guard) = &case.guard {
+                                self.compile_expr(guard)?;
+                                self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_case);
+                            }
+                        }
+                        Pattern::MatchMapping { .. } => {
+                            return Err("MatchMapping pattern not supported yet".to_string());
+                        }
+                        Pattern::MatchStar { .. } => {
+                            return Err("MatchStar pattern not supported yet".to_string());
+                        }
+                        Pattern::MatchOr(..) => {
+                            return Err("MatchOr pattern not supported yet".to_string());
+                        }
+                        Pattern::MatchClass { cls, patterns, kwd_attrs, kwd_patterns } => {
+                            // MatchClass: check isinstance(subject, cls) then check attributes
+                            // Check isinstance
+                            let isinstance_idx = self.get_name_index("isinstance") as u32;
+                            self.emit(Opcode::LOAD_GLOBAL, isinstance_idx);
+                            self.emit(Opcode::SWAP, 1); // subject on top
+                            self.compile_expr(cls)?;
+                            self.emit(Opcode::CALL, 2); // isinstance(subject, cls)
+                            self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_case);
+
+                            // Check positional patterns (access by attribute or position)
+                            for pat in patterns {
+                                let pat_next = self.new_label();
+                                self.emit(Opcode::DUP_TOP, 0); // dup subject
+                                match pat {
+                                    Pattern::MatchValue(val) => {
+                                        self.compile_expr(val)?;
+                                        self.emit(Opcode::COMPARE_OP, 2); // ==
+                                        self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_case);
+                                    }
+                                    Pattern::MatchAs { name: Some(n), .. } => {
+                                        let idx = self.add_varname(n) as u32;
+                                        self.emit(Opcode::STORE_FAST, idx);
+                                    }
+                                    Pattern::MatchAs { name: None, .. } => {
+                                        self.emit(Opcode::POP_TOP, 0);
+                                    }
+                                    Pattern::MatchSingleton(s) => {
+                                        let const_idx = self.get_const_index(match s.as_str() {
+                                            "None" => ConstValue::None,
+                                            "True" => ConstValue::Bool(true),
+                                            "False" => ConstValue::Bool(false),
+                                            _ => ConstValue::String(s.clone()),
+                                        }) as u32;
+                                        self.emit(Opcode::LOAD_CONST, const_idx);
+                                        self.emit(Opcode::COMPARE_OP, 8); // IS
+                                        self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_case);
+                                    }
+                                    _ => {}
+                                }
+                            }
+
+                            // Check keyword patterns
+                            for (kwd_attr, kwd_pat) in kwd_attrs.iter().zip(kwd_patterns.iter()) {
+                                self.emit(Opcode::DUP_TOP, 0); // dup subject
+                                let attr_idx = self.get_name_index(kwd_attr) as u32;
+                                self.emit(Opcode::LOAD_ATTR, attr_idx);
+                                match kwd_pat {
+                                    Pattern::MatchValue(val) => {
+                                        self.compile_expr(val)?;
+                                        self.emit(Opcode::COMPARE_OP, 2); // ==
+                                        self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_case);
+                                    }
+                                    Pattern::MatchAs { name: Some(n), .. } => {
+                                        let idx = self.add_varname(n) as u32;
+                                        self.emit(Opcode::STORE_FAST, idx);
+                                    }
+                                    Pattern::MatchAs { name: None, .. } => {
+                                        self.emit(Opcode::POP_TOP, 0);
+                                    }
+                                    Pattern::MatchSingleton(s) => {
+                                        let const_idx = self.get_const_index(match s.as_str() {
+                                            "None" => ConstValue::None,
+                                            "True" => ConstValue::Bool(true),
+                                            "False" => ConstValue::Bool(false),
+                                            _ => ConstValue::String(s.clone()),
+                                        }) as u32;
+                                        self.emit(Opcode::LOAD_CONST, const_idx);
+                                        self.emit(Opcode::COMPARE_OP, 8); // IS
+                                        self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_case);
+                                    }
+                                    _ => {}
+                                }
+                            }
+
+                            if let Some(guard) = &case.guard {
+                                self.compile_expr(guard)?;
+                                self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_case);
+                            }
+                        }
                     }
                     self.emit(Opcode::POP_TOP, 0); // pop subject
                     self.compile_stmts(&case.body)?;
@@ -1361,11 +1499,27 @@ impl Compiler {
                 self.compile_expr(slice)?;
                 self.emit(Opcode::STORE_SUBSCR, 0);
             }
+            Expr::Starred(inner) => {
+                // Starred target: unwrap and compile inner target
+                self.compile_assign_target(inner)?;
+            }
             Expr::List(elts) | Expr::Tuple(elts) => {
-                let count = elts.len();
-                self.emit(Opcode::UNPACK_SEQUENCE, count as u32);
-                for elt in elts {
-                    self.compile_assign_target(elt)?;
+                // Check if any element is a Starred target — use UNPACK_EX if so
+                let star_pos = elts.iter().position(|e| matches!(e, Expr::Starred(_)));
+                if let Some(pos) = star_pos {
+                    let before = pos;
+                    let after = elts.len() - pos - 1;
+                    let arg = ((before as u32) << 8) | (after as u32);
+                    self.emit(Opcode::UNPACK_EX, arg);
+                    for elt in elts {
+                        self.compile_assign_target(elt)?;
+                    }
+                } else {
+                    let count = elts.len();
+                    self.emit(Opcode::UNPACK_SEQUENCE, count as u32);
+                    for elt in elts {
+                        self.compile_assign_target(elt)?;
+                    }
                 }
             }
             _ => return Err(format!("Cannot assign to {:?}", target)),
@@ -1789,6 +1943,7 @@ impl Compiler {
             }
             Expr::Dict { keys, values } => {
                 self.emit(Opcode::BUILD_MAP, keys.len() as u32);
+                let n = keys.len();
                 for (key, value) in keys.iter().zip(values.iter()) {
                     self.emit(Opcode::DUP_TOP, 0);
                     match key {
@@ -1798,8 +1953,10 @@ impl Compiler {
                     self.compile_expr(value)?;
                     self.emit(Opcode::MAP_ADD, 1);
                 }
-                // Pop the extra DUP_TOP copy left on the stack after MAP_ADD
-                self.emit(Opcode::POP_TOP, 0);
+                // Pop all DUP_TOP copies except the original BUILD_MAP result
+                for _ in 0..n {
+                    self.emit(Opcode::POP_TOP, 0);
+                }
             }
             Expr::Set(elts) => {
                 for elt in elts {
