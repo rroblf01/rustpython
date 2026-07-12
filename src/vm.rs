@@ -282,6 +282,15 @@ impl VirtualMachine {
           // Native wave module
           modules.insert("wave".to_string(), create_module("wave", create_wave_dict()));
 
+          // Native numbers module (Number ABC stubs)
+          modules.insert("numbers".to_string(), create_module("numbers", create_numbers_dict()));
+
+          // Native ast module (literal_eval and node stubs)
+          modules.insert("ast".to_string(), create_module("ast", create_ast_dict()));
+
+          // Native sunau module (Sun AU audio format stubs)
+          modules.insert("sunau".to_string(), create_module("sunau", create_sunau_dict()));
+
           // Native difflib module (with unified_diff)
           modules.insert("difflib".to_string(), create_module("difflib", create_difflib_dict()));
 
@@ -404,6 +413,32 @@ impl VirtualMachine {
 
           // Native unittest module (stub with TestCase)
           modules.insert("unittest".to_string(), create_module("unittest", create_unittest_dict()));
+
+          // Native email module (stub with EmailMessage)
+          let email_mod = create_module("email", create_email_dict());
+          modules.insert("email".to_string(), email_mod.clone());
+
+          // Native email.mime.text submodule (MIMEText stub)
+          let email_mime_text_mod = create_module("email.mime.text", create_email_mime_text_dict());
+          // Create email.mime intermediate submodule and wire it under email
+          let email_mime_mod = create_module("email.mime", HashMap::new());
+          {
+              let mut email_mut = email_mod.borrow_mut();
+              if let PyObject::Module { dict: email_dict, .. } = &mut *email_mut {
+                  email_dict.insert("mime".to_string(), email_mime_mod.clone());
+              }
+          }
+          {
+              let mut mime_mut = email_mime_mod.borrow_mut();
+              if let PyObject::Module { dict: mime_dict, .. } = &mut *mime_mut {
+                  mime_dict.insert("text".to_string(), email_mime_text_mod.clone());
+              }
+          }
+          modules.insert("email.mime".to_string(), email_mime_mod);
+          modules.insert("email.mime.text".to_string(), email_mime_text_mod);
+
+          // Native configparser module
+          modules.insert("configparser".to_string(), create_module("configparser", create_configparser_dict()));
 
           // Populate sys.path with default search paths
          if let PyObject::List(path_list) = &mut *sys_dict.get("path").unwrap().borrow_mut() {

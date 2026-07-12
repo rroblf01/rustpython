@@ -2302,6 +2302,711 @@ pub fn create_wave_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
+// ---- email module ----
+
+fn email_message_getitem(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() < 2 {
+        return Err(PyError::type_error("__getitem__() takes at least 2 arguments (self, key)"));
+    }
+    let key = args[1].str();
+    let inst = args[0].borrow();
+    if let PyObject::Instance { dict, .. } = &*inst {
+        let header_key = format!("_header_{}", key);
+        match dict.get(&header_key) {
+            Some(val) => Ok(val.clone()),
+            None => Ok(py_none()),
+        }
+    } else {
+        Err(PyError::type_error("EmailMessage instance required"))
+    }
+}
+
+fn email_message_setitem(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() < 3 {
+        return Err(PyError::type_error("__setitem__() takes at least 3 arguments (self, key, value)"));
+    }
+    let key = args[1].str();
+    let value = args[2].str();
+    let mut inst = args[0].borrow_mut();
+    if let PyObject::Instance { dict, .. } = &mut *inst {
+        let header_key = format!("_header_{}", key);
+        dict.insert(header_key, py_str(&value));
+    }
+    Ok(py_none())
+}
+
+fn email_message_set_content(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() < 2 {
+        return Err(PyError::type_error("set_content() takes at least 1 argument (text)"));
+    }
+    let text = args[1].str();
+    let mut inst = args[0].borrow_mut();
+    if let PyObject::Instance { dict, .. } = &mut *inst {
+        dict.insert("_content".to_string(), py_str(&text));
+        dict.insert("_content_type".to_string(), py_str("text/plain"));
+    }
+    Ok(py_none())
+}
+
+fn email_message_as_string(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() {
+        return Err(PyError::type_error("as_string() takes at least 1 argument (self)"));
+    }
+    let inst = args[0].borrow();
+    if let PyObject::Instance { dict, .. } = &*inst {
+        // Collect headers
+        let mut headers: Vec<(String, String)> = Vec::new();
+        for (k, v) in dict.iter() {
+            if let Some(header_name) = k.strip_prefix("_header_") {
+                headers.push((header_name.to_string(), v.str()));
+            }
+        }
+        // Sort known headers first for readability
+        let priority = |name: &str| -> usize {
+            match name {
+                "From" => 0,
+                "To" => 1,
+                "Subject" => 2,
+                _ => 3,
+            }
+        };
+        headers.sort_by_key(|(k, _)| priority(k));
+
+        let content = dict.get("_content").map(|v| v.str()).unwrap_or_default();
+
+        let mut result = String::new();
+        for (name, value) in &headers {
+            result.push_str(&format!("{}: {}\r\n", name, value));
+        }
+        result.push_str("\r\n");
+        result.push_str(&content);
+
+        Ok(py_str(&result))
+    } else {
+        Err(PyError::type_error("EmailMessage instance required"))
+    }
+}
+
+fn email_message_repr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() {
+        return Err(PyError::type_error("__repr__() takes at least 1 argument (self)"));
+    }
+    let inst = args[0].borrow();
+    if let PyObject::Instance { dict, .. } = &*inst {
+        let subject = dict.get("_header_Subject").map(|v| v.str()).unwrap_or_default();
+        let from_addr = dict.get("_header_From").map(|v| v.str()).unwrap_or_default();
+        let to_addr = dict.get("_header_To").map(|v| v.str()).unwrap_or_default();
+        Ok(py_str(&format!("<EmailMessage: From: {}, To: {}, Subject: {}>", from_addr, to_addr, subject)))
+    } else {
+        Err(PyError::type_error("EmailMessage instance required"))
+    }
+}
+
+fn email_message_constructor(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    // Create the EmailMessage type
+    let mut type_dict = HashMap::new();
+    type_dict.insert("__getitem__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "__getitem__".to_string(),
+        func: email_message_getitem,
+    }));
+    type_dict.insert("__setitem__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "__setitem__".to_string(),
+        func: email_message_setitem,
+    }));
+    type_dict.insert("__repr__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "__repr__".to_string(),
+        func: email_message_repr,
+    }));
+    type_dict.insert("set_content".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "set_content".to_string(),
+        func: email_message_set_content,
+    }));
+    type_dict.insert("as_string".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "as_string".to_string(),
+        func: email_message_as_string,
+    }));
+
+    let email_type = PyObjectRef::new(PyObject::Type {
+        name: "EmailMessage".to_string(),
+        dict: type_dict,
+        bases: vec![],
+        mro: vec![],
+    });
+
+    // Create instance with empty dict
+    let instance = PyObjectRef::new(PyObject::Instance {
+        typ: email_type,
+        dict: HashMap::new(),
+    });
+
+    Ok(instance)
+}
+
+pub fn create_email_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! email_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    // EmailMessage class constructor (callable)
+    d.insert("EmailMessage".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "EmailMessage".to_string(),
+        func: email_message_constructor,
+    }));
+
+    // MIMEText is in email.mime.text, but we provide a stub here for convenience
+    email_func!("MIMEText", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("MIMEText() missing required argument"));
+        }
+        let body = args[0].str();
+        let subtype = if args.len() > 1 { args[1].str() } else { "plain".to_string() };
+
+        // Create a simple MIMEText instance (EmailMessage-like)
+        let mut type_dict = HashMap::new();
+        type_dict.insert("as_string".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "as_string".to_string(),
+            func: |a| {
+                let inst = a[0].borrow();
+                if let PyObject::Instance { dict, .. } = &*inst {
+                    let content = dict.get("_content").map(|v| v.str()).unwrap_or_default();
+                    let ct = dict.get("_content_type").map(|v| v.str()).unwrap_or_default();
+                    let mut result = format!("Content-Type: {}\r\n", ct);
+                    result.push_str(&format!("Content-Transfer-Encoding: 7bit\r\n"));
+                    result.push_str("\r\n");
+                    result.push_str(&content);
+                    Ok(py_str(&result))
+                } else {
+                    Err(PyError::type_error("MIMEText instance required"))
+                }
+            },
+        }));
+
+        let mime_type = PyObjectRef::new(PyObject::Type {
+            name: "MIMEText".to_string(),
+            dict: type_dict,
+            bases: vec![],
+            mro: vec![],
+        });
+
+        let mut instance_dict = HashMap::new();
+        instance_dict.insert("_content".to_string(), py_str(&body));
+        instance_dict.insert("_content_type".to_string(), py_str(&format!("text/{}", subtype)));
+
+        Ok(PyObjectRef::new(PyObject::Instance {
+            typ: mime_type,
+            dict: instance_dict,
+        }))
+    });
+
+    d
+}
+
+pub fn create_email_mime_text_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    d.insert("MIMEText".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "MIMEText".to_string(),
+        func: |args| {
+            if args.is_empty() {
+                return Err(PyError::type_error("MIMEText() missing required argument"));
+            }
+            let body = args[0].str();
+            let subtype = if args.len() > 1 { args[1].str() } else { "plain".to_string() };
+
+            let mut type_dict = HashMap::new();
+            type_dict.insert("as_string".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "as_string".to_string(),
+                func: |a| {
+                    let inst = a[0].borrow();
+                    if let PyObject::Instance { dict, .. } = &*inst {
+                        let content = dict.get("_content").map(|v| v.str()).unwrap_or_default();
+                        let ct = dict.get("_content_type").map(|v| v.str()).unwrap_or_default();
+                        let mut result = format!("Content-Type: {}\r\n", ct);
+                        result.push_str("Content-Transfer-Encoding: 7bit\r\n");
+                        result.push_str("\r\n");
+                        result.push_str(&content);
+                        Ok(py_str(&result))
+                    } else {
+                        Err(PyError::type_error("MIMEText instance required"))
+                    }
+                },
+            }));
+
+            let mime_type = PyObjectRef::new(PyObject::Type {
+                name: "MIMEText".to_string(),
+                dict: type_dict,
+                bases: vec![],
+                mro: vec![],
+            });
+
+            let mut instance_dict = HashMap::new();
+            instance_dict.insert("_content".to_string(), py_str(&body));
+            instance_dict.insert("_content_type".to_string(), py_str(&format!("text/{}", subtype)));
+
+            Ok(PyObjectRef::new(PyObject::Instance {
+                typ: mime_type,
+                dict: instance_dict,
+            }))
+        },
+    }));
+    d
+}
+
+pub fn create_configparser_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+
+    // Helper: parse INI string into sections
+    fn parse_ini_string(data: &str) -> HashMap<String, HashMap<String, String>> {
+        let mut sections: HashMap<String, HashMap<String, String>> = HashMap::new();
+        let mut current_section: Option<String> = None;
+
+        // Start with a pseudo-section for DEFAULT values
+        sections.insert("DEFAULT".to_string(), HashMap::new());
+
+        for line in data.lines() {
+            let trimmed = line.trim();
+            // Skip empty lines and comments
+            if trimmed.is_empty() || trimmed.starts_with(';') || trimmed.starts_with('#') {
+                continue;
+            }
+
+            // Section header: [sectionname]
+            if trimmed.starts_with('[') {
+                if let Some(end) = trimmed.find(']') {
+                    let name = trimmed[1..end].trim().to_string();
+                    if !name.is_empty() {
+                        current_section = Some(name.clone());
+                        sections.entry(name).or_insert_with(HashMap::new);
+                    }
+                }
+                continue;
+            }
+
+            // Key = value (or key: value)
+            if let Some(eq_pos) = trimmed.find('=').or_else(|| trimmed.find(':')) {
+                let key = trimmed[..eq_pos].trim().to_string();
+                let value = trimmed[eq_pos + 1..].trim().to_string();
+                if !key.is_empty() {
+                    let section_name = current_section.clone().unwrap_or_else(|| "DEFAULT".to_string());
+                    let section = sections.entry(section_name).or_insert_with(HashMap::new);
+                    section.insert(key, value);
+                }
+            }
+        }
+
+        sections
+    }
+
+    // ConfigParser class — constructor
+    d.insert("ConfigParser".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "ConfigParser".to_string(),
+        func: |args| {
+            let mut type_dict = HashMap::new();
+
+            // read_string(self, string) — parse INI from a string
+            type_dict.insert("read_string".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "read_string".to_string(),
+                func: |inner_args| {
+                    if inner_args.len() < 2 {
+                        return Err(PyError::type_error("read_string() missing required argument: string"));
+                    }
+                    let data = inner_args[1].str();
+
+                    let sections_ref = {
+                        let inst = inner_args[0].borrow();
+                        if let PyObject::Instance { dict, .. } = &*inst {
+                            dict.get("_sections").cloned().unwrap_or(py_dict())
+                        } else {
+                            return Err(PyError::type_error("read_string(): not a ConfigParser instance"));
+                        }
+                    };
+
+                    let parsed = parse_ini_string(&data);
+                    // Merge parsed sections into existing sections
+                    if let PyObject::Dict(ref mut sections_dict) = &mut *sections_ref.borrow_mut() {
+                        for (section_name, options) in parsed {
+                            let section_key = py_str(&section_name);
+                            // Try to get existing section dict
+                            let existing = sections_dict.get(&section_key).ok().and_then(|o| o);
+                            if let Some(existing_ref) = existing {
+                                if let PyObject::Dict(ref mut existing_dict) = &mut *existing_ref.borrow_mut() {
+                                    for (key, val) in options {
+                                        let _ = existing_dict.set(py_str(&key), py_str(&val));
+                                    }
+                                }
+                            } else {
+                                // Create new section dict
+                                let option_dict = py_dict();
+                                if let PyObject::Dict(ref mut od) = &mut *option_dict.borrow_mut() {
+                                    for (key, val) in options {
+                                        let _ = od.set(py_str(&key), py_str(&val));
+                                    }
+                                }
+                                let _ = sections_dict.set(py_str(&section_name), option_dict);
+                            }
+                        }
+                    }
+
+                    Ok(py_none())
+                },
+            }));
+
+            // read(self, filename) — parse INI from a file
+            type_dict.insert("read".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "read".to_string(),
+                func: |inner_args| {
+                    if inner_args.len() < 2 {
+                        return Err(PyError::type_error("read() missing required argument: filename"));
+                    }
+                    let filename = inner_args[1].str();
+                    let content = match std::fs::read_to_string(&filename) {
+                        Ok(s) => s,
+                        Err(e) => return Err(PyError::type_error(format!("Cannot read file '{}': {}", filename, e))),
+                    };
+
+                    // Reuse read_string logic — call it on self
+                    let sections_ref = {
+                        let inst = inner_args[0].borrow();
+                        if let PyObject::Instance { dict, .. } = &*inst {
+                            dict.get("_sections").cloned().unwrap_or(py_dict())
+                        } else {
+                            return Err(PyError::type_error("read(): not a ConfigParser instance"));
+                        }
+                    };
+
+                    let parsed = parse_ini_string(&content);
+                    if let PyObject::Dict(ref mut sections_dict) = &mut *sections_ref.borrow_mut() {
+                        for (section_name, options) in parsed {
+                            let section_key = py_str(&section_name);
+                            let existing = sections_dict.get(&section_key).ok().and_then(|o| o);
+                            if let Some(existing_ref) = existing {
+                                if let PyObject::Dict(ref mut existing_dict) = &mut *existing_ref.borrow_mut() {
+                                    for (key, val) in options {
+                                        let _ = existing_dict.set(py_str(&key), py_str(&val));
+                                    }
+                                }
+                            } else {
+                                let option_dict = py_dict();
+                                if let PyObject::Dict(ref mut od) = &mut *option_dict.borrow_mut() {
+                                    for (key, val) in options {
+                                        let _ = od.set(py_str(&key), py_str(&val));
+                                    }
+                                }
+                                let _ = sections_dict.set(py_str(&section_name), option_dict);
+                            }
+                        }
+                    }
+
+                    // Return list of successfully read files
+                    Ok(py_list(vec![inner_args[1].clone()]))
+                },
+            }));
+
+            // sections(self) — return list of section names
+            type_dict.insert("sections".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "sections".to_string(),
+                func: |inner_args| {
+                    if inner_args.is_empty() {
+                        return Err(PyError::type_error("sections() missing self argument"));
+                    }
+                    let inst = inner_args[0].borrow();
+                    if let PyObject::Instance { dict, .. } = &*inst {
+                        let sections_ref = dict.get("_sections").cloned().unwrap_or(py_dict());
+                        let sections_borrow = sections_ref.borrow();
+                        if let PyObject::Dict(sections_dict) = &*sections_borrow {
+                            let mut names: Vec<PyObjectRef> = Vec::new();
+                            for (k, _) in sections_dict.items() {
+                                let name = k.str();
+                                if name != "DEFAULT" {
+                                    names.push(py_str(&name));
+                                }
+                            }
+                            Ok(py_list(names))
+                        } else {
+                            Ok(py_list(vec![]))
+                        }
+                    } else {
+                        Err(PyError::type_error("sections(): not a ConfigParser instance"))
+                    }
+                },
+            }));
+
+            // options(self, section) — return list of option names in a section
+            type_dict.insert("options".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "options".to_string(),
+                func: |inner_args| {
+                    if inner_args.len() < 2 {
+                        return Err(PyError::type_error("options() missing required argument: section"));
+                    }
+                    let section_name = inner_args[1].str();
+                    let inst = inner_args[0].borrow();
+                    if let PyObject::Instance { dict, .. } = &*inst {
+                        let sections_ref = dict.get("_sections").cloned().unwrap_or(py_dict());
+                        drop(inst);
+                        let sections_borrow = sections_ref.borrow();
+                        if let PyObject::Dict(sections_dict) = &*sections_borrow {
+                            let section_key = py_str(&section_name);
+                            if let Ok(Some(section_ref)) = sections_dict.get(&section_key) {
+                                let section_borrow = section_ref.borrow();
+                                if let PyObject::Dict(option_dict) = &*section_borrow {
+                                    let mut keys: Vec<PyObjectRef> = option_dict.keys().into_iter()
+                                        .map(|k| py_str(&k.str()))
+                                        .collect();
+                                    // Also include DEFAULT options
+                                    if section_name != "DEFAULT" {
+                                        if let Ok(Some(default_ref)) = sections_dict.get(&py_str("DEFAULT")) {
+                                            if let PyObject::Dict(default_dict) = &*default_ref.borrow() {
+                                                for k in default_dict.keys() {
+                                                    let kstr = k.str();
+                                                    if !keys.iter().any(|k2| k2.str() == kstr) {
+                                                        keys.push(py_str(&kstr));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Ok(py_list(keys))
+                                } else {
+                                    Ok(py_list(vec![]))
+                                }
+                            } else {
+                                Err(PyError::type_error(format!("No section '{}'", section_name)))
+                            }
+                        } else {
+                            Ok(py_list(vec![]))
+                        }
+                    } else {
+                        Err(PyError::type_error("options(): not a ConfigParser instance"))
+                    }
+                },
+            }));
+
+            // get(self, section, option, fallback=None) — get a value
+            type_dict.insert("get".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "get".to_string(),
+                func: |inner_args| {
+                    if inner_args.len() < 3 {
+                        return Err(PyError::type_error("get() missing required arguments: section, option"));
+                    }
+                    let section_name = inner_args[1].str();
+                    let option_name = inner_args[2].str();
+                    let fallback = if inner_args.len() > 3 { Some(inner_args[3].clone()) } else { None };
+
+                    let inst = inner_args[0].borrow();
+                    if let PyObject::Instance { dict, .. } = &*inst {
+                        let sections_ref = dict.get("_sections").cloned().unwrap_or(py_dict());
+                        drop(inst);
+
+                        let sections_borrowed = sections_ref.borrow();
+                        if let PyObject::Dict(sections_dict) = &*sections_borrowed {
+                            // Try the specified section
+                            let section_key = py_str(&section_name);
+                            if let Ok(Some(section_ref)) = sections_dict.get(&section_key) {
+                                if let PyObject::Dict(option_dict) = &*section_ref.borrow() {
+                                    let option_key = py_str(&option_name);
+                                    if let Ok(Some(val)) = option_dict.get(&option_key) {
+                                        return Ok(val);
+                                    }
+                                }
+                            }
+                            // Try DEFAULT section
+                            if section_name != "DEFAULT" {
+                                if let Ok(Some(default_ref)) = sections_dict.get(&py_str("DEFAULT")) {
+                                    if let PyObject::Dict(default_dict) = &*default_ref.borrow() {
+                                        let option_key = py_str(&option_name);
+                                        if let Ok(Some(val)) = default_dict.get(&option_key) {
+                                            return Ok(val);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Return fallback or raise error
+                    match fallback {
+                        Some(fb) => Ok(fb),
+                        None => Err(PyError::type_error(format!(
+                            "No option '{}' in section '{}'", option_name, section_name
+                        ))),
+                    }
+                },
+            }));
+
+            // items(self, section) — return list of (option, value) tuples
+            type_dict.insert("items".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "items".to_string(),
+                func: |inner_args| {
+                    if inner_args.len() < 2 {
+                        return Err(PyError::type_error("items() missing required argument: section"));
+                    }
+                    let section_name = inner_args[1].str();
+                    let inst = inner_args[0].borrow();
+                    if let PyObject::Instance { dict, .. } = &*inst {
+                        let sections_ref = dict.get("_sections").cloned().unwrap_or(py_dict());
+                        drop(inst);
+                        let sections_borrow = sections_ref.borrow();
+                        if let PyObject::Dict(sections_dict) = &*sections_borrow {
+                            let section_key = py_str(&section_name);
+                            if let Ok(Some(section_ref)) = sections_dict.get(&section_key) {
+                                let section_borrow = section_ref.borrow();
+                                if let PyObject::Dict(option_dict) = &*section_borrow {
+                                    let mut result: Vec<PyObjectRef> = Vec::new();
+                                    // Include DEFAULT options first
+                                    if section_name != "DEFAULT" {
+                                        if let Ok(Some(default_ref)) = sections_dict.get(&py_str("DEFAULT")) {
+                                            if let PyObject::Dict(default_dict) = &*default_ref.borrow() {
+                                                for (k, v) in default_dict.items() {
+                                                    result.push(py_tuple(vec![k, v]));
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // Add section-specific options
+                                    for (k, v) in option_dict.items() {
+                                        let kstr = k.str();
+                                        // Override DEFAULT if present
+                                        if let Some(pos) = result.iter().position(|t| {
+                                            if let PyObject::Tuple(items) = &*t.borrow() {
+                                                items[0].str() == kstr
+                                            } else { false }
+                                        }) {
+                                            result[pos] = py_tuple(vec![k, v]);
+                                        } else {
+                                            result.push(py_tuple(vec![k, v]));
+                                        }
+                                    }
+                                    Ok(py_list(result))
+                                } else {
+                                    Ok(py_list(vec![]))
+                                }
+                            } else {
+                                Err(PyError::type_error(format!("No section '{}'", section_name)))
+                            }
+                        } else {
+                            Ok(py_list(vec![]))
+                        }
+                    } else {
+                        Err(PyError::type_error("items(): not a ConfigParser instance"))
+                    }
+                },
+            }));
+
+            // add_section(self, name) — add a new section
+            type_dict.insert("add_section".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "add_section".to_string(),
+                func: |inner_args| {
+                    if inner_args.len() < 2 {
+                        return Err(PyError::type_error("add_section() missing required argument: name"));
+                    }
+                    let section_name = inner_args[1].str();
+
+                    let sections_ref = {
+                        let inst = inner_args[0].borrow();
+                        if let PyObject::Instance { dict, .. } = &*inst {
+                            dict.get("_sections").cloned().unwrap_or(py_dict())
+                        } else {
+                            return Err(PyError::type_error("add_section(): not a ConfigParser instance"));
+                        }
+                    };
+
+                    if let PyObject::Dict(ref mut sections_dict) = &mut *sections_ref.borrow_mut() {
+                        let section_key = py_str(&section_name);
+                        if sections_dict.contains(&section_key).unwrap_or(false) {
+                            return Err(PyError::type_error(format!("Section '{}' already exists", section_name)));
+                        }
+                        let _ = sections_dict.set(py_str(&section_name), py_dict());
+                    }
+
+                    Ok(py_none())
+                },
+            }));
+
+            // set(self, section, option, value) — set an option
+            type_dict.insert("set".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "set".to_string(),
+                func: |inner_args| {
+                    if inner_args.len() < 4 {
+                        return Err(PyError::type_error("set() missing required arguments: section, option, value"));
+                    }
+                    let section_name = inner_args[1].str();
+                    let option_name = inner_args[2].str();
+                    let value = inner_args[3].str();
+
+                    let sections_ref = {
+                        let inst = inner_args[0].borrow();
+                        if let PyObject::Instance { dict, .. } = &*inst {
+                            dict.get("_sections").cloned().unwrap_or(py_dict())
+                        } else {
+                            return Err(PyError::type_error("set(): not a ConfigParser instance"));
+                        }
+                    };
+
+                    if let PyObject::Dict(ref mut sections_dict) = &mut *sections_ref.borrow_mut() {
+                        let section_key = py_str(&section_name);
+                        // Check section exists
+                        if !sections_dict.contains(&section_key).unwrap_or(false) {
+                            return Err(PyError::type_error(format!("No section '{}'", section_name)));
+                        }
+                        if let Ok(Some(existing_ref)) = sections_dict.get(&section_key) {
+                            if let PyObject::Dict(ref mut option_dict) = &mut *existing_ref.borrow_mut() {
+                                let _ = option_dict.set(py_str(&option_name), py_str(&value));
+                            }
+                        }
+                    }
+
+                    Ok(py_none())
+                },
+            }));
+
+            // has_section(self, name) — check if section exists
+            type_dict.insert("has_section".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "has_section".to_string(),
+                func: |inner_args| {
+                    if inner_args.len() < 2 {
+                        return Err(PyError::type_error("has_section() missing required argument: name"));
+                    }
+                    let section_name = inner_args[1].str();
+                    let inst = inner_args[0].borrow();
+                    if let PyObject::Instance { dict, .. } = &*inst {
+                        let sections_ref = dict.get("_sections").cloned().unwrap_or(py_dict());
+                        drop(inst);
+                        let sections_borrow = sections_ref.borrow();
+                        if let PyObject::Dict(sections_dict) = &*sections_borrow {
+                            let section_key = py_str(&section_name);
+                            let found = sections_dict.contains(&section_key).unwrap_or(false);
+                            Ok(py_bool(found))
+                        } else {
+                            Ok(py_bool(false))
+                        }
+                    } else {
+                        Err(PyError::type_error("has_section(): not a ConfigParser instance"))
+                    }
+                },
+            }));
+
+            let typ = PyObjectRef::new(PyObject::Type {
+                name: "ConfigParser".to_string(),
+                dict: type_dict,
+                bases: vec![],
+                mro: vec![],
+            });
+
+            let mut instance_dict = HashMap::new();
+            instance_dict.insert("_sections".to_string(), py_dict());
+
+            Ok(PyObjectRef::new(PyObject::Instance {
+                typ,
+                dict: instance_dict,
+            }))
+        },
+    }));
+
+    d
+}
+
 use std::rc::Rc;
 use std::cell::RefCell;
 use std::sync::{Arc, Mutex};
@@ -2503,7 +3208,7 @@ fn parse_literal(chars: &[char], pos: &mut usize) -> PyResult<PyObjectRef> {
                 let value = parse_literal(chars, pos)?;
                 // Set key-value in dict object
                 let key_str = key.str();
-                if let PyObject::Dict(ref d) = *dict_obj.borrow() {
+                if let PyObject::Dict(ref mut d) = *dict_obj.borrow_mut() {
                     d.set(py_str(&key_str), value).ok();
                 }
                 skip_ws(chars, pos);
