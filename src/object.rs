@@ -5039,6 +5039,104 @@ impl ObjectAccess for PyObject {
                     _ => Err(PyError::attribute_error(format!("'Exception' object has no attribute '{}'", name))),
                 }
             }
+            PyObject::Int(_i) => {
+                match name {
+                    "__bool__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__bool__".to_string(),
+                        func: |args| {
+                            if let PyObject::Int(v) = &*args[0].borrow() {
+                                Ok(py_bool(!v.is_zero()))
+                            } else { Err(PyError::runtime_error("__bool__ on non-int")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__float__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__float__".to_string(),
+                        func: |args| {
+                            if let PyObject::Int(v) = &*args[0].borrow() {
+                                Ok(py_float(v.to_f64().unwrap_or(0.0)))
+                            } else { Err(PyError::runtime_error("__float__ on non-int")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "bit_length" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "bit_length".to_string(),
+                        func: |args| {
+                            if let PyObject::Int(v) = &*args[0].borrow() {
+                                Ok(py_int(v.bits() as i64))
+                            } else { Err(PyError::runtime_error("bit_length on non-int")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    _ => Err(PyError::attribute_error(format!("'int' object has no attribute '{}'", name))),
+                }
+            }
+            PyObject::Float(_f) => {
+                match name {
+                    "__int__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__int__".to_string(),
+                        func: |args| {
+                            if let PyObject::Float(v) = &*args[0].borrow() {
+                                Ok(py_int(*v as i64))
+                            } else { Err(PyError::runtime_error("__int__ on non-float")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "as_integer_ratio" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "as_integer_ratio".to_string(),
+                        func: |args| {
+                            if let PyObject::Float(v) = &*args[0].borrow() {
+                                let f = *v;
+                                if f.is_nan() || f.is_infinite() {
+                                    return Err(PyError::value_error(format!("cannot convert {:?} to integer ratio", f)));
+                                }
+                                // Decompose f64 into a reduced fraction
+                                fn float_to_ratio(x: f64) -> (BigInt, BigInt) {
+                                    if x == 0.0 { return (BigInt::from(0), BigInt::from(1)); }
+                                    let bits = x.to_bits();
+                                    let sign = if (bits >> 63) == 0 { 1i64 } else { -1i64 };
+                                    let biased_exp = ((bits >> 52) & 0x7ff) as i64;
+                                    let mantissa = bits & 0x000f_ffff_ffff_ffff;
+                                    if biased_exp == 0 {
+                                        if mantissa == 0 { return (BigInt::from(0), BigInt::from(1)); }
+                                        // Subnormal: value = mantissa * 2^(-1074)
+                                        let num = BigInt::from(sign) * BigInt::from(mantissa);
+                                        let den = BigInt::from(1i64) << 1074;
+                                        let g = gcd_bigint(&num, &den);
+                                        (num / &g, den / g)
+                                    } else {
+                                        // Normal: add implicit leading 1
+                                        let full_mantissa = 0x0010_0000_0000_0000 | mantissa;
+                                        let exp = biased_exp - 1023 - 52;
+                                        if exp >= 0 {
+                                            (BigInt::from(sign) * BigInt::from(full_mantissa) * (BigInt::from(1i64) << (exp as u32)), BigInt::from(1))
+                                        } else {
+                                            let num = BigInt::from(sign) * BigInt::from(full_mantissa);
+                                            let den = BigInt::from(1i64) << ((-exp) as u32);
+                                            let g = gcd_bigint(&num, &den);
+                                            (num / &g, den / g)
+                                        }
+                                    }
+                                }
+                                fn gcd_bigint(a: &BigInt, b: &BigInt) -> BigInt {
+                                    let mut a = a.clone();
+                                    let mut b = b.clone();
+                                    while !b.is_zero() {
+                                        let t = b.clone();
+                                        b = a % &t;
+                                        a = t;
+                                    }
+                                    a.abs()
+                                }
+                                let (num, den) = float_to_ratio(f);
+                                Ok(py_tuple(vec![py_int(num), py_int(den)]))
+                            } else { Err(PyError::runtime_error("as_integer_ratio on non-float")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    _ => Err(PyError::attribute_error(format!("'float' object has no attribute '{}'", name))),
+                }
+            }
             _ => Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", self.type_name(), name))),
         }
     }
@@ -5753,7 +5851,7 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
     os_func!("system", |args| {
         if args.is_empty() { return Err(PyError::type_error("system() takes at least 1 argument")); }
         let cmd = args[0].str();
-        match std::process::Command::new("sh").arg("-c").arg(&cmd).status() {
+        match std::process::Command::new("/bin/sh").arg("-c").arg(&cmd).status() {
             Ok(status) => Ok(py_int(status.code().unwrap_or(0) as i64)),
             Err(e) => Err(PyError::OsError(format!("{}", e))),
         }
@@ -6844,7 +6942,7 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
             return Err(PyError::ValueError("empty command".to_string()));
         }
         let output = if shell {
-            std::process::Command::new("sh")
+            std::process::Command::new("/bin/sh")
                 .arg("-c")
                 .arg(&cmd_str)
                 .output()
@@ -6885,7 +6983,7 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
             return Err(PyError::ValueError("empty command".to_string()));
         }
         let output = if shell {
-            std::process::Command::new("sh")
+            std::process::Command::new("/bin/sh")
                 .arg("-c")
                 .arg(&cmd_str)
                 .output()
@@ -9103,6 +9201,327 @@ pub fn create_warnings_dict() -> HashMap<String, PyObjectRef> {
 
     // Insert the current filter state as a readable attribute
     d.insert("filters".to_string(), py_list(vec![]));
+
+    d
+}
+
+// ---- pickle module ----
+// dumps(obj) returns repr(obj), loads(s) parses string via eval-like approach.
+pub fn create_pickle_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! pickle_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    pickle_func!("dumps", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("dumps() missing required argument"));
+        }
+        Ok(py_str(&args[0].repr()))
+    });
+
+    pickle_func!("loads", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("loads() missing required argument"));
+        }
+        let s = args[0].str();
+        // Evaluate the string expression using the same approach as builtin_eval
+        let mut parser = crate::parser::Parser::new(&s);
+        let program = parser.parse_program()
+            .map_err(|e| PyError::type_error(format!("pickle.loads parse error: {}", e)))?;
+        let mut compiler = crate::compiler::Compiler::new();
+        let code = compiler.compile(&program, "<pickle>")
+            .map_err(|e| PyError::type_error(format!("pickle.loads compile error: {}", e)))?;
+        let mut vm = crate::vm::VirtualMachine::new();
+        let result = vm.run(code)
+            .map_err(|e| PyError::type_error(format!("pickle.loads error: {}", e)))?;
+        Ok(result)
+    });
+
+    d
+}
+
+// ---- logging module ----
+// basicConfig(level) stores level; getLogger(name) returns dict-like with .info/.debug/.warning/.error methods.
+thread_local! {
+    static LOG_LEVEL: std::cell::RefCell<String> = std::cell::RefCell::new("WARNING".to_string());
+}
+
+fn logging_debug(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() < 2 { return Ok(py_none()); }
+    let level = LOG_LEVEL.with(|l| l.borrow().clone());
+    if level != "DEBUG" && level != "INFO" && level != "WARNING" && level != "ERROR" && level != "CRITICAL" {
+        return Ok(py_none());
+    }
+    let msg = args[1].str();
+    let logger_name = {
+        let borrowed = args[0].borrow();
+        if let PyObject::Instance { dict, .. } = &*borrowed {
+            dict.get("name").map(|n| n.str()).unwrap_or_default()
+        } else {
+            String::new()
+        }
+    };
+    eprintln!("DEBUG:{}:{}", logger_name, msg);
+    Ok(py_none())
+}
+
+fn logging_info(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() < 2 { return Ok(py_none()); }
+    let level = LOG_LEVEL.with(|l| l.borrow().clone());
+    if level != "INFO" && level != "WARNING" && level != "ERROR" && level != "CRITICAL" {
+        return Ok(py_none());
+    }
+    let msg = args[1].str();
+    let logger_name = {
+        let borrowed = args[0].borrow();
+        if let PyObject::Instance { dict, .. } = &*borrowed {
+            dict.get("name").map(|n| n.str()).unwrap_or_default()
+        } else {
+            String::new()
+        }
+    };
+    eprintln!("INFO:{}:{}", logger_name, msg);
+    Ok(py_none())
+}
+
+fn logging_warning(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() < 2 { return Ok(py_none()); }
+    let level = LOG_LEVEL.with(|l| l.borrow().clone());
+    if level != "WARNING" && level != "ERROR" && level != "CRITICAL" {
+        return Ok(py_none());
+    }
+    let msg = args[1].str();
+    let logger_name = {
+        let borrowed = args[0].borrow();
+        if let PyObject::Instance { dict, .. } = &*borrowed {
+            dict.get("name").map(|n| n.str()).unwrap_or_default()
+        } else {
+            String::new()
+        }
+    };
+    eprintln!("WARNING:{}:{}", logger_name, msg);
+    Ok(py_none())
+}
+
+fn logging_error(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() < 2 { return Ok(py_none()); }
+    let level = LOG_LEVEL.with(|l| l.borrow().clone());
+    if level != "ERROR" && level != "CRITICAL" {
+        return Ok(py_none());
+    }
+    let msg = args[1].str();
+    let logger_name = {
+        let borrowed = args[0].borrow();
+        if let PyObject::Instance { dict, .. } = &*borrowed {
+            dict.get("name").map(|n| n.str()).unwrap_or_default()
+        } else {
+            String::new()
+        }
+    };
+    eprintln!("ERROR:{}:{}", logger_name, msg);
+    Ok(py_none())
+}
+
+pub fn create_logging_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! log_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    log_func!("basicConfig", |args| {
+        if args.len() >= 1 {
+            // Accept basicConfig(level=...) via kwargs not available, use positional
+            let level = args[0].str().to_uppercase();
+            LOG_LEVEL.with(|l| *l.borrow_mut() = level);
+        }
+        Ok(py_none())
+    });
+
+    // Store logger instances in a thread-local registry
+    thread_local! {
+        static LOGGER_REGISTRY: std::cell::RefCell<HashMap<String, PyObjectRef>> = std::cell::RefCell::new(HashMap::new());
+    }
+
+    log_func!("getLogger", |args| {
+        let name = if args.is_empty() { "root".to_string() } else { args[0].str() };
+        // Check registry first
+        let cached = LOGGER_REGISTRY.with(|reg| reg.borrow().get(&name).cloned());
+        if let Some(logger) = cached {
+            return Ok(logger);
+        }
+        // Create a new Logger type
+        let logger_typ = PyObjectRef::new(PyObject::Type {
+            name: "Logger".to_string(),
+            dict: {
+                let mut type_dict = HashMap::new();
+                type_dict.insert("info".to_string(), PyObjectRef::imm(PyObject::BuiltinMethod {
+                    name: "info".to_string(),
+                    func: logging_info,
+                    self_obj: py_none(),
+                }));
+                type_dict.insert("debug".to_string(), PyObjectRef::imm(PyObject::BuiltinMethod {
+                    name: "debug".to_string(),
+                    func: logging_debug,
+                    self_obj: py_none(),
+                }));
+                type_dict.insert("warning".to_string(), PyObjectRef::imm(PyObject::BuiltinMethod {
+                    name: "warning".to_string(),
+                    func: logging_warning,
+                    self_obj: py_none(),
+                }));
+                type_dict.insert("error".to_string(), PyObjectRef::imm(PyObject::BuiltinMethod {
+                    name: "error".to_string(),
+                    func: logging_error,
+                    self_obj: py_none(),
+                }));
+                type_dict
+            },
+            bases: vec![],
+            mro: vec![],
+        });
+        let instance = PyObjectRef::new(PyObject::Instance {
+            typ: logger_typ,
+            dict: HashMap::from([
+                ("name".to_string(), py_str(&name)),
+            ]),
+        });
+        LOGGER_REGISTRY.with(|reg| reg.borrow_mut().insert(name.clone(), instance.clone()));
+        Ok(instance)
+    });
+
+    // Add level constants
+    d.insert("CRITICAL".to_string(), py_int(50));
+    d.insert("ERROR".to_string(), py_int(40));
+    d.insert("WARNING".to_string(), py_int(30));
+    d.insert("INFO".to_string(), py_int(20));
+    d.insert("DEBUG".to_string(), py_int(10));
+    d.insert("NOTSET".to_string(), py_int(0));
+
+    d
+}
+
+// ---- timeit module ----
+// timeit(stmt) runs statement via exec and times it.
+pub fn create_timeit_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! timeit_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    timeit_func!("timeit", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("timeit() missing required argument (stmt)"));
+        }
+        let stmt = args[0].str();
+        let number: u64 = if args.len() > 1 {
+            args[1].as_i64().unwrap_or(1_000_000) as u64
+        } else {
+            1_000_000
+        };
+
+        // Compile the statement
+        let mut parser = crate::parser::Parser::new(&stmt);
+        let program = parser.parse_program()
+            .map_err(|e| PyError::type_error(format!("timeit parse error: {}", e)))?;
+        let mut compiler = crate::compiler::Compiler::new();
+        let code = compiler.compile(&program, "<timeit>")
+            .map_err(|e| PyError::type_error(format!("timeit compile error: {}", e)))?;
+
+        // Execute number times, measuring elapsed wall time
+        let start = std::time::Instant::now();
+        for _ in 0..number {
+            let mut vm = crate::vm::VirtualMachine::new();
+            vm.run(code.clone())
+                .map_err(|e| PyError::type_error(format!("timeit error: {}", e)))?;
+        }
+        let elapsed = start.elapsed();
+        let total_secs = elapsed.as_secs_f64();
+        let per_loop = total_secs / number as f64;
+
+        // Return the total time in seconds (as a float)
+        Ok(py_float(per_loop))
+    });
+
+    // Also provide a repeat function for convenience
+    timeit_func!("repeat", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("repeat() missing required argument (stmt)"));
+        }
+        let stmt = args[0].str();
+        let repeat: u64 = if args.len() > 1 {
+            args[1].as_i64().unwrap_or(3) as u64
+        } else {
+            3
+        };
+        let number: u64 = if args.len() > 2 {
+            args[2].as_i64().unwrap_or(1_000_000) as u64
+        } else {
+            1_000_000
+        };
+
+        let mut parser = crate::parser::Parser::new(&stmt);
+        let program = parser.parse_program()
+            .map_err(|e| PyError::type_error(format!("timeit repeat parse error: {}", e)))?;
+        let mut compiler = crate::compiler::Compiler::new();
+        let code = compiler.compile(&program, "<timeit>")
+            .map_err(|e| PyError::type_error(format!("timeit repeat compile error: {}", e)))?;
+
+        let mut times = Vec::new();
+        for _ in 0..repeat {
+            let start = std::time::Instant::now();
+            for _ in 0..number {
+                let mut vm = crate::vm::VirtualMachine::new();
+                vm.run(code.clone())
+                    .map_err(|e| PyError::type_error(format!("timeit repeat error: {}", e)))?;
+            }
+            let elapsed = start.elapsed();
+            times.push(py_float(elapsed.as_secs_f64()));
+        }
+
+        Ok(py_list(times))
+    });
+
+    // Default number of repetitions
+    d.insert("default_number".to_string(), py_int(1_000_000));
+    d.insert("default_repeat".to_string(), py_int(3));
+
+    d
+}
+
+// ---- json.tool module ----
+// main() that formats stdin JSON.
+pub fn create_json_tool_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! jt_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    jt_func!("main", |_args| {
+        // Read all of stdin
+        let mut input = String::new();
+        use std::io::Read;
+        match std::io::stdin().read_to_string(&mut input) {
+            Ok(_) => {
+                // Parse JSON
+                let parsed = json_decode(&input)?;
+                // Pretty-print with indent=2
+                let formatted = json_encode_full(&parsed, Some(2), true, 0)?;
+                // Print to stdout
+                println!("{}", formatted.str());
+                Ok(py_none())
+            }
+            Err(e) => Err(PyError::runtime_error(format!("json.tool error reading stdin: {}", e))),
+        }
+    });
 
     d
 }

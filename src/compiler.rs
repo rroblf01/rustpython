@@ -705,7 +705,14 @@ impl Compiler {
     // ---- Statement compilation ----
 
     fn compile_stmts(&mut self, stmts: &[Stmt]) -> Result<(), String> {
+        let mut first = true;
         for stmt in stmts {
+            if first {
+                first = false;
+                if matches!(stmt, Stmt::Match { .. }) {
+                    self.emit(Opcode::NOP, 0);
+                }
+            }
             self.compile_stmt(stmt)?;
         }
         Ok(())

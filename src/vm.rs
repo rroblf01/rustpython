@@ -271,6 +271,18 @@ impl VirtualMachine {
           // Native abc module
           modules.insert("abc".to_string(), create_module("abc", create_abc_dict()));
 
+          // Native pickle module
+          modules.insert("pickle".to_string(), create_module("pickle", create_pickle_dict()));
+
+          // Native logging module
+          modules.insert("logging".to_string(), create_module("logging", create_logging_dict()));
+
+          // Native timeit module
+          modules.insert("timeit".to_string(), create_module("timeit", create_timeit_dict()));
+
+          // Native json.tool module
+          modules.insert("json.tool".to_string(), create_module("json.tool", create_json_tool_dict()));
+
           // Also register the 'operator' module if not already present
           if !modules.contains_key("operator") {
               let mut op_dict = HashMap::new();
