@@ -435,7 +435,18 @@ impl Parser {
 
     fn parse_for(&mut self, is_async: bool) -> Result<Stmt, String> {
         self.expect(&Token::For)?;
-        let target = self.parse_bitwise_or()?;
+        let mut target = self.parse_bitwise_or()?;
+        // Handle tuple unpacking: 'for a, b in ...'
+        if self.at(&Token::Comma) {
+            let mut elts = vec![target];
+            while self.eat(&Token::Comma) {
+                if self.at(&Token::In) {
+                    break;
+                }
+                elts.push(self.parse_bitwise_or()?);
+            }
+            target = Expr::Tuple(elts);
+        }
         self.expect(&Token::In)?;
         let iter = self.parse_expr()?;
         self.expect(&Token::Colon)?;

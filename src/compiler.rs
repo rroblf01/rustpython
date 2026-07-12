@@ -1313,46 +1313,35 @@ impl Compiler {
                         Pattern::MatchSequence(patterns) => {
                             // MatchSequence: check length and match elements
                             self.emit(Opcode::DUP_TOP, 0);
-                            // Try to get len(subject)
-                            let const_none = self.get_const_index(ConstValue::None) as u32;
-                            let const_zero = self.get_const_index(ConstValue::Int("0".to_string())) as u32;
-                            // Simple approach: check if subject has expected length
-                            // For now, just unpack and compare each element
-                            if !patterns.is_empty() {
-                                // Use BUILD_TUPLE to store subject elements for comparison
+                            // Get length of subject
+                            let len_name_idx = self.get_name_index("len") as u32;
+                            self.emit(Opcode::LOAD_GLOBAL, len_name_idx);
+                            self.emit(Opcode::SWAP, 1);
+                            self.emit(Opcode::CALL, 1);
+                            let length_const = self.get_const_index(ConstValue::Int(patterns.len().to_string())) as u32;
+                            self.emit(Opcode::LOAD_CONST, length_const);
+                            self.emit(Opcode::COMPARE_OP, 2); // ==
+                            self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_case);
+                            // Now check each element
+                            for (i, pat) in patterns.iter().enumerate() {
+                                let idx_const = self.get_const_index(ConstValue::Int(i.to_string())) as u32;
                                 self.emit(Opcode::DUP_TOP, 0);
-                                let count = patterns.len() as u32;
-                                // Get length of subject
-                                let len_name_idx = self.get_name_index("len") as u32;
-                                self.emit(Opcode::LOAD_GLOBAL, len_name_idx);
-                                self.emit(Opcode::SWAP, 1);
-                                self.emit(Opcode::CALL, 1);
-                                let length_const = self.get_const_index(ConstValue::Int(patterns.len().to_string())) as u32;
-                                self.emit(Opcode::LOAD_CONST, length_const);
-                                self.emit(Opcode::COMPARE_OP, 2); // ==
-                                self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_case);
-                                // Now check each element
-                                // For simplicity, load each element via subscript
-                                for (i, pat) in patterns.iter().enumerate() {
-                                    let idx_const = self.get_const_index(ConstValue::Int(i.to_string())) as u32;
-                                    self.emit(Opcode::DUP_TOP, 0);
-                                    self.emit(Opcode::LOAD_CONST, idx_const);
-                                    self.emit(Opcode::BINARY_OP, 6); // BINARY_SUBSCR
-                                    match pat {
-                                        Pattern::MatchValue(val) => {
-                                            self.compile_expr(val)?;
-                                            self.emit(Opcode::COMPARE_OP, 2); // ==
-                                            self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_case);
-                                        }
-                                        Pattern::MatchAs { name: Some(n), .. } => {
-                                            let idx = self.add_varname(n) as u32;
-                                            self.emit(Opcode::STORE_FAST, idx);
-                                        }
-                                        Pattern::MatchAs { name: None, .. } => {
-                                            self.emit(Opcode::POP_TOP, 0);
-                                        }
-                                        _ => return Err("Sequence pattern sub-pattern not supported".to_string()),
+                                self.emit(Opcode::LOAD_CONST, idx_const);
+                                self.emit(Opcode::BINARY_OP, 13); // BINARY_SUBSCR
+                                match pat {
+                                    Pattern::MatchValue(val) => {
+                                        self.compile_expr(val)?;
+                                        self.emit(Opcode::COMPARE_OP, 2); // ==
+                                        self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_case);
                                     }
+                                    Pattern::MatchAs { name: Some(n), .. } => {
+                                        let idx = self.add_varname(n) as u32;
+                                        self.emit(Opcode::STORE_FAST, idx);
+                                    }
+                                    Pattern::MatchAs { name: None, .. } => {
+                                        self.emit(Opcode::POP_TOP, 0);
+                                    }
+                                    _ => return Err("Sequence pattern sub-pattern not supported".to_string()),
                                 }
                             }
                             if let Some(guard) = &case.guard {
@@ -1505,8 +1494,6 @@ impl Compiler {
                     self.compile_stmts(&case.body)?;
                     self.emit_jump(Opcode::JUMP, end_label);
                     self.fix_label(next_case);
-                    // Re-push subject for next case
-                    self.emit(Opcode::COPY, 0);
                 }
                 self.emit(Opcode::POP_TOP, 0); // pop subject at end
                 self.fix_label(end_label);

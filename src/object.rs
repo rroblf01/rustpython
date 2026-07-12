@@ -916,7 +916,11 @@ fn escape_string(s: &str) -> String {
             '\"' => out.push_str("\\\""),
             '\x00'..='\x1f' => out.push_str(&format!("\\x{:02x}", c as u8)),
             '\x7f' => out.push_str("\\x7f"),
-            c if c as u32 > 0x10ffff => out.push_str(&format!("\\U{:08x}", c as u32)),
+            c if c.is_control() => match c as u32 {
+                code @ 0..=0xff => out.push_str(&format!("\\x{:02x}", code as u8)),
+                code @ 0x100..=0xffff => out.push_str(&format!("\\u{:04x}", code)),
+                code => out.push_str(&format!("\\U{:08x}", code)),
+            },
             c => out.push(c),
         }
     }
@@ -3612,7 +3616,73 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
+                    "__reversed__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__reversed__".to_string(),
+                        func: |args| {
+                            if let PyObject::List(list) = &*args[0].borrow() {
+                                let mut rev = list.clone();
+                                rev.reverse();
+                                Ok(PyObjectRef::new(PyObject::List(rev)))
+                            } else { Err(PyError::runtime_error("__reversed__ on non-list")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__sizeof__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__sizeof__".to_string(),
+                        func: |args| {
+                            if let PyObject::List(list) = &*args[0].borrow() {
+                                Ok(py_int(56 + (list.len() as i64) * 8))
+                            } else { Err(PyError::runtime_error("__sizeof__ on non-list")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     _ => Err(PyError::attribute_error(format!("'list' object has no attribute '{}'", name))),
+                }
+            }
+            PyObject::Tuple(_v) => {
+                match name {
+                    "__reversed__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__reversed__".to_string(),
+                        func: |args| {
+                            if let PyObject::Tuple(tuple) = &*args[0].borrow() {
+                                let mut rev = tuple.clone();
+                                rev.reverse();
+                                Ok(PyObjectRef::imm(PyObject::Tuple(rev)))
+                            } else { Err(PyError::runtime_error("__reversed__ on non-tuple")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__sizeof__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__sizeof__".to_string(),
+                        func: |args| {
+                            if let PyObject::Tuple(tuple) = &*args[0].borrow() {
+                                Ok(py_int(40 + (tuple.len() as i64) * 8))
+                            } else { Err(PyError::runtime_error("__sizeof__ on non-tuple")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    _ => Err(PyError::attribute_error(format!("'tuple' object has no attribute '{}'", name))),
+                }
+            }
+            PyObject::Bytes(_v) => {
+                match name {
+                    "__sizeof__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__sizeof__".to_string(),
+                        func: |args| {
+                            if let PyObject::Bytes(bytes) = &*args[0].borrow() {
+                                Ok(py_int(33 + bytes.len() as i64))
+                            } else { Err(PyError::runtime_error("__sizeof__ on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__repr__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__repr__".to_string(),
+                        func: |args| {
+                            Ok(py_str(&args[0].repr()))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    _ => Err(PyError::attribute_error(format!("'bytes' object has no attribute '{}'", name))),
                 }
             }
             PyObject::ByteArray(_b) => {
@@ -3746,6 +3816,15 @@ impl ObjectAccess for PyObject {
                                 let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
                                 Ok(py_str(&hex))
                             } else { Err(PyError::runtime_error("__str__ on non-bytearray")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__sizeof__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__sizeof__".to_string(),
+                        func: |args| {
+                            if let PyObject::ByteArray(bytes) = &*args[0].borrow() {
+                                Ok(py_int(33 + bytes.len() as i64))
+                            } else { Err(PyError::runtime_error("__sizeof__ on non-bytearray")) }
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -3983,6 +4062,27 @@ impl ObjectAccess for PyObject {
                     })),
                     "translate" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "translate".to_string(), func: |a| { let s = a[0].str(); if a.len() > 1 { let _table = &a[1]; } Ok(py_str(&s)) }, self_obj: PyObjectRef::new(PyObject::None) })),
                     "encode" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "encode".to_string(), func: |a| { let s = a[0].str(); if a.len() > 1 { let _encoding = a[1].str(); } Ok(PyObjectRef::imm(PyObject::Bytes(s.as_bytes().to_vec()))) }, self_obj: PyObjectRef::new(PyObject::None) })),
+                    "isidentifier" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "isidentifier".to_string(),
+                        func: |a| {
+                            let s = a[0].str();
+                            if s.is_empty() { return Ok(py_bool(false)); }
+                            let mut chars = s.chars();
+                            let first = chars.next().unwrap();
+                            let valid = (first == '_') || first.is_ascii_alphabetic();
+                            if !valid { return Ok(py_bool(false)); }
+                            Ok(py_bool(chars.all(|c| c == '_' || c.is_ascii_alphanumeric())))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__sizeof__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__sizeof__".to_string(),
+                        func: |a| {
+                            let s = a[0].str();
+                            Ok(py_int(49 + s.len() as i64))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     _ => Err(PyError::attribute_error(format!("'str' object has no attribute '{}'", name))),
                 }
             }
@@ -4124,6 +4224,15 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
+                    "__sizeof__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__sizeof__".to_string(),
+                        func: |args| {
+                            if let PyObject::Dict(d) = &*args[0].borrow() {
+                                Ok(py_int(72 + (d.len() as i64) * 16))
+                            } else { Err(PyError::runtime_error("__sizeof__ on non-dict")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     _ => Err(PyError::attribute_error(format!("'dict' object has no attribute '{}'", name))),
                 }
             }
@@ -4179,6 +4288,15 @@ impl ObjectAccess for PyObject {
                             let s = args[0].borrow();
                             if let PyObject::Set(set) = &*s { Ok(PyObjectRef::new(PyObject::Set(set.clone()))) }
                             else { Err(PyError::runtime_error("copy on non-set")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__sizeof__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__sizeof__".to_string(),
+                        func: |args| {
+                            if let PyObject::Set(set) = &*args[0].borrow() {
+                                Ok(py_int(72 + (set.len() as i64) * 8))
+                            } else { Err(PyError::runtime_error("__sizeof__ on non-set")) }
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
