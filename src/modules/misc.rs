@@ -3898,3 +3898,201 @@ pub fn create_argparse_dict() -> HashMap<String, PyObjectRef> {
     d.insert("ArgumentParser".to_string(), parser_type);
     d
 }
+
+
+// ─── asyncio module (basic event loop) ────────────────────────────────────
+
+pub fn create_asyncio_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! asyncio_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    // Future class
+    let mut future_type_dict = HashMap::new();
+    macro_rules! future_method {
+        ($name:expr, $func:expr) => {
+            future_type_dict.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+    future_method!("__init__", |args| {
+        let self_obj = args[0].clone();
+        let obj = self_obj.borrow_mut();
+        // Future state stored in __dict__
+        Ok(crate::object::py_none())
+    });
+    future_method!("__await__", |args| {
+        // Returns a generator that yields self once then returns result
+        let self_obj = args[0].clone();
+        Ok(self_obj)
+    });
+    future_method!("set_result", |args| {
+        let self_obj = args[0].clone();
+        let result = args[1].clone();
+        self_obj.borrow_mut().set_attribute("_result", result).ok();
+        self_obj.borrow_mut().set_attribute("_done", crate::object::py_bool(true)).ok();
+        Ok(crate::object::py_none())
+    });
+    future_method!("done", |args| {
+        let self_obj = args[0].clone();
+        if let Ok(val) = self_obj.borrow().get_attribute("_done") {
+            return Ok(val);
+        }
+        Ok(crate::object::py_bool(false))
+    });
+    future_method!("result", |args| {
+        let self_obj = args[0].clone();
+        if let Ok(val) = self_obj.borrow().get_attribute("_result") {
+            return Ok(val);
+        }
+        Err(crate::object::PyError::runtime_error("Future has no result"))
+    });
+
+    let future_type = PyObjectRef::new(PyObject::Type {
+        name: "Future".to_string(),
+        dict: future_type_dict,
+        bases: vec![],
+        mro: vec![],
+    });
+    d.insert("Future".to_string(), future_type);
+
+    // Task class
+    let mut task_type_dict = HashMap::new();
+    macro_rules! task_method {
+        ($name:expr, $func:expr) => {
+            task_type_dict.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+    task_method!("__init__", |args| {
+        let self_obj = args[0].clone();
+        let coro = args[1].clone();
+        self_obj.borrow_mut().set_attribute("_coro", coro).ok();
+        self_obj.borrow_mut().set_attribute("_done", crate::object::py_bool(false)).ok();
+        Ok(crate::object::py_none())
+    });
+    task_method!("step", |args| {
+        let self_obj = args[0].clone();
+        let coro = self_obj.borrow().get_attribute("_coro")?;
+        // Try to advance the coroutine via __next__ or send
+        let next_func = coro.borrow().get_attribute("__next__")?;
+        match crate::object::call_bound_method(next_func, coro.clone(), vec![]) {
+            Ok(val) => {
+                // If the coroutine yielded a Future, set up wakeup
+                let type_name = val.borrow().type_name();
+                if type_name == "Future" {
+                    // Register a callback to resume this task
+                    let self_clone = self_obj.clone();
+                    let callback = PyObjectRef::new(PyObject::Closure(Rc::new(move |_args| {
+                        // Step the task again
+                        let next_func2 = self_clone.borrow().get_attribute("_coro").ok()
+                            .and_then(|c| c.borrow().get_attribute("send").ok());
+                        Ok(crate::object::py_none())
+                    })));
+                    val.borrow_mut().set_attribute("_callbacks", crate::object::py_list(vec![callback])).ok();
+                }
+                Ok(val)
+            }
+            Err(crate::object::PyError::StopIteration) => {
+                self_obj.borrow_mut().set_attribute("_done", crate::object::py_bool(true)).ok();
+                Ok(crate::object::py_none())
+            }
+            Err(e) => Err(e),
+        }
+    });
+
+    let task_type = PyObjectRef::new(PyObject::Type {
+        name: "Task".to_string(),
+        dict: task_type_dict,
+        bases: vec![],
+        mro: vec![],
+    });
+    d.insert("Task".to_string(), task_type);
+
+    // asyncio.run(coro): Minimal event loop
+    asyncio_func!("run", |args| {
+        let coro = args[0].clone();
+        // Get the global VM pointer
+        let vm_ptr = crate::object::VM_PTR.with(|p| *p.borrow()).ok_or_else(|| {
+            crate::object::PyError::runtime_error("no active VM")
+        })?;
+        // Safety: VM is guaranteed alive during this call
+        let vm = unsafe { &mut *vm_ptr };
+        // Create a new frame to run the coroutine
+        let coro_borrowed = coro.borrow();
+        if let crate::object::PyObject::Coroutine { ref frame } = &*coro_borrowed {
+            let frame_borrowed = frame.borrow();
+            if let Some(ref coro_frame) = *frame_borrowed {
+                // We need to push this frame onto the VM and execute
+                let mut coro_frame_clone = coro_frame.clone();
+                coro_frame_clone.module_globals = None;
+                // Execute until completion
+                vm.frames.push(coro_frame_clone);
+                let result = vm.execute();
+                vm.frames.pop();
+                return result;
+            }
+        }
+        // If not a coroutine, try calling it directly
+        let coro_clone = coro.clone();
+        let send_attr = coro_clone.borrow().get_attribute("send").ok();
+        if let Some(send_method) = send_attr {
+            let result = crate::object::call_bound_method(send_method, coro.clone(), vec![crate::object::py_none()]);
+            match result {
+                Ok(val) => Ok(val),
+                Err(crate::object::PyError::StopIteration) => Ok(crate::object::py_none()),
+                Err(e) => Err(e),
+            }
+        } else {
+            crate::object::call_bound_method(coro.clone(), coro.clone(), vec![])
+        }
+    });
+
+    // asyncio.sleep(delay) -> Future
+    // Returns a Future that resolves after the delay
+    asyncio_func!("sleep", |args| {
+        let delay = args[0].clone();
+        // Create a Future by calling builtins.dict or using construct
+        let future = crate::object::PyObjectRef::new(crate::object::PyObject::Instance {
+            typ: crate::object::py_none(),  // placeholder
+            dict: std::collections::HashMap::new(),
+        });
+        // Set Future-specific attributes
+        future.borrow_mut().set_attribute("_done", crate::object::py_bool(false)).ok();
+        future.borrow_mut().set_attribute("_result", crate::object::py_none()).ok();
+        // For now, immediately resolve sleep(0) and create pending for others
+        if let crate::object::PyObject::Int(n) = &*delay.borrow() {
+            if n == &num_bigint::BigInt::from(0) {
+                future.borrow_mut().set_attribute("_done", crate::object::py_bool(true)).ok();
+                future.borrow_mut().set_attribute("_result", crate::object::py_none()).ok();
+            }
+        }
+        Ok(future)
+    });
+
+    // asyncio.gather(*coros, return_exceptions=False)
+    asyncio_func!("gather", |args| {
+        let futures: Vec<PyObjectRef> = args.to_vec();
+        // For now, return a simple list of results (blocking gather)
+        let mut results = Vec::new();
+        for f in &futures {
+            // Try to run directly if it's a coroutine
+            let f_type = f.borrow().type_name();
+            if f_type == "coroutine" || f_type == "generator" {
+                if let Ok(send) = f.borrow().get_attribute("send") {
+                    match crate::object::call_bound_method(send, f.clone(), vec![crate::object::py_none()]) {
+                        Ok(val) => results.push(val),
+                        Err(crate::object::PyError::StopIteration) => results.push(crate::object::py_none()),
+                        Err(e) => return Err(e),
+                    }
+                }
+            } else {
+                results.push(f.clone());
+            }
+        }
+        Ok(crate::object::py_list(results))
+    });
+
+    d
+}

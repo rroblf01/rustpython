@@ -489,6 +489,9 @@ impl VirtualMachine {
           // Native importlib stub module
           modules.insert("importlib".to_string(), create_module("importlib", create_importlib_dict()));
 
+          // Native asyncio module (basic event loop)
+          modules.insert("asyncio".to_string(), create_module("asyncio", create_asyncio_dict()));
+
           // Populate sys.path with default search paths
          if let PyObject::List(path_list) = &mut *sys_dict.get("path").unwrap().borrow_mut() {
              path_list.push(py_str("."));
