@@ -474,6 +474,266 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
     }
     d.insert("environ".to_string(), create_module("environ", environ_dict));
 
+    // --- os.getpid() ---
+    os_func!("getpid", |_| {
+        Ok(py_int(std::process::id() as i64))
+    });
+
+    // --- os.getppid() ---
+    os_func!("getppid", |_| {
+        // Parse /proc/self/stat for parent PID
+        match std::fs::read_to_string("/proc/self/stat") {
+            Ok(stat) => {
+                if let Some(idx) = stat.rfind(')') {
+                    let fields: Vec<&str> = stat[idx+1..].split_whitespace().collect();
+                    if fields.len() > 1 {
+                        if let Ok(ppid) = fields[1].parse::<i64>() {
+                            return Ok(py_int(ppid));
+                        }
+                    }
+                }
+                Err(PyError::OsError("failed to parse /proc/self/stat".to_string()))
+            }
+            Err(e) => Err(PyError::OsError(format!("{}", e))),
+        }
+    });
+
+    // --- os.cpu_count() ---
+    os_func!("cpu_count", |_| {
+        match std::thread::available_parallelism() {
+            Ok(n) => Ok(py_int(n.get() as i64)),
+            Err(_) => Ok(py_none()),
+        }
+    });
+
+    // --- os.getloadavg() ---
+    os_func!("getloadavg", |_| {
+        match std::fs::read_to_string("/proc/loadavg") {
+            Ok(data) => {
+                let parts: Vec<&str> = data.split_whitespace().collect();
+                if parts.len() >= 3 {
+                    let load1: f64 = parts[0].parse().unwrap_or(0.0);
+                    let load5: f64 = parts[1].parse().unwrap_or(0.0);
+                    let load15: f64 = parts[2].parse().unwrap_or(0.0);
+                    Ok(py_tuple(vec![py_float(load1), py_float(load5), py_float(load15)]))
+                } else {
+                    Ok(py_tuple(vec![py_float(0.0), py_float(0.0), py_float(0.0)]))
+                }
+            }
+            Err(_) => Ok(py_tuple(vec![py_float(0.0), py_float(0.0), py_float(0.0)])),
+        }
+    });
+
+    // --- Helper: convert fs::Metadata to stat dict ---
+    fn stat_to_dict(meta: &std::fs::Metadata) -> HashMap<String, PyObjectRef> {
+        use std::os::unix::fs::MetadataExt;
+        let mut d = HashMap::new();
+        d.insert("st_mode".to_string(), py_int(meta.mode() as i64));
+        d.insert("st_ino".to_string(), py_int(meta.ino() as i64));
+        d.insert("st_dev".to_string(), py_int(meta.dev() as i64));
+        d.insert("st_nlink".to_string(), py_int(meta.nlink() as i64));
+        d.insert("st_uid".to_string(), py_int(meta.uid() as i64));
+        d.insert("st_gid".to_string(), py_int(meta.gid() as i64));
+        d.insert("st_size".to_string(), py_int(meta.size() as i64));
+        if let Ok(t) = meta.modified() {
+            let dur = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+            d.insert("st_mtime".to_string(), py_float(dur.as_secs_f64()));
+        }
+        if let Ok(t) = meta.accessed() {
+            let dur = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+            d.insert("st_atime".to_string(), py_float(dur.as_secs_f64()));
+        }
+        if let Ok(t) = meta.created() {
+            let dur = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+            d.insert("st_ctime".to_string(), py_float(dur.as_secs_f64()));
+        }
+        d
+    }
+
+    // --- os.stat(path) ---
+    os_func!("stat", |args| {
+        if args.is_empty() { return Err(PyError::type_error("stat() takes at least 1 argument")); }
+        match std::fs::metadata(&args[0].str()) {
+            Ok(meta) => Ok(create_module("stat_result", stat_to_dict(&meta))),
+            Err(e) => Err(PyError::OsError(format!("{}", e))),
+        }
+    });
+
+    // --- os.lstat(path) ---
+    os_func!("lstat", |args| {
+        if args.is_empty() { return Err(PyError::type_error("lstat() takes at least 1 argument")); }
+        match std::fs::symlink_metadata(&args[0].str()) {
+            Ok(meta) => Ok(create_module("stat_result", stat_to_dict(&meta))),
+            Err(e) => Err(PyError::OsError(format!("{}", e))),
+        }
+    });
+
+    // --- stat_result module with field index constants ---
+    {
+        let mut sr = HashMap::new();
+        sr.insert("ST_MODE".to_string(), py_int(0));
+        sr.insert("ST_INO".to_string(), py_int(1));
+        sr.insert("ST_DEV".to_string(), py_int(2));
+        sr.insert("ST_NLINK".to_string(), py_int(3));
+        sr.insert("ST_UID".to_string(), py_int(4));
+        sr.insert("ST_GID".to_string(), py_int(5));
+        sr.insert("ST_SIZE".to_string(), py_int(6));
+        sr.insert("ST_ATIME".to_string(), py_int(7));
+        sr.insert("ST_MTIME".to_string(), py_int(8));
+        sr.insert("ST_CTIME".to_string(), py_int(9));
+        sr.insert("n_fields".to_string(), py_int(10));
+        sr.insert("n_sequence_fields".to_string(), py_int(10));
+        sr.insert("__doc__".to_string(), py_str("stat_result: stat results as a module with named field indices"));
+        d.insert("stat_result".to_string(), create_module("stat_result", sr));
+    }
+
+    // --- os.chmod(path, mode) ---
+    os_func!("chmod", |args| {
+        if args.len() < 2 { return Err(PyError::type_error("chmod() takes at least 2 arguments")); }
+        let path = args[0].str();
+        let mode = args[1].as_i64().unwrap_or(0) as u32;
+        use std::os::unix::fs::PermissionsExt;
+        match std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)) {
+            Ok(()) => Ok(py_none()),
+            Err(e) => Err(PyError::OsError(format!("{}", e))),
+        }
+    });
+
+    // --- os.chown(path, uid, gid) ---
+    os_func!("chown", |args| {
+        if args.len() < 3 { return Err(PyError::type_error("chown() takes at least 3 arguments")); }
+        let path = args[0].str();
+        let uid = args[1].as_i64().unwrap_or(-1);
+        let gid = args[2].as_i64().unwrap_or(-1);
+        use std::os::unix::fs::chown;
+        match chown(
+            &path,
+            if uid == -1 { None } else { Some(uid as u32) },
+            if gid == -1 { None } else { Some(gid as u32) },
+        ) {
+            Ok(()) => Ok(py_none()),
+            Err(e) => Err(PyError::OsError(format!("{}", e))),
+        }
+    });
+
+    // --- os.link(src, dst) ---
+    os_func!("link", |args| {
+        if args.len() < 2 { return Err(PyError::type_error("link() takes at least 2 arguments")); }
+        match std::fs::hard_link(&args[0].str(), &args[1].str()) {
+            Ok(()) => Ok(py_none()),
+            Err(e) => Err(PyError::OsError(format!("{}", e))),
+        }
+    });
+
+    // --- os.symlink(src, dst) ---
+    os_func!("symlink", |args| {
+        if args.len() < 2 { return Err(PyError::type_error("symlink() takes at least 2 arguments")); }
+        use std::os::unix::fs::symlink;
+        match symlink(&args[0].str(), &args[1].str()) {
+            Ok(()) => Ok(py_none()),
+            Err(e) => Err(PyError::OsError(format!("{}", e))),
+        }
+    });
+
+    // --- os.readlink(path) ---
+    os_func!("readlink", |args| {
+        if args.is_empty() { return Err(PyError::type_error("readlink() takes at least 1 argument")); }
+        match std::fs::read_link(&args[0].str()) {
+            Ok(p) => Ok(py_str(&p.to_string_lossy())),
+            Err(e) => Err(PyError::OsError(format!("{}", e))),
+        }
+    });
+
+    // --- os.makedirs(path) ---
+    os_func!("makedirs", |args| {
+        if args.is_empty() { return Err(PyError::type_error("makedirs() takes at least 1 argument")); }
+        let path = args[0].str();
+        match std::fs::create_dir_all(&path) {
+            Ok(()) => Ok(py_none()),
+            Err(e) => Err(PyError::OsError(format!("{}", e))),
+        }
+    });
+
+    // --- os.rmdir(path) ---
+    os_func!("rmdir", |args| {
+        if args.is_empty() { return Err(PyError::type_error("rmdir() takes at least 1 argument")); }
+        match std::fs::remove_dir(&args[0].str()) {
+            Ok(()) => Ok(py_none()),
+            Err(e) => Err(PyError::OsError(format!("{}", e))),
+        }
+    });
+
+    // --- os.walk(top): directory tree walker (returns list of tuples) ---
+    os_func!("walk", |args| {
+        if args.is_empty() { return Err(PyError::type_error("walk() takes at least 1 argument")); }
+        let top = args[0].str();
+        let mut results = Vec::new();
+        let mut dirs_to_visit = vec![top];
+        while let Some(dir) = dirs_to_visit.pop() {
+            match std::fs::read_dir(&dir) {
+                Ok(entries) => {
+                    let mut dirname_strs: Vec<String> = Vec::new();
+                    let mut filename_strs: Vec<String> = Vec::new();
+                    for entry in entries.flatten() {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                        if name == "." || name == ".." { continue; }
+                        if is_dir {
+                            dirname_strs.push(name);
+                        } else {
+                            filename_strs.push(name);
+                        }
+                    }
+                    dirname_strs.sort();
+                    filename_strs.sort();
+                    let dirnames: Vec<PyObjectRef> = dirname_strs.iter().map(|s| py_str(s)).collect();
+                    let filenames: Vec<PyObjectRef> = filename_strs.iter().map(|s| py_str(s)).collect();
+                    results.push(py_tuple(vec![
+                        py_str(&dir),
+                        py_list(dirnames),
+                        py_list(filenames),
+                    ]));
+                    // Push subdirs in reverse order for DFS alphabetical traversal
+                    for dirname in dirname_strs.iter().rev() {
+                        let sub = if dir.ends_with('/') {
+                            format!("{}{}", dir, dirname)
+                        } else {
+                            format!("{}/{}", dir, dirname)
+                        };
+                        dirs_to_visit.push(sub);
+                    }
+                }
+                Err(_) => { /* skip unreadable directories */ }
+            }
+        }
+        Ok(PyObjectRef::new(PyObject::List(results)))
+    });
+
+    // --- File mode constants (from <sys/stat.h>) ---
+    d.insert("S_IFMT".to_string(), py_int(0o170000));
+    d.insert("S_IFSOCK".to_string(), py_int(0o140000));
+    d.insert("S_IFLNK".to_string(), py_int(0o120000));
+    d.insert("S_IFREG".to_string(), py_int(0o100000));
+    d.insert("S_IFBLK".to_string(), py_int(0o060000));
+    d.insert("S_IFDIR".to_string(), py_int(0o040000));
+    d.insert("S_IFCHR".to_string(), py_int(0o020000));
+    d.insert("S_IFIFO".to_string(), py_int(0o010000));
+    d.insert("S_ISUID".to_string(), py_int(0o4000));
+    d.insert("S_ISGID".to_string(), py_int(0o2000));
+    d.insert("S_ISVTX".to_string(), py_int(0o1000));
+    d.insert("S_IRWXU".to_string(), py_int(0o700));
+    d.insert("S_IRUSR".to_string(), py_int(0o400));
+    d.insert("S_IWUSR".to_string(), py_int(0o200));
+    d.insert("S_IXUSR".to_string(), py_int(0o100));
+    d.insert("S_IRWXG".to_string(), py_int(0o070));
+    d.insert("S_IRGRP".to_string(), py_int(0o040));
+    d.insert("S_IWGRP".to_string(), py_int(0o020));
+    d.insert("S_IXGRP".to_string(), py_int(0o010));
+    d.insert("S_IRWXO".to_string(), py_int(0o007));
+    d.insert("S_IROTH".to_string(), py_int(0o004));
+    d.insert("S_IWOTH".to_string(), py_int(0o002));
+    d.insert("S_IXOTH".to_string(), py_int(0o001));
+
     // os.path sub-module will be wired as a proper submodule in vm.rs
     // The path attribute is set there (not inline) to allow proper os.path import
     d
