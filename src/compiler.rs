@@ -1366,8 +1366,59 @@ impl Compiler {
                         Pattern::MatchStar { .. } => {
                             return Err("MatchStar pattern not supported yet".to_string());
                         }
-                        Pattern::MatchOr(..) => {
-                            return Err("MatchOr pattern not supported yet".to_string());
+                        Pattern::MatchOr(subpatterns) => {
+                            let or_matched = self.new_label();
+                            for pat in subpatterns {
+                                match pat {
+                                    Pattern::MatchAs { name: Some(n), .. } => {
+                                        self.emit(Opcode::DUP_TOP, 0);
+                                        let idx = self.add_varname(n) as u32;
+                                        self.emit(Opcode::STORE_FAST, idx);
+                                        self.emit_jump(Opcode::JUMP, or_matched);
+                                    }
+                                    Pattern::MatchAs { name: None, .. } => {
+                                        // Wildcard: always matches
+                                        self.emit(Opcode::DUP_TOP, 0);
+                                        self.emit(Opcode::POP_TOP, 0);
+                                        self.emit_jump(Opcode::JUMP, or_matched);
+                                    }
+                                    Pattern::MatchValue(val) => {
+                                        self.emit(Opcode::DUP_TOP, 0);
+                                        let try_next = self.new_label();
+                                        self.compile_expr(val)?;
+                                        self.emit(Opcode::COMPARE_OP, 2); // ==
+                                        self.emit_jump(Opcode::POP_JUMP_IF_FALSE, try_next);
+                                        self.emit_jump(Opcode::JUMP, or_matched);
+                                        self.fix_label(try_next);
+                                    }
+                                    Pattern::MatchSingleton(s) => {
+                                        self.emit(Opcode::DUP_TOP, 0);
+                                        let try_next = self.new_label();
+                                        let const_idx = self.get_const_index(match s.as_str() {
+                                            "None" => ConstValue::None,
+                                            "True" => ConstValue::Bool(true),
+                                            "False" => ConstValue::Bool(false),
+                                            _ => ConstValue::String(s.clone()),
+                                        }) as u32;
+                                        self.emit(Opcode::LOAD_CONST, const_idx);
+                                        self.emit(Opcode::COMPARE_OP, 8); // IS
+                                        self.emit_jump(Opcode::POP_JUMP_IF_FALSE, try_next);
+                                        self.emit_jump(Opcode::JUMP, or_matched);
+                                        self.fix_label(try_next);
+                                    }
+                                    _ => return Err("MatchOr subpattern type not supported".to_string()),
+                                }
+                            }
+                            // All alternatives failed
+                            self.emit_jump(Opcode::JUMP, next_case);
+                            self.fix_label(or_matched);
+                            // Check guard if present
+                            if let Some(guard) = &case.guard {
+                                self.emit(Opcode::DUP_TOP, 0);
+                                self.compile_expr(guard)?;
+                                self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_case);
+                            }
+                            // Fall through to POP_TOP subject, body, JUMP end_label
                         }
                         Pattern::MatchClass { cls, patterns, kwd_attrs, kwd_patterns } => {
                             // MatchClass: check isinstance(subject, cls) then check attributes

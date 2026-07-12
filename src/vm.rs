@@ -232,6 +232,15 @@ impl VirtualMachine {
           // Native statistics module
           modules.insert("statistics".to_string(), create_module("statistics", create_statistics_dict()));
 
+          // Native contextlib module
+          modules.insert("contextlib".to_string(), create_module("contextlib", create_contextlib_dict()));
+
+          // Native decimal module
+          modules.insert("decimal".to_string(), create_module("decimal", create_decimal_dict()));
+
+          // Native fractions module
+          modules.insert("fractions".to_string(), create_module("fractions", create_fractions_dict()));
+
           // Also register the 'operator' module if not already present
           if !modules.contains_key("operator") {
               let mut op_dict = HashMap::new();

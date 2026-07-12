@@ -1,0 +1,9 @@
+print('before match')
+def f(x):
+    match x:
+        case 1:
+            return 'one'
+        case _:
+            return 'other'
+print('match:', f(1))
+print('after match')

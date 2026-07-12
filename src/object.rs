@@ -4889,6 +4889,14 @@ impl ObjectAccess for PyObject {
                 dict.remove(name).ok_or_else(|| PyError::attribute_error(format!("'{}' object has no attribute '{}'", self.type_name(), name)))?;
                 Ok(())
             }
+            PyObject::Module { dict, .. } => {
+                dict.remove(name).ok_or_else(|| PyError::attribute_error(format!("module has no attribute '{}'", name)))?;
+                Ok(())
+            }
+            PyObject::Type { dict, .. } => {
+                dict.remove(name).ok_or_else(|| PyError::attribute_error(format!("type has no attribute '{}'", name)))?;
+                Ok(())
+            }
             _ => Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", self.type_name(), name))),
         }
     }
@@ -6341,6 +6349,27 @@ pub fn create_random_dict() -> HashMap<String, PyObjectRef> {
         let a = args[0].as_i64().unwrap_or(0) as f64;
         let b = args[1].as_i64().unwrap_or(1) as f64;
         Ok(py_float(a + (b - a) * fast_random_f64()))
+    });
+
+    rnd_func!("shuffle", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("shuffle() takes at least 1 argument"));
+        }
+        let seq = &args[0];
+        let seq_borrowed = seq.borrow();
+        if let PyObject::List(items) = &*seq_borrowed {
+            let mut items = items.clone();
+            drop(seq_borrowed);
+            let len = items.len();
+            for i in (1..len).rev() {
+                let j = (fast_random_u64() % (i + 1) as u64) as usize;
+                items.swap(i, j);
+            }
+            *seq.borrow_mut() = PyObject::List(items);
+            Ok(py_none())
+        } else {
+            Err(PyError::type_error("shuffle() argument must be a list"))
+        }
     });
 
     d
@@ -8338,5 +8367,65 @@ pub fn create_statistics_dict() -> HashMap<String, PyObjectRef> {
         }
     });
 
+    d
+}
+
+
+pub fn create_contextlib_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! ctx_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+    ctx_func!("contextmanager", |args| {
+        if args.is_empty() { return Err(PyError::type_error("contextmanager() missing argument")); }
+        Ok(args[0].clone())
+    });
+    ctx_func!("nullcontext", |args| {
+        if args.is_empty() { Ok(py_none()) } else { Ok(args[0].clone()) }
+    });
+    ctx_func!("suppress", |_| Ok(py_none()));
+    d
+}
+
+pub fn create_decimal_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! dec_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+    dec_func!("Decimal", |args| {
+        if args.is_empty() { return Err(PyError::type_error("Decimal() missing argument")); }
+        let val = args[0].str();
+        Ok(py_str(&format!("Decimal('{}')", val)))
+    });
+    d
+}
+
+pub fn create_fractions_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! frac_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+    frac_func!("Fraction", |args| {
+        if args.len() < 2 { return Err(PyError::type_error("Fraction() requires 2 arguments")); }
+        let n = args[0].as_i64().unwrap_or(0);
+        let mut den = args[1].as_i64().unwrap_or(1);
+        if den == 0 { return Err(PyError::ValueError("Fraction denominator cannot be zero".to_string())); }
+        let mut num = n;
+        if den < 0 { num = -num; den = -den; }
+        let g = {
+            let mut a = num.abs();
+            let mut b = den;
+            while b != 0 { let t = b; b = a % b; a = t; }
+            a
+        };
+        if g > 1 { num /= g; den /= g; }
+        Ok(py_str(&format!("{}/{}", num, den)))
+    });
     d
 }
