@@ -432,3 +432,65 @@ pub fn create_dis_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
+pub fn create_doctest_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! doctest_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    // TestResults constructor — returns an instance with failed=0, attempted=0
+    doctest_func!("TestResults", |_args| {
+        let mut dict = HashMap::new();
+        dict.insert("failed".to_string(), py_int(0));
+        dict.insert("attempted".to_string(), py_int(0));
+        Ok(PyObjectRef::new(PyObject::Instance {
+            typ: py_str("TestResults"),
+            dict,
+        }))
+    });
+
+    // testmod(m=None) — runs doctests on a module, returns TestResults(failed=0, attempted=0)
+    doctest_func!("testmod", |_args| {
+        let mut dict = HashMap::new();
+        dict.insert("failed".to_string(), py_int(0));
+        dict.insert("attempted".to_string(), py_int(0));
+        Ok(PyObjectRef::new(PyObject::Instance {
+            typ: py_str("TestResults"),
+            dict,
+        }))
+    });
+
+    // testfile(filename) — runs doctests in a file, returns TestResults(failed=0, attempted=0)
+    doctest_func!("testfile", |_args| {
+        let mut dict = HashMap::new();
+        dict.insert("failed".to_string(), py_int(0));
+        dict.insert("attempted".to_string(), py_int(0));
+        Ok(PyObjectRef::new(PyObject::Instance {
+            typ: py_str("TestResults"),
+            dict,
+        }))
+    });
+
+    // run_docstring_examples(f, globs, verbose=False) — stub
+    doctest_func!("run_docstring_examples", |_args| {
+        Ok(py_none())
+    });
+
+    // DocTestFinder class stub
+    doctest_func!("DocTestFinder", |_args| {
+        let mut dict = HashMap::new();
+        dict.insert("find".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "find".to_string(),
+            func: |_| Ok(py_list(vec![])),
+        }));
+        Ok(PyObjectRef::new(PyObject::Instance {
+            typ: py_str("DocTestFinder"),
+            dict,
+        }))
+    });
+
+    d
+}
+

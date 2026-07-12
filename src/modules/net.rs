@@ -1,5 +1,7 @@
 use crate::object::*;
 use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::net::TcpStream;
 
 pub fn create_select_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
@@ -369,3 +371,412 @@ pub fn create_urllib_dict() -> HashMap<String, PyObjectRef> {
 use std::rc::Rc;
 use std::cell::RefCell;
 use std::process::Command;
+
+// ---------------------------------------------------------------------------
+// http.client module - HTTPConnection class
+// ---------------------------------------------------------------------------
+
+/// Standalone read() method for HTTPResponse instances.
+/// `args[0]` is the HTTPResponse instance (auto-bound by BuiltinMethod).
+fn http_response_read(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() {
+        return Err(PyError::type_error("read() missing required 'self' argument"));
+    }
+    let borrowed = args[0].borrow();
+    if let PyObject::Instance { dict, .. } = &*borrowed {
+        if let Some(body) = dict.get("_body") {
+            return Ok(body.clone());
+        }
+    }
+    Ok(PyObjectRef::imm(PyObject::Bytes(vec![])))
+}
+
+pub fn create_http_client_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+
+    // ---- HTTPResponse type ----
+    let mut resp_dict = HashMap::new();
+    resp_dict.insert(
+        "read".to_string(),
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "read".to_string(),
+            func: http_response_read,
+        }),
+    );
+    let http_resp_type = PyObjectRef::new(PyObject::Type {
+        name: "HTTPResponse".to_string(),
+        dict: resp_dict,
+        bases: vec![],
+        mro: vec![],
+    });
+    d.insert("HTTPResponse".to_string(), http_resp_type.clone());
+
+    // ---- HTTPConnection class ----
+    let mut conn_dict = HashMap::new();
+
+    // __init__(self, host, port=80)
+    conn_dict.insert(
+        "__init__".to_string(),
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__init__".to_string(),
+            func: |args| {
+                if args.len() < 2 {
+                    return Err(PyError::type_error(
+                        "HTTPConnection() missing 1 required positional argument: 'host'",
+                    ));
+                }
+                let self_obj = &args[0];
+                let host = args[1].str();
+                let port = if args.len() > 2 {
+                    args[2].as_i64().unwrap_or(80) as u16
+                } else {
+                    80u16
+                };
+                if let PyObject::Instance { dict, .. } = &mut *self_obj.borrow_mut() {
+                    dict.insert("_host".to_string(), py_str(&host));
+                    dict.insert("_port".to_string(), py_int(port as i64));
+                }
+                Ok(py_none())
+            },
+        }),
+    );
+
+    // request(self, method, url, body=None, headers=None)
+    conn_dict.insert(
+        "request".to_string(),
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "request".to_string(),
+            func: |args| {
+                if args.len() < 3 {
+                    return Err(PyError::type_error(
+                        "request() missing 2 required positional arguments: 'method' and 'url'",
+                    ));
+                }
+                let self_obj = &args[0];
+                let method = args[1].str();
+                let url = args[2].str();
+
+                // Extract body (optional, arg 3)
+                let body = if args.len() > 3 {
+                    let b = &args[3];
+                    let b_borrowed = b.borrow();
+                    match &*b_borrowed {
+                        PyObject::Bytes(bytes) => Some(bytes.clone()),
+                        PyObject::None => None,
+                        _ => Some(b.str().into_bytes()),
+                    }
+                } else {
+                    None
+                };
+
+                // Extract headers (optional, arg 4) - passed as PyDict
+                let headers: HashMap<String, String> = if args.len() > 4 {
+                    let h = &args[4];
+                    let h_borrowed = h.borrow();
+                    let mut result = HashMap::new();
+                    if let PyObject::Dict(pydict) = &*h_borrowed {
+                        for (k, v) in pydict.items() {
+                            result.insert(k.str(), v.str());
+                        }
+                    }
+                    result
+                } else {
+                    HashMap::new()
+                };
+
+                // Read host and port from instance dict
+                let (host, port) = {
+                    let borrowed = self_obj.borrow();
+                    if let PyObject::Instance { dict, .. } = &*borrowed {
+                        let host = dict
+                            .get("_host")
+                            .map(|h| h.str())
+                            .unwrap_or_else(|| "localhost".to_string());
+                        let port = dict
+                            .get("_port")
+                            .and_then(|p| p.as_i64())
+                            .unwrap_or(80) as u16;
+                        (host, port)
+                    } else {
+                        return Err(PyError::runtime_error("invalid HTTPConnection instance"));
+                    }
+                };
+
+                // Connect via TcpStream
+                let addr = format!("{}:{}", host, port);
+                let stream = match TcpStream::connect(&addr) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        return Err(PyError::OsError(format!(
+                            "Could not connect to {}: {}",
+                            addr, e
+                        )));
+                    }
+                };
+
+                // Build HTTP request path
+                let path = if url.starts_with("http://") || url.starts_with("https://") {
+                    let after_proto = if url.starts_with("https://") {
+                        &url[8..]
+                    } else {
+                        &url[7..]
+                    };
+                    if let Some(slash_pos) = after_proto.find('/') {
+                        &after_proto[slash_pos..]
+                    } else {
+                        "/"
+                    }
+                } else {
+                    url.as_str()
+                };
+
+                let mut request = format!(
+                    "{} {} HTTP/1.1\r\nHost: {}\r\n",
+                    method, path, host
+                );
+                for (k, v) in &headers {
+                    request.push_str(&format!("{}: {}\r\n", k, v));
+                }
+                if let Some(ref body_bytes) = body {
+                    request.push_str(&format!("Content-Length: {}\r\n", body_bytes.len()));
+                }
+                request.push_str("Connection: close\r\n\r\n");
+
+                let mut full_request = request.into_bytes();
+                if let Some(ref body_bytes) = body {
+                    full_request.extend_from_slice(body_bytes);
+                }
+
+                // Send request
+                if let Err(e) = (&stream).write_all(&full_request) {
+                    return Err(PyError::OsError(format!("Failed to send request: {}", e)));
+                }
+
+                // Store stream in instance dict as a Socket object
+                let sock = PyObjectRef::new(PyObject::Socket {
+                    inner: Rc::new(RefCell::new(SocketInner::TcpStream(stream))),
+                });
+                if let PyObject::Instance { dict, .. } = &mut *self_obj.borrow_mut() {
+                    dict.insert("_stream".to_string(), sock);
+                }
+
+                Ok(py_none())
+            },
+        }),
+    );
+
+    // getresponse(self) -> HTTPResponse
+    conn_dict.insert(
+        "getresponse".to_string(),
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "getresponse".to_string(),
+            func: |args| {
+                if args.is_empty() {
+                    return Err(PyError::type_error(
+                        "getresponse() missing required 'self' argument",
+                    ));
+                }
+                let self_obj = &args[0];
+
+                // Take the Socket out of the instance dict
+                let sock = {
+                    let mut borrowed = self_obj.borrow_mut();
+                    if let PyObject::Instance { dict, .. } = &mut *borrowed {
+                        dict.remove("_stream")
+                            .ok_or_else(|| {
+                                PyError::runtime_error(
+                                    "no request made yet - call request() first",
+                                )
+                            })?
+                    } else {
+                        return Err(PyError::runtime_error(
+                            "invalid HTTPConnection instance",
+                        ));
+                    }
+                };
+
+                // Extract TcpStream from Socket via try_clone
+                let mut stream = {
+                    let sock_borrowed = sock.borrow();
+                    if let PyObject::Socket { inner } = &*sock_borrowed {
+                        let inner_borrowed = inner.borrow();
+                        match &*inner_borrowed {
+                            SocketInner::TcpStream(s) => s
+                                .try_clone()
+                                .map_err(|e| {
+                                    PyError::OsError(format!("Failed to clone stream: {}", e))
+                                })?,
+                            _ => {
+                                return Err(PyError::runtime_error(
+                                    "no active HTTP connection",
+                                ));
+                            }
+                        }
+                    } else {
+                        return Err(PyError::runtime_error(
+                            "internal error: stream socket not found",
+                        ));
+                    }
+                };
+
+                // Read response status line
+                use std::io::BufRead;
+                let mut reader = std::io::BufReader::new(&mut stream);
+                let mut status_line = String::new();
+                if reader
+                    .read_line(&mut status_line)
+                    .map_err(|e| PyError::OsError(format!("Failed to read response: {}", e)))?
+                    == 0
+                {
+                    return Err(PyError::runtime_error("connection closed"));
+                }
+
+                let status_line = status_line.trim();
+                let status_code: i64 = status_line
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+
+                // Skip headers
+                loop {
+                    let mut line = String::new();
+                    if reader
+                        .read_line(&mut line)
+                        .map_err(|e| PyError::OsError(format!("Failed to read header: {}", e)))?
+                        == 0
+                    {
+                        break;
+                    }
+                    if line.trim().is_empty() {
+                        break;
+                    }
+                }
+
+                // Read body (rest of stream)
+                let mut body = Vec::new();
+                reader
+                    .read_to_end(&mut body)
+                    .map_err(|e| PyError::OsError(format!("Failed to read body: {}", e)))?;
+
+                // Build fresh HTTPResponse type (no captures for fn pointer)
+                let local_resp_type = PyObjectRef::new(PyObject::Type {
+                    name: "HTTPResponse".to_string(),
+                    dict: {
+                        let mut rd = HashMap::new();
+                        rd.insert(
+                            "read".to_string(),
+                            PyObjectRef::new(PyObject::BuiltinFunction {
+                                name: "read".to_string(),
+                                func: http_response_read,
+                            }),
+                        );
+                        rd
+                    },
+                    bases: vec![],
+                    mro: vec![],
+                });
+
+                // Build HTTPResponse instance
+                let mut inst_dict = HashMap::new();
+                inst_dict.insert("status".to_string(), py_int(status_code));
+                inst_dict.insert("_body".to_string(), PyObjectRef::imm(PyObject::Bytes(body)));
+
+                Ok(PyObjectRef::new(PyObject::Instance {
+                    typ: local_resp_type,
+                    dict: inst_dict,
+                }))
+            },
+        }),
+    );
+
+    // close(self)
+    conn_dict.insert(
+        "close".to_string(),
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "close".to_string(),
+            func: |args| {
+                let self_obj = &args[0];
+                if let PyObject::Instance { dict, .. } = &mut *self_obj.borrow_mut() {
+                    let _ = dict.remove("_stream");
+                }
+                Ok(py_none())
+            },
+        }),
+    );
+
+    let http_conn_type = PyObjectRef::new(PyObject::Type {
+        name: "HTTPConnection".to_string(),
+        dict: conn_dict,
+        bases: vec![],
+        mro: vec![],
+    });
+    d.insert("HTTPConnection".to_string(), http_conn_type);
+
+    d
+}
+
+// ---------------------------------------------------------------------------
+// smtplib module - SMTP class (stub)
+// ---------------------------------------------------------------------------
+
+pub fn create_smtplib_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+
+    let mut smtp_dict = HashMap::new();
+
+    // __init__(self, host, port=25)
+    smtp_dict.insert(
+        "__init__".to_string(),
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__init__".to_string(),
+            func: |args| {
+                if args.len() < 2 {
+                    return Err(PyError::type_error(
+                        "SMTP() missing 1 required positional argument: 'host'",
+                    ));
+                }
+                let self_obj = &args[0];
+                let host = args[1].str();
+                let port = if args.len() > 2 {
+                    args[2].as_i64().unwrap_or(25) as u16
+                } else {
+                    25u16
+                };
+                if let PyObject::Instance { dict, .. } = &mut *self_obj.borrow_mut() {
+                    dict.insert("_host".to_string(), py_str(&host));
+                    dict.insert("_port".to_string(), py_int(port as i64));
+                }
+                Ok(py_none())
+            },
+        }),
+    );
+
+    // sendmail(self, from_addr, to_addrs, msg) -> {} (stub)
+    smtp_dict.insert(
+        "sendmail".to_string(),
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "sendmail".to_string(),
+            func: |_args| Ok(py_dict()),
+        }),
+    );
+
+    // quit(self) -> None (stub)
+    smtp_dict.insert(
+        "quit".to_string(),
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "quit".to_string(),
+            func: |_args| Ok(py_none()),
+        }),
+    );
+
+    let smtp_type = PyObjectRef::new(PyObject::Type {
+        name: "SMTP".to_string(),
+        dict: smtp_dict,
+        bases: vec![],
+        mro: vec![],
+    });
+    d.insert("SMTP".to_string(), smtp_type);
+
+    d
+}

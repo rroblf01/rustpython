@@ -397,7 +397,19 @@ impl VirtualMachine {
           modules.insert("dis".to_string(), create_module("dis", create_dis_dict()));
 
           // Native http module (HTTPStatus enum)
-          modules.insert("http".to_string(), create_module("http", create_http_dict()));
+          let http_mod = create_module("http", create_http_dict());
+          modules.insert("http".to_string(), http_mod.clone());
+
+          // Native http.client submodule (HTTPConnection, HTTPResponse)
+          let http_client_mod = create_module("http.client", create_http_client_dict());
+          // Wire client as a submodule attribute of the http parent module
+          if let PyObject::Module { dict, .. } = &mut *http_mod.borrow_mut() {
+              dict.insert("client".to_string(), http_client_mod.clone());
+          }
+          modules.insert("http.client".to_string(), http_client_mod);
+
+          // Native smtplib module (SMTP stub)
+          modules.insert("smtplib".to_string(), create_module("smtplib", create_smtplib_dict()));
 
           // Native html module (escape/unescape)
           let html_mod = create_module("html", create_html_dict());
@@ -411,8 +423,19 @@ impl VirtualMachine {
           }
           modules.insert("html.entities".to_string(), html_entities_mod);
 
+          // Native html.parser module (HTMLParser stub)
+          let html_parser_mod = create_module("html.parser", create_html_parser_dict());
+          // Wire parser as a submodule attribute of the html parent module
+          if let PyObject::Module { dict, .. } = &mut *html_mod.borrow_mut() {
+              dict.insert("parser".to_string(), html_parser_mod.clone());
+          }
+          modules.insert("html.parser".to_string(), html_parser_mod);
+
           // Native unittest module (stub with TestCase)
           modules.insert("unittest".to_string(), create_module("unittest", create_unittest_dict()));
+
+          // Native doctest module (stub with TestResults and testmod)
+          modules.insert("doctest".to_string(), create_module("doctest", create_doctest_dict()));
 
           // Native email module (stub with EmailMessage)
           let email_mod = create_module("email", create_email_dict());
@@ -439,6 +462,23 @@ impl VirtualMachine {
 
           // Native configparser module
           modules.insert("configparser".to_string(), create_module("configparser", create_configparser_dict()));
+
+          // Native xml.etree.ElementTree module
+          let xml_etree_mod = create_module("xml.etree.ElementTree", create_xml_etree_dict());
+          modules.insert("xml.etree.ElementTree".to_string(), xml_etree_mod.clone());
+          // Native xml module (empty package)
+          let xml_mod = create_module("xml", create_xml_dict());
+          // Wire etree as a submodule of xml
+          if let PyObject::Module { dict: xml_el_dict, .. } = &mut *xml_mod.borrow_mut() {
+              xml_el_dict.insert("etree".to_string(), xml_etree_mod.clone());
+          }
+          modules.insert("xml".to_string(), xml_mod);
+
+          // Native this module (Zen of Python)
+          modules.insert("this".to_string(), create_module("this", create_this_dict()));
+
+          // Native argparse module (ArgumentParser stub)
+          modules.insert("argparse".to_string(), create_module("argparse", create_argparse_dict()));
 
           // Populate sys.path with default search paths
          if let PyObject::List(path_list) = &mut *sys_dict.get("path").unwrap().borrow_mut() {

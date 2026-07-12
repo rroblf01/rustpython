@@ -620,6 +620,59 @@ pub fn create_difflib_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
+pub fn create_html_parser_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+
+    thread_local! {
+        static HTML_PARSER_DATA: std::cell::RefCell<String> = std::cell::RefCell::new(String::new());
+    }
+
+    // HTMLParser class — callable that returns an instance with feed, close, getpos
+    let html_parser = PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "HTMLParser".to_string(),
+        func: |_args| {
+            let mut dict = HashMap::new();
+
+            // feed(data) — accumulates data
+            dict.insert("feed".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "feed".to_string(),
+                func: |fargs| {
+                    if !fargs.is_empty() {
+                        HTML_PARSER_DATA.with(|d| {
+                            d.borrow_mut().push_str(&fargs[0].str());
+                        });
+                    }
+                    Ok(py_none())
+                },
+            }));
+
+            // close() — returns accumulated data and clears
+            dict.insert("close".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "close".to_string(),
+                func: |_| {
+                    let result = HTML_PARSER_DATA.with(|d| d.borrow().clone());
+                    HTML_PARSER_DATA.with(|d| d.borrow_mut().clear());
+                    Ok(py_str(&result))
+                },
+            }));
+
+            // getpos() — returns (1, 0)
+            dict.insert("getpos".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "getpos".to_string(),
+                func: |_| Ok(py_tuple(vec![py_int(1), py_int(0)])),
+            }));
+
+            Ok(PyObjectRef::new(PyObject::Instance {
+                typ: py_str("HTMLParser"),
+                dict,
+            }))
+        },
+    });
+    d.insert("HTMLParser".to_string(), html_parser);
+
+    d
+}
+
 use std::rc::Rc;
 use std::cell::RefCell;
 use num_traits::ToPrimitive;
