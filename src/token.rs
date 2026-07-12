@@ -842,6 +842,7 @@ impl Lexer {
                         let mut expr = String::new();
                         let mut conversion: u8 = 0;
                         let mut format_spec = String::new();
+                        let mut debug: bool = false;
                         let mut state: u8 = 0; // 0=expr, 1=after_conv_marker, 2=format_spec
                         while depth > 0 {
                             match self.advance() {
@@ -859,15 +860,17 @@ impl Lexer {
                                         else { expr.push('}'); }
                                     }
                                 }
+                                Some('=') if depth == 1 && state == 0 => {
+                                    debug = true;
+                                    // Don't add '=' to expr — it's a debug marker
+                                }
                                 Some('!') if depth == 1 && state == 0 => {
-                                    // Check for !r, !s, !a
                                     state = 1;
                                 }
                                 Some('r') if state == 1 => { conversion = 1; state = 0; }
                                 Some('s') if state == 1 => { conversion = 2; state = 0; }
                                 Some('a') if state == 1 => { conversion = 3; state = 0; }
                                 Some(':') if depth == 1 && state == 0 => {
-                                    // Start of format spec
                                     state = 2;
                                 }
                                 Some(c) => {
@@ -883,6 +886,14 @@ impl Lexer {
                                     }
                                 }
                                 None => break,
+                            }
+                        }
+                        // If debug mode, prepend "{expr}=" to the literal text
+                        if debug {
+                            let prefix = format!("{}=", expr);
+                            literal.push_str(&prefix);
+                            if conversion == 0 {
+                                conversion = 1; // Default to !r (repr) for debug
                             }
                         }
                         parts.push((std::mem::take(&mut literal), expr, format_spec, conversion));

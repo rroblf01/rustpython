@@ -274,6 +274,21 @@ impl Parser {
                 op,
                 value: Box::new(value),
             })
+        } else if self.at(&Token::Colon) {
+            // Annotation assignment: x: int = 5 or x: int
+            self.next(); // consume colon
+            let annotation = self.parse_expr()?;
+            let value = if self.eat(&Token::Equal) {
+                Some(Box::new(self.parse_expr()?))
+            } else {
+                None
+            };
+            self.expect_newline_or_eof();
+            Ok(Stmt::AnnAssign {
+                target: Box::new(expr),
+                annotation: Box::new(annotation),
+                value,
+            })
         } else {
             self.expect_newline_or_eof();
             Ok(Stmt::Expr(Box::new(expr)))

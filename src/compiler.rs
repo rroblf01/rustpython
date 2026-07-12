@@ -1210,7 +1210,11 @@ impl Compiler {
             Stmt::With { items, body, is_async } => {
                 for (_i, item) in items.iter().enumerate() {
                     self.compile_expr(&item.context_expr)?;
-                    self.emit(Opcode::SETUP_WITH, 0);
+                    if *is_async {
+                        self.emit(Opcode::BEFORE_ASYNC_WITH, 0);
+                    } else {
+                        self.emit(Opcode::SETUP_WITH, 0);
+                    }
                     if let Some(var) = &item.optional_vars {
                         self.compile_assign_target(var)?;
                     } else {
