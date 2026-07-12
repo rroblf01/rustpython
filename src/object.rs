@@ -5507,6 +5507,16 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
             std::fs::File::create("/dev/null").unwrap()
         }))),
     }));
+    d.insert("platform".to_string(), py_str(std::env::consts::OS));
+    d.insert("implementation".to_string(), py_str("RustPython"));
+    d.insert("byteorder".to_string(), py_str(if cfg!(target_endian = "little") { "little" } else { "big" }));
+    d.insert("maxsize".to_string(), py_int(i64::MAX));
+    d.insert("maxunicode".to_string(), py_int(1114111));
+    d.insert("api_version".to_string(), py_int(1013));
+    d.insert("executable".to_string(), py_str(&std::env::current_exe().map(|p| p.to_string_lossy().to_string()).unwrap_or_default()));
+    d.insert("prefix".to_string(), py_str("/usr"));
+    d.insert("exec_prefix".to_string(), py_str("/usr"));
+    d.insert("winver".to_string(), py_str("3.12"));
     d
 }
 
