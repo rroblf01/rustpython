@@ -74,6 +74,7 @@ pub enum Stmt {
     Try {
         body: Vec<Stmt>,
         handlers: Vec<ExceptHandler>,
+        handlers_star: Vec<ExceptStar>,
         orelse: Vec<Stmt>,
         finalbody: Vec<Stmt>,
     },
@@ -93,6 +94,11 @@ pub enum Stmt {
     Pass,
     Break,
     Continue,
+    TypeAlias {
+        name: Ident,
+        type_params: Vec<Ident>,
+        value: Box<Expr>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -126,6 +132,13 @@ pub struct MatchCase {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExceptHandler {
+    pub typ: Option<Box<Expr>>,
+    pub name: Option<Ident>,
+    pub body: Vec<Stmt>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExceptStar {
     pub typ: Option<Box<Expr>>,
     pub name: Option<Ident>,
     pub body: Vec<Stmt>,

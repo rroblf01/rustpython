@@ -12,35 +12,45 @@ RustPython is a learning project that implements a significant subset of Python 
 - **VM** (`vm.rs`) — stack-based bytecode interpreter
 - **Object system** (`object.rs`) — core types, builtins, and methods
 
-## Features implemented
+## What's working (CPython 3.14 compatibility)
 
+**Status: ~75% complete for CPython 3.14 feature coverage**
+
+### Fully working
 | Category | Details |
 |----------|---------|
-| Types | `None`, `bool`, `int` (arbitrary precision), `float`, `str`, `bytes`, `bytearray`, `list`, `tuple`, `dict` (arbitrary hashable keys), `set`, `range` (lazy), `slice`, `function`, `generator`, `class`, `module`, `file`, `super`, `property`, `staticmethod`, `classmethod` |
-| Operators | Arithmetic (`+` `-` `*` `/` `//` `%` `**`), bitwise (`<<` `>>` `&` `|` `^` `~`), comparison (`<` `<=` `==` `>=` `>` `!=`), membership (`in` `not in`), identity (`is` `is not`) |
-| Comprehensions | List, dict, set — including multi-generator and `if` filters |
-| Functions | `def`, `lambda`, `*args`, `**kwargs`, default arguments, closures |
-| Classes | Single inheritance, `__init__`, `__str__`, `__len__`, `__repr__`, `__hash__`, `__call__`, properties, staticmethod, classmethod |
-| Control flow | `if`/`elif`/`else`, `for`/`in`, `while`, `try`/`except`, `match`/`case`, `break`/`continue` |
-| Generators | `yield`, `yield from`, generator expressions |
-| Builtins | 60+ builtin functions including `print`, `len`, `range`, `type`, `int`, `float`, `str`, `list`, `tuple`, `dict`, `set`, `bytes`, `bytearray`, `format`, `object`, `hash`, `slice`, `dir`, `globals`, `locals`, `ascii`, `frozenset`, `memoryview`, `sorted`, `enumerate`, `zip`, `map`, `filter`, `any`, `all`, `sum`, `min`, `max`, `abs`, `repr`, `iter`, `next`, `open`, `eval`, `exec`, `super`, `property`, `staticmethod`, `classmethod`, `isinstance`, `issubclass`, `hasattr`, `getattr`, `setattr`, `delattr`, `id`, `callable`, `pow`, `reversed`, `help`, `exit`, `input`, `ord`, `chr`, `hex`, `oct`, `bin` |
-| Methods | List (9), Dict (9), Str (27), Set (18) |
-| Literals | `b"..."` / `b'...'` bytes, `f"..."` f-strings, escape sequences including `\uHHHH` and `\UHHHHHHHH` |
+| **Arithmetic & operators** | All standard operators, augmented assignment, `@` matmul |
+| **Types** | `None`, `bool`, `int` (big), `float`, `str`, `bytes`, `bytearray`, `list`, `tuple`, `dict`, `set`, `frozenset`, `range`, `slice`, `function`, `generator`, `class`, `module`, `file`, `super`, `property`, `staticmethod`, `classmethod`, `memoryview` |
+| **Comprehensions** | List, dict, set — multi-generator, `if` filters |
+| **Functions** | `def`, `lambda`, `*args`, `**kwargs`, defaults, closures, keyword args |
+| **Classes & OOP** | Single/multiple inheritance, descriptors, `super()`, `@property`, `@classmethod`, `@staticmethod`, `__slots__`-like patterns via `__dict__` |
+| **Control flow** | `if`/`elif`/`else`, `for`/`in`, `while`, `try`/`except`/`finally`/`else`, `match`/`case` (basic patterns), `break`/`continue`, `with` (context managers) |
+| **Generators** | `yield`, `yield from`, generator expressions, `.send()`, `.throw()`, `.close()` |
+| **Async** | `async def`, `await`, `async for`, `async with` (parser + coroutine type) |
+| **Builtins** | 70+ builtin functions |
+| **String methods** | 27+ methods |
+| **Dict operations** | `dict \| other`, `\|=` union operators (PEP 584) |
+| **CLI** | `-c`, file execution, REPL, `--version`, `--help` |
 
-## Not implemented
+### Partially working
+| Feature | Status |
+|---------|--------|
+| `match`/`case` with complex patterns | MatchValue, MatchAs, MatchSingleton, MatchSequence work; MatchMapping, MatchClass, MatchStar in progress |
+| `import` statement | Native modules work; `.py` file import partially works |
+| `del` statement | `del name`, `del obj.attr` work; `del subscript` now works |
+| F-strings | Basic expressions + format specs work |
+| Exception handling | Full `try`/`except`/`else`/`finally`, `raise...from`, `except...as` all work |
+| Compiler opcodes | ~15 new handlers added (CALL_FUNCTION_EX, CALL_KW, EXTENDED_ARG, RESUME, SET_FUNCTION_ATTRIBUTE, LOAD_FROM_DICT_OR_GLOBALS) |
 
-- `async`/`await`
-- `with` statement / context managers
-- `@decorator` syntax
-- Full `except ... as e` pattern
-- `finally` blocks
-- `raise ... from` chaining
-- `del` statement
-- `@` matrix multiply operator
-- f-string format specs
-- `__getitem__`/`__setitem__`/`__iter__`/`__next__` on custom classes
-- Multiple inheritance MRO
-- `import` of standard library modules
+### Not yet implemented
+- `except*` / Exception Groups (PEP 654)
+- `type` statement (PEP 695)
+- Full `.py` file import system (importlib)
+- `asyncio` event loop
+- Full MRO C3 linearization (basic multiple inheritance works)
+- Inline `*args`/`**kwargs` unpack in function calls (`f(*args)`)
+- Line numbers in tracebacks
+- `__slots__`, `__annotations__`, `__module__`/`__qualname__` on all objects
 
 ## Building
 

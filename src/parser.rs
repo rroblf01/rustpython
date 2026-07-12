@@ -1,5 +1,5 @@
 use crate::ast::*;
-use crate::token::{Lexer, Token};
+use crate::token::{Lexer, LexerState, Token};
 
 pub struct Parser {
     lexer: Lexer,
@@ -71,6 +71,19 @@ impl Parser {
                 Ok(s)
             }
             _ => unexpected_token!(self, "NAME"),
+        }
+    }
+
+    fn at_name(&self, name: &str) -> bool {
+        matches!(&self.current, Token::Name(n) if n == name)
+    }
+
+    fn eat_name(&mut self, name: &str) -> bool {
+        if self.at_name(name) {
+            self.next();
+            true
+        } else {
+            false
         }
     }
 
@@ -162,8 +175,11 @@ impl Parser {
         if self.at(&Token::Try) {
             return self.parse_try();
         }
-        if self.at(&Token::Match) {
+        if matches!(&self.current, Token::Name(n) if n == "match") {
             return self.parse_match();
+        }
+        if matches!(&self.current, Token::Name(n) if n == "type") {
+            return self.parse_type_alias();
         }
         if self.at(&Token::Class) {
             return self.parse_class();
@@ -506,27 +522,49 @@ impl Parser {
         self.expect(&Token::Colon)?;
         let body = self.parse_block()?;
         let mut handlers = Vec::new();
+        let mut handlers_star = Vec::new();
         let mut orelse = Vec::new();
         let mut finalbody = Vec::new();
 
         while self.eat(&Token::Except) {
-            let typ = if !self.at(&Token::Colon) {
-                Some(Box::new(self.parse_expr()?))
+            // Check for except* (PEP 654)
+            if self.eat(&Token::Star) {
+                let typ = if !self.at(&Token::Colon) {
+                    Some(Box::new(self.parse_expr()?))
+                } else {
+                    None
+                };
+                let name = if self.eat(&Token::As) {
+                    Some(self.expect_name()?)
+                } else {
+                    None
+                };
+                self.expect(&Token::Colon)?;
+                let handler_body = self.parse_block()?;
+                handlers_star.push(ExceptStar {
+                    typ,
+                    name,
+                    body: handler_body,
+                });
             } else {
-                None
-            };
-            let name = if self.eat(&Token::As) {
-                Some(self.expect_name()?)
-            } else {
-                None
-            };
-            self.expect(&Token::Colon)?;
-            let handler_body = self.parse_block()?;
-            handlers.push(ExceptHandler {
-                typ,
-                name,
-                body: handler_body,
-            });
+                let typ = if !self.at(&Token::Colon) {
+                    Some(Box::new(self.parse_expr()?))
+                } else {
+                    None
+                };
+                let name = if self.eat(&Token::As) {
+                    Some(self.expect_name()?)
+                } else {
+                    None
+                };
+                self.expect(&Token::Colon)?;
+                let handler_body = self.parse_block()?;
+                handlers.push(ExceptHandler {
+                    typ,
+                    name,
+                    body: handler_body,
+                });
+            }
         }
 
         if self.eat(&Token::Else) {
@@ -537,11 +575,12 @@ impl Parser {
             self.expect(&Token::Colon)?;
             finalbody = self.parse_block()?;
         }
-        Ok(Stmt::Try { body, handlers, orelse, finalbody })
+        Ok(Stmt::Try { body, handlers, handlers_star, orelse, finalbody })
     }
 
     fn parse_match(&mut self) -> Result<Stmt, String> {
-        self.expect(&Token::Match)?;
+        // consume the 'match' keyword token (now Name("match"))
+        self.next();
         let subject = self.parse_expr()?;
         self.expect(&Token::Colon)?;
         let cases = self.parse_match_cases()?;
@@ -551,13 +590,33 @@ impl Parser {
         })
     }
 
+    fn parse_type_alias(&mut self) -> Result<Stmt, String> {
+        // consume the 'type' keyword token (now Name("type"))
+        self.next();
+        let name = self.expect_name()?;
+        let mut type_params = Vec::new();
+        // Optional: [T, U, ...] type parameters (PEP 695)
+        if self.eat(&Token::LeftBracket) {
+            loop {
+                type_params.push(self.expect_name()?);
+                if !self.eat(&Token::Comma) { break; }
+            }
+            self.expect(&Token::RightBracket)?;
+        }
+        self.expect(&Token::Equal)?;
+        let value = self.parse_expr()?;
+        self.expect_newline_or_eof();
+        Ok(Stmt::TypeAlias { name, type_params, value: Box::new(value) })
+    }
+
     fn parse_match_cases(&mut self) -> Result<Vec<MatchCase>, String> {
         let mut cases = Vec::new();
         loop {
             while self.eat(&Token::Newline) || self.eat(&Token::Indent) || self.eat(&Token::Dedent) {}
-            if !self.eat(&Token::Case) {
+            if !matches!(&self.current, Token::Name(n) if n == "case") {
                 break;
             }
+            self.next(); // consume "case" keyword
             let pattern = self.parse_pattern()?;
             let guard = if self.eat(&Token::If) {
                 Some(Box::new(self.parse_expr()?))
@@ -1516,6 +1575,10 @@ impl Parser {
                             elts.push(self.parse_bitwise_or()?);
                         }
                         if !self.eat(&Token::Comma) { break; }
+                        // After eating a trailing comma, check if we're at the end
+                        if self.at(&Token::RightBracket) || self.at(&Token::EndOfFile) {
+                            break;
+                        }
                     }
                 }
                 // Check for list comprehension: [expr for ...]

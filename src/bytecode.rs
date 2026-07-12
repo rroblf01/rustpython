@@ -132,6 +132,7 @@ impl Opcode {
     pub fn from_u16(n: u16) -> Option<Opcode> {
         use Opcode::*;
         Some(match n {
+            4 => CALL_FUNCTION_EX,
             42 => BINARY_OP,
             44 => BUILD_LIST,
             45 => BUILD_MAP,
@@ -140,6 +141,9 @@ impl Opcode {
             48 => BUILD_STRING,
             49 => BUILD_TUPLE,
             50 => CALL,
+            51 => CALL_INTRINSIC_1,
+            52 => CALL_INTRINSIC_2,
+            53 => CALL_KW,
             54 => COMPARE_OP,
             55 => CONTAINS_OP,
             64 => EXTENDED_ARG,
@@ -151,10 +155,12 @@ impl Opcode {
             71 => JUMP_BACKWARD,
             73 => JUMP_FORWARD,
             74 => LIST_APPEND,
+            75 => LIST_EXTEND,
             76 => LOAD_ATTR,
             78 => LOAD_CONST,
             79 => LOAD_DEREF,
             80 => LOAD_FAST,
+            87 => LOAD_FROM_DICT_OR_GLOBALS,
             88 => LOAD_GLOBAL,
             89 => LOAD_NAME,
             93 => MAKE_CELL,
@@ -163,9 +169,10 @@ impl Opcode {
             98 => POP_JUMP_IF_NOT_NONE,
             99 => POP_JUMP_IF_TRUE,
             100 => RAISE_VARARGS,
-            // 101 => RERAISE,
             102 => SEND,
             103 => SET_ADD,
+            104 => SET_FUNCTION_ATTRIBUTE,
+            105 => SET_UPDATE,
             106 => STORE_ATTR,
             107 => STORE_DEREF,
              108 => STORE_FAST,
@@ -177,6 +184,7 @@ impl Opcode {
             115 => UNPACK_SEQUENCE,
             114 => UNPACK_EX,
             116 => YIELD_VALUE,
+            128 => RESUME,
             25 => NOP,
             29 => POP_TOP,
             31 => PUSH_NULL,
@@ -188,6 +196,7 @@ impl Opcode {
             0 => STORE_SUBSCR,
             261 => LOAD_CLOSURE,
             202 => DICT_MERGE,
+            218 => UNPACK_SEQUENCE_TWO_TUPLE,
             _ => return None,
         })
     }
@@ -197,15 +206,16 @@ impl Opcode {
 pub struct Instr {
     pub op: Opcode,
     pub arg: u32,
+    pub line_no: Option<usize>,
 }
 
 impl Instr {
     pub fn new(op: Opcode) -> Self {
-        Instr { op, arg: 0 }
+        Instr { op, arg: 0, line_no: None }
     }
 
     pub fn with_arg(op: Opcode, arg: u32) -> Self {
-        Instr { op, arg }
+        Instr { op, arg, line_no: None }
     }
 }
 

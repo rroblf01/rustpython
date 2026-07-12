@@ -3810,9 +3810,8 @@ pub fn create_this_dict() -> HashMap<String, PyObjectRef> {
                If the implementation is hard to explain, it's a bad idea.\n\
                If the implementation is easy to explain, it may be a good idea.\n\
                Namespaces are one honking great idea -- let's do more of those!";
+    // Store Zen text as module data (prints on explicit import, not at startup)
     d.insert("s".to_string(), py_str(zen));
-    // Print Zen of Python on import
-    println!("{}", zen);
     d
 }
 

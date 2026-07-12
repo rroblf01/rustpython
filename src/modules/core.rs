@@ -134,6 +134,8 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     add_exc_type!("TimeoutError", builtin_make_exception_timeouterror);
     add_exc_type!("UnicodeDecodeError", builtin_make_exception_unicodedecodeerror);
     add_exc_type!("UnicodeEncodeError", builtin_make_exception_unicodeencodeerror);
+    add_exc_type!("ExceptionGroup", builtin_make_exception_exceptiongroup);
+    add_exc_type!("BaseExceptionGroup", builtin_make_exception_baseexceptiongroup);
 
     let math_module = PyObjectRef::new(PyObject::Module {
         name: "math".to_string(),
@@ -266,6 +268,34 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
     d.insert("prefix".to_string(), py_str("/usr"));
     d.insert("exec_prefix".to_string(), py_str("/usr"));
     d.insert("winver".to_string(), py_str("3.12"));
+    d
+}
+
+/// Native importlib stub module providing import_module().
+pub fn create_importlib_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! importlib_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    // import_module(name, package=None) -> module
+    importlib_func!("import_module", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("import_module() takes at least 1 argument"));
+        }
+        let name = args[0].str();
+        // We can't easily access the VM from a builtin function.
+        // For now, return an error guiding users to use built-in import.
+        // This is a stub — the real import_module is available as __import__.
+        Err(PyError::ImportError(format!(
+            "importlib.import_module() is not yet implemented in RustPython; use built-in 'import' statement instead"
+        )))
+    });
+
+    // __version__ — indicates importlib metadata
+    d.insert("__version__".to_string(), py_str("1.0.0"));
     d
 }
 

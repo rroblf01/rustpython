@@ -659,8 +659,8 @@ impl Lexer {
                         "while" => Token::While,
                         "with" => Token::With,
                         "yield" => Token::Yield,
-                        "match" => Token::Match,
-                        "case" => Token::Case,
+                        "match" => Token::Name("match".to_string()),
+                        "case" => Token::Name("case".to_string()),
                         "_" => Token::Underscore,
                         _ => Token::Name(name),
                     };
@@ -938,5 +938,40 @@ impl Lexer {
 
     pub fn get_line_col(&self) -> (usize, usize) {
         (self.line, self.col)
+    }
+}
+
+#[derive(Clone)]
+pub struct LexerState {
+    pub pos: usize,
+    pub line: usize,
+    pub col: usize,
+    pub at_line_start: bool,
+    pub pending: Vec<Token>,
+    pub paren_level: usize,
+    pub indent_stack: Vec<usize>,
+}
+
+impl Lexer {
+    pub fn save_state(&self) -> LexerState {
+        LexerState {
+            pos: self.pos,
+            line: self.line,
+            col: self.col,
+            at_line_start: self.at_line_start,
+            pending: self.pending.clone(),
+            paren_level: self.paren_level,
+            indent_stack: self.indent_stack.clone(),
+        }
+    }
+
+    pub fn restore_state(&mut self, state: LexerState) {
+        self.pos = state.pos;
+        self.line = state.line;
+        self.col = state.col;
+        self.at_line_start = state.at_line_start;
+        self.pending = state.pending;
+        self.paren_level = state.paren_level;
+        self.indent_stack = state.indent_stack;
     }
 }

@@ -500,6 +500,11 @@ pub enum PyObject {
         args: Vec<PyObjectRef>,
         cause: Option<PyObjectRef>,
     },
+    ExceptionGroup {
+        typ: String,
+        args: Vec<PyObjectRef>,
+        exceptions: Vec<PyObjectRef>,
+    },
     BuildClass,
     BoundMethod {
         func: PyObjectRef,
@@ -580,6 +585,7 @@ impl PyObject {
             PyObject::Cell { .. } => "cell",
             PyObject::Capsule { .. } => "capsule",
             PyObject::Exception { .. } => "Exception",
+            PyObject::ExceptionGroup { typ, .. } => typ,
             PyObject::BuildClass => "builtin_function_or_method",
             PyObject::BoundMethod { .. } => "method",
             PyObject::Partial { .. } => "partial",
@@ -696,6 +702,11 @@ impl PyObject {
             PyObject::Exception { typ, args, cause: _ } => {
                 let args_str: Vec<String> = args.iter().map(|a| a.repr()).collect();
                 format!("{}({})", typ, args_str.join(", "))
+            }
+            PyObject::ExceptionGroup { typ, args, exceptions } => {
+                let args_str: Vec<String> = args.iter().map(|a| a.repr()).collect();
+                let exc_str: Vec<String> = exceptions.iter().map(|e| e.repr()).collect();
+                format!("{}({}, {})", typ, args_str.join(", "), exc_str.join(", "))
             }
             PyObject::BuildClass => "<builtin function __build_class__>".to_string(),
             PyObject::BoundMethod { func, .. } => format!("<bound method {}>", func.borrow().type_name()),
@@ -3439,6 +3450,87 @@ pub fn builtin_classmethod(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Ok(PyObjectRef::new(PyObject::ClassMethod { func: args[0].clone() }))
 }
 
+// ---- __slots__ helpers ----
+
+/// Extract slot names from a __slots__ value (can be str, tuple, list, or set)
+fn extract_slots(slots_val: &PyObjectRef, result: &mut Vec<String>) {
+    let borrowed = slots_val.borrow();
+    match &*borrowed {
+        PyObject::Str(s) => {
+            if !result.contains(s) {
+                result.push(s.clone());
+            }
+        }
+        PyObject::Tuple(items) => {
+            for item in items {
+                if let PyObject::Str(s) = &*item.borrow() {
+                    if !result.contains(s) {
+                        result.push(s.clone());
+                    }
+                }
+            }
+        }
+        PyObject::List(items) => {
+            for item in items {
+                if let PyObject::Str(s) = &*item.borrow() {
+                    if !result.contains(s) {
+                        result.push(s.clone());
+                    }
+                }
+            }
+        }
+        PyObject::Set(set) => {
+            for item in set.to_vec() {
+                if let PyObject::Str(s) = &*item.borrow() {
+                    if !result.contains(s) {
+                        result.push(s.clone());
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Get the effective __slots__ for a type, checking the entire MRO.
+/// Returns None if no __slots__ is defined anywhere in the hierarchy.
+fn get_instance_slots(typ: &PyObjectRef) -> Option<Vec<String>> {
+    let typ_ref = typ.borrow();
+    if let PyObject::Type { dict: type_dict, mro, .. } = &*typ_ref {
+        let mut all_slots = Vec::new();
+
+        // Check the type's own __slots__
+        if let Some(slots_val) = type_dict.get("__slots__") {
+            extract_slots(slots_val, &mut all_slots);
+        }
+
+        // Check bases' __slots__ (skip self at index 0)
+        for base in mro.iter().skip(1) {
+            let base_ref = base.borrow();
+            if let PyObject::Type { dict: base_dict, .. } = &*base_ref {
+                if let Some(slots_val) = base_dict.get("__slots__") {
+                    extract_slots(slots_val, &mut all_slots);
+                }
+            }
+        }
+
+        if !all_slots.is_empty() {
+            return Some(all_slots);
+        }
+    }
+    None
+}
+
+/// Get the class name for an Instance's type, used for error messages.
+fn get_type_name_for_instance(typ: &PyObjectRef) -> String {
+    let typ_ref = typ.borrow();
+    if let PyObject::Type { name, .. } = &*typ_ref {
+        name.clone()
+    } else {
+        "object".to_string()
+    }
+}
+
 // ---- Attribute access ----
 
 pub trait ObjectAccess {
@@ -3487,6 +3579,26 @@ impl ObjectAccess for PyObject {
                 }).ok_or_else(|| PyError::attribute_error(format!("type has no attribute '{}'", name)))
             }
             PyObject::Instance { dict, typ } => {
+                // If __slots__ is defined, verify the attribute is allowed
+                if let Some(slots) = get_instance_slots(typ) {
+                    if !slots.iter().any(|s| s == name) {
+                        // Check if it's a class-level attribute (method, etc.) — those are always allowed
+                        let typ_ref = typ.borrow();
+                        let is_in_type = if let PyObject::Type { dict: type_dict, mro, .. } = &*typ_ref {
+                            type_dict.contains_key(name) || mro.iter().skip(1).any(|base| {
+                                if let PyObject::Type { dict: base_dict, .. } = &*base.borrow() {
+                                    base_dict.contains_key(name)
+                                } else { false }
+                            })
+                        } else { false };
+                        if !is_in_type {
+                            let type_name = get_type_name_for_instance(typ);
+                            return Err(PyError::attribute_error(
+                                format!("'{}' object has no attribute '{}'", type_name, name)
+                            ));
+                        }
+                    }
+                }
                 dict.get(name).cloned().or_else(|| {
                     let typ_ref = typ.borrow();
                     if let PyObject::Type { dict: type_dict, mro, .. } = &*typ_ref {
@@ -5348,7 +5460,16 @@ impl ObjectAccess for PyObject {
 
     fn set_attribute(&mut self, name: &str, value: PyObjectRef) -> PyResult<()> {
         match self {
-            PyObject::Instance { dict, .. } => {
+            PyObject::Instance { dict, typ } => {
+                // Check __slots__ restriction if defined on the type or its MRO
+                if let Some(slots) = get_instance_slots(typ) {
+                    if !slots.iter().any(|s| s == name) {
+                        let type_name = get_type_name_for_instance(typ);
+                        return Err(PyError::attribute_error(
+                            format!("'{}' object has no attribute '{}'", type_name, name)
+                        ));
+                    }
+                }
                 dict.insert(name.to_string(), value);
                 Ok(())
             }
@@ -5370,8 +5491,19 @@ impl ObjectAccess for PyObject {
 
     fn del_attribute(&mut self, name: &str) -> PyResult<()> {
         match self {
-            PyObject::Instance { dict, .. } => {
-                dict.remove(name).ok_or_else(|| PyError::attribute_error(format!("'{}' object has no attribute '{}'", self.type_name(), name)))?;
+            PyObject::Instance { dict, typ } => {
+                // Check __slots__ restriction if defined on the type or its MRO
+                if let Some(slots) = get_instance_slots(typ) {
+                    if !slots.iter().any(|s| s == name) {
+                        let type_name = get_type_name_for_instance(typ);
+                        return Err(PyError::attribute_error(
+                            format!("'{}' object has no attribute '{}'", type_name, name)
+                        ));
+                    }
+                }
+                dict.remove(name).ok_or_else(|| PyError::attribute_error(format!(
+                    "'{}' object has no attribute '{}'", self.type_name(), name
+                )))?;
                 Ok(())
             }
             PyObject::Module { dict, .. } => {
@@ -5382,7 +5514,9 @@ impl ObjectAccess for PyObject {
                 dict.remove(name).ok_or_else(|| PyError::attribute_error(format!("type has no attribute '{}'", name)))?;
                 Ok(())
             }
-            _ => Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", self.type_name(), name))),
+            _ => Err(PyError::attribute_error(format!(
+                "'{}' object has no attribute '{}'", self.type_name(), name
+            ))),
         }
     }
 }
@@ -5762,6 +5896,43 @@ make_exception_func!(builtin_make_exception_interruptederror, "InterruptedError"
 make_exception_func!(builtin_make_exception_timeouterror, "TimeoutError");
 make_exception_func!(builtin_make_exception_unicodedecodeerror, "UnicodeDecodeError");
 make_exception_func!(builtin_make_exception_unicodeencodeerror, "UnicodeEncodeError");
+
+// ExceptionGroup and BaseExceptionGroup factory functions (PEP 654)
+pub fn builtin_make_exception_exceptiongroup(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    let message = if !args.is_empty() { args[0].str() } else { "".to_string() };
+    let exceptions = if args.len() > 1 {
+        match &*args[1].borrow() {
+            PyObject::List(items) => items.clone(),
+            PyObject::Tuple(items) => items.clone(),
+            _ => vec![],
+        }
+    } else {
+        vec![]
+    };
+    Ok(PyObjectRef::new(PyObject::ExceptionGroup {
+        typ: "ExceptionGroup".to_string(),
+        args: args.to_vec(),
+        exceptions,
+    }))
+}
+
+pub fn builtin_make_exception_baseexceptiongroup(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    let message = if !args.is_empty() { args[0].str() } else { "".to_string() };
+    let exceptions = if args.len() > 1 {
+        match &*args[1].borrow() {
+            PyObject::List(items) => items.clone(),
+            PyObject::Tuple(items) => items.clone(),
+            _ => vec![],
+        }
+    } else {
+        vec![]
+    };
+    Ok(PyObjectRef::new(PyObject::ExceptionGroup {
+        typ: "BaseExceptionGroup".to_string(),
+        args: args.to_vec(),
+        exceptions,
+    }))
+}
 
 fn json_encode(val: &PyObjectRef) -> PyResult<PyObjectRef> {
     match &*val.borrow() {

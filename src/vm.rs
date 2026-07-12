@@ -116,22 +116,28 @@ pub struct VirtualMachine {
     /// Indexed by (function_id, instruction_offset). Used by JIT to
     /// identify hot paths for native compilation.
     pub profile: RefCell<HashMap<usize, Vec<u32>>>,
+    /// Line number of the last instruction executed. Used for error reporting.
+    pub last_error_line: Option<usize>,
 }
 
 impl VirtualMachine {
     pub fn new() -> Self {
+        Self::new_with_args(std::env::args().collect())
+    }
+
+    pub fn new_with_args(argv: Vec<String>) -> Self {
         let mut builtins = create_builtins();
         let globals_map = HashMap::from([
             ("__name__".to_string(), py_str("__main__")),
             ("__builtins__".to_string(), create_module("builtins", builtins.clone())),
         ]);
         let globals = Rc::new(RefCell::new(globals_map));
- 
+
          let mut modules = HashMap::new();
          modules.insert("builtins".to_string(), create_module("builtins", builtins.clone()));
          modules.insert("math".to_string(), create_module("math", create_math_dict()));
 
-         let sys_dict = create_sys_dict(std::env::args().collect());
+         let sys_dict = create_sys_dict(argv);
          modules.insert("sys".to_string(), create_module("sys", sys_dict.clone()));
           builtins.extend(sys_dict.clone());
 
@@ -480,6 +486,9 @@ impl VirtualMachine {
           // Native argparse module (ArgumentParser stub)
           modules.insert("argparse".to_string(), create_module("argparse", create_argparse_dict()));
 
+          // Native importlib stub module
+          modules.insert("importlib".to_string(), create_module("importlib", create_importlib_dict()));
+
           // Populate sys.path with default search paths
          if let PyObject::List(path_list) = &mut *sys_dict.get("path").unwrap().borrow_mut() {
              path_list.push(py_str("."));
@@ -502,6 +511,7 @@ impl VirtualMachine {
               jit: RefCell::new(JitCompiler::new()),
               sys_path: vec!["./".to_string(), "./Lib/".to_string(), "/usr/lib/python3.13/".to_string()],
               profile: RefCell::new(HashMap::new()),
+              last_error_line: None,
           }
     }
 
@@ -726,6 +736,8 @@ impl VirtualMachine {
         if ip >= self.frames[fi].code.instructions.len() {
             return Err(PyError::runtime_error("execution reached end of code"));
         }
+        // Save line number for error reporting before ip is incremented
+        self.last_error_line = self.frames[fi].code.instructions[ip].line_no;
         let op = self.frames[fi].code.instructions[ip].op;
         let arg = self.frames[fi].code.instructions[ip].arg;
         self.frames[fi].ip = ip + 1;
@@ -2840,10 +2852,13 @@ fn is_exception_subclass(child_type: &str, parent_type: &str) -> bool {
     // BaseException is the root — it has no parent.
     let parent: Option<&str> = match child_type {
         "BaseException" => None,
-        "Exception" | "SystemExit" | "KeyboardInterrupt" | "GeneratorExit" => Some("BaseException"),
+        "Exception" | "SystemExit" | "KeyboardInterrupt" | "GeneratorExit" |
+        "BaseExceptionGroup" => Some("BaseException"),
         // Sub-hierarchy parents (intermediate nodes in the tree)
         "ArithmeticError" | "LookupError" | "ImportError" | "RuntimeError" |
         "Warning" | "OSError" | "ValueError" => Some("Exception"),
+        // ExceptionGroup inherits from Exception
+        "ExceptionGroup" => Some("Exception"),
         // Sub-hierarchy children — must come before leaves to not be shadowed
         // Children of ArithmeticError
         "FloatingPointError" | "OverflowError" | "ZeroDivisionError" => Some("ArithmeticError"),
