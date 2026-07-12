@@ -241,6 +241,21 @@ impl VirtualMachine {
           // Native fractions module
           modules.insert("fractions".to_string(), create_module("fractions", create_fractions_dict()));
 
+          // Native platform module
+          modules.insert("platform".to_string(), create_module("platform", create_platform_dict()));
+
+          // Native getopt module
+          modules.insert("getopt".to_string(), create_module("getopt", create_getopt_dict()));
+
+          // Native getpass module
+          modules.insert("getpass".to_string(), create_module("getpass", create_getpass_dict()));
+
+          // Native tempfile module
+          modules.insert("tempfile".to_string(), create_module("tempfile", create_tempfile_dict()));
+
+          // Native shutil module
+          modules.insert("shutil".to_string(), create_module("shutil", create_shutil_dict()));
+
           // Also register the 'operator' module if not already present
           if !modules.contains_key("operator") {
               let mut op_dict = HashMap::new();
@@ -1548,6 +1563,30 @@ impl VirtualMachine {
                 let index = self.frames[fi].pop()?;
                 let obj = self.frames[fi].pop()?;
                 py_setitem(&obj, &index, val)?;
+            }
+
+            Opcode::DELETE_ATTR => {
+                let name_idx = arg as usize;
+                let name = self.frames[fi].code.names.get(name_idx).ok_or_else(|| {
+                    PyError::runtime_error("name index out of range")
+                })?.clone();
+                let obj = self.frames[fi].pop()?;
+                // Check for __delattr__ on Instance types first
+                {
+                    let obj_borrowed = obj.borrow();
+                    if let PyObject::Instance { typ, .. } = &*obj_borrowed {
+                        let typ_ref = typ.borrow();
+                        if let PyObject::Type { dict: type_dict, .. } = &*typ_ref {
+                            if let Some(delattr_method) = type_dict.get("__delattr__").cloned() {
+                                drop(typ_ref);
+                                drop(obj_borrowed);
+                                self.call_function(delattr_method, vec![obj.clone(), py_str(&name)], vec![])?;
+                                return Ok(None);
+                            }
+                        }
+                    }
+                }
+                obj.borrow_mut().del_attribute(&name)?;
             }
 
             Opcode::LIST_APPEND => {

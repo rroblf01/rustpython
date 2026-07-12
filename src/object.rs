@@ -2321,6 +2321,23 @@ pub fn builtin_delattr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         return Err(PyError::type_error("delattr() takes exactly 2 arguments"));
     }
     let attr_name = args[1].str();
+    // Check for __delattr__ on Instance types first
+    let f = {
+        let obj_borrowed = args[0].borrow();
+        match &*obj_borrowed {
+            PyObject::Instance { typ, .. } => {
+                let typ_ref = typ.borrow();
+                match &*typ_ref {
+                    PyObject::Type { dict: type_dict, .. } => type_dict.get("__delattr__").cloned(),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    };
+    if let Some(f) = f {
+        return call_bound_method(f, args[0].clone(), vec![args[1].clone()]);
+    }
     args[0].borrow_mut().del_attribute(&attr_name)?;
     Ok(py_none())
 }
@@ -8426,6 +8443,295 @@ pub fn create_fractions_dict() -> HashMap<String, PyObjectRef> {
         };
         if g > 1 { num /= g; den /= g; }
         Ok(py_str(&format!("{}/{}", num, den)))
+    });
+    d
+}
+
+// ---- platform module ----
+pub fn create_platform_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! plat_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+    plat_func!("platform", |_| {
+        let os = std::env::consts::OS;
+        let arch = std::env::consts::ARCH;
+        Ok(py_str(&format!("{}-{}", os, arch)))
+    });
+    plat_func!("machine", |_| {
+        Ok(py_str(std::env::consts::ARCH))
+    });
+    plat_func!("processor", |_| {
+        // Fall back to architecture string if no more specific info
+        Ok(py_str(std::env::consts::ARCH))
+    });
+    plat_func!("python_implementation", |_| {
+        Ok(py_str("RustPython"))
+    });
+    plat_func!("python_version", |_| {
+        Ok(py_str("3.12.0"))
+    });
+    plat_func!("system", |_| {
+        Ok(py_str(std::env::consts::OS))
+    });
+    d
+}
+
+// ---- getopt module ----
+pub fn create_getopt_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! getopt_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    // Helper: check if a short option expects an argument (followed by ':' in shortopts)
+    fn short_has_arg(c: char, shortopts: &str) -> bool {
+        if let Some(pos) = shortopts.find(c) {
+            shortopts.as_bytes().get(pos + 1) == Some(&b':')
+        } else {
+            false
+        }
+    }
+
+    getopt_func!("getopt", |args| {
+        if args.len() < 2 {
+            return Err(PyError::type_error("getopt() requires at least 2 arguments (args, shortopts)"));
+        }
+        let shortopts = args[1].str();
+        // Parse longopts if provided (third argument is a list of long option names)
+        let longopts: Vec<String> = if args.len() > 2 {
+            if let PyObject::List(list) = &*args[2].borrow() {
+                list.iter().map(|s| s.str()).collect()
+            } else {
+                return Err(PyError::type_error("longopts must be a list"));
+            }
+        } else {
+            Vec::new()
+        };
+
+        // Extract the argument list from the first argument (should be a list of strings)
+        let arg_list: Vec<String> = if let PyObject::List(list) = &*args[0].borrow() {
+            list.iter().map(|s| s.str()).collect()
+        } else {
+            return Err(PyError::type_error("args must be a list"));
+        };
+
+        let mut opts: Vec<PyObjectRef> = Vec::new();
+        let mut positional: Vec<PyObjectRef> = Vec::new();
+        let mut i: usize = 1; // Skip the program name (args[0])
+        let mut options_done = false;
+
+        while i < arg_list.len() {
+            let arg = &arg_list[i];
+            if options_done || !arg.starts_with('-') {
+                positional.push(py_str(arg));
+                i += 1;
+                if arg.starts_with('-') { options_done = true; }
+                continue;
+            }
+            if arg == "--" {
+                options_done = true;
+                i += 1;
+                continue;
+            }
+            if arg.starts_with("--") {
+                // Long option
+                let opt_name = &arg[2..];
+                let (name, val) = if let Some(eq_pos) = opt_name.find('=') {
+                    (&opt_name[..eq_pos], Some(&opt_name[eq_pos + 1..]))
+                } else {
+                    (opt_name, None)
+                };
+                // Check if this long option expects an argument
+                let needs_val = longopts.iter().any(|lo| {
+                    let base = if lo.ends_with('=') { &lo[..lo.len()-1] } else { lo.as_str() };
+                    base == name && lo.ends_with('=')
+                });
+                match val {
+                    Some(v) => opts.push(py_tuple(vec![py_str(&format!("--{}", name)), py_str(v)])),
+                    None => {
+                        if needs_val {
+                            i += 1;
+                            if i < arg_list.len() {
+                                opts.push(py_tuple(vec![py_str(&format!("--{}", name)), py_str(&arg_list[i])]));
+                            } else {
+                                return Err(PyError::type_error(&format!("option --{} requires a value", name)));
+                            }
+                        } else {
+                            opts.push(py_tuple(vec![py_str(&format!("--{}", name)), py_str("")]));
+                        }
+                    }
+                }
+                i += 1;
+            } else {
+                // Short option(s)
+                let chars: Vec<char> = arg[1..].chars().collect();
+                for (j, c) in chars.iter().enumerate() {
+                    if !shortopts.contains(*c) {
+                        return Err(PyError::type_error(&format!("option -{} not recognized", c)));
+                    }
+                    if short_has_arg(*c, &shortopts) {
+                        if j + 1 < chars.len() {
+                            // Value attached: -xvalue
+                            let val: String = chars[j + 1..].iter().collect();
+                            opts.push(py_tuple(vec![py_str(&format!("-{}", c)), py_str(&val)]));
+                            break;
+                        } else {
+                            i += 1;
+                            if i < arg_list.len() {
+                                opts.push(py_tuple(vec![py_str(&format!("-{}", c)), py_str(&arg_list[i])]));
+                            } else {
+                                return Err(PyError::type_error(&format!("option -{} requires an argument", c)));
+                            }
+                        }
+                    } else {
+                        opts.push(py_tuple(vec![py_str(&format!("-{}", c)), py_str("")]));
+                    }
+                }
+                i += 1;
+            }
+        }
+
+        Ok(py_tuple(vec![py_list(opts), py_list(positional)]))
+    });
+    d
+}
+
+// ---- getpass module ----
+pub fn create_getpass_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! getpass_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+    getpass_func!("getuser", |_| {
+        let user = std::env::var("USER")
+            .or_else(|_| std::env::var("LOGNAME"))
+            .unwrap_or_else(|_| "unknown".to_string());
+        Ok(py_str(&user))
+    });
+    getpass_func!("getpass", |args| {
+        let prompt = if args.is_empty() { "Password: ".to_string() } else { args[0].str() };
+        // In this minimal native implementation, we echo the prompt and read a line from stdin.
+        // This is simplified — a real getpass would disable terminal echo.
+        print!("{}", prompt);
+        use std::io::Write;
+        std::io::stdout().flush().ok();
+        let mut password = String::new();
+        match std::io::stdin().read_line(&mut password) {
+            Ok(_) => Ok(py_str(password.trim_end())),
+            Err(_) => Err(PyError::runtime_error("failed to read password")),
+        }
+    });
+    d
+}
+
+// ---- tempfile module ----
+pub fn create_tempfile_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! temp_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    // Simple random suffix generator using /dev/urandom or fallback
+    fn random_suffix(len: usize) -> String {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        // Mix time-based and random characters
+        let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let mut result = String::with_capacity(len);
+        let chars = b"abcdefghijklmnopqrstuvwxyz0123456789";
+        let mut seed = ts;
+        for _ in 0..len {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let idx = (seed as usize) % chars.len();
+            result.push(chars[idx] as char);
+        }
+        result
+    }
+
+    temp_func!("mkstemp", |_| {
+        // Try up to 10 times to create a unique temp file
+        for _ in 0..10 {
+            let suffix = random_suffix(8);
+            let name = format!("/tmp/tmp{}", suffix);
+            match std::fs::File::create_new(&name) {
+                Ok(file) => {
+                    use std::os::fd::AsRawFd;
+                    let fd = file.as_raw_fd();
+                    // Return (fd, name) as a tuple
+                    return Ok(py_tuple(vec![py_int(fd as i64), py_str(&name)]));
+                }
+                Err(_) => continue,
+            }
+        }
+        Err(PyError::runtime_error("could not create temporary file"))
+    });
+
+    temp_func!("mkdtemp", |_| {
+        for _ in 0..10 {
+            let suffix = random_suffix(8);
+            let name = format!("/tmp/tmp{}", suffix);
+            match std::fs::create_dir(&name) {
+                Ok(()) => return Ok(py_str(&name)),
+                Err(_) => continue,
+            }
+        }
+        Err(PyError::runtime_error("could not create temporary directory"))
+    });
+
+    // Add temporary directory path
+    d.insert("tempdir".to_string(), py_str("/tmp"));
+    d
+}
+
+// ---- shutil module ----
+pub fn create_shutil_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! shutil_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+    shutil_func!("copy", |args| {
+        if args.len() < 2 {
+            return Err(PyError::type_error("copy() requires 2 arguments (src, dst)"));
+        }
+        let src = args[0].str();
+        let dst = args[1].str();
+        match std::fs::copy(&src, &dst) {
+            Ok(_) => Ok(py_str(&dst)),
+            Err(e) => Err(PyError::OsError(format!("copy error: {}", e))),
+        }
+    });
+
+    shutil_func!("rmtree", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("rmtree() requires 1 argument (path)"));
+        }
+        let path = args[0].str();
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => Ok(py_none()),
+            Err(e) => Err(PyError::OsError(format!("rmtree error: {}", e))),
+        }
+    });
+
+    shutil_func!("move", |args| {
+        if args.len() < 2 {
+            return Err(PyError::type_error("move() requires 2 arguments (src, dst)"));
+        }
+        let src = args[0].str();
+        let dst = args[1].str();
+        match std::fs::rename(&src, &dst) {
+            Ok(()) => Ok(py_str(&dst)),
+            Err(e) => Err(PyError::OsError(format!("move error: {}", e))),
+        }
     });
     d
 }
