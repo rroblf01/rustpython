@@ -206,6 +206,18 @@ impl VirtualMachine {
           // Native pprint module
           modules.insert("pprint".to_string(), create_module("pprint", create_pprint_dict()));
 
+          // Native hashlib module
+          modules.insert("hashlib".to_string(), create_module("hashlib", create_hashlib_dict()));
+
+          // Native base64 module
+          modules.insert("base64".to_string(), create_module("base64", create_base64_dict()));
+
+          // Native uuid module
+          modules.insert("uuid".to_string(), create_module("uuid", create_uuid_dict()));
+
+          // Native string module
+          modules.insert("string".to_string(), create_module("string", create_string_dict()));
+
           // Also register the 'operator' module if not already present
           if !modules.contains_key("operator") {
               let mut op_dict = HashMap::new();
@@ -1325,7 +1337,7 @@ impl VirtualMachine {
                     let obj_borrowed = obj.borrow();
                     match &*obj_borrowed {
                         PyObject::Instance { dict, typ } => {
-                            dict.get(&name).cloned().or_else(|| {
+                            let attr = dict.get(&name).cloned().or_else(|| {
                                 let typ_ref = typ.borrow();
                                 if let PyObject::Type { dict: type_dict, mro, .. } = &*typ_ref {
                                     let found = type_dict.get(&name).cloned().or_else(|| {
@@ -1377,7 +1389,25 @@ impl VirtualMachine {
                                 } else {
                                     None
                                 }
-                            }).ok_or_else(|| PyError::attribute_error(format!("'{}' object has no attribute '{}'", obj_borrowed.type_name(), name)))
+                            });
+                            match attr {
+                                Some(val) => Ok(val),
+                                None => {
+                                    // Check for __getattr__ method on type before erroring
+                                    let typ_ref = typ.borrow();
+                                    if let PyObject::Type { dict: type_dict, .. } = &*typ_ref {
+                                        if let Some(getattr_method) = type_dict.get("__getattr__").cloned() {
+                                            drop(typ_ref);
+                                            drop(obj_borrowed);
+                                            self.call_function(getattr_method, vec![obj.clone(), py_str(&name)], vec![])
+                                        } else {
+                                            Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", obj_borrowed.type_name(), name)))
+                                        }
+                                    } else {
+                                        Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", obj_borrowed.type_name(), name)))
+                                    }
+                                }
+                            }
                         }
                         _ => {
                             let type_name = obj_borrowed.type_name();
@@ -1430,6 +1460,23 @@ impl VirtualMachine {
                 })?.clone();
                 let val = self.frames[fi].pop()?;
                 let obj = self.frames[fi].pop()?;
+
+                // Check for __setattr__ on Instance types first
+                {
+                    let obj_borrowed = obj.borrow();
+                    if let PyObject::Instance { typ, .. } = &*obj_borrowed {
+                        let typ_ref = typ.borrow();
+                        if let PyObject::Type { dict: type_dict, .. } = &*typ_ref {
+                            if let Some(setattr_method) = type_dict.get("__setattr__").cloned() {
+                                drop(typ_ref);
+                                drop(obj_borrowed);
+                                self.call_function(setattr_method, vec![obj.clone(), py_str(&name), val.clone()], vec![])?;
+                                return Ok(None);
+                            }
+                        }
+                    }
+                }
+
                 // Check for __set__ descriptor protocol on Instance types
                 let descriptor_clone = {
                     let obj_borrowed = obj.borrow();

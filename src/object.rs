@@ -3364,8 +3364,19 @@ impl ObjectAccess for PyObject {
                     "pop" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "pop".to_string(),
                         func: |args| {
-                            if let PyObject::List(list) = &mut *args[0].borrow_mut() { list.pop().ok_or_else(|| PyError::runtime_error("pop from empty list")) }
-                            else { Err(PyError::runtime_error("pop on non-list")) }
+                            if let PyObject::List(list) = &mut *args[0].borrow_mut() {
+                                if args.len() > 1 {
+                                    let idx = args[1].as_i64().ok_or_else(|| PyError::type_error("pop index must be an integer"))?;
+                                    let len = list.len() as i64;
+                                    let idx = if idx < 0 { len + idx } else { idx };
+                                    if idx < 0 || idx >= len {
+                                        return Err(PyError::index_error("pop index out of range"));
+                                    }
+                                    Ok(list.remove(idx as usize))
+                                } else {
+                                    list.pop().ok_or_else(|| PyError::runtime_error("pop from empty list"))
+                                }
+                            } else { Err(PyError::runtime_error("pop on non-list")) }
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -3393,6 +3404,19 @@ impl ObjectAccess for PyObject {
                         func: |args| {
                             if let PyObject::List(list) = &mut *args[0].borrow_mut() { list.reverse(); Ok(py_none()) }
                             else { Err(PyError::runtime_error("reverse on non-list")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "remove" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "remove".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("remove() takes exactly one argument")); }
+                            if let PyObject::List(list) = &mut *args[0].borrow_mut() {
+                                let pos = list.iter().position(|item| item.equals(&args[1]).unwrap_or(false))
+                                    .ok_or_else(|| PyError::value_error(format!("{} is not in list", args[1].str())))?;
+                                list.remove(pos);
+                                Ok(py_none())
+                            } else { Err(PyError::runtime_error("remove on non-list")) }
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -3452,6 +3476,143 @@ impl ObjectAccess for PyObject {
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
                     _ => Err(PyError::attribute_error(format!("'list' object has no attribute '{}'", name))),
+                }
+            }
+            PyObject::ByteArray(_b) => {
+                match name {
+                    "append" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "append".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("append() takes exactly one argument")); }
+                            let val = args[1].borrow();
+                            if let PyObject::Int(i) = &*val {
+                                let n = i.to_i64().ok_or_else(|| PyError::value_error("byte value out of range"))?;
+                                if n < 0 || n > 255 { return Err(PyError::value_error("byte must be in range(0, 256)")); }
+                                if let PyObject::ByteArray(bytes) = &mut *args[0].borrow_mut() {
+                                    bytes.push(n as u8);
+                                    Ok(py_none())
+                                } else { Err(PyError::runtime_error("append on non-bytearray")) }
+                            } else { Err(PyError::type_error("argument must be an integer")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "extend" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "extend".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("extend() takes exactly one argument")); }
+                            let it = builtin_iter(&[args[1].clone()])?;
+                            loop {
+                                match builtin_next(&[it.clone()]) {
+                                    Ok(v) => {
+                                        let vv = v.borrow();
+                                        if let PyObject::Int(i) = &*vv {
+                                            let n = i.to_i64().ok_or_else(|| PyError::value_error("byte value out of range"))?;
+                                            if n < 0 || n > 255 { return Err(PyError::value_error("byte must be in range(0, 256)")); }
+                                            if let PyObject::ByteArray(bytes) = &mut *args[0].borrow_mut() {
+                                                bytes.push(n as u8);
+                                            } else { return Err(PyError::runtime_error("extend on non-bytearray")); }
+                                        } else { return Err(PyError::type_error("argument must be iterable of integers")); }
+                                    }
+                                    Err(PyError::StopIteration) => return Ok(py_none()),
+                                    Err(e) => return Err(e),
+                                }
+                            }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "insert" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "insert".to_string(),
+                        func: |args| {
+                            if args.len() < 3 { return Err(PyError::type_error("insert() takes exactly 2 arguments")); }
+                            let idx = args[1].as_i64().unwrap_or(0) as usize;
+                            let val = args[2].borrow();
+                            if let PyObject::Int(i) = &*val {
+                                let n = i.to_i64().ok_or_else(|| PyError::value_error("byte value out of range"))?;
+                                if n < 0 || n > 255 { return Err(PyError::value_error("byte must be in range(0, 256)")); }
+                                if let PyObject::ByteArray(bytes) = &mut *args[0].borrow_mut() {
+                                    let idx = idx.min(bytes.len());
+                                    bytes.insert(idx, n as u8);
+                                    Ok(py_none())
+                                } else { Err(PyError::runtime_error("insert on non-bytearray")) }
+                            } else { Err(PyError::type_error("argument must be an integer")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "remove" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "remove".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("remove() takes exactly one argument")); }
+                            let val = args[1].borrow();
+                            if let PyObject::Int(i) = &*val {
+                                let n = i.to_i64().ok_or_else(|| PyError::value_error("byte value out of range"))? as u8;
+                                if let PyObject::ByteArray(bytes) = &mut *args[0].borrow_mut() {
+                                    let pos = bytes.iter().position(|&x| x == n)
+                                        .ok_or_else(|| PyError::value_error(format!("value {} not found in bytearray", n)))?;
+                                    bytes.remove(pos);
+                                    Ok(py_none())
+                                } else { Err(PyError::runtime_error("remove on non-bytearray")) }
+                            } else { Err(PyError::type_error("argument must be an integer")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "pop" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "pop".to_string(),
+                        func: |args| {
+                            if let PyObject::ByteArray(bytes) = &mut *args[0].borrow_mut() {
+                                let idx = if args.len() > 1 {
+                                    let i = args[1].as_i64().ok_or_else(|| PyError::type_error("pop index must be an integer"))?;
+                                    let len = bytes.len() as i64;
+                                    if i < 0 { len + i } else { i }
+                                } else {
+                                    bytes.len() as i64 - 1
+                                };
+                                if idx < 0 || idx >= bytes.len() as i64 {
+                                    return Err(PyError::index_error("pop index out of range"));
+                                }
+                                let val = bytes.remove(idx as usize);
+                                Ok(PyObjectRef::imm(PyObject::Int(BigInt::from(val))))
+                            } else { Err(PyError::runtime_error("pop on non-bytearray")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__getitem__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__getitem__".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("__getitem__() requires an index")); }
+                            py_getitem(&args[0], &args[1])
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__setitem__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__setitem__".to_string(),
+                        func: |args| {
+                            if args.len() < 3 { return Err(PyError::type_error("__setitem__() requires an index and value")); }
+                            py_setitem(&args[0], &args[1], args[2].clone())?;
+                            Ok(py_none())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__len__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__len__".to_string(),
+                        func: |args| {
+                            let b = args[0].borrow();
+                            if let PyObject::ByteArray(bytes) = &*b {
+                                Ok(py_int(bytes.len() as i64))
+                            } else { Err(PyError::runtime_error("__len__ on non-bytearray")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__str__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__str__".to_string(),
+                        func: |args| {
+                            if let PyObject::ByteArray(bytes) = &*args[0].borrow() {
+                                let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+                                Ok(py_str(&hex))
+                            } else { Err(PyError::runtime_error("__str__ on non-bytearray")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    _ => Err(PyError::attribute_error(format!("'bytearray' object has no attribute '{}'", name))),
                 }
             }
             PyObject::Str(_s) => {
@@ -3569,6 +3730,111 @@ impl ObjectAccess for PyObject {
                             if args.len() < 3 { return Err(PyError::type_error("__mod__() too few args")); }
                             let fmt = args[1].str();
                             let result = string_interpolate(&fmt, &args[2]).map_err(|e| PyError::runtime_error(e))?;
+                            Ok(py_str(&result))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "partition" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "partition".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("partition() takes exactly one argument")); }
+                            let s = args[0].str();
+                            let sep = args[1].str();
+                            if let Some(pos) = s.find(&sep) {
+                                Ok(py_tuple(vec![
+                                    py_str(&s[..pos]),
+                                    py_str(&sep),
+                                    py_str(&s[pos + sep.len()..]),
+                                ]))
+                            } else {
+                                Ok(py_tuple(vec![py_str(&s), py_str(""), py_str("")]))
+                            }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "rpartition" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "rpartition".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("rpartition() takes exactly one argument")); }
+                            let s = args[0].str();
+                            let sep = args[1].str();
+                            if let Some(pos) = s.rfind(&sep) {
+                                Ok(py_tuple(vec![
+                                    py_str(&s[..pos]),
+                                    py_str(&sep),
+                                    py_str(&s[pos + sep.len()..]),
+                                ]))
+                            } else {
+                                Ok(py_tuple(vec![py_str(""), py_str(""), py_str(&s)]))
+                            }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "splitlines" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "splitlines".to_string(),
+                        func: |args| {
+                            let s = args[0].str();
+                            let keepends = if args.len() > 1 { args[1].truthy() } else { false };
+                            let mut lines: Vec<PyObjectRef> = Vec::new();
+                            let mut start = 0;
+                            let chars: Vec<char> = s.chars().collect();
+                            let len = chars.len();
+                            let mut i = 0;
+                            while i < len {
+                                let mut end = i;
+                                let mut line_end = i;
+                                if chars[i] == '\r' {
+                                    if i + 1 < len && chars[i + 1] == '\n' {
+                                        line_end = i + 2;
+                                    } else {
+                                        line_end = i + 1;
+                                    }
+                                } else if chars[i] == '\n' {
+                                    line_end = i + 1;
+                                } else {
+                                    i += 1;
+                                    continue;
+                                }
+                                if keepends {
+                                    end = line_end;
+                                } else {
+                                    end = i;
+                                }
+                                let line: String = chars[start..end].iter().collect();
+                                lines.push(py_str(&line));
+                                i = line_end;
+                                start = i;
+                            }
+                            if start < len || s.ends_with('\n') || s.is_empty() || lines.is_empty() {
+                                let line: String = chars[start..].iter().collect();
+                                if !line.is_empty() || s.ends_with('\n') || (s.is_empty() && lines.is_empty()) {
+                                    lines.push(py_str(&line));
+                                }
+                            }
+                            Ok(py_list(lines))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "expandtabs" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "expandtabs".to_string(),
+                        func: |args| {
+                            let s = args[0].str();
+                            let tabsize = if args.len() > 1 { args[1].as_i64().unwrap_or(8) as usize } else { 8 };
+                            let mut result = String::with_capacity(s.len());
+                            let mut col = 0;
+                            for c in s.chars() {
+                                if c == '\t' {
+                                    let spaces = tabsize - (col % tabsize);
+                                    result.push_str(&" ".repeat(spaces));
+                                    col += spaces;
+                                } else if c == '\n' || c == '\r' {
+                                    result.push(c);
+                                    col = 0;
+                                } else {
+                                    result.push(c);
+                                    col += 1;
+                                }
+                            }
                             Ok(py_str(&result))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
@@ -7326,6 +7592,196 @@ pub fn create_pprint_dict() -> HashMap<String, PyObjectRef> {
         print!("{}", out);
         Ok(py_none())
     });
+
+    d
+}
+
+// === HASHLIB MODULE ===
+pub fn create_hashlib_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! hl_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    hl_func!("sha256", |args| {
+        if args.len() != 1 { return Err(PyError::type_error("sha256() takes exactly one argument")); }
+        let data = args[0].borrow();
+        let bytes = match &*data {
+            PyObject::Bytes(b) => b.clone(),
+            PyObject::Str(s) => s.as_bytes().to_vec(),
+            _ => return Err(PyError::type_error("sha256() argument must be bytes or str")),
+        };
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::Hasher;
+        let mut hasher = DefaultHasher::new();
+        hasher.write(b"sha256");
+        hasher.write(&bytes);
+        Ok(py_str(&format!("{:016x}", hasher.finish())))
+    });
+
+    hl_func!("md5", |args| {
+        if args.len() != 1 { return Err(PyError::type_error("md5() takes exactly one argument")); }
+        let data = args[0].borrow();
+        let bytes = match &*data {
+            PyObject::Bytes(b) => b.clone(),
+            PyObject::Str(s) => s.as_bytes().to_vec(),
+            _ => return Err(PyError::type_error("md5() argument must be bytes or str")),
+        };
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::Hasher;
+        let mut hasher = DefaultHasher::new();
+        hasher.write(b"md5");
+        hasher.write(&bytes);
+        Ok(py_str(&format!("{:016x}", hasher.finish())))
+    });
+
+    d
+}
+
+// === BASE64 MODULE ===
+pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! b64_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    fn b64_encode(data: &[u8]) -> String {
+        const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::new();
+        for chunk in data.chunks(3) {
+            let len = chunk.len();
+            let b0 = chunk[0];
+            let b1 = if len > 1 { chunk[1] } else { 0 };
+            let b2 = if len > 2 { chunk[2] } else { 0 };
+            out.push(CHARS[(b0 >> 2) as usize] as char);
+            out.push(CHARS[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
+            if len > 1 {
+                out.push(CHARS[(((b1 & 0x0F) << 2) | (b2 >> 6)) as usize] as char);
+            } else {
+                out.push('=');
+            }
+            if len > 2 {
+                out.push(CHARS[(b2 & 0x3F) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+        out
+    }
+
+    fn b64_decode(s: &str) -> Result<Vec<u8>, String> {
+        let mut rev = [255u8; 256];
+        let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        for (i, &c) in alphabet.iter().enumerate() {
+            rev[c as usize] = i as u8;
+        }
+        let bytes = s.as_bytes();
+        if bytes.len() % 4 != 0 {
+            return Err("Invalid base64 input length".to_string());
+        }
+        let mut out = Vec::new();
+        for chunk in bytes.chunks(4) {
+            let mut vals = [0u8; 4];
+            for i in 0..4 {
+                if chunk[i] == b'=' {
+                    vals[i] = 0;
+                } else {
+                    let v = rev[chunk[i] as usize];
+                    if v == 255 {
+                        return Err("Invalid base64 character".to_string());
+                    }
+                    vals[i] = v;
+                }
+            }
+            out.push((vals[0] << 2) | (vals[1] >> 4));
+            if chunk[2] != b'=' {
+                out.push((vals[1] << 4) | (vals[2] >> 2));
+            }
+            if chunk[3] != b'=' {
+                out.push((vals[2] << 6) | vals[3]);
+            }
+        }
+        Ok(out)
+    }
+
+    b64_func!("b64encode", |args| {
+        if args.len() != 1 { return Err(PyError::type_error("b64encode() takes exactly one argument")); }
+        let data = args[0].borrow();
+        let bytes = match &*data {
+            PyObject::Bytes(b) => b.clone(),
+            PyObject::ByteArray(b) => b.clone(),
+            _ => return Err(PyError::type_error("b64encode() argument must be bytes")),
+        };
+        Ok(py_str(&b64_encode(&bytes)))
+    });
+
+    b64_func!("b64decode", |args| {
+        if args.len() != 1 { return Err(PyError::type_error("b64decode() takes exactly one argument")); }
+        let data = args[0].borrow();
+        let s = match &*data {
+            PyObject::Str(s) => s.clone(),
+            _ => return Err(PyError::type_error("b64decode() argument must be a string")),
+        };
+        match b64_decode(&s) {
+            Ok(bytes) => Ok(PyObjectRef::imm(PyObject::Bytes(bytes))),
+            Err(e) => Err(PyError::value_error(e)),
+        }
+    });
+
+    d
+}
+
+// === UUID MODULE ===
+pub fn create_uuid_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! uuid_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    uuid_func!("uuid4", |args| {
+        if !args.is_empty() { return Err(PyError::type_error("uuid4() takes no arguments")); }
+        let r1 = fast_random_u64();
+        let r2 = fast_random_u64();
+        let time_low = r1 as u32;
+        let time_mid = (r1 >> 32) as u16;
+        let time_hi_and_version = ((r1 >> 48) as u16 & 0x0FFF) | 0x4000;
+        let clock_seq = (r2 as u16 & 0x3FFF) | 0x8000;
+        let node = (r2 >> 16) as u64;
+        Ok(py_str(&format!("{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
+            time_low, time_mid, time_hi_and_version, clock_seq, node)))
+    });
+
+    d
+}
+
+// === STRING MODULE ===
+pub fn create_string_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    let ascii_lowercase = "abcdefghijklmnopqrstuvwxyz";
+    let ascii_uppercase = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    let ascii_letters = &format!("{}{}", ascii_lowercase, ascii_uppercase);
+    let digits = "0123456789";
+    let hexdigits = "0123456789abcdefABCDEF";
+    let octdigits = "01234567";
+    let punctuation = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
+    let whitespace = " \t\n\r\u{0b}\u{0c}";
+    let printable = &format!("{}{}{}{}", digits, ascii_letters, punctuation, whitespace);
+
+    d.insert("ascii_letters".to_string(), py_str(ascii_letters));
+    d.insert("ascii_lowercase".to_string(), py_str(ascii_lowercase));
+    d.insert("ascii_uppercase".to_string(), py_str(ascii_uppercase));
+    d.insert("digits".to_string(), py_str(digits));
+    d.insert("hexdigits".to_string(), py_str(hexdigits));
+    d.insert("octdigits".to_string(), py_str(octdigits));
+    d.insert("punctuation".to_string(), py_str(punctuation));
+    d.insert("printable".to_string(), py_str(printable));
+    d.insert("whitespace".to_string(), py_str(whitespace));
 
     d
 }
