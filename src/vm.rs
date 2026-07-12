@@ -256,6 +256,21 @@ impl VirtualMachine {
           // Native shutil module
           modules.insert("shutil".to_string(), create_module("shutil", create_shutil_dict()));
 
+          // Native graphlib module
+          modules.insert("graphlib".to_string(), create_module("graphlib", create_graphlib_dict()));
+
+          // Native pdb module
+          modules.insert("pdb".to_string(), create_module("pdb", create_pdb_dict()));
+
+          // Native traceback module
+          modules.insert("traceback".to_string(), create_module("traceback", create_traceback_dict()));
+
+          // Native warnings module
+          modules.insert("warnings".to_string(), create_module("warnings", create_warnings_dict()));
+
+          // Native abc module
+          modules.insert("abc".to_string(), create_module("abc", create_abc_dict()));
+
           // Also register the 'operator' module if not already present
           if !modules.contains_key("operator") {
               let mut op_dict = HashMap::new();

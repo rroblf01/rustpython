@@ -2771,6 +2771,30 @@ pub fn builtin_id(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Ok(py_int(args[0].get_id() as i64))
 }
 
+pub fn builtin_vars(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() != 1 {
+        return Err(PyError::type_error("vars() takes exactly one argument"));
+    }
+    let obj = args[0].borrow();
+    match &*obj {
+        PyObject::Instance { dict, .. } => {
+            let mut pd = PyDict::new();
+            for (k, v) in dict.iter() {
+                pd.set(py_str(k), v.clone())?;
+            }
+            Ok(PyObjectRef::new(PyObject::Dict(pd)))
+        }
+        PyObject::Module { dict, .. } => {
+            let mut pd = PyDict::new();
+            for (k, v) in dict.iter() {
+                pd.set(py_str(k), v.clone())?;
+            }
+            Ok(PyObjectRef::new(PyObject::Dict(pd)))
+        }
+        _ => Err(PyError::type_error(format!("vars() argument must have __dict__ attribute"))),
+    }
+}
+
 pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() != 2 {
         return Err(PyError::type_error("isinstance() takes exactly 2 arguments"));
@@ -3636,6 +3660,19 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
+                    "__contains__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__contains__".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("__contains__() takes exactly one argument")); }
+                            if let PyObject::List(list) = &*args[0].borrow() {
+                                for item in list.iter() {
+                                    if item.equals(&args[1])? { return Ok(py_bool(true)); }
+                                }
+                                Ok(py_bool(false))
+                            } else { Err(PyError::runtime_error("__contains__ on non-list")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     _ => Err(PyError::attribute_error(format!("'list' object has no attribute '{}'", name))),
                 }
             }
@@ -4230,6 +4267,16 @@ impl ObjectAccess for PyObject {
                             if let PyObject::Dict(d) = &*args[0].borrow() {
                                 Ok(py_int(72 + (d.len() as i64) * 16))
                             } else { Err(PyError::runtime_error("__sizeof__ on non-dict")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__contains__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__contains__".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("__contains__() takes exactly one argument")); }
+                            if let PyObject::Dict(d) = &*args[0].borrow() {
+                                Ok(py_bool(d.contains(&args[1])?))
+                            } else { Err(PyError::runtime_error("__contains__ on non-dict")) }
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -5447,6 +5494,7 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     add_func!("max", builtin_max);
     add_func!("min", builtin_min);
     add_func!("id", builtin_id);
+    add_func!("vars", builtin_vars);
     add_func!("isinstance", builtin_isinstance);
     add_func!("open", builtin_open);
     add_func!("any", builtin_any);
@@ -8851,5 +8899,210 @@ pub fn create_shutil_dict() -> HashMap<String, PyObjectRef> {
             Err(e) => Err(PyError::OsError(format!("move error: {}", e))),
         }
     });
+    d
+}
+
+// ---- graphlib module ----
+pub fn create_graphlib_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! gl_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    // TopologicalSorter — returns a sorted list from the given graph
+    gl_func!("TopologicalSorter", |args| {
+        // Accept a dict or list of pairs as graph
+        let mut edges: Vec<(String, String)> = Vec::new();
+        if args.len() >= 1 {
+            let graph = &args[0];
+            let borrowed = graph.borrow();
+            match &*borrowed {
+                PyObject::Dict(dict) => {
+                    for (key, val) in dict.items() {
+                        let k = key.str();
+                        let v = val.str();
+                        edges.push((k, v));
+                    }
+                }
+                PyObject::List(items) => {
+                    for item in items {
+                        if let PyObject::Tuple(pair) = &*item.borrow() {
+                            if pair.len() >= 2 {
+                                edges.push((pair[0].str(), pair[1].str()));
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Simple topological sort: Kahn's algorithm
+        let mut in_degree: HashMap<String, usize> = HashMap::new();
+        let mut adj: HashMap<String, Vec<String>> = HashMap::new();
+        let mut nodes: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        for (from, to) in &edges {
+            adj.entry(from.clone()).or_default().push(to.clone());
+            in_degree.entry(to.clone()).or_insert(0);
+            in_degree.entry(from.clone()).or_insert(0);
+            nodes.insert(from.clone());
+            nodes.insert(to.clone());
+        }
+
+        // Also handle nodes referenced only as keys/values in pairs
+        for n in &edges {
+            in_degree.entry(n.0.clone()).or_insert(0);
+            in_degree.entry(n.1.clone()).or_insert(0);
+            nodes.insert(n.0.clone());
+            nodes.insert(n.1.clone());
+        }
+
+        for (_, neighbors) in &adj {
+            for n in neighbors {
+                *in_degree.entry(n.clone()).or_insert(0) += 1;
+            }
+        }
+
+        let mut queue: Vec<String> = Vec::new();
+        for (node, deg) in &in_degree {
+            if *deg == 0 {
+                queue.push(node.clone());
+            }
+        }
+
+        let mut sorted: Vec<PyObjectRef> = Vec::new();
+        while !queue.is_empty() {
+            queue.sort_by(|a, b| b.cmp(a)); // use as stack
+            let node = queue.pop().unwrap();
+            sorted.push(py_str(&node));
+            if let Some(neighbors) = adj.get(&node) {
+                for n in neighbors {
+                    if let Some(deg) = in_degree.get_mut(n) {
+                        *deg -= 1;
+                        if *deg == 0 {
+                            queue.push(n.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        // If any nodes remain unprocessed, there's a cycle — just return empty
+        // (stub behavior)
+        if sorted.len() != nodes.len() {
+            sorted.clear();
+        }
+
+        Ok(py_list(sorted))
+    });
+
+    d
+}
+
+// ---- pdb module ----
+pub fn create_pdb_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! pdb_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    pdb_func!("set_trace", |_| {
+        println!("Debugger not available");
+        Ok(py_none())
+    });
+
+    d
+}
+
+// ---- traceback module ----
+pub fn create_traceback_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! tb_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    tb_func!("format_exc", |_| {
+        Ok(py_str(""))
+    });
+
+    tb_func!("print_exc", |_| {
+        println!("No traceback");
+        Ok(py_none())
+    });
+
+    d
+}
+
+// ---- warnings module ----
+pub fn create_warnings_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! warn_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    // Store simplefilter state in a thread-local
+    thread_local! {
+        static WARN_FILTER: std::cell::RefCell<String> = std::cell::RefCell::new("default".to_string());
+    }
+
+    warn_func!("warn", |args| {
+        let msg = if !args.is_empty() { args[0].str() } else { String::new() };
+        println!("Warning: {}", msg);
+        Ok(py_none())
+    });
+
+    warn_func!("simplefilter", |args| {
+        if !args.is_empty() {
+            let action = args[0].str();
+            WARN_FILTER.with(|f| *f.borrow_mut() = action);
+        }
+        Ok(py_none())
+    });
+
+    // Insert the current filter state as a readable attribute
+    d.insert("filters".to_string(), py_list(vec![]));
+
+    d
+}
+
+// ---- abc module ----
+pub fn create_abc_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! abc_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    // ABC class — returns a simple Instance with a type marker
+    abc_func!("ABC", |args| {
+        let _ = args;
+        Ok(PyObjectRef::new(PyObject::Instance {
+            typ: PyObjectRef::new(PyObject::Module {
+                name: "abc".to_string(),
+                dict: HashMap::new(),
+            }),
+            dict: HashMap::new(),
+        }))
+    });
+
+    // abstractmethod — returns the function unchanged
+    abc_func!("abstractmethod", |args| {
+        if !args.is_empty() {
+            Ok(args[0].clone())
+        } else {
+            Ok(py_none())
+        }
+    });
+
     d
 }

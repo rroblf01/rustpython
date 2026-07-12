@@ -1,0 +1,10 @@
+def f(x):
+    print('hi')
+    match x:
+        case 1:
+            return 'one'
+        case _:
+            return 'other'
+print('def ok')
+print('f(1):', f(1))
+print('DONE')

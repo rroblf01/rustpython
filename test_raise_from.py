@@ -1,5 +1,7 @@
-# Test 2: raise exc from cause
+# Test raise from Y
 try:
-    raise ValueError("original") from ValueError("cause")
+    raise ValueError("original") from RuntimeError("cause")
 except ValueError as e:
-    print("caught ValueError")
+    print("Caught ValueError")
+    # Print cause info
+    print("Done")
