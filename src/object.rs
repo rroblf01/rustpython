@@ -6838,44 +6838,77 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
         if args.is_empty() {
             return Err(PyError::type_error("run() missing required argument"));
         }
-        let cmd_args: Vec<String> = if let PyObject::List(items) = &*args[0].borrow() {
-            items.iter().map(|a| a.str()).collect()
-        } else {
-            vec![args[0].str()]
-        };
-        if cmd_args.is_empty() {
+        let shell = if args.len() > 1 { args[1].truthy() } else { false };
+        let cmd_str = args[0].str();
+        if cmd_str.is_empty() {
             return Err(PyError::ValueError("empty command".to_string()));
         }
-        let output = std::process::Command::new(&cmd_args[0])
-            .args(&cmd_args[1..])
-            .output()
-            .map_err(|e| PyError::OsError(format!("{}", e)))?;
+        let output = if shell {
+            std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&cmd_str)
+                .output()
+                .map_err(|e| PyError::OsError(format!("{}", e)))?
+        } else {
+            let cmd_args: Vec<String> = if let PyObject::List(items) = &*args[0].borrow() {
+                items.iter().map(|a| a.str()).collect()
+            } else {
+                vec![cmd_str]
+            };
+            if cmd_args.is_empty() {
+                return Err(PyError::ValueError("empty command".to_string()));
+            }
+            std::process::Command::new(&cmd_args[0])
+                .args(&cmd_args[1..])
+                .output()
+                .map_err(|e| PyError::OsError(format!("{}", e)))?
+        };
         let returncode = output.status.code().unwrap_or(-1) as i64;
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        Ok(py_dict())
+        let stdout_str = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr_str = String::from_utf8_lossy(&output.stderr).to_string();
+        let result = py_dict();
+        if let PyObject::Dict(dict) = &mut *result.borrow_mut() {
+            dict.set(py_str("returncode"), py_int(returncode)).ok();
+            dict.set(py_str("stdout"), py_str(&stdout_str)).ok();
+            dict.set(py_str("stderr"), py_str(&stderr_str)).ok();
+        }
+        Ok(result)
     });
 
     sub_func!("check_output", |args| {
         if args.is_empty() {
             return Err(PyError::type_error("check_output() missing required argument"));
         }
-        let cmd_args: Vec<String> = if let PyObject::List(items) = &*args[0].borrow() {
-            items.iter().map(|a| a.str()).collect()
-        } else {
-            vec![args[0].str()]
-        };
-        if cmd_args.is_empty() {
+        let shell = if args.len() > 1 { args[1].truthy() } else { false };
+        let cmd_str = args[0].str();
+        if cmd_str.is_empty() {
             return Err(PyError::ValueError("empty command".to_string()));
         }
-        let output = std::process::Command::new(&cmd_args[0])
-            .args(&cmd_args[1..])
-            .output()
-            .map_err(|e| PyError::OsError(format!("{}", e)))?;
+        let output = if shell {
+            std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&cmd_str)
+                .output()
+                .map_err(|e| PyError::OsError(format!("{}", e)))?
+        } else {
+            let cmd_args: Vec<String> = if let PyObject::List(items) = &*args[0].borrow() {
+                items.iter().map(|a| a.str()).collect()
+            } else {
+                vec![cmd_str]
+            };
+            if cmd_args.is_empty() {
+                return Err(PyError::ValueError("empty command".to_string()));
+            }
+            std::process::Command::new(&cmd_args[0])
+                .args(&cmd_args[1..])
+                .output()
+                .map_err(|e| PyError::OsError(format!("{}", e)))?
+        };
         if !output.status.success() {
             return Err(PyError::runtime_error(format!("Command returned non-zero exit status")));
         }
-        Ok(py_str(&String::from_utf8_lossy(&output.stdout)))
+        // Return stdout as bytes
+        Ok(PyObjectRef::imm(PyObject::Bytes(output.stdout)))
     });
 
     // Constants
