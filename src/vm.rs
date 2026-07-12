@@ -2,10 +2,10 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::cell::RefCell;
 use num_bigint::BigInt;
+use num_traits::ToPrimitive;
 use smallvec::SmallVec;
 use crate::bytecode::*;
 use crate::object::*;
-use crate::object::ObjectAccess;
 use crate::jit::JitCompiler;
 
 thread_local! {
@@ -184,6 +184,15 @@ impl VirtualMachine {
 
           // Native struct module for binary packing
           modules.insert("struct".to_string(), create_module("struct", create_struct_dict()));
+
+          // Native bisect module for binary search
+          modules.insert("bisect".to_string(), create_module("bisect", create_bisect_dict()));
+
+          // Native heapq module for heap queue operations
+          modules.insert("heapq".to_string(), create_module("heapq", create_heapq_dict()));
+
+          // Native enum module
+          modules.insert("enum".to_string(), create_module("enum", create_enum_dict()));
 
           // Also register the 'operator' module if not already present
           if !modules.contains_key("operator") {
@@ -1757,9 +1766,10 @@ impl VirtualMachine {
             }
 
             Opcode::FORMAT_WITH_SPEC => {
-                let _spec = self.frames[fi].pop()?;
+                let spec = self.frames[fi].pop()?;
                 let val = self.frames[fi].pop()?;
-                self.frames[fi].push(py_str(&val.str()));
+                let spec_str = spec.str();
+                self.frames[fi].push(py_str(&format_with_spec(&val, &spec_str)?));
             }
 
             Opcode::CONVERT_VALUE => {
@@ -2410,5 +2420,339 @@ fn is_exception_subclass(child_type: &str, parent_type: &str) -> bool {
             }
         }
         None => false,
+    }
+}
+
+/// Implements Python's Format Specification Mini-Language.
+///
+/// Parses a format spec string in the form:
+/// `[[fill]align][sign][#][0][width][grouping_option][.precision][type]`
+/// and applies the formatting to the given value.
+///
+/// See: https://docs.python.org/3/library/string.html#formatspec
+fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
+    if spec_str.is_empty() {
+        return Ok(val.str());
+    }
+
+    let chars: Vec<char> = spec_str.chars().collect();
+    let len = chars.len();
+    let mut idx = 0;
+
+    // --- parse [[fill]align] ---
+    let fill_char;
+    let align;
+    if idx + 1 < len && matches!(chars[idx + 1], '<' | '>' | '^' | '=') {
+        fill_char = chars[idx];
+        align = chars[idx + 1];
+        idx += 2;
+    } else if idx < len && matches!(chars[idx], '<' | '>' | '^' | '=') {
+        fill_char = ' ';
+        align = chars[idx];
+        idx += 1;
+    } else {
+        fill_char = ' ';
+        align = '>';
+    }
+
+    // --- parse [sign] ---
+    let sign = if idx < len && matches!(chars[idx], '+' | '-' | ' ') {
+        let s = chars[idx];
+        idx += 1;
+        s
+    } else {
+        '-'  // default: show sign only for negatives
+    };
+
+    // --- parse [#] ---
+    let alternate = if idx < len && chars[idx] == '#' { idx += 1; true } else { false };
+
+    // --- parse [0] (zero-pad flag) ---
+    // Note: '0' after width means just a digit, not zero-pad.
+    // But Python's spec has '0' right after the sign/# before width.
+    // We check if the next char is '0' AND is followed by a digit (width).
+    let mut zero_pad = false;
+    if idx < len && chars[idx] == '0' {
+        // If '0' is followed by a digit or end, it's the start of width with zero-padding
+        zero_pad = true;
+        if idx + 1 < len && chars[idx + 1].is_ascii_digit() {
+            idx += 1; // consume the '0' — it becomes part of width
+        } else {
+            idx += 1; // just '0' with no width
+        }
+    }
+
+    // --- parse [width] ---
+    let width: Option<usize> = {
+        let start = idx;
+        while idx < len && chars[idx].is_ascii_digit() { idx += 1; }
+        if idx > start {
+            Some(chars[start..idx].iter().collect::<String>().parse::<usize>().unwrap())
+        } else {
+            None
+        }
+    };
+
+    // Go back if we consumed '0' but it wasn't really zero-pad (no width follows)
+    if zero_pad && width.is_none() {
+        // The '0' was just a literal zero in a width-less spec — not valid, treat as no-op
+        zero_pad = false;
+    }
+
+    // --- parse grouping option [,|_] ---
+    if idx < len && (chars[idx] == ',' || chars[idx] == '_') {
+        idx += 1;
+    }
+
+    // --- parse [.precision] ---
+    let precision: Option<usize> = if idx < len && chars[idx] == '.' {
+        idx += 1;
+        let start = idx;
+        while idx < len && chars[idx].is_ascii_digit() { idx += 1; }
+        if idx > start {
+            Some(chars[start..idx].iter().collect::<String>().parse::<usize>().unwrap())
+        } else {
+            Some(0) // '.' with no digits means precision 0
+        }
+    } else {
+        None
+    };
+
+    // --- parse [type] ---
+    let fmt_type = if idx < len { Some(chars[idx]) } else { None };
+
+    // Determine value type
+    let val_borrowed = val.borrow();
+    let is_int = matches!(&*val_borrowed, PyObject::Int(_) | PyObject::Bool(_));
+    let is_float = matches!(&*val_borrowed, PyObject::Float(_));
+
+    // Generate the formatted value based on type
+    let base = match (fmt_type, is_int, is_float) {
+        // Integer: decimal (default or 'd')
+        (None, true, _) | (Some('d'), true, _) => {
+            if let PyObject::Int(i) = &*val_borrowed {
+                let s = format_int_with_sign(i, sign, precision);
+                s
+            } else if let PyObject::Bool(b) = &*val_borrowed {
+                format!("{}", if *b { 1i64 } else { 0i64 })
+            } else {
+                val.str()
+            }
+        }
+        // Integer: hex lowercase
+        (Some('x'), true, _) => {
+            if let PyObject::Int(i) = &*val_borrowed {
+                if alternate { format!("0x{:x}", i) } else { format!("{:x}", i) }
+            } else { val.str() }
+        }
+        // Integer: hex uppercase
+        (Some('X'), true, _) => {
+            if let PyObject::Int(i) = &*val_borrowed {
+                if alternate { format!("0X{:X}", i) } else { format!("{:X}", i) }
+            } else { val.str() }
+        }
+        // Integer: binary
+        (Some('b'), true, _) => {
+            if let PyObject::Int(i) = &*val_borrowed {
+                if alternate { format!("0b{:b}", i) } else { format!("{:b}", i) }
+            } else { val.str() }
+        }
+        // Integer: octal
+        (Some('o'), true, _) => {
+            if let PyObject::Int(i) = &*val_borrowed {
+                if alternate { format!("0o{:o}", i) } else { format!("{:o}", i) }
+            } else { val.str() }
+        }
+        // Integer: character
+        (Some('c'), true, _) => {
+            if let PyObject::Int(i) = &*val_borrowed {
+                if let Some(n) = i.to_u32() {
+                    if let Some(c) = char::from_u32(n) {
+                        c.to_string()
+                    } else {
+                        return Err(PyError::value_error("chr() arg not in range(0x110000)"));
+                    }
+                } else {
+                    return Err(PyError::value_error("chr() arg not in range(0x110000)"));
+                }
+            } else {
+                return Err(PyError::type_error("integer argument expected, got float"));
+            }
+        }
+
+        // Float: default (no type) — use str() for compat
+        (None, _, true) => val.str(),
+        // Float: fixed-point
+        (Some('f'), _, true) | (Some('F'), _, true) => {
+            if let PyObject::Float(f) = &*val_borrowed {
+                let s = format_float_with_sign(*f, sign, precision);
+                s
+            } else { val.str() }
+        }
+        // Float: scientific lowercase
+        (Some('e'), _, true) => {
+            if let PyObject::Float(f) = &*val_borrowed {
+                let s = match precision {
+                    Some(p) => format!("{:.prec$e}", f, prec = p),
+                    None => format!("{:e}", f),
+                };
+                // Apply sign
+                apply_sign(&s, *f, sign)
+            } else { val.str() }
+        }
+        // Float: scientific uppercase
+        (Some('E'), _, true) => {
+            if let PyObject::Float(f) = &*val_borrowed {
+                let s = match precision {
+                    Some(p) => format!("{:.prec$E}", f, prec = p),
+                    None => format!("{:E}", f),
+                };
+                apply_sign(&s, *f, sign)
+            } else { val.str() }
+        }
+        // Float: general lowercase
+        (Some('g'), _, true) => {
+            if let PyObject::Float(f) = &*val_borrowed {
+                let s = match precision {
+                    Some(p) => format!("{:.prec$}", f, prec = p),
+                    None => format!("{}", f),
+                };
+                apply_sign(&s, *f, sign)
+            } else { val.str() }
+        }
+        // Float: general uppercase
+        (Some('G'), _, true) => {
+            if let PyObject::Float(f) = &*val_borrowed {
+                let s = match precision {
+                    Some(p) => format!("{:.prec$}", f, prec = p).to_uppercase(),
+                    None => format!("{}", f).to_uppercase(),
+                };
+                apply_sign(&s, *f, sign)
+            } else { val.str() }
+        }
+        // Float: percentage
+        (Some('%'), _, true) => {
+            if let PyObject::Float(f) = &*val_borrowed {
+                let pct = f * 100.0;
+                let s = match precision {
+                    Some(p) => format!("{:.prec$}", pct, prec = p),
+                    None => format!("{}", pct),
+                };
+                format!("{}%", s)
+            } else { val.str() }
+        }
+
+        // Default for string or any other type: str() representation
+        _ => val.str(),
+    };
+
+    // Apply zero-padding (fill='0', align='=' for numbers)
+    let base = if zero_pad {
+        let effective_align = '=';
+        apply_padding(&base, width, effective_align, '0', true)
+    } else {
+        base
+    };
+
+    // Apply final width and alignment
+    let result = apply_padding(&base, width, align, fill_char, false);
+
+    Ok(result)
+}
+
+/// Apply '+'/' '/'-' sign prefix. If `sign` is '-', only negative numbers get a '-'.
+/// If `sign` is '+', positive numbers get '+', negative get '-'.
+/// If `sign` is ' ', positive numbers get ' ', negative get '-'.
+fn apply_sign(s: &str, val: f64, sign: char) -> String {
+    if val < 0.0 {
+        // Negative — Rust format already includes '-'
+        format!("-{}", &s.trim_start_matches('-'))
+    } else {
+        match sign {
+            '+' => format!("+{}", s),
+            ' ' => format!(" {}", s),
+            '-' => s.to_string(),
+            _ => s.to_string(),
+        }
+    }
+}
+
+/// Format a BigInt with sign handling for Python format spec.
+fn format_int_with_sign(i: &BigInt, sign: char, precision: Option<usize>) -> String {
+    let s = if i.sign() == num_bigint::Sign::Minus {
+        // Remove negative sign from BigInt's display, we'll add it back
+        let abs_s = format!("{}", i).trim_start_matches('-').to_string();
+        let s = match precision {
+            Some(p) if p > abs_s.len() => {
+                let zeros = "0".repeat(p - abs_s.len());
+                format!("{}{}", zeros, abs_s)
+            }
+            _ => abs_s,
+        };
+        format!("-{}", s)
+    } else {
+        let abs_s = format!("{}", i);
+        let s = match precision {
+            Some(p) if p > abs_s.len() => {
+                let zeros = "0".repeat(p - abs_s.len());
+                format!("{}{}", zeros, abs_s)
+            }
+            _ => abs_s,
+        };
+        match sign {
+            '+' => format!("+{}", s),
+            ' ' => format!(" {}", s),
+            '-' => s,
+            _ => s,
+        }
+    };
+    s
+}
+
+/// Format a float with sign and precision.
+fn format_float_with_sign(val: f64, sign: char, precision: Option<usize>) -> String {
+    let s = match precision {
+        Some(p) => format!("{:.prec$}", val, prec = p),
+        None => format!("{}", val),
+    };
+    apply_sign(&s, val, sign)
+}
+
+/// Apply padding/alignment to a base string.
+fn apply_padding(s: &str, width: Option<usize>, align: char, fill: char, zero_mode: bool) -> String {
+    let w = match width {
+        Some(w) => w,
+        None => return s.to_string(),
+    };
+    if s.len() >= w {
+        return s.to_string();
+    }
+    let padding = w - s.len();
+    let pad_str: String = fill.to_string().repeat(padding);
+
+    match align {
+        '<' => format!("{}{}", s, pad_str),
+        '>' => format!("{}{}", pad_str, s),
+        '^' => {
+            let left = padding / 2;
+            let right = padding - left;
+            format!("{}{}{}", fill.to_string().repeat(left), s, fill.to_string().repeat(right))
+        }
+        '=' => {
+            // Insert padding after sign (if any) but before digits
+            if zero_mode {
+                // For zero-pad mode, just left-pad
+                format!("{}{}", pad_str, s)
+            } else {
+                // For '=' alignment with custom fill, insert after any leading sign
+                if s.starts_with('+') || s.starts_with('-') || s.starts_with(' ') {
+                    let (sign_byte, rest) = s.split_at(1);
+                    format!("{}{}{}", sign_byte, pad_str, rest)
+                } else {
+                    format!("{}{}", pad_str, s)
+                }
+            }
+        }
+        _ => format!("{}{}", pad_str, s), // default right-align
     }
 }

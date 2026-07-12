@@ -3320,7 +3320,7 @@ impl ObjectAccess for PyObject {
                             if args.len() < 2 { return Err(PyError::type_error("index() takes at least 1 argument")); }
                             if let PyObject::List(list) = &*args[0].borrow() {
                                 for (i, item) in list.iter().enumerate() {
-                                    if item.is(&args[1]) { return Ok(py_int(i as i64)); }
+                                    if item.equals(&args[1])? { return Ok(py_int(i as i64)); }
                                 }
                                 Err(PyError::value_error(format!("{} is not in list", args[1].str())))
                             } else { Err(PyError::runtime_error("index on non-list")) }
@@ -3332,7 +3332,7 @@ impl ObjectAccess for PyObject {
                         func: |args| {
                             if args.len() < 2 { return Err(PyError::type_error("count() takes at least 1 argument")); }
                             if let PyObject::List(list) = &*args[0].borrow() {
-                                let c = list.iter().filter(|item| item.is(&args[1])).count();
+                                let c = list.iter().filter(|item| item.equals(&args[1]).unwrap_or(false)).count();
                                 Ok(py_int(c as i64))
                             } else { Err(PyError::runtime_error("count on non-list")) }
                         },
@@ -3524,8 +3524,13 @@ impl ObjectAccess for PyObject {
                         name: "pop".to_string(),
                         func: |args| {
                             if args.len() < 2 { return Err(PyError::type_error("pop() takes at least 1 argument")); }
-                            if let PyObject::Dict(d) = &mut *args[0].borrow_mut() { d.remove(&args[1]) }
-                            else { Err(PyError::runtime_error("pop on non-dict")) }
+                            if let PyObject::Dict(d) = &mut *args[0].borrow_mut() {
+                                match d.remove(&args[1]) {
+                                    Ok(val) => Ok(val),
+                                    Err(_) if args.len() > 2 => Ok(args[2].clone()),
+                                    Err(e) => Err(e),
+                                }
+                            } else { Err(PyError::runtime_error("pop on non-dict")) }
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -6522,6 +6527,322 @@ pub fn create_struct_dict() -> HashMap<String, PyObjectRef> {
             Err(PyError::Exception(msg, py_none()))
         },
     }));
+
+    d
+}
+
+/// Creates a native bisect module for binary search and insertion on lists.
+pub fn create_bisect_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! bisect_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    bisect_func!("bisect_left", |args| {
+        if args.len() < 2 { return Err(PyError::type_error("bisect_left() requires at least 2 arguments (list, item)")); }
+        let items = {
+            let a = args[0].borrow();
+            match &*a { PyObject::List(v) => v.clone(), _ => return Err(PyError::type_error("bisect_left() argument must be a list")) }
+        };
+        let x = &args[1];
+        let mut lo = if args.len() > 2 { args[2].as_i64().ok_or_else(|| PyError::type_error("lo must be an integer"))? as usize } else { 0 };
+        let mut hi = if args.len() > 3 { args[3].as_i64().ok_or_else(|| PyError::type_error("hi must be an integer"))? as usize } else { items.len() };
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if items[mid].borrow().lt(x)? { lo = mid + 1; } else { hi = mid; }
+        }
+        Ok(py_int(lo as i64))
+    });
+
+    bisect_func!("bisect_right", |args| {
+        if args.len() < 2 { return Err(PyError::type_error("bisect_right() requires at least 2 arguments (list, item)")); }
+        let items = {
+            let a = args[0].borrow();
+            match &*a { PyObject::List(v) => v.clone(), _ => return Err(PyError::type_error("bisect_right() argument must be a list")) }
+        };
+        let x = &args[1];
+        let mut lo = if args.len() > 2 { args[2].as_i64().ok_or_else(|| PyError::type_error("lo must be an integer"))? as usize } else { 0 };
+        let mut hi = if args.len() > 3 { args[3].as_i64().ok_or_else(|| PyError::type_error("hi must be an integer"))? as usize } else { items.len() };
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if x.borrow().lt(&items[mid])? { hi = mid; } else { lo = mid + 1; }
+        }
+        Ok(py_int(lo as i64))
+    });
+
+    bisect_func!("insort_left", |args| {
+        if args.len() < 2 { return Err(PyError::type_error("insort_left() requires at least 2 arguments (list, item)")); }
+        let items = {
+            let a = args[0].borrow();
+            match &*a { PyObject::List(v) => v.clone(), _ => return Err(PyError::type_error("insort_left() argument must be a list")) }
+        };
+        let x = &args[1];
+        let mut lo = if args.len() > 2 { args[2].as_i64().ok_or_else(|| PyError::type_error("lo must be an integer"))? as usize } else { 0 };
+        let mut hi = if args.len() > 3 { args[3].as_i64().ok_or_else(|| PyError::type_error("hi must be an integer"))? as usize } else { items.len() };
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if items[mid].borrow().lt(x)? { lo = mid + 1; } else { hi = mid; }
+        }
+        if let PyObject::List(list) = &mut *args[0].borrow_mut() { list.insert(lo, x.clone()); Ok(py_none()) }
+        else { Err(PyError::type_error("insort_left() argument must be a list")) }
+    });
+
+    bisect_func!("insort_right", |args| {
+        if args.len() < 2 { return Err(PyError::type_error("insort_right() requires at least 2 arguments (list, item)")); }
+        let items = {
+            let a = args[0].borrow();
+            match &*a { PyObject::List(v) => v.clone(), _ => return Err(PyError::type_error("insort_right() argument must be a list")) }
+        };
+        let x = &args[1];
+        let mut lo = if args.len() > 2 { args[2].as_i64().ok_or_else(|| PyError::type_error("lo must be an integer"))? as usize } else { 0 };
+        let mut hi = if args.len() > 3 { args[3].as_i64().ok_or_else(|| PyError::type_error("hi must be an integer"))? as usize } else { items.len() };
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if x.borrow().lt(&items[mid])? { hi = mid; } else { lo = mid + 1; }
+        }
+        if let PyObject::List(list) = &mut *args[0].borrow_mut() { list.insert(lo, x.clone()); Ok(py_none()) }
+        else { Err(PyError::type_error("insort_right() argument must be a list")) }
+    });
+
+    d
+}
+
+/// Creates a native heapq module for heap queue operations on lists.
+pub fn create_heapq_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! heap_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    // Internal: sift-down (for heappop, heapreplace, heapify)
+    fn _siftdown(heap: &mut Vec<PyObjectRef>, start: usize, pos: usize) {
+        let mut pos = pos;
+        while pos > start {
+            let parent = (pos - 1) / 2;
+            if heap[pos].borrow().lt(&heap[parent]).unwrap_or(false) {
+                heap.swap(pos, parent);
+                pos = parent;
+            } else {
+                break;
+            }
+        }
+    }
+
+    // Internal: sift-up (for heapify)
+    fn _siftup(heap: &mut Vec<PyObjectRef>, pos: usize) {
+        let end = heap.len();
+        let mut pos = pos;
+        let start = pos;
+        while pos < end {
+            let left = 2 * pos + 1;
+            let right = 2 * pos + 2;
+            let mut smallest = pos;
+            if left < end && heap[left].borrow().lt(&heap[smallest]).unwrap_or(false) {
+                smallest = left;
+            }
+            if right < end && heap[right].borrow().lt(&heap[smallest]).unwrap_or(false) {
+                smallest = right;
+            }
+            if smallest == pos { break; }
+            heap.swap(pos, smallest);
+            pos = smallest;
+        }
+        // Bubble back up if needed (after moving nodes)
+        _siftdown(heap, start, pos);
+    }
+
+    heap_func!("heapify", |args| {
+        if args.is_empty() { return Err(PyError::type_error("heapify() missing required argument")); }
+        if let PyObject::List(list) = &mut *args[0].borrow_mut() {
+            let n = list.len();
+            if n > 1 {
+                for i in (0..n / 2).rev() {
+                    _siftup(list, i);
+                }
+            }
+            Ok(py_none())
+        } else {
+            Err(PyError::type_error("heapify() argument must be a list"))
+        }
+    });
+
+    heap_func!("heappush", |args| {
+        if args.len() < 2 { return Err(PyError::type_error("heappush() requires 2 arguments (heap, item)")); }
+        if let PyObject::List(list) = &mut *args[0].borrow_mut() {
+            list.push(args[1].clone());
+            _siftdown(list, 0, list.len() - 1);
+            Ok(py_none())
+        } else {
+            Err(PyError::type_error("heappush() argument must be a list"))
+        }
+    });
+
+    heap_func!("heappop", |args| {
+        if args.is_empty() { return Err(PyError::type_error("heappop() missing required argument")); }
+        if let PyObject::List(list) = &mut *args[0].borrow_mut() {
+            if list.is_empty() { return Err(PyError::index_error("pop from an empty heap")); }
+            let last = list.len() - 1;
+            list.swap(0, last);
+            let result = list.pop().unwrap();
+            if !list.is_empty() { _siftup(list, 0); }
+            Ok(result)
+        } else {
+            Err(PyError::type_error("heappop() argument must be a list"))
+        }
+    });
+
+    heap_func!("heapreplace", |args| {
+        if args.len() < 2 { return Err(PyError::type_error("heapreplace() requires 2 arguments (heap, item)")); }
+        if let PyObject::List(list) = &mut *args[0].borrow_mut() {
+            if list.is_empty() { return Err(PyError::index_error("heapreplace() on empty heap")); }
+            let result = list[0].clone();
+            list[0] = args[1].clone();
+            _siftup(list, 0);
+            Ok(result)
+        } else {
+            Err(PyError::type_error("heapreplace() argument must be a list"))
+        }
+    });
+
+    // Helper: extract comparable values for nlargest/nsmallest
+    fn _extract_items(args: &[PyObjectRef]) -> PyResult<(usize, Vec<PyObjectRef>)> {
+        if args.len() < 2 { return Err(PyError::type_error("requires at least 2 arguments (n, iterable)")); }
+        let n = args[0].as_i64().ok_or_else(|| PyError::type_error("n must be an integer"))?;
+        if n < 0 { return Err(PyError::value_error("n must be non-negative")); }
+        let n = n as usize;
+        // Extract items from iterable
+        let iterable = crate::object::builtin_iter(&[args[1].clone()])?;
+        let mut items = Vec::new();
+        loop {
+            match crate::object::builtin_next(&[iterable.clone()]) {
+                Ok(val) => items.push(val),
+                Err(PyError::StopIteration) => break,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok((n, items))
+    }
+
+    heap_func!("nlargest", |args| {
+        let (n, mut items) = _extract_items(args)?;
+        if n == 0 { return Ok(py_list(Vec::new())); }
+        // Use a min-heap of size n to track largest n elements
+        if items.len() <= n {
+            // Sort descending
+            items.sort_by(|a, b| b.borrow().lt(a).unwrap_or(false).cmp(&true).reverse());
+            return Ok(py_list(items));
+        }
+        // Build a min-heap of the first n elements
+        let mut heap: Vec<PyObjectRef> = items.drain(..n).collect();
+        if heap.len() > 1 {
+            for i in (0..heap.len() / 2).rev() {
+                _siftup(&mut heap, i);
+            }
+        }
+        for item in items {
+            if item.borrow().lt(&heap[0]).unwrap_or(false) {
+                // item < smallest in heap, skip
+            } else {
+                heap[0] = item;
+                _siftup(&mut heap, 0);
+            }
+        }
+        // Sort descending
+        heap.sort_by(|a, b| b.borrow().lt(a).unwrap_or(false).cmp(&true).reverse());
+        Ok(py_list(heap))
+    });
+
+    heap_func!("nsmallest", |args| {
+        let (n, mut items) = _extract_items(args)?;
+        if n == 0 { return Ok(py_list(Vec::new())); }
+        if items.len() <= n {
+            items.sort_by(|a, b| a.borrow().lt(b).unwrap_or(false).cmp(&true));
+            return Ok(py_list(items));
+        }
+        // Use a max-heap (negation) of size n to track smallest n elements
+        // Actually, we can use a max-heap: track largest in the small set
+        // For max-heap we invert comparison
+        let mut heap: Vec<PyObjectRef> = items.drain(..n).collect();
+        if heap.len() > 1 {
+            for i in (0..heap.len() / 2).rev() {
+                _siftup_max(&mut heap, i);
+            }
+        }
+        for item in items {
+            if heap[0].borrow().lt(&item).unwrap_or(false) {
+                // item < heap[0], skip
+            } else {
+                heap[0] = item;
+                _siftup_max(&mut heap, 0);
+            }
+        }
+        heap.sort_by(|a, b| a.borrow().lt(b).unwrap_or(false).cmp(&true));
+        Ok(py_list(heap))
+    });
+
+    fn _siftup_max(heap: &mut Vec<PyObjectRef>, pos: usize) {
+        let end = heap.len();
+        let mut pos = pos;
+        while pos < end {
+            let left = 2 * pos + 1;
+            let right = 2 * pos + 2;
+            let mut largest = pos;
+            if left < end && heap[largest].borrow().lt(&heap[left]).unwrap_or(false) {
+                largest = left;
+            }
+            if right < end && heap[largest].borrow().lt(&heap[right]).unwrap_or(false) {
+                largest = right;
+            }
+            if largest == pos { break; }
+            heap.swap(pos, largest);
+            pos = largest;
+        }
+    }
+
+    d
+}
+
+use std::sync::atomic::{AtomicI64, Ordering};
+static ENUM_AUTO_COUNTER: AtomicI64 = AtomicI64::new(1);
+
+/// Creates a native enum module with Enum, IntEnum, and auto().
+pub fn create_enum_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! enum_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    enum_func!("auto", |args| {
+        let _ = args;
+        let val = ENUM_AUTO_COUNTER.fetch_add(1, Ordering::SeqCst);
+        Ok(py_int(val))
+    });
+
+    enum_func!("Enum", |args| {
+        if args.is_empty() { return Err(PyError::type_error("Enum() requires at least 1 argument")); }
+        // Enum is a callable that returns an int.
+        // If called with (name, value), return value; if called with just value, return it.
+        if args.len() >= 2 {
+            Ok(args[1].clone())
+        } else {
+            Ok(args[0].clone())
+        }
+    });
+
+    enum_func!("IntEnum", |args| {
+        if args.is_empty() { return Err(PyError::type_error("IntEnum() requires at least 1 argument")); }
+        if args.len() >= 2 {
+            Ok(args[1].clone())
+        } else {
+            Ok(args[0].clone())
+        }
+    });
 
     d
 }
