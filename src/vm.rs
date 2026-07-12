@@ -2453,12 +2453,49 @@ fn is_exception_subclass(child_type: &str, parent_type: &str) -> bool {
     // BaseException is the root — it has no parent.
     let parent: Option<&str> = match child_type {
         "BaseException" => None,
-        "Exception" => Some("BaseException"),
+        "Exception" | "SystemExit" | "KeyboardInterrupt" | "GeneratorExit" => Some("BaseException"),
+        // Exception → BaseException subclasses
         "TypeError" | "ValueError" | "ZeroDivisionError" | "NameError" |
         "AttributeError" | "IndexError" | "KeyError" | "RuntimeError" |
         "StopIteration" | "AssertionError" | "ImportError" | "OSError" |
-        "OsError" | "MatchError" => Some("Exception"),
-        "SystemExit" => Some("BaseException"),
+        "OsError" | "MatchError" | "NotImplementedError" | "RecursionError" |
+        "EOFError" | "StopAsyncIteration" | "ModuleNotFoundError" |
+        "FloatingPointError" | "OverflowError" | "ArithmeticError" |
+        "LookupError" | "EnvironmentError" | "IOError" | "FileNotFoundError" |
+        "PermissionError" | "NotADirectoryError" | "IsADirectoryError" |
+        "FileExistsError" | "ConnectionError" | "BrokenPipeError" |
+        "ConnectionAbortedError" | "ConnectionRefusedError" |
+        "ConnectionResetError" | "BlockingIOError" | "ChildProcessError" |
+        "InterruptedError" | "ProcessLookupError" | "TimeoutError" |
+        "UnicodeError" | "UnicodeEncodeError" | "UnicodeDecodeError" |
+        "UnicodeTranslateError" | "ReferenceError" | "BufferError" |
+        "Warning" | "UserWarning" | "DeprecationWarning" |
+        "PendingDeprecationWarning" | "SyntaxWarning" | "RuntimeWarning" |
+        "FutureWarning" | "ImportWarning" | "UnicodeWarning" |
+        "BytesWarning" | "ResourceWarning" => Some("Exception"),
+        // Subclasses of ValueError
+        "UnicodeError" => Some("ValueError"),
+        // Subclasses of OSError
+        "EnvironmentError" | "IOError" => Some("OSError"),
+        "FileNotFoundError" | "PermissionError" | "NotADirectoryError" |
+        "IsADirectoryError" | "FileExistsError" => Some("OSError"),
+        "ConnectionError" | "BrokenPipeError" | "ConnectionAbortedError" |
+        "ConnectionRefusedError" | "ConnectionResetError" => Some("OSError"),
+        "BlockingIOError" | "ChildProcessError" | "InterruptedError" |
+        "ProcessLookupError" | "TimeoutError" => Some("OSError"),
+        // Subclasses of ArithmeticError
+        "FloatingPointError" | "OverflowError" | "ZeroDivisionError" => Some("ArithmeticError"),
+        // Subclasses of LookupError
+        "IndexError" | "KeyError" => Some("LookupError"),
+        // Subclasses of RuntimeError
+        "RecursionError" | "NotImplementedError" => Some("RuntimeError"),
+        // Subclasses of ImportError
+        "ModuleNotFoundError" => Some("ImportError"),
+        // Subclasses of Warning
+        "UserWarning" | "DeprecationWarning" | "PendingDeprecationWarning" |
+        "SyntaxWarning" | "RuntimeWarning" | "FutureWarning" |
+        "ImportWarning" | "UnicodeWarning" | "BytesWarning" |
+        "ResourceWarning" => Some("Warning"),
         // For any exception type we don't know about (e.g. user-defined),
         // assume it's a subclass of Exception (standard Python behavior).
         _ => Some("Exception"),

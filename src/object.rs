@@ -2334,6 +2334,37 @@ pub fn builtin_bin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Ok(py_str(&format!("0b{:b}", n)))
 }
 
+pub fn builtin_ascii(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() != 1 {
+        return Err(PyError::type_error("ascii() takes exactly one argument"));
+    }
+    let s = args[0].repr();
+    let mut result = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_ascii() {
+            result.push(c);
+        } else {
+            let code = c as u32;
+            if code <= 0xFF {
+                result.push_str(&format!("\\x{:02x}", code));
+            } else if code <= 0xFFFF {
+                result.push_str(&format!("\\u{:04x}", code));
+            } else {
+                result.push_str(&format!("\\U{:08x}", code));
+            }
+        }
+    }
+    Ok(py_str(&result))
+}
+
+pub fn builtin_memoryview(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() != 1 {
+        return Err(PyError::type_error("memoryview() takes exactly one argument"));
+    }
+    // Return a string representation since we don't have a full memoryview type
+    Ok(py_str(&format!("<memory at 0x{:x}>", std::ptr::from_ref(&args[0]) as usize)))
+}
+
 pub fn builtin_input(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if !args.is_empty() {
         print!("{}", args[0].str());
@@ -4782,6 +4813,32 @@ make_exception_func!(builtin_make_exception_stopiteration, "StopIteration");
 make_exception_func!(builtin_make_exception_assertionerror, "AssertionError");
 make_exception_func!(builtin_make_exception_oserror, "OSError");
 make_exception_func!(builtin_make_exception_importerror, "ImportError");
+// Additional exception types for full CPython hierarchy
+make_exception_func!(builtin_make_exception_lookuperror, "LookupError");
+make_exception_func!(builtin_make_exception_arithmeticerror, "ArithmeticError");
+make_exception_func!(builtin_make_exception_floatingpointerror, "FloatingPointError");
+make_exception_func!(builtin_make_exception_overflowerror, "OverflowError");
+make_exception_func!(builtin_make_exception_environmenterror, "EnvironmentError");
+make_exception_func!(builtin_make_exception_ioerror, "IOError");
+make_exception_func!(builtin_make_exception_filenotfounderror, "FileNotFoundError");
+make_exception_func!(builtin_make_exception_permissionerror, "PermissionError");
+make_exception_func!(builtin_make_exception_notimplementederror, "NotImplementedError");
+make_exception_func!(builtin_make_exception_recursionerror, "RecursionError");
+make_exception_func!(builtin_make_exception_keyboardinterrupt, "KeyboardInterrupt");
+make_exception_func!(builtin_make_exception_generatorexit, "GeneratorExit");
+make_exception_func!(builtin_make_exception_systemexit, "SystemExit");
+make_exception_func!(builtin_make_exception_modulenotfounderror, "ModuleNotFoundError");
+make_exception_func!(builtin_make_exception_stopasynciteration, "StopAsyncIteration");
+make_exception_func!(builtin_make_exception_eoferror, "EOFError");
+make_exception_func!(builtin_make_exception_connectionerror, "ConnectionError");
+make_exception_func!(builtin_make_exception_brokenpipeerror, "BrokenPipeError");
+make_exception_func!(builtin_make_exception_connectionrefusederror, "ConnectionRefusedError");
+make_exception_func!(builtin_make_exception_blockingioerror, "BlockingIOError");
+make_exception_func!(builtin_make_exception_childprocesserror, "ChildProcessError");
+make_exception_func!(builtin_make_exception_interruptederror, "InterruptedError");
+make_exception_func!(builtin_make_exception_timeouterror, "TimeoutError");
+make_exception_func!(builtin_make_exception_unicodedecodeerror, "UnicodeDecodeError");
+make_exception_func!(builtin_make_exception_unicodeencodeerror, "UnicodeEncodeError");
 
 // ---- Module creation ----
 
@@ -4823,6 +4880,8 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     add_func!("hex", builtin_hex);
     add_func!("oct", builtin_oct);
     add_func!("bin", builtin_bin);
+    add_func!("ascii", builtin_ascii);
+    add_func!("memoryview", builtin_memoryview);
     add_func!("input", builtin_input);
     add_func!("exit", builtin_exit);
     add_func!("repr", builtin_repr);
@@ -4890,6 +4949,31 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     add_exc_type!("AssertionError", builtin_make_exception_assertionerror);
     add_exc_type!("OSError", builtin_make_exception_oserror);
     add_exc_type!("ImportError", builtin_make_exception_importerror);
+    add_exc_type!("LookupError", builtin_make_exception_lookuperror);
+    add_exc_type!("ArithmeticError", builtin_make_exception_arithmeticerror);
+    add_exc_type!("FloatingPointError", builtin_make_exception_floatingpointerror);
+    add_exc_type!("OverflowError", builtin_make_exception_overflowerror);
+    add_exc_type!("EnvironmentError", builtin_make_exception_environmenterror);
+    add_exc_type!("IOError", builtin_make_exception_ioerror);
+    add_exc_type!("FileNotFoundError", builtin_make_exception_filenotfounderror);
+    add_exc_type!("PermissionError", builtin_make_exception_permissionerror);
+    add_exc_type!("NotImplementedError", builtin_make_exception_notimplementederror);
+    add_exc_type!("RecursionError", builtin_make_exception_recursionerror);
+    add_exc_type!("KeyboardInterrupt", builtin_make_exception_keyboardinterrupt);
+    add_exc_type!("GeneratorExit", builtin_make_exception_generatorexit);
+    add_exc_type!("SystemExit", builtin_make_exception_systemexit);
+    add_exc_type!("ModuleNotFoundError", builtin_make_exception_modulenotfounderror);
+    add_exc_type!("StopAsyncIteration", builtin_make_exception_stopasynciteration);
+    add_exc_type!("EOFError", builtin_make_exception_eoferror);
+    add_exc_type!("ConnectionError", builtin_make_exception_connectionerror);
+    add_exc_type!("BrokenPipeError", builtin_make_exception_brokenpipeerror);
+    add_exc_type!("ConnectionRefusedError", builtin_make_exception_connectionrefusederror);
+    add_exc_type!("BlockingIOError", builtin_make_exception_blockingioerror);
+    add_exc_type!("ChildProcessError", builtin_make_exception_childprocesserror);
+    add_exc_type!("InterruptedError", builtin_make_exception_interruptederror);
+    add_exc_type!("TimeoutError", builtin_make_exception_timeouterror);
+    add_exc_type!("UnicodeDecodeError", builtin_make_exception_unicodedecodeerror);
+    add_exc_type!("UnicodeEncodeError", builtin_make_exception_unicodeencodeerror);
 
     let math_module = PyObjectRef::new(PyObject::Module {
         name: "math".to_string(),
