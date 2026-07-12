@@ -1303,11 +1303,242 @@ pub fn create_graphlib_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
+// ---- pickle helper functions ----
+
+/// Serialize a Python object to bytes using a simple custom format.
+///
+/// Format (byte markers):
+///   N       -> None
+///   T       -> True
+///   F       -> False
+///   I<val>\n -> int (decimal, newline-terminated)
+///   G<val>\n -> float (decimal, newline-terminated)
+///   S<len>:<utf8>  -> str (length-prefixed UTF-8)
+///   B<len>:<bytes>  -> bytes (length-prefixed raw bytes)
+///   [ ... ] -> list (elements serialized recursively)
+///   ( ... ) -> tuple (elements serialized recursively)
+///   { ... } -> dict (alternating key-value pairs serialized recursively)
+fn pickle_serialize(obj: &PyObjectRef, buf: &mut Vec<u8>) -> PyResult<()> {
+    match &*obj.borrow() {
+        PyObject::None => buf.push(b'N'),
+        PyObject::Bool(true) => buf.push(b'T'),
+        PyObject::Bool(false) => buf.push(b'F'),
+        PyObject::Int(n) => {
+            buf.push(b'I');
+            buf.extend_from_slice(n.to_string().as_bytes());
+            buf.push(b'\n');
+        }
+        PyObject::Float(f) => {
+            buf.push(b'G');
+            let s = if f.is_nan() {
+                "nan".to_string()
+            } else if f.is_infinite() && f.is_sign_positive() {
+                "inf".to_string()
+            } else if f.is_infinite() {
+                "-inf".to_string()
+            } else {
+                let s = format!("{:.17}", f);
+                let s = s.trim_end_matches('0').to_string();
+                if s.ends_with('.') {
+                    format!("{}0", s)
+                } else {
+                    s
+                }
+            };
+            buf.extend_from_slice(s.as_bytes());
+            buf.push(b'\n');
+        }
+        PyObject::Str(s) => {
+            buf.push(b'S');
+            let bytes = s.as_bytes();
+            buf.extend_from_slice(bytes.len().to_string().as_bytes());
+            buf.push(b':');
+            buf.extend_from_slice(bytes);
+        }
+        PyObject::Bytes(b) => {
+            buf.push(b'B');
+            buf.extend_from_slice(b.len().to_string().as_bytes());
+            buf.push(b':');
+            buf.extend_from_slice(b);
+        }
+        PyObject::List(items) => {
+            buf.push(b'[');
+            for item in items {
+                pickle_serialize(item, buf)?;
+            }
+            buf.push(b']');
+        }
+        PyObject::Tuple(items) => {
+            buf.push(b'(');
+            for item in items {
+                pickle_serialize(item, buf)?;
+            }
+            buf.push(b')');
+        }
+        PyObject::Dict(d) => {
+            buf.push(b'{');
+            for (k, v) in d.items() {
+                pickle_serialize(&k, buf)?;
+                pickle_serialize(&v, buf)?;
+            }
+            buf.push(b'}');
+        }
+        _ => {
+            return Err(PyError::type_error(format!(
+                "cannot pickle {} object",
+                obj.borrow().type_name()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Deserialize a Python object from bytes using the custom pickle format.
+fn pickle_deserialize(data: &[u8], pos: &mut usize) -> PyResult<PyObjectRef> {
+    if *pos >= data.len() {
+        return Err(PyError::type_error("unexpected end of pickle data"));
+    }
+    let marker = data[*pos];
+    *pos += 1;
+    match marker {
+        b'N' => Ok(py_none()),
+        b'T' => Ok(py_bool(true)),
+        b'F' => Ok(py_bool(false)),
+        b'I' => {
+            let start = *pos;
+            while *pos < data.len() && data[*pos] != b'\n' {
+                *pos += 1;
+            }
+            if *pos >= data.len() {
+                return Err(PyError::type_error("unterminated integer in pickle data"));
+            }
+            let s = std::str::from_utf8(&data[start..*pos])
+                .map_err(|_| PyError::type_error("invalid utf-8 in pickle int"))?;
+            *pos += 1; // skip '\n'
+            let n: num_bigint::BigInt = s
+                .parse()
+                .map_err(|_| PyError::type_error(format!("invalid integer: {}", s)))?;
+            Ok(py_int(n))
+        }
+        b'G' => {
+            let start = *pos;
+            while *pos < data.len() && data[*pos] != b'\n' {
+                *pos += 1;
+            }
+            if *pos >= data.len() {
+                return Err(PyError::type_error("unterminated float in pickle data"));
+            }
+            let s = std::str::from_utf8(&data[start..*pos])
+                .map_err(|_| PyError::type_error("invalid utf-8 in pickle float"))?;
+            *pos += 1; // skip '\n'
+            let f: f64 = s
+                .parse()
+                .map_err(|_| PyError::type_error(format!("invalid float: {}", s)))?;
+            Ok(py_float(f))
+        }
+        b'S' => {
+            let start = *pos;
+            while *pos < data.len() && data[*pos] != b':' {
+                *pos += 1;
+            }
+            if *pos >= data.len() {
+                return Err(PyError::type_error(
+                    "unterminated string length in pickle data",
+                ));
+            }
+            let len_str = std::str::from_utf8(&data[start..*pos])
+                .map_err(|_| PyError::type_error("invalid utf-8 in pickle string length"))?;
+            let len: usize = len_str
+                .parse()
+                .map_err(|_| PyError::type_error(format!("invalid string length: {}", len_str)))?;
+            *pos += 1; // skip ':'
+            if *pos + len > data.len() {
+                return Err(PyError::type_error("unexpected end of pickle string data"));
+            }
+            let s = std::str::from_utf8(&data[*pos..*pos + len])
+                .map_err(|_| PyError::type_error("invalid utf-8 in pickle string"))?;
+            *pos += len;
+            Ok(py_str(s))
+        }
+        b'B' => {
+            let start = *pos;
+            while *pos < data.len() && data[*pos] != b':' {
+                *pos += 1;
+            }
+            if *pos >= data.len() {
+                return Err(PyError::type_error(
+                    "unterminated bytes length in pickle data",
+                ));
+            }
+            let len_str = std::str::from_utf8(&data[start..*pos])
+                .map_err(|_| PyError::type_error("invalid utf-8 in pickle bytes length"))?;
+            let len: usize = len_str
+                .parse()
+                .map_err(|_| PyError::type_error(format!("invalid bytes length: {}", len_str)))?;
+            *pos += 1; // skip ':'
+            if *pos + len > data.len() {
+                return Err(PyError::type_error("unexpected end of pickle bytes data"));
+            }
+            let bytes = data[*pos..*pos + len].to_vec();
+            *pos += len;
+            Ok(PyObjectRef::imm(PyObject::Bytes(bytes)))
+        }
+        b'[' => {
+            let mut items = Vec::new();
+            while *pos < data.len() && data[*pos] != b']' {
+                items.push(pickle_deserialize(data, pos)?);
+            }
+            if *pos >= data.len() {
+                return Err(PyError::type_error("unterminated list in pickle data"));
+            }
+            *pos += 1; // skip ']'
+            Ok(py_list(items))
+        }
+        b'(' => {
+            let mut items = Vec::new();
+            while *pos < data.len() && data[*pos] != b')' {
+                items.push(pickle_deserialize(data, pos)?);
+            }
+            if *pos >= data.len() {
+                return Err(PyError::type_error("unterminated tuple in pickle data"));
+            }
+            *pos += 1; // skip ')'
+            Ok(py_tuple(items))
+        }
+        b'{' => {
+            let mut dict = crate::object::PyDict::new();
+            while *pos < data.len() && data[*pos] != b'}' {
+                let key = pickle_deserialize(data, pos)?;
+                if *pos >= data.len() {
+                    return Err(PyError::type_error("unterminated dict in pickle data"));
+                }
+                let value = pickle_deserialize(data, pos)?;
+                dict.set(key, value)?;
+            }
+            if *pos >= data.len() {
+                return Err(PyError::type_error("unterminated dict in pickle data"));
+            }
+            *pos += 1; // skip '}'
+            Ok(PyObjectRef::new(PyObject::Dict(dict)))
+        }
+        _ => Err(PyError::type_error(format!(
+            "unknown pickle marker byte: 0x{:02x}",
+            marker
+        ))),
+    }
+}
+
 pub fn create_pickle_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! pickle_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
 
@@ -1315,24 +1546,34 @@ pub fn create_pickle_dict() -> HashMap<String, PyObjectRef> {
         if args.is_empty() {
             return Err(PyError::type_error("dumps() missing required argument"));
         }
-        Ok(py_str(&args[0].repr()))
+        let mut buf = Vec::new();
+        pickle_serialize(&args[0], &mut buf)?;
+        Ok(PyObjectRef::imm(PyObject::Bytes(buf)))
     });
 
     pickle_func!("loads", |args| {
         if args.is_empty() {
             return Err(PyError::type_error("loads() missing required argument"));
         }
-        let s = args[0].str();
-        // Evaluate the string expression using the same approach as builtin_eval
-        let mut parser = crate::parser::Parser::new(&s);
-        let program = parser.parse_program()
-            .map_err(|e| PyError::type_error(format!("pickle.loads parse error: {}", e)))?;
-        let mut compiler = crate::compiler::Compiler::new();
-        let code = compiler.compile(&program, "<pickle>")
-            .map_err(|e| PyError::type_error(format!("pickle.loads compile error: {}", e)))?;
-        let mut vm = crate::vm::VirtualMachine::new();
-        let result = vm.run(code)
-            .map_err(|e| PyError::type_error(format!("pickle.loads error: {}", e)))?;
+        let data: Vec<u8> = match &*args[0].borrow() {
+            PyObject::Bytes(b) => b.clone(),
+            PyObject::Str(s) => s.as_bytes().to_vec(),
+            _ => {
+                return Err(PyError::type_error(
+                    "loads() argument must be bytes or string",
+                ))
+            }
+        };
+        let mut pos = 0;
+        let result = pickle_deserialize(&data, &mut pos)?;
+        // Check there's no trailing garbage (except for flat values where pos may be at end)
+        if pos != data.len() {
+            return Err(PyError::type_error(format!(
+                "pickle data has trailing bytes after value (pos={}, len={})",
+                pos,
+                data.len()
+            )));
+        }
         Ok(result)
     });
 

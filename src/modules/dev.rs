@@ -493,4 +493,113 @@ pub fn create_doctest_dict() -> HashMap<String, PyObjectRef> {
 
     d
 }
+// ─── inspect module ────────────────────────────────────────────────────────
 
+pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! inspect_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                name: $name.to_string(),
+                func: $func,
+            }));
+        };
+    }
+
+    inspect_func!("isfunction", |args| {
+        if args.len() < 1 { return Err(PyError::type_error("isfunction() requires 1 argument")); }
+        let obj = args[0].borrow();
+        Ok(py_bool(matches!(&*obj, PyObject::Function { .. })))
+    });
+
+    inspect_func!("isgeneratorfunction", |args| {
+        if args.len() < 1 { return Err(PyError::type_error("isgeneratorfunction() requires 1 argument")); }
+        let obj = args[0].borrow();
+        let is_gen = match &*obj {
+            PyObject::Function { code, .. } => (code.flags & 0x0020) != 0,
+            _ => false,
+        };
+        Ok(py_bool(is_gen))
+    });
+
+    inspect_func!("iscoroutinefunction", |args| {
+        if args.len() < 1 { return Err(PyError::type_error("iscoroutinefunction() requires 1 argument")); }
+        let obj = args[0].borrow();
+        let is_coro = match &*obj {
+            PyObject::Function { code, .. } => (code.flags & 0x0080) != 0,
+            _ => false,
+        };
+        Ok(py_bool(is_coro))
+    });
+
+    inspect_func!("isclass", |args| {
+        if args.len() < 1 { return Err(PyError::type_error("isclass() requires 1 argument")); }
+        let obj = args[0].borrow();
+        Ok(py_bool(matches!(&*obj, PyObject::Type { .. })))
+    });
+
+    inspect_func!("ismodule", |args| {
+        if args.len() < 1 { return Err(PyError::type_error("ismodule() requires 1 argument")); }
+        let obj = args[0].borrow();
+        Ok(py_bool(matches!(&*obj, PyObject::Module { .. })))
+    });
+
+    inspect_func!("ismethod", |args| {
+        if args.len() < 1 { return Err(PyError::type_error("ismethod() requires 1 argument")); }
+        let obj = args[0].borrow();
+        Ok(py_bool(matches!(&*obj, PyObject::BoundMethod { .. })))
+    });
+
+    inspect_func!("isframe", |_args| Ok(py_bool(false)));
+    inspect_func!("istraceback", |_args| Ok(py_bool(false)));
+
+    inspect_func!("getdoc", |args| {
+        if args.len() < 1 { return Err(PyError::type_error("getdoc() requires 1 argument")); }
+        let obj = args[0].borrow();
+        let doc = match &*obj {
+            PyObject::Function { ref dict, .. } => dict.get("__doc__").cloned(),
+            PyObject::Type { ref dict, .. } => dict.get("__doc__").cloned(),
+            PyObject::Module { ref dict, .. } => dict.get("__doc__").cloned(),
+            PyObject::Instance { ref dict, .. } => dict.get("__doc__").cloned(),
+            _ => None,
+        };
+        Ok(doc.unwrap_or(py_none()))
+    });
+
+    inspect_func!("getfile", |_args| Ok(py_str("<unknown>")));
+    inspect_func!("getsourcefile", |_args| Ok(py_none()));
+    inspect_func!("getsource", |_args| Ok(py_str("Source not available in RustPython")));
+
+    inspect_func!("getmodule", |args| {
+        if args.len() < 1 { return Err(PyError::type_error("getmodule() requires 1 argument")); }
+        let module_name = args[0].borrow().get_attribute("__module__").ok()
+            .and_then(|v| { if let PyObject::Str(s) = &*v.borrow() { Some(s.clone()) } else { None } });
+        Ok(if let Some(name) = module_name { py_str(&name) } else { py_none() })
+    });
+
+    inspect_func!("getmembers", |args| {
+        if args.len() < 1 { return Err(PyError::type_error("getmembers() requires 1 argument")); }
+        let obj = args[0].borrow();
+        let dict = match &*obj {
+            PyObject::Function { ref dict, .. } => Some(dict),
+            PyObject::Type { ref dict, .. } => Some(dict),
+            PyObject::Module { ref dict, .. } => Some(dict),
+            PyObject::Instance { ref dict, .. } => Some(dict),
+            _ => None,
+        };
+        let members: Vec<PyObjectRef> = if let Some(d) = dict {
+            let mut items: Vec<(String, PyObjectRef)> = d.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            items.sort_by(|a, b| a.0.cmp(&b.0));
+            items.into_iter().map(|(k, v)| py_tuple(vec![py_str(&k), v])).collect()
+        } else { Vec::new() };
+        Ok(py_list(members))
+    });
+
+    inspect_func!("signature", |_args| Ok(py_str("<signature not available>")));
+    inspect_func!("currentframe", |_args| Ok(py_none()));
+    inspect_func!("stack", |_args| Ok(py_list(vec![])));
+    inspect_func!("getouterframes", |_args| Ok(py_list(vec![])));
+    inspect_func!("getinnerframes", |_args| Ok(py_list(vec![])));
+
+    d
+}

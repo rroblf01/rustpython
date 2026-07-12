@@ -141,8 +141,17 @@ impl VirtualMachine {
          modules.insert("sys".to_string(), create_module("sys", sys_dict.clone()));
           builtins.extend(sys_dict.clone());
 
-         let os_dict = create_os_dict();
-         modules.insert("os".to_string(), create_module("os", os_dict.clone()));
+         // Native os module
+         let os_mod = create_module("os", create_os_dict());
+         modules.insert("os".to_string(), os_mod.clone());
+
+         // Native os.path submodule (path manipulation functions)
+         let os_path_mod = create_module("os.path", create_os_path_dict());
+         // Wire path as a submodule attribute of the os parent module
+         if let PyObject::Module { dict, .. } = &mut *os_mod.borrow_mut() {
+             dict.insert("path".to_string(), os_path_mod.clone());
+         }
+         modules.insert("os.path".to_string(), os_path_mod);
 
          let pathlib_dict = create_pathlib_dict();
          modules.insert("pathlib".to_string(), create_module("pathlib", pathlib_dict));
@@ -488,6 +497,8 @@ impl VirtualMachine {
 
           // Native importlib stub module
           modules.insert("importlib".to_string(), create_module("importlib", create_importlib_dict()));
+
+          modules.insert("inspect".to_string(), create_module("inspect", create_inspect_dict()));
 
           // Native asyncio module (basic event loop)
           modules.insert("asyncio".to_string(), create_module("asyncio", create_asyncio_dict()));

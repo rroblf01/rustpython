@@ -474,19 +474,32 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
     }
     d.insert("environ".to_string(), create_module("environ", environ_dict));
 
-    // os.path sub-module
-    let mut path_dict = HashMap::new();
+    // os.path sub-module will be wired as a proper submodule in vm.rs
+    // The path attribute is set there (not inline) to allow proper os.path import
+    d
+}
+
+/// Create the os.path submodule dict with path manipulation functions.
+///
+/// Provides: join, exists, isfile, isdir, abspath, dirname, basename,
+/// splitext, split, getsize, getmtime, islink, expanduser, normpath, normcase
+pub fn create_os_path_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
     macro_rules! path_func {
         ($name:expr, $func:expr) => {
-            path_dict.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
         };
     }
+
+    // --- String-based path manipulation functions ---
+
     path_func!("join", |args| {
         let parts: Vec<String> = args.iter().map(|a| a.str()).collect();
         if parts.is_empty() { return Ok(py_str("")); }
         let result = parts.join("/");
         Ok(py_str(&result))
     });
+
     path_func!("dirname", |args| {
         if args.is_empty() { return Err(PyError::type_error("dirname() takes at least 1 argument")); }
         let path = args[0].str();
@@ -496,6 +509,7 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
         };
         Ok(py_str(&result))
     });
+
     path_func!("basename", |args| {
         if args.is_empty() { return Err(PyError::type_error("basename() takes at least 1 argument")); }
         let path = args[0].str();
@@ -505,6 +519,7 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
         };
         Ok(py_str(&result))
     });
+
     path_func!("split", |args| {
         if args.is_empty() { return Err(PyError::type_error("split() takes at least 1 argument")); }
         let path = args[0].str();
@@ -518,6 +533,7 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
         };
         Ok(py_list(vec![py_str(&head), py_str(&tail)]))
     });
+
     path_func!("splitext", |args| {
         if args.is_empty() { return Err(PyError::type_error("splitext() takes at least 1 argument")); }
         let path = args[0].str();
@@ -530,19 +546,163 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
         };
         Ok(py_list(vec![py_str(&root), py_str(&ext)]))
     });
+
+    // --- Filesystem-based checks ---
+
     path_func!("exists", |args| {
         if args.is_empty() { return Err(PyError::type_error("exists() takes at least 1 argument")); }
         Ok(py_bool(std::path::Path::new(&args[0].str()).exists()))
     });
+
     path_func!("isfile", |args| {
         if args.is_empty() { return Err(PyError::type_error("isfile() takes at least 1 argument")); }
         Ok(py_bool(std::path::Path::new(&args[0].str()).is_file()))
     });
+
     path_func!("isdir", |args| {
         if args.is_empty() { return Err(PyError::type_error("isdir() takes at least 1 argument")); }
         Ok(py_bool(std::path::Path::new(&args[0].str()).is_dir()))
     });
-    d.insert("path".to_string(), create_module("path", path_dict));
+
+    // --- Path resolution and normalization ---
+
+    path_func!("abspath", |args| {
+        if args.is_empty() { return Err(PyError::type_error("abspath() takes at least 1 argument")); }
+        let path_str = args[0].str();
+        let path = std::path::Path::new(&path_str);
+        if path.is_absolute() {
+            // Resolve . and .. components for a clean absolute path
+            let mut components: Vec<&str> = Vec::new();
+            for c in path_str.split('/') {
+                match c {
+                    "." | "" => continue,
+                    ".." => { components.pop(); }
+                    c => { components.push(c); }
+                }
+            }
+            let result = if components.is_empty() {
+                "/".to_string()
+            } else {
+                format!("/{}", components.join("/"))
+            };
+            Ok(py_str(&result))
+        } else {
+            match std::env::current_dir() {
+                Ok(cwd) => {
+                    let abs = cwd.join(&path_str);
+                    Ok(py_str(&abs.to_string_lossy().to_string()))
+                }
+                Err(e) => Err(PyError::OsError(format!("{}", e))),
+            }
+        }
+    });
+
+    // --- Filesystem metadata ---
+
+    path_func!("getsize", |args| {
+        if args.is_empty() { return Err(PyError::type_error("getsize() takes at least 1 argument")); }
+        match std::fs::metadata(&args[0].str()) {
+            Ok(meta) => Ok(py_int(meta.len() as i64)),
+            Err(e) => Err(PyError::OsError(format!("{}", e))),
+        }
+    });
+
+    path_func!("getmtime", |args| {
+        if args.is_empty() { return Err(PyError::type_error("getmtime() takes at least 1 argument")); }
+        match std::fs::metadata(&args[0].str()) {
+            Ok(meta) => {
+                match meta.modified() {
+                    Ok(time) => {
+                        use std::time::SystemTime;
+                        let duration = time.duration_since(SystemTime::UNIX_EPOCH)
+                            .unwrap_or_default();
+                        Ok(py_float(duration.as_secs_f64()))
+                    }
+                    Err(e) => Err(PyError::OsError(format!("{}", e))),
+                }
+            }
+            Err(e) => Err(PyError::OsError(format!("{}", e))),
+        }
+    });
+
+    path_func!("islink", |args| {
+        if args.is_empty() { return Err(PyError::type_error("islink() takes at least 1 argument")); }
+        match std::fs::symlink_metadata(&args[0].str()) {
+            Ok(meta) => Ok(py_bool(meta.file_type().is_symlink())),
+            Err(_) => Ok(py_bool(false)), // Python os.path.islink returns False on error
+        }
+    });
+
+    // --- User expansion ---
+
+    path_func!("expanduser", |args| {
+        if args.is_empty() { return Err(PyError::type_error("expanduser() takes at least 1 argument")); }
+        let path = args[0].str();
+        if path == "~" || path.starts_with("~/") {
+            match std::env::var("HOME") {
+                Ok(home) => {
+                    let result = if path == "~" {
+                        home
+                    } else {
+                        format!("{}/{}", home, &path[2..])
+                    };
+                    Ok(py_str(&result))
+                }
+                Err(_) => {
+                    Ok(py_str(&path))
+                }
+            }
+        } else {
+            Ok(py_str(&path))
+        }
+    });
+
+    // --- Normalization ---
+
+    path_func!("normpath", |args| {
+        if args.is_empty() { return Err(PyError::type_error("normpath() takes at least 1 argument")); }
+        let path = args[0].str();
+        let mut parts: Vec<&str> = Vec::new();
+        let is_absolute = path.starts_with('/');
+        for segment in path.split('/') {
+            match segment {
+                "." | "" => continue,
+                ".." => {
+                    // Only pop if we won't go above root (for absolute paths)
+                    // or if we have a regular component to pop (for relative)
+                    if parts.is_empty() {
+                        if !is_absolute {
+                            parts.push("..");
+                        }
+                        // else: absolute path, just ignore (can't go above /)
+                    } else if parts.last() == Some(&"..") {
+                        parts.push("..");
+                    } else {
+                        parts.pop();
+                    }
+                }
+                c => parts.push(c),
+            }
+        }
+        let joined = parts.join("/");
+        let result = if is_absolute {
+            format!("/{}", joined)
+        } else if joined.is_empty() {
+            ".".to_string()
+        } else {
+            joined
+        };
+        Ok(py_str(&result))
+    });
+
+    path_func!("normcase", |args| {
+        if args.is_empty() { return Err(PyError::type_error("normcase() takes at least 1 argument")); }
+        let path = args[0].str();
+        // On Unix, normcase is a no-op (returns path unchanged)
+        // On Windows it would lowercase and convert / to \\
+        Ok(py_str(&path))
+    });
+
     d
 }
 
