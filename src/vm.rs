@@ -25,6 +25,10 @@ pub struct Frame {
     pub exception_handlers: Vec<ExceptionHandler>,
     pub return_value: Option<PyResult<PyObjectRef>>,
     pub closure: Vec<PyObjectRef>,
+    /// Active exception for re-raise. Set by PUSH_EXC_INFO, consumed by RERAISE.
+    /// This is separate from the value stack so that POP_EXCEPT (which pops the
+    /// exception from the value stack) does not break RERAISE in try/finally blocks.
+    pub active_exception: Option<PyObjectRef>,
     /// Inline attribute cache — caches LOAD_ATTR results per instruction offset.
     /// Cleared when the frame is created; populated on first attribute access.
     pub attr_cache: Vec<Option<(u64, PyObjectRef)>>,  // (type_version_tag, cached_value)
@@ -67,6 +71,7 @@ impl Frame {
             exception_handlers: Vec::new(),
             return_value: None,
             closure: Vec::new(),
+            active_exception: None,
             attr_cache: vec![None; instr_count],
             global_cache: vec![None; instr_count],
             registers: Vec::new(),
@@ -217,6 +222,15 @@ impl VirtualMachine {
 
           // Native string module
           modules.insert("string".to_string(), create_module("string", create_string_dict()));
+
+          // Native csv module
+          modules.insert("csv".to_string(), create_module("csv", create_csv_dict()));
+
+          // Native io module (StringIO)
+          modules.insert("io".to_string(), create_module("io", create_io_dict()));
+
+          // Native statistics module
+          modules.insert("statistics".to_string(), create_module("statistics", create_statistics_dict()));
 
           // Also register the 'operator' module if not already present
           if !modules.contains_key("operator") {
@@ -1380,6 +1394,13 @@ impl VirtualMachine {
                                                     return Some(val.clone());
                                                 }
                                             }
+                                            PyObject::BuiltinFunction { name: n, func } => {
+                                                return Some(PyObjectRef::imm(PyObject::BuiltinMethod {
+                                                    name: n.clone(),
+                                                    func: *func,
+                                                    self_obj: obj.clone(),
+                                                }));
+                                            }
                                             _ => {
                                                 return Some(val.clone());
                                             }
@@ -1549,6 +1570,27 @@ impl VirtualMachine {
                 }
             }
 
+            Opcode::DICT_MERGE => {
+                let source = self.frames[fi].pop()?;
+                let target = self.frames[fi].peek(arg as usize)?;
+                let source_items = {
+                    let src_borrowed = source.borrow();
+                    match &*src_borrowed {
+                        PyObject::Dict(d) => d.items(),
+                        _ => return Err(PyError::type_error(
+                            format!("cannot merge non-dict into dict"))),
+                    }
+                };
+                let mut target_borrowed = target.borrow_mut();
+                if let PyObject::Dict(td) = &mut *target_borrowed {
+                    for (k, v) in source_items {
+                        td.set(k, v)?;
+                    }
+                } else {
+                    return Err(PyError::runtime_error("DICT_MERGE on non-dict"));
+                }
+            }
+
             Opcode::UNPACK_SEQUENCE => {
                 let count = arg as usize;
                 let seq = self.frames[fi].pop()?;
@@ -1639,7 +1681,13 @@ impl VirtualMachine {
             }
 
             Opcode::PUSH_EXC_INFO => {
-                // No-op on value stack — exc_obj stays on top for DUP_TOP below
+                // Save TOS to active_exception without popping (the exception
+                // stays on the value stack for DUP_TOP/CHECK_EXC_MATCH below).
+                // This provides a stable source for RERAISE even after POP_EXCEPT
+                // pops the exception from the value stack (as in try/finally).
+                if let Ok(exc) = self.frames[fi].peek(0) {
+                    self.frames[fi].active_exception = Some(exc);
+                }
             }
 
             Opcode::POP_EXCEPT => {
@@ -1704,11 +1752,17 @@ impl VirtualMachine {
             }
 
             Opcode::RERAISE => {
+                // Prefer active_exception (set by PUSH_EXC_INFO) so that
+                // POP_EXCEPT (which pops from the value stack) does not break
+                // RERAISE in try/finally blocks.
+                if let Some(exc) = self.frames[fi].active_exception.take() {
+                    return Err(PyError::Exception("re-raise".to_string(), exc));
+                }
                 match self.frames[fi].pop() {
                     Ok(exc) => {
-                        return Err(PyError::Exception(format!("re-raise"), exc));
+                        return Err(PyError::Exception("re-raise".to_string(), exc));
                     }
-                    Err(_) => return Err(PyError::runtime_error("re-raise")),
+                    Err(_) => return Err(PyError::runtime_error("No active exception to re-raise")),
                 }
             }
 
@@ -2501,27 +2555,15 @@ fn is_exception_subclass(child_type: &str, parent_type: &str) -> bool {
     let parent: Option<&str> = match child_type {
         "BaseException" => None,
         "Exception" | "SystemExit" | "KeyboardInterrupt" | "GeneratorExit" => Some("BaseException"),
-        // Exception → BaseException subclasses
-        "TypeError" | "ValueError" | "ZeroDivisionError" | "NameError" |
-        "AttributeError" | "IndexError" | "KeyError" | "RuntimeError" |
-        "StopIteration" | "AssertionError" | "ImportError" | "OSError" |
-        "OsError" | "MatchError" | "NotImplementedError" | "RecursionError" |
-        "EOFError" | "StopAsyncIteration" | "ModuleNotFoundError" |
-        "FloatingPointError" | "OverflowError" | "ArithmeticError" |
-        "LookupError" | "EnvironmentError" | "IOError" | "FileNotFoundError" |
-        "PermissionError" | "NotADirectoryError" | "IsADirectoryError" |
-        "FileExistsError" | "ConnectionError" | "BrokenPipeError" |
-        "ConnectionAbortedError" | "ConnectionRefusedError" |
-        "ConnectionResetError" | "BlockingIOError" | "ChildProcessError" |
-        "InterruptedError" | "ProcessLookupError" | "TimeoutError" |
-        "ReferenceError" | "BufferError" |
-        "Warning" | "UserWarning" | "DeprecationWarning" |
-        "PendingDeprecationWarning" | "SyntaxWarning" | "RuntimeWarning" |
-        "FutureWarning" | "ImportWarning" | "UnicodeWarning" |
-        "BytesWarning" | "ResourceWarning" => Some("Exception"),
-        // Subclasses of ValueError
-        "UnicodeError" => Some("ValueError"),
-        // Subclasses of OSError
+        // Sub-hierarchy parents (intermediate nodes in the tree)
+        "ArithmeticError" | "LookupError" | "ImportError" | "RuntimeError" |
+        "Warning" | "OSError" | "ValueError" => Some("Exception"),
+        // Sub-hierarchy children — must come before leaves to not be shadowed
+        // Children of ArithmeticError
+        "FloatingPointError" | "OverflowError" | "ZeroDivisionError" => Some("ArithmeticError"),
+        // Children of LookupError
+        "IndexError" | "KeyError" => Some("LookupError"),
+        // Children of OSError
         "EnvironmentError" | "IOError" => Some("OSError"),
         "FileNotFoundError" | "PermissionError" | "NotADirectoryError" |
         "IsADirectoryError" | "FileExistsError" => Some("OSError"),
@@ -2529,21 +2571,24 @@ fn is_exception_subclass(child_type: &str, parent_type: &str) -> bool {
         "ConnectionRefusedError" | "ConnectionResetError" => Some("OSError"),
         "BlockingIOError" | "ChildProcessError" | "InterruptedError" |
         "ProcessLookupError" | "TimeoutError" => Some("OSError"),
-        // Subclasses of ArithmeticError
-        "FloatingPointError" | "OverflowError" | "ZeroDivisionError" => Some("ArithmeticError"),
-        // Subclasses of LookupError
-        "IndexError" | "KeyError" => Some("LookupError"),
-        // Subclasses of RuntimeError
-        "RecursionError" | "NotImplementedError" => Some("RuntimeError"),
-        // Subclasses of ImportError
+        // Children of RuntimeError
+        "NotImplementedError" | "RecursionError" => Some("RuntimeError"),
+        // Children of ImportError
         "ModuleNotFoundError" => Some("ImportError"),
-        // Subclasses of Warning
+        // Children of ValueError
+        "UnicodeError" | "UnicodeEncodeError" | "UnicodeDecodeError" |
+        "UnicodeTranslateError" => Some("ValueError"),
+        // Children of Warning
         "UserWarning" | "DeprecationWarning" | "PendingDeprecationWarning" |
         "SyntaxWarning" | "RuntimeWarning" | "FutureWarning" |
         "ImportWarning" | "UnicodeWarning" | "BytesWarning" |
         "ResourceWarning" => Some("Warning"),
-        // For any exception type we don't know about (e.g. user-defined),
-        // assume it's a subclass of Exception (standard Python behavior).
+        // Leaf exception types — directly under Exception, no subclasses
+        "TypeError" | "ValueError" | "NameError" | "AttributeError" |
+        "StopIteration" | "StopAsyncIteration" | "AssertionError" |
+        "BufferError" | "EOFError" | "MatchError" | "ReferenceError" |
+        "MemoryError" => Some("Exception"),
+        // Unknown types default to Exception (users can define subclasses)
         _ => Some("Exception"),
     };
     match parent {

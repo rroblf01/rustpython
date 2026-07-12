@@ -5890,6 +5890,84 @@ fn json_parse_object<I: Iterator<Item = char>>(chars: &mut std::iter::Peekable<I
     }
 }
 
+fn json_encode_full(val: &PyObjectRef, indent: Option<usize>, sort_keys: bool, level: usize) -> PyResult<PyObjectRef> {
+    match &*val.borrow() {
+        PyObject::None => Ok(py_str("null")),
+        PyObject::Bool(b) => Ok(py_str(if *b { "true" } else { "false" })),
+        PyObject::Int(i) => Ok(py_str(&i.to_string())),
+        PyObject::Float(f) => {
+            if f.is_nan() || f.is_infinite() {
+                return Err(PyError::ValueError("Out of range float values are not JSON compliant".to_string()));
+            }
+            Ok(py_str(&f.to_string()))
+        }
+        PyObject::Str(s) => Ok(py_str(&json_escape_string(s))),
+        PyObject::List(items) | PyObject::Tuple(items) => {
+            if indent.is_some() {
+                let inner_indent = indent.unwrap_or(4);
+                let pad = " ".repeat(inner_indent * (level + 1));
+                let close_pad = " ".repeat(inner_indent * level);
+                let mut parts = Vec::with_capacity(items.len());
+                for item in items {
+                    let encoded = json_encode_full(item, indent, sort_keys, level + 1)?;
+                    parts.push(format!("\n{}{}", pad, encoded.str()));
+                }
+                if parts.is_empty() {
+                    Ok(py_str("[]"))
+                } else {
+                    parts.push(format!("\n{}", close_pad));
+                    Ok(py_str(&format!("[{}]", parts.join(","))))
+                }
+            } else {
+                let mut parts = Vec::with_capacity(items.len());
+                for item in items {
+                    let encoded = json_encode_full(item, indent, sort_keys, level + 1)?;
+                    parts.push(encoded.str());
+                }
+                Ok(py_str(&format!("[{}]", parts.join(", "))))
+            }
+        }
+        PyObject::Dict(d) => {
+            let pairs: Vec<(String, String)> = if sort_keys {
+                let mut sorted: Vec<(String, String)> = d.items().iter()
+                    .map(|(k, v)| {
+                        let key_obj = json_encode_full(k, indent, sort_keys, level + 1)
+                            .unwrap_or_else(|_| py_str("\"?\""));
+                        let val_obj = json_encode_full(v, indent, sort_keys, level + 1)
+                            .unwrap_or_else(|_| py_str("null"));
+                        (k.str(), format!("{}: {}", key_obj.str(), val_obj.str()))
+                    })
+                    .collect();
+                sorted.sort_by(|a, b| a.0.cmp(&b.0));
+                sorted
+            } else {
+                d.items().iter().map(|(k, v)| {
+                    let key_obj = json_encode_full(k, indent, sort_keys, level + 1)
+                        .unwrap_or_else(|_| py_str("\"?\""));
+                    let val_obj = json_encode_full(v, indent, sort_keys, level + 1)
+                        .unwrap_or_else(|_| py_str("null"));
+                    (String::new(), format!("{}: {}", key_obj.str(), val_obj.str()))
+                }).collect()
+            };
+            if indent.is_some() {
+                let inner_indent = indent.unwrap_or(4);
+                let pad = " ".repeat(inner_indent * (level + 1));
+                let close_pad = " ".repeat(inner_indent * level);
+                let items: Vec<String> = pairs.iter().map(|(_, v)| format!("\n{}{}", pad, v)).collect();
+                if items.is_empty() {
+                    Ok(py_str("{}"))
+                } else {
+                    Ok(py_str(&format!("{{{},{}\n{}}}", items.join(","), "", close_pad)))
+                }
+            } else {
+                let items: Vec<String> = pairs.iter().map(|(_, v)| v.clone()).collect();
+                Ok(py_str(&format!("{{{}}}", items.join(", "))))
+            }
+        }
+        _ => Err(PyError::type_error(format!("Object of type '{}' is not JSON serializable", val.borrow().type_name()))),
+    }
+}
+
 pub fn create_json_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! json_func {
@@ -5900,7 +5978,12 @@ pub fn create_json_dict() -> HashMap<String, PyObjectRef> {
 
     json_func!("dumps", |args| {
         if args.is_empty() { return Err(PyError::type_error("dumps() missing required argument")); }
-        json_encode(&args[0])
+        let indent = if args.len() > 1 {
+            let v = args[1].as_i64().unwrap_or(-1);
+            if v >= 0 { Some(v as usize) } else { None }
+        } else { None };
+        let sort_keys = if args.len() > 2 { args[2].truthy() } else { false };
+        json_encode_full(&args[0], indent, sort_keys, 0)
     });
 
     json_func!("loads", |args| {
@@ -7863,6 +7946,323 @@ pub fn create_string_dict() -> HashMap<String, PyObjectRef> {
     d.insert("punctuation".to_string(), py_str(punctuation));
     d.insert("printable".to_string(), py_str(printable));
     d.insert("whitespace".to_string(), py_str(whitespace));
+
+    d
+}
+
+// === CSV MODULE ===
+pub fn create_csv_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! csv_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    csv_func!("reader", |args| {
+        if args.is_empty() { return Err(PyError::type_error("reader() missing required argument")); }
+        let s = args[0].str();
+        let mut result = Vec::new();
+        for line in s.lines() {
+            if line.trim().is_empty() { continue; }
+            let fields: Vec<PyObjectRef> = line.split(',').map(|f| py_str(f.trim())).collect();
+            result.push(py_list(fields));
+        }
+        Ok(py_list(result))
+    });
+
+    csv_func!("writer", |args| {
+        if args.is_empty() { return Err(PyError::type_error("writer() missing required argument")); }
+        let data = &args[0];
+        let borrowed = data.borrow();
+        if let PyObject::List(rows) = &*borrowed {
+            let mut lines = Vec::new();
+            for row in rows {
+                let row_b = row.borrow();
+                if let PyObject::List(fields) = &*row_b {
+                    let line: Vec<String> = fields.iter().map(|f| f.str()).collect();
+                    lines.push(line.join(","));
+                } else {
+                    return Err(PyError::type_error("writer() argument must be a list of lists"));
+                }
+            }
+            Ok(py_str(&lines.join("\n")))
+        } else {
+            Err(PyError::type_error("writer() argument must be a list of lists"))
+        }
+    });
+
+    d
+}
+
+// === IO MODULE ===
+fn io_stringio_read(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() { return Err(PyError::type_error("read() missing required 'self' argument")); }
+    let self_obj = &args[0];
+    let inst = self_obj.borrow();
+    if let PyObject::Instance { dict, .. } = &*inst {
+        if let Some(buf) = dict.get("_buffer") {
+            let buf_str = buf.str();
+            let pos = dict.get("_pos").and_then(|p| p.as_i64()).unwrap_or(0) as usize;
+            let result = buf_str[pos..].to_string();
+            // Update position to end (full read consumed everything)
+            drop(inst);
+            if let PyObject::Instance { dict, .. } = &mut *self_obj.borrow_mut() {
+                dict.insert("_pos".to_string(), py_int(buf_str.len() as i64));
+            }
+            Ok(py_str(&result))
+        } else {
+            Ok(py_str(""))
+        }
+    } else {
+        Err(PyError::type_error("StringIO instance required"))
+    }
+}
+
+fn io_stringio_readline(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() { return Err(PyError::type_error("readline() missing required 'self' argument")); }
+    let self_obj = &args[0];
+    let inst = self_obj.borrow();
+    if let PyObject::Instance { dict, .. } = &*inst {
+        if let Some(buf) = dict.get("_buffer") {
+            let buf_str = buf.str();
+            let pos = dict.get("_pos").and_then(|p| p.as_i64()).unwrap_or(0) as usize;
+            if pos >= buf_str.len() {
+                return Ok(py_str(""));
+            }
+            let remaining = &buf_str[pos..];
+            let end = remaining.find('\n').map(|i| i + 1).unwrap_or(remaining.len());
+            let result = &remaining[..end];
+            let new_pos = pos + end;
+            drop(inst);
+            if let PyObject::Instance { dict, .. } = &mut *self_obj.borrow_mut() {
+                dict.insert("_pos".to_string(), py_int(new_pos as i64));
+            }
+            Ok(py_str(result))
+        } else {
+            Ok(py_str(""))
+        }
+    } else {
+        Err(PyError::type_error("StringIO instance required"))
+    }
+}
+
+fn io_stringio_write(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() < 2 { return Err(PyError::type_error("write() missing required argument")); }
+    let self_obj = &args[0];
+    let text = args[1].str();
+    let inst = self_obj.borrow();
+    if let PyObject::Instance { dict, .. } = &*inst {
+        let pos = dict.get("_pos").and_then(|p| p.as_i64()).unwrap_or(0) as usize;
+        drop(inst);
+        if let PyObject::Instance { dict, .. } = &mut *self_obj.borrow_mut() {
+            let buf = dict.entry("_buffer".to_string()).or_insert_with(|| py_str(""));
+            let mut buf_str = buf.str();
+            // Insert at position
+            if pos <= buf_str.len() {
+                buf_str.insert_str(pos, &text);
+                *buf = py_str(&buf_str);
+            }
+            dict.insert("_pos".to_string(), py_int((pos + text.len()) as i64));
+        }
+        Ok(py_int(text.len() as i64))
+    } else {
+        Err(PyError::type_error("StringIO instance required"))
+    }
+}
+
+fn io_stringio_seek(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() < 2 { return Err(PyError::type_error("seek() missing required argument")); }
+    let self_obj = &args[0];
+    let pos = args[1].as_i64().unwrap_or(0);
+    if let PyObject::Instance { dict, .. } = &mut *self_obj.borrow_mut() {
+        dict.insert("_pos".to_string(), py_int(pos));
+    }
+    Ok(py_int(pos))
+}
+
+fn io_stringio_tell(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() { return Err(PyError::type_error("tell() missing required 'self' argument")); }
+    let self_obj = &args[0];
+    let inst = self_obj.borrow();
+    if let PyObject::Instance { dict, .. } = &*inst {
+        Ok(dict.get("_pos").cloned().unwrap_or(py_int(0)))
+    } else {
+        Err(PyError::type_error("StringIO instance required"))
+    }
+}
+
+fn io_stringio_getvalue(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() { return Err(PyError::type_error("getvalue() missing required 'self' argument")); }
+    let self_obj = &args[0];
+    let inst = self_obj.borrow();
+    if let PyObject::Instance { dict, .. } = &*inst {
+        Ok(dict.get("_buffer").cloned().unwrap_or(py_str("")))
+    } else {
+        Err(PyError::type_error("StringIO instance required"))
+    }
+}
+
+pub fn create_io_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! io_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    io_func!("StringIO", |args| {
+        // Create the type on each call (no caching needed for native modules)
+        let mut type_dict = HashMap::new();
+        type_dict.insert("read".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "read".to_string(), func: io_stringio_read }));
+        type_dict.insert("readline".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "readline".to_string(), func: io_stringio_readline }));
+        type_dict.insert("write".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "write".to_string(), func: io_stringio_write }));
+        type_dict.insert("seek".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "seek".to_string(), func: io_stringio_seek }));
+        type_dict.insert("tell".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "tell".to_string(), func: io_stringio_tell }));
+        type_dict.insert("getvalue".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "getvalue".to_string(), func: io_stringio_getvalue }));
+        let typ = PyObjectRef::new(PyObject::Type {
+            name: "StringIO".to_string(),
+            dict: type_dict,
+            bases: vec![],
+            mro: vec![],
+        });
+        let mut instance_dict = HashMap::new();
+        let initial = if !args.is_empty() { args[0].str() } else { String::new() };
+        instance_dict.insert("_buffer".to_string(), py_str(&initial));
+        instance_dict.insert("_pos".to_string(), py_int(0));
+        Ok(PyObjectRef::new(PyObject::Instance {
+            typ,
+            dict: instance_dict,
+        }))
+    });
+
+    d
+}
+
+// === STATISTICS MODULE ===
+pub fn create_statistics_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! stat_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    stat_func!("mean", |args| {
+        if args.is_empty() { return Err(PyError::type_error("mean() missing required argument")); }
+        let data = &args[0];
+        let borrowed = data.borrow();
+        if let PyObject::List(items) = &*borrowed {
+            if items.is_empty() {
+                return Err(PyError::ValueError("mean() argument is empty".to_string()));
+            }
+            let mut sum = 0.0f64;
+            let mut count = 0usize;
+            for item in items {
+                let v = item.borrow();
+                match &*v {
+                    PyObject::Int(i) => { sum += i.to_f64().unwrap_or(0.0); count += 1; }
+                    PyObject::Float(f) => { sum += f; count += 1; }
+                    _ => return Err(PyError::type_error("mean() argument must contain numbers")),
+                }
+            }
+            Ok(py_float(sum / count as f64))
+        } else {
+            Err(PyError::type_error("mean() argument must be a list"))
+        }
+    });
+
+    stat_func!("median", |args| {
+        if args.is_empty() { return Err(PyError::type_error("median() missing required argument")); }
+        let data = &args[0];
+        let borrowed = data.borrow();
+        if let PyObject::List(items) = &*borrowed {
+            if items.is_empty() {
+                return Err(PyError::ValueError("median() argument is empty".to_string()));
+            }
+            let mut nums: Vec<f64> = Vec::with_capacity(items.len());
+            for item in items {
+                let v = item.borrow();
+                match &*v {
+                    PyObject::Int(i) => nums.push(i.to_f64().unwrap_or(0.0)),
+                    PyObject::Float(f) => nums.push(*f),
+                    _ => return Err(PyError::type_error("median() argument must contain numbers")),
+                }
+            }
+            nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let n = nums.len();
+            if n % 2 == 0 {
+                Ok(py_float((nums[n/2 - 1] + nums[n/2]) / 2.0))
+            } else {
+                Ok(py_float(nums[n/2]))
+            }
+        } else {
+            Err(PyError::type_error("median() argument must be a list"))
+        }
+    });
+
+    stat_func!("stdev", |args| {
+        if args.is_empty() { return Err(PyError::type_error("stdev() missing required argument")); }
+        let data = &args[0];
+        let borrowed = data.borrow();
+        if let PyObject::List(items) = &*borrowed {
+            if items.len() < 2 {
+                return Err(PyError::ValueError("stdev() requires at least 2 data points".to_string()));
+            }
+            let mut nums: Vec<f64> = Vec::with_capacity(items.len());
+            for item in items {
+                let v = item.borrow();
+                match &*v {
+                    PyObject::Int(i) => nums.push(i.to_f64().unwrap_or(0.0)),
+                    PyObject::Float(f) => nums.push(*f),
+                    _ => return Err(PyError::type_error("stdev() argument must contain numbers")),
+                }
+            }
+            let n = nums.len() as f64;
+            let sum: f64 = nums.iter().sum();
+            let mean = sum / n;
+            let variance: f64 = nums.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0);
+            Ok(py_float(variance.sqrt()))
+        } else {
+            Err(PyError::type_error("stdev() argument must be a list"))
+        }
+    });
+
+    stat_func!("mode", |args| {
+        if args.is_empty() { return Err(PyError::type_error("mode() missing required argument")); }
+        let data = &args[0];
+        let borrowed = data.borrow();
+        if let PyObject::List(items) = &*borrowed {
+            if items.is_empty() {
+                return Err(PyError::ValueError("mode() argument is empty".to_string()));
+            }
+            let mut counts = std::collections::HashMap::new();
+            let mut max_count = 0i64;
+            let mut modes: Vec<PyObjectRef> = Vec::new();
+            for item in items {
+                let hash = item.hash()?;
+                let entry = counts.entry(hash).or_insert((0i64, item.clone()));
+                entry.0 += 1;
+            }
+            // Find the max count
+            for (_, (count, ref item)) in &counts {
+                if *count > max_count {
+                    max_count = *count;
+                    modes.clear();
+                    modes.push(item.clone());
+                } else if *count == max_count {
+                    modes.push(item.clone());
+                }
+            }
+            if modes.len() == 1 {
+                Ok(modes[0].clone())
+            } else {
+                Ok(py_list(modes))
+            }
+        } else {
+            Err(PyError::type_error("mode() argument must be a list"))
+        }
+    });
 
     d
 }

@@ -1942,19 +1942,28 @@ impl Compiler {
                 self.emit(Opcode::BUILD_TUPLE, elts.len() as u32);
             }
             Expr::Dict { keys, values } => {
-                self.emit(Opcode::BUILD_MAP, keys.len() as u32);
-                let n = keys.len();
+                self.emit(Opcode::BUILD_MAP, 0);
+                let mut dup_count = 0u32;
                 for (key, value) in keys.iter().zip(values.iter()) {
-                    self.emit(Opcode::DUP_TOP, 0);
                     match key {
-                        Some(k) => self.compile_expr(k)?,
-                        None => return Err("Dict key expected".to_string()),
+                        Some(k) => {
+                            self.emit(Opcode::DUP_TOP, 0);
+                            dup_count += 1;
+                            self.compile_expr(k)?;
+                            self.compile_expr(value)?;
+                            self.emit(Opcode::MAP_ADD, 1);
+                        }
+                        None => {
+                            // Dict unpacking: {**expr}
+                            self.emit(Opcode::DUP_TOP, 0);
+                            dup_count += 1;
+                            self.compile_expr(value)?;
+                            self.emit(Opcode::DICT_MERGE, 1);
+                        }
                     }
-                    self.compile_expr(value)?;
-                    self.emit(Opcode::MAP_ADD, 1);
                 }
                 // Pop all DUP_TOP copies except the original BUILD_MAP result
-                for _ in 0..n {
+                for _ in 0..dup_count {
                     self.emit(Opcode::POP_TOP, 0);
                 }
             }

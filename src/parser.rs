@@ -1230,7 +1230,48 @@ impl Parser {
                             let value = self.parse_expr()?;
                             keywords.push(Keyword { arg, value: Box::new(value) });
                         } else {
-                            args.push(self.parse_expr()?);
+                            // Parse the first expression with bitwise-or precedence
+                            // so we can detect generator expressions (expr for ...)
+                            let expr = self.parse_bitwise_or()?;
+                            // Check for generator expression as sole argument: f(x for x in lst)
+                            if self.at(&Token::For) && args.is_empty() && keywords.is_empty() {
+                                self.next(); // consume 'for'
+                                let target = self.parse_bitwise_or()?;
+                                self.expect(&Token::In)?;
+                                let iter = self.parse_or_expr()?;
+                                let mut generators = vec![Comprehension {
+                                    target: Box::new(target),
+                                    iter: Box::new(iter),
+                                    ifs: Vec::new(),
+                                    is_async: false,
+                                }];
+                                while self.eat(&Token::For) {
+                                    let t = self.parse_bitwise_or()?;
+                                    self.expect(&Token::In)?;
+                                    let i = self.parse_or_expr()?;
+                                    generators.push(Comprehension {
+                                        target: Box::new(t),
+                                        iter: Box::new(i),
+                                        ifs: Vec::new(),
+                                        is_async: false,
+                                    });
+                                }
+                                if self.eat(&Token::If) {
+                                    if let Some(last) = generators.last_mut() {
+                                        last.ifs.push(self.parse_or_expr()?);
+                                        while self.eat(&Token::If) {
+                                            last.ifs.push(self.parse_or_expr()?);
+                                        }
+                                    }
+                                }
+                                args.push(Expr::GeneratorExp {
+                                    elt: Box::new(expr),
+                                    generators,
+                                });
+                                if !self.eat(&Token::Comma) { break; }
+                                continue;
+                            }
+                            args.push(expr);
                         }
                         if !self.eat(&Token::Comma) { break; }
                     }

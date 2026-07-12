@@ -123,6 +123,9 @@ pub enum Opcode {
     REG_RETURN = 0xC7,       // return r[src]
     REG_JUMP_IF_FALSE = 0xC8, // if !r[src]: pc += offset
     REG_BUILD_LIST = 0xC9,   // r[dst] = [r[arg0], r[arg1], ...]
+
+    // Custom opcodes for dict operations
+    DICT_MERGE = 202, // Pop TOS (source dict) and merge into dict at TOS1
 }
 
 impl Opcode {
@@ -184,6 +187,7 @@ impl Opcode {
             28 => DUP_TOP,
             0 => STORE_SUBSCR,
             261 => LOAD_CLOSURE,
+            202 => DICT_MERGE,
             _ => return None,
         })
     }
@@ -236,7 +240,7 @@ fn needs_arg(op: Opcode) -> bool {
         GET_ANEXT | GET_AWAITABLE | CLEANUP_THROW | END_SEND | FORMAT_SIMPLE |
         FORMAT_WITH_SPEC | CONVERT_VALUE | LOAD_LOCALS | RETURN_GENERATOR |
         SETUP_ANNOTATIONS | POP_EXCEPT | UNPACK_SEQUENCE_TWO_TUPLE |
-        DUP_TOP | STORE_SUBSCR | LOAD_CLOSURE | POP_ITER
+        DUP_TOP | STORE_SUBSCR | LOAD_CLOSURE | POP_ITER | DICT_MERGE
     )
 }
 
