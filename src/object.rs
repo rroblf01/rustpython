@@ -4,7 +4,8 @@ use std::fmt;
 use std::collections::HashMap;
 use num_bigint::{BigInt, Sign};
 use num_traits::{Zero, One, ToPrimitive, float::FloatCore, Signed};
-use crate::bytecode::CodeObject;
+use crate::bytecode::{needs_arg, CodeObject};
+use crate::modules::*;
 
 pub type BuiltinFunc = fn(&[PyObjectRef]) -> PyResult<PyObjectRef>;
 
@@ -539,6 +540,8 @@ pub enum PyObject {
     Coroutine {
         frame: std::cell::RefCell<Option<super::vm::Frame>>,
     },
+    Array(PyArray),
+    Closure(Rc<dyn Fn(&[PyObjectRef]) -> PyResult<PyObjectRef>>),
 }
 
 pub enum SocketInner {
@@ -591,6 +594,8 @@ impl PyObject {
             PyObject::ClassMethod { .. } => "classmethod",
             PyObject::Generator { .. } => "generator",
             PyObject::Coroutine { .. } => "coroutine",
+            PyObject::Array(_) => "array",
+            PyObject::Closure(_) => "builtin_function_or_method",
         }.to_string()
     }
 
@@ -706,6 +711,17 @@ impl PyObject {
             PyObject::ClassMethod { .. } => format!("<classmethod object>"),
             PyObject::Generator { .. } => format!("<generator object>"),
             PyObject::Coroutine { .. } => format!("<coroutine object>"),
+            PyObject::Array(arr) => {
+                let items: Vec<String> = arr.data.iter().map(|v| {
+                    if arr.typecode == 'i' {
+                        py_int(*v as i64).repr()
+                    } else {
+                        py_float(*v).repr()
+                    }
+                }).collect();
+                format!("array('{}', [{}])", arr.typecode, items.join(", "))
+            },
+            PyObject::Closure(_) => "<builtin function>".to_string(),
         }
     }
 
@@ -748,6 +764,8 @@ impl PyObject {
                 }
                 true
             }
+            PyObject::Array(arr) => !arr.data.is_empty(),
+            PyObject::Closure(_) => true,
             _ => true,
         }
     }
@@ -831,6 +849,15 @@ impl PyObject {
                     Err(PyError::type_error(format!("unhashable type: '{}'", self.type_name())))
                 }
             }
+            PyObject::Array(arr) => {
+                let mut h: usize = 0xabcdef;
+                for &v in &arr.data {
+                    let bits = v.to_bits();
+                    h = h.wrapping_mul(1000003).wrapping_add(bits as usize);
+                }
+                Ok(h)
+            }
+            PyObject::Closure(_) => Err(PyError::type_error(format!("unhashable type: '{}'", self.type_name()))),
             _ => Err(PyError::type_error(format!("unhashable type: '{}'", self.type_name()))),
         }
     }
@@ -901,6 +928,7 @@ impl PyObject {
                     eq
                 }
             }
+            (PyObject::Array(a), PyObject::Array(b)) => a.typecode == b.typecode && a.data == b.data,
             _ => false,
         };
         Ok(result)
@@ -1493,7 +1521,7 @@ fn try_get_method(obj: &PyObjectRef, name: &str) -> Option<PyObjectRef> {
     }
 }
 
-trait Compare {
+pub trait Compare {
     fn lt(&self, other: &PyObjectRef) -> PyResult<bool>;
     fn le(&self, other: &PyObjectRef) -> PyResult<bool>;
     fn gt(&self, other: &PyObjectRef) -> PyResult<bool>;
@@ -1680,6 +1708,7 @@ pub fn builtin_len(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         }
         PyObject::Bytes(b) => Ok(py_int(b.len())),
         PyObject::ByteArray(b) => Ok(py_int(b.len())),
+        PyObject::Array(arr) => Ok(py_int(arr.data.len())),
         PyObject::Instance { typ, .. } => {
             let f = {
                 let typ_ref = typ.borrow();
@@ -2441,8 +2470,13 @@ pub fn call_bound_method(func: PyObjectRef, self_obj: PyObjectRef, args: Vec<PyO
             all_args.extend(args);
             f(&all_args)
         }
+        PyObject::Closure(func) => {
+            let mut all_args = vec![self_obj];
+            all_args.extend(args);
+            func(&all_args)
+        }
         PyObject::Function { code, globals: g, defaults, .. } => {
-            let mut frame = super::vm::Frame::new(std::rc::Rc::new(code.clone()), g.clone(), std::rc::Rc::new(create_builtins()));
+            let mut frame = super::vm::Frame::new(std::rc::Rc::new(code.clone()), g.clone(), std::rc::Rc::new(create_builtins()), None);
             let code = code.clone();
             let defaults = defaults.clone();
             // Set self at index 0
@@ -3252,7 +3286,7 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
                 } else {
                     code.varnames.len()
                 };
-                let mut frame = super::vm::Frame::new(std::rc::Rc::new(code.clone()), g.clone(), std::rc::Rc::new(create_builtins()));
+                let mut frame = super::vm::Frame::new(std::rc::Rc::new(code.clone()), g.clone(), std::rc::Rc::new(create_builtins()), None);
                 for i in 0..npos.min(named_params) {
                     if i < code.varnames.len() {
                         frame.fast_locals[i] = Some(a[i].clone());
@@ -3751,6 +3785,52 @@ impl ObjectAccess for PyObject {
                         name: "__repr__".to_string(),
                         func: |args| {
                             Ok(py_str(&args[0].repr()))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__str__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__str__".to_string(),
+                        func: |args| {
+                            Ok(py_str(&args[0].str()))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__len__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__len__".to_string(),
+                        func: |args| {
+                            let b = args[0].borrow();
+                            if let PyObject::Bytes(bytes) = &*b {
+                                Ok(py_int(bytes.len() as i64))
+                            } else { Err(PyError::runtime_error("__len__ on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "hex" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "hex".to_string(),
+                        func: |args| {
+                            if let PyObject::Bytes(bytes) = &*args[0].borrow() {
+                                let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+                                Ok(py_str(&hex))
+                            } else { Err(PyError::runtime_error("hex on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "decode" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "decode".to_string(),
+                        func: |args| {
+                            if let PyObject::Bytes(bytes) = &*args[0].borrow() {
+                                let encoding = if args.len() > 1 { args[1].str() } else { "utf-8".to_string() };
+                                if encoding == "utf-8" || encoding == "utf8" {
+                                    if let Ok(s) = String::from_utf8(bytes.clone()) {
+                                        Ok(py_str(&s))
+                                    } else {
+                                        Err(PyError::value_error("invalid utf-8 sequence".to_string()))
+                                    }
+                                } else {
+                                    let s = String::from_utf8_lossy(bytes).to_string();
+                                    Ok(py_str(&s))
+                                }
+                            } else { Err(PyError::runtime_error("decode on non-bytes")) }
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -5550,6 +5630,25 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                 _ => Err(PyError::type_error("bytearray indices must be integers or slices")),
             }
         }
+        PyObject::Array(arr) => {
+            let idx = index.borrow();
+            if let PyObject::Int(i) = &*idx {
+                let i = i.to_isize().ok_or_else(|| PyError::index_error("array index out of range"))?;
+                let len = arr.data.len() as isize;
+                let i = if i < 0 { len + i } else { i };
+                if i < 0 || i >= len {
+                    return Err(PyError::index_error("array index out of range"));
+                }
+                let v = arr.data[i as usize];
+                if arr.typecode == 'i' {
+                    Ok(py_int(v as i64))
+                } else {
+                    Ok(py_float(v))
+                }
+            } else {
+                Err(PyError::type_error("array indices must be integers"))
+            }
+        }
         _ => Err(PyError::type_error(format!("'{}' object is not subscriptable", o.type_name()))),
     }
 }
@@ -5664,523 +5763,6 @@ make_exception_func!(builtin_make_exception_timeouterror, "TimeoutError");
 make_exception_func!(builtin_make_exception_unicodedecodeerror, "UnicodeDecodeError");
 make_exception_func!(builtin_make_exception_unicodeencodeerror, "UnicodeEncodeError");
 
-// ---- Module creation ----
-
-pub fn create_builtins() -> HashMap<String, PyObjectRef> {
-    let mut builtins = HashMap::new();
-    builtins.insert("None".to_string(), py_none());
-    builtins.insert("True".to_string(), py_bool(true));
-    builtins.insert("False".to_string(), py_bool(false));
-    builtins.insert("Ellipsis".to_string(), PyObjectRef::imm(PyObject::Str("...".to_string())));
-
-    macro_rules! add_func {
-        ($name:expr, $func:expr) => {
-            builtins.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
-                name: $name.to_string(),
-                func: $func,
-            }));
-        };
-    }
-
-    add_func!("print", builtin_print);
-    add_func!("len", builtin_len);
-    add_func!("range", builtin_range);
-    add_func!("type", builtin_type_of);
-    add_func!("int", builtin_int);
-    add_func!("float", builtin_float);
-    add_func!("str", builtin_str);
-    add_func!("bool", builtin_bool);
-    add_func!("list", builtin_list);
-    add_func!("tuple", builtin_tuple);
-    add_func!("dict", builtin_dict);
-    add_func!("set", builtin_set);
-    add_func!("abs", builtin_abs);
-    add_func!("hasattr", builtin_hasattr);
-    add_func!("getattr", builtin_getattr);
-    add_func!("setattr", builtin_setattr);
-    add_func!("delattr", builtin_delattr);
-    add_func!("ord", builtin_ord);
-    add_func!("chr", builtin_chr);
-    add_func!("hex", builtin_hex);
-    add_func!("oct", builtin_oct);
-    add_func!("bin", builtin_bin);
-    add_func!("ascii", builtin_ascii);
-    add_func!("memoryview", builtin_memoryview);
-    add_func!("input", builtin_input);
-    add_func!("exit", builtin_exit);
-    add_func!("repr", builtin_repr);
-    add_func!("sorted", builtin_sorted);
-    add_func!("enumerate", builtin_enumerate);
-    add_func!("iter", builtin_iter);
-    add_func!("next", builtin_next);
-    add_func!("sum", builtin_sum);
-    add_func!("max", builtin_max);
-    add_func!("min", builtin_min);
-    add_func!("id", builtin_id);
-    add_func!("vars", builtin_vars);
-    add_func!("isinstance", builtin_isinstance);
-    add_func!("open", builtin_open);
-    add_func!("any", builtin_any);
-    add_func!("all", builtin_all);
-    add_func!("callable", builtin_callable);
-    add_func!("breakpoint", builtin_breakpoint);
-    add_func!("pow", builtin_pow);
-    add_func!("reversed", builtin_reversed);
-    add_func!("issubclass", builtin_issubclass);
-    add_func!("help", builtin_help);
-    add_func!("eval", builtin_eval);
-    add_func!("exec", builtin_exec);
-    add_func!("compile", builtin_compile);
-    add_func!("super", builtin_super);
-    add_func!("map", builtin_map);
-    add_func!("filter", builtin_filter);
-    add_func!("zip", builtin_zip);
-    add_func!("property", builtin_property);
-    add_func!("staticmethod", builtin_staticmethod);
-    add_func!("classmethod", builtin_classmethod);
-    add_func!("bytes", builtin_bytes);
-    add_func!("bytearray", builtin_bytearray);
-    add_func!("frozenset", builtin_frozenset);
-    add_func!("format", builtin_format);
-    add_func!("object", builtin_object);
-    add_func!("hash", builtin_hash);
-    add_func!("slice", builtin_slice);
-    add_func!("divmod", builtin_divmod);
-    add_func!("round", builtin_round);
-    add_func!("dir", builtin_dir);
-    add_func!("globals", builtin_globals);
-    add_func!("locals", builtin_locals);
-
-    macro_rules! add_exc_type {
-        ($name:expr, $func:expr) => {
-            builtins.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
-                name: $name.to_string(),
-                func: $func,
-            }));
-        };
-    }
-
-    add_exc_type!("BaseException", builtin_make_exception_baseexception);
-    add_exc_type!("Exception", builtin_make_exception_exception);
-    add_exc_type!("TypeError", builtin_make_exception_typeerror);
-    add_exc_type!("ValueError", builtin_make_exception_valueerror);
-    add_exc_type!("ZeroDivisionError", builtin_make_exception_zerodivisionerror);
-    add_exc_type!("NameError", builtin_make_exception_nameerror);
-    add_exc_type!("AttributeError", builtin_make_exception_attributeerror);
-    add_exc_type!("IndexError", builtin_make_exception_indexerror);
-    add_exc_type!("KeyError", builtin_make_exception_keyerror);
-    add_exc_type!("RuntimeError", builtin_make_exception_runtimeerror);
-    add_exc_type!("StopIteration", builtin_make_exception_stopiteration);
-    add_exc_type!("AssertionError", builtin_make_exception_assertionerror);
-    add_exc_type!("OSError", builtin_make_exception_oserror);
-    add_exc_type!("ImportError", builtin_make_exception_importerror);
-    add_exc_type!("LookupError", builtin_make_exception_lookuperror);
-    add_exc_type!("ArithmeticError", builtin_make_exception_arithmeticerror);
-    add_exc_type!("FloatingPointError", builtin_make_exception_floatingpointerror);
-    add_exc_type!("OverflowError", builtin_make_exception_overflowerror);
-    add_exc_type!("EnvironmentError", builtin_make_exception_environmenterror);
-    add_exc_type!("IOError", builtin_make_exception_ioerror);
-    add_exc_type!("FileNotFoundError", builtin_make_exception_filenotfounderror);
-    add_exc_type!("PermissionError", builtin_make_exception_permissionerror);
-    add_exc_type!("NotImplementedError", builtin_make_exception_notimplementederror);
-    add_exc_type!("RecursionError", builtin_make_exception_recursionerror);
-    add_exc_type!("KeyboardInterrupt", builtin_make_exception_keyboardinterrupt);
-    add_exc_type!("GeneratorExit", builtin_make_exception_generatorexit);
-    add_exc_type!("SystemExit", builtin_make_exception_systemexit);
-    add_exc_type!("ModuleNotFoundError", builtin_make_exception_modulenotfounderror);
-    add_exc_type!("StopAsyncIteration", builtin_make_exception_stopasynciteration);
-    add_exc_type!("EOFError", builtin_make_exception_eoferror);
-    add_exc_type!("ConnectionError", builtin_make_exception_connectionerror);
-    add_exc_type!("BrokenPipeError", builtin_make_exception_brokenpipeerror);
-    add_exc_type!("ConnectionRefusedError", builtin_make_exception_connectionrefusederror);
-    add_exc_type!("BlockingIOError", builtin_make_exception_blockingioerror);
-    add_exc_type!("ChildProcessError", builtin_make_exception_childprocesserror);
-    add_exc_type!("InterruptedError", builtin_make_exception_interruptederror);
-    add_exc_type!("TimeoutError", builtin_make_exception_timeouterror);
-    add_exc_type!("UnicodeDecodeError", builtin_make_exception_unicodedecodeerror);
-    add_exc_type!("UnicodeEncodeError", builtin_make_exception_unicodeencodeerror);
-
-    let math_module = PyObjectRef::new(PyObject::Module {
-        name: "math".to_string(),
-        dict: create_math_dict(),
-    });
-    builtins.insert("math".to_string(), math_module.clone());
-
-    builtins
-}
-
-pub fn create_math_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! math_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-    math_func!("sqrt", |args| {
-        if args.len() != 1 { return Err(PyError::type_error("sqrt() takes exactly one argument")); }
-        let v = args[0].borrow();
-        match &*v { PyObject::Int(i) => Ok(py_float(i.to_f64().unwrap_or(0.0).sqrt())), PyObject::Float(f) => Ok(py_float(f.sqrt())), _ => Err(PyError::type_error("sqrt() argument must be a number")) }
-    });
-    math_func!("sin", |args| {
-        if args.len() != 1 { return Err(PyError::type_error("sin() takes exactly one argument")); }
-        let v = args[0].borrow();
-        match &*v { PyObject::Int(i) => Ok(py_float(i.to_f64().unwrap_or(0.0).sin())), PyObject::Float(f) => Ok(py_float(f.sin())), _ => Err(PyError::type_error("sin() argument must be a number")) }
-    });
-    math_func!("cos", |args| {
-        if args.len() != 1 { return Err(PyError::type_error("cos() takes exactly one argument")); }
-        let v = args[0].borrow();
-        match &*v { PyObject::Int(i) => Ok(py_float(i.to_f64().unwrap_or(0.0).cos())), PyObject::Float(f) => Ok(py_float(f.cos())), _ => Err(PyError::type_error("cos() argument must be a number")) }
-    });
-    math_func!("tan", |args| {
-        if args.len() != 1 { return Err(PyError::type_error("tan() takes exactly one argument")); }
-        let v = args[0].borrow();
-        match &*v { PyObject::Int(i) => Ok(py_float(i.to_f64().unwrap_or(0.0).tan())), PyObject::Float(f) => Ok(py_float(f.tan())), _ => Err(PyError::type_error("tan() argument must be a number")) }
-    });
-    math_func!("floor", |args| {
-        if args.len() != 1 { return Err(PyError::type_error("floor() takes exactly one argument")); }
-        let v = args[0].borrow();
-        match &*v { PyObject::Int(i) => Ok(py_int(i.clone())), PyObject::Float(f) => Ok(py_int(f.floor() as i64)), _ => Err(PyError::type_error("floor() argument must be a number")) }
-    });
-    math_func!("ceil", |args| {
-        if args.len() != 1 { return Err(PyError::type_error("ceil() takes exactly one argument")); }
-        let v = args[0].borrow();
-        match &*v { PyObject::Int(i) => Ok(py_int(i.clone())), PyObject::Float(f) => Ok(py_int(f.ceil() as i64)), _ => Err(PyError::type_error("ceil() argument must be a number")) }
-    });
-    math_func!("exp", |args| {
-        if args.len() != 1 { return Err(PyError::type_error("exp() takes exactly one argument")); }
-        let v = args[0].borrow();
-        match &*v { PyObject::Int(i) => Ok(py_float(i.to_f64().unwrap_or(0.0).exp())), PyObject::Float(f) => Ok(py_float(f.exp())), _ => Err(PyError::type_error("exp() argument must be a number")) }
-    });
-    math_func!("pow", |args| {
-        if args.len() != 2 { return Err(PyError::type_error("pow() takes exactly two arguments")); }
-        let a = args[0].borrow();
-        let b = args[1].borrow();
-        match (&*a, &*b) {
-            (PyObject::Int(i), PyObject::Int(j)) => Ok(py_float(i.to_f64().unwrap_or(0.0).powf(j.to_f64().unwrap_or(0.0)))),
-            (PyObject::Int(i), PyObject::Float(f)) => Ok(py_float(i.to_f64().unwrap_or(0.0).powf(*f))),
-            (PyObject::Float(f), PyObject::Int(i)) => Ok(py_float(f.powf(i.to_f64().unwrap_or(0.0)))),
-            (PyObject::Float(a), PyObject::Float(b)) => Ok(py_float(a.powf(*b))),
-            _ => Err(PyError::type_error("pow() argument must be a number")),
-        }
-    });
-    math_func!("log", |args| {
-        if args.len() < 1 || args.len() > 2 { return Err(PyError::type_error("log() takes one or two arguments")); }
-        let v = args[0].borrow();
-        let x = match &*v { PyObject::Int(i) => i.to_f64().unwrap_or(0.0), PyObject::Float(f) => *f, _ => return Err(PyError::type_error("log() argument must be a number")) };
-        let base = if args.len() == 2 {
-            let b = args[1].borrow();
-            match &*b { PyObject::Int(i) => i.to_f64().unwrap_or(0.0), PyObject::Float(f) => *f, _ => return Err(PyError::type_error("log() base must be a number")) }
-        } else {
-            std::f64::consts::E
-        };
-        Ok(py_float(x.log(base)))
-    });
-    math_func!("abs", |args| {
-        if args.len() != 1 { return Err(PyError::type_error("abs() takes exactly one argument")); }
-        let v = args[0].borrow();
-        match &*v { PyObject::Int(i) => Ok(py_float(i.to_f64().unwrap_or(0.0).abs())), PyObject::Float(f) => Ok(py_float(f.abs())), _ => Err(PyError::type_error("abs() argument must be a number")) }
-    });
-    d.insert("pi".to_string(), py_float(std::f64::consts::PI));
-    d.insert("e".to_string(), py_float(std::f64::consts::E));
-    d
-}
-
-pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! sys_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-    sys_func!("exit", |args| {
-        let code = if args.len() > 0 {
-            match &*args[0].borrow() {
-                PyObject::Int(i) => i.to_i64().unwrap_or(0) as i32,
-                _ => 1,
-            }
-        } else { 0 };
-        Err(PyError::SystemExit(code))
-    });
-    d.insert("argv".to_string(), py_list(argv.into_iter().map(|s| py_str(&s)).collect()));
-    d.insert("path".to_string(), py_list(vec![]));
-    d.insert("modules".to_string(), py_dict());
-    d.insert("version".to_string(), py_str("3.12.0 (RustPython 0.1.0)"));
-    d.insert("stdin".to_string(), PyObjectRef::new(PyObject::File {
-        file: std::rc::Rc::new(std::cell::RefCell::new(std::fs::File::open("/dev/stdin").unwrap_or_else(|_| {
-            // Fallback: create a temporary file
-            std::fs::File::create("/dev/null").unwrap()
-        }))),
-    }));
-    d.insert("stdout".to_string(), PyObjectRef::new(PyObject::File {
-        file: std::rc::Rc::new(std::cell::RefCell::new(std::fs::File::create("/dev/stdout").unwrap_or_else(|_| {
-            std::fs::File::create("/dev/null").unwrap()
-        }))),
-    }));
-    d.insert("stderr".to_string(), PyObjectRef::new(PyObject::File {
-        file: std::rc::Rc::new(std::cell::RefCell::new(std::fs::File::create("/dev/stderr").unwrap_or_else(|_| {
-            std::fs::File::create("/dev/null").unwrap()
-        }))),
-    }));
-    d.insert("platform".to_string(), py_str(std::env::consts::OS));
-    d.insert("implementation".to_string(), py_str("RustPython"));
-    d.insert("byteorder".to_string(), py_str(if cfg!(target_endian = "little") { "little" } else { "big" }));
-    d.insert("maxsize".to_string(), py_int(i64::MAX));
-    d.insert("maxunicode".to_string(), py_int(1114111));
-    d.insert("api_version".to_string(), py_int(1013));
-    d.insert("executable".to_string(), py_str(&std::env::current_exe().map(|p| p.to_string_lossy().to_string()).unwrap_or_default()));
-    d.insert("prefix".to_string(), py_str("/usr"));
-    d.insert("exec_prefix".to_string(), py_str("/usr"));
-    d.insert("winver".to_string(), py_str("3.12"));
-    d
-}
-
-pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! os_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-    os_func!("listdir", |args| {
-        let path = if args.len() > 0 { args[0].str() } else { ".".to_string() };
-        match std::fs::read_dir(&path) {
-            Ok(entries) => {
-                let names: Vec<PyObjectRef> = entries.filter_map(|e| e.ok()).map(|e| py_str(&e.file_name().to_string_lossy())).collect();
-                Ok(py_list(names))
-            }
-            Err(e) => Err(PyError::OsError(format!("{}", e))),
-        }
-    });
-    os_func!("mkdir", |args| {
-        if args.is_empty() { return Err(PyError::type_error("mkdir() takes at least 1 argument")); }
-        match std::fs::create_dir(&args[0].str()) {
-            Ok(()) => Ok(py_none()),
-            Err(e) => Err(PyError::OsError(format!("{}", e))),
-        }
-    });
-    os_func!("remove", |args| {
-        if args.is_empty() { return Err(PyError::type_error("remove() takes at least 1 argument")); }
-        match std::fs::remove_file(&args[0].str()) {
-            Ok(()) => Ok(py_none()),
-            Err(e) => Err(PyError::OsError(format!("{}", e))),
-        }
-    });
-    os_func!("rename", |args| {
-        if args.len() < 2 { return Err(PyError::type_error("rename() takes 2 arguments")); }
-        match std::fs::rename(&args[0].str(), &args[1].str()) {
-            Ok(()) => Ok(py_none()),
-            Err(e) => Err(PyError::OsError(format!("{}", e))),
-        }
-    });
-
-    os_func!("system", |args| {
-        if args.is_empty() { return Err(PyError::type_error("system() takes at least 1 argument")); }
-        let cmd = args[0].str();
-        match std::process::Command::new("/bin/sh").arg("-c").arg(&cmd).status() {
-            Ok(status) => Ok(py_int(status.code().unwrap_or(0) as i64)),
-            Err(e) => Err(PyError::OsError(format!("{}", e))),
-        }
-    });
-
-    os_func!("chdir", |args| {
-        if args.is_empty() { return Err(PyError::type_error("chdir() takes at least 1 argument")); }
-        match std::env::set_current_dir(&args[0].str()) {
-            Ok(()) => Ok(py_none()),
-            Err(e) => Err(PyError::OsError(format!("{}", e))),
-        }
-    });
-
-    os_func!("getcwd", |_| {
-        match std::env::current_dir() {
-            Ok(p) => Ok(py_str(&p.to_string_lossy())),
-            Err(e) => Err(PyError::OsError(format!("{}", e))),
-        }
-    });
-
-    os_func!("getenv", |args| {
-        if args.is_empty() { return Ok(py_none()); }
-        let key = args[0].str();
-        match std::env::var(&key) {
-            Ok(val) => Ok(py_str(&val)),
-            Err(_) => {
-                if args.len() > 1 { Ok(args[1].clone()) }
-                else { Ok(py_none()) }
-            }
-        }
-    });
-
-    os_func!("putenv", |args| {
-        if args.len() < 2 { return Err(PyError::type_error("putenv() takes exactly 2 arguments")); }
-        std::env::set_var(args[0].str(), args[1].str());
-        Ok(py_none())
-    });
-
-    os_func!("unsetenv", |args| {
-        if args.is_empty() { return Err(PyError::type_error("unsetenv() takes at least 1 argument")); }
-        std::env::remove_var(args[0].str());
-        Ok(py_none())
-    });
-
-    // File descriptor operations
-    os_func!("open", |args| {
-        if args.len() < 2 { return Err(PyError::type_error("open() requires at least 2 arguments")); }
-        let path = args[0].str();
-        let flags = args[1].as_i64().unwrap_or(0) as i32;
-        let mut opts = std::fs::OpenOptions::new();
-        // O_RDONLY=0, O_WRONLY=1, O_RDWR=2 — check access mode
-        let access_mode = flags & 3;
-        if access_mode == 0 { opts.read(true); }     // O_RDONLY
-        if access_mode == 1 { opts.write(true); }    // O_WRONLY
-        if access_mode == 2 { opts.write(true); opts.read(true); } // O_RDWR
-        if flags & 64 != 0 { opts.create(true); }       // O_CREAT = 64
-        if flags & 512 != 0 { opts.truncate(true); }    // O_TRUNC = 512
-        if flags & 1024 != 0 { opts.append(true); }     // O_APPEND = 1024
-        match opts.open(&path) {
-            Ok(file) => {
-                use std::os::unix::io::IntoRawFd;
-                Ok(py_int(file.into_raw_fd() as i64))
-            }
-            Err(e) => Err(PyError::OsError(format!("{}", e))),
-        }
-    });
-    os_func!("read", |args| {
-        if args.len() < 2 { return Err(PyError::type_error("read() requires at least 2 arguments")); }
-        let fd = args[0].as_i64().unwrap_or(-1) as i32;
-        let n = args[1].as_i64().unwrap_or(0) as usize;
-        use std::os::unix::io::FromRawFd;
-        let mut buf = vec![0u8; n];
-        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
-        use std::io::Read;
-        match file.read(&mut buf) {
-            Ok(count) => {
-                buf.truncate(count);
-                std::mem::forget(file); // Don't close the fd
-                Ok(PyObjectRef::new(PyObject::Bytes(buf)))
-            }
-            Err(e) => {
-                std::mem::forget(file);
-                Err(PyError::OsError(format!("{}", e)))
-            }
-        }
-    });
-    os_func!("write", |args| {
-        if args.len() < 2 { return Err(PyError::type_error("write() requires at least 2 arguments")); }
-        let fd = args[0].as_i64().unwrap_or(-1) as i32;
-        let data = match &*args[1].borrow() {
-            PyObject::Bytes(b) => b.clone(),
-            PyObject::Str(s) => s.as_bytes().to_vec(),
-            _ => return Err(PyError::type_error("write() argument 2 must be bytes or str")),
-        };
-        use std::os::unix::io::FromRawFd;
-        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
-        use std::io::Write;
-        match file.write(&data) {
-            Ok(count) => {
-                std::mem::forget(file);
-                Ok(py_int(count as i64))
-            }
-            Err(e) => {
-                std::mem::forget(file);
-                Err(PyError::OsError(format!("{}", e)))
-            }
-        }
-    });
-    os_func!("close", |args| {
-        if args.is_empty() { return Err(PyError::type_error("close() requires at least 1 argument")); }
-        let fd = args[0].as_i64().unwrap_or(-1) as i32;
-        use std::os::unix::io::FromRawFd;
-        let file = unsafe { std::fs::File::from_raw_fd(fd) };
-        drop(file); // Closes the fd
-        Ok(py_none())
-    });
-
-    // OS flags for open()
-    d.insert("O_RDONLY".to_string(), py_int(0));
-    d.insert("O_WRONLY".to_string(), py_int(1));
-    d.insert("O_RDWR".to_string(), py_int(2));
-    d.insert("O_CREAT".to_string(), py_int(64));
-    d.insert("O_TRUNC".to_string(), py_int(512));
-    d.insert("O_APPEND".to_string(), py_int(1024));
-
-    // environ dict
-    let mut environ_dict = HashMap::new();
-    for (key, val) in std::env::vars() {
-        environ_dict.insert(key, py_str(&val));
-    }
-    d.insert("environ".to_string(), create_module("environ", environ_dict));
-
-    // os.path sub-module
-    let mut path_dict = HashMap::new();
-    macro_rules! path_func {
-        ($name:expr, $func:expr) => {
-            path_dict.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-    path_func!("join", |args| {
-        let parts: Vec<String> = args.iter().map(|a| a.str()).collect();
-        if parts.is_empty() { return Ok(py_str("")); }
-        let result = parts.join("/");
-        Ok(py_str(&result))
-    });
-    path_func!("dirname", |args| {
-        if args.is_empty() { return Err(PyError::type_error("dirname() takes at least 1 argument")); }
-        let path = args[0].str();
-        let result = match path.rfind('/') {
-            Some(i) => if i == 0 { "/".to_string() } else { path[..i].to_string() },
-            None => ".".to_string(),
-        };
-        Ok(py_str(&result))
-    });
-    path_func!("basename", |args| {
-        if args.is_empty() { return Err(PyError::type_error("basename() takes at least 1 argument")); }
-        let path = args[0].str();
-        let result = match path.rfind('/') {
-            Some(i) => path[i+1..].to_string(),
-            None => path,
-        };
-        Ok(py_str(&result))
-    });
-    path_func!("split", |args| {
-        if args.is_empty() { return Err(PyError::type_error("split() takes at least 1 argument")); }
-        let path = args[0].str();
-        let (head, tail) = match path.rfind('/') {
-            Some(i) => {
-                let h = if i == 0 { "/".to_string() } else { path[..i].to_string() };
-                let t = path[i+1..].to_string();
-                (h, t)
-            }
-            None => (".".to_string(), path.clone()),
-        };
-        Ok(py_list(vec![py_str(&head), py_str(&tail)]))
-    });
-    path_func!("splitext", |args| {
-        if args.is_empty() { return Err(PyError::type_error("splitext() takes at least 1 argument")); }
-        let path = args[0].str();
-        let dot = path.rfind('.');
-        let (root, ext) = match dot {
-            Some(i) if i > path.rfind('/').map_or(0, |j| j + 1) => {
-                (path[..i].to_string(), path[i..].to_string())
-            }
-            _ => (path.clone(), "".to_string()),
-        };
-        Ok(py_list(vec![py_str(&root), py_str(&ext)]))
-    });
-    path_func!("exists", |args| {
-        if args.is_empty() { return Err(PyError::type_error("exists() takes at least 1 argument")); }
-        Ok(py_bool(std::path::Path::new(&args[0].str()).exists()))
-    });
-    path_func!("isfile", |args| {
-        if args.is_empty() { return Err(PyError::type_error("isfile() takes at least 1 argument")); }
-        Ok(py_bool(std::path::Path::new(&args[0].str()).is_file()))
-    });
-    path_func!("isdir", |args| {
-        if args.is_empty() { return Err(PyError::type_error("isdir() takes at least 1 argument")); }
-        Ok(py_bool(std::path::Path::new(&args[0].str()).is_dir()))
-    });
-    d.insert("path".to_string(), create_module("path", path_dict));
-    d
-}
-
 fn json_encode(val: &PyObjectRef) -> PyResult<PyObjectRef> {
     match &*val.borrow() {
         PyObject::None => Ok(py_str("null")),
@@ -6234,7 +5816,7 @@ fn json_escape_string(s: &str) -> String {
     out
 }
 
-fn json_decode(s: &str) -> PyResult<PyObjectRef> {
+pub fn json_decode(s: &str) -> PyResult<PyObjectRef> {
     let s = s.trim();
     let mut chars = s.chars().peekable();
     json_parse_value(&mut chars)
@@ -6378,7 +5960,7 @@ fn json_parse_object<I: Iterator<Item = char>>(chars: &mut std::iter::Peekable<I
     }
 }
 
-fn json_encode_full(val: &PyObjectRef, indent: Option<usize>, sort_keys: bool, level: usize) -> PyResult<PyObjectRef> {
+pub fn json_encode_full(val: &PyObjectRef, indent: Option<usize>, sort_keys: bool, level: usize) -> PyResult<PyObjectRef> {
     match &*val.borrow() {
         PyObject::None => Ok(py_str("null")),
         PyObject::Bool(b) => Ok(py_str(if *b { "true" } else { "false" })),
@@ -6456,104 +6038,14 @@ fn json_encode_full(val: &PyObjectRef, indent: Option<usize>, sort_keys: bool, l
     }
 }
 
-pub fn create_json_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! json_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    json_func!("dumps", |args| {
-        if args.is_empty() { return Err(PyError::type_error("dumps() missing required argument")); }
-        let indent = if args.len() > 1 {
-            let v = args[1].as_i64().unwrap_or(-1);
-            if v >= 0 { Some(v as usize) } else { None }
-        } else { None };
-        let sort_keys = if args.len() > 2 { args[2].truthy() } else { false };
-        json_encode_full(&args[0], indent, sort_keys, 0)
-    });
-
-    json_func!("loads", |args| {
-        if args.is_empty() { return Err(PyError::type_error("loads() missing required argument")); }
-        let s = args[0].str();
-        json_decode(&s)
-    });
-
-    d
-}
-
-pub fn create_collections_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! coll_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    // deque: double-ended queue
-    coll_func!("deque", |args| {
-        let iterable = if args.len() > 0 { Some(args[0].clone()) } else { None };
-        let mut deque = std::collections::VecDeque::new();
-        if let Some(iter) = iterable {
-            // Iterate over the iterable and add items
-            if let Ok(it) = crate::object::builtin_iter(&[iter]) {
-                loop {
-                    match crate::object::builtin_next(&[it.clone()]) {
-                        Ok(v) => deque.push_back(v),
-                        Err(crate::object::PyError::StopIteration) => break,
-                        Err(e) => return Err(e),
-                    }
-                }
-            }
-        }
-        Ok(PyObjectRef::new(PyObject::List(deque.into_iter().collect())))
-    });
-
-    // Counter: count hashable objects
-    coll_func!("Counter", |args| {
-        if args.is_empty() {
-            return Ok(crate::object::py_dict());
-        }
-        let iterable = &args[0];
-        let mut counts = std::collections::HashMap::<usize, (PyObjectRef, i64)>::new();
-        let mut order = Vec::new();
-        if let Ok(it) = crate::object::builtin_iter(&[iterable.clone()]) {
-            loop {
-                match crate::object::builtin_next(&[it.clone()]) {
-                    Ok(item) => {
-                        let hash = item.hash()?;
-                        let entry = counts.entry(hash).or_insert_with(|| {
-                            order.push(hash);
-                            (item.clone(), 0)
-                        });
-                        entry.1 += 1;
-                    }
-                    Err(crate::object::PyError::StopIteration) => break,
-                    Err(e) => return Err(e),
-                }
-            }
-        }
-        let dict = crate::object::py_dict();
-        for hash in &order {
-            if let Some((item, count)) = counts.get(hash) {
-                let count_val = crate::object::py_int(*count);
-                if let crate::object::PyObject::Dict(d) = &mut *dict.borrow_mut() {
-                    d.set(item.clone(), count_val)?;
-                }
-            }
-        }
-        Ok(dict)
-    });
-
-    d
-}
-
 pub fn call_function(func: &PyObjectRef, args: Vec<PyObjectRef>) -> PyResult<PyObjectRef> {
     let f = func.borrow();
     match &*f {
         PyObject::BuiltinFunction { func: bf, .. } => {
             return bf(&args);
+        }
+        PyObject::Closure(func) => {
+            return func(&args);
         }
         _ => {}
     }
@@ -6561,301 +6053,16 @@ pub fn call_function(func: &PyObjectRef, args: Vec<PyObjectRef>) -> PyResult<PyO
     Err(PyError::type_error(format!("'{}' object is not callable", func.borrow().type_name())))
 }
 
-pub fn create_functools_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! ft_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    ft_func!("reduce", |args| {
-        if args.len() < 2 {
-            return Err(PyError::type_error("reduce() takes at least 2 arguments"));
-        }
-        let func = args[0].clone();
-        let iterable = &args[1];
-        let it = builtin_iter(&[iterable.clone()])?;
-        let mut acc = match builtin_next(&[it.clone()]) {
-            Ok(v) => v,
-            Err(PyError::StopIteration) => {
-                if args.len() >= 3 { return Ok(args[2].clone()); }
-                return Err(PyError::type_error("reduce() of empty sequence with no initial value"));
-            }
-            Err(e) => return Err(e),
-        };
-        loop {
-            match builtin_next(&[it.clone()]) {
-                Ok(v) => {
-                    let result = builtin_call(&func, &[acc, v])?;
-                    acc = result;
-                }
-                Err(PyError::StopIteration) => break,
-                Err(e) => return Err(e),
-            }
-        }
-        Ok(acc)
-    });
-
-    ft_func!("partial", |args| {
-        if args.is_empty() {
-            return Err(PyError::type_error("partial() takes at least 1 argument"));
-        }
-        let func = args[0].clone();
-        let partial_args: Vec<PyObjectRef> = args[1..].to_vec();
-        Ok(PyObjectRef::new(PyObject::Partial { func, args: partial_args }))
-    });
-
-    d
-}
-
-pub fn create_itertools_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! it_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    it_func!("chain", |args| {
-        let mut items = Vec::new();
-        for arg in args {
-            if let Ok(it) = builtin_iter(&[arg.clone()]) {
-                loop {
-                    match builtin_next(&[it.clone()]) {
-                        Ok(v) => items.push(v),
-                        Err(PyError::StopIteration) => break,
-                        Err(e) => return Err(e),
-                    }
-                }
-            }
-        }
-        Ok(py_list(items))
-    });
-
-    it_func!("count", |args| {
-        let start = if args.len() > 0 {
-            if let Some(n) = args[0].as_i64() { n } else { 0i64 }
-        } else { 0i64 };
-        let step = if args.len() > 1 {
-            if let Some(n) = args[1].as_i64() { n } else { 1i64 }
-        } else { 1i64 };
-        let mut current = start;
-        let mut items = Vec::new();
-        for _ in 0..10000 {
-            items.push(py_int(current));
-            current += step;
-        }
-        Ok(py_list(items))
-    });
-
-    it_func!("product", |args| {
-        if args.is_empty() {
-            return Ok(py_list(vec![py_tuple(vec![])]));
-        }
-        let mut pools: Vec<Vec<PyObjectRef>> = Vec::new();
-        for arg in args {
-            let mut pool = Vec::new();
-            if let Ok(it) = builtin_iter(&[arg.clone()]) {
-                loop {
-                    match builtin_next(&[it.clone()]) {
-                        Ok(v) => pool.push(v),
-                        Err(PyError::StopIteration) => break,
-                        Err(e) => return Err(e),
-                    }
-                }
-            }
-            pools.push(pool);
-        }
-        let mut result = vec![vec![]];
-        for pool in &pools {
-            let mut new_result = Vec::new();
-            for prefix in &result {
-                for item in pool {
-                    let mut new_prefix = prefix.clone();
-                    new_prefix.push(item.clone());
-                    new_result.push(new_prefix);
-                }
-            }
-            result = new_result;
-        }
-        Ok(py_list(result.into_iter().map(|v| py_tuple(v)).collect()))
-    });
-
-    d
-}
-
 static RNG_STATE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-fn fast_random_u64() -> u64 {
+pub fn fast_random_u64() -> u64 {
     RNG_STATE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         .wrapping_mul(6364136223846793005)
         .wrapping_add(1442695040888963407)
 }
 
-fn fast_random_f64() -> f64 {
+pub fn fast_random_f64() -> f64 {
     (fast_random_u64() >> 11) as f64 * (1.0 / 9007199254740992.0)
-}
-
-pub fn create_random_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! rnd_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    rnd_func!("random", |args| {
-        Ok(py_float(fast_random_f64()))
-    });
-
-    rnd_func!("randint", |args| {
-        if args.len() < 2 {
-            return Err(PyError::type_error("randint() takes at least 2 arguments"));
-        }
-        let a = args[0].as_i64().ok_or_else(|| PyError::type_error("randint() argument must be int"))?;
-        let b = args[1].as_i64().ok_or_else(|| PyError::type_error("randint() argument must be int"))?;
-        if a > b {
-            return Err(PyError::ValueError("randint() empty range".to_string()));
-        }
-        let range = (b - a + 1) as u64;
-        let n = fast_random_u64() % range;
-        Ok(py_int(a + n as i64))
-    });
-
-    rnd_func!("choice", |args| {
-        if args.is_empty() {
-            return Err(PyError::type_error("choice() takes at least 1 argument"));
-        }
-        let seq = &args[0];
-        let seq_borrowed = seq.borrow();
-        let len = match &*seq_borrowed {
-            PyObject::List(v) => v.len(),
-            PyObject::Tuple(v) => v.len(),
-            PyObject::Str(s) => s.len(),
-            _ => return Err(PyError::type_error("choice() argument must be a sequence")),
-        };
-        if len == 0 {
-            return Err(PyError::IndexError("cannot choose from an empty sequence".to_string()));
-        }
-        let idx = (fast_random_u64() % len as u64) as usize;
-        let val = match &*seq_borrowed {
-            PyObject::List(v) => v[idx].clone(),
-            PyObject::Tuple(v) => v[idx].clone(),
-            PyObject::Str(s) => py_str(&s[idx..=idx]),
-            _ => unreachable!(),
-        };
-        Ok(val)
-    });
-
-    rnd_func!("uniform", |args| {
-        if args.len() < 2 {
-            return Err(PyError::type_error("uniform() takes at least 2 arguments"));
-        }
-        let a = args[0].as_i64().unwrap_or(0) as f64;
-        let b = args[1].as_i64().unwrap_or(1) as f64;
-        Ok(py_float(a + (b - a) * fast_random_f64()))
-    });
-
-    rnd_func!("shuffle", |args| {
-        if args.is_empty() {
-            return Err(PyError::type_error("shuffle() takes at least 1 argument"));
-        }
-        let seq = &args[0];
-        let seq_borrowed = seq.borrow();
-        if let PyObject::List(items) = &*seq_borrowed {
-            let mut items = items.clone();
-            drop(seq_borrowed);
-            let len = items.len();
-            for i in (1..len).rev() {
-                let j = (fast_random_u64() % (i + 1) as u64) as usize;
-                items.swap(i, j);
-            }
-            *seq.borrow_mut() = PyObject::List(items);
-            Ok(py_none())
-        } else {
-            Err(PyError::type_error("shuffle() argument must be a list"))
-        }
-    });
-
-    d
-}
-
-pub fn create_datetime_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! dt_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    dt_func!("datetime", |args| {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default();
-        let secs = now.as_secs() as i64;
-        let nanos = now.subsec_nanos();
-        // Format as ISO string
-        let seconds = secs % 60;
-        let minutes = (secs / 60) % 60;
-        let hours = (secs / 3600) % 24;
-        let days = secs / 86400;
-        // Approximate year/month/day from days since epoch
-        let mut y = 1970i64;
-        let mut remaining = days;
-        loop {
-            let year_days = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) { 366 } else { 365 };
-            if remaining < year_days { break; }
-            remaining -= year_days;
-            y += 1;
-        }
-        let is_leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
-        let month_days = [31, if is_leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-        let mut m = 1usize;
-        for days_in_month in &month_days {
-            if remaining < *days_in_month { break; }
-            remaining -= days_in_month;
-            m += 1;
-        }
-        let d = remaining + 1;
-        let date_str = format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", y, m, d, hours, minutes, seconds);
-        Ok(py_str(&date_str))
-    });
-
-    dt_func!("date", |args| {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default();
-        let secs = now.as_secs() as i64;
-        let days = secs / 86400;
-        let mut y = 1970i64;
-        let mut remaining = days;
-        loop {
-            let year_days = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) { 366 } else { 365 };
-            if remaining < year_days { break; }
-            remaining -= year_days;
-            y += 1;
-        }
-        let is_leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
-        let month_days = [31, if is_leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-        let mut m = 1usize;
-        for days_in_month in &month_days {
-            if remaining < *days_in_month { break; }
-            remaining -= days_in_month;
-            m += 1;
-        }
-        let d = remaining + 1;
-        Ok(py_str(&format!("{:04}-{:02}-{:02}", y, m, d)))
-    });
-
-    dt_func!("now", |args| {
-        let s = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default();
-        Ok(py_float(s.as_secs_f64()))
-    });
-
-    d
 }
 
 fn socket_addr_to_string(addr: &PyObjectRef) -> PyResult<String> {
@@ -6874,39 +6081,17 @@ fn socket_addr_to_string(addr: &PyObjectRef) -> PyResult<String> {
     }
 }
 
-pub fn create_select_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! sel_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    sel_func!("select", |args| {
-        if args.len() < 3 {
-            return Err(PyError::type_error("select() takes at least 3 arguments"));
-        }
-        let rlist = &args[0];
-        let _wlist = &args[1];
-        let _xlist = &args[2];
-        let mut readable = Vec::new();
-        let rlist_b = rlist.borrow();
-        if let PyObject::List(items) = &*rlist_b {
-            for item in items {
-                readable.push(item.clone());
-            }
-        }
-        Ok(py_tuple(vec![py_list(readable), py_list(vec![]), py_list(vec![])]))
-    });
-
-    d
-}
-
 pub struct ThreadInner {
     pub handle: Option<std::thread::JoinHandle<()>>,
     pub result: std::sync::Arc<std::sync::Mutex<Option<PyObjectRef>>>,
     pub target: PyObjectRef,
     pub args: Vec<PyObjectRef>,
+}
+
+#[derive(Clone)]
+pub struct PyArray {
+    pub typecode: char,
+    pub data: Vec<f64>,
 }
 
 pub struct LockInner {
@@ -6917,367 +6102,6 @@ pub struct QueueInner {
     pub queue: std::collections::VecDeque<PyObjectRef>,
 }
 
-pub fn create_socket_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! sock_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    sock_func!("socket", |args| {
-        let family = if args.len() > 0 { args[0].as_i64().unwrap_or(2) } else { 2 };
-        let _sock_type = if args.len() > 1 { args[1].as_i64().unwrap_or(1) } else { 1 };
-        let _proto = if args.len() > 2 { args[2].as_i64().unwrap_or(0) } else { 0 };
-        if family != 2 {
-            return Err(PyError::runtime_error("Only AF_INET sockets are supported"));
-        }
-        Ok(PyObjectRef::new(PyObject::Socket {
-            inner: std::rc::Rc::new(std::cell::RefCell::new(SocketInner::Uninitialized)),
-        }))
-    });
-
-    d.insert("AF_INET".to_string(), py_int(2));
-    d.insert("SOCK_STREAM".to_string(), py_int(1));
-    d.insert("SOCK_DGRAM".to_string(), py_int(2));
-    d.insert("SOL_SOCKET".to_string(), py_int(1));
-    d.insert("SO_REUSEADDR".to_string(), py_int(2));
-
-    sock_func!("gethostname", |_| {
-        match std::process::Command::new("hostname").output() {
-            Ok(output) => {
-                let hostname = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                Ok(py_str(&hostname))
-            }
-            Err(_) => Ok(py_str("localhost")),
-        }
-    });
-
-    sock_func!("gethostbyname", |args| {
-        if args.is_empty() {
-            return Err(PyError::type_error("gethostbyname() missing required argument"));
-        }
-        let hostname = args[0].str();
-        if hostname == "localhost" || hostname == "127.0.0.1" {
-            return Ok(py_str("127.0.0.1"));
-        }
-        // Try DNS resolution
-        match std::net::ToSocketAddrs::to_socket_addrs(&(hostname.as_str(), 0)) {
-            Ok(mut addrs) => {
-                if let Some(addr) = addrs.find(|a| a.is_ipv4()) {
-                    Ok(py_str(&addr.ip().to_string()))
-                } else {
-                    Ok(py_str(&hostname))
-                }
-            }
-            Err(_) => Ok(py_str(&hostname)),
-        }
-    });
-
-    d
-}
-
-pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! re_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    re_func!("search", |args| {
-        if args.len() < 2 {
-            return Err(PyError::type_error("search() takes at least 2 arguments"));
-        }
-        let pattern = args[0].str();
-        let string = args[1].str();
-        match regex::Regex::new(&pattern) {
-            Ok(re) => {
-                match re.find(&string) {
-                    Some(m) => {
-                        let start = m.start();
-                        let end = m.end();
-                        let text = m.as_str().to_string();
-                        Ok(py_tuple(vec![py_int(start as i64), py_int(end as i64), py_str(&text)]))
-                    }
-                    None => Ok(py_none()),
-                }
-            }
-            Err(e) => Err(PyError::ValueError(format!("invalid regex: {}", e))),
-        }
-    });
-
-    re_func!("match", |args| {
-        if args.len() < 2 {
-            return Err(PyError::type_error("match() takes at least 2 arguments"));
-        }
-        let pattern = args[0].str();
-        let string = args[1].str();
-        match regex::Regex::new(&pattern) {
-            Ok(re) => {
-                match re.find_at(&string, 0) {
-                    Some(m) if m.start() == 0 => {
-                        let end = m.end();
-                        let text = m.as_str().to_string();
-                        Ok(py_tuple(vec![py_int(0), py_int(end as i64), py_str(&text)]))
-                    }
-                    _ => Ok(py_none()),
-                }
-            }
-            Err(e) => Err(PyError::ValueError(format!("invalid regex: {}", e))),
-        }
-    });
-
-    re_func!("findall", |args| {
-        if args.len() < 2 {
-            return Err(PyError::type_error("findall() takes at least 2 arguments"));
-        }
-        let pattern = args[0].str();
-        let string = args[1].str();
-        match regex::Regex::new(&pattern) {
-            Ok(re) => {
-                let results: Vec<PyObjectRef> = re.find_iter(&string)
-                    .map(|m| py_str(m.as_str()))
-                    .collect();
-                Ok(py_list(results))
-            }
-            Err(e) => Err(PyError::ValueError(format!("invalid regex: {}", e))),
-        }
-    });
-
-    re_func!("sub", |args| {
-        if args.len() < 3 {
-            return Err(PyError::type_error("sub() takes at least 3 arguments"));
-        }
-        let pattern = args[0].str();
-        let repl = args[1].str();
-        let string = args[2].str();
-        match regex::Regex::new(&pattern) {
-            Ok(re) => {
-                let result = re.replace_all(&string, repl.as_str());
-                Ok(py_str(&result))
-            }
-            Err(e) => Err(PyError::ValueError(format!("invalid regex: {}", e))),
-        }
-    });
-
-    re_func!("split", |args| {
-        if args.len() < 2 {
-            return Err(PyError::type_error("split() takes at least 2 arguments"));
-        }
-        let pattern = args[0].str();
-        let string = args[1].str();
-        let limit = if args.len() > 2 { args[2].as_i64().unwrap_or(0) as usize } else { 0 };
-        match regex::Regex::new(&pattern) {
-            Ok(re) => {
-                let parts: Vec<PyObjectRef> = if limit > 0 {
-                    re.splitn(&string, limit).map(|s| py_str(s)).collect()
-                } else {
-                    re.split(&string).map(|s| py_str(s)).collect()
-                };
-                Ok(py_list(parts))
-            }
-            Err(e) => Err(PyError::ValueError(format!("invalid regex: {}", e))),
-        }
-    });
-
-    d
-}
-
-pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! sub_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    sub_func!("run", |args| {
-        if args.is_empty() {
-            return Err(PyError::type_error("run() missing required argument"));
-        }
-        let shell = if args.len() > 1 { args[1].truthy() } else { false };
-        let cmd_str = args[0].str();
-        if cmd_str.is_empty() {
-            return Err(PyError::ValueError("empty command".to_string()));
-        }
-        let output = if shell {
-            std::process::Command::new("/bin/sh")
-                .arg("-c")
-                .arg(&cmd_str)
-                .output()
-                .map_err(|e| PyError::OsError(format!("{}", e)))?
-        } else {
-            let cmd_args: Vec<String> = if let PyObject::List(items) = &*args[0].borrow() {
-                items.iter().map(|a| a.str()).collect()
-            } else {
-                vec![cmd_str]
-            };
-            if cmd_args.is_empty() {
-                return Err(PyError::ValueError("empty command".to_string()));
-            }
-            std::process::Command::new(&cmd_args[0])
-                .args(&cmd_args[1..])
-                .output()
-                .map_err(|e| PyError::OsError(format!("{}", e)))?
-        };
-        let returncode = output.status.code().unwrap_or(-1) as i64;
-        let stdout_str = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr_str = String::from_utf8_lossy(&output.stderr).to_string();
-        let result = py_dict();
-        if let PyObject::Dict(dict) = &mut *result.borrow_mut() {
-            dict.set(py_str("returncode"), py_int(returncode)).ok();
-            dict.set(py_str("stdout"), py_str(&stdout_str)).ok();
-            dict.set(py_str("stderr"), py_str(&stderr_str)).ok();
-        }
-        Ok(result)
-    });
-
-    sub_func!("check_output", |args| {
-        if args.is_empty() {
-            return Err(PyError::type_error("check_output() missing required argument"));
-        }
-        let shell = if args.len() > 1 { args[1].truthy() } else { false };
-        let cmd_str = args[0].str();
-        if cmd_str.is_empty() {
-            return Err(PyError::ValueError("empty command".to_string()));
-        }
-        let output = if shell {
-            std::process::Command::new("/bin/sh")
-                .arg("-c")
-                .arg(&cmd_str)
-                .output()
-                .map_err(|e| PyError::OsError(format!("{}", e)))?
-        } else {
-            let cmd_args: Vec<String> = if let PyObject::List(items) = &*args[0].borrow() {
-                items.iter().map(|a| a.str()).collect()
-            } else {
-                vec![cmd_str]
-            };
-            if cmd_args.is_empty() {
-                return Err(PyError::ValueError("empty command".to_string()));
-            }
-            std::process::Command::new(&cmd_args[0])
-                .args(&cmd_args[1..])
-                .output()
-                .map_err(|e| PyError::OsError(format!("{}", e)))?
-        };
-        if !output.status.success() {
-            return Err(PyError::runtime_error(format!("Command returned non-zero exit status")));
-        }
-        // Return stdout as bytes
-        Ok(PyObjectRef::imm(PyObject::Bytes(output.stdout)))
-    });
-
-    // Constants
-    d.insert("PIPE".to_string(), py_int(-1));
-
-    d
-}
-
-pub fn create_threading_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! thr_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    thr_func!("Thread", |args| {
-        let target = if args.len() > 0 { args[0].clone() } else { py_none() };
-        let thread_args = if args.len() > 1 {
-            if let PyObject::Tuple(items) = &*args[1].borrow() {
-                items.clone()
-            } else { vec![] }
-        } else { vec![] };
-        let inner = std::sync::Arc::new(std::sync::Mutex::new(ThreadInner {
-            handle: None,
-            result: std::sync::Arc::new(std::sync::Mutex::new(None)),
-            target,
-            args: thread_args,
-        }));
-        Ok(PyObjectRef::new(PyObject::Thread(inner)))
-    });
-
-    thr_func!("Lock", |_| {
-        let inner = std::sync::Arc::new(std::sync::Mutex::new(LockInner {
-            lock: std::sync::atomic::AtomicBool::new(false),
-        }));
-        Ok(PyObjectRef::new(PyObject::Lock(inner)))
-    });
-
-    thr_func!("current_thread", |_| {
-        Ok(py_str("MainThread"))
-    });
-
-    thr_func!("active_count", |_| {
-        Ok(py_int(1))
-    });
-
-    d
-}
-
-/// Creates a callable that returns a dict-like object for WeakValueDictionary
-pub fn create_weakref_weak_val_dict() -> PyObjectRef {
-    PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "WeakValueDictionary".to_string(),
-        func: |args| {
-            if args.len() > 0 {
-                // Copy items from the argument
-                if let PyObject::Dict(items) = &*args[0].borrow() {
-                    let mut new_dict = PyDict::new();
-                    for (k, v) in items.items() {
-                        let _ = new_dict.set(k, v);
-                    }
-                    return Ok(PyObjectRef::new(PyObject::Dict(new_dict)));
-                }
-            }
-            Ok(py_dict())
-        },
-    })
-}
-
-/// Creates a callable that returns a dict-like object for WeakKeyDictionary
-pub fn create_weakref_weak_key_dict() -> PyObjectRef {
-    PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "WeakKeyDictionary".to_string(),
-        func: |args| {
-            if args.len() > 0 {
-                if let PyObject::Dict(items) = &*args[0].borrow() {
-                    let mut new_dict = PyDict::new();
-                    for (k, v) in items.items() {
-                        let _ = new_dict.set(k, v);
-                    }
-                    return Ok(PyObjectRef::new(PyObject::Dict(new_dict)));
-                }
-            }
-            Ok(py_dict())
-        },
-    })
-}
-
-/// Creates a callable that returns a set-like object for WeakSet
-pub fn create_weakref_weak_set() -> PyObjectRef {
-    PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "WeakSet".to_string(),
-        func: |args| {
-            if args.len() > 0 {
-                if let PyObject::Set(s) = &*args[0].borrow() {
-                    return Ok(args[0].clone());
-                }
-                if let PyObject::List(items) = &*args[0].borrow() {
-                    let mut s = PySet::new();
-                    for item in items {
-                        let _ = s.add(item.clone());
-                    }
-                    return Ok(PyObjectRef::new(PyObject::Set(s)));
-                }
-            }
-            Ok(PyObjectRef::new(PyObject::Set(PySet::new())))
-        },
-    })
-}
-
 pub fn create_module(name: &str, dict: HashMap<String, PyObjectRef>) -> PyObjectRef {
     PyObjectRef::new(PyObject::Module {
         name: name.to_string(),
@@ -7285,129 +6109,8 @@ pub fn create_module(name: &str, dict: HashMap<String, PyObjectRef>) -> PyObject
     })
 }
 
-/// Creates a minimal native copy module — shallow and deep copy for basic types.
-pub fn create_copy_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! copy_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    copy_func!("copy", |args| {
-        if args.is_empty() {
-            return Err(PyError::type_error("copy() missing required argument"));
-        }
-        let obj = &args[0];
-        let borrowed = obj.borrow();
-        match &*borrowed {
-            PyObject::None => Ok(py_none()),
-            PyObject::Bool(b) => Ok(py_bool(*b)),
-            PyObject::Int(_) | PyObject::Float(_) | PyObject::Str(_) | PyObject::Bytes(_) => Ok(obj.clone()),
-            PyObject::Tuple(items) => {
-                let mut new_items = Vec::with_capacity(items.len());
-                for item in items {
-                    new_items.push(item.clone());
-                }
-                Ok(PyObjectRef::imm(PyObject::Tuple(new_items)))
-            }
-            PyObject::List(items) => {
-                let new_items: Vec<PyObjectRef> = items.iter().map(|i| {
-                    // Shallow copy: clone references
-                    let b = i.borrow();
-                    match &*b {
-                        PyObject::None => py_none(),
-                        PyObject::Bool(b) => py_bool(*b),
-                        PyObject::Int(_) | PyObject::Float(_) | PyObject::Str(_) => i.clone(),
-                        _ => i.clone(),
-                    }
-                }).collect();
-                Ok(py_list(new_items))
-            }
-            PyObject::Dict(dict) => {
-                let mut new_dict = PyDict::new();
-                for (k, v) in dict.items() {
-                    let _ = new_dict.set(k, v);
-                }
-                Ok(PyObjectRef::new(PyObject::Dict(new_dict)))
-            }
-            PyObject::Set(s) => {
-                let mut new_set = PySet::new();
-                for item in s.to_vec() {
-                    let _ = new_set.add(item);
-                }
-                Ok(PyObjectRef::new(PyObject::Set(new_set)))
-            }
-            _ => {
-                // For instances and custom types, try __copy__
-                if let Ok(copy_method) = borrowed.get_attribute("__copy__") {
-                    drop(borrowed);
-                    return crate::object::call_function(&copy_method, vec![obj.clone()]);
-                }
-                Ok(obj.clone())
-            }
-        }
-    });
-
-    copy_func!("deepcopy", |args| {
-        if args.is_empty() {
-            return Err(PyError::type_error("deepcopy() missing required argument"));
-        }
-        let obj = &args[0];
-        let memo = if args.len() > 1 { args[1].clone() } else { py_dict() };
-        let borrowed = obj.borrow();
-        match &*borrowed {
-            PyObject::None => Ok(py_none()),
-            PyObject::Bool(b) => Ok(py_bool(*b)),
-            PyObject::Int(_) | PyObject::Float(_) | PyObject::Str(_) | PyObject::Bytes(_) => Ok(obj.clone()),
-            PyObject::Tuple(items) => {
-                let mut new_items = Vec::with_capacity(items.len());
-                for item in items {
-                    new_items.push(deepcopy_one(item, &memo)?);
-                }
-                Ok(PyObjectRef::imm(PyObject::Tuple(new_items)))
-            }
-            PyObject::List(items) => {
-                let mut new_items = Vec::with_capacity(items.len());
-                for item in items {
-                    new_items.push(deepcopy_one(item, &memo)?);
-                }
-                Ok(py_list(new_items))
-            }
-            PyObject::Dict(dict) => {
-                let mut new_dict = PyDict::new();
-                for (k, v) in dict.items() {
-                    let new_k = deepcopy_one(&k, &memo)?;
-                    let new_v = deepcopy_one(&v, &memo)?;
-                    let _ = new_dict.set(new_k, new_v);
-                }
-                Ok(PyObjectRef::new(PyObject::Dict(new_dict)))
-            }
-            _ => {
-                // For instances, try __deepcopy__ first
-                if let Ok(dc_method) = borrowed.get_attribute("__deepcopy__") {
-                    drop(borrowed);
-                    return crate::object::call_function(&dc_method, vec![obj.clone(), memo]);
-                }
-                Ok(obj.clone())
-            }
-        }
-    });
-
-    // Error class
-    d.insert("Error".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "Error".to_string(),
-        func: |args| {
-            let msg = if !args.is_empty() { args[0].str() } else { "copy error".to_string() };
-            Err(PyError::Exception(msg, py_none()))
-        },
-    }));
-
-    d
-}
-
 /// Helper: deep-copy a single object with memo support
-fn deepcopy_one(obj: &PyObjectRef, memo: &PyObjectRef) -> Result<PyObjectRef, PyError> {
+pub fn deepcopy_one(obj: &PyObjectRef, memo: &PyObjectRef) -> Result<PyObjectRef, PyError> {
     // Check memo first using identity
     if let PyObject::Dict(memo_dict) = &*memo.borrow() {
         if let Some(cached) = memo_dict.get_by_identity(obj) {
@@ -7452,1128 +6155,11 @@ fn deepcopy_one(obj: &PyObjectRef, memo: &PyObjectRef) -> Result<PyObjectRef, Py
     Ok(result)
 }
 
-/// Creates the _weakref module — native replacement for the C extension.
-/// Provides enough for CPython's weakref.py to load.
-pub fn create_weakref_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! wr_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    // ref(obj) returns a weak reference object (callable)
-    // If the object is still alive, calling it returns the object
-    // Since we don't have full GC, we use a simple Rc-based weak reference
-    wr_func!("ref", |args| {
-        if args.is_empty() {
-            return Err(PyError::type_error("ref() requires at least 1 argument"));
-        }
-        let obj = args[0].clone();
-        // Return a BuiltinMethod that when called returns the original object
-        Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
-            name: "weakref".to_string(),
-            func: |args| Ok(args[0].clone()),
-            self_obj: obj,
-        }))
-    });
-
-    wr_func!("proxy", |args| {
-        if args.is_empty() {
-            return Err(PyError::type_error("proxy() requires at least 1 argument"));
-        }
-        Ok(args[0].clone())
-    });
-
-    wr_func!("getweakrefcount", |_| Ok(py_int(0)));
-    wr_func!("getweakrefs", |_| Ok(py_list(vec![])));
-
-    // Type constants
-    d.insert("ReferenceType".to_string(), py_str("weakref"));
-    d.insert("ProxyType".to_string(), py_str("weakproxy"));
-    d.insert("CallableProxyType".to_string(), py_str("weakcallableproxy"));
-
-    // Internal function used by weakrefset
-    wr_func!("_remove_dead_weakref", |_| Ok(py_none()));
-
-    d
-}
-
-/// Creates the _collections_abc module — native replacement for the C extension.
-pub fn create_collections_abc_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! abc_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    abc_func!("__import__", |_| Ok(py_bool(true)));
-
-    // Abstract base classes as simple markers
-    let abc_meta = PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "ABCMeta".to_string(),
-        func: |args| {
-            Ok(PyObjectRef::new(PyObject::Instance {
-                typ: py_dict(), // simplified type
-                dict: HashMap::new(),
-            }))
-        },
-    });
-
-    d.insert("ABCMeta".to_string(), abc_meta);
-    d.insert("Hashable".to_string(), py_str("Hashable"));
-    d.insert("Iterable".to_string(), py_str("Iterable"));
-    d.insert("Iterator".to_string(), py_str("Iterator"));
-    d.insert("Sized".to_string(), py_str("Sized"));
-    d.insert("Callable".to_string(), py_str("Callable"));
-    d.insert("Sequence".to_string(), py_str("Sequence"));
-    d.insert("MutableSequence".to_string(), py_str("MutableSequence"));
-    d.insert("Set".to_string(), py_str("Set"));
-    d.insert("MutableSet".to_string(), py_str("MutableSet"));
-    d.insert("Mapping".to_string(), py_str("Mapping"));
-    d.insert("MutableMapping".to_string(), py_str("MutableMapping"));
-    d.insert("MappingView".to_string(), py_str("MappingView"));
-    d.insert("ItemsView".to_string(), py_str("ItemsView"));
-    d.insert("KeysView".to_string(), py_str("KeysView"));
-    d.insert("ValuesView".to_string(), py_str("ValuesView"));
-    d.insert("Container".to_string(), py_str("Container"));
-
-    d
-}
-
-/// Creates a minimal `types` module with commonly used types.
-pub fn create_types_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! t_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    t_func!("FunctionType", |args| {
-        if args.is_empty() { return Err(PyError::type_error("FunctionType() requires an argument")); }
-        Ok(args[0].clone())
-    });
-    t_func!("LambdaType", |args| {
-        if args.is_empty() { return Err(PyError::type_error("LambdaType() requires an argument")); }
-        Ok(args[0].clone())
-    });
-    t_func!("MethodType", |args| {
-        if args.is_empty() { return Err(PyError::type_error("MethodType() requires an argument")); }
-        Ok(args[0].clone())
-    });
-    t_func!("BuiltinFunctionType", |args| {
-        if args.is_empty() { return Err(PyError::type_error("BuiltinFunctionType() requires an argument")); }
-        Ok(args[0].clone())
-    });
-    t_func!("ModuleType", |args| {
-        if args.is_empty() { return Err(PyError::type_error("ModuleType() requires an argument")); }
-        Ok(args[0].clone())
-    });
-    t_func!("NoneType", |_| Ok(py_none()));
-    t_func!("GeneratorType", |args| {
-        if args.is_empty() { return Err(PyError::type_error("GeneratorType() requires an argument")); }
-        Ok(args[0].clone())
-    });
-    t_func!("CoroutineType", |args| {
-        if args.is_empty() { return Err(PyError::type_error("CoroutineType() requires an argument")); }
-        Ok(args[0].clone())
-    });
-    t_func!("SimpleNamespace", |args| {
-        let d = py_dict();
-        if args.len() > 0 {
-            if let PyObject::Dict(items) = &*args[0].borrow() {
-                let mut new_dict = PyDict::new();
-                for (k, v) in items.items() {
-                    let _ = new_dict.set(k, v);
-                }
-                return Ok(PyObjectRef::new(PyObject::Dict(new_dict)));
-            }
-        }
-        Ok(d)
-    });
-    d.insert("CodeType".to_string(), py_str("code"));
-    d.insert("MappingProxyType".to_string(), py_str("mappingproxy"));
-
-    d
-}
-
-/// Creates a minimal `struct` module for binary packing/unpacking.
-pub fn create_struct_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! s_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    fn fmt_size(fmt: &str) -> usize {
-        let mut size = 0usize;
-        let mut chars = fmt.chars().peekable();
-        while let Some(c) = chars.next() {
-            let count = match c {
-                ' ' | '!' | '@' | '<' | '>' | '=' => continue,
-                '0'..='9' => {
-                    let mut n = String::from(c);
-                    while let Some(d @ '0'..='9') = chars.peek() {
-                        n.push(*d);
-                        chars.next();
-                    }
-                    n.parse::<usize>().unwrap_or(1)
-                }
-                _ => 1,
-            };
-            size += match c {
-                'c' | 'b' | 'B' | '?' | 'x' => 1 * count,
-                'h' | 'H' => 2 * count,
-                'i' | 'I' | 'l' | 'L' | 'f' => 4 * count,
-                'q' | 'Q' | 'd' => 8 * count,
-                's' | 'p' => count,
-                _ => 1 * count,
-            };
-        }
-        size
-    }
-
-    s_func!("calcsize", |args| {
-        if args.is_empty() {
-            return Err(PyError::type_error("calcsize() missing required argument"));
-        }
-        let fmt = args[0].str();
-        Ok(py_int(fmt_size(&fmt) as i64))
-    });
-
-    s_func!("pack", |args| {
-        if args.len() < 2 {
-            return Err(PyError::type_error("pack() requires format string and values"));
-        }
-        let fmt = args[0].str();
-        let values: Vec<u8> = args[1..].iter().map(|arg| {
-            if let Some(n) = arg.as_i64() { n as u8 } else { 0u8 }
-        }).collect();
-        let size = fmt_size(&fmt);
-        let mut data = Vec::with_capacity(size);
-        for v in &values { data.push(*v); }
-        while data.len() < size { data.push(0); }
-        Ok(PyObjectRef::imm(PyObject::Bytes(data)))
-    });
-
-    s_func!("unpack", |args| {
-        if args.len() < 2 {
-            return Err(PyError::type_error("unpack() requires format string and buffer"));
-        }
-        let fmt = args[0].str();
-        let buf = {
-            let b = args[1].borrow();
-            match &*b {
-                PyObject::Bytes(data) => data.clone(),
-                _ => return Err(PyError::type_error("unpack() arg 2 must be bytes")),
-            }
-        };
-        let size = fmt_size(&fmt);
-        if buf.len() < size {
-            return Err(PyError::type_error(format!("unpack() requires a buffer of {} bytes", size)));
-        }
-        let values: Vec<PyObjectRef> = buf[..size].iter().map(|&b| py_int(b as i64)).collect();
-        Ok(PyObjectRef::imm(PyObject::Tuple(values)))
-    });
-
-    d.insert("error".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "error".to_string(),
-        func: |args| {
-            let msg = if !args.is_empty() { args[0].str() } else { "struct error".to_string() };
-            Err(PyError::Exception(msg, py_none()))
-        },
-    }));
-
-    d
-}
-
-/// Creates a native bisect module for binary search and insertion on lists.
-pub fn create_bisect_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! bisect_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    bisect_func!("bisect_left", |args| {
-        if args.len() < 2 { return Err(PyError::type_error("bisect_left() requires at least 2 arguments (list, item)")); }
-        let items = {
-            let a = args[0].borrow();
-            match &*a { PyObject::List(v) => v.clone(), _ => return Err(PyError::type_error("bisect_left() argument must be a list")) }
-        };
-        let x = &args[1];
-        let mut lo = if args.len() > 2 { args[2].as_i64().ok_or_else(|| PyError::type_error("lo must be an integer"))? as usize } else { 0 };
-        let mut hi = if args.len() > 3 { args[3].as_i64().ok_or_else(|| PyError::type_error("hi must be an integer"))? as usize } else { items.len() };
-        while lo < hi {
-            let mid = (lo + hi) / 2;
-            if items[mid].borrow().lt(x)? { lo = mid + 1; } else { hi = mid; }
-        }
-        Ok(py_int(lo as i64))
-    });
-
-    bisect_func!("bisect_right", |args| {
-        if args.len() < 2 { return Err(PyError::type_error("bisect_right() requires at least 2 arguments (list, item)")); }
-        let items = {
-            let a = args[0].borrow();
-            match &*a { PyObject::List(v) => v.clone(), _ => return Err(PyError::type_error("bisect_right() argument must be a list")) }
-        };
-        let x = &args[1];
-        let mut lo = if args.len() > 2 { args[2].as_i64().ok_or_else(|| PyError::type_error("lo must be an integer"))? as usize } else { 0 };
-        let mut hi = if args.len() > 3 { args[3].as_i64().ok_or_else(|| PyError::type_error("hi must be an integer"))? as usize } else { items.len() };
-        while lo < hi {
-            let mid = (lo + hi) / 2;
-            if x.borrow().lt(&items[mid])? { hi = mid; } else { lo = mid + 1; }
-        }
-        Ok(py_int(lo as i64))
-    });
-
-    bisect_func!("insort_left", |args| {
-        if args.len() < 2 { return Err(PyError::type_error("insort_left() requires at least 2 arguments (list, item)")); }
-        let items = {
-            let a = args[0].borrow();
-            match &*a { PyObject::List(v) => v.clone(), _ => return Err(PyError::type_error("insort_left() argument must be a list")) }
-        };
-        let x = &args[1];
-        let mut lo = if args.len() > 2 { args[2].as_i64().ok_or_else(|| PyError::type_error("lo must be an integer"))? as usize } else { 0 };
-        let mut hi = if args.len() > 3 { args[3].as_i64().ok_or_else(|| PyError::type_error("hi must be an integer"))? as usize } else { items.len() };
-        while lo < hi {
-            let mid = (lo + hi) / 2;
-            if items[mid].borrow().lt(x)? { lo = mid + 1; } else { hi = mid; }
-        }
-        if let PyObject::List(list) = &mut *args[0].borrow_mut() { list.insert(lo, x.clone()); Ok(py_none()) }
-        else { Err(PyError::type_error("insort_left() argument must be a list")) }
-    });
-
-    bisect_func!("insort_right", |args| {
-        if args.len() < 2 { return Err(PyError::type_error("insort_right() requires at least 2 arguments (list, item)")); }
-        let items = {
-            let a = args[0].borrow();
-            match &*a { PyObject::List(v) => v.clone(), _ => return Err(PyError::type_error("insort_right() argument must be a list")) }
-        };
-        let x = &args[1];
-        let mut lo = if args.len() > 2 { args[2].as_i64().ok_or_else(|| PyError::type_error("lo must be an integer"))? as usize } else { 0 };
-        let mut hi = if args.len() > 3 { args[3].as_i64().ok_or_else(|| PyError::type_error("hi must be an integer"))? as usize } else { items.len() };
-        while lo < hi {
-            let mid = (lo + hi) / 2;
-            if x.borrow().lt(&items[mid])? { hi = mid; } else { lo = mid + 1; }
-        }
-        if let PyObject::List(list) = &mut *args[0].borrow_mut() { list.insert(lo, x.clone()); Ok(py_none()) }
-        else { Err(PyError::type_error("insort_right() argument must be a list")) }
-    });
-
-    d
-}
-
-/// Creates a native heapq module for heap queue operations on lists.
-pub fn create_heapq_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! heap_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    // Internal: sift-down (for heappop, heapreplace, heapify)
-    fn _siftdown(heap: &mut Vec<PyObjectRef>, start: usize, pos: usize) {
-        let mut pos = pos;
-        while pos > start {
-            let parent = (pos - 1) / 2;
-            if heap[pos].borrow().lt(&heap[parent]).unwrap_or(false) {
-                heap.swap(pos, parent);
-                pos = parent;
-            } else {
-                break;
-            }
-        }
-    }
-
-    // Internal: sift-up (for heapify)
-    fn _siftup(heap: &mut Vec<PyObjectRef>, pos: usize) {
-        let end = heap.len();
-        let mut pos = pos;
-        let start = pos;
-        while pos < end {
-            let left = 2 * pos + 1;
-            let right = 2 * pos + 2;
-            let mut smallest = pos;
-            if left < end && heap[left].borrow().lt(&heap[smallest]).unwrap_or(false) {
-                smallest = left;
-            }
-            if right < end && heap[right].borrow().lt(&heap[smallest]).unwrap_or(false) {
-                smallest = right;
-            }
-            if smallest == pos { break; }
-            heap.swap(pos, smallest);
-            pos = smallest;
-        }
-        // Bubble back up if needed (after moving nodes)
-        _siftdown(heap, start, pos);
-    }
-
-    heap_func!("heapify", |args| {
-        if args.is_empty() { return Err(PyError::type_error("heapify() missing required argument")); }
-        if let PyObject::List(list) = &mut *args[0].borrow_mut() {
-            let n = list.len();
-            if n > 1 {
-                for i in (0..n / 2).rev() {
-                    _siftup(list, i);
-                }
-            }
-            Ok(py_none())
-        } else {
-            Err(PyError::type_error("heapify() argument must be a list"))
-        }
-    });
-
-    heap_func!("heappush", |args| {
-        if args.len() < 2 { return Err(PyError::type_error("heappush() requires 2 arguments (heap, item)")); }
-        if let PyObject::List(list) = &mut *args[0].borrow_mut() {
-            list.push(args[1].clone());
-            _siftdown(list, 0, list.len() - 1);
-            Ok(py_none())
-        } else {
-            Err(PyError::type_error("heappush() argument must be a list"))
-        }
-    });
-
-    heap_func!("heappop", |args| {
-        if args.is_empty() { return Err(PyError::type_error("heappop() missing required argument")); }
-        if let PyObject::List(list) = &mut *args[0].borrow_mut() {
-            if list.is_empty() { return Err(PyError::index_error("pop from an empty heap")); }
-            let last = list.len() - 1;
-            list.swap(0, last);
-            let result = list.pop().unwrap();
-            if !list.is_empty() { _siftup(list, 0); }
-            Ok(result)
-        } else {
-            Err(PyError::type_error("heappop() argument must be a list"))
-        }
-    });
-
-    heap_func!("heapreplace", |args| {
-        if args.len() < 2 { return Err(PyError::type_error("heapreplace() requires 2 arguments (heap, item)")); }
-        if let PyObject::List(list) = &mut *args[0].borrow_mut() {
-            if list.is_empty() { return Err(PyError::index_error("heapreplace() on empty heap")); }
-            let result = list[0].clone();
-            list[0] = args[1].clone();
-            _siftup(list, 0);
-            Ok(result)
-        } else {
-            Err(PyError::type_error("heapreplace() argument must be a list"))
-        }
-    });
-
-    // Helper: extract comparable values for nlargest/nsmallest
-    fn _extract_items(args: &[PyObjectRef]) -> PyResult<(usize, Vec<PyObjectRef>)> {
-        if args.len() < 2 { return Err(PyError::type_error("requires at least 2 arguments (n, iterable)")); }
-        let n = args[0].as_i64().ok_or_else(|| PyError::type_error("n must be an integer"))?;
-        if n < 0 { return Err(PyError::value_error("n must be non-negative")); }
-        let n = n as usize;
-        // Extract items from iterable
-        let iterable = crate::object::builtin_iter(&[args[1].clone()])?;
-        let mut items = Vec::new();
-        loop {
-            match crate::object::builtin_next(&[iterable.clone()]) {
-                Ok(val) => items.push(val),
-                Err(PyError::StopIteration) => break,
-                Err(e) => return Err(e),
-            }
-        }
-        Ok((n, items))
-    }
-
-    heap_func!("nlargest", |args| {
-        let (n, mut items) = _extract_items(args)?;
-        if n == 0 { return Ok(py_list(Vec::new())); }
-        // Use a min-heap of size n to track largest n elements
-        if items.len() <= n {
-            // Sort descending
-            items.sort_by(|a, b| b.borrow().lt(a).unwrap_or(false).cmp(&true).reverse());
-            return Ok(py_list(items));
-        }
-        // Build a min-heap of the first n elements
-        let mut heap: Vec<PyObjectRef> = items.drain(..n).collect();
-        if heap.len() > 1 {
-            for i in (0..heap.len() / 2).rev() {
-                _siftup(&mut heap, i);
-            }
-        }
-        for item in items {
-            if item.borrow().lt(&heap[0]).unwrap_or(false) {
-                // item < smallest in heap, skip
-            } else {
-                heap[0] = item;
-                _siftup(&mut heap, 0);
-            }
-        }
-        // Sort descending
-        heap.sort_by(|a, b| b.borrow().lt(a).unwrap_or(false).cmp(&true).reverse());
-        Ok(py_list(heap))
-    });
-
-    heap_func!("nsmallest", |args| {
-        let (n, mut items) = _extract_items(args)?;
-        if n == 0 { return Ok(py_list(Vec::new())); }
-        if items.len() <= n {
-            items.sort_by(|a, b| a.borrow().lt(b).unwrap_or(false).cmp(&true));
-            return Ok(py_list(items));
-        }
-        // Use a max-heap (negation) of size n to track smallest n elements
-        // Actually, we can use a max-heap: track largest in the small set
-        // For max-heap we invert comparison
-        let mut heap: Vec<PyObjectRef> = items.drain(..n).collect();
-        if heap.len() > 1 {
-            for i in (0..heap.len() / 2).rev() {
-                _siftup_max(&mut heap, i);
-            }
-        }
-        for item in items {
-            if heap[0].borrow().lt(&item).unwrap_or(false) {
-                // item < heap[0], skip
-            } else {
-                heap[0] = item;
-                _siftup_max(&mut heap, 0);
-            }
-        }
-        heap.sort_by(|a, b| a.borrow().lt(b).unwrap_or(false).cmp(&true));
-        Ok(py_list(heap))
-    });
-
-    fn _siftup_max(heap: &mut Vec<PyObjectRef>, pos: usize) {
-        let end = heap.len();
-        let mut pos = pos;
-        while pos < end {
-            let left = 2 * pos + 1;
-            let right = 2 * pos + 2;
-            let mut largest = pos;
-            if left < end && heap[largest].borrow().lt(&heap[left]).unwrap_or(false) {
-                largest = left;
-            }
-            if right < end && heap[largest].borrow().lt(&heap[right]).unwrap_or(false) {
-                largest = right;
-            }
-            if largest == pos { break; }
-            heap.swap(pos, largest);
-            pos = largest;
-        }
-    }
-
-    d
-}
-
 use std::sync::atomic::{AtomicI64, Ordering};
-static ENUM_AUTO_COUNTER: AtomicI64 = AtomicI64::new(1);
-
-/// Creates a native enum module with Enum, IntEnum, and auto().
-pub fn create_enum_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! enum_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    enum_func!("auto", |args| {
-        let _ = args;
-        let val = ENUM_AUTO_COUNTER.fetch_add(1, Ordering::SeqCst);
-        Ok(py_int(val))
-    });
-
-    enum_func!("Enum", |args| {
-        if args.is_empty() { return Err(PyError::type_error("Enum() requires at least 1 argument")); }
-        // Enum is a callable that returns an int.
-        // If called with (name, value), return value; if called with just value, return it.
-        if args.len() >= 2 {
-            Ok(args[1].clone())
-        } else {
-            Ok(args[0].clone())
-        }
-    });
-
-    enum_func!("IntEnum", |args| {
-        if args.is_empty() { return Err(PyError::type_error("IntEnum() requires at least 1 argument")); }
-        if args.len() >= 2 {
-            Ok(args[1].clone())
-        } else {
-            Ok(args[0].clone())
-        }
-    });
-
-    d
-}
-
-// === GLOB MODULE ===
-pub fn create_glob_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! glob_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    fn glob_match(name: &str, pattern: &str) -> bool {
-        let re_str = format!("^{}$", pattern.replace(".", "\\.").replace("?", ".").replace("*", ".*"));
-        regex::Regex::new(&re_str).map(|re| re.is_match(name)).unwrap_or(false)
-    }
-
-    fn walk_glob(base: &std::path::Path, parts: &[&str], prefix: &str, results: &mut Vec<String>) {
-        if parts.is_empty() {
-            return;
-        }
-        let part = parts[0];
-        let rest = &parts[1..];
-
-        if let Ok(entries) = std::fs::read_dir(base) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if !glob_match(&name, part) {
-                    continue;
-                }
-                let full = if prefix.is_empty() { name.clone() } else { format!("{}/{}", prefix, name) };
-                if rest.is_empty() {
-                    results.push(full);
-                } else {
-                    let path = entry.path();
-                    if path.is_dir() {
-                        walk_glob(&path, rest, &full, results);
-                    }
-                }
-            }
-        }
-    }
-
-    glob_func!("glob", |args| {
-        if args.len() < 1 {
-            return Err(PyError::type_error("glob() takes exactly 1 argument"));
-        }
-        let pattern = args[0].str();
-        let pattern = pattern.trim().to_string();
-        if pattern.is_empty() {
-            return Ok(py_list(vec![]));
-        }
-
-        let is_absolute = pattern.starts_with('/');
-        let parts: Vec<&str> = pattern.split('/').filter(|p| !p.is_empty()).collect();
-        if parts.is_empty() {
-            return Ok(py_list(vec![]));
-        }
-
-        let start = if is_absolute { std::path::Path::new("/") } else { std::path::Path::new(".") };
-
-        let mut results = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(start) {
-            let first = parts[0];
-            let rest = &parts[1..];
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if !glob_match(&name, first) {
-                    continue;
-                }
-                if rest.is_empty() {
-                    results.push(name);
-                } else {
-                    let path = entry.path();
-                    if path.is_dir() {
-                        walk_glob(&path, rest, &name, &mut results);
-                    }
-                }
-            }
-        }
-
-        results.sort();
-        let py_results: Vec<PyObjectRef> = results.into_iter().map(|s| py_str(&s)).collect();
-        Ok(py_list(py_results))
-    });
-    d
-}
-
-// === FNMATCH MODULE ===
-pub fn create_fnmatch_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! fnmatch_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    fn fnmatch_match(name: &str, pattern: &str) -> bool {
-        let mut re_str = String::from("^");
-        for ch in pattern.chars() {
-            match ch {
-                '.' => re_str.push_str("\\."),
-                '*' => re_str.push_str(".*"),
-                '?' => re_str.push('.'),
-                other => re_str.push(other),
-            }
-        }
-        re_str.push('$');
-        regex::Regex::new(&re_str).map(|re| re.is_match(name)).unwrap_or(false)
-    }
-
-    fnmatch_func!("fnmatch", |args| {
-        if args.len() < 2 {
-            return Err(PyError::type_error("fnmatch() takes exactly 2 arguments"));
-        }
-        let name = args[0].str();
-        let pattern = args[1].str();
-        Ok(py_bool(fnmatch_match(&name, &pattern)))
-    });
-    d
-}
-
-// === TEXTWRAP MODULE ===
-pub fn create_textwrap_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! tw_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    tw_func!("dedent", |args| {
-        if args.len() < 1 {
-            return Err(PyError::type_error("dedent() takes exactly 1 argument"));
-        }
-        let text = args[0].str();
-        let indent = text.lines()
-            .filter(|l| !l.trim().is_empty())
-            .map(|l| l.len() - l.trim_start().len())
-            .min()
-            .unwrap_or(0);
-        let result: String = text.lines()
-            .map(|l| {
-                if l.len() >= indent && l.chars().take(indent).all(|c| c.is_whitespace()) {
-                    &l[indent..]
-                } else {
-                    l
-                }
-            })
-            .collect::<Vec<&str>>()
-            .join("\n");
-        Ok(py_str(&result))
-    });
-
-    tw_func!("indent", |args| {
-        if args.len() < 2 {
-            return Err(PyError::type_error("indent() takes at least 2 arguments"));
-        }
-        let text = args[0].str();
-        let prefix = args[1].str();
-        let result: String = text.lines()
-            .map(|l| format!("{}{}", prefix, l))
-            .collect::<Vec<String>>()
-            .join("\n");
-        Ok(py_str(&result))
-    });
-
-    tw_func!("fill", |args| {
-        if args.len() < 1 {
-            return Err(PyError::type_error("fill() takes at least 1 argument"));
-        }
-        let text = args[0].str();
-        let width = if args.len() > 2 {
-            args[2].as_i64().unwrap_or(70) as usize
-        } else {
-            70
-        };
-        if width == 0 || width >= text.len() {
-            return Ok(py_str(&text));
-        }
-        let words: Vec<&str> = text.split_whitespace().collect();
-        let mut lines: Vec<String> = Vec::new();
-        let mut current = String::new();
-        for word in words {
-            if current.is_empty() {
-                current = word.to_string();
-            } else if current.len() + 1 + word.len() <= width {
-                current.push(' ');
-                current.push_str(word);
-            } else {
-                lines.push(current);
-                current = word.to_string();
-            }
-        }
-        if !current.is_empty() {
-            lines.push(current);
-        }
-        Ok(py_str(&lines.join("\n")))
-    });
-
-    tw_func!("shorten", |args| {
-        if args.len() < 1 {
-            return Err(PyError::type_error("shorten() takes at least 1 argument"));
-        }
-        let text = args[0].str();
-        let width = if args.len() > 1 {
-            args[1].as_i64().unwrap_or(70) as usize
-        } else {
-            70
-        };
-        if text.len() <= width {
-            return Ok(py_str(&text));
-        }
-        let truncated: String = text.chars().take(width).collect();
-        if let Some(last_space) = truncated.rfind(' ') {
-            let result: String = truncated[..last_space].to_string() + " ...";
-            Ok(py_str(&result))
-        } else {
-            Ok(py_str(&(truncated + " ...")))
-        }
-    });
-
-    d
-}
-
-// === PPRINT MODULE ===
-pub fn create_pprint_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! pp_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    fn pprint_recurse(obj: &PyObjectRef, indent: usize, out: &mut String) {
-        let borrowed = obj.borrow();
-        match &*borrowed {
-            PyObject::List(items) => {
-                if items.is_empty() {
-                    out.push_str("[]");
-                    return;
-                }
-                out.push_str("[\n");
-                for (i, item) in items.iter().enumerate() {
-                    out.push_str(&" ".repeat(indent + 4));
-                    pprint_recurse(item, indent + 4, out);
-                    if i < items.len() - 1 { out.push(','); }
-                    out.push('\n');
-                }
-                out.push_str(&" ".repeat(indent));
-                out.push(']');
-            }
-            PyObject::Tuple(items) => {
-                if items.is_empty() {
-                    out.push_str("()");
-                    return;
-                }
-                if items.len() == 1 {
-                    out.push_str("(\n");
-                    out.push_str(&" ".repeat(indent + 4));
-                    pprint_recurse(&items[0], indent + 4, out);
-                    out.push_str(",\n");
-                    out.push_str(&" ".repeat(indent));
-                    out.push(')');
-                    return;
-                }
-                out.push_str("(\n");
-                for (i, item) in items.iter().enumerate() {
-                    out.push_str(&" ".repeat(indent + 4));
-                    pprint_recurse(item, indent + 4, out);
-                    if i < items.len() - 1 { out.push(','); }
-                    out.push('\n');
-                }
-                out.push_str(&" ".repeat(indent));
-                out.push(')');
-            }
-            PyObject::Dict(dict) => {
-                if dict.is_empty() {
-                    out.push_str("{}");
-                    return;
-                }
-                out.push_str("{\n");
-                let pairs = dict.items();
-                for (i, (k, v)) in pairs.iter().enumerate() {
-                    out.push_str(&" ".repeat(indent + 4));
-                    pprint_recurse(k, indent + 4, out);
-                    out.push_str(": ");
-                    pprint_recurse(v, indent + 4, out);
-                    if i < pairs.len() - 1 { out.push(','); }
-                    out.push('\n');
-                }
-                out.push_str(&" ".repeat(indent));
-                out.push('}');
-            }
-            PyObject::Set(items) => {
-                let vec = items.to_vec();
-                if vec.is_empty() {
-                    out.push_str("set()");
-                    return;
-                }
-                out.push_str("{\n");
-                for (i, item) in vec.iter().enumerate() {
-                    out.push_str(&" ".repeat(indent + 4));
-                    pprint_recurse(item, indent + 4, out);
-                    if i < vec.len() - 1 { out.push(','); }
-                    out.push('\n');
-                }
-                out.push_str(&" ".repeat(indent));
-                out.push('}');
-            }
-            PyObject::Str(s) => {
-                out.push('\'');
-                out.push_str(s);
-                out.push('\'');
-            }
-            _ => {
-                out.push_str(&borrowed.repr());
-            }
-        }
-    }
-
-    pp_func!("pprint", |args| {
-        if args.len() < 1 {
-            return Err(PyError::type_error("pprint() takes at least 1 argument"));
-        }
-        let mut out = String::new();
-        pprint_recurse(&args[0], 0, &mut out);
-        print!("{}", out);
-        Ok(py_none())
-    });
-
-    d
-}
-
-// === HASHLIB MODULE ===
-pub fn create_hashlib_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! hl_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    hl_func!("sha256", |args| {
-        if args.len() != 1 { return Err(PyError::type_error("sha256() takes exactly one argument")); }
-        let data = args[0].borrow();
-        let bytes = match &*data {
-            PyObject::Bytes(b) => b.clone(),
-            PyObject::Str(s) => s.as_bytes().to_vec(),
-            _ => return Err(PyError::type_error("sha256() argument must be bytes or str")),
-        };
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::Hasher;
-        let mut hasher = DefaultHasher::new();
-        hasher.write(b"sha256");
-        hasher.write(&bytes);
-        Ok(py_str(&format!("{:016x}", hasher.finish())))
-    });
-
-    hl_func!("md5", |args| {
-        if args.len() != 1 { return Err(PyError::type_error("md5() takes exactly one argument")); }
-        let data = args[0].borrow();
-        let bytes = match &*data {
-            PyObject::Bytes(b) => b.clone(),
-            PyObject::Str(s) => s.as_bytes().to_vec(),
-            _ => return Err(PyError::type_error("md5() argument must be bytes or str")),
-        };
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::Hasher;
-        let mut hasher = DefaultHasher::new();
-        hasher.write(b"md5");
-        hasher.write(&bytes);
-        Ok(py_str(&format!("{:016x}", hasher.finish())))
-    });
-
-    d
-}
-
-// === BASE64 MODULE ===
-pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! b64_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    fn b64_encode(data: &[u8]) -> String {
-        const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut out = String::new();
-        for chunk in data.chunks(3) {
-            let len = chunk.len();
-            let b0 = chunk[0];
-            let b1 = if len > 1 { chunk[1] } else { 0 };
-            let b2 = if len > 2 { chunk[2] } else { 0 };
-            out.push(CHARS[(b0 >> 2) as usize] as char);
-            out.push(CHARS[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
-            if len > 1 {
-                out.push(CHARS[(((b1 & 0x0F) << 2) | (b2 >> 6)) as usize] as char);
-            } else {
-                out.push('=');
-            }
-            if len > 2 {
-                out.push(CHARS[(b2 & 0x3F) as usize] as char);
-            } else {
-                out.push('=');
-            }
-        }
-        out
-    }
-
-    fn b64_decode(s: &str) -> Result<Vec<u8>, String> {
-        let mut rev = [255u8; 256];
-        let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        for (i, &c) in alphabet.iter().enumerate() {
-            rev[c as usize] = i as u8;
-        }
-        let bytes = s.as_bytes();
-        if bytes.len() % 4 != 0 {
-            return Err("Invalid base64 input length".to_string());
-        }
-        let mut out = Vec::new();
-        for chunk in bytes.chunks(4) {
-            let mut vals = [0u8; 4];
-            for i in 0..4 {
-                if chunk[i] == b'=' {
-                    vals[i] = 0;
-                } else {
-                    let v = rev[chunk[i] as usize];
-                    if v == 255 {
-                        return Err("Invalid base64 character".to_string());
-                    }
-                    vals[i] = v;
-                }
-            }
-            out.push((vals[0] << 2) | (vals[1] >> 4));
-            if chunk[2] != b'=' {
-                out.push((vals[1] << 4) | (vals[2] >> 2));
-            }
-            if chunk[3] != b'=' {
-                out.push((vals[2] << 6) | vals[3]);
-            }
-        }
-        Ok(out)
-    }
-
-    b64_func!("b64encode", |args| {
-        if args.len() != 1 { return Err(PyError::type_error("b64encode() takes exactly one argument")); }
-        let data = args[0].borrow();
-        let bytes = match &*data {
-            PyObject::Bytes(b) => b.clone(),
-            PyObject::ByteArray(b) => b.clone(),
-            _ => return Err(PyError::type_error("b64encode() argument must be bytes")),
-        };
-        Ok(py_str(&b64_encode(&bytes)))
-    });
-
-    b64_func!("b64decode", |args| {
-        if args.len() != 1 { return Err(PyError::type_error("b64decode() takes exactly one argument")); }
-        let data = args[0].borrow();
-        let s = match &*data {
-            PyObject::Str(s) => s.clone(),
-            _ => return Err(PyError::type_error("b64decode() argument must be a string")),
-        };
-        match b64_decode(&s) {
-            Ok(bytes) => Ok(PyObjectRef::imm(PyObject::Bytes(bytes))),
-            Err(e) => Err(PyError::value_error(e)),
-        }
-    });
-
-    d
-}
-
-// === UUID MODULE ===
-pub fn create_uuid_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! uuid_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    uuid_func!("uuid4", |args| {
-        if !args.is_empty() { return Err(PyError::type_error("uuid4() takes no arguments")); }
-        let r1 = fast_random_u64();
-        let r2 = fast_random_u64();
-        let time_low = r1 as u32;
-        let time_mid = (r1 >> 32) as u16;
-        let time_hi_and_version = ((r1 >> 48) as u16 & 0x0FFF) | 0x4000;
-        let clock_seq = (r2 as u16 & 0x3FFF) | 0x8000;
-        let node = (r2 >> 16) as u64;
-        Ok(py_str(&format!("{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
-            time_low, time_mid, time_hi_and_version, clock_seq, node)))
-    });
-
-    d
-}
-
-// === STRING MODULE ===
-pub fn create_string_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    let ascii_lowercase = "abcdefghijklmnopqrstuvwxyz";
-    let ascii_uppercase = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-    let ascii_letters = &format!("{}{}", ascii_lowercase, ascii_uppercase);
-    let digits = "0123456789";
-    let hexdigits = "0123456789abcdefABCDEF";
-    let octdigits = "01234567";
-    let punctuation = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
-    let whitespace = " \t\n\r\u{0b}\u{0c}";
-    let printable = &format!("{}{}{}{}", digits, ascii_letters, punctuation, whitespace);
-
-    d.insert("ascii_letters".to_string(), py_str(ascii_letters));
-    d.insert("ascii_lowercase".to_string(), py_str(ascii_lowercase));
-    d.insert("ascii_uppercase".to_string(), py_str(ascii_uppercase));
-    d.insert("digits".to_string(), py_str(digits));
-    d.insert("hexdigits".to_string(), py_str(hexdigits));
-    d.insert("octdigits".to_string(), py_str(octdigits));
-    d.insert("punctuation".to_string(), py_str(punctuation));
-    d.insert("printable".to_string(), py_str(printable));
-    d.insert("whitespace".to_string(), py_str(whitespace));
-
-    d
-}
-
-// === CSV MODULE ===
-pub fn create_csv_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! csv_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    csv_func!("reader", |args| {
-        if args.is_empty() { return Err(PyError::type_error("reader() missing required argument")); }
-        let s = args[0].str();
-        let mut result = Vec::new();
-        for line in s.lines() {
-            if line.trim().is_empty() { continue; }
-            let fields: Vec<PyObjectRef> = line.split(',').map(|f| py_str(f.trim())).collect();
-            result.push(py_list(fields));
-        }
-        Ok(py_list(result))
-    });
-
-    csv_func!("writer", |args| {
-        if args.is_empty() { return Err(PyError::type_error("writer() missing required argument")); }
-        let data = &args[0];
-        let borrowed = data.borrow();
-        if let PyObject::List(rows) = &*borrowed {
-            let mut lines = Vec::new();
-            for row in rows {
-                let row_b = row.borrow();
-                if let PyObject::List(fields) = &*row_b {
-                    let line: Vec<String> = fields.iter().map(|f| f.str()).collect();
-                    lines.push(line.join(","));
-                } else {
-                    return Err(PyError::type_error("writer() argument must be a list of lists"));
-                }
-            }
-            Ok(py_str(&lines.join("\n")))
-        } else {
-            Err(PyError::type_error("writer() argument must be a list of lists"))
-        }
-    });
-
-    d
-}
+pub static ENUM_AUTO_COUNTER: AtomicI64 = AtomicI64::new(1);
 
 // === IO MODULE ===
-fn io_stringio_read(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+pub fn io_stringio_read(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() { return Err(PyError::type_error("read() missing required 'self' argument")); }
     let self_obj = &args[0];
     let inst = self_obj.borrow();
@@ -8596,7 +6182,7 @@ fn io_stringio_read(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
 }
 
-fn io_stringio_readline(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+pub fn io_stringio_readline(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() { return Err(PyError::type_error("readline() missing required 'self' argument")); }
     let self_obj = &args[0];
     let inst = self_obj.borrow();
@@ -8624,7 +6210,7 @@ fn io_stringio_readline(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
 }
 
-fn io_stringio_write(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+pub fn io_stringio_write(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() < 2 { return Err(PyError::type_error("write() missing required argument")); }
     let self_obj = &args[0];
     let text = args[1].str();
@@ -8648,7 +6234,7 @@ fn io_stringio_write(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
 }
 
-fn io_stringio_seek(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+pub fn io_stringio_seek(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() < 2 { return Err(PyError::type_error("seek() missing required argument")); }
     let self_obj = &args[0];
     let pos = args[1].as_i64().unwrap_or(0);
@@ -8658,7 +6244,7 @@ fn io_stringio_seek(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Ok(py_int(pos))
 }
 
-fn io_stringio_tell(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+pub fn io_stringio_tell(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() { return Err(PyError::type_error("tell() missing required 'self' argument")); }
     let self_obj = &args[0];
     let inst = self_obj.borrow();
@@ -8669,7 +6255,7 @@ fn io_stringio_tell(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
 }
 
-fn io_stringio_getvalue(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+pub fn io_stringio_getvalue(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() { return Err(PyError::type_error("getvalue() missing required 'self' argument")); }
     let self_obj = &args[0];
     let inst = self_obj.borrow();
@@ -8680,7 +6266,7 @@ fn io_stringio_getvalue(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
 }
 
-fn io_bytesio_read(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+pub fn io_bytesio_read(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() { return Err(PyError::type_error("read() missing required 'self' argument")); }
     let self_obj = &args[0];
     let inst = self_obj.borrow();
@@ -8705,7 +6291,7 @@ fn io_bytesio_read(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
 }
 
-fn io_bytesio_readline(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+pub fn io_bytesio_readline(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() { return Err(PyError::type_error("readline() missing required 'self' argument")); }
     let self_obj = &args[0];
     let inst = self_obj.borrow();
@@ -8736,7 +6322,7 @@ fn io_bytesio_readline(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
 }
 
-fn io_bytesio_write(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+pub fn io_bytesio_write(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() < 2 { return Err(PyError::type_error("write() missing required argument")); }
     let self_obj = &args[0];
     let data = args[1].borrow();
@@ -8770,7 +6356,7 @@ fn io_bytesio_write(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
 }
 
-fn io_bytesio_seek(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+pub fn io_bytesio_seek(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() < 2 { return Err(PyError::type_error("seek() missing required argument")); }
     let self_obj = &args[0];
     let pos = args[1].as_i64().unwrap_or(0);
@@ -8780,7 +6366,7 @@ fn io_bytesio_seek(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Ok(py_int(pos))
 }
 
-fn io_bytesio_tell(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+pub fn io_bytesio_tell(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() { return Err(PyError::type_error("tell() missing required 'self' argument")); }
     let self_obj = &args[0];
     let inst = self_obj.borrow();
@@ -8791,7 +6377,7 @@ fn io_bytesio_tell(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
 }
 
-fn io_bytesio_getvalue(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+pub fn io_bytesio_getvalue(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() { return Err(PyError::type_error("getvalue() missing required 'self' argument")); }
     let self_obj = &args[0];
     let inst = self_obj.borrow();
@@ -8802,766 +6388,13 @@ fn io_bytesio_getvalue(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
 }
 
-pub fn create_io_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! io_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    io_func!("StringIO", |args| {
-        // Create the type on each call (no caching needed for native modules)
-        let mut type_dict = HashMap::new();
-        type_dict.insert("read".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "read".to_string(), func: io_stringio_read }));
-        type_dict.insert("readline".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "readline".to_string(), func: io_stringio_readline }));
-        type_dict.insert("write".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "write".to_string(), func: io_stringio_write }));
-        type_dict.insert("seek".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "seek".to_string(), func: io_stringio_seek }));
-        type_dict.insert("tell".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "tell".to_string(), func: io_stringio_tell }));
-        type_dict.insert("getvalue".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "getvalue".to_string(), func: io_stringio_getvalue }));
-        let typ = PyObjectRef::new(PyObject::Type {
-            name: "StringIO".to_string(),
-            dict: type_dict,
-            bases: vec![],
-            mro: vec![],
-        });
-        let mut instance_dict = HashMap::new();
-        let initial = if !args.is_empty() { args[0].str() } else { String::new() };
-        instance_dict.insert("_buffer".to_string(), py_str(&initial));
-        instance_dict.insert("_pos".to_string(), py_int(0));
-        Ok(PyObjectRef::new(PyObject::Instance {
-            typ,
-            dict: instance_dict,
-        }))
-    });
-
-    io_func!("BytesIO", |args| {
-        let mut type_dict = HashMap::new();
-        type_dict.insert("read".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "read".to_string(), func: io_bytesio_read }));
-        type_dict.insert("readline".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "readline".to_string(), func: io_bytesio_readline }));
-        type_dict.insert("write".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "write".to_string(), func: io_bytesio_write }));
-        type_dict.insert("seek".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "seek".to_string(), func: io_bytesio_seek }));
-        type_dict.insert("tell".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "tell".to_string(), func: io_bytesio_tell }));
-        type_dict.insert("getvalue".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "getvalue".to_string(), func: io_bytesio_getvalue }));
-        let typ = PyObjectRef::new(PyObject::Type {
-            name: "BytesIO".to_string(),
-            dict: type_dict,
-            bases: vec![],
-            mro: vec![],
-        });
-        let mut instance_dict = HashMap::new();
-        let initial = if !args.is_empty() {
-            let a = args[0].borrow();
-            match &*a {
-                PyObject::Bytes(b) => b.clone(),
-                _ => vec![],
-            }
-        } else { vec![] };
-        instance_dict.insert("_buffer".to_string(), PyObjectRef::imm(PyObject::Bytes(initial)));
-        instance_dict.insert("_pos".to_string(), py_int(0));
-        Ok(PyObjectRef::new(PyObject::Instance {
-            typ,
-            dict: instance_dict,
-        }))
-    });
-
-    d
-}
-
-// === STATISTICS MODULE ===
-pub fn create_statistics_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! stat_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    stat_func!("mean", |args| {
-        if args.is_empty() { return Err(PyError::type_error("mean() missing required argument")); }
-        let data = &args[0];
-        let borrowed = data.borrow();
-        if let PyObject::List(items) = &*borrowed {
-            if items.is_empty() {
-                return Err(PyError::ValueError("mean() argument is empty".to_string()));
-            }
-            let mut sum = 0.0f64;
-            let mut count = 0usize;
-            for item in items {
-                let v = item.borrow();
-                match &*v {
-                    PyObject::Int(i) => { sum += i.to_f64().unwrap_or(0.0); count += 1; }
-                    PyObject::Float(f) => { sum += f; count += 1; }
-                    _ => return Err(PyError::type_error("mean() argument must contain numbers")),
-                }
-            }
-            Ok(py_float(sum / count as f64))
-        } else {
-            Err(PyError::type_error("mean() argument must be a list"))
-        }
-    });
-
-    stat_func!("median", |args| {
-        if args.is_empty() { return Err(PyError::type_error("median() missing required argument")); }
-        let data = &args[0];
-        let borrowed = data.borrow();
-        if let PyObject::List(items) = &*borrowed {
-            if items.is_empty() {
-                return Err(PyError::ValueError("median() argument is empty".to_string()));
-            }
-            let mut nums: Vec<f64> = Vec::with_capacity(items.len());
-            for item in items {
-                let v = item.borrow();
-                match &*v {
-                    PyObject::Int(i) => nums.push(i.to_f64().unwrap_or(0.0)),
-                    PyObject::Float(f) => nums.push(*f),
-                    _ => return Err(PyError::type_error("median() argument must contain numbers")),
-                }
-            }
-            nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            let n = nums.len();
-            if n % 2 == 0 {
-                Ok(py_float((nums[n/2 - 1] + nums[n/2]) / 2.0))
-            } else {
-                Ok(py_float(nums[n/2]))
-            }
-        } else {
-            Err(PyError::type_error("median() argument must be a list"))
-        }
-    });
-
-    stat_func!("stdev", |args| {
-        if args.is_empty() { return Err(PyError::type_error("stdev() missing required argument")); }
-        let data = &args[0];
-        let borrowed = data.borrow();
-        if let PyObject::List(items) = &*borrowed {
-            if items.len() < 2 {
-                return Err(PyError::ValueError("stdev() requires at least 2 data points".to_string()));
-            }
-            let mut nums: Vec<f64> = Vec::with_capacity(items.len());
-            for item in items {
-                let v = item.borrow();
-                match &*v {
-                    PyObject::Int(i) => nums.push(i.to_f64().unwrap_or(0.0)),
-                    PyObject::Float(f) => nums.push(*f),
-                    _ => return Err(PyError::type_error("stdev() argument must contain numbers")),
-                }
-            }
-            let n = nums.len() as f64;
-            let sum: f64 = nums.iter().sum();
-            let mean = sum / n;
-            let variance: f64 = nums.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0);
-            Ok(py_float(variance.sqrt()))
-        } else {
-            Err(PyError::type_error("stdev() argument must be a list"))
-        }
-    });
-
-    stat_func!("mode", |args| {
-        if args.is_empty() { return Err(PyError::type_error("mode() missing required argument")); }
-        let data = &args[0];
-        let borrowed = data.borrow();
-        if let PyObject::List(items) = &*borrowed {
-            if items.is_empty() {
-                return Err(PyError::ValueError("mode() argument is empty".to_string()));
-            }
-            let mut counts = std::collections::HashMap::new();
-            let mut max_count = 0i64;
-            let mut modes: Vec<PyObjectRef> = Vec::new();
-            for item in items {
-                let hash = item.hash()?;
-                let entry = counts.entry(hash).or_insert((0i64, item.clone()));
-                entry.0 += 1;
-            }
-            // Find the max count
-            for (_, (count, ref item)) in &counts {
-                if *count > max_count {
-                    max_count = *count;
-                    modes.clear();
-                    modes.push(item.clone());
-                } else if *count == max_count {
-                    modes.push(item.clone());
-                }
-            }
-            if modes.len() == 1 {
-                Ok(modes[0].clone())
-            } else {
-                Ok(py_list(modes))
-            }
-        } else {
-            Err(PyError::type_error("mode() argument must be a list"))
-        }
-    });
-
-    d
-}
-
-
-pub fn create_contextlib_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! ctx_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-    ctx_func!("contextmanager", |args| {
-        if args.is_empty() { return Err(PyError::type_error("contextmanager() missing argument")); }
-        Ok(args[0].clone())
-    });
-    ctx_func!("nullcontext", |args| {
-        if args.is_empty() { Ok(py_none()) } else { Ok(args[0].clone()) }
-    });
-    ctx_func!("suppress", |_| Ok(py_none()));
-    d
-}
-
-pub fn create_decimal_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! dec_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-    dec_func!("Decimal", |args| {
-        if args.is_empty() { return Err(PyError::type_error("Decimal() missing argument")); }
-        let val = args[0].str();
-        Ok(py_str(&format!("Decimal('{}')", val)))
-    });
-    d
-}
-
-pub fn create_fractions_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! frac_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-    frac_func!("Fraction", |args| {
-        if args.len() < 2 { return Err(PyError::type_error("Fraction() requires 2 arguments")); }
-        let n = args[0].as_i64().unwrap_or(0);
-        let mut den = args[1].as_i64().unwrap_or(1);
-        if den == 0 { return Err(PyError::ValueError("Fraction denominator cannot be zero".to_string())); }
-        let mut num = n;
-        if den < 0 { num = -num; den = -den; }
-        let g = {
-            let mut a = num.abs();
-            let mut b = den;
-            while b != 0 { let t = b; b = a % b; a = t; }
-            a
-        };
-        if g > 1 { num /= g; den /= g; }
-        Ok(py_str(&format!("{}/{}", num, den)))
-    });
-    d
-}
-
-// ---- platform module ----
-pub fn create_platform_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! plat_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-    plat_func!("platform", |_| {
-        let os = std::env::consts::OS;
-        let arch = std::env::consts::ARCH;
-        Ok(py_str(&format!("{}-{}", os, arch)))
-    });
-    plat_func!("machine", |_| {
-        Ok(py_str(std::env::consts::ARCH))
-    });
-    plat_func!("processor", |_| {
-        // Fall back to architecture string if no more specific info
-        Ok(py_str(std::env::consts::ARCH))
-    });
-    plat_func!("python_implementation", |_| {
-        Ok(py_str("RustPython"))
-    });
-    plat_func!("python_version", |_| {
-        Ok(py_str("3.12.0"))
-    });
-    plat_func!("system", |_| {
-        Ok(py_str(std::env::consts::OS))
-    });
-    d
-}
-
-// ---- getopt module ----
-pub fn create_getopt_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! getopt_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    // Helper: check if a short option expects an argument (followed by ':' in shortopts)
-    fn short_has_arg(c: char, shortopts: &str) -> bool {
-        if let Some(pos) = shortopts.find(c) {
-            shortopts.as_bytes().get(pos + 1) == Some(&b':')
-        } else {
-            false
-        }
-    }
-
-    getopt_func!("getopt", |args| {
-        if args.len() < 2 {
-            return Err(PyError::type_error("getopt() requires at least 2 arguments (args, shortopts)"));
-        }
-        let shortopts = args[1].str();
-        // Parse longopts if provided (third argument is a list of long option names)
-        let longopts: Vec<String> = if args.len() > 2 {
-            if let PyObject::List(list) = &*args[2].borrow() {
-                list.iter().map(|s| s.str()).collect()
-            } else {
-                return Err(PyError::type_error("longopts must be a list"));
-            }
-        } else {
-            Vec::new()
-        };
-
-        // Extract the argument list from the first argument (should be a list of strings)
-        let arg_list: Vec<String> = if let PyObject::List(list) = &*args[0].borrow() {
-            list.iter().map(|s| s.str()).collect()
-        } else {
-            return Err(PyError::type_error("args must be a list"));
-        };
-
-        let mut opts: Vec<PyObjectRef> = Vec::new();
-        let mut positional: Vec<PyObjectRef> = Vec::new();
-        let mut i: usize = 1; // Skip the program name (args[0])
-        let mut options_done = false;
-
-        while i < arg_list.len() {
-            let arg = &arg_list[i];
-            if options_done || !arg.starts_with('-') {
-                positional.push(py_str(arg));
-                i += 1;
-                if arg.starts_with('-') { options_done = true; }
-                continue;
-            }
-            if arg == "--" {
-                options_done = true;
-                i += 1;
-                continue;
-            }
-            if arg.starts_with("--") {
-                // Long option
-                let opt_name = &arg[2..];
-                let (name, val) = if let Some(eq_pos) = opt_name.find('=') {
-                    (&opt_name[..eq_pos], Some(&opt_name[eq_pos + 1..]))
-                } else {
-                    (opt_name, None)
-                };
-                // Check if this long option expects an argument
-                let needs_val = longopts.iter().any(|lo| {
-                    let base = if lo.ends_with('=') { &lo[..lo.len()-1] } else { lo.as_str() };
-                    base == name && lo.ends_with('=')
-                });
-                match val {
-                    Some(v) => opts.push(py_tuple(vec![py_str(&format!("--{}", name)), py_str(v)])),
-                    None => {
-                        if needs_val {
-                            i += 1;
-                            if i < arg_list.len() {
-                                opts.push(py_tuple(vec![py_str(&format!("--{}", name)), py_str(&arg_list[i])]));
-                            } else {
-                                return Err(PyError::type_error(&format!("option --{} requires a value", name)));
-                            }
-                        } else {
-                            opts.push(py_tuple(vec![py_str(&format!("--{}", name)), py_str("")]));
-                        }
-                    }
-                }
-                i += 1;
-            } else {
-                // Short option(s)
-                let chars: Vec<char> = arg[1..].chars().collect();
-                for (j, c) in chars.iter().enumerate() {
-                    if !shortopts.contains(*c) {
-                        return Err(PyError::type_error(&format!("option -{} not recognized", c)));
-                    }
-                    if short_has_arg(*c, &shortopts) {
-                        if j + 1 < chars.len() {
-                            // Value attached: -xvalue
-                            let val: String = chars[j + 1..].iter().collect();
-                            opts.push(py_tuple(vec![py_str(&format!("-{}", c)), py_str(&val)]));
-                            break;
-                        } else {
-                            i += 1;
-                            if i < arg_list.len() {
-                                opts.push(py_tuple(vec![py_str(&format!("-{}", c)), py_str(&arg_list[i])]));
-                            } else {
-                                return Err(PyError::type_error(&format!("option -{} requires an argument", c)));
-                            }
-                        }
-                    } else {
-                        opts.push(py_tuple(vec![py_str(&format!("-{}", c)), py_str("")]));
-                    }
-                }
-                i += 1;
-            }
-        }
-
-        Ok(py_tuple(vec![py_list(opts), py_list(positional)]))
-    });
-    d
-}
-
-// ---- getpass module ----
-pub fn create_getpass_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! getpass_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-    getpass_func!("getuser", |_| {
-        let user = std::env::var("USER")
-            .or_else(|_| std::env::var("LOGNAME"))
-            .unwrap_or_else(|_| "unknown".to_string());
-        Ok(py_str(&user))
-    });
-    getpass_func!("getpass", |args| {
-        let prompt = if args.is_empty() { "Password: ".to_string() } else { args[0].str() };
-        // In this minimal native implementation, we echo the prompt and read a line from stdin.
-        // This is simplified — a real getpass would disable terminal echo.
-        print!("{}", prompt);
-        use std::io::Write;
-        std::io::stdout().flush().ok();
-        let mut password = String::new();
-        match std::io::stdin().read_line(&mut password) {
-            Ok(_) => Ok(py_str(password.trim_end())),
-            Err(_) => Err(PyError::runtime_error("failed to read password")),
-        }
-    });
-    d
-}
-
-// ---- tempfile module ----
-pub fn create_tempfile_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! temp_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    // Simple random suffix generator using /dev/urandom or fallback
-    fn random_suffix(len: usize) -> String {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        // Mix time-based and random characters
-        let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
-        let mut result = String::with_capacity(len);
-        let chars = b"abcdefghijklmnopqrstuvwxyz0123456789";
-        let mut seed = ts;
-        for _ in 0..len {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            let idx = (seed as usize) % chars.len();
-            result.push(chars[idx] as char);
-        }
-        result
-    }
-
-    temp_func!("mkstemp", |_| {
-        // Try up to 10 times to create a unique temp file
-        for _ in 0..10 {
-            let suffix = random_suffix(8);
-            let name = format!("/tmp/tmp{}", suffix);
-            match std::fs::File::create_new(&name) {
-                Ok(file) => {
-                    use std::os::fd::AsRawFd;
-                    let fd = file.as_raw_fd();
-                    // Return (fd, name) as a tuple
-                    return Ok(py_tuple(vec![py_int(fd as i64), py_str(&name)]));
-                }
-                Err(_) => continue,
-            }
-        }
-        Err(PyError::runtime_error("could not create temporary file"))
-    });
-
-    temp_func!("mkdtemp", |_| {
-        for _ in 0..10 {
-            let suffix = random_suffix(8);
-            let name = format!("/tmp/tmp{}", suffix);
-            match std::fs::create_dir(&name) {
-                Ok(()) => return Ok(py_str(&name)),
-                Err(_) => continue,
-            }
-        }
-        Err(PyError::runtime_error("could not create temporary directory"))
-    });
-
-    // Add temporary directory path
-    d.insert("tempdir".to_string(), py_str("/tmp"));
-    d
-}
-
-// ---- shutil module ----
-pub fn create_shutil_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! shutil_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-    shutil_func!("copy", |args| {
-        if args.len() < 2 {
-            return Err(PyError::type_error("copy() requires 2 arguments (src, dst)"));
-        }
-        let src = args[0].str();
-        let dst = args[1].str();
-        match std::fs::copy(&src, &dst) {
-            Ok(_) => Ok(py_str(&dst)),
-            Err(e) => Err(PyError::OsError(format!("copy error: {}", e))),
-        }
-    });
-
-    shutil_func!("rmtree", |args| {
-        if args.is_empty() {
-            return Err(PyError::type_error("rmtree() requires 1 argument (path)"));
-        }
-        let path = args[0].str();
-        match std::fs::remove_dir_all(&path) {
-            Ok(()) => Ok(py_none()),
-            Err(e) => Err(PyError::OsError(format!("rmtree error: {}", e))),
-        }
-    });
-
-    shutil_func!("move", |args| {
-        if args.len() < 2 {
-            return Err(PyError::type_error("move() requires 2 arguments (src, dst)"));
-        }
-        let src = args[0].str();
-        let dst = args[1].str();
-        match std::fs::rename(&src, &dst) {
-            Ok(()) => Ok(py_str(&dst)),
-            Err(e) => Err(PyError::OsError(format!("move error: {}", e))),
-        }
-    });
-    d
-}
-
-// ---- graphlib module ----
-pub fn create_graphlib_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! gl_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    // TopologicalSorter — returns a sorted list from the given graph
-    gl_func!("TopologicalSorter", |args| {
-        // Accept a dict or list of pairs as graph
-        let mut edges: Vec<(String, String)> = Vec::new();
-        if args.len() >= 1 {
-            let graph = &args[0];
-            let borrowed = graph.borrow();
-            match &*borrowed {
-                PyObject::Dict(dict) => {
-                    for (key, val) in dict.items() {
-                        let k = key.str();
-                        let v = val.str();
-                        edges.push((k, v));
-                    }
-                }
-                PyObject::List(items) => {
-                    for item in items {
-                        if let PyObject::Tuple(pair) = &*item.borrow() {
-                            if pair.len() >= 2 {
-                                edges.push((pair[0].str(), pair[1].str()));
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        // Simple topological sort: Kahn's algorithm
-        let mut in_degree: HashMap<String, usize> = HashMap::new();
-        let mut adj: HashMap<String, Vec<String>> = HashMap::new();
-        let mut nodes: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-        for (from, to) in &edges {
-            adj.entry(from.clone()).or_default().push(to.clone());
-            in_degree.entry(to.clone()).or_insert(0);
-            in_degree.entry(from.clone()).or_insert(0);
-            nodes.insert(from.clone());
-            nodes.insert(to.clone());
-        }
-
-        // Also handle nodes referenced only as keys/values in pairs
-        for n in &edges {
-            in_degree.entry(n.0.clone()).or_insert(0);
-            in_degree.entry(n.1.clone()).or_insert(0);
-            nodes.insert(n.0.clone());
-            nodes.insert(n.1.clone());
-        }
-
-        for (_, neighbors) in &adj {
-            for n in neighbors {
-                *in_degree.entry(n.clone()).or_insert(0) += 1;
-            }
-        }
-
-        let mut queue: Vec<String> = Vec::new();
-        for (node, deg) in &in_degree {
-            if *deg == 0 {
-                queue.push(node.clone());
-            }
-        }
-
-        let mut sorted: Vec<PyObjectRef> = Vec::new();
-        while !queue.is_empty() {
-            queue.sort_by(|a, b| b.cmp(a)); // use as stack
-            let node = queue.pop().unwrap();
-            sorted.push(py_str(&node));
-            if let Some(neighbors) = adj.get(&node) {
-                for n in neighbors {
-                    if let Some(deg) = in_degree.get_mut(n) {
-                        *deg -= 1;
-                        if *deg == 0 {
-                            queue.push(n.clone());
-                        }
-                    }
-                }
-            }
-        }
-
-        // If any nodes remain unprocessed, there's a cycle — just return empty
-        // (stub behavior)
-        if sorted.len() != nodes.len() {
-            sorted.clear();
-        }
-
-        Ok(py_list(sorted))
-    });
-
-    d
-}
-
-// ---- pdb module ----
-pub fn create_pdb_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! pdb_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    pdb_func!("set_trace", |_| {
-        println!("Debugger not available");
-        Ok(py_none())
-    });
-
-    d
-}
-
-// ---- traceback module ----
-pub fn create_traceback_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! tb_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    tb_func!("format_exc", |_| {
-        Ok(py_str(""))
-    });
-
-    tb_func!("print_exc", |_| {
-        println!("No traceback");
-        Ok(py_none())
-    });
-
-    d
-}
-
-// ---- warnings module ----
-pub fn create_warnings_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! warn_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    // Store simplefilter state in a thread-local
-    thread_local! {
-        static WARN_FILTER: std::cell::RefCell<String> = std::cell::RefCell::new("default".to_string());
-    }
-
-    warn_func!("warn", |args| {
-        let msg = if !args.is_empty() { args[0].str() } else { String::new() };
-        println!("Warning: {}", msg);
-        Ok(py_none())
-    });
-
-    warn_func!("simplefilter", |args| {
-        if !args.is_empty() {
-            let action = args[0].str();
-            WARN_FILTER.with(|f| *f.borrow_mut() = action);
-        }
-        Ok(py_none())
-    });
-
-    // Insert the current filter state as a readable attribute
-    d.insert("filters".to_string(), py_list(vec![]));
-
-    d
-}
-
-// ---- pickle module ----
-// dumps(obj) returns repr(obj), loads(s) parses string via eval-like approach.
-pub fn create_pickle_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! pickle_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    pickle_func!("dumps", |args| {
-        if args.is_empty() {
-            return Err(PyError::type_error("dumps() missing required argument"));
-        }
-        Ok(py_str(&args[0].repr()))
-    });
-
-    pickle_func!("loads", |args| {
-        if args.is_empty() {
-            return Err(PyError::type_error("loads() missing required argument"));
-        }
-        let s = args[0].str();
-        // Evaluate the string expression using the same approach as builtin_eval
-        let mut parser = crate::parser::Parser::new(&s);
-        let program = parser.parse_program()
-            .map_err(|e| PyError::type_error(format!("pickle.loads parse error: {}", e)))?;
-        let mut compiler = crate::compiler::Compiler::new();
-        let code = compiler.compile(&program, "<pickle>")
-            .map_err(|e| PyError::type_error(format!("pickle.loads compile error: {}", e)))?;
-        let mut vm = crate::vm::VirtualMachine::new();
-        let result = vm.run(code)
-            .map_err(|e| PyError::type_error(format!("pickle.loads error: {}", e)))?;
-        Ok(result)
-    });
-
-    d
-}
-
 // ---- logging module ----
 // basicConfig(level) stores level; getLogger(name) returns dict-like with .info/.debug/.warning/.error methods.
 thread_local! {
-    static LOG_LEVEL: std::cell::RefCell<String> = std::cell::RefCell::new("WARNING".to_string());
+    pub static LOG_LEVEL: std::cell::RefCell<String> = std::cell::RefCell::new("WARNING".to_string());
 }
 
-fn logging_debug(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+pub fn logging_debug(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() < 2 { return Ok(py_none()); }
     let level = LOG_LEVEL.with(|l| l.borrow().clone());
     if level != "DEBUG" && level != "INFO" && level != "WARNING" && level != "ERROR" && level != "CRITICAL" {
@@ -9580,7 +6413,7 @@ fn logging_debug(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Ok(py_none())
 }
 
-fn logging_info(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+pub fn logging_info(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() < 2 { return Ok(py_none()); }
     let level = LOG_LEVEL.with(|l| l.borrow().clone());
     if level != "INFO" && level != "WARNING" && level != "ERROR" && level != "CRITICAL" {
@@ -9599,7 +6432,7 @@ fn logging_info(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Ok(py_none())
 }
 
-fn logging_warning(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+pub fn logging_warning(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() < 2 { return Ok(py_none()); }
     let level = LOG_LEVEL.with(|l| l.borrow().clone());
     if level != "WARNING" && level != "ERROR" && level != "CRITICAL" {
@@ -9618,7 +6451,7 @@ fn logging_warning(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Ok(py_none())
 }
 
-fn logging_error(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+pub fn logging_error(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() < 2 { return Ok(py_none()); }
     let level = LOG_LEVEL.with(|l| l.borrow().clone());
     if level != "ERROR" && level != "CRITICAL" {
@@ -9637,332 +6470,8 @@ fn logging_error(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Ok(py_none())
 }
 
-pub fn create_logging_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! log_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    log_func!("basicConfig", |args| {
-        if args.len() >= 1 {
-            // Accept basicConfig(level=...) via kwargs not available, use positional
-            let level = args[0].str().to_uppercase();
-            LOG_LEVEL.with(|l| *l.borrow_mut() = level);
-        }
-        Ok(py_none())
-    });
-
-    // Store logger instances in a thread-local registry
-    thread_local! {
-        static LOGGER_REGISTRY: std::cell::RefCell<HashMap<String, PyObjectRef>> = std::cell::RefCell::new(HashMap::new());
-    }
-
-    log_func!("getLogger", |args| {
-        let name = if args.is_empty() { "root".to_string() } else { args[0].str() };
-        // Check registry first
-        let cached = LOGGER_REGISTRY.with(|reg| reg.borrow().get(&name).cloned());
-        if let Some(logger) = cached {
-            return Ok(logger);
-        }
-        // Create a new Logger type
-        let logger_typ = PyObjectRef::new(PyObject::Type {
-            name: "Logger".to_string(),
-            dict: {
-                let mut type_dict = HashMap::new();
-                type_dict.insert("info".to_string(), PyObjectRef::imm(PyObject::BuiltinMethod {
-                    name: "info".to_string(),
-                    func: logging_info,
-                    self_obj: py_none(),
-                }));
-                type_dict.insert("debug".to_string(), PyObjectRef::imm(PyObject::BuiltinMethod {
-                    name: "debug".to_string(),
-                    func: logging_debug,
-                    self_obj: py_none(),
-                }));
-                type_dict.insert("warning".to_string(), PyObjectRef::imm(PyObject::BuiltinMethod {
-                    name: "warning".to_string(),
-                    func: logging_warning,
-                    self_obj: py_none(),
-                }));
-                type_dict.insert("error".to_string(), PyObjectRef::imm(PyObject::BuiltinMethod {
-                    name: "error".to_string(),
-                    func: logging_error,
-                    self_obj: py_none(),
-                }));
-                type_dict
-            },
-            bases: vec![],
-            mro: vec![],
-        });
-        let instance = PyObjectRef::new(PyObject::Instance {
-            typ: logger_typ,
-            dict: HashMap::from([
-                ("name".to_string(), py_str(&name)),
-            ]),
-        });
-        LOGGER_REGISTRY.with(|reg| reg.borrow_mut().insert(name.clone(), instance.clone()));
-        Ok(instance)
-    });
-
-    // Add level constants
-    d.insert("CRITICAL".to_string(), py_int(50));
-    d.insert("ERROR".to_string(), py_int(40));
-    d.insert("WARNING".to_string(), py_int(30));
-    d.insert("INFO".to_string(), py_int(20));
-    d.insert("DEBUG".to_string(), py_int(10));
-    d.insert("NOTSET".to_string(), py_int(0));
-
-    d
-}
-
-// ---- timeit module ----
-// timeit(stmt) runs statement via exec and times it.
-pub fn create_timeit_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! timeit_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    timeit_func!("timeit", |args| {
-        if args.is_empty() {
-            return Err(PyError::type_error("timeit() missing required argument (stmt)"));
-        }
-        let stmt = args[0].str();
-        let number: u64 = if args.len() > 1 {
-            args[1].as_i64().unwrap_or(1_000_000) as u64
-        } else {
-            1_000_000
-        };
-
-        // Compile the statement
-        let mut parser = crate::parser::Parser::new(&stmt);
-        let program = parser.parse_program()
-            .map_err(|e| PyError::type_error(format!("timeit parse error: {}", e)))?;
-        let mut compiler = crate::compiler::Compiler::new();
-        let code = compiler.compile(&program, "<timeit>")
-            .map_err(|e| PyError::type_error(format!("timeit compile error: {}", e)))?;
-
-        // Execute number times, measuring elapsed wall time
-        let start = std::time::Instant::now();
-        for _ in 0..number {
-            let mut vm = crate::vm::VirtualMachine::new();
-            vm.run(code.clone())
-                .map_err(|e| PyError::type_error(format!("timeit error: {}", e)))?;
-        }
-        let elapsed = start.elapsed();
-        let total_secs = elapsed.as_secs_f64();
-        let per_loop = total_secs / number as f64;
-
-        // Return the total time in seconds (as a float)
-        Ok(py_float(per_loop))
-    });
-
-    // Also provide a repeat function for convenience
-    timeit_func!("repeat", |args| {
-        if args.is_empty() {
-            return Err(PyError::type_error("repeat() missing required argument (stmt)"));
-        }
-        let stmt = args[0].str();
-        let repeat: u64 = if args.len() > 1 {
-            args[1].as_i64().unwrap_or(3) as u64
-        } else {
-            3
-        };
-        let number: u64 = if args.len() > 2 {
-            args[2].as_i64().unwrap_or(1_000_000) as u64
-        } else {
-            1_000_000
-        };
-
-        let mut parser = crate::parser::Parser::new(&stmt);
-        let program = parser.parse_program()
-            .map_err(|e| PyError::type_error(format!("timeit repeat parse error: {}", e)))?;
-        let mut compiler = crate::compiler::Compiler::new();
-        let code = compiler.compile(&program, "<timeit>")
-            .map_err(|e| PyError::type_error(format!("timeit repeat compile error: {}", e)))?;
-
-        let mut times = Vec::new();
-        for _ in 0..repeat {
-            let start = std::time::Instant::now();
-            for _ in 0..number {
-                let mut vm = crate::vm::VirtualMachine::new();
-                vm.run(code.clone())
-                    .map_err(|e| PyError::type_error(format!("timeit repeat error: {}", e)))?;
-            }
-            let elapsed = start.elapsed();
-            times.push(py_float(elapsed.as_secs_f64()));
-        }
-
-        Ok(py_list(times))
-    });
-
-    // Default number of repetitions
-    d.insert("default_number".to_string(), py_int(1_000_000));
-    d.insert("default_repeat".to_string(), py_int(3));
-
-    d
-}
-
-// ---- json.tool module ----
-// main() that formats stdin JSON.
-pub fn create_json_tool_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! jt_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    jt_func!("main", |_args| {
-        // Read all of stdin
-        let mut input = String::new();
-        use std::io::Read;
-        match std::io::stdin().read_to_string(&mut input) {
-            Ok(_) => {
-                // Parse JSON
-                let parsed = json_decode(&input)?;
-                // Pretty-print with indent=2
-                let formatted = json_encode_full(&parsed, Some(2), true, 0)?;
-                // Print to stdout
-                println!("{}", formatted.str());
-                Ok(py_none())
-            }
-            Err(e) => Err(PyError::runtime_error(format!("json.tool error reading stdin: {}", e))),
-        }
-    });
-
-    d
-}
-
-// ---- abc module ----
-pub fn create_abc_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! abc_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    // ABC class — returns a simple Instance with a type marker
-    abc_func!("ABC", |args| {
-        let _ = args;
-        Ok(PyObjectRef::new(PyObject::Instance {
-            typ: PyObjectRef::new(PyObject::Module {
-                name: "abc".to_string(),
-                dict: HashMap::new(),
-            }),
-            dict: HashMap::new(),
-        }))
-    });
-
-    // abstractmethod — returns the function unchanged
-    abc_func!("abstractmethod", |args| {
-        if !args.is_empty() {
-            Ok(args[0].clone())
-        } else {
-            Ok(py_none())
-        }
-    });
-
-    d
-}
-
-// ---- cmath module (complex math: sqrt, sin, cos using f64) ----
-pub fn create_cmath_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! cm_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-    cm_func!("sqrt", |args| {
-        if args.len() != 1 { return Err(PyError::type_error("sqrt() takes exactly one argument")); }
-        let v = args[0].borrow();
-        match &*v { PyObject::Int(i) => Ok(py_float(i.to_f64().unwrap_or(0.0).sqrt())), PyObject::Float(f) => Ok(py_float(f.sqrt())), _ => Err(PyError::type_error("sqrt() argument must be a number")) }
-    });
-    cm_func!("sin", |args| {
-        if args.len() != 1 { return Err(PyError::type_error("sin() takes exactly one argument")); }
-        let v = args[0].borrow();
-        match &*v { PyObject::Int(i) => Ok(py_float(i.to_f64().unwrap_or(0.0).sin())), PyObject::Float(f) => Ok(py_float(f.sin())), _ => Err(PyError::type_error("sin() argument must be a number")) }
-    });
-    cm_func!("cos", |args| {
-        if args.len() != 1 { return Err(PyError::type_error("cos() takes exactly one argument")); }
-        let v = args[0].borrow();
-        match &*v { PyObject::Int(i) => Ok(py_float(i.to_f64().unwrap_or(0.0).cos())), PyObject::Float(f) => Ok(py_float(f.cos())), _ => Err(PyError::type_error("cos() argument must be a number")) }
-    });
-    d
-}
-
-// ---- gzip module ----
-pub fn create_gzip_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! gz_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    gz_func!("open", |args| {
-        if args.len() < 1 || args.len() > 2 {
-            return Err(PyError::type_error("open() takes 1-2 arguments (filename, [mode])"));
-        }
-        let filename = args[0].borrow().str();
-        let mode = if args.len() > 1 { args[1].borrow().str() } else { "rb".to_string() };
-        if mode.contains('w') || mode.contains('x') || mode.contains('a') {
-            match std::fs::File::create(&filename) {
-                Ok(_) => Ok(py_none()),
-                Err(e) => Err(PyError::runtime_error(format!("gzip.open: cannot create '{}': {}", filename, e))),
-            }
-        } else {
-            match std::fs::File::open(&filename) {
-                Ok(_) => Ok(py_none()),
-                Err(e) => Err(PyError::runtime_error(format!("gzip.open: cannot open '{}': {}", filename, e))),
-            }
-        }
-    });
-
-    gz_func!("compress", |args| {
-        if args.len() != 1 { return Err(PyError::type_error("compress() takes exactly one argument")); }
-        let data = args[0].borrow();
-        let bytes = match &*data {
-            PyObject::Bytes(b) => b.clone(),
-            PyObject::Str(s) => s.as_bytes().to_vec(),
-            _ => return Err(PyError::type_error("compress() argument must be bytes or str")),
-        };
-        // Build a minimal gzip stream: header (10 bytes) + stored data + crc32 + size
-        let mut result = Vec::with_capacity(bytes.len() + 18);
-        // ID1, ID2 (magic)
-        result.push(0x1f);
-        result.push(0x8b);
-        // CM = deflate (8)
-        result.push(8);
-        // FLG = 0
-        result.push(0);
-        // MTIME = 0 (4 bytes)
-        result.extend_from_slice(&[0u8; 4]);
-        // XFL = 0
-        result.push(0);
-        // OS = 255 (unknown)
-        result.push(255);
-        // Store raw data (no compression)
-        result.extend_from_slice(&bytes);
-        // CRC32 (4 bytes)
-        let crc = gzip_crc32(&bytes);
-        result.extend_from_slice(&crc.to_le_bytes());
-        // Original size (4 bytes)
-        result.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-        Ok(PyObjectRef::new(PyObject::Bytes(result)))
-    });
-
-    d
-}
-
 /// Bit-by-bit CRC32 computation for gzip compress.
-fn gzip_crc32(data: &[u8]) -> u32 {
+pub fn gzip_crc32(data: &[u8]) -> u32 {
     let mut crc = !0u32;
     for &byte in data {
         crc ^= byte as u32;
@@ -9977,115 +6486,938 @@ fn gzip_crc32(data: &[u8]) -> u32 {
     !crc
 }
 
-// ---- tarfile module ----
-pub fn create_tarfile_dict() -> HashMap<String, PyObjectRef> {
+// ---- pathlib module ----
+thread_local! {
+    pub static PATH_TYPE: std::cell::RefCell<Option<PyObjectRef>> = std::cell::RefCell::new(None);
+}
+
+// ---- zipfile module ----
+// Helper: extract ZIP entry data from an Instance's dict
+fn zipfile_get_entry(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    let self_obj = &args[0];
+    let name = args[1].borrow().str();
+    let (entries, data) = match &*self_obj.borrow() {
+        PyObject::Instance { dict, .. } => {
+            let entries = dict.get("_entries").ok_or_else(|| PyError::runtime_error("ZipFile instance corrupted: missing _entries"))?.clone();
+            let data = dict.get("_data").ok_or_else(|| PyError::runtime_error("ZipFile instance corrupted: missing _data"))?.clone();
+            (entries, data)
+        }
+        _ => return Err(PyError::runtime_error("ZipFile method called on non-instance")),
+    };
+
+    let entries_list = match &*entries.borrow() {
+        PyObject::List(items) => items.clone(),
+        _ => return Err(PyError::runtime_error("ZipFile entries corrupted")),
+    };
+
+    let data_bytes = match &*data.borrow() {
+        PyObject::Bytes(b) => b.clone(),
+        _ => return Err(PyError::runtime_error("ZipFile data corrupted")),
+    };
+
+    for entry in &entries_list {
+        let entry_borrow = entry.borrow();
+        let entry_list = match &*entry_borrow {
+            PyObject::List(items) => items,
+            _ => continue,
+        };
+        if entry_list.len() < 5 { continue; }
+        let entry_name = entry_list[0].borrow().str();
+        if entry_name != name {
+            continue;
+        }
+        let data_offset = match entry_list[1].as_i64() { Some(n) => n as usize, None => continue };
+        let compressed_size = match entry_list[2].as_i64() { Some(n) => n as usize, None => continue };
+        if data_offset + compressed_size > data_bytes.len() {
+            return Err(PyError::runtime_error("ZipFile: data truncated in archive"));
+        }
+        let raw = data_bytes[data_offset..data_offset + compressed_size].to_vec();
+        return Ok(PyObjectRef::new(PyObject::Bytes(raw)));
+    }
+
+    Err(PyError::key_error(format!("File not found in zip: '{}'", name)))
+}
+
+fn zipfile_namelist(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() {
+        return Err(PyError::type_error("namelist() requires self"));
+    }
+    match &*args[0].borrow() {
+        PyObject::Instance { dict, .. } => {
+            if let Some(names) = dict.get("_names") {
+                return Ok(names.clone());
+            }
+            Err(PyError::runtime_error("ZipFile instance corrupted: missing _names"))
+        }
+        _ => Err(PyError::runtime_error("namelist() called on non-instance")),
+    }
+}
+
+fn zipfile_read(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() < 2 {
+        return Err(PyError::type_error("read() takes exactly one argument (name)"));
+    }
+    zipfile_get_entry(args)
+}
+
+fn zipfile_extract(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() < 2 {
+        return Err(PyError::type_error("extract() takes exactly one argument (name)"));
+    }
+    zipfile_get_entry(args)
+}
+
+fn zipfile_infolist(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    let self_obj = &args[0];
+    let entries = match &*self_obj.borrow() {
+        PyObject::Instance { dict, .. } => {
+            dict.get("_entries").ok_or_else(|| PyError::runtime_error("ZipFile instance corrupted"))?.clone()
+        }
+        _ => return Err(PyError::runtime_error("infolist() called on non-instance")),
+    };
+
+    let entries_list = match &*entries.borrow() {
+        PyObject::List(items) => items.clone(),
+        _ => return Err(PyError::runtime_error("ZipFile entries corrupted")),
+    };
+
+    let infos: Vec<PyObjectRef> = entries_list.iter().map(|entry| {
+        let entry_borrow = entry.borrow();
+        let entry_list = match &*entry_borrow {
+            PyObject::List(items) => items,
+            _ => return py_none(),
+        };
+        let mut info_dict = HashMap::new();
+        if entry_list.len() >= 1 {
+            info_dict.insert("filename".to_string(), entry_list[0].clone());
+        }
+        if entry_list.len() >= 4 {
+            info_dict.insert("file_size".to_string(), entry_list[3].clone());
+        }
+        if entry_list.len() >= 3 {
+            info_dict.insert("compress_size".to_string(), entry_list[2].clone());
+        }
+        PyObjectRef::new(PyObject::Instance {
+            typ: PyObjectRef::new(PyObject::Module {
+                name: "zipfile.ZipInfo".to_string(),
+                dict: HashMap::new(),
+            }),
+            dict: info_dict,
+        })
+    }).collect();
+
+    Ok(py_list(infos))
+}
+
+pub fn zipfile_constructor(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() < 1 || args.len() > 2 {
+        return Err(PyError::type_error("ZipFile() takes 1-2 arguments (filename, [mode])"));
+    }
+    let filename = args[0].borrow().str();
+    let mode = if args.len() > 1 { args[1].borrow().str() } else { "r".to_string() };
+    if mode != "r" {
+        return Err(PyError::value_error("ZipFile only supports mode='r'"));
+    }
+
+    // Read entire file into memory
+    let archive = match std::fs::read(&filename) {
+        Ok(d) => d,
+        Err(e) => return Err(PyError::runtime_error(format!("Cannot open zip file '{}': {}", filename, e))),
+    };
+
+    // Scan for local file headers (signature 0x04034b50)
+    let archive_len = archive.len();
+    let mut offset = 0usize;
+    // entries stored as Vec of Python lists: [name, data_offset, compressed_size, uncompressed_size, compress_method]
+    let mut names: Vec<PyObjectRef> = Vec::new();
+    let mut entries: Vec<PyObjectRef> = Vec::new();
+
+    loop {
+        if offset + 30 > archive_len {
+            break;
+        }
+        let sig = u32::from_le_bytes([
+            archive[offset],
+            archive[offset + 1],
+            archive[offset + 2],
+            archive[offset + 3],
+        ]);
+        if sig != 0x04034b50 {
+            // Not a local file header — reached central directory or end
+            break;
+        }
+
+        let compressed_size = u32::from_le_bytes([
+            archive[offset + 18], archive[offset + 19],
+            archive[offset + 20], archive[offset + 21],
+        ]) as usize;
+        let uncompressed_size = u32::from_le_bytes([
+            archive[offset + 22], archive[offset + 23],
+            archive[offset + 24], archive[offset + 25],
+        ]) as usize;
+        let filename_length = u16::from_le_bytes([archive[offset + 26], archive[offset + 27]]) as usize;
+        let extra_field_length = u16::from_le_bytes([archive[offset + 28], archive[offset + 29]]) as usize;
+
+        let name_start = offset + 30;
+        let data_start = name_start + filename_length + extra_field_length;
+
+        let name = if filename_length > 0 && name_start + filename_length <= archive_len {
+            String::from_utf8_lossy(&archive[name_start..name_start + filename_length]).to_string()
+        } else {
+            String::new()
+        };
+
+        names.push(py_str(&name));
+        entries.push(PyObjectRef::new(PyObject::List(vec![
+            py_str(&name),
+            py_int(data_start as i64),
+            py_int(compressed_size as i64),
+            py_int(uncompressed_size as i64),
+            // compress_method stored separately in entries_meta if needed
+        ])));
+
+        offset = data_start + compressed_size;
+    }
+
+    let mut inst_dict = HashMap::new();
+    inst_dict.insert("filename".to_string(), py_str(&filename));
+    inst_dict.insert("_data".to_string(), PyObjectRef::new(PyObject::Bytes(archive)));
+    inst_dict.insert("_names".to_string(), py_list(names));
+    inst_dict.insert("_entries".to_string(), py_list(entries));
+
+    // Attach methods as BuiltinFunctions (will be wrapped as BuiltinMethod with self_obj)
+    inst_dict.insert("namelist".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "namelist".to_string(),
+        func: zipfile_namelist,
+    }));
+    inst_dict.insert("read".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "read".to_string(),
+        func: zipfile_read,
+    }));
+    inst_dict.insert("extract".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "extract".to_string(),
+        func: zipfile_extract,
+    }));
+    inst_dict.insert("infolist".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "infolist".to_string(),
+        func: zipfile_infolist,
+    }));
+
+    Ok(PyObjectRef::new(PyObject::Instance {
+        typ: PyObjectRef::new(PyObject::Module {
+            name: "zipfile.ZipFile".to_string(),
+            dict: HashMap::new(),
+        }),
+        dict: inst_dict,
+    }))
+}
+
+// === MIMETYPES MODULE ===
+use once_cell::sync::Lazy;
+
+// Static MIME type database: extension -> (type, encoding)
+static KNOWN_TYPES: Lazy<HashMap<String, (String, String)>> = Lazy::new(|| {
+    HashMap::from([
+        (".html".to_string(), ("text/html".to_string(), "".to_string())),
+        (".htm".to_string(), ("text/html".to_string(), "".to_string())),
+        (".css".to_string(), ("text/css".to_string(), "".to_string())),
+        (".js".to_string(), ("application/javascript".to_string(), "".to_string())),
+        (".json".to_string(), ("application/json".to_string(), "".to_string())),
+        (".xml".to_string(), ("application/xml".to_string(), "".to_string())),
+        (".txt".to_string(), ("text/plain".to_string(), "".to_string())),
+        (".csv".to_string(), ("text/csv".to_string(), "".to_string())),
+        (".md".to_string(), ("text/markdown".to_string(), "".to_string())),
+        (".py".to_string(), ("text/x-python".to_string(), "".to_string())),
+        (".png".to_string(), ("image/png".to_string(), "".to_string())),
+        (".jpg".to_string(), ("image/jpeg".to_string(), "".to_string())),
+        (".jpeg".to_string(), ("image/jpeg".to_string(), "".to_string())),
+        (".gif".to_string(), ("image/gif".to_string(), "".to_string())),
+        (".bmp".to_string(), ("image/bmp".to_string(), "".to_string())),
+        (".ico".to_string(), ("image/x-icon".to_string(), "".to_string())),
+        (".svg".to_string(), ("image/svg+xml".to_string(), "".to_string())),
+        (".webp".to_string(), ("image/webp".to_string(), "".to_string())),
+        (".mp3".to_string(), ("audio/mpeg".to_string(), "".to_string())),
+        (".wav".to_string(), ("audio/wav".to_string(), "".to_string())),
+        (".ogg".to_string(), ("audio/ogg".to_string(), "".to_string())),
+        (".mp4".to_string(), ("video/mp4".to_string(), "".to_string())),
+        (".webm".to_string(), ("video/webm".to_string(), "".to_string())),
+        (".avi".to_string(), ("video/x-msvideo".to_string(), "".to_string())),
+        (".mov".to_string(), ("video/quicktime".to_string(), "".to_string())),
+        (".pdf".to_string(), ("application/pdf".to_string(), "".to_string())),
+        (".zip".to_string(), ("application/zip".to_string(), "".to_string())),
+        (".gz".to_string(), ("application/gzip".to_string(), "".to_string())),
+        (".tar".to_string(), ("application/x-tar".to_string(), "".to_string())),
+        (".rar".to_string(), ("application/vnd.rar".to_string(), "".to_string())),
+        (".7z".to_string(), ("application/x-7z-compressed".to_string(), "".to_string())),
+        (".exe".to_string(), ("application/x-msdownload".to_string(), "".to_string())),
+        (".bin".to_string(), ("application/octet-stream".to_string(), "".to_string())),
+        (".wasm".to_string(), ("application/wasm".to_string(), "".to_string())),
+        (".woff".to_string(), ("font/woff".to_string(), "".to_string())),
+        (".woff2".to_string(), ("font/woff2".to_string(), "".to_string())),
+        (".ttf".to_string(), ("font/ttf".to_string(), "".to_string())),
+        (".otf".to_string(), ("font/otf".to_string(), "".to_string())),
+        (".yaml".to_string(), ("text/yaml".to_string(), "".to_string())),
+        (".yml".to_string(), ("text/yaml".to_string(), "".to_string())),
+        (".toml".to_string(), ("application/toml".to_string(), "".to_string())),
+        (".doc".to_string(), ("application/msword".to_string(), "".to_string())),
+        (".docx".to_string(), ("application/vnd.openxmlformats-officedocument.wordprocessingml.document".to_string(), "".to_string())),
+        (".xls".to_string(), ("application/vnd.ms-excel".to_string(), "".to_string())),
+        (".xlsx".to_string(), ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".to_string(), "".to_string())),
+        (".ppt".to_string(), ("application/vnd.ms-powerpoint".to_string(), "".to_string())),
+        (".pptx".to_string(), ("application/vnd.openxmlformats-officedocument.presentationml.presentation".to_string(), "".to_string())),
+        (".rtf".to_string(), ("application/rtf".to_string(), "".to_string())),
+    ])
+});
+
+// Static reverse mapping: type -> extension
+static KNOWN_EXTS: Lazy<HashMap<String, String>> = Lazy::new(|| {
+    HashMap::from([
+        ("text/html".to_string(), ".html".to_string()),
+        ("text/css".to_string(), ".css".to_string()),
+        ("application/javascript".to_string(), ".js".to_string()),
+        ("application/json".to_string(), ".json".to_string()),
+        ("application/xml".to_string(), ".xml".to_string()),
+        ("text/plain".to_string(), ".txt".to_string()),
+        ("text/csv".to_string(), ".csv".to_string()),
+        ("text/markdown".to_string(), ".md".to_string()),
+        ("text/x-python".to_string(), ".py".to_string()),
+        ("image/png".to_string(), ".png".to_string()),
+        ("image/jpeg".to_string(), ".jpg".to_string()),
+        ("image/gif".to_string(), ".gif".to_string()),
+        ("image/bmp".to_string(), ".bmp".to_string()),
+        ("image/x-icon".to_string(), ".ico".to_string()),
+        ("image/svg+xml".to_string(), ".svg".to_string()),
+        ("image/webp".to_string(), ".webp".to_string()),
+        ("audio/mpeg".to_string(), ".mp3".to_string()),
+        ("audio/wav".to_string(), ".wav".to_string()),
+        ("audio/ogg".to_string(), ".ogg".to_string()),
+        ("video/mp4".to_string(), ".mp4".to_string()),
+        ("video/webm".to_string(), ".webm".to_string()),
+        ("video/x-msvideo".to_string(), ".avi".to_string()),
+        ("video/quicktime".to_string(), ".mov".to_string()),
+        ("application/pdf".to_string(), ".pdf".to_string()),
+        ("application/zip".to_string(), ".zip".to_string()),
+        ("application/gzip".to_string(), ".gz".to_string()),
+        ("application/x-tar".to_string(), ".tar".to_string()),
+        ("application/vnd.rar".to_string(), ".rar".to_string()),
+        ("application/x-7z-compressed".to_string(), ".7z".to_string()),
+        ("application/x-msdownload".to_string(), ".exe".to_string()),
+        ("application/octet-stream".to_string(), ".bin".to_string()),
+        ("application/wasm".to_string(), ".wasm".to_string()),
+        ("font/woff".to_string(), ".woff".to_string()),
+        ("font/woff2".to_string(), ".woff2".to_string()),
+        ("font/ttf".to_string(), ".ttf".to_string()),
+        ("font/otf".to_string(), ".otf".to_string()),
+        ("text/yaml".to_string(), ".yaml".to_string()),
+        ("application/toml".to_string(), ".toml".to_string()),
+        ("application/msword".to_string(), ".doc".to_string()),
+        ("application/vnd.openxmlformats-officedocument.wordprocessingml.document".to_string(), ".docx".to_string()),
+        ("application/vnd.ms-excel".to_string(), ".xls".to_string()),
+        ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".to_string(), ".xlsx".to_string()),
+        ("application/vnd.ms-powerpoint".to_string(), ".ppt".to_string()),
+        ("application/vnd.openxmlformats-officedocument.presentationml.presentation".to_string(), ".pptx".to_string()),
+        ("application/rtf".to_string(), ".rtf".to_string()),
+    ])
+});
+
+pub fn mime_guess_type(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() {
+        return Err(PyError::type_error("guess_type() takes at least 1 argument"));
+    }
+    let url = args[0].str();
+    // Strip query string and fragment
+    let path = url.split('?').next().unwrap_or("").split('#').next().unwrap_or("");
+    let ext = {
+        let p = path.rfind('.').map(|i| &path[i..]).unwrap_or("");
+        p.to_lowercase()
+    };
+    let (mime_type, encoding) = KNOWN_TYPES.get(&ext).cloned().unwrap_or_else(|| {
+        ("application/octet-stream".to_string(), "".to_string())
+    });
+    let encoding = if encoding.is_empty() { py_none() } else { py_str(&encoding) };
+    let result = PyObjectRef::new(PyObject::Tuple(vec![py_str(&mime_type), encoding]));
+    Ok(result)
+}
+
+pub fn mime_guess_extension(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() {
+        return Err(PyError::type_error("guess_extension() takes at least 1 argument"));
+    }
+    let mime_type = args[0].str();
+    let ext = KNOWN_EXTS.get(&mime_type);
+    match ext {
+        Some(e) => Ok(py_str(e)),
+        None => Ok(py_none()),
+    }
+}
+
+pub fn mime_add_type(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() < 2 {
+        return Err(PyError::type_error("add_type() takes at least 2 arguments (type, ext)"));
+    }
+    let _ = args;
+    Ok(py_none())
+}
+
+// === SHELVE MODULE ===
+// Shelf class backed by a dict. open(filename) -> Shelf instance.
+
+/// Extract the _data dict from a Shelf Instance (args[0]).
+fn shelf_get_data(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() {
+        return Err(PyError::type_error("method requires self"));
+    }
+    match &*args[0].borrow() {
+        PyObject::Instance { dict, .. } => {
+            match dict.get("_data") {
+                Some(data) => Ok(data.clone()),
+                None => Err(PyError::runtime_error("Shelf instance corrupted: missing _data")),
+            }
+        }
+        _ => Err(PyError::type_error("expected Shelf instance")),
+    }
+}
+
+fn shelf_close(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    let _ = args;
+    Ok(py_none())
+}
+
+fn shelf_sync(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    let _ = args;
+    Ok(py_none())
+}
+
+fn shelf_get(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    // args[0] = self, args[1] = key, args[2] = default (optional)
+    if args.len() < 2 {
+        return Err(PyError::type_error("get() takes at least 2 arguments (self, key)"));
+    }
+    let data = shelf_get_data(args)?;
+    let key = args[1].str();
+    let data_ref = data.borrow();
+    if let PyObject::Dict(ref d) = &*data_ref {
+        let py_key = py_str(&key);
+        match d.get(&py_key)? {
+            Some(val) => Ok(val),
+            None => {
+                if args.len() > 2 {
+                    Ok(args[2].clone())
+                } else {
+                    Ok(py_none())
+                }
+            }
+        }
+    } else {
+        Ok(py_none())
+    }
+}
+
+fn shelf_keys(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    let data = shelf_get_data(args)?;
+    let data_ref = data.borrow();
+    if let PyObject::Dict(ref d) = &*data_ref {
+        let ks = d.keys();
+        Ok(PyObjectRef::new(PyObject::List(ks)))
+    } else {
+        Ok(PyObjectRef::new(PyObject::List(vec![])))
+    }
+}
+
+fn shelf_values(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    let data = shelf_get_data(args)?;
+    let data_ref = data.borrow();
+    if let PyObject::Dict(ref d) = &*data_ref {
+        let vs = d.values();
+        Ok(PyObjectRef::new(PyObject::List(vs)))
+    } else {
+        Ok(PyObjectRef::new(PyObject::List(vec![])))
+    }
+}
+
+fn shelf_items(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    let data = shelf_get_data(args)?;
+    let data_ref = data.borrow();
+    if let PyObject::Dict(ref d) = &*data_ref {
+        let pairs: Vec<PyObjectRef> = d.items().into_iter().map(|(k, v)| {
+            PyObjectRef::new(PyObject::Tuple(vec![k, v]))
+        }).collect();
+        Ok(PyObjectRef::new(PyObject::List(pairs)))
+    } else {
+        Ok(PyObjectRef::new(PyObject::List(vec![])))
+    }
+}
+
+// __len__(self) -> int (for len())
+fn shelf_len(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    let data = shelf_get_data(args)?;
+    let data_ref = data.borrow();
+    if let PyObject::Dict(ref d) = &*data_ref {
+        Ok(py_int(d.len() as i64))
+    } else {
+        Ok(py_int(0))
+    }
+}
+
+// __contains__(self, key) -> bool (for 'key in shelf')
+fn shelf_contains(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() < 2 {
+        return Err(PyError::type_error("__contains__() takes at least 2 arguments (self, key)"));
+    }
+    let data = shelf_get_data(args)?;
+    let key = args[1].str();
+    let data_ref = data.borrow();
+    if let PyObject::Dict(ref d) = &*data_ref {
+        let py_key = py_str(&key);
+        Ok(py_bool(d.contains(&py_key)?))
+    } else {
+        Ok(py_bool(false))
+    }
+}
+
+// __repr__(self) -> str
+fn shelf_repr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    let data = shelf_get_data(args)?;
+    let data_ref = data.borrow();
+    if let PyObject::Dict(ref d) = &*data_ref {
+        Ok(py_str(&format!("Shelf({} items)", d.len())))
+    } else {
+        Ok(py_str("Shelf(0 items)"))
+    }
+}
+
+// __getitem__(self, key) -> value (for shelf[key])
+fn shelf_getitem(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() < 2 {
+        return Err(PyError::type_error("__getitem__() takes at least 2 arguments (self, key)"));
+    }
+    let data = shelf_get_data(args)?;
+    let key = args[1].str();
+    let data_ref = data.borrow();
+    if let PyObject::Dict(ref d) = &*data_ref {
+        let py_key = py_str(&key);
+        match d.get(&py_key)? {
+            Some(val) => Ok(val),
+            None => Err(PyError::key_error(format!("'{}'", key))),
+        }
+    } else {
+        Err(PyError::key_error(format!("'{}'", key)))
+    }
+}
+
+// __setitem__(self, key, value) (for shelf[key] = value)
+fn shelf_setitem(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() < 3 {
+        return Err(PyError::type_error("__setitem__() takes at least 3 arguments (self, key, value)"));
+    }
+    let data = shelf_get_data(args)?;
+    let key = args[1].str();
+    {
+        let mut data_mut = data.borrow_mut();
+        if let PyObject::Dict(ref mut d) = &mut *data_mut {
+            d.set(py_str(&key), args[2].clone())?;
+        }
+    }
+    Ok(py_none())
+}
+
+// __delitem__(self, key) (for del shelf[key])
+fn shelf_delitem(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() < 2 {
+        return Err(PyError::type_error("__delitem__() takes at least 2 arguments (self, key)"));
+    }
+    let data = shelf_get_data(args)?;
+    let key = args[1].str();
+    {
+        let mut data_mut = data.borrow_mut();
+        if let PyObject::Dict(ref mut d) = &mut *data_mut {
+            let py_key = py_str(&key);
+            d.remove(&py_key)?;
+        }
+    }
+    Ok(py_none())
+}
+
+pub fn shelf_open(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() {
+        return Err(PyError::type_error("open() takes at least 1 argument (filename)"));
+    }
+    let filename = args[0].str();
+
+    // Internal data dict
+    let data_dict = py_dict();
+
+    // Instance dict with field and methods
+    let mut inst_dict = HashMap::new();
+    inst_dict.insert("_data".to_string(), data_dict);
+    inst_dict.insert("filename".to_string(), py_str(&filename));
+
+    inst_dict.insert("close".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "close".to_string(), func: shelf_close }));
+    inst_dict.insert("sync".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "sync".to_string(), func: shelf_sync }));
+    inst_dict.insert("get".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "get".to_string(), func: shelf_get }));
+    inst_dict.insert("keys".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "keys".to_string(), func: shelf_keys }));
+    inst_dict.insert("values".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "values".to_string(), func: shelf_values }));
+    inst_dict.insert("items".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "items".to_string(), func: shelf_items }));
+
+    // Type dict with dunder methods (used by py_getitem/py_setitem dispatch)
+    let mut type_dict = HashMap::new();
+    type_dict.insert("__getitem__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "__getitem__".to_string(), func: shelf_getitem }));
+    type_dict.insert("__setitem__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "__setitem__".to_string(), func: shelf_setitem }));
+    type_dict.insert("__delitem__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "__delitem__".to_string(), func: shelf_delitem }));
+    type_dict.insert("__len__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "__len__".to_string(), func: shelf_len }));
+    type_dict.insert("__contains__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "__contains__".to_string(), func: shelf_contains }));
+    type_dict.insert("__repr__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "__repr__".to_string(), func: shelf_repr }));
+
+    // Build Shelf type
+    let shelf_type = PyObjectRef::new(PyObject::Type {
+        name: "Shelf".to_string(),
+        dict: type_dict,
+        bases: vec![],
+        // MRO includes self so __getitem__ lookup works
+        mro: vec![],
+    });
+
+    let instance = PyObjectRef::new(PyObject::Instance {
+        typ: shelf_type,
+        dict: inst_dict,
+    });
+
+    Ok(instance)
+}
+
+// ---- urllib module ----
+
+/// Create a response object for urlopen with a read() method.
+/// The response body bytes are stored in the instance dict under "_body".
+fn create_urlopen_response(body: Vec<u8>) -> PyObjectRef {
+    use std::collections::HashMap;
+
+    // Create the response type with a read() method
+    let mut type_dict = HashMap::new();
+    type_dict.insert("read".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "read".to_string(),
+        func: |args| {
+            if args.is_empty() {
+                return Err(PyError::type_error("read() missing argument"));
+            }
+            let body = args[0].borrow();
+            if let PyObject::Instance { dict, .. } = &*body {
+                if let Some(body_val) = dict.get("_body") {
+                    return Ok(body_val.clone());
+                }
+            }
+            Ok(PyObjectRef::imm(PyObject::Bytes(Vec::new())))
+        },
+    }));
+
+    let resp_type = PyObjectRef::new(PyObject::Type {
+        name: "HTTPResponse".to_string(),
+        dict: type_dict,
+        bases: vec![],
+        mro: vec![],
+    });
+
+    let mut instance_dict = HashMap::new();
+    instance_dict.insert("_body".to_string(), PyObjectRef::imm(PyObject::Bytes(body)));
+    PyObjectRef::new(PyObject::Instance {
+        typ: resp_type,
+        dict: instance_dict,
+    })
+}
+
+pub fn create_urllib_request_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
-    macro_rules! tar_func {
+    macro_rules! request_func {
         ($name:expr, $func:expr) => {
             d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
         };
     }
 
-    tar_func!("open", |args| {
-        if args.len() < 1 { return Err(PyError::type_error("tarfile.open() takes at least 1 argument (name)")); }
-        let _name = args[0].borrow().str();
-        // Return an Instance with getnames() and extractall() methods
-        let mut inst_dict = HashMap::new();
-        inst_dict.insert("name".to_string(), py_str(&_name));
-        inst_dict.insert("getnames".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "getnames".to_string(),
-            func: |_args| Ok(py_list(vec![])),
-        }));
-        inst_dict.insert("extractall".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "extractall".to_string(),
-            func: |_args| Ok(py_none()),
-        }));
+    request_func!("urlopen", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("urlopen() missing required argument 'url'"));
+        }
+        let url_str = args[0].str();
+
+        // Only support http:// URLs with a simple GET
+        if !url_str.starts_with("http://") {
+            return Err(PyError::type_error(format!("urlopen() only supports http:// URLs, got: {}", url_str)));
+        }
+
+        let rest = url_str.trim_start_matches("http://");
+        let (host_port, path) = match rest.find('/') {
+            Some(pos) => (&rest[..pos], &rest[pos..]),
+            None => (rest, "/"),
+        };
+
+        let (host, port) = if let Some(colon_pos) = host_port.find(':') {
+            (&host_port[..colon_pos], host_port[colon_pos+1..].parse::<u16>().unwrap_or(80))
+        } else {
+            (host_port, 80u16)
+        };
+
+        if host.is_empty() {
+            return Err(PyError::type_error("urlopen() invalid URL: empty host"));
+        }
+
+        // Connect via TcpStream
+        let addr = format!("{}:{}", host, port);
+        let stream = match std::net::TcpStream::connect(&addr) {
+            Ok(s) => s,
+            Err(e) => return Err(PyError::runtime_error(format!("urlopen() failed to connect: {}", e))),
+        };
+
+        // Send HTTP GET request
+        let request = format!("GET {} HTTP/1.0\r\nHost: {}\r\nConnection: close\r\n\r\n", path, host);
+        {
+            use std::io::Write;
+            if let Err(e) = (&stream).write_all(request.as_bytes()) {
+                return Err(PyError::runtime_error(format!("urlopen() write error: {}", e)));
+            }
+        }
+
+        // Read response
+        let mut response = Vec::new();
+        {
+            use std::io::Read;
+            if let Err(e) = (&stream).read_to_end(&mut response) {
+                return Err(PyError::runtime_error(format!("urlopen() read error: {}", e)));
+            }
+        }
+
+        // Parse HTTP response
+        let response_str = String::from_utf8_lossy(&response);
+        let body = if let Some(body_start) = response_str.find("\r\n\r\n") {
+            let header_end = body_start + 4;
+            if header_end < response.len() {
+                response[header_end..].to_vec()
+            } else {
+                Vec::new()
+            }
+        } else {
+            // No headers found, return raw response as body
+            response.clone()
+        };
+
+        Ok(create_urlopen_response(body))
+    });
+
+    d
+}
+
+/// Percent-encode a character (for quote)
+fn percent_encode_byte(byte: u8) -> String {
+    format!("%{:02X}", byte)
+}
+
+/// Percent-decode a string (for unquote)
+fn percent_decode(s: &str) -> String {
+    let mut result = String::new();
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            let hex: String = chars.by_ref().take(2).collect();
+            if hex.len() == 2 {
+                if let Ok(byte) = u8::from_str_radix(&hex, 16) {
+                    result.push(byte as char);
+                    continue;
+                }
+            }
+            // Invalid percent encoding, preserve original
+            result.push('%');
+            result.push_str(&hex);
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
+/// Check if a byte should be encoded in URL (for quote)
+fn needs_percent_encode(byte: u8, safe: &str) -> bool {
+    // Always safe: unreserved characters per RFC 3986
+    if byte.is_ascii_alphanumeric() {
+        return false;
+    }
+    // Also safe: these unreserved chars
+    if matches!(byte, b'_' | b'-' | b'.' | b'~') {
+        return false;
+    }
+    // Check user-provided safe chars
+    if safe.as_bytes().contains(&byte) {
+        return false;
+    }
+    true
+}
+
+pub fn create_urllib_parse_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! parse_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    // urlparse(url, scheme='', allow_fragments=True)
+    parse_func!("urlparse", |args| {
+        let url = if args.len() > 0 { args[0].str() } else { return Err(PyError::type_error("urlparse() missing required argument 'url'")); };
+        let scheme_default = if args.len() > 1 { args[1].str() } else { String::new() };
+
+        let mut scheme = scheme_default;
+        let mut netloc = String::new();
+        let mut params = String::new();
+        let mut query = String::new();
+        let mut fragment = String::new();
+        let mut path = String::new();
+
+        // Split fragment (allow_fragments defaults to true)
+        let allow_fragments = if args.len() > 2 { args[2].truthy() } else { true };
+        let remaining = if allow_fragments {
+            if let Some(pos) = url.find('#') {
+                fragment = url[pos+1..].to_string();
+                url[..pos].to_string()
+            } else {
+                url.clone()
+            }
+        } else {
+            url.clone()
+        };
+
+        // Split query
+        let remaining = if let Some(pos) = remaining.find('?') {
+            query = remaining[pos+1..].to_string();
+            remaining[..pos].to_string()
+        } else {
+            remaining
+        };
+
+        // Extract scheme
+        if let Some(pos) = remaining.find("://") {
+            scheme = remaining[..pos].to_string();
+            let after_scheme = &remaining[pos+3..];
+            // Extract netloc (host:port or host)
+            if let Some(slash_pos) = after_scheme.find('/') {
+                netloc = after_scheme[..slash_pos].to_string();
+                path = after_scheme[slash_pos..].to_string();
+            } else {
+                netloc = after_scheme.to_string();
+            }
+        } else {
+            path = remaining;
+        }
+
+        // Split params from path (last semicolon in path segment)
+        if let Some(pos) = path.rfind(';') {
+            params = path[pos+1..].to_string();
+            path = path[..pos].to_string();
+        }
+
+        // Create result type with scheme, netloc, path, params, query, fragment attributes
+        let type_dict = HashMap::new();
+        let parse_type = PyObjectRef::new(PyObject::Type {
+            name: "ParseResult".to_string(),
+            dict: type_dict,
+            bases: vec![],
+            mro: vec![],
+        });
+
+        let mut instance_dict = HashMap::new();
+        instance_dict.insert("scheme".to_string(), py_str(&scheme));
+        instance_dict.insert("netloc".to_string(), py_str(&netloc));
+        instance_dict.insert("path".to_string(), py_str(&path));
+        instance_dict.insert("params".to_string(), py_str(&params));
+        instance_dict.insert("query".to_string(), py_str(&query));
+        instance_dict.insert("fragment".to_string(), py_str(&fragment));
         Ok(PyObjectRef::new(PyObject::Instance {
-            typ: PyObjectRef::new(PyObject::Module {
-                name: "tarfile.TarFile".to_string(),
-                dict: HashMap::new(),
-            }),
-            dict: inst_dict,
+            typ: parse_type,
+            dict: instance_dict,
         }))
     });
 
-    d
-}
+    // urlencode(query, doseq=False)
+    parse_func!("urlencode", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("urlencode() missing required argument 'query'"));
+        }
+        let _doseq = if args.len() > 1 { args[1].truthy() } else { false };
 
-// ---- hashlib_extra module ----
-pub fn create_hashlib_extra_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! hle_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
+        let obj = args[0].borrow();
+        let mut pairs: Vec<(String, String)> = Vec::new();
 
-    hle_func!("md5", |args| {
-        if args.len() != 1 { return Err(PyError::type_error("md5() takes exactly one argument")); }
-        let data = args[0].borrow();
-        let bytes = match &*data {
-            PyObject::Bytes(b) => b.clone(),
-            PyObject::Str(s) => s.as_bytes().to_vec(),
-            _ => return Err(PyError::type_error("md5() argument must be bytes or str")),
-        };
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::Hasher;
-        let mut hasher = DefaultHasher::new();
-        hasher.write(b"md5");
-        hasher.write(&bytes);
-        Ok(py_str(&format!("{:016x}", hasher.finish())))
+        match &*obj {
+            PyObject::Dict(dict) => {
+                for (k, v) in dict.items() {
+                    let key = k.str();
+                    let val = v.str();
+                    pairs.push((key, val));
+                }
+            }
+            PyObject::List(items) | PyObject::Tuple(items) => {
+                for item in items {
+                    let item_ref = item.borrow();
+                    if let PyObject::Tuple(pair) = &*item_ref {
+                        if pair.len() >= 2 {
+                            let key = pair[0].str();
+                            let val = pair[1].str();
+                            pairs.push((key, val));
+                        }
+                    } else if let PyObject::List(pair) = &*item_ref {
+                        if pair.len() >= 2 {
+                            let key = pair[0].str();
+                            let val = pair[1].str();
+                            pairs.push((key, val));
+                        }
+                    } else {
+                        // Try to iterate
+                        let key = item.str();
+                        pairs.push((key, String::new()));
+                    }
+                }
+            }
+            _ => {
+                return Err(PyError::type_error("urlencode() argument must be dict, list of tuples, or list of lists"));
+            }
+        }
+
+        // Percent-encode both keys and values
+        let encoded: Vec<String> = pairs.into_iter().map(|(k, v)| {
+            let enc_key: String = k.bytes().map(|b| {
+                if needs_percent_encode(b, "") { percent_encode_byte(b) }
+                else { (b as char).to_string() }
+            }).collect::<Vec<_>>().concat();
+            let enc_val: String = v.bytes().map(|b| {
+                if needs_percent_encode(b, "") { percent_encode_byte(b) }
+                else { (b as char).to_string() }
+            }).collect::<Vec<_>>().concat();
+            format!("{}={}", enc_key, enc_val)
+        }).collect();
+
+        Ok(py_str(&encoded.join("&")))
     });
 
-    hle_func!("sha1", |args| {
-        if args.len() != 1 { return Err(PyError::type_error("sha1() takes exactly one argument")); }
-        let data = args[0].borrow();
-        let bytes = match &*data {
-            PyObject::Bytes(b) => b.clone(),
-            PyObject::Str(s) => s.as_bytes().to_vec(),
-            _ => return Err(PyError::type_error("sha1() argument must be bytes or str")),
-        };
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::Hasher;
-        let mut hasher = DefaultHasher::new();
-        hasher.write(b"sha1");
-        hasher.write(&bytes);
-        Ok(py_str(&format!("{:016x}", hasher.finish())))
+    // quote(string, safe='/')
+    parse_func!("quote", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("quote() missing required argument 'string'"));
+        }
+        let s = args[0].str();
+        let safe = if args.len() > 1 { args[1].str() } else { "/".to_string() };
+
+        let encoded: String = s.bytes().map(|b| {
+            if needs_percent_encode(b, &safe) { percent_encode_byte(b) }
+            else { (b as char).to_string() }
+        }).collect::<Vec<_>>().concat();
+
+        Ok(py_str(&encoded))
     });
 
-    hle_func!("sha256", |args| {
-        if args.len() != 1 { return Err(PyError::type_error("sha256() takes exactly one argument")); }
-        let data = args[0].borrow();
-        let bytes = match &*data {
-            PyObject::Bytes(b) => b.clone(),
-            PyObject::Str(s) => s.as_bytes().to_vec(),
-            _ => return Err(PyError::type_error("sha256() argument must be bytes or str")),
-        };
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::Hasher;
-        let mut hasher = DefaultHasher::new();
-        hasher.write(b"sha256");
-        hasher.write(&bytes);
-        Ok(py_str(&format!("{:016x}", hasher.finish())))
-    });
-
-    d
-}
-
-// ---- _queue module ----
-pub fn create_queue_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! q_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    q_func!("Queue", |_args| {
-        let inner = std::sync::Arc::new(std::sync::Mutex::new(QueueInner {
-            queue: std::collections::VecDeque::new(),
-        }));
-        Ok(PyObjectRef::new(PyObject::Queue(inner)))
+    // unquote(string, encoding='utf-8', errors='replace')
+    parse_func!("unquote", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("unquote() missing required argument 'string'"));
+        }
+        let s = args[0].str();
+        Ok(py_str(&percent_decode(&s)))
     });
 
     d

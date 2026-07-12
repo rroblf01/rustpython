@@ -219,7 +219,7 @@ impl fmt::Display for Instr {
     }
 }
 
-fn needs_arg(op: Opcode) -> bool {
+pub(crate) fn needs_arg(op: Opcode) -> bool {
     use Opcode::*;
     matches!(op,
         BINARY_OP | BUILD_LIST | BUILD_MAP | BUILD_SET | BUILD_SLICE |
@@ -293,6 +293,7 @@ pub enum ConstValue {
     Bool(bool),
     Int(String),
     Float(String),
+    Complex { real: String, imag: String },
     String(String),
     Bytes(Vec<u8>),
     Code(Box<CodeObject>),

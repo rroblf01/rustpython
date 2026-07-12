@@ -4,6 +4,7 @@ mod parser;
 mod bytecode;
 mod compiler;
 mod object;
+mod modules;
 mod vm;
 mod jit;
 mod interner;

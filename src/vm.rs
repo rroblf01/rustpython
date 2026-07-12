@@ -5,6 +5,7 @@ use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 use smallvec::SmallVec;
 use crate::bytecode::*;
+use crate::modules::*;
 use crate::object::*;
 use crate::jit::JitCompiler;
 
@@ -37,6 +38,10 @@ pub struct Frame {
     /// Virtual registers for register-based bytecode execution.
     /// 256 virtual registers (u8 index) — no stack needed for most ops.
     pub registers: Vec<Option<PyObjectRef>>,
+    /// Optional reference to the enclosing module's globals.
+    /// Used by class bodies to resolve LOAD_NAME against module-level names
+    /// and by MAKE_FUNCTION to set __module__ on created functions.
+    pub module_globals: Option<Rc<RefCell<HashMap<String, PyObjectRef>>>>,
 }
 
 #[derive(Clone)]
@@ -57,6 +62,7 @@ impl Frame {
         code: Rc<CodeObject>,
         globals: Rc<RefCell<HashMap<String, PyObjectRef>>>,
         builtins: Rc<HashMap<String, PyObjectRef>>,
+        module_globals: Option<Rc<RefCell<HashMap<String, PyObjectRef>>>>,
     ) -> Self {
         let instr_count = code.instructions.len();
         Frame {
@@ -75,6 +81,7 @@ impl Frame {
             attr_cache: vec![None; instr_count],
             global_cache: vec![None; instr_count],
             registers: Vec::new(),
+            module_globals,
         }
     }
 
@@ -131,6 +138,13 @@ impl VirtualMachine {
          let os_dict = create_os_dict();
          modules.insert("os".to_string(), create_module("os", os_dict.clone()));
 
+         let pathlib_dict = create_pathlib_dict();
+         modules.insert("pathlib".to_string(), create_module("pathlib", pathlib_dict));
+
+         // Native urllib package (urllib.request, urllib.parse)
+         let urllib_dict = create_urllib_dict();
+         modules.insert("urllib".to_string(), create_module("urllib", urllib_dict));
+
          let json_dict = create_json_dict();
          modules.insert("json".to_string(), create_module("json", json_dict));
 
@@ -161,8 +175,38 @@ impl VirtualMachine {
           let subprocess_dict = create_subprocess_dict();
           modules.insert("subprocess".to_string(), create_module("subprocess", subprocess_dict));
 
+          // Native pickle module (basic stub)
+          modules.insert("pickle".to_string(), create_module("pickle", create_pickle_dict()));
+
+          // Native logging module
+          modules.insert("logging".to_string(), create_module("logging", create_logging_dict()));
+
+          // Native timeit module
+          modules.insert("timeit".to_string(), create_module("timeit", create_timeit_dict()));
+
           let threading_dict = create_threading_dict();
           modules.insert("threading".to_string(), create_module("threading", threading_dict));
+
+          // Native _thread module (CPython C extension replacement)
+          modules.insert("_thread".to_string(), create_module("_thread", create_thread_module_dict()));
+
+          // Native signal module (CPython C extension replacement)
+          modules.insert("signal".to_string(), create_module("signal", create_signal_dict()));
+
+          // Native gc module (CPython C extension replacement)
+          modules.insert("gc".to_string(), create_module("gc", create_gc_dict()));
+
+          // Native sysconfig module (CPython stdlib replacement)
+          modules.insert("sysconfig".to_string(), create_module("sysconfig", create_sysconfig_dict()));
+
+          // Native linecache module (CPython stdlib replacement)
+          modules.insert("linecache".to_string(), create_module("linecache", create_linecache_dict()));
+
+          // Native calendar module
+          modules.insert("calendar".to_string(), create_module("calendar", create_calendar_dict()));
+
+          // Native locale module
+          modules.insert("locale".to_string(), create_module("locale", create_locale_dict()));
 
           // Native C extension replacements for CPython stdlib compatibility
           let weakref_dict = create_weakref_dict();
@@ -214,14 +258,32 @@ impl VirtualMachine {
           // Native hashlib module
           modules.insert("hashlib".to_string(), create_module("hashlib", create_hashlib_dict()));
 
+          // Native secrets module
+          modules.insert("secrets".to_string(), create_module("secrets", create_secrets_dict()));
+
+          // Native hmac module
+          modules.insert("hmac".to_string(), create_module("hmac", create_hmac_dict()));
+
           // Native base64 module
           modules.insert("base64".to_string(), create_module("base64", create_base64_dict()));
 
           // Native uuid module
           modules.insert("uuid".to_string(), create_module("uuid", create_uuid_dict()));
 
-          // Native string module
-          modules.insert("string".to_string(), create_module("string", create_string_dict()));
+          // Native string module (with capwords and Formatter)
+          let mut string_dict = create_string_dict();
+          let string_v2 = create_string_dict_v2();
+          for (k, v) in string_v2 { string_dict.insert(k, v); }
+          modules.insert("string".to_string(), create_module("string", string_dict));
+
+          // Native colorsys module
+          modules.insert("colorsys".to_string(), create_module("colorsys", create_colorsys_dict()));
+
+          // Native wave module
+          modules.insert("wave".to_string(), create_module("wave", create_wave_dict()));
+
+          // Native difflib module (with unified_diff)
+          modules.insert("difflib".to_string(), create_module("difflib", create_difflib_dict()));
 
           // Native csv module
           modules.insert("csv".to_string(), create_module("csv", create_csv_dict()));
@@ -271,6 +333,9 @@ impl VirtualMachine {
           // Native abc module
           modules.insert("abc".to_string(), create_module("abc", create_abc_dict()));
 
+          // Native typing module (type annotation stubs)
+          modules.insert("typing".to_string(), create_module("typing", create_typing_dict()));
+
           // Native pickle module
           modules.insert("pickle".to_string(), create_module("pickle", create_pickle_dict()));
 
@@ -289,19 +354,56 @@ impl VirtualMachine {
           // Native gzip module
           modules.insert("gzip".to_string(), create_module("gzip", create_gzip_dict()));
 
+          // Native zlib module
+          modules.insert("zlib".to_string(), create_module("zlib", create_zlib_dict()));
+
           // Native tarfile module
           modules.insert("tarfile".to_string(), create_module("tarfile", create_tarfile_dict()));
+
+          // Native zipfile module (read-only)
+          modules.insert("zipfile".to_string(), create_module("zipfile", create_zipfile_dict()));
 
           // Native hashlib_extra module
           modules.insert("hashlib_extra".to_string(), create_module("hashlib_extra", create_hashlib_extra_dict()));
 
-          // Also register the 'operator' module if not already present
-          if !modules.contains_key("operator") {
-              let mut op_dict = HashMap::new();
-              // Some operators used by CPython's operator.py
-              op_dict.insert("__import__".to_string(), py_bool(true));
-              modules.insert("operator".to_string(), create_module("operator", op_dict));
+          // Native dataclasses module
+          modules.insert("dataclasses".to_string(), create_module("dataclasses", create_dataclasses_dict()));
+
+          // Native operator module
+          modules.insert("operator".to_string(), create_module("operator", create_operator_dict()));
+
+          // Native reprlib module
+          modules.insert("reprlib".to_string(), create_module("reprlib", create_reprlib_dict()));
+
+          // Native array module
+          modules.insert("array".to_string(), create_module("array", create_array_dict()));
+
+          // Native shelve module (persistent dict wrapper)
+          modules.insert("shelve".to_string(), create_module("shelve", create_shelve_dict()));
+
+          // Native mimetypes module
+          modules.insert("mimetypes".to_string(), create_module("mimetypes", create_mimetypes_dict()));
+
+          // Native dis module for bytecode disassembly
+          modules.insert("dis".to_string(), create_module("dis", create_dis_dict()));
+
+          // Native http module (HTTPStatus enum)
+          modules.insert("http".to_string(), create_module("http", create_http_dict()));
+
+          // Native html module (escape/unescape)
+          let html_mod = create_module("html", create_html_dict());
+          modules.insert("html".to_string(), html_mod.clone());
+
+          // Native html.entities module (html5 entity map)
+          let html_entities_mod = create_module("html.entities", create_html_entities_dict());
+          // Wire entities as a submodule attribute of the html parent module
+          if let PyObject::Module { dict, .. } = &mut *html_mod.borrow_mut() {
+              dict.insert("entities".to_string(), html_entities_mod.clone());
           }
+          modules.insert("html.entities".to_string(), html_entities_mod);
+
+          // Native unittest module (stub with TestCase)
+          modules.insert("unittest".to_string(), create_module("unittest", create_unittest_dict()));
 
           // Populate sys.path with default search paths
          if let PyObject::List(path_list) = &mut *sys_dict.get("path").unwrap().borrow_mut() {
@@ -316,7 +418,7 @@ impl VirtualMachine {
                  mod_dict.set(py_str(name), module.clone()).ok();
              }
          }
- 
+
          VirtualMachine {
               frames: Vec::new(),
               builtins: Rc::new(builtins),
@@ -329,29 +431,12 @@ impl VirtualMachine {
     }
 
     pub fn run(&mut self, code: CodeObject) -> PyResult<PyObjectRef> {
-        // Try JIT compilation for module-level code
-        let mut jit = self.jit.borrow_mut();
-        if let Some(compiled) = jit.compile(&code) {
-            let jit_consts = crate::jit::JitCompiler::precompute_with_globals(
-                &code,
-                &self.globals.borrow(),
-                &self.builtins,
-            );
-            drop(jit);
-            let mut result = crate::object::py_none();
-            compiled(
-                std::ptr::null(),
-                0,
-                jit_consts.as_ptr(),
-                &mut result as *mut PyObjectRef,
-            );
-            return Ok(result);
-        }
-        drop(jit);
+        // JIT compilation disabled — using stable interpreter path only
         let frame = Frame::new(
             Rc::new(code),
             self.globals.clone(),
             Rc::clone(&self.builtins),
+            None,
         );
         self.frames.push(frame);
         let result = self.execute();
@@ -361,7 +446,7 @@ impl VirtualMachine {
 
     pub fn exec_code(&mut self, code: CodeObject, globals: Option<Rc<RefCell<HashMap<String, PyObjectRef>>>>) -> PyResult<PyObjectRef> {
         let g = globals.unwrap_or_else(|| self.globals.clone());
-        let frame = Frame::new(Rc::new(code), g, Rc::clone(&self.builtins));
+        let frame = Frame::new(Rc::new(code), g, Rc::clone(&self.builtins), None);
         self.frames.push(frame);
         let result = self.execute();
         self.frames.pop();
@@ -615,6 +700,14 @@ impl VirtualMachine {
                     }
                     ConstValue::String(s) => py_str(&s),
                     ConstValue::Bytes(b) => PyObjectRef::imm(PyObject::Bytes(b)),
+                    ConstValue::Complex { real, imag } => {
+                        // Create a string representation matching Python's complex repr
+                        if imag.starts_with('-') {
+                            py_str(&format!("({}{}j)", real, imag))
+                        } else {
+                            py_str(&format!("({}+{}j)", real, imag))
+                        }
+                    }
                     ConstValue::Code(code) => {
                         PyObjectRef::imm(PyObject::Code(code))
                     }
@@ -629,6 +722,11 @@ impl VirtualMachine {
                     let f = &self.frames[self.frames.len() - 1];
                     f.locals.get(name).cloned()
                         .or_else(|| f.globals.borrow().get(name).cloned())
+                        .or_else(|| {
+                            // Check module_globals (enclosing module scope for class bodies)
+                            f.module_globals.as_ref()
+                                .and_then(|mg| mg.borrow().get(name).cloned())
+                        })
                         .or_else(|| f.builtins.get(name).cloned())
                 };
                 match val {
@@ -864,6 +962,13 @@ impl VirtualMachine {
                     ConstValue::Float(s) => py_float(s.parse().map_err(|_| PyError::value_error("invalid float"))?),
                     ConstValue::String(s) => py_str(&s),
                     ConstValue::Bytes(b) => PyObjectRef::imm(PyObject::Bytes(b)),
+                    ConstValue::Complex { real, imag } => {
+                        if imag.starts_with('-') {
+                            py_str(&format!("({}{}j)", real, imag))
+                        } else {
+                            py_str(&format!("({}+{}j)", real, imag))
+                        }
+                    }
                     ConstValue::Code(code) => PyObjectRef::imm(PyObject::Code(code)),
                 };
                 if dst < self.frames[fi].registers.len() {
@@ -1048,7 +1153,7 @@ impl VirtualMachine {
                     "<function>".to_string()
                 };
                 let globals = self.frames[fi].globals.clone();
-                let func = PyObjectRef::new(PyObject::Function {
+                let mut func = PyObjectRef::new(PyObject::Function {
                     code,
                     globals,
                     name,
@@ -1058,6 +1163,17 @@ impl VirtualMachine {
                     jit_ptr: std::cell::Cell::new(0),
                     jit_consts: std::cell::RefCell::new(Vec::new()),
                 });
+                // Set __module__ from module_globals if available
+                if let Some(ref mg) = self.frames[fi].module_globals {
+                    let mg = mg.borrow();
+                    if let Some(module_name) = mg.get("__name__") {
+                        if let PyObject::Str(s) = &*module_name.borrow() {
+                            if let PyObject::Function { dict, .. } = &mut *func.borrow_mut() {
+                                dict.insert("__module__".to_string(), py_str(s));
+                            }
+                        }
+                    }
+                }
                 self.frames[fi].push(func);
             }
 
@@ -2024,6 +2140,18 @@ impl VirtualMachine {
                     0 => py_str(&val.str()),
                     1 => py_str(&val.repr()),
                     2 => py_str(&val.str()),
+                    3 => {
+                        // !a (ascii) conversion: repr() with non-ASCII escaped
+                        let s = val.repr();
+                        let escaped: String = s.chars().flat_map(|c| {
+                            if c.is_ascii() {
+                                c.to_string().chars().collect::<Vec<_>>()
+                            } else {
+                                c.escape_unicode().collect::<Vec<_>>()
+                            }
+                        }).collect();
+                        py_str(&escaped)
+                    }
                     _ => return Err(PyError::runtime_error("unknown conversion type")),
                 };
                 self.frames[fi].push(result);
@@ -2226,6 +2354,13 @@ impl VirtualMachine {
             let self_obj = self_obj.clone();
             let mut new_args = vec![self_obj];
             new_args.extend(args);
+            if !keywords.is_empty() {
+                let mut dict = crate::object::PyDict::new();
+                for (k, v) in keywords {
+                    let _ = dict.set(crate::object::py_str(&k), v);
+                }
+                new_args.push(crate::object::PyObjectRef::new(crate::object::PyObject::Dict(dict)));
+            }
             return func(&new_args);
         }
 
@@ -2244,44 +2379,18 @@ impl VirtualMachine {
             return self.call_function(func, all_args, keywords);
         }
 
-        if let PyObject::Function { code, globals: func_globals, defaults, jit_ptr, closure, jit_consts, .. } = &*callable.borrow() {
-            // Try JIT execution: if we have compiled code, use it directly
-            let jit_fn: usize = jit_ptr.get();
-            if jit_fn != 0 {
-                let func: extern "C" fn(*const PyObjectRef, usize, *const PyObjectRef, *mut PyObjectRef) = 
-                    unsafe { std::mem::transmute(jit_fn) };
-                let mut const_cache = jit_consts.borrow_mut();
-                if const_cache.is_empty() {
-                    *const_cache = crate::jit::JitCompiler::precompute_with_names(code);
-                }
-                let mut result = crate::object::py_none();
-                func(args.as_ptr(), args.len(), const_cache.as_ptr(), &mut result as *mut PyObjectRef);
-                return Ok(result);
-            }
+        if let PyObject::Function { code, globals: func_globals, defaults, closure, .. } = &*callable.borrow() {
+            // JIT compilation disabled — using stable interpreter path only
             // Try simple execution without Frame creation
             if defaults.is_empty() && keywords.is_empty() {
                 if let Some(result) = Self::try_exec_simple(code, &args) {
                     return result;
                 }
             }
-            // Try JIT compilation on first call
-            let mut jit = self.jit.borrow_mut();
-            if let Some(compiled) = jit.compile(code) {
-                let fn_ptr = compiled as *const () as usize;
-                drop(jit);
-                jit_ptr.set(fn_ptr);
-                let jit_consts_compiled = crate::jit::JitCompiler::precompute_with_globals(code, &func_globals.borrow(), &self.builtins);
-                let mut result = crate::object::py_none();
-                compiled(args.as_ptr(), args.len(), jit_consts_compiled.as_ptr(), &mut result as *mut PyObjectRef);
-                let mut const_cache = jit_consts.borrow_mut();
-                *const_cache = jit_consts_compiled;
-                return Ok(result);
-            }
-            drop(jit);
             let func_globals = func_globals.clone();
             let defaults = defaults.clone();
             let code_rc = Rc::new(code.clone());
-            let mut new_frame = Frame::new(Rc::clone(&code_rc), func_globals, Rc::clone(&self.builtins));
+            let mut new_frame = Frame::new(Rc::clone(&code_rc), func_globals, Rc::clone(&self.builtins), None);
             new_frame.closure = closure.clone();
             let code = code;
 
@@ -2400,7 +2509,7 @@ impl VirtualMachine {
                         let code = code.clone();
                         let func_globals = func_globals.clone();
                         drop(init_borrowed);
-                        let mut new_frame = Frame::new(Rc::new(code), func_globals, Rc::clone(&self.builtins));
+                        let mut new_frame = Frame::new(Rc::new(code), func_globals, Rc::clone(&self.builtins), None);
                         // Set self at index 0
                         if !new_frame.code.varnames.is_empty() {
                             new_frame.fast_locals[0] = Some(instance.clone());
@@ -2440,10 +2549,20 @@ impl VirtualMachine {
 
             let namespace = Rc::new(RefCell::new(HashMap::new()));
 
+            // Capture the calling frame's module_globals (or globals as fallback)
+            // so that LOAD_NAME inside the class body can resolve module-level names.
+            let caller_module_globals = if self.frames.len() >= 2 {
+                let caller_frame = &self.frames[self.frames.len() - 2];
+                caller_frame.module_globals.clone()
+                    .or_else(|| Some(caller_frame.globals.clone()))
+            } else {
+                None
+            };
+
             match &*func.borrow() {
                 PyObject::Function { code, .. } => {
                     let code = code.clone();
-                    let new_frame = Frame::new(Rc::new(code), namespace.clone(), Rc::clone(&self.builtins));
+                    let mut new_frame = Frame::new(Rc::new(code), namespace.clone(), Rc::clone(&self.builtins), caller_module_globals);
                     self.frames.push(new_frame);
                     self.execute()?;
                     self.frames.pop();

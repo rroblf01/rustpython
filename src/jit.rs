@@ -762,6 +762,14 @@ impl JitCompiler {
             ConstValue::Float(f) => crate::object::py_float(f.parse().unwrap_or(0.0)),
             ConstValue::String(s) => crate::object::py_str(s),
             ConstValue::Bytes(b) => crate::object::PyObjectRef::new(crate::object::PyObject::Bytes(b.clone())),
+            ConstValue::Complex { real, imag } => {
+                let s = if imag.starts_with('-') {
+                    format!("({}{}j)", real, imag)
+                } else {
+                    format!("({}+{}j)", real, imag)
+                };
+                crate::object::py_str(&s)
+            }
             ConstValue::Code(_) => crate::object::py_none(),
         }).collect()
     }

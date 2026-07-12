@@ -1,8 +1,0 @@
-print('abs:', abs(-5))
-print('all:', all([True, True]))
-print('any:', any([False, True]))
-print('sum:', sum([1,2,3]))
-print('max:', max(3, 7, 1))
-print('min:', min(3, 7, 1))
-print('sorted reverse:', sorted([3,1,2]))
-print('OK')

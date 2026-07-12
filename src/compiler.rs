@@ -781,25 +781,82 @@ impl Compiler {
                 }
             }
             Stmt::AugAssign { target, op, value } => {
-                self.compile_expr(target)?;
-                self.compile_expr(value)?;
-                let bin_op = match op {
-                    Operator::Add => 0, // BINARY_OP +
-                    Operator::Sub => 1,
-                    Operator::Mult => 2,
-                    Operator::Div => 3,
-                    Operator::FloorDiv => 4,
-                    Operator::Mod => 5,
-                    Operator::Pow => 6,
-                    Operator::LShift => 7,
-                    Operator::RShift => 8,
-                    Operator::BitOr => 9,
-                    Operator::BitXor => 10,
-                    Operator::BitAnd => 11,
-                    Operator::MatMult => 12,
-                };
-                self.emit(Opcode::BINARY_OP, bin_op);
-                self.compile_assign_target(target)?;
+                match &**target {
+                    Expr::Subscript { value: obj, slice } => {
+                        // For subscript augmented assignment like x[0] += 1:
+                        self.compile_expr(obj)?;
+                        self.compile_expr(slice)?;
+                        self.emit(Opcode::COPY, 0);
+                        self.emit(Opcode::COPY, 2);
+                        self.emit(Opcode::SWAP, 1);
+                        self.emit(Opcode::BINARY_OP, 13); // BINARY_SUBSCR
+                        self.compile_expr(value)?;
+                        let bin_op = match op {
+                            Operator::Add => 0,
+                            Operator::Sub => 1,
+                            Operator::Mult => 2,
+                            Operator::Div => 3,
+                            Operator::FloorDiv => 4,
+                            Operator::Mod => 5,
+                            Operator::Pow => 6,
+                            Operator::LShift => 7,
+                            Operator::RShift => 8,
+                            Operator::BitOr => 9,
+                            Operator::BitXor => 10,
+                            Operator::BitAnd => 11,
+                            Operator::MatMult => 12,
+                        };
+                        self.emit(Opcode::BINARY_OP, bin_op);
+                        self.emit(Opcode::STORE_SUBSCR, 0);
+                    }
+                    Expr::Attribute { value: obj, attr } => {
+                        // For attribute augmented assignment like x.a += 1:
+                        self.compile_expr(obj)?;
+                        self.emit(Opcode::COPY, 0);
+                        let attr_idx = self.get_name_index(attr) as u32;
+                        self.emit(Opcode::LOAD_ATTR, attr_idx);
+                        self.compile_expr(value)?;
+                        let bin_op = match op {
+                            Operator::Add => 0,
+                            Operator::Sub => 1,
+                            Operator::Mult => 2,
+                            Operator::Div => 3,
+                            Operator::FloorDiv => 4,
+                            Operator::Mod => 5,
+                            Operator::Pow => 6,
+                            Operator::LShift => 7,
+                            Operator::RShift => 8,
+                            Operator::BitOr => 9,
+                            Operator::BitXor => 10,
+                            Operator::BitAnd => 11,
+                            Operator::MatMult => 12,
+                        };
+                        self.emit(Opcode::BINARY_OP, bin_op);
+                        self.emit(Opcode::SWAP, 1);
+                        self.emit(Opcode::STORE_ATTR, attr_idx);
+                    }
+                    _ => {
+                        self.compile_expr(target)?;
+                        self.compile_expr(value)?;
+                        let bin_op = match op {
+                            Operator::Add => 0,
+                            Operator::Sub => 1,
+                            Operator::Mult => 2,
+                            Operator::Div => 3,
+                            Operator::FloorDiv => 4,
+                            Operator::Mod => 5,
+                            Operator::Pow => 6,
+                            Operator::LShift => 7,
+                            Operator::RShift => 8,
+                            Operator::BitOr => 9,
+                            Operator::BitXor => 10,
+                            Operator::BitAnd => 11,
+                            Operator::MatMult => 12,
+                        };
+                        self.emit(Opcode::BINARY_OP, bin_op);
+                        self.compile_assign_target(target)?;
+                    }
+                }
             }
             Stmt::If { test, body, orelse } => {
                 self.compile_expr(test)?;
@@ -1812,7 +1869,7 @@ impl Compiler {
                     Constant::String(s) => ConstValue::String(s.clone()),
                     Constant::Ellipsis => ConstValue::String("...".to_string()),
                     Constant::Bytes(b) => ConstValue::Bytes(b.clone()),
-                    Constant::Complex { real: _, imag: _ } => ConstValue::None,
+                    Constant::Complex { real, imag } => ConstValue::Complex { real: real.clone(), imag: imag.clone() },
                 };
                 let idx = self.get_const_index(const_value) as u32;
                 self.emit(Opcode::LOAD_CONST, idx);
