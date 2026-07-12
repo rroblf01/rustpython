@@ -194,6 +194,18 @@ impl VirtualMachine {
           // Native enum module
           modules.insert("enum".to_string(), create_module("enum", create_enum_dict()));
 
+          // Native glob module
+          modules.insert("glob".to_string(), create_module("glob", create_glob_dict()));
+
+          // Native fnmatch module
+          modules.insert("fnmatch".to_string(), create_module("fnmatch", create_fnmatch_dict()));
+
+          // Native textwrap module
+          modules.insert("textwrap".to_string(), create_module("textwrap", create_textwrap_dict()));
+
+          // Native pprint module
+          modules.insert("pprint".to_string(), create_module("pprint", create_pprint_dict()));
+
           // Also register the 'operator' module if not already present
           if !modules.contains_key("operator") {
               let mut op_dict = HashMap::new();

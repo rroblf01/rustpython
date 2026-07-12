@@ -428,6 +428,7 @@ pub enum PyObject {
     Tuple(Vec<PyObjectRef>),
     Dict(PyDict),
     Set(PySet),
+    FrozenSet(PySet),
     Range {
         start: i64,
         stop: i64,
@@ -554,6 +555,7 @@ impl PyObject {
             PyObject::Tuple(_) => "tuple",
             PyObject::Dict(_) => "dict",
             PyObject::Set(_) => "set",
+            PyObject::FrozenSet(_) => "frozenset",
             PyObject::Range { .. } => "range",
             PyObject::RangeIter { .. } => "range_iterator",
             PyObject::ListIter { .. } => "list_iterator",
@@ -625,6 +627,11 @@ impl PyObject {
                 let items: Vec<String> = vec.iter().map(|x| x.repr()).collect();
                 format!("{{{}}}", items.join(", "))
             }
+            PyObject::FrozenSet(items) => {
+                let vec = items.to_vec();
+                let items: Vec<String> = vec.iter().map(|x| x.repr()).collect();
+                format!("frozenset({{{}}})", items.join(", "))
+            }
             PyObject::Range { start, stop, step } => {
                 if *step == 1 { format!("range({}, {})", start, stop) }
                 else { format!("range({}, {}, {})", start, stop, step) }
@@ -684,6 +691,7 @@ impl PyObject {
             PyObject::Tuple(v) => !v.is_empty(),
             PyObject::Dict(d) => !d.is_empty(),
             PyObject::Set(s) => !s.is_empty(),
+            PyObject::FrozenSet(s) => !s.is_empty(),
             PyObject::Range { start, stop, step } => *step > 0 && *start < *stop || *step < 0 && *start > *stop,
             PyObject::RangeIter { current, stop, step } => *step > 0 && *current < *stop || *step < 0 && *current > *stop,
             PyObject::Instance { typ, .. } => {
@@ -749,6 +757,13 @@ impl PyObject {
             PyObject::Tuple(items) => {
                 let mut h: usize = 0x345678;
                 for item in items {
+                    h = h.wrapping_mul(1000003).wrapping_add(item.hash()?);
+                }
+                Ok(h)
+            }
+            PyObject::FrozenSet(items) => {
+                let mut h: usize = 0x987654;
+                for item in items.to_vec() {
                     h = h.wrapping_mul(1000003).wrapping_add(item.hash()?);
                 }
                 Ok(h)
@@ -830,6 +845,16 @@ impl PyObject {
                 eq
             }
             (PyObject::Set(a), PyObject::Set(b)) => {
+                if a.len() != b.len() { false }
+                else {
+                    let mut eq = true;
+                    for item in a.to_vec() {
+                        if !b.contains(&item).unwrap_or(false) { eq = false; break; }
+                    }
+                    eq
+                }
+            }
+            (PyObject::FrozenSet(a), PyObject::FrozenSet(b)) => {
                 if a.len() != b.len() { false }
                 else {
                     let mut eq = true;
@@ -1566,6 +1591,7 @@ pub fn contains_op(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<bool> {
         PyObject::Set(items) => {
             items.contains(b)
         }
+        PyObject::FrozenSet(items) => items.contains(b),
         PyObject::Range { start, stop, step } => {
             let item = b.borrow();
             if let PyObject::Int(n) = &*item {
@@ -1601,6 +1627,7 @@ pub fn builtin_len(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         PyObject::Tuple(v) => Ok(py_int(v.len())),
         PyObject::Dict(d) => Ok(py_int(d.len())),
         PyObject::Set(s) => Ok(py_int(s.len())),
+        PyObject::FrozenSet(s) => Ok(py_int(s.len())),
         PyObject::Range { start, stop, step } => {
             if *step > 0 && *start >= *stop { Ok(py_int(0)) }
             else if *step < 0 && *start <= *stop { Ok(py_int(0)) }
@@ -1941,6 +1968,29 @@ pub fn builtin_bytearray(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 Ok(PyObjectRef::new(PyObject::ByteArray(result)))
             }
             _ => Err(PyError::type_error(format!("cannot convert '{}' to bytearray", obj.type_name()))),
+        }
+    }
+}
+
+pub fn builtin_frozenset(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() {
+        Ok(PyObjectRef::imm(PyObject::FrozenSet(PySet::new())))
+    } else {
+        let obj = args[0].borrow();
+        match &*obj {
+            PyObject::Set(s) => Ok(PyObjectRef::imm(PyObject::FrozenSet(s.clone()))),
+            PyObject::FrozenSet(s) => Ok(PyObjectRef::imm(PyObject::FrozenSet(s.clone()))),
+            PyObject::List(v) => {
+                let mut set = PySet::new();
+                for item in v { set.add(item.clone())?; }
+                Ok(PyObjectRef::imm(PyObject::FrozenSet(set)))
+            }
+            PyObject::Tuple(v) => {
+                let mut set = PySet::new();
+                for item in v { set.add(item.clone())?; }
+                Ok(PyObjectRef::imm(PyObject::FrozenSet(set)))
+            }
+            _ => Err(PyError::type_error(format!("cannot convert '{}' to frozenset", obj.type_name()))),
         }
     }
 }
@@ -2461,6 +2511,7 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         PyObject::Tuple(v) => Ok(py_list(v.clone())),
         PyObject::Str(s) => Ok(py_list(s.chars().map(|c| py_str(&c.to_string())).collect())),
         PyObject::Set(s) => Ok(py_list(s.to_vec())),
+        PyObject::FrozenSet(s) => Ok(py_list(s.to_vec())),
         _ => Ok(args[0].clone()),
     }
 }
@@ -4789,6 +4840,7 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     add_func!("classmethod", builtin_classmethod);
     add_func!("bytes", builtin_bytes);
     add_func!("bytearray", builtin_bytearray);
+    add_func!("frozenset", builtin_frozenset);
     add_func!("format", builtin_format);
     add_func!("object", builtin_object);
     add_func!("hash", builtin_hash);
@@ -6842,6 +6894,337 @@ pub fn create_enum_dict() -> HashMap<String, PyObjectRef> {
         } else {
             Ok(args[0].clone())
         }
+    });
+
+    d
+}
+
+// === GLOB MODULE ===
+pub fn create_glob_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! glob_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    fn glob_match(name: &str, pattern: &str) -> bool {
+        let re_str = format!("^{}$", pattern.replace(".", "\\.").replace("?", ".").replace("*", ".*"));
+        regex::Regex::new(&re_str).map(|re| re.is_match(name)).unwrap_or(false)
+    }
+
+    fn walk_glob(base: &std::path::Path, parts: &[&str], prefix: &str, results: &mut Vec<String>) {
+        if parts.is_empty() {
+            return;
+        }
+        let part = parts[0];
+        let rest = &parts[1..];
+
+        if let Ok(entries) = std::fs::read_dir(base) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if !glob_match(&name, part) {
+                    continue;
+                }
+                let full = if prefix.is_empty() { name.clone() } else { format!("{}/{}", prefix, name) };
+                if rest.is_empty() {
+                    results.push(full);
+                } else {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        walk_glob(&path, rest, &full, results);
+                    }
+                }
+            }
+        }
+    }
+
+    glob_func!("glob", |args| {
+        if args.len() < 1 {
+            return Err(PyError::type_error("glob() takes exactly 1 argument"));
+        }
+        let pattern = args[0].str();
+        let pattern = pattern.trim().to_string();
+        if pattern.is_empty() {
+            return Ok(py_list(vec![]));
+        }
+
+        let is_absolute = pattern.starts_with('/');
+        let parts: Vec<&str> = pattern.split('/').filter(|p| !p.is_empty()).collect();
+        if parts.is_empty() {
+            return Ok(py_list(vec![]));
+        }
+
+        let start = if is_absolute { std::path::Path::new("/") } else { std::path::Path::new(".") };
+
+        let mut results = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(start) {
+            let first = parts[0];
+            let rest = &parts[1..];
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if !glob_match(&name, first) {
+                    continue;
+                }
+                if rest.is_empty() {
+                    results.push(name);
+                } else {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        walk_glob(&path, rest, &name, &mut results);
+                    }
+                }
+            }
+        }
+
+        results.sort();
+        let py_results: Vec<PyObjectRef> = results.into_iter().map(|s| py_str(&s)).collect();
+        Ok(py_list(py_results))
+    });
+    d
+}
+
+// === FNMATCH MODULE ===
+pub fn create_fnmatch_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! fnmatch_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    fn fnmatch_match(name: &str, pattern: &str) -> bool {
+        let mut re_str = String::from("^");
+        for ch in pattern.chars() {
+            match ch {
+                '.' => re_str.push_str("\\."),
+                '*' => re_str.push_str(".*"),
+                '?' => re_str.push('.'),
+                other => re_str.push(other),
+            }
+        }
+        re_str.push('$');
+        regex::Regex::new(&re_str).map(|re| re.is_match(name)).unwrap_or(false)
+    }
+
+    fnmatch_func!("fnmatch", |args| {
+        if args.len() < 2 {
+            return Err(PyError::type_error("fnmatch() takes exactly 2 arguments"));
+        }
+        let name = args[0].str();
+        let pattern = args[1].str();
+        Ok(py_bool(fnmatch_match(&name, &pattern)))
+    });
+    d
+}
+
+// === TEXTWRAP MODULE ===
+pub fn create_textwrap_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! tw_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    tw_func!("dedent", |args| {
+        if args.len() < 1 {
+            return Err(PyError::type_error("dedent() takes exactly 1 argument"));
+        }
+        let text = args[0].str();
+        let indent = text.lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| l.len() - l.trim_start().len())
+            .min()
+            .unwrap_or(0);
+        let result: String = text.lines()
+            .map(|l| {
+                if l.len() >= indent && l.chars().take(indent).all(|c| c.is_whitespace()) {
+                    &l[indent..]
+                } else {
+                    l
+                }
+            })
+            .collect::<Vec<&str>>()
+            .join("\n");
+        Ok(py_str(&result))
+    });
+
+    tw_func!("indent", |args| {
+        if args.len() < 2 {
+            return Err(PyError::type_error("indent() takes at least 2 arguments"));
+        }
+        let text = args[0].str();
+        let prefix = args[1].str();
+        let result: String = text.lines()
+            .map(|l| format!("{}{}", prefix, l))
+            .collect::<Vec<String>>()
+            .join("\n");
+        Ok(py_str(&result))
+    });
+
+    tw_func!("fill", |args| {
+        if args.len() < 1 {
+            return Err(PyError::type_error("fill() takes at least 1 argument"));
+        }
+        let text = args[0].str();
+        let width = if args.len() > 2 {
+            args[2].as_i64().unwrap_or(70) as usize
+        } else {
+            70
+        };
+        if width == 0 || width >= text.len() {
+            return Ok(py_str(&text));
+        }
+        let words: Vec<&str> = text.split_whitespace().collect();
+        let mut lines: Vec<String> = Vec::new();
+        let mut current = String::new();
+        for word in words {
+            if current.is_empty() {
+                current = word.to_string();
+            } else if current.len() + 1 + word.len() <= width {
+                current.push(' ');
+                current.push_str(word);
+            } else {
+                lines.push(current);
+                current = word.to_string();
+            }
+        }
+        if !current.is_empty() {
+            lines.push(current);
+        }
+        Ok(py_str(&lines.join("\n")))
+    });
+
+    tw_func!("shorten", |args| {
+        if args.len() < 1 {
+            return Err(PyError::type_error("shorten() takes at least 1 argument"));
+        }
+        let text = args[0].str();
+        let width = if args.len() > 1 {
+            args[1].as_i64().unwrap_or(70) as usize
+        } else {
+            70
+        };
+        if text.len() <= width {
+            return Ok(py_str(&text));
+        }
+        let truncated: String = text.chars().take(width).collect();
+        if let Some(last_space) = truncated.rfind(' ') {
+            let result: String = truncated[..last_space].to_string() + " ...";
+            Ok(py_str(&result))
+        } else {
+            Ok(py_str(&(truncated + " ...")))
+        }
+    });
+
+    d
+}
+
+// === PPRINT MODULE ===
+pub fn create_pprint_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! pp_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    fn pprint_recurse(obj: &PyObjectRef, indent: usize, out: &mut String) {
+        let borrowed = obj.borrow();
+        match &*borrowed {
+            PyObject::List(items) => {
+                if items.is_empty() {
+                    out.push_str("[]");
+                    return;
+                }
+                out.push_str("[\n");
+                for (i, item) in items.iter().enumerate() {
+                    out.push_str(&" ".repeat(indent + 4));
+                    pprint_recurse(item, indent + 4, out);
+                    if i < items.len() - 1 { out.push(','); }
+                    out.push('\n');
+                }
+                out.push_str(&" ".repeat(indent));
+                out.push(']');
+            }
+            PyObject::Tuple(items) => {
+                if items.is_empty() {
+                    out.push_str("()");
+                    return;
+                }
+                if items.len() == 1 {
+                    out.push_str("(\n");
+                    out.push_str(&" ".repeat(indent + 4));
+                    pprint_recurse(&items[0], indent + 4, out);
+                    out.push_str(",\n");
+                    out.push_str(&" ".repeat(indent));
+                    out.push(')');
+                    return;
+                }
+                out.push_str("(\n");
+                for (i, item) in items.iter().enumerate() {
+                    out.push_str(&" ".repeat(indent + 4));
+                    pprint_recurse(item, indent + 4, out);
+                    if i < items.len() - 1 { out.push(','); }
+                    out.push('\n');
+                }
+                out.push_str(&" ".repeat(indent));
+                out.push(')');
+            }
+            PyObject::Dict(dict) => {
+                if dict.is_empty() {
+                    out.push_str("{}");
+                    return;
+                }
+                out.push_str("{\n");
+                let pairs = dict.items();
+                for (i, (k, v)) in pairs.iter().enumerate() {
+                    out.push_str(&" ".repeat(indent + 4));
+                    pprint_recurse(k, indent + 4, out);
+                    out.push_str(": ");
+                    pprint_recurse(v, indent + 4, out);
+                    if i < pairs.len() - 1 { out.push(','); }
+                    out.push('\n');
+                }
+                out.push_str(&" ".repeat(indent));
+                out.push('}');
+            }
+            PyObject::Set(items) => {
+                let vec = items.to_vec();
+                if vec.is_empty() {
+                    out.push_str("set()");
+                    return;
+                }
+                out.push_str("{\n");
+                for (i, item) in vec.iter().enumerate() {
+                    out.push_str(&" ".repeat(indent + 4));
+                    pprint_recurse(item, indent + 4, out);
+                    if i < vec.len() - 1 { out.push(','); }
+                    out.push('\n');
+                }
+                out.push_str(&" ".repeat(indent));
+                out.push('}');
+            }
+            PyObject::Str(s) => {
+                out.push('\'');
+                out.push_str(s);
+                out.push('\'');
+            }
+            _ => {
+                out.push_str(&borrowed.repr());
+            }
+        }
+    }
+
+    pp_func!("pprint", |args| {
+        if args.len() < 1 {
+            return Err(PyError::type_error("pprint() takes at least 1 argument"));
+        }
+        let mut out = String::new();
+        pprint_recurse(&args[0], 0, &mut out);
+        print!("{}", out);
+        Ok(py_none())
     });
 
     d

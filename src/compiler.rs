@@ -1798,6 +1798,8 @@ impl Compiler {
                     self.compile_expr(value)?;
                     self.emit(Opcode::MAP_ADD, 1);
                 }
+                // Pop the extra DUP_TOP copy left on the stack after MAP_ADD
+                self.emit(Opcode::POP_TOP, 0);
             }
             Expr::Set(elts) => {
                 for elt in elts {
