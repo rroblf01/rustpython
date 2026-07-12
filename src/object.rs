@@ -443,6 +443,11 @@ pub enum PyObject {
         list: Vec<PyObjectRef>,
         index: usize,
     },
+    EnumerateIter {
+        items: Vec<PyObjectRef>,
+        pos: usize,
+        start: usize,
+    },
     Slice {
         start: PyObjectRef,
         stop: PyObjectRef,
@@ -559,6 +564,7 @@ impl PyObject {
             PyObject::Range { .. } => "range",
             PyObject::RangeIter { .. } => "range_iterator",
             PyObject::ListIter { .. } => "list_iterator",
+            PyObject::EnumerateIter { .. } => "enumerate",
             PyObject::Slice { .. } => "slice",
             PyObject::Code(_) => "code",
             PyObject::Function { .. } => "function",
@@ -664,6 +670,7 @@ impl PyObject {
             }
             PyObject::RangeIter { .. } => "<range_iterator object>".to_string(),
             PyObject::ListIter { .. } => "<list_iterator object>".to_string(),
+            PyObject::EnumerateIter { .. } => "<enumerate object>".to_string(),
             PyObject::Slice { start, stop, step } => {
                 format!("slice({}, {}, {})", start.repr(), stop.repr(), step.repr())
             }
@@ -720,6 +727,7 @@ impl PyObject {
             PyObject::FrozenSet(s) => !s.is_empty(),
             PyObject::Range { start, stop, step } => *step > 0 && *start < *stop || *step < 0 && *start > *stop,
             PyObject::RangeIter { current, stop, step } => *step > 0 && *current < *stop || *step < 0 && *current > *stop,
+            PyObject::EnumerateIter { items, pos, .. } => *pos < items.len(),
             PyObject::Instance { typ, .. } => {
                 // Check for __bool__ method
                 // If no __bool__, objects are truthy by default
@@ -2748,6 +2756,16 @@ pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
     let obj = args[0].borrow();
     let class = args[1].borrow();
+    // Handle tuple of types: isinstance(x, (type1, type2, ...))
+    if let PyObject::Tuple(types) = &*class {
+        for t in types {
+            let check_args = vec![args[0].clone(), t.clone()];
+            if builtin_isinstance(&check_args)?.truthy() {
+                return Ok(py_bool(true));
+            }
+        }
+        return Ok(py_bool(false));
+    }
     match (&*obj, &*class) {
         (PyObject::Instance { typ, .. }, PyObject::Type { mro, .. }) => {
             let typ_name = typ.borrow().type_name();
@@ -2911,13 +2929,38 @@ pub fn builtin_issubclass(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() != 2 {
         return Err(PyError::type_error("issubclass() takes exactly 2 arguments"));
     }
+    // Handle tuple of types: issubclass(cls, (type1, type2, ...))
+    let base = args[1].borrow();
+    if let PyObject::Tuple(types) = &*base {
+        for t in types {
+            let check_args = vec![args[0].clone(), t.clone()];
+            if builtin_issubclass(&check_args)?.truthy() {
+                return Ok(py_bool(true));
+            }
+        }
+        return Ok(py_bool(false));
+    }
     let cls = args[0].borrow();
+    drop(base);
     let base = args[1].borrow();
     match (&*cls, &*base) {
         (PyObject::Type { mro: cls_mro, .. }, PyObject::Type { .. }) => {
             let base_tn = base.type_name();
             for c in cls_mro {
                 if c.borrow().type_name() == base_tn {
+                    return Ok(py_bool(true));
+                }
+            }
+            Ok(py_bool(false))
+        }
+        (PyObject::Type { mro: cls_mro, .. }, _) => {
+            // Non-Type second argument: compare by name
+            let base_name = base.str();
+            if base_name == "object" {
+                return Ok(py_bool(true));
+            }
+            for c in cls_mro {
+                if c.borrow().type_name() == base_name {
                     return Ok(py_bool(true));
                 }
             }
@@ -3212,11 +3255,13 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
 pub fn builtin_property(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let getter = if args.len() > 0 { Some(args[0].clone()) } else { None };
     let setter = if args.len() > 1 { Some(args[1].clone()) } else { None };
+    let deleter = if args.len() > 2 { Some(args[2].clone()) } else { None };
+    let doc = if args.len() > 3 { Some(args[3].str()) } else { None };
     Ok(PyObjectRef::new(PyObject::Property {
         getter,
         setter,
-        deleter: None,
-        doc: None,
+        deleter,
+        doc,
     }))
 }
 
@@ -3346,11 +3391,28 @@ impl ObjectAccess for PyObject {
                     }
                 }).ok_or_else(|| PyError::attribute_error(format!("instance has no attribute '{}'", name)))
             }
-            PyObject::Property { getter, setter, deleter, .. } => {
+            PyObject::Property { getter, setter, deleter, doc, .. } => {
                 match name {
                     "fget" => getter.clone().ok_or_else(|| PyError::attribute_error("property has no getter".to_string())),
                     "fset" => setter.clone().ok_or_else(|| PyError::attribute_error("property has no setter".to_string())),
                     "fdel" => deleter.clone().ok_or_else(|| PyError::attribute_error("property has no deleter".to_string())),
+                    "doc" => Ok(doc.clone().map_or_else(py_none, |d| py_str(&d))),
+                    "__get__" => {
+                        if let Some(_) = getter {
+                            Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                                name: "__get__".to_string(),
+                                func: |args| {
+                                    if args.len() < 4 { return Err(PyError::type_error("__get__() takes 2 positional arguments")); }
+                                    // args: [self_obj, descriptor, instance, owner]
+                                    let g = args[1].borrow();
+                                    if let PyObject::Property { getter: Some(getter_fn), .. } = &*g {
+                                        call_bound_method(getter_fn.clone(), args[2].clone(), vec![])
+                                    } else { Err(PyError::runtime_error("property has no getter")) }
+                                },
+                                self_obj: PyObjectRef::new(PyObject::None),
+                            }))
+                        } else { Err(PyError::attribute_error("property has no getter".to_string())) }
+                    }
                     "__set__" => {
                         if let Some(_) = setter {
                             Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
@@ -3777,13 +3839,13 @@ impl ObjectAccess for PyObject {
                     "islower" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "islower".to_string(), func: |a| Ok(py_bool(a[0].str() == a[0].str().to_lowercase())), self_obj: PyObjectRef::new(PyObject::None) })),
                     "isupper" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "isupper".to_string(), func: |a| Ok(py_bool(a[0].str() == a[0].str().to_uppercase())), self_obj: PyObjectRef::new(PyObject::None) })),
                     "istitle" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "istitle".to_string(), func: |a| { let s = a[0].str(); let mut prev_is_letter = false; let mut is_title = true; for c in s.chars() { if c.is_ascii_uppercase() { if prev_is_letter { is_title = false; break; } prev_is_letter = true; } else if c.is_ascii_lowercase() { if !prev_is_letter { is_title = false; break; } prev_is_letter = true; } else { prev_is_letter = false; } } Ok(py_bool(is_title && !s.is_empty())) }, self_obj: PyObjectRef::new(PyObject::None) })),
-                    "title" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "title".to_string(), func: |a| Ok(py_str(&a[0].str().split_whitespace().map(|w| { let mut c = w.chars(); match c.next() { Some(f) => f.to_uppercase().collect::<String>() + &c.as_str().to_lowercase(), None => String::new() } }).collect::<Vec<_>>().join(" "))), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "title" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "title".to_string(), func: |a| { let s = a[0].str(); let mut result = String::with_capacity(s.len()); let mut prev_cased = false; for c in s.chars() { if c.is_uppercase() || c.is_lowercase() { if !prev_cased { result.extend(c.to_uppercase()); } else { result.extend(c.to_lowercase()); } prev_cased = true; } else { result.push(c); prev_cased = false; } } Ok(py_str(&result)) }, self_obj: PyObjectRef::new(PyObject::None) })),
                     "capitalize" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "capitalize".to_string(), func: |a| { let s = a[0].str(); let mut c = s.chars(); Ok(py_str(&match c.next() { Some(f) => f.to_uppercase().collect::<String>() + &c.as_str().to_lowercase(), None => String::new() })) }, self_obj: PyObjectRef::new(PyObject::None) })),
-                    "swapcase" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "swapcase".to_string(), func: |a| Ok(py_str(&a[0].str().chars().map(|c| if c.is_uppercase() { c.to_lowercase().to_string() } else { c.to_uppercase().to_string() }).collect::<String>())), self_obj: PyObjectRef::new(PyObject::None) })),
-                    "zfill" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "zfill".to_string(), func: |a| if a.len() < 2 { return Err(PyError::type_error("zfill() takes exactly 1 argument")); } else { let w = a[1].as_i64().unwrap_or(0) as usize; let s = a[0].str(); if w > s.len() { Ok(py_str(&format!("{:0>width$}", s, width=w))) } else { Ok(py_str(&s)) } }, self_obj: PyObjectRef::new(PyObject::None) })),
+                    "swapcase" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "swapcase".to_string(), func: |a| { let s = a[0].str(); let mut result = String::with_capacity(s.len()); for c in s.chars() { if c.is_uppercase() { result.extend(c.to_lowercase()); } else if c.is_lowercase() { result.extend(c.to_uppercase()); } else { result.push(c); } } Ok(py_str(&result)) }, self_obj: PyObjectRef::new(PyObject::None) })),
+                    "zfill" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "zfill".to_string(), func: |a| { if a.len() < 2 { return Err(PyError::type_error("zfill() takes exactly 1 argument")); } let w = a[1].as_i64().unwrap_or(0) as usize; let s = a[0].str(); if w <= s.len() { return Ok(py_str(&s)); } let (sign, rest) = if let Some(stripped) = s.strip_prefix('+').or_else(|| s.strip_prefix('-')) { (&s[..1], stripped) } else { ("", s.as_str()) }; let padded = format!("{}{:0>width$}", sign, rest, width = w - sign.len()); Ok(py_str(&padded)) }, self_obj: PyObjectRef::new(PyObject::None) })),
                     "ljust" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "ljust".to_string(), func: |a| if a.len() < 2 { return Err(PyError::type_error("ljust() takes exactly 1 argument")); } else { let w = a[1].as_i64().unwrap_or(0) as usize; let fill = if a.len() > 2 { let f = a[2].str(); f.chars().next().unwrap_or(' ') } else { ' ' }; let s = a[0].str(); let padding = if w > s.len() { fill.to_string().repeat(w - s.len()) } else { String::new() }; Ok(py_str(&(s.to_string() + &padding))) }, self_obj: PyObjectRef::new(PyObject::None) })),
-                    "rjust" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "rjust".to_string(), func: |a| if a.len() < 2 { return Err(PyError::type_error("rjust() takes exactly 1 argument")); } else { let w = a[1].as_i64().unwrap_or(0) as usize; let s = a[0].str(); let padding = if w > s.len() { " ".repeat(w - s.len()) } else { String::new() }; Ok(py_str(&(padding + &s))) }, self_obj: PyObjectRef::new(PyObject::None) })),
-                    "center" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "center".to_string(), func: |a| if a.len() < 2 { return Err(PyError::type_error("center() takes exactly 1 argument")); } else { let w = a[1].as_i64().unwrap_or(0) as usize; let s = a[0].str(); if w <= s.len() { Ok(py_str(&s)) } else { let pad = w - s.len(); let left = pad / 2; let right = pad - left; Ok(py_str(&(" ".repeat(left) + &s + &" ".repeat(right)))) } }, self_obj: PyObjectRef::new(PyObject::None) })),
+                    "rjust" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "rjust".to_string(), func: |a| { if a.len() < 2 { return Err(PyError::type_error("rjust() takes exactly 1 argument")); } let w = a[1].as_i64().unwrap_or(0) as usize; let fill = if a.len() > 2 { a[2].str().chars().next().unwrap_or(' ') } else { ' ' }; let s = a[0].str(); if w <= s.len() { Ok(py_str(&s)) } else { Ok(py_str(&(fill.to_string().repeat(w - s.len()) + &s))) } }, self_obj: PyObjectRef::new(PyObject::None) })),
+                    "center" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "center".to_string(), func: |a| { if a.len() < 2 { return Err(PyError::type_error("center() takes exactly 1 argument")); } let w = a[1].as_i64().unwrap_or(0) as usize; let fill = if a.len() > 2 { a[2].str().chars().next().unwrap_or(' ') } else { ' ' }; let s = a[0].str(); if w <= s.len() { Ok(py_str(&s)) } else { let pad = w - s.len(); let left = pad / 2; let right = pad - left; let fill_s = fill.to_string(); Ok(py_str(&(fill_s.repeat(left) + &s + &fill_s.repeat(right)))) } }, self_obj: PyObjectRef::new(PyObject::None) })),
                     "removeprefix" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "removeprefix".to_string(), func: |a| if a.len() < 2 { return Err(PyError::type_error("removeprefix() takes exactly 1 argument")); } else { let s = a[0].str(); let p = a[1].str(); Ok(py_str(if s.starts_with(&p) { &s[p.len()..] } else { &s })) }, self_obj: PyObjectRef::new(PyObject::None) })),
                     "removesuffix" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "removesuffix".to_string(), func: |a| if a.len() < 2 { return Err(PyError::type_error("removesuffix() takes exactly 1 argument")); } else { let s = a[0].str(); let p = a[1].str(); Ok(py_str(if s.ends_with(&p) { &s[..s.len()-p.len()] } else { &s })) }, self_obj: PyObjectRef::new(PyObject::None) })),
                     "__mod__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
@@ -3902,6 +3964,8 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
+                    "translate" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "translate".to_string(), func: |a| { let s = a[0].str(); if a.len() > 1 { let _table = &a[1]; } Ok(py_str(&s)) }, self_obj: PyObjectRef::new(PyObject::None) })),
+                    "encode" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "encode".to_string(), func: |a| { let s = a[0].str(); if a.len() > 1 { let _encoding = a[1].str(); } Ok(PyObjectRef::imm(PyObject::Bytes(s.as_bytes().to_vec()))) }, self_obj: PyObjectRef::new(PyObject::None) })),
                     _ => Err(PyError::attribute_error(format!("'str' object has no attribute '{}'", name))),
                 }
             }

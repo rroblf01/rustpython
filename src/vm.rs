@@ -1251,6 +1251,10 @@ impl VirtualMachine {
                     PyObject::Range { start, stop, step } => {
                         self.frames[fi].push(PyObjectRef::new(PyObject::RangeIter { current: *start, stop: *stop, step: *step }));
                     }
+                    PyObject::EnumerateIter { .. } => {
+                        drop(obj);
+                        self.frames[fi].push(val);
+                    }
                     _ => return Err(PyError::type_error(format!("'{}' object is not iterable", obj.type_name()))),
                 }
                 }
@@ -1297,6 +1301,7 @@ impl VirtualMachine {
                         PyObject::RangeIter { current, stop, step } => {
                             if *step > 0 { *current >= *stop } else { *current <= *stop }
                         }
+                        PyObject::EnumerateIter { items, pos, .. } => *pos >= items.len(),
                         _ => {
                             // Not a built-in iterator — check for __next__ protocol
                             if obj.type_name() == "instance" {
