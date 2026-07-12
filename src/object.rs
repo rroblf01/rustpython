@@ -516,6 +516,7 @@ pub enum PyObject {
     },
     Thread(std::sync::Arc<std::sync::Mutex<ThreadInner>>),
     Lock(std::sync::Arc<std::sync::Mutex<LockInner>>),
+    Queue(std::sync::Arc<std::sync::Mutex<QueueInner>>),
     Super {
         cls: PyObjectRef,
         obj: PyObjectRef,
@@ -583,6 +584,7 @@ impl PyObject {
             PyObject::Socket { .. } => "socket",
             PyObject::Thread(_) => "Thread",
             PyObject::Lock(_) => "lock",
+            PyObject::Queue(_) => "Queue",
             PyObject::Super { .. } => "super",
             PyObject::Property { .. } => "property",
             PyObject::StaticMethod { .. } => "staticmethod",
@@ -697,6 +699,7 @@ impl PyObject {
             PyObject::Socket { .. } => format!("<socket object>"),
             PyObject::Thread(_) => "<Thread>".to_string(),
             PyObject::Lock(_) => "<lock>".to_string(),
+            PyObject::Queue(_) => "<Queue>".to_string(),
             PyObject::Super { .. } => format!("<super object>"),
             PyObject::Property { .. } => format!("<property object>"),
             PyObject::StaticMethod { .. } => format!("<staticmethod object>"),
@@ -1702,9 +1705,8 @@ pub fn builtin_range(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         1 => {
             let stop = args[0].borrow();
             if let PyObject::Int(n) = &*stop {
-                let n = n.to_usize().unwrap_or(0);
-                let items: Vec<PyObjectRef> = (0..n).map(|i| py_int(i as i64)).collect();
-                Ok(py_list(items))
+                let stop = n.to_i64().ok_or_else(|| PyError::type_error("range() expects int arguments"))?;
+                Ok(PyObjectRef::imm(PyObject::Range { start: 0, stop, step: 1 }))
             } else {
                 Err(PyError::type_error("range() expects int arguments"))
             }
@@ -1713,10 +1715,9 @@ pub fn builtin_range(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             let start = args[0].borrow();
             let stop = args[1].borrow();
             if let (PyObject::Int(a), PyObject::Int(b)) = (&*start, &*stop) {
-                let a = a.to_i64().unwrap_or(0);
-                let b = b.to_i64().unwrap_or(0);
-                let items: Vec<PyObjectRef> = (a..b).map(|i| py_int(i)).collect();
-                Ok(py_list(items))
+                let a = a.to_i64().ok_or_else(|| PyError::type_error("range() expects int arguments"))?;
+                let b = b.to_i64().ok_or_else(|| PyError::type_error("range() expects int arguments"))?;
+                Ok(PyObjectRef::imm(PyObject::Range { start: a, stop: b, step: 1 }))
             } else {
                 Err(PyError::type_error("range() expects int arguments"))
             }
@@ -1726,24 +1727,11 @@ pub fn builtin_range(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             let stop = args[1].borrow();
             let step = args[2].borrow();
             if let (PyObject::Int(a), PyObject::Int(b), PyObject::Int(s)) = (&*start, &*stop, &*step) {
-                let a = a.to_i64().unwrap_or(0);
-                let b = b.to_i64().unwrap_or(0);
-                let s = s.to_i64().unwrap_or(1);
+                let a = a.to_i64().ok_or_else(|| PyError::type_error("range() expects int arguments"))?;
+                let b = b.to_i64().ok_or_else(|| PyError::type_error("range() expects int arguments"))?;
+                let s = s.to_i64().ok_or_else(|| PyError::type_error("range() expects int arguments"))?;
                 if s == 0 { return Err(PyError::value_error("range() arg 3 must not be zero")); }
-                let mut items = Vec::new();
-                let mut i = a;
-                if s > 0 {
-                    while i < b {
-                        items.push(py_int(i));
-                        i += s;
-                    }
-                } else {
-                    while i > b {
-                        items.push(py_int(i));
-                        i += s;
-                    }
-                }
-                Ok(py_list(items))
+                Ok(PyObjectRef::imm(PyObject::Range { start: a, stop: b, step: s }))
             } else {
                 Err(PyError::type_error("range() expects int arguments"))
             }
@@ -2576,19 +2564,17 @@ pub fn builtin_enumerate(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             i.to_usize().unwrap_or(0)
         } else { 0 }
     } else { 0 };
-    let mut index = start;
-    let mut items = Vec::new();
+    // Eagerly consume the iterable into a Vec, then wrap in lazy EnumerateIter
     let iterable = builtin_iter(&[args[0].clone()])?;
+    let mut items = Vec::new();
     loop {
         match builtin_next(&[iterable.clone()]) {
-            Ok(val) => {
-                items.push(py_tuple(vec![py_int(index as i64), val]));
-                index += 1;
-            }
-            Err(PyError::StopIteration) => return Ok(py_list(items)),
+            Ok(val) => items.push(val),
+            Err(PyError::StopIteration) => break,
             Err(e) => return Err(e),
         }
     }
+    Ok(PyObjectRef::new(PyObject::EnumerateIter { items, pos: 0, start }))
 }
 
 pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
@@ -2622,6 +2608,9 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         PyObject::Str(s) => Ok(py_list(s.chars().map(|c| py_str(&c.to_string())).collect())),
         PyObject::Set(s) => Ok(py_list(s.to_vec())),
         PyObject::FrozenSet(s) => Ok(py_list(s.to_vec())),
+        PyObject::Range { start, stop, step } => {
+            Ok(PyObjectRef::new(PyObject::RangeIter { current: *start, stop: *stop, step: *step }))
+        }
         _ => Ok(args[0].clone()),
     }
 }
@@ -2696,6 +2685,27 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             } else {
                 let v = list[*index].clone();
                 *index += 1;
+                Ok(v)
+            }
+        }
+        PyObject::EnumerateIter { items, pos, start } => {
+            if *pos >= items.len() {
+                if args.len() >= 2 { Ok(args[1].clone()) }
+                else { Err(PyError::stop_iteration()) }
+            } else {
+                let val = items[*pos].clone();
+                let idx = *start + *pos;
+                *pos += 1;
+                Ok(py_tuple(vec![py_int(idx as i64), val]))
+            }
+        }
+        PyObject::RangeIter { current, stop, step } => {
+            if (*step > 0 && *current >= *stop) || (*step < 0 && *current <= *stop) {
+                if args.len() >= 2 { Ok(args[1].clone()) }
+                else { Err(PyError::stop_iteration()) }
+            } else {
+                let v = py_int(*current);
+                *current += *step;
                 Ok(v)
             }
         }
@@ -2947,13 +2957,16 @@ pub fn builtin_reversed(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     match &*obj {
         PyObject::List(v) => {
             let mut rev = v.clone(); rev.reverse();
-            Ok(PyObjectRef::new(PyObject::List(rev)))
+            Ok(PyObjectRef::new(PyObject::ListIter { list: rev, index: 0 }))
         }
         PyObject::Tuple(v) => {
             let mut rev = v.clone(); rev.reverse();
-            Ok(PyObjectRef::imm(PyObject::Tuple(rev)))
+            Ok(PyObjectRef::new(PyObject::ListIter { list: rev, index: 0 }))
         }
-        PyObject::Str(s) => Ok(py_str(&s.chars().rev().collect::<String>())),
+        PyObject::Str(s) => {
+            let chars: Vec<PyObjectRef> = s.chars().rev().map(|c| py_str(&c.to_string())).collect();
+            Ok(PyObjectRef::new(PyObject::ListIter { list: chars, index: 0 }))
+        }
         _ => {
             let mut v = Vec::new();
             let iterable = builtin_iter(&[args[0].clone()])?;
@@ -2965,7 +2978,7 @@ pub fn builtin_reversed(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 }
             }
             v.reverse();
-            Ok(PyObjectRef::new(PyObject::List(v)))
+            Ok(PyObjectRef::new(PyObject::ListIter { list: v, index: 0 }))
         }
     }
 }
@@ -3018,7 +3031,29 @@ pub fn builtin_issubclass(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 pub fn builtin_help(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
         println!("Welcome to RustPython 0.1.0!");
-        println!("For information about a specific object, type help(object)");
+        println!();
+        println!("Available built-in functions:");
+        println!("  abs()  all()  any()  ascii()  bin()  bool()  breakpoint()");
+        println!("  bytearray()  bytes()  callable()  chr()  compile()  delattr()");
+        println!("  dict()  dir()  divmod()  enumerate()  eval()  exec()  exit()");
+        println!("  filter()  float()  format()  frozenset()  getattr()  globals()");
+        println!("  hasattr()  hash()  help()  hex()  id()  input()  int()");
+        println!("  isinstance()  issubclass()  iter()  len()  list()  locals()");
+        println!("  map()  max()  memoryview()  min()  next()  object()  oct()");
+        println!("  open()  ord()  pow()  print()  property()  range()  repr()");
+        println!("  reversed()  round()  set()  setattr()  slice()  sorted()");
+        println!("  staticmethod()  str()  sum()  super()  tuple()  type()  vars()");
+        println!("  zip()");
+        println!();
+        println!("Available error types:");
+        println!("  BaseException  Exception  TypeError  ValueError  ZeroDivisionError");
+        println!("  NameError  AttributeError  IndexError  KeyError  RuntimeError");
+        println!("  StopIteration  AssertionError  OSError  ImportError  LookupError");
+        println!("  ArithmeticError  OverflowError  NotImplementedError  RecursionError");
+        println!("  KeyboardInterrupt  SystemExit  ModuleNotFoundError  FileNotFoundError");
+        println!("  PermissionError  UnicodeDecodeError  UnicodeEncodeError");
+        println!();
+        println!("Type help(object) for information about a specific object.");
     } else {
         let obj = args[0].borrow();
         match &*obj {
@@ -4280,6 +4315,23 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
+                    "__or__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__or__".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("__or__() takes exactly one argument")); }
+                            let other = args[1].borrow();
+                            if let PyObject::Dict(other_dict) = &*other {
+                                let d = args[0].borrow();
+                                if let PyObject::Dict(dict) = &*d {
+                                    let mut new_dict = PyDict::new();
+                                    for (k, v) in dict.items() { new_dict.set(k, v)?; }
+                                    for (k, v) in other_dict.items() { new_dict.set(k, v)?; }
+                                    Ok(PyObjectRef::new(PyObject::Dict(new_dict)))
+                                } else { Err(PyError::runtime_error("__or__ on non-dict")) }
+                            } else { Err(PyError::type_error("__or__() argument must be a dict")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     _ => Err(PyError::attribute_error(format!("'dict' object has no attribute '{}'", name))),
                 }
             }
@@ -4955,15 +5007,18 @@ impl ObjectAccess for PyObject {
                                 }
                                 let target = locked.target.clone();
                                 let thread_args = locked.args.clone();
+                                // Don't create a real thread (PyObjectRef is !Send)
+                                // Thread runs synchronously instead
                                 let result = locked.result.clone();
                                 let call_result = crate::object::builtin_call(&target, &thread_args);
                                 match call_result {
                                     Ok(val) => {
                                         *result.lock().unwrap() = Some(val);
                                     }
-                                    Err(_) => {}
+                                    Err(e) => {
+                                        eprintln!("Thread raised: {}", e);
+                                    }
                                 }
-                                locked.handle = Some(std::thread::spawn(|| {}));
                             }
                             Ok(py_none())
                         },
@@ -5002,6 +5057,33 @@ impl ObjectAccess for PyObject {
             PyObject::Lock(inner_arc) => {
                 let inner_arc = inner_arc.clone();
                 match name {
+                    "__enter__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__enter__".to_string(),
+                        func: |args| {
+                            let obj = args[0].borrow();
+                            if let PyObject::Lock(inner_arc) = &*obj {
+                                let locked = inner_arc.lock().unwrap();
+                                while locked.lock.load(std::sync::atomic::Ordering::SeqCst) {
+                                    std::thread::yield_now();
+                                }
+                                locked.lock.store(true, std::sync::atomic::Ordering::SeqCst);
+                            }
+                            Ok(args[0].clone())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__exit__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__exit__".to_string(),
+                        func: |args| {
+                            let obj = args[0].borrow();
+                            if let PyObject::Lock(inner_arc) = &*obj {
+                                let locked = inner_arc.lock().unwrap();
+                                locked.lock.store(false, std::sync::atomic::Ordering::SeqCst);
+                            }
+                            Ok(py_none())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     "acquire" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "acquire".to_string(),
                         func: |args| {
@@ -5030,6 +5112,49 @@ impl ObjectAccess for PyObject {
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
                     _ => Err(PyError::attribute_error(format!("'lock' object has no attribute '{}'", name))),
+                }
+            }
+            PyObject::Queue(inner_arc) => {
+                let inner_arc = inner_arc.clone();
+                match name {
+                    "put" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "put".to_string(),
+                        func: |args| {
+                            let obj = args[0].borrow();
+                            if let PyObject::Queue(inner_arc) = &*obj {
+                                let item = args.get(1).cloned().ok_or_else(|| PyError::type_error("put() missing argument"))?;
+                                let mut q = inner_arc.lock().unwrap();
+                                q.queue.push_back(item);
+                            }
+                            Ok(py_none())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "get" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "get".to_string(),
+                        func: |args| {
+                            let obj = args[0].borrow();
+                            if let PyObject::Queue(inner_arc) = &*obj {
+                                let mut q = inner_arc.lock().unwrap();
+                                return q.queue.pop_front().ok_or_else(|| PyError::runtime_error("empty queue"));
+                            }
+                            Err(PyError::runtime_error("not a Queue"))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "qsize" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "qsize".to_string(),
+                        func: |args| {
+                            let obj = args[0].borrow();
+                            if let PyObject::Queue(inner_arc) = &*obj {
+                                let q = inner_arc.lock().unwrap();
+                                return Ok(py_int(q.queue.len() as i64));
+                            }
+                            Ok(py_int(0))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    _ => Err(PyError::attribute_error(format!("'Queue' object has no attribute '{}'", name))),
                 }
             }
             PyObject::Exception { typ, args, .. } => {
@@ -6788,6 +6913,10 @@ pub struct LockInner {
     pub lock: std::sync::atomic::AtomicBool,
 }
 
+pub struct QueueInner {
+    pub queue: std::collections::VecDeque<PyObjectRef>,
+}
+
 pub fn create_socket_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! sock_func {
@@ -6813,6 +6942,37 @@ pub fn create_socket_dict() -> HashMap<String, PyObjectRef> {
     d.insert("SOCK_DGRAM".to_string(), py_int(2));
     d.insert("SOL_SOCKET".to_string(), py_int(1));
     d.insert("SO_REUSEADDR".to_string(), py_int(2));
+
+    sock_func!("gethostname", |_| {
+        match std::process::Command::new("hostname").output() {
+            Ok(output) => {
+                let hostname = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                Ok(py_str(&hostname))
+            }
+            Err(_) => Ok(py_str("localhost")),
+        }
+    });
+
+    sock_func!("gethostbyname", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("gethostbyname() missing required argument"));
+        }
+        let hostname = args[0].str();
+        if hostname == "localhost" || hostname == "127.0.0.1" {
+            return Ok(py_str("127.0.0.1"));
+        }
+        // Try DNS resolution
+        match std::net::ToSocketAddrs::to_socket_addrs(&(hostname.as_str(), 0)) {
+            Ok(mut addrs) => {
+                if let Some(addr) = addrs.find(|a| a.is_ipv4()) {
+                    Ok(py_str(&addr.ip().to_string()))
+                } else {
+                    Ok(py_str(&hostname))
+                }
+            }
+            Err(_) => Ok(py_str(&hostname)),
+        }
+    });
 
     d
 }
@@ -8520,6 +8680,128 @@ fn io_stringio_getvalue(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
 }
 
+fn io_bytesio_read(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() { return Err(PyError::type_error("read() missing required 'self' argument")); }
+    let self_obj = &args[0];
+    let inst = self_obj.borrow();
+    if let PyObject::Instance { dict, .. } = &*inst {
+        if let Some(buf) = dict.get("_buffer") {
+            let buf_bytes = match &*buf.borrow() {
+                PyObject::Bytes(b) => b.clone(),
+                _ => vec![],
+            };
+            let pos = dict.get("_pos").and_then(|p| p.as_i64()).unwrap_or(0) as usize;
+            let result = buf_bytes[pos..].to_vec();
+            drop(inst);
+            if let PyObject::Instance { dict, .. } = &mut *self_obj.borrow_mut() {
+                dict.insert("_pos".to_string(), py_int(buf_bytes.len() as i64));
+            }
+            Ok(PyObjectRef::imm(PyObject::Bytes(result)))
+        } else {
+            Ok(PyObjectRef::imm(PyObject::Bytes(vec![])))
+        }
+    } else {
+        Err(PyError::type_error("BytesIO instance required"))
+    }
+}
+
+fn io_bytesio_readline(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() { return Err(PyError::type_error("readline() missing required 'self' argument")); }
+    let self_obj = &args[0];
+    let inst = self_obj.borrow();
+    if let PyObject::Instance { dict, .. } = &*inst {
+        if let Some(buf) = dict.get("_buffer") {
+            let buf_bytes = match &*buf.borrow() {
+                PyObject::Bytes(b) => b.clone(),
+                _ => vec![],
+            };
+            let pos = dict.get("_pos").and_then(|p| p.as_i64()).unwrap_or(0) as usize;
+            if pos >= buf_bytes.len() {
+                return Ok(PyObjectRef::imm(PyObject::Bytes(vec![])));
+            }
+            let remaining = &buf_bytes[pos..];
+            let end = remaining.iter().position(|&b| b == b'\n').map(|i| i + 1).unwrap_or(remaining.len());
+            let result = remaining[..end].to_vec();
+            let new_pos = pos + end;
+            drop(inst);
+            if let PyObject::Instance { dict, .. } = &mut *self_obj.borrow_mut() {
+                dict.insert("_pos".to_string(), py_int(new_pos as i64));
+            }
+            Ok(PyObjectRef::imm(PyObject::Bytes(result)))
+        } else {
+            Ok(PyObjectRef::imm(PyObject::Bytes(vec![])))
+        }
+    } else {
+        Err(PyError::type_error("BytesIO instance required"))
+    }
+}
+
+fn io_bytesio_write(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() < 2 { return Err(PyError::type_error("write() missing required argument")); }
+    let self_obj = &args[0];
+    let data = args[1].borrow();
+    let bytes = match &*data {
+        PyObject::Bytes(b) => b.clone(),
+        PyObject::Str(s) => s.as_bytes().to_vec(),
+        _ => return Err(PyError::type_error("write() argument must be bytes or str")),
+    };
+    let inst = self_obj.borrow();
+    if let PyObject::Instance { dict, .. } = &*inst {
+        let pos = dict.get("_pos").and_then(|p| p.as_i64()).unwrap_or(0) as usize;
+        drop(inst);
+        if let PyObject::Instance { dict, .. } = &mut *self_obj.borrow_mut() {
+            let buf = dict.entry("_buffer".to_string()).or_insert_with(|| PyObjectRef::imm(PyObject::Bytes(vec![])));
+            let mut buf_bytes = match &*buf.borrow() {
+                PyObject::Bytes(b) => b.clone(),
+                _ => vec![],
+            };
+            // Insert at position (overwrite)
+            if pos <= buf_bytes.len() {
+                buf_bytes.splice(pos..pos, bytes.iter().cloned());
+            } else {
+                buf_bytes.extend(&bytes);
+            }
+            *buf = PyObjectRef::imm(PyObject::Bytes(buf_bytes));
+            dict.insert("_pos".to_string(), py_int((pos + bytes.len()) as i64));
+        }
+        Ok(py_int(bytes.len() as i64))
+    } else {
+        Err(PyError::type_error("BytesIO instance required"))
+    }
+}
+
+fn io_bytesio_seek(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() < 2 { return Err(PyError::type_error("seek() missing required argument")); }
+    let self_obj = &args[0];
+    let pos = args[1].as_i64().unwrap_or(0);
+    if let PyObject::Instance { dict, .. } = &mut *self_obj.borrow_mut() {
+        dict.insert("_pos".to_string(), py_int(pos));
+    }
+    Ok(py_int(pos))
+}
+
+fn io_bytesio_tell(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() { return Err(PyError::type_error("tell() missing required 'self' argument")); }
+    let self_obj = &args[0];
+    let inst = self_obj.borrow();
+    if let PyObject::Instance { dict, .. } = &*inst {
+        Ok(dict.get("_pos").cloned().unwrap_or(py_int(0)))
+    } else {
+        Err(PyError::type_error("BytesIO instance required"))
+    }
+}
+
+fn io_bytesio_getvalue(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() { return Err(PyError::type_error("getvalue() missing required 'self' argument")); }
+    let self_obj = &args[0];
+    let inst = self_obj.borrow();
+    if let PyObject::Instance { dict, .. } = &*inst {
+        Ok(dict.get("_buffer").cloned().unwrap_or_else(|| PyObjectRef::imm(PyObject::Bytes(vec![]))))
+    } else {
+        Err(PyError::type_error("BytesIO instance required"))
+    }
+}
+
 pub fn create_io_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! io_func {
@@ -8546,6 +8828,36 @@ pub fn create_io_dict() -> HashMap<String, PyObjectRef> {
         let mut instance_dict = HashMap::new();
         let initial = if !args.is_empty() { args[0].str() } else { String::new() };
         instance_dict.insert("_buffer".to_string(), py_str(&initial));
+        instance_dict.insert("_pos".to_string(), py_int(0));
+        Ok(PyObjectRef::new(PyObject::Instance {
+            typ,
+            dict: instance_dict,
+        }))
+    });
+
+    io_func!("BytesIO", |args| {
+        let mut type_dict = HashMap::new();
+        type_dict.insert("read".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "read".to_string(), func: io_bytesio_read }));
+        type_dict.insert("readline".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "readline".to_string(), func: io_bytesio_readline }));
+        type_dict.insert("write".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "write".to_string(), func: io_bytesio_write }));
+        type_dict.insert("seek".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "seek".to_string(), func: io_bytesio_seek }));
+        type_dict.insert("tell".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "tell".to_string(), func: io_bytesio_tell }));
+        type_dict.insert("getvalue".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "getvalue".to_string(), func: io_bytesio_getvalue }));
+        let typ = PyObjectRef::new(PyObject::Type {
+            name: "BytesIO".to_string(),
+            dict: type_dict,
+            bases: vec![],
+            mro: vec![],
+        });
+        let mut instance_dict = HashMap::new();
+        let initial = if !args.is_empty() {
+            let a = args[0].borrow();
+            match &*a {
+                PyObject::Bytes(b) => b.clone(),
+                _ => vec![],
+            }
+        } else { vec![] };
+        instance_dict.insert("_buffer".to_string(), PyObjectRef::imm(PyObject::Bytes(initial)));
         instance_dict.insert("_pos".to_string(), py_int(0));
         Ok(PyObjectRef::new(PyObject::Instance {
             typ,
@@ -9755,6 +10067,25 @@ pub fn create_hashlib_extra_dict() -> HashMap<String, PyObjectRef> {
         hasher.write(b"sha256");
         hasher.write(&bytes);
         Ok(py_str(&format!("{:016x}", hasher.finish())))
+    });
+
+    d
+}
+
+// ---- _queue module ----
+pub fn create_queue_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! q_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    q_func!("Queue", |_args| {
+        let inner = std::sync::Arc::new(std::sync::Mutex::new(QueueInner {
+            queue: std::collections::VecDeque::new(),
+        }));
+        Ok(PyObjectRef::new(PyObject::Queue(inner)))
     });
 
     d
