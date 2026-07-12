@@ -602,8 +602,34 @@ impl PyObject {
                 }
             }
             PyObject::Str(s) => format!("'{}'", escape_string(s)),
-            PyObject::Bytes(b) => format!("b'{}'", String::from_utf8_lossy(b)),
-            PyObject::ByteArray(b) => format!("bytearray(b'{}')", String::from_utf8_lossy(b)),
+            PyObject::Bytes(b) => {
+                let s: String = b.iter().map(|&byte| {
+                    match byte {
+                        b'\\' => "\\\\".to_string(),
+                        b'\'' => "\\'".to_string(),
+                        b'\n' => "\\n".to_string(),
+                        b'\t' => "\\t".to_string(),
+                        b'\r' => "\\r".to_string(),
+                        0x20..=0x7e => (byte as char).to_string(),
+                        _ => format!("\\x{:02x}", byte),
+                    }
+                }).collect();
+                format!("b'{}'", s)
+            }
+            PyObject::ByteArray(b) => {
+                let s: String = b.iter().map(|&byte| {
+                    match byte {
+                        b'\\' => "\\\\".to_string(),
+                        b'\'' => "\\'".to_string(),
+                        b'\n' => "\\n".to_string(),
+                        b'\t' => "\\t".to_string(),
+                        b'\r' => "\\r".to_string(),
+                        0x20..=0x7e => (byte as char).to_string(),
+                        _ => format!("\\x{:02x}", byte),
+                    }
+                }).collect();
+                format!("bytearray(b'{}')", s)
+            }
             PyObject::List(items) => {
                 let items: Vec<String> = items.iter().map(|x| x.repr()).collect();
                 format!("[{}]", items.join(", "))
@@ -880,9 +906,9 @@ fn escape_string(s: &str) -> String {
             '\\' => out.push_str("\\\\"),
             '\'' => out.push_str("\\'"),
             '\"' => out.push_str("\\\""),
-            c if c.is_ascii_control() => {
-                out.push_str(&format!("\\x{:02x}", c as u8));
-            }
+            '\x00'..='\x1f' => out.push_str(&format!("\\x{:02x}", c as u8)),
+            '\x7f' => out.push_str("\\x7f"),
+            c if c as u32 > 0x10ffff => out.push_str(&format!("\\U{:08x}", c as u32)),
             c => out.push(c),
         }
     }
@@ -2460,6 +2486,19 @@ pub fn builtin_sorted(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
         return Err(PyError::type_error("sorted() takes at least 1 argument"));
     }
+    // Check for key keyword argument (last arg could be a dict with "key")
+    let key_fn: Option<PyObjectRef> = if args.len() >= 2 {
+        // Check if last arg is a dict (keyword args container)
+        let last = args.last().unwrap();
+        let last_borrowed = last.borrow();
+        if let PyObject::Dict(kwargs) = &*last_borrowed {
+            kwargs.get(&py_str("key")).unwrap_or(None)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let mut v = Vec::new();
     let iterable = builtin_iter(&[args[0].clone()])?;
     loop {
@@ -2472,17 +2511,28 @@ pub fn builtin_sorted(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // Use Rust's stable sort (O(n log n))
     let len = v.len();
     if len > 1 {
-        // Simple insertion sort for small, merge sort for large
-        // Actually, let's use Rust's sort_by with our comparison
+        // Sort with comparison, optionally applying key function
+        let key_fn_ref = key_fn.clone();
         v.sort_by(|a, b| {
-            match a.borrow().gt(b) {
+            let a_val = if let Some(ref kf) = key_fn_ref {
+                call_bound_method(kf.clone(), a.clone(), vec![]).unwrap_or_else(|_| a.clone())
+            } else {
+                a.clone()
+            };
+            let b_val = if let Some(ref kf) = key_fn_ref {
+                call_bound_method(kf.clone(), b.clone(), vec![]).unwrap_or_else(|_| b.clone())
+            } else {
+                b.clone()
+            };
+            let ordering = match a_val.borrow().gt(&b_val) {
                 Ok(true) => std::cmp::Ordering::Greater,
-                Ok(false) => match a.borrow().lt(b) {
+                Ok(false) => match a_val.borrow().lt(&b_val) {
                     Ok(true) => std::cmp::Ordering::Less,
                     _ => std::cmp::Ordering::Equal,
                 },
                 Err(_) => std::cmp::Ordering::Equal,
-            }
+            };
+            ordering
         });
     }
     Ok(py_list(v))
@@ -3475,6 +3525,14 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
+                    "copy" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "copy".to_string(),
+                        func: |args| {
+                            if let PyObject::List(list) = &*args[0].borrow() { Ok(py_list(list.clone())) }
+                            else { Err(PyError::runtime_error("copy on non-list")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     _ => Err(PyError::attribute_error(format!("'list' object has no attribute '{}'", name))),
                 }
             }
@@ -3707,6 +3765,11 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
+                    "isdecimal" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "isdecimal".to_string(), func: |a| Ok(py_bool(!a[0].str().is_empty() && a[0].str().chars().all(|c| c.is_ascii_digit() && !c.is_ascii_control()))), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "isnumeric" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "isnumeric".to_string(), func: |a| Ok(py_bool(!a[0].str().is_empty() && a[0].str().chars().any(|c| c.is_numeric()))), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "isascii" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "isascii".to_string(), func: |a| Ok(py_bool(a[0].str().is_ascii())), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "isprintable" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "isprintable".to_string(), func: |a| Ok(py_bool(!a[0].str().is_empty() && a[0].str().chars().all(|c| c.is_ascii_graphic() || c == ' '))), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "casefold" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "casefold".to_string(), func: |a| Ok(py_str(&a[0].str().to_lowercase())), self_obj: PyObjectRef::new(PyObject::None) })),
                     "isdigit" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "isdigit".to_string(), func: |a| Ok(py_bool(a[0].str().chars().all(|c| c.is_ascii_digit()))), self_obj: PyObjectRef::new(PyObject::None) })),
                     "isalpha" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "isalpha".to_string(), func: |a| Ok(py_bool(a[0].str().chars().all(|c| c.is_ascii_alphabetic()))), self_obj: PyObjectRef::new(PyObject::None) })),
                     "isalnum" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "isalnum".to_string(), func: |a| Ok(py_bool(a[0].str().chars().all(|c| c.is_ascii_alphanumeric()))), self_obj: PyObjectRef::new(PyObject::None) })),
@@ -3959,6 +4022,24 @@ impl ObjectAccess for PyObject {
                                 for (k, v) in dict.items() { new_dict.set(k, v)?; }
                                 Ok(PyObjectRef::new(PyObject::Dict(new_dict)))
                             } else { Err(PyError::runtime_error("copy on non-dict")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "fromkeys" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "fromkeys".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("fromkeys() takes at least 1 argument")); }
+                            let mut new_dict = PyDict::new();
+                            let val = if args.len() > 2 { args[2].clone() } else { py_none() };
+                            let it = builtin_iter(&[args[1].clone()])?;
+                            loop {
+                                match builtin_next(&[it.clone()]) {
+                                    Ok(k) => { new_dict.set(k, val.clone())?; }
+                                    Err(PyError::StopIteration) => break,
+                                    Err(e) => return Err(e),
+                                }
+                            }
+                            Ok(PyObjectRef::new(PyObject::Dict(new_dict)))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),

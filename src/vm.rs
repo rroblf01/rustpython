@@ -2514,8 +2514,7 @@ fn is_exception_subclass(child_type: &str, parent_type: &str) -> bool {
         "ConnectionAbortedError" | "ConnectionRefusedError" |
         "ConnectionResetError" | "BlockingIOError" | "ChildProcessError" |
         "InterruptedError" | "ProcessLookupError" | "TimeoutError" |
-        "UnicodeError" | "UnicodeEncodeError" | "UnicodeDecodeError" |
-        "UnicodeTranslateError" | "ReferenceError" | "BufferError" |
+        "ReferenceError" | "BufferError" |
         "Warning" | "UserWarning" | "DeprecationWarning" |
         "PendingDeprecationWarning" | "SyntaxWarning" | "RuntimeWarning" |
         "FutureWarning" | "ImportWarning" | "UnicodeWarning" |
