@@ -879,8 +879,12 @@ impl Parser {
         self.expect(&Token::Import)?;
         // Handle `from X import (a, b, c)` — parenthesized import names
         let has_paren = self.eat(&Token::LeftParen);
+        if has_paren {
+            while self.eat(&Token::Newline) {}  // skip comment-generated newlines
+        }
         let names = self.parse_import_names()?;
         if has_paren {
+            while self.eat(&Token::Newline) {}  // skip newlines before closing paren
             self.expect(&Token::RightParen)?;
         }
         self.expect_newline_or_eof();
@@ -913,6 +917,8 @@ impl Parser {
         }
         let mut names = vec![self.parse_alias()?];
         while self.eat(&Token::Comma) {
+            while self.eat(&Token::Newline) {}  // skip newlines between items
+            if self.at(&Token::RightParen) { break; }  // trailing comma
             if self.at(&Token::Star) {
                 names.push(Alias { name: "*".to_string(), asname: None });
                 self.next();
@@ -927,6 +933,9 @@ impl Parser {
         let mut args = Vec::new();
         if !self.at(&Token::RightParen) {
             loop {
+                // Allow trailing comma: if we see ')' after a comma, stop
+                if self.at(&Token::RightParen) { break; }
+
                 if self.eat(&Token::DoubleStar) {
                     let name = self.expect_name()?;
                     let annotation = if self.eat(&Token::Colon) {
@@ -1010,6 +1019,13 @@ impl Parser {
                         return Ok(stmts);
                     }
                     _ => {}
+                }
+                // Skip blank lines and comment-only lines (tokenized as Newline)
+                while self.at(&Token::Newline) {
+                    self.next();
+                }
+                if self.at(&Token::Dedent) || self.at(&Token::EndOfFile) {
+                    continue;
                 }
                 stmts.push(self.parse_stmt()?);
             }
@@ -1302,6 +1318,7 @@ impl Parser {
                 let mut keywords = Vec::new();
                 if !self.at(&Token::RightParen) {
                     loop {
+                        if self.at(&Token::RightParen) { break; }
                         if self.at(&Token::Star) {
                             let starred = self.parse_expr()?;
                             args.push(Expr::Starred(Box::new(starred)));
@@ -1359,6 +1376,7 @@ impl Parser {
                             args.push(expr);
                         }
                         if !self.eat(&Token::Comma) { break; }
+                        while self.eat(&Token::Newline) {}  // skip comment-generated newlines
                     }
                 }
                 self.expect(&Token::RightParen)?;
@@ -1457,28 +1475,69 @@ impl Parser {
             }
 
             Token::String(s) => {
-                let s = s.clone();
+                let mut parts = vec![s.clone()];
                 self.next();
-                let mut parts = vec![Expr::Constant(Constant::String(s))];
-                while let Token::String(s2) = &self.current {
-                    parts.push(Expr::Constant(Constant::String(s2.clone())));
-                    self.next();
+                // Implicit string concatenation: adjacent strings with optional newlines
+                while {
+                    while self.at(&Token::Newline) { self.next(); }
+                    matches!(&self.current, Token::String(_))
+                } {
+                    if let Token::String(next) = &self.current {
+                        parts.push(next.clone());
+                        self.next();
+                    }
                 }
                 if parts.len() == 1 {
-                    Ok(parts.into_iter().next().unwrap())
+                    Ok(Expr::Constant(Constant::String(parts[0].clone())))
                 } else {
-                    Ok(Expr::JoinedStr(parts))
+                    Ok(Expr::Constant(Constant::String(parts.concat())))
                 }
             }
 
             Token::Bytes(b) => {
-                let b = b.clone();
+                let mut parts = vec![b.clone()];
                 self.next();
-                Ok(Expr::Constant(Constant::Bytes(b)))
+                // Implicit bytes concatenation: adjacent bytes with optional newlines
+                while {
+                    while self.at(&Token::Newline) { self.next(); }
+                    matches!(&self.current, Token::Bytes(_))
+                } {
+                    if let Token::Bytes(next) = &self.current {
+                        parts.push(next.clone());
+                        self.next();
+                    }
+                }
+                let combined: Vec<u8> = parts.into_iter().flatten().collect();
+                Ok(Expr::Constant(Constant::Bytes(combined)))
             }
 
             Token::FStringStart => {
-                self.parse_fstring()
+                let mut parts = vec![self.parse_fstring()?];
+                // Implicit concatenation: adjacent f-strings and regular strings
+                loop {
+                    while self.at(&Token::Newline) { self.next(); }
+                    match &self.current {
+                        Token::FStringStart => {
+                            parts.push(self.parse_fstring()?);
+                        }
+                        Token::String(s) => {
+                            let s = s.clone();
+                            self.next();
+                            parts.push(Expr::Constant(Constant::String(s)));
+                        }
+                        _ => break,
+                    }
+                }
+                if parts.len() == 1 {
+                    Ok(parts.into_iter().next().unwrap())
+                } else {
+                    let mut result = parts.into_iter().reduce(|a, b| Expr::BinOp {
+                        left: Box::new(a),
+                        op: Operator::Add,
+                        right: Box::new(b),
+                    }).unwrap();
+                    Ok(result)
+                }
             }
 
             Token::Name(s) => {
