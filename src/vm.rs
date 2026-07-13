@@ -965,7 +965,17 @@ impl VirtualMachine {
                         ConstValue::None => py_none(),
                         ConstValue::Bool(b) => py_bool(*b),
                         ConstValue::Int(s) => {
-                            if let Ok(n) = s.parse::<i64>() { py_int(n) }
+                            let s_trim = s.trim_start_matches('_');
+                            if let Some(oct) = s_trim.strip_prefix("0o").or_else(|| s_trim.strip_prefix("0O")) {
+                                if let Ok(n) = i64::from_str_radix(oct, 8) { py_int(n) }
+                                else { let n = num_bigint::BigInt::parse_bytes(oct.as_bytes(), 8)?; PyObjectRef::imm(PyObject::Int(n)) }
+                            } else if let Some(hex) = s_trim.strip_prefix("0x").or_else(|| s_trim.strip_prefix("0X")) {
+                                if let Ok(n) = i64::from_str_radix(hex, 16) { py_int(n) }
+                                else { let n = num_bigint::BigInt::parse_bytes(hex.as_bytes(), 16)?; PyObjectRef::imm(PyObject::Int(n)) }
+                            } else if let Some(bin) = s_trim.strip_prefix("0b").or_else(|| s_trim.strip_prefix("0B")) {
+                                if let Ok(n) = i64::from_str_radix(bin, 2) { py_int(n) }
+                                else { let n = num_bigint::BigInt::parse_bytes(bin.as_bytes(), 2)?; PyObjectRef::imm(PyObject::Int(n)) }
+                            } else if let Ok(n) = s.parse::<i64>() { py_int(n) }
                             else { let n: num_bigint::BigInt = s.parse().ok()?; PyObjectRef::imm(PyObject::Int(n)) }
                         }
                         ConstValue::Float(s) => py_float(s.parse().ok()?),
