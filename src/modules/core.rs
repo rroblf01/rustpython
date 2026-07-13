@@ -316,6 +316,116 @@ pub fn create_importlib_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
+/// Native importlib.resources stub module.
+/// Provides `files(package)` and `as_file(traversable)` stubs for certifi compatibility.
+pub fn create_importlib_resources_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+
+    // Helper: read name attribute from a module
+    fn mod_name(obj: &PyObjectRef) -> String {
+        let b = obj.borrow();
+        if let PyObject::Module { dict, .. } = &*b {
+            if let Some(name) = dict.get("name") {
+                if let PyObject::Str(s) = &*name.borrow() {
+                    return s.clone();
+                }
+            }
+        }
+        String::new()
+    }
+
+    // __enter__ for context manager: return args[0].name
+    fn enter_cm(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+        if args.is_empty() { return Ok(py_none()); }
+        Ok(py_str(&mod_name(&args[0])))
+    }
+
+    // __exit__ for context manager: no-op
+    fn exit_cm(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+        Ok(py_none())
+    }
+
+    // joinpath for traversable: args[0].name + args[1]
+    fn trav_joinpath(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+        if args.len() < 2 { return Ok(py_none()); }
+        let base = mod_name(&args[0]);
+        let child = args[1].str();
+        Ok(py_str(&format!("{}/{}", base.trim_end_matches('/'), child)))
+    }
+
+    // as_file(traversable) -> context manager wrapping the path
+    d.insert("as_file".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "as_file".to_string(),
+        func: |args| {
+            if args.is_empty() {
+                return Err(PyError::type_error("as_file() requires 1 argument (traversable)"));
+            }
+            let path_str = args[0].str();
+            let cm = create_module("_CtxManager", HashMap::from([
+                ("__enter__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "__enter__".to_string(),
+                    func: enter_cm,
+                })),
+                ("__exit__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "__exit__".to_string(),
+                    func: exit_cm,
+                })),
+                ("name".to_string(), py_str(&path_str)),
+            ]));
+            Ok(cm)
+        },
+    }));
+
+    // files(package) -> traversable with joinpath()
+    d.insert("files".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "files".to_string(),
+        func: |args| {
+            if args.is_empty() {
+                return Err(PyError::type_error("files() requires 1 argument (package name)"));
+            }
+            let pkg_name = args[0].str();
+            // Look up the package's __path__ via VM_PTR
+            let pkg_path = {
+                let vm_ptr = crate::object::VM_PTR.with(|p| *p.borrow());
+                if let Some(ptr) = vm_ptr {
+                    let vm = unsafe { &mut *ptr };
+                    match vm.modules.get(&pkg_name) {
+                        Some(mod_obj) => {
+                            let borrowed = mod_obj.borrow();
+                            if let PyObject::Module { dict, .. } = &*borrowed {
+                                if let Some(path_list) = dict.get("__path__") {
+                                    if let PyObject::List(items) = &*path_list.borrow() {
+                                        if let Some(first) = items.first() {
+                                            if let PyObject::Str(s) = &*first.borrow() {
+                                                s.clone()
+                                            } else { format!("./{}", pkg_name) }
+                                        } else { format!("./{}", pkg_name) }
+                                    } else { format!("./{}", pkg_name) }
+                                } else { format!("./{}", pkg_name) }
+                            } else { format!("./{}", pkg_name) }
+                        }
+                        None => format!("./{}", pkg_name),
+                    }
+                } else {
+                    format!("./{}", pkg_name)
+                }
+            };
+
+            let trav = create_module("_Traversable", HashMap::from([
+                ("joinpath".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "joinpath".to_string(),
+                    func: trav_joinpath,
+                })),
+                ("name".to_string(), py_str(&pkg_path)),
+            ]));
+            // __str__ via name attribute
+            Ok(trav)
+        },
+    }));
+
+    d
+}
+
 pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! os_func {

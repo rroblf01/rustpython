@@ -499,7 +499,16 @@ impl VirtualMachine {
           modules.insert("argparse".to_string(), create_module("argparse", create_argparse_dict()));
 
           // Native importlib stub module
-          modules.insert("importlib".to_string(), create_module("importlib", create_importlib_dict()));
+          let importlib_mod = create_module("importlib", create_importlib_dict());
+          // Wire importlib.resources as a submodule
+          {
+              let resources_mod = create_module("importlib.resources", create_importlib_resources_dict());
+              if let PyObject::Module { dict, .. } = &mut *importlib_mod.borrow_mut() {
+                  dict.insert("resources".to_string(), resources_mod.clone());
+              }
+              modules.insert("importlib.resources".to_string(), resources_mod);
+          }
+          modules.insert("importlib".to_string(), importlib_mod);
 
           modules.insert("inspect".to_string(), create_module("inspect", create_inspect_dict()));
 
@@ -648,7 +657,6 @@ impl VirtualMachine {
                         });
                         if let Some(ref base) = pkg_path {
                             let base_trimmed = base.trim_end_matches('/');
-                            eprintln!("DEBUG dot candidate base='{}' child='{}'", base_trimmed, child_name);
                             vec![
                                 format!("{}/{}.py", base_trimmed, child_name),
                                 format!("{}/{}/__init__.py", base_trimmed, child_name),
@@ -657,10 +665,9 @@ impl VirtualMachine {
                     } else { vec![] }
                 };
                 for candidate in &child_paths {
-                    eprintln!("DEBUG! candidate={}", candidate);
                     let source = match std::fs::read_to_string(candidate) {
-                        Ok(s) => { eprintln!("DEBUG! read OK, len={}", s.len()); s },
-                        Err(e) => { eprintln!("DEBUG! read FAIL: {}", e); continue; }
+                        Ok(s) => s,
+                        Err(_e) => { continue; }
                     };
                     let full_child_name = format!("{}.{}", parent_name, child_name);
                     // Create empty module and insert into modules BEFORE executing
@@ -675,10 +682,7 @@ impl VirtualMachine {
                     }
                     let module = match self.exec_module_source(&source, candidate, &full_child_name) {
                         Ok(m) => m,
-                        Err(e) => {
-                            eprintln!("DEBUG! exec_module_source FAIL: {}", e);
-                            continue;
-                        }
+                        Err(_e) => { continue; }
                     };
                     self.modules.insert(full_child_name.clone(), module.clone());
                     return Ok(module);
