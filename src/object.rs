@@ -2756,7 +2756,14 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                         (name.clone(), *func)
                     } else { return Err(PyError::runtime_error("expected __next__ method")) }
                 };
-                return f(&[args[0].clone()]);
+                let result = f(&[args[0].clone()]);
+                // Convert raise StopIteration into PyError::StopIteration for next() protocol
+                if let Err(PyError::Exception(ref typ, _)) = result {
+                    if typ == "StopIteration" {
+                        return Err(PyError::StopIteration);
+                    }
+                }
+                return result;
             }
             _ => None,
         }

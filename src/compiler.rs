@@ -1348,8 +1348,8 @@ impl Compiler {
             }
             Stmt::Assert { test, msg } => {
                 let assertion_error_idx =
-                    self.get_const_index(ConstValue::String("AssertionError".to_string())) as u32;
-                self.emit(Opcode::LOAD_CONST, assertion_error_idx);
+                    self.get_name_index("AssertionError") as u32;
+                self.emit(Opcode::LOAD_GLOBAL, assertion_error_idx);
                 self.compile_expr(test)?;
                 let ok_label = self.new_label();
                 self.emit_jump(Opcode::POP_JUMP_IF_TRUE, ok_label);

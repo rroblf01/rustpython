@@ -346,6 +346,11 @@ pub fn create_hmac_dict() -> HashMap<String, PyObjectRef> {
         }))
     });
 
+    // HMAC alias — same as new()
+    if let Some(func) = d.get("new") {
+        d.insert("HMAC".to_string(), func.clone());
+    }
+
     d
 }
 
