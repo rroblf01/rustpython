@@ -231,7 +231,9 @@ impl VirtualMachine {
           modules.insert("_weakref".to_string(), create_module("_weakref", weakref_dict.clone()));
 
           let collections_abc_dict = create_collections_abc_dict();
-          modules.insert("_collections_abc".to_string(), create_module("_collections_abc", collections_abc_dict));
+          modules.insert("_collections_abc".to_string(), create_module("_collections_abc", collections_abc_dict.clone()));
+          // Pre-register collections.abc so the import chain walker finds it without needing __path__
+          modules.insert("collections.abc".to_string(), create_module("collections.abc", collections_abc_dict));
 
           // Native weakref module (replaces CPython weakref.py)
           let mut weakref_mod_dict = weakref_dict; // Start from _weakref

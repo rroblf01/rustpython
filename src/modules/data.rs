@@ -1,4 +1,5 @@
 use crate::object::*;
+use crate::modules::create_collections_abc_dict;
 use std::collections::HashMap;
 
 pub fn create_json_dict() -> HashMap<String, PyObjectRef> {
@@ -90,6 +91,9 @@ pub fn create_collections_dict() -> HashMap<String, PyObjectRef> {
         }
         Ok(dict)
     });
+
+    // collections.abc submodule (Iterable, Hashable, etc.)
+    d.insert("abc".to_string(), create_module("collections.abc", create_collections_abc_dict()));
 
     d
 }
