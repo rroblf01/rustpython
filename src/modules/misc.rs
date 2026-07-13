@@ -1668,6 +1668,26 @@ pub fn create_logging_dict() -> HashMap<String, PyObjectRef> {
                     func: logging_error,
                     self_obj: py_none(),
                 }));
+                type_dict.insert("addHandler".to_string(), PyObjectRef::imm(PyObject::BuiltinMethod {
+                    name: "addHandler".to_string(),
+                    func: |args| {
+                        if args.len() < 2 { return Err(PyError::type_error("addHandler requires handler argument")); }
+                        // Store handler in instance dict's _handlers list
+                        let instance = args[0].clone();
+                        let handler = args[1].clone();
+                        let mut dict = instance.borrow_mut();
+                        if let PyObject::Instance { dict: inst_dict, .. } = &mut *dict {
+                            let handlers = inst_dict.entry("_handlers".to_string()).or_insert_with(|| {
+                                PyObjectRef::new(PyObject::List(Vec::new()))
+                            });
+                            if let PyObject::List(ref mut v) = &mut *handlers.borrow_mut() {
+                                v.push(handler);
+                            }
+                        }
+                        Ok(py_none())
+                    },
+                    self_obj: py_none(),
+                }));
                 type_dict
             },
             bases: vec![],
