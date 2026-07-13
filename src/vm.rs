@@ -95,6 +95,14 @@ impl Frame {
 
     pub fn peek(&self, depth: usize) -> PyResult<PyObjectRef> {
         if depth >= self.stack.len() {
+            let instr_ip = if self.ip > 0 { self.ip - 1 } else { 0 };
+            let op_str = if instr_ip < self.code.instructions.len() {
+                format!("{:?}", self.code.instructions[instr_ip].op)
+            } else {
+                "END".to_string()
+            };
+            eprintln!("DEBUG stack underflow: depth={}, stack_len={}, instr_ip={}, code_name='{}', op={}", 
+                depth, self.stack.len(), instr_ip, self.code.name, op_str);
             return Err(PyError::runtime_error("stack underflow (peek)"));
         }
         Ok(self.stack[self.stack.len() - 1 - depth].clone())
@@ -1389,8 +1397,17 @@ impl VirtualMachine {
 
             Opcode::COPY => {
                 let depth = arg as usize;
-                let val = self.frames[fi].peek(depth)?;
-                self.frames[fi].push(val);
+                if depth >= self.frames[fi].stack.len() {
+                    // Graceful fallback: if depth exceeds stack, treat as DUP_TOP
+                    if let Some(val) = self.frames[fi].stack.last().cloned() {
+                        self.frames[fi].push(val);
+                    } else {
+                        return Err(PyError::runtime_error("stack underflow (peek)"));
+                    }
+                } else {
+                    let val = self.frames[fi].peek(depth)?;
+                    self.frames[fi].push(val);
+                }
             }
 
             Opcode::SWAP => {
