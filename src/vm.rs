@@ -531,7 +531,13 @@ impl VirtualMachine {
             // Detect virtual environment (VIRTUAL_ENV env var or .venv in CWD)
             let venv = std::env::var("VIRTUAL_ENV").ok()
                 .or_else(|| {
-                    std::env::current_dir().ok()
+                    let cwd = std::env::current_dir().ok();
+                    eprintln!("DEBUG venv: VIRTUAL_ENV not set, checking CWD .venv");
+                    if let Some(ref d) = cwd {
+                        let dotvenv = d.join(".venv");
+                        eprintln!("DEBUG venv: checking {}. is_dir={}", dotvenv.display(), dotvenv.is_dir());
+                    }
+                    cwd
                         .filter(|d| d.join(".venv").is_dir())
                         .map(|d| d.join(".venv").to_string_lossy().to_string())
                 });
@@ -639,60 +645,108 @@ impl VirtualMachine {
     }
 
     pub fn import_module_from_file(&mut self, name: &str) -> Result<PyObjectRef, String> {
-        // Handle dotted names: e.g. "certifi.core" -> find parent "certifi" in modules,
-        // then search its __path__ for "core.py" or "core/__init__.py"
+        // Handle dotted names: e.g. "certifi.core" or "django.utils.version"
+        // Walk through each segment, importing missing packages as we go
         if let Some(dot_pos) = name.find('.') {
-            let parent_name = &name[..dot_pos];
-            let child_name = &name[dot_pos + 1..];
-            if let Some(parent_mod) = self.modules.get(parent_name) {
-                let child_paths = {
-                    let parent = parent_mod.borrow();
-                    if let PyObject::Module { dict, .. } = &*parent {
-                        let pkg_path = dict.get("__path__").and_then(|p| {
-                            if let PyObject::List(items) = &*p.borrow() {
-                                items.first().and_then(|i| {
-                                    if let PyObject::Str(s) = &*i.borrow() { Some(s.clone()) } else { None }
-                                })
-                            } else { None }
-                        });
-                        if let Some(ref base) = pkg_path {
-                            let base_trimmed = base.trim_end_matches('/');
-                            vec![
-                                format!("{}/{}.py", base_trimmed, child_name),
-                                format!("{}/{}/__init__.py", base_trimmed, child_name),
-                            ]
-                        } else { vec![] }
-                    } else { vec![] }
-                };
-                for candidate in &child_paths {
-                    let source = match std::fs::read_to_string(candidate) {
-                        Ok(s) => s,
-                        Err(_e) => { continue; }
-                    };
-                    let full_child_name = format!("{}.{}", parent_name, child_name);
-                    // Create empty module and insert into modules BEFORE executing
-                    let empty_mod = create_module(&full_child_name, HashMap::new());
-                    self.modules.insert(full_child_name.clone(), empty_mod.clone());
-                    if let Some(sys_mod) = self.modules.get("sys") {
-                        if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
-                            if let Some(mod_dict) = dict.get("modules") {
-                                mod_dict.borrow_mut().set_attribute(&full_child_name, empty_mod.clone()).ok();
+            let parts: Vec<&str> = name.split('.').collect();
+            let mut current_name = parts[0].to_string();
+            let mut parent_path: Option<String> = None;
+
+            // Check if we already have the top-level module
+            if !self.modules.contains_key(&current_name) {
+                eprintln!("DEBUG import: top-level '{}' NOT in modules", current_name);
+                // Not in modules — fall through to regular file search below
+            } else {
+                eprintln!("DEBUG import: top-level '{}' IS in modules", current_name);
+                // Walk the chain: for each part after the first, resolve the child
+                let mut all_resolved = true;
+                for i in 1..parts.len() {
+                    let child = parts[i];
+                    let full_name = format!("{}.{}", current_name, child);
+                    eprintln!("DEBUG chain: i={}, child='{}', full='{}', current='{}'", i, child, full_name, current_name);
+
+                    // If already in modules, skip to next
+                    if self.modules.contains_key(&full_name) {
+                        eprintln!("DEBUG chain: '{}' already in modules", full_name);
+                        current_name = full_name;
+                        parent_path = None;
+                        continue;
+                    }
+
+                    // Get the parent's __path__
+                    if parent_path.is_none() {
+                        eprintln!("DEBUG chain: getting __path__ for '{}'", current_name);
+                        if let Some(parent_mod) = self.modules.get(&current_name) {
+                            let borrowed = parent_mod.borrow();
+                            if let PyObject::Module { dict, .. } = &*borrowed {
+                                let p = dict.get("__path__").and_then(|pl| {
+                                    if let PyObject::List(items) = &*pl.borrow() {
+                                        items.first().and_then(|i| {
+                                            if let PyObject::Str(s) = &*i.borrow() { Some(s.clone()) } else { None }
+                                        })
+                                    } else { None }
+                                });
+                                eprintln!("DEBUG chain: parent_path for '{}' = {:?}", current_name, p);
+                                parent_path = p;
+                            } else {
+                                eprintln!("DEBUG chain: '{}' is not a Module", current_name);
+                                parent_path = None;
                             }
+                        } else {
+                            eprintln!("DEBUG chain: '{}' NOT in modules!", current_name);
+                            parent_path = None;
                         }
                     }
-                    let module = match self.exec_module_source(&source, candidate, &full_child_name) {
-                        Ok(m) => m,
-                        Err(_e) => { continue; }
-                    };
-                    self.modules.insert(full_child_name.clone(), module.clone());
-                    return Ok(module);
+
+                    // Try to find the child as a file/subpackage in parent's __path__
+                    if let Some(ref base) = parent_path {
+                        let base_trimmed = base.trim_end_matches('/');
+                        eprintln!("DEBUG chain: searching '{}' in '{}'", child, base_trimmed);
+                        for candidate in &[
+                            format!("{}/{}.py", base_trimmed, child),
+                            format!("{}/{}/__init__.py", base_trimmed, child),
+                        ] {
+                            eprintln!("DEBUG chain: candidate='{}'", candidate);
+                            if let Ok(source) = std::fs::read_to_string(candidate) {
+                                let is_pkg = candidate.ends_with("__init__.py");
+                                let empty_dict = if is_pkg {
+                                    if let Some(pkg_dir) = std::path::Path::new(candidate).parent() {
+                                        HashMap::from([
+                                            ("__path__".to_string(), py_list(vec![py_str(&pkg_dir.to_string_lossy().to_string())])),
+                                            ("__package__".to_string(), py_str(&full_name)),
+                                        ])
+                                    } else { HashMap::new() }
+                                } else { HashMap::new() };
+                                let empty_mod = create_module(&full_name, empty_dict);
+                                self.modules.insert(full_name.clone(), empty_mod.clone());
+                                let module = self.exec_module_source(&source, candidate, &full_name)?;
+                                self.modules.insert(full_name.clone(), module.clone());
+                                current_name = full_name;
+                                parent_path = None;
+                                break;
+                            }
+                        }
+                    } else {
+                        all_resolved = false;
+                        break;
+                    }
                 }
-                let child_full = format!("{}.{}", parent_name, child_name);
-                return Err(format!("No module named '{}' (submodule of '{}' not found)", child_full, parent_name));
+                if all_resolved {
+                    if let Some(result) = self.modules.get(&current_name).cloned() {
+                        return Ok(result);
+                    }
+                }
+                // If we resolved some but not all, continue to search
+                // from the last unresolved parent
             }
-            // If parent not found, fall through to regular search
+
+            // If we didn't have the top-level or couldn't walk the chain,
+            // fall through to regular sys.path search below
         }
+
+        // Search sys.path for the module
         let search_paths = self.get_sys_path();
+        eprintln!("DEBUG import: searching sys.path for '{}', paths={:?}", name, search_paths);
         for base in &search_paths {
             let py_path = if base.ends_with('/') {
                 format!("{}{}.py", base, name)
@@ -700,7 +754,6 @@ impl VirtualMachine {
                 format!("{}/{}.py", base, name)
             };
             if let Ok(source) = std::fs::read_to_string(&py_path) {
-                // Insert into modules BEFORE executing (for circular/relative import resolution)
                 let empty_mod = create_module(name, HashMap::new());
                 self.modules.insert(name.to_string(), empty_mod.clone());
                 if let Some(sys_mod) = self.modules.get("sys") {
@@ -720,7 +773,6 @@ impl VirtualMachine {
                 format!("{}/{}/__init__.py", base, name)
             };
             if let Ok(source) = std::fs::read_to_string(&init_path) {
-                // Insert into modules BEFORE executing (for circular/relative import resolution)
                 let pkg_dir = std::path::Path::new(&init_path).parent()
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_default();
@@ -2483,19 +2535,21 @@ impl VirtualMachine {
                 };
                 if let Some(module) = self.modules.get(&resolved) {
                     self.frames[fi].push(module.clone());
-                } else if let Ok(module) = self.import_module_from_file(&resolved) {
-                    self.modules.insert(resolved.clone(), module.clone());
-                    // Also add to sys.modules if available
-                    if let Some(sys_mod) = self.modules.get("sys") {
-                        if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
-                            if let Some(mod_dict) = dict.get("modules") {
-                                mod_dict.borrow_mut().set_attribute(&resolved, module.clone()).ok();
-                            }
-                        }
-                    }
-                    self.frames[fi].push(module);
                 } else {
-                    return Err(PyError::ImportError(format!("No module named '{}'", resolved)));
+                    match self.import_module_from_file(&resolved) {
+                        Ok(module) => {
+                            self.modules.insert(resolved.clone(), module.clone());
+                            if let Some(sys_mod) = self.modules.get("sys") {
+                                if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
+                                    if let Some(mod_dict) = dict.get("modules") {
+                                        mod_dict.borrow_mut().set_attribute(&resolved, module.clone()).ok();
+                                    }
+                                }
+                            }
+                            self.frames[fi].push(module);
+                        }
+                        Err(msg) => return Err(PyError::ImportError(msg)),
+                    }
                 }
             }
 

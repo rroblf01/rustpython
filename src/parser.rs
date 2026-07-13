@@ -241,21 +241,20 @@ impl Parser {
 
     fn parse_stmt_tail(&mut self, expr: Expr) -> Result<Stmt, String> {
         if self.eat(&Token::Equal) {
-            let mut value = self.parse_expr()?;
-            // Handle tuple assignment without parens: a = 1, 2, 3
+            let mut value = self.parse_conditional_expr()?;
             if self.at(&Token::Comma) && !self.at(&Token::Semicolon) && !self.at(&Token::Newline) {
                 let mut elts = vec![value];
                 while self.eat(&Token::Comma) {
                     if self.at(&Token::Newline) || self.at(&Token::Semicolon) || self.at(&Token::EndOfFile) {
                         break;
                     }
-                    elts.push(self.parse_expr()?);
+                    elts.push(self.parse_conditional_expr()?);
                 }
                 value = Expr::Tuple(elts);
             }
             let mut targets = vec![expr];
             while self.eat(&Token::Equal) {
-                targets.push(self.parse_expr()?);
+                targets.push(self.parse_conditional_expr()?);
             }
             self.expect_newline_or_eof();
             Ok(Stmt::Assign { targets, value: Box::new(value) })
@@ -283,7 +282,7 @@ impl Parser {
                 Token::AtEqual => Operator::MatMult,
                 _ => unreachable!(),
             };
-            let value = self.parse_expr()?;
+            let value = self.parse_conditional_expr()?;
             self.expect_newline_or_eof();
             Ok(Stmt::AugAssign {
                 target: Box::new(expr),
@@ -769,7 +768,7 @@ impl Parser {
     fn parse_return(&mut self) -> Result<Stmt, String> {
         self.expect(&Token::Return)?;
         let value = if !self.at(&Token::Newline) && !self.at(&Token::Semicolon) && !self.at(&Token::EndOfFile) {
-            Some(Box::new(self.parse_expr()?))
+            Some(Box::new(self.parse_conditional_expr()?))
         } else {
             None
         };
@@ -1037,15 +1036,15 @@ impl Parser {
     // ---- Expressions ----
 
     fn parse_expr(&mut self) -> Result<Expr, String> {
-        self.parse_if_expr()
+        self.parse_or_expr()
     }
 
-    fn parse_if_expr(&mut self) -> Result<Expr, String> {
+    fn parse_conditional_expr(&mut self) -> Result<Expr, String> {
         let expr = self.parse_or_expr()?;
         if self.eat(&Token::If) {
-            let test = self.parse_expr()?;
+            let test = self.parse_conditional_expr()?;
             self.expect(&Token::Else)?;
-            let orelse = self.parse_expr()?;
+            let orelse = self.parse_conditional_expr()?;
             Ok(Expr::IfExp {
                 test: Box::new(test),
                 body: Box::new(expr),
@@ -1321,6 +1320,7 @@ impl Parser {
                     loop {
                         if self.at(&Token::RightParen) { break; }
                         if self.at(&Token::Star) {
+                            self.next(); // consume *
                             let starred = self.parse_expr()?;
                             args.push(Expr::Starred(Box::new(starred)));
                         } else if self.at(&Token::DoubleStar) {
@@ -1333,9 +1333,8 @@ impl Parser {
                             let value = self.parse_expr()?;
                             keywords.push(Keyword { arg, value: Box::new(value) });
                         } else {
-                            // Parse the first expression with bitwise-or precedence
-                            // so we can detect generator expressions (expr for ...)
-                            let expr = self.parse_bitwise_or()?;
+                            // Parse expression with full ternary support
+                            let expr = self.parse_conditional_expr()?;
                             // Check for generator expression as sole argument: f(x for x in lst)
                             if self.at(&Token::For) && args.is_empty() && keywords.is_empty() {
                                 self.next(); // consume 'for'
@@ -1494,7 +1493,12 @@ impl Parser {
                 // pre-compute f-strings at parse time.
                 let mut expr = Expr::Constant(Constant::String(parts.concat()));
                 loop {
-                    while self.at(&Token::Newline) { self.next(); }
+                    // Only eat newlines if followed by a string or f-string (implicit concatenation)
+                    while self.at(&Token::Newline)
+                        && (matches!(self.peek(), Token::String(_)) || matches!(self.peek(), Token::FStringStart))
+                    {
+                        self.next();
+                    }
                     match &self.current {
                         Token::String(s2) => {
                             let s = s2.clone();
@@ -1523,10 +1527,14 @@ impl Parser {
                 let mut parts = vec![b.clone()];
                 self.next();
                 // Implicit bytes concatenation: adjacent bytes with optional newlines
-                while {
-                    while self.at(&Token::Newline) { self.next(); }
-                    matches!(&self.current, Token::Bytes(_))
-                } {
+                loop {
+                    // Only eat newlines if followed by a bytes literal
+                    while self.at(&Token::Newline) && matches!(self.peek(), Token::Bytes(_)) {
+                        self.next();
+                    }
+                    if !matches!(&self.current, Token::Bytes(_)) {
+                        break;
+                    }
                     if let Token::Bytes(next) = &self.current {
                         parts.push(next.clone());
                         self.next();
@@ -1540,7 +1548,12 @@ impl Parser {
                 let mut parts = vec![self.parse_fstring()?];
                 // Implicit concatenation: adjacent f-strings and regular strings
                 loop {
-                    while self.at(&Token::Newline) { self.next(); }
+                    // Only eat newlines if followed by an f-string or string (implicit concatenation)
+                    while self.at(&Token::Newline)
+                        && (matches!(self.peek(), Token::FStringStart) || matches!(self.peek(), Token::String(_)))
+                    {
+                        self.next();
+                    }
                     match &self.current {
                         Token::FStringStart => {
                             parts.push(self.parse_fstring()?);
@@ -1922,7 +1935,7 @@ impl Parser {
     fn parse_yield_expr(&mut self) -> Result<Expr, String> {
         self.next();
         if self.eat(&Token::From) {
-            let expr = self.parse_expr()?;
+            let expr = self.parse_conditional_expr()?;
             Ok(Expr::YieldFrom(Box::new(expr)))
         } else {
             let expr = if !self.at(&Token::Newline) && !self.at(&Token::RightParen)
@@ -1930,7 +1943,7 @@ impl Parser {
                 && !self.at(&Token::Colon) && !self.at(&Token::Comma)
                 && !self.at(&Token::Semicolon) && !self.at(&Token::EndOfFile)
             {
-                Some(Box::new(self.parse_expr()?))
+                Some(Box::new(self.parse_conditional_expr()?))
             } else {
                 None
             };

@@ -618,6 +618,11 @@ impl Lexer {
                         let quote = self.advance().unwrap();
                         return self.tokenize_fstring(quote);
                     }
+                    // Check for raw strings (r"..." or r'...')
+                    if (name == "r" || name == "R") && (self.peek() == Some('"') || self.peek() == Some('\'')) {
+                        let quote = self.advance().unwrap();
+                        return self.read_string(quote, true, false);
+                    }
                     // Check for bytes literals (b"..." or b'...')
                     if (name == "b" || name == "B") && (self.peek() == Some('"') || self.peek() == Some('\'')) {
                         let quote = self.advance().unwrap();
