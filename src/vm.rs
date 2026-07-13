@@ -1504,7 +1504,13 @@ impl VirtualMachine {
                 } else {
                     "<function>".to_string()
                 };
-                let globals = self.frames[fi].globals.clone();
+                // Use module_globals when available (class body execution) so that
+                // functions defined inside a class body capture the module's globals
+                // (e.g. 'empty' from django.utils.functional) rather than the class
+                // namespace. Falls back to the frame's globals for module-level code
+                // and regular function calls.
+                let globals = self.frames[fi].module_globals.clone()
+                    .unwrap_or_else(|| self.frames[fi].globals.clone());
                 let mut func = PyObjectRef::new(PyObject::Function {
                     code,
                     globals,
