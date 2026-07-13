@@ -3749,6 +3749,15 @@ impl ObjectAccess for PyObject {
                 }).ok_or_else(|| PyError::attribute_error(format!("type has no attribute '{}'", name)))
             }
             PyObject::Instance { dict, typ } => {
+                if name == "__dict__" {
+                    eprintln!("DEBUG get_attribute __dict__ on Instance: dict has {} items, {:?}", dict.len(), dict.keys().collect::<Vec<_>>());
+                    // Convert instance's HashMap to a PyDict
+                    let mut pd = PyDict::new();
+                    for (k, v) in dict.iter() {
+                        let _ = pd.set(py_str(k), v.clone());
+                    }
+                    return Ok(PyObjectRef::new(PyObject::Dict(pd)));
+                }
                 // If __slots__ is defined, verify the attribute is allowed
                 if let Some(slots) = get_instance_slots(typ) {
                     if !slots.iter().any(|s| s == name) {

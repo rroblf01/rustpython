@@ -272,7 +272,15 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
         }))),
     }));
     d.insert("platform".to_string(), py_str(std::env::consts::OS));
-    d.insert("implementation".to_string(), py_str("RustPython"));
+    // sys.implementation — CPython returns a namespace with name, cache_tag, etc.
+    {
+        let mut imp_dict = HashMap::new();
+        imp_dict.insert("name".to_string(), py_str("cpython"));
+        imp_dict.insert("cache_tag".to_string(), py_str("cpython-314"));
+        imp_dict.insert("hexversion".to_string(), py_int(50987248)); // 0x030A0000
+        imp_dict.insert("_multi_threaded".to_string(), py_bool(true));
+        d.insert("implementation".to_string(), create_module("implementation", imp_dict));
+    }
     d.insert("byteorder".to_string(), py_str(if cfg!(target_endian = "little") { "little" } else { "big" }));
     d.insert("maxsize".to_string(), py_int(i64::MAX));
     d.insert("maxunicode".to_string(), py_int(1114111));

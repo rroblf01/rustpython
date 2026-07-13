@@ -717,6 +717,7 @@ impl VirtualMachine {
                                         ])
                                     } else { HashMap::new() }
                                 } else { HashMap::new() };
+                eprintln!("DEBUG chain: importing '{}' from '{}'", full_name, current_name);
                                 let empty_mod = create_module(&full_name, empty_dict);
                                 self.modules.insert(full_name.clone(), empty_mod.clone());
                                 let module = self.exec_module_source(&source, candidate, &full_name)?;
@@ -829,10 +830,13 @@ impl VirtualMachine {
     }
 
     fn exec_module_source(&mut self, source: &str, path: &str, name: &str) -> Result<PyObjectRef, String> {
+        eprintln!("DEBUG exec_module_source: parsing '{}'...", name);
         let mut parser = crate::parser::Parser::new(source);
         let program = parser.parse_program().map_err(|e| format!("Parse error: {}", e))?;
+        eprintln!("DEBUG exec_module_source: compiling '{}'...", name);
         let mut compiler = crate::compiler::Compiler::new();
         let code = compiler.compile(&program, path).map_err(|e| format!("Compile error: {}", e))?;
+        eprintln!("DEBUG exec_module_source: compiled '{}' OK, {} instrs", name, code.instructions.len());
         let is_package = path.ends_with("__init__.py");
         let mut globals_map = HashMap::from([
             ("__name__".to_string(), py_str(name)),
@@ -850,7 +854,12 @@ impl VirtualMachine {
             globals_map.insert("__package__".to_string(), py_str(""));
         }
         let module_globals = Rc::new(RefCell::new(globals_map));
-        self.exec_code(code, Some(Rc::clone(&module_globals))).map_err(|e| format!("{}", e))?;
+        eprintln!("DEBUG exec_module_source: executing '{}'...", name);
+        self.exec_code(code, Some(Rc::clone(&module_globals))).map_err(|e| {
+            eprintln!("DEBUG exec_module_source: '{}' FAILED: {:?}", name, e);
+            format!("{}", e)
+        })?;
+        eprintln!("DEBUG exec_module_source: '{}' completed OK", name);
         let globals_copy = module_globals.borrow().clone();
         Ok(create_module(name, globals_copy))
     }
@@ -1869,6 +1878,15 @@ impl VirtualMachine {
                     let obj_borrowed = obj.borrow();
                     match &*obj_borrowed {
                         PyObject::Instance { dict, typ } => {
+                            if name == "__dict__" {
+                                let mut pd = crate::object::PyDict::new();
+                                for (k, v) in dict.iter() {
+                                    let _ = pd.set(py_str(k), v.clone());
+                                }
+                                drop(obj_borrowed);
+                                self.frames[fi].push(PyObjectRef::new(PyObject::Dict(pd)));
+                                return Ok(None);
+                            }
                             let attr = dict.get(&name).cloned().or_else(|| {
                                 let typ_ref = typ.borrow();
                                 if let PyObject::Type { dict: type_dict, mro, .. } = &*typ_ref {

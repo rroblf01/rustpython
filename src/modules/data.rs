@@ -181,6 +181,44 @@ pub fn create_functools_dict() -> HashMap<String, PyObjectRef> {
         };
         Ok(PyObjectRef::new(PyObject::Closure(Rc::new(decorator))))
     });
+    // Simple lru_cache that stores results in a dict
+    ft_func!("lru_cache", |args| {
+        let maxsize = if !args.is_empty() {
+            match &*args[0].borrow() {
+                PyObject::Int(i) => i.to_i64().unwrap_or(128) as usize,
+                _ => 128,
+            }
+        } else { 128 };
+        // Return a decorator (closure) that wraps functions
+        let decorator = move |dec_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+            if dec_args.is_empty() {
+                return Err(PyError::type_error("lru_cache requires a function argument"));
+            }
+            let func = dec_args[0].clone();
+            let cache = std::cell::RefCell::new(
+                std::collections::HashMap::<String, PyObjectRef>::new(),
+            );
+            let maxsize = maxsize;
+            let cache_wrapper = move |inner_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                let key = inner_args
+                    .iter()
+                    .map(|a| format!("{:?}", a))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let mut cache = cache.borrow_mut();
+                if let Some(cached) = cache.get(&key) {
+                    return Ok(cached.clone());
+                }
+                let result = builtin_call(&func, inner_args)?;
+                if cache.len() < maxsize {
+                    cache.insert(key, result.clone());
+                }
+                Ok(result)
+            };
+            Ok(PyObjectRef::new(PyObject::Closure(Rc::new(cache_wrapper))))
+        };
+        Ok(PyObjectRef::new(PyObject::Closure(Rc::new(decorator))))
+    });
 
     d
 }
