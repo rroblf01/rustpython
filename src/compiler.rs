@@ -687,7 +687,7 @@ impl Compiler {
                     }
                     let all_inner_names = Self::collect_names_in_stmts(body);
                     for name in &all_inner_names {
-                        if !inner_local.contains(name) && !inner_globals.contains(name) {
+                        if !inner_local.contains(name) && !inner_globals.contains(name) && local_names.contains(name) {
                             refs.insert(name.clone());
                         }
                     }

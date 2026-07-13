@@ -3074,8 +3074,8 @@ impl VirtualMachine {
 
             // Capture the calling frame's module_globals (or globals as fallback)
             // so that LOAD_NAME inside the class body can resolve module-level names.
-            let caller_module_globals = if self.frames.len() >= 2 {
-                let caller_frame = &self.frames[self.frames.len() - 2];
+            let caller_module_globals = if self.frames.len() >= 1 {
+                let caller_frame = &self.frames[self.frames.len() - 1];
                 caller_frame.module_globals.clone()
                     .or_else(|| Some(caller_frame.globals.clone()))
             } else {
