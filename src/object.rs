@@ -5975,7 +5975,36 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                     }
                     Ok(items[i as usize].clone())
                 }
-                _ => Err(PyError::type_error("tuple indices must be integers or slices")),
+                PyObject::Slice { start, stop, step } => {
+                    let mut result = Vec::new();
+                    let len = items.len();
+                    let s = start.borrow();
+                    let e = stop.borrow();
+                    let st = step.borrow();
+                    let step_val = if let PyObject::Int(i) = &*st { i.to_isize().unwrap_or(1) } else { 1 };
+                    if step_val > 0 {
+                        let start_val = if let PyObject::Int(i) = &*s { i.to_isize().unwrap_or(0) } else { 0 };
+                        let stop_val = if let PyObject::Int(i) = &*e { i.to_isize().unwrap_or(len as isize) } else { len as isize };
+                        let mut i = start_val;
+                        while i < stop_val && i < len as isize {
+                            result.push(items[i as usize].clone());
+                            i += step_val;
+                        }
+                    } else {
+                        let start_val = if let PyObject::Int(i) = &*s { i.to_isize().unwrap_or((len as isize) - 1) } else { (len as isize) - 1 };
+                        let stop_val = if let PyObject::Int(i) = &*e { i.to_isize().unwrap_or(-1) } else { -1 };
+                        let mut i = start_val;
+                        while i > stop_val && i >= 0 {
+                            result.push(items[i as usize].clone());
+                            i += step_val;
+                        }
+                    }
+                    Ok(py_tuple(result))
+                }
+                _ => {
+                    eprintln!("DEBUG tuple subscript: index type={:?}", index.borrow().type_name());
+                    Err(PyError::type_error("tuple indices must be integers or slices"))
+                }
             }
         }
         PyObject::Str(s) => {
