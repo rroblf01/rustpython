@@ -2169,8 +2169,15 @@ pub fn create_gc_dict() -> HashMap<String, PyObjectRef> {
         };
     }
 
+    // Wire gc.collect() to the actual generational GC in gc.rs
     gc_func!("collect", |_| {
-        Ok(py_int(0))
+        crate::gc::GC_HEAP.with(|heap| {
+            heap.borrow_mut().collect();
+        });
+        let stats = crate::gc::GC_HEAP.with(|heap| {
+            *heap.borrow().stats()
+        });
+        Ok(py_int(stats.freed as i64))
     });
 
     gc_func!("enable", |_| {

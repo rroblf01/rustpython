@@ -1867,8 +1867,34 @@ pub fn builtin_int(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         PyObject::Int(_) => Ok(args[0].clone()),
         PyObject::Float(f) => Ok(py_int(*f as i64)),
         PyObject::Str(s) => {
-            let n: i64 = s.trim().parse().map_err(|_| PyError::value_error(format!("invalid literal for int(): '{}'", s)))?;
-            Ok(py_int(n))
+            let s_trim = s.trim();
+            // Remove underscores (Python visual separator, e.g. "0xFF_FF" or "1_000_000")
+            let s_clean: String = s_trim.chars().filter(|&c| c != '_').collect();
+            // Split optional sign from body
+            let (sign, body) = match s_clean.as_bytes().first() {
+                Some(b'-') => (-1, &s_clean[1..]),
+                Some(b'+') => (1, &s_clean[1..]),
+                _ => (1, &s_clean[..]),
+            };
+            let make_err = || PyError::value_error(format!("invalid literal for int(): '{}'", s));
+            let obj = if let Some(oct) = body.strip_prefix("0o").or_else(|| body.strip_prefix("0O")) {
+                if let Ok(n) = i64::from_str_radix(oct, 8) { py_int(sign * n) }
+                else if let Some(n) = BigInt::parse_bytes(oct.as_bytes(), 8) { py_int(if sign < 0 { -n } else { n }) }
+                else { return Err(make_err()); }
+            } else if let Some(hex) = body.strip_prefix("0x").or_else(|| body.strip_prefix("0X")) {
+                if let Ok(n) = i64::from_str_radix(hex, 16) { py_int(sign * n) }
+                else if let Some(n) = BigInt::parse_bytes(hex.as_bytes(), 16) { py_int(if sign < 0 { -n } else { n }) }
+                else { return Err(make_err()); }
+            } else if let Some(bin) = body.strip_prefix("0b").or_else(|| body.strip_prefix("0B")) {
+                if let Ok(n) = i64::from_str_radix(bin, 2) { py_int(sign * n) }
+                else if let Some(n) = BigInt::parse_bytes(bin.as_bytes(), 2) { py_int(if sign < 0 { -n } else { n }) }
+                else { return Err(make_err()); }
+            } else {
+                if let Ok(n) = body.parse::<i64>() { py_int(sign * n) }
+                else if let Ok(n) = body.parse::<BigInt>() { py_int(if sign < 0 { -n } else { n }) }
+                else { return Err(make_err()); }
+            };
+            Ok(obj)
         }
         PyObject::Bool(b) => Ok(py_int(if *b { 1 } else { 0 })),
         _ => Err(PyError::type_error(format!("int() argument must be a string or number, not '{}'", obj.type_name()))),
