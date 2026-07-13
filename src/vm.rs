@@ -774,13 +774,6 @@ impl VirtualMachine {
                                 self.modules.insert(full_name.clone(), empty_mod.clone());
                                 let module = self.exec_module_source(&source, candidate, &full_name)?;
                                 self.modules.insert(full_name.clone(), module.clone());
-                                // Register subpackage in parent module's dict
-                                if let Some(parent_mod) = self.modules.get(&current_name) {
-                                    if let PyObject::Module { dict, .. } = &mut *parent_mod.borrow_mut() {
-                                        let child_name = full_name.rsplit('.').next().unwrap_or(&full_name);
-                                        dict.insert(child_name.to_string(), module.clone());
-                                    }
-                                }
                                 current_name = full_name;
                                 parent_path = None;
                                 break;
