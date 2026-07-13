@@ -2055,24 +2055,129 @@ impl VirtualMachine {
                 };
                 let matched = match &*exc.borrow() {
                     PyObject::Exception { typ, .. } => is_exception_subclass(typ, &expected_name),
+                    PyObject::ExceptionGroup { typ, .. } => is_exception_subclass(typ, &expected_name),
                     _ => false,
                 };
                 self.frames[fi].push(py_bool(matched));
+            }
+
+            Opcode::CHECK_EXC_MATCH_STAR => {
+                // For except*: splits ExceptionGroup into matched/unmatched subgroups.
+                // Pops 3 items (type, exc_dup from DUP_TOP, exc_orig from before DUP_TOP).
+                // On match: pushes [unmatched_eg_or_empty_eg, matched_eg, True].
+                // On no match: pushes [exc_orig, False].
+                let expected = self.frames[fi].pop()?;
+                let exc_dup = self.frames[fi].pop()?;
+                let exc_orig = self.frames[fi].pop()?;
+                let expected_name = match &*expected.borrow() {
+                    PyObject::Str(s) => s.clone(),
+                    PyObject::Type { name, .. } => name.clone(),
+                    PyObject::BuiltinFunction { name, .. } => name.clone(),
+                    _ => return Err(PyError::type_error("exceptions must derive from BaseException")),
+                };
+
+                // Read the type info from exc_dup while we still hold the borrow
+                let is_eg = match &*exc_dup.borrow() {
+                    PyObject::ExceptionGroup { .. } => true,
+                    _ => false,
+                };
+
+                if is_eg {
+                    // Read fully from the borrow so we can drop it
+                    let (typ, args, matched, unmatched) = {
+                        let eg = &*exc_dup.borrow();
+                        let (typ, args, exceptions) = match eg {
+                            PyObject::ExceptionGroup { typ, args, exceptions } => (typ.clone(), args.clone(), exceptions.clone()),
+                            _ => unreachable!(),
+                        };
+                        let mut matched = Vec::new();
+                        let mut unmatched = Vec::new();
+                        for child in &exceptions {
+                            let child_name = match &*child.borrow() {
+                                PyObject::Exception { typ, .. } => typ.clone(),
+                                PyObject::ExceptionGroup { typ, .. } => typ.clone(),
+                                _ => String::new(),
+                            };
+                            if is_exception_subclass(&child_name, &expected_name) {
+                                matched.push(child.clone());
+                            } else {
+                                unmatched.push(child.clone());
+                            }
+                        }
+                        (typ, args, matched, unmatched)
+                    };
+
+                    if !matched.is_empty() {
+                        let matched_group = PyObjectRef::new(PyObject::ExceptionGroup {
+                            typ: typ.clone(),
+                            args: args.clone(),
+                            exceptions: matched,
+                        });
+                        if !unmatched.is_empty() {
+                            let unmatched_group = PyObjectRef::new(PyObject::ExceptionGroup {
+                                typ: typ.clone(),
+                                args: vec![py_str(&typ)],
+                                exceptions: unmatched,
+                            });
+                            self.frames[fi].push(unmatched_group);
+                        } else {
+                            let empty_group = PyObjectRef::new(PyObject::ExceptionGroup {
+                                typ: typ.clone(),
+                                args: vec![py_str(&typ)],
+                                exceptions: vec![],
+                            });
+                            self.frames[fi].push(empty_group);
+                        }
+                        self.frames[fi].push(matched_group);
+                        self.frames[fi].push(py_bool(true));
+                    } else {
+                        // No matching children: restore original exception
+                        self.frames[fi].push(exc_orig);
+                        self.frames[fi].push(py_bool(false));
+                    }
+                } else {
+                    // Not an ExceptionGroup — normal match check
+                    let matched = match &*exc_dup.borrow() {
+                        PyObject::Exception { typ, .. } => is_exception_subclass(typ, &expected_name),
+                        _ => false,
+                    };
+                    if matched {
+                        let empty_group = PyObjectRef::new(PyObject::ExceptionGroup {
+                            typ: "ExceptionGroup".to_string(),
+                            args: vec![py_str("")],
+                            exceptions: vec![],
+                        });
+                        self.frames[fi].push(empty_group);
+                        self.frames[fi].push(exc_dup);
+                        self.frames[fi].push(py_bool(true));
+                    } else {
+                        self.frames[fi].push(exc_orig);
+                        self.frames[fi].push(py_bool(false));
+                    }
+                }
             }
 
             Opcode::RERAISE => {
                 // Prefer active_exception (set by PUSH_EXC_INFO) so that
                 // POP_EXCEPT (which pops from the value stack) does not break
                 // RERAISE in try/finally blocks.
-                if let Some(exc) = self.frames[fi].active_exception.take() {
-                    return Err(PyError::Exception("re-raise".to_string(), exc));
-                }
-                match self.frames[fi].pop() {
-                    Ok(exc) => {
-                        return Err(PyError::Exception("re-raise".to_string(), exc));
+                let reraise_exc = if let Some(exc) = self.frames[fi].active_exception.take() {
+                    exc
+                } else {
+                    match self.frames[fi].pop() {
+                        Ok(exc) => exc,
+                        Err(_) => return Err(PyError::runtime_error("No active exception to re-raise")),
                     }
-                    Err(_) => return Err(PyError::runtime_error("No active exception to re-raise")),
+                };
+                // Check if it's an empty ExceptionGroup (all exceptions were handled)
+                let is_empty_eg = match &*reraise_exc.borrow() {
+                    PyObject::ExceptionGroup { exceptions, .. } => exceptions.is_empty(),
+                    _ => false,
+                };
+                if !is_empty_eg {
+                    return Err(PyError::Exception("re-raise".to_string(), reraise_exc));
                 }
+                // Empty group — all exceptions handled, silently continue
             }
 
             Opcode::RAISE_VARARGS => {
@@ -2090,7 +2195,7 @@ impl VirtualMachine {
                     1 => {
                         let exc = self.frames[fi].pop()?;
                         // If the raised value is a callable (class/factory), call it first
-                        let is_callable = !matches!(&*exc.borrow(), PyObject::Str(_) | PyObject::Exception { .. });
+                        let is_callable = !matches!(&*exc.borrow(), PyObject::Str(_) | PyObject::Exception { .. } | PyObject::ExceptionGroup { .. });
                         let exc = if is_callable {
                             let exc_clone = exc.clone();
                             match self.call_function(exc_clone, vec![], vec![]) {
@@ -2103,6 +2208,9 @@ impl VirtualMachine {
                         let msg = match &*exc.borrow() {
                             PyObject::Str(s) => s.clone(),
                             PyObject::Exception { args, .. } => {
+                                if !args.is_empty() { args[0].str() } else { "".to_string() }
+                            }
+                            PyObject::ExceptionGroup { args, .. } => {
                                 if !args.is_empty() { args[0].str() } else { "".to_string() }
                             }
                             _ => return Err(PyError::type_error("exceptions must be str or Exception instances")),
@@ -2327,8 +2435,9 @@ impl VirtualMachine {
 
             Opcode::YIELD_VALUE => {
                 let val = self.frames[fi].pop()?;
-                // Push sent value (None for next()) so execution can continue
-                self.frames[fi].push(py_none());
+                // Don't push a placeholder; the Generator/Coroutine send method
+                // will push the actual sent value (or None for __next__) onto
+                // the frame stack, making it available for the next instruction.
                 return Ok(Some(val));
             }
 
@@ -2359,45 +2468,84 @@ impl VirtualMachine {
             }
 
             Opcode::SEND => {
-                // Send value into generator/coroutine: pop value, peek iterator
+                // Send value into generator/coroutine/iterator: pop value, peek iterator
                 let val = self.frames[fi].pop()?;
                 let iter_val = self.frames[fi].peek(0)?;
-                let is_gen = matches!(&*iter_val.borrow(), PyObject::Generator { .. });
-                let is_coro = matches!(&*iter_val.borrow(), PyObject::Coroutine { .. });
-                if is_gen || is_coro {
-                    let method_name = if is_gen { "send" } else { "send" };
-                    let send_method = iter_val.borrow().get_attribute(method_name)
-                        .map_err(|_| PyError::attribute_error("object has no send method"))?;
-                    // Bind the method to the iterator
-                    let bound = PyObjectRef::imm(PyObject::BuiltinMethod {
-                        name: "send".to_string(),
-                        func: {
-                            let b = send_method.borrow();
-                            match &*b {
-                                PyObject::BuiltinMethod { func, .. } => *func,
-                                _ => return Err(PyError::runtime_error("expected BuiltinMethod")),
+                let result = {
+                    // Try to find a send method on the iterator
+                    let is_gen = matches!(&*iter_val.borrow(), PyObject::Generator { .. });
+                    let is_coro = matches!(&*iter_val.borrow(), PyObject::Coroutine { .. });
+                    if is_gen || is_coro {
+                        let method_name = "send";
+                        match iter_val.borrow().get_attribute(method_name) {
+                            Ok(send_method) => {
+                                let bound = match &*send_method.borrow() {
+                                    PyObject::BuiltinMethod { func, .. } => {
+                                        PyObjectRef::imm(PyObject::BuiltinMethod {
+                                            name: "send".to_string(),
+                                            func: *func,
+                                            self_obj: iter_val.clone(),
+                                        })
+                                    }
+                                    _ => return Err(PyError::runtime_error("expected BuiltinMethod for send")),
+                                };
+                                self.call_function(bound, vec![val], vec![])
                             }
-                        },
-                        self_obj: iter_val.clone(),
-                    });
-                    match self.call_function(bound, vec![val], vec![]) {
-                        Ok(val) => {
-                            self.frames[fi].push(val);
+                            Err(_) => Err(PyError::attribute_error("object has no send method")),
                         }
-                        Err(e) if matches!(&e, PyError::StopIteration) => {
-                            self.frames[fi].push(py_none());
+                    } else {
+                        // Handle Instance objects and other types with a send method
+                        match iter_val.borrow().get_attribute("send") {
+                            Ok(send_method) => {
+                                let bound = match &*send_method.borrow() {
+                                    PyObject::BuiltinMethod { func, .. } => {
+                                        PyObjectRef::imm(PyObject::BuiltinMethod {
+                                            name: "send".to_string(),
+                                            func: *func,
+                                            self_obj: iter_val.clone(),
+                                        })
+                                    }
+                                    _ => return Err(PyError::runtime_error("expected BuiltinMethod for send")),
+                                };
+                                self.call_function(bound, vec![val], vec![])
+                            }
+                            Err(_) => {
+                                // No send method — try __next__ (for simple iterators used with await)
+                                Err(PyError::type_error("SEND on non-generator/coroutine/instance"))
+                            }
                         }
-                        Err(e) => return Err(e),
                     }
-                } else {
-                    return Err(PyError::type_error("SEND on non-generator/coroutine"));
+                };
+                match result {
+                    Ok(val) => {
+                        self.frames[fi].push(val);
+                    }
+                    Err(e) => {
+                        match e {
+                            PyError::StopIteration => {
+                                // StopIteration with no value — push None as return value
+                                self.frames[fi].push(py_none());
+                                // Jump to cleanup target (absolute jump, like FOR_ITER)
+                                self.frames[fi].ip = arg as usize;
+                            }
+                            PyError::Exception(ref typ, ref _exc_val) if typ == "StopIteration" => {
+                                // Extract the return value from the PyError::Exception
+                                let return_val = _exc_val.clone();
+                                self.frames[fi].push(return_val);
+                                // Jump to cleanup target (absolute jump, like FOR_ITER)
+                                self.frames[fi].ip = arg as usize;
+                            }
+                            other => return Err(other),
+                        }
+                    }
                 }
             }
 
             Opcode::END_SEND => {
-                // Pop the result and the iterator from the stack
-                self.frames[fi].pop()?; // result
-                self.frames[fi].pop()?; // iterator
+                // Pop result and iterator, push result (validates proper stack state)
+                let result = self.frames[fi].pop()?;
+                let _iter = self.frames[fi].pop()?; // iterator, discarded
+                self.frames[fi].push(result);
             }
 
             Opcode::CLEANUP_THROW => {
@@ -2690,7 +2838,8 @@ impl VirtualMachine {
 
             let mut mro = vec![class.clone()];
             // C3 linearization for proper method resolution
-            mro.extend(c3_linearize(&bases_vec));
+            let linearization = c3_linearize(&bases_vec)?;
+            mro.extend(linearization);
             if let PyObject::Type { mro: mro_field, .. } = &mut *class.borrow_mut() {
                 *mro_field = mro;
             }
@@ -2738,26 +2887,32 @@ impl VirtualMachine {
                 frame.stack.truncate(handler.stack_depth);
                 frame.ip = handler.instr_addr;
                 let exc_obj = {
-                    let (typ, cause) = match error {
-                        PyError::TypeError(_) => ("TypeError".to_string(), None),
-                        PyError::ValueError(_) => ("ValueError".to_string(), None),
-                        PyError::NameError(_) => ("NameError".to_string(), None),
-                        PyError::AttributeError(_) => ("AttributeError".to_string(), None),
-                        PyError::IndexError(_) => ("IndexError".to_string(), None),
-                        PyError::KeyError(_) => ("KeyError".to_string(), None),
-                        PyError::ZeroDivisionError(_) => ("ZeroDivisionError".to_string(), None),
-                        PyError::RuntimeError(_) => ("RuntimeError".to_string(), None),
-                        PyError::StopIteration => ("StopIteration".to_string(), None),
-                        PyError::AssertionError(_) => ("AssertionError".to_string(), None),
-                        PyError::ImportError(_) => ("ImportError".to_string(), None),
+                    let (typ, cause, is_group) = match error {
+                        PyError::TypeError(_) => ("TypeError".to_string(), None, false),
+                        PyError::ValueError(_) => ("ValueError".to_string(), None, false),
+                        PyError::NameError(_) => ("NameError".to_string(), None, false),
+                        PyError::AttributeError(_) => ("AttributeError".to_string(), None, false),
+                        PyError::IndexError(_) => ("IndexError".to_string(), None, false),
+                        PyError::KeyError(_) => ("KeyError".to_string(), None, false),
+                        PyError::ZeroDivisionError(_) => ("ZeroDivisionError".to_string(), None, false),
+                        PyError::RuntimeError(_) => ("RuntimeError".to_string(), None, false),
+                        PyError::StopIteration => ("StopIteration".to_string(), None, false),
+                        PyError::AssertionError(_) => ("AssertionError".to_string(), None, false),
+                        PyError::ImportError(_) => ("ImportError".to_string(), None, false),
                         PyError::Exception(_, exc) => {
                             let exc_borrow = exc.borrow();
                             match &*exc_borrow {
-                                PyObject::Exception { typ, cause, .. } => (typ.clone(), cause.clone()),
-                                _ => ("Exception".to_string(), None),
+                                PyObject::Exception { typ, cause, .. } => (typ.clone(), cause.clone(), false),
+                                PyObject::ExceptionGroup { .. } => {
+                                    // Preserve ExceptionGroup: push it directly
+                                    drop(exc_borrow);
+                                    frame.push(exc.clone());
+                                    return true;
+                                }
+                                _ => ("Exception".to_string(), None, false),
                             }
                         }
-                        _ => ("Exception".to_string(), None),
+                        _ => ("Exception".to_string(), None, false),
                     };
                     PyObjectRef::imm(PyObject::Exception {
                         typ,
@@ -2780,52 +2935,79 @@ impl VirtualMachine {
     }
 }
 
-fn c3_linearize(bases: &[PyObjectRef]) -> Vec<PyObjectRef> {
-    if bases.is_empty() { return vec![]; }
-    let mut result: Vec<PyObjectRef> = Vec::new();
-    let mut remaining: Vec<Vec<PyObjectRef>> = Vec::new();
+/// C3 linearization for proper method resolution order (MRO).
+///
+/// Implements the C3 algorithm used by CPython since Python 2.3.
+/// Merges the MROs of all bases together with the direct bases list.
+/// Returns an error if a consistent MRO cannot be created.
+fn c3_linearize(bases: &[PyObjectRef]) -> PyResult<Vec<PyObjectRef>> {
+    if bases.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // Build the lists to merge:
+    // For each base, get its linearized MRO (already computed since classes
+    // are created in dependency order). If the base's MRO is empty (as with
+    // built-in types whose MRO was never computed), treat it as just [base].
+    // The C3 algorithm also includes the direct bases list as the last merge
+    // list to enforce base ordering constraints.
+    let mut lists: Vec<Vec<PyObjectRef>> = Vec::new();
     for base in bases {
-        let mut base_mro = vec![base.clone()];
-        if let PyObject::Type { mro, .. } = &*base.borrow() {
-            for cls in mro.iter() {
-                if !result.iter().any(|c| c.borrow().type_name() == cls.borrow().type_name()) {
-                    if !base_mro.iter().any(|c| c.borrow().type_name() == cls.borrow().type_name()) {
-                        base_mro.push(cls.clone());
-                    }
-                }
+        let base_mro = if let PyObject::Type { mro, .. } = &*base.borrow() {
+            if mro.is_empty() {
+                vec![base.clone()]
+            } else {
+                mro.clone()
             }
-        }
-        remaining.push(base_mro);
+        } else {
+            vec![base.clone()]
+        };
+        lists.push(base_mro);
     }
-    while !remaining.is_empty() {
+    // Add the direct bases list as the final merge constraint (C3 spec)
+    lists.push(bases.to_vec());
+
+    let mut result: Vec<PyObjectRef> = Vec::new();
+    loop {
+        // Collect non-empty lists
+        let non_empty: Vec<&Vec<PyObjectRef>> = lists.iter().filter(|l| !l.is_empty()).collect();
+        if non_empty.is_empty() {
+            return Ok(result);
+        }
+
         let mut found = false;
-        for i in 0..remaining.len() {
-            if remaining[i].is_empty() { continue; }
-            let candidate = remaining[i][0].clone();
+        'candidate: for list in &non_empty {
+            let candidate = &list[0];
             let candidate_name = candidate.borrow().type_name();
-            let mut bad = false;
-            for j in 0..remaining.len() {
-                if i == j { continue; }
-                if remaining[j].len() > 1 {
-                    for k in 1..remaining[j].len() {
-                        if remaining[j][k].borrow().type_name() == candidate_name { bad = true; break; }
+
+            // Check if candidate appears in the tail of any other non-empty list
+            for other in &non_empty {
+                if other.len() > 1 {
+                    for item in &other[1..] {
+                        if item.borrow().type_name() == candidate_name {
+                            continue 'candidate;
+                        }
                     }
                 }
-                if bad { break; }
             }
-            if !bad {
-                result.push(candidate);
-                for list in &mut remaining {
-                    if !list.is_empty() && list[0].borrow().type_name() == candidate_name { list.remove(0); }
+
+            // Candidate is valid — add to result and remove from all heads
+            result.push(candidate.clone());
+            for list in &mut lists {
+                if !list.is_empty() && list[0].borrow().type_name() == candidate_name {
+                    list.remove(0);
                 }
-                found = true;
-                break;
             }
+            found = true;
+            break;
         }
-        if !found { break; }
-        remaining.retain(|l| !l.is_empty());
+
+        if !found {
+            return Err(PyError::type_error(
+                "Cannot create a consistent method resolution order (MRO)"
+            ));
+        }
     }
-    result
 }
 
 impl VirtualMachine {

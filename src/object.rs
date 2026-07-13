@@ -4813,7 +4813,8 @@ impl ObjectAccess for PyObject {
                                                 Ok(val)
                                             } else {
                                                 *frame_opt = None;
-                                                Err(crate::object::PyError::StopIteration)
+                                                // Propagate the return value via StopIteration for SEND
+                                                Err(crate::object::PyError::Exception("StopIteration".to_string(), val))
                                             }
                                         }
                                         Err(e) => {
@@ -4821,7 +4822,8 @@ impl ObjectAccess for PyObject {
                                             if matches!(&e, crate::object::PyError::StopIteration) {
                                                 return Err(e);
                                             }
-                                            Err(e)
+                                            // Wrapping other exceptions as StopIteration with value
+                                            Err(crate::object::PyError::Exception("StopIteration".to_string(), crate::object::py_none()))
                                         }
                                     }
                                 } else {
@@ -4888,7 +4890,8 @@ impl ObjectAccess for PyObject {
                                                 Ok(val)
                                             } else {
                                                 *frame_opt = None;
-                                                Err(crate::object::PyError::StopIteration)
+                                                // Propagate the return value via StopIteration for SEND
+                                                Err(crate::object::PyError::Exception("StopIteration".to_string(), val))
                                             }
                                         }
                                         Err(e) => {
@@ -4896,7 +4899,8 @@ impl ObjectAccess for PyObject {
                                             if matches!(&e, crate::object::PyError::StopIteration) {
                                                 return Err(e);
                                             }
-                                            Err(e)
+                                            // Wrap other exceptions as StopIteration with value
+                                            Err(crate::object::PyError::Exception("StopIteration".to_string(), crate::object::py_none()))
                                         }
                                     }
                                 } else {

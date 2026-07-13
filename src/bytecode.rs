@@ -126,6 +126,12 @@ pub enum Opcode {
 
     // Custom opcodes for dict operations
     DICT_MERGE = 202, // Pop TOS (source dict) and merge into dict at TOS1
+
+    // ExceptionGroup splitting for except* (PEP 654)
+    // Like CHECK_EXC_MATCH but for except*: pops type + exc_dup + exc_orig,
+    // splits ExceptionGroup into matched/unmatched subgroups, pushes
+    // [unmatched_eg, matched_eg, True] on match or [exc_orig, False] on no match.
+    CHECK_EXC_MATCH_STAR = 120,
 }
 
 impl Opcode {
@@ -197,6 +203,7 @@ impl Opcode {
             261 => LOAD_CLOSURE,
             202 => DICT_MERGE,
             218 => UNPACK_SEQUENCE_TWO_TUPLE,
+            120 => CHECK_EXC_MATCH_STAR,
             _ => return None,
         })
     }

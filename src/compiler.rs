@@ -1192,12 +1192,12 @@ impl Compiler {
                             self.emit_jump(Opcode::JUMP, handler_done);
                         }
                     }
-                    // Compile except* handlers (same logic as regular for stub)
+                    // Compile except* handlers — split ExceptionGroups, fall through
                     for handler in handlers_star {
                         if let Some(typ) = &handler.typ {
                             self.emit(Opcode::DUP_TOP, 0);
                             self.compile_expr(typ)?;
-                            self.emit(Opcode::CHECK_EXC_MATCH, 0);
+                            self.emit(Opcode::CHECK_EXC_MATCH_STAR, 0);
                             let next_handler = self.new_label();
                             self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_handler);
                             if let Some(name) = &handler.name {
@@ -1208,9 +1208,11 @@ impl Compiler {
                                     let idx = self.add_varname(name) as u32;
                                     self.emit(Opcode::STORE_FAST, idx);
                                 }
+                            } else {
+                                self.emit(Opcode::POP_TOP, 0);
                             }
                             self.compile_stmts(&handler.body)?;
-                            self.emit_jump(Opcode::JUMP, handler_done);
+                            // Fall through to next handler (no JUMP to handler_done!)
                             self.fix_label(next_handler);
                         } else {
                             if let Some(name) = &handler.name {
@@ -1223,7 +1225,6 @@ impl Compiler {
                                 }
                             }
                             self.compile_stmts(&handler.body)?;
-                            self.emit_jump(Opcode::JUMP, handler_done);
                         }
                     }
                     self.emit(Opcode::RERAISE, 0);
@@ -1287,12 +1288,12 @@ impl Compiler {
                             self.emit_jump(Opcode::JUMP, handler_done);
                         }
                     }
-                    // Compile except* handlers (same logic as regular for stub)
+                    // Compile except* handlers — split ExceptionGroups, fall through
                     for handler in handlers_star {
                         if let Some(typ) = &handler.typ {
                             self.emit(Opcode::DUP_TOP, 0);
                             self.compile_expr(typ)?;
-                            self.emit(Opcode::CHECK_EXC_MATCH, 0);
+                            self.emit(Opcode::CHECK_EXC_MATCH_STAR, 0);
                             let next_handler = self.new_label();
                             self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_handler);
                             if let Some(name) = &handler.name {
@@ -1303,9 +1304,11 @@ impl Compiler {
                                     let idx = self.add_varname(name) as u32;
                                     self.emit(Opcode::STORE_FAST, idx);
                                 }
+                            } else {
+                                self.emit(Opcode::POP_TOP, 0);
                             }
                             self.compile_stmts(&handler.body)?;
-                            self.emit_jump(Opcode::JUMP, handler_done);
+                            // Fall through to next handler (no JUMP to handler_done!)
                             self.fix_label(next_handler);
                         } else {
                             if let Some(name) = &handler.name {
@@ -1318,7 +1321,6 @@ impl Compiler {
                                 }
                             }
                             self.compile_stmts(&handler.body)?;
-                            self.emit_jump(Opcode::JUMP, handler_done);
                         }
                     }
                     self.emit(Opcode::RERAISE, 0);
@@ -2425,6 +2427,24 @@ impl Compiler {
             Expr::Await(expr) => {
                 self.compile_expr(expr)?;
                 self.emit(Opcode::GET_AWAITABLE, 0);
+                let const_none = self.get_const_index(ConstValue::None) as u32;
+                self.emit(Opcode::LOAD_CONST, const_none);
+                // Emit the SEND/YIELD loop (matching CPython's `await` compilation):
+                //   >> loop:
+                //     SEND cleanup_target   (jump to cleanup_target on StopIteration)
+                //     YIELD_VALUE           (yield the awaited value)
+                //     JUMP_BACKWARD loop    (the resume value from send() is used
+                //                           as the next SEND value)
+                //   >> cleanup_target:
+                //     END_SEND             (pop iterator, pop result, push result)
+                let loop_label = self.new_label();
+                let end_label = self.new_label();
+                self.mark_label(loop_label);
+                self.emit_jump(Opcode::SEND, end_label);
+                self.emit(Opcode::YIELD_VALUE, 0);
+                self.emit_backward_jump(loop_label);
+                self.fix_label(end_label);
+                self.emit(Opcode::END_SEND, 0);
             }
         }
         Ok(())
