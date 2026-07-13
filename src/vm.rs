@@ -772,8 +772,30 @@ impl VirtualMachine {
                 eprintln!("DEBUG chain: importing '{}' from '{}'", full_name, current_name);
                                 let empty_mod = create_module(&full_name, empty_dict);
                                 self.modules.insert(full_name.clone(), empty_mod.clone());
+                                // Register in sys.modules for code that checks sys.modules[__name__]
+                                {
+                                    let mod_dict = self.modules.get("sys").and_then(|sys_mod| {
+                                        if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
+                                            dict.get("modules").cloned()
+                                        } else { None }
+                                    });
+                                    if let Some(md) = mod_dict {
+                                        md.borrow_mut().set_attribute(&full_name, empty_mod.clone()).ok();
+                                    }
+                                }
                                 let module = self.exec_module_source(&source, candidate, &full_name)?;
                                 self.modules.insert(full_name.clone(), module.clone());
+                                // Update sys.modules with the full module
+                                {
+                                    let mod_dict = self.modules.get("sys").and_then(|sys_mod| {
+                                        if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
+                                            dict.get("modules").cloned()
+                                        } else { None }
+                                    });
+                                    if let Some(md) = mod_dict {
+                                        md.borrow_mut().set_attribute(&full_name, module.clone()).ok();
+                                    }
+                                }
                                 current_name = full_name;
                                 parent_path = None;
                                 break;
@@ -812,7 +834,7 @@ impl VirtualMachine {
                 self.modules.insert(name.to_string(), empty_mod.clone());
                 if let Some(sys_mod) = self.modules.get("sys") {
                     if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
-                        if let Some(mod_dict) = dict.get("modules") {
+                        if let Some(mod_dict) = dict.get("modules").cloned() {
                             mod_dict.borrow_mut().set_attribute(name, empty_mod.clone()).ok();
                         }
                     }
@@ -837,7 +859,7 @@ impl VirtualMachine {
                 self.modules.insert(name.to_string(), empty_mod.clone());
                 if let Some(sys_mod) = self.modules.get("sys") {
                     if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
-                        if let Some(mod_dict) = dict.get("modules") {
+                        if let Some(mod_dict) = dict.get("modules").cloned() {
                             mod_dict.borrow_mut().set_attribute(name, empty_mod.clone()).ok();
                         }
                     }
@@ -1022,7 +1044,8 @@ impl VirtualMachine {
 
     pub fn execute(&mut self) -> PyResult<PyObjectRef> {
         crate::object::VM_PTR.with(|p| {
-            if p.borrow().is_none() {
+            let needs_set = p.borrow().is_none();
+            if needs_set {
                 *p.borrow_mut() = Some(self as *mut VirtualMachine);
             }
         });
@@ -2694,7 +2717,7 @@ impl VirtualMachine {
                             self.modules.insert(resolved.clone(), module.clone());
                             if let Some(sys_mod) = self.modules.get("sys") {
                                 if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
-                                    if let Some(mod_dict) = dict.get("modules") {
+                                    if let Some(mod_dict) = dict.get("modules").cloned() {
                                         mod_dict.borrow_mut().set_attribute(&resolved, module.clone()).ok();
                                     }
                                 }
@@ -2712,37 +2735,44 @@ impl VirtualMachine {
                     PyError::runtime_error("name index out of range")
                 })?.clone();
                 let module = self.frames[fi].peek(0)?;
-                let obj = module.borrow();
-                match &*obj {
-                    PyObject::Module { dict, .. } => {
-                        if let Some(val) = dict.get(&name) {
-                            self.frames[fi].push(val.clone());
-                        } else {
-                            // Try to import as submodule
-                            let module_name = module.borrow().get_attribute("__name__")
-                                .ok().map(|n| n.str()).unwrap_or_default();
-                            let submodule_name = if module_name.is_empty() {
-                                name.clone()
-                            } else {
-                                format!("{}.{}", module_name, name)
+                // Check if name is in module's dict first (without holding borrow)
+                let found = {
+                    let obj = module.borrow();
+                    match &*obj {
+                        PyObject::Module { dict, .. } => dict.get(&name).cloned(),
+                        _ => return Err(PyError::runtime_error("IMPORT_FROM on non-module")),
+                    }
+                };
+                if let Some(val) = found {
+                    self.frames[fi].push(val);
+                } else {
+                    // Get module name for submodule import (clone to avoid borrow conflicts)
+                    let module_name = {
+                        let obj = module.borrow();
+                        match &*obj {
+                            PyObject::Module { name: mn, .. } => mn.clone(),
+                            _ => return Err(PyError::runtime_error("IMPORT_FROM on non-module")),
+                        }
+                    };
+                    let submodule_name = if module_name.is_empty() || module_name == "__builtins__" {
+                        name.clone()
+                    } else {
+                        format!("{}.{}", module_name, name)
+                    };
+                    match self.import_module_from_file(&submodule_name) {
+                        Ok(submod) => {
+                            self.modules.insert(submodule_name.clone(), submod.clone());
+                            self.frames[fi].push(submod);
+                        }
+                        Err(_) => {
+                            let obj = module.borrow();
+                            let type_name = match &*obj {
+                                PyObject::Module { name: mn, .. } => mn.clone(),
+                                _ => module.borrow().type_name(),
                             };
-                            match self.import_module_from_file(&submodule_name) {
-                                Ok(submod) => {
-                                    self.modules.insert(submodule_name.clone(), submod.clone());
-                                    // Register in parent's dict
-                                    if let PyObject::Module { dict, .. } = &mut *module.borrow_mut() {
-                                        dict.insert(name.clone(), submod.clone());
-                                    }
-                                    self.frames[fi].push(submod);
-                                }
-                                Err(_) => {
-                                    return Err(PyError::ImportError(format!("cannot import name '{}' from '{}'", name,
-                                        module.borrow().type_name())));
-                                }
-                            }
+                            return Err(PyError::ImportError(format!("cannot import name '{}' from '{}'", name, type_name)));
                         }
                     }
-                    _ => return Err(PyError::runtime_error("IMPORT_FROM on non-module")),
                 }
             }
 
