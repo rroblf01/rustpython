@@ -1832,8 +1832,15 @@ pub fn builtin_type_of(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() != 1 {
         return Err(PyError::type_error("type() takes exactly one argument"));
     }
-    let name = args[0].borrow().type_name();
-    Ok(PyObjectRef::imm(PyObject::Str(name)))
+    let borrowed = args[0].borrow();
+    match &*borrowed {
+        PyObject::Instance { typ, .. } => Ok(typ.clone()),
+        PyObject::Type { .. } => Ok(args[0].clone()),
+        _ => {
+            let name = borrowed.type_name();
+            Ok(PyObjectRef::imm(PyObject::Str(name)))
+        }
+    }
 }
 
 pub fn builtin_int(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
@@ -5736,13 +5743,17 @@ impl ObjectAccess for PyObject {
             }
             PyObject::Super { cls, obj } => {
                 // super(cls, obj).attr: walk MRO of obj's type, starting after cls
+                eprintln!("DEBUG Super.get_attribute name={} cls_type={} obj_type_name={}", name, cls.borrow().type_name(), obj.borrow().type_name());
                 let obj_type = if let PyObject::Instance { typ, .. } = &*obj.borrow() {
+                    eprintln!("DEBUG Super.get_attribute obj is Instance, typ={}", typ.borrow().type_name());
                     Some(typ.clone())
                 } else {
+                    eprintln!("DEBUG Super.get_attribute obj is not Instance, trying __class__");
                     obj.borrow().get_attribute("__class__").ok()
                 };
                 if let Some(obj_type) = obj_type {
                     if let PyObject::Type { mro, .. } = &*obj_type.borrow() {
+                        eprintln!("DEBUG Super.get_attribute mro.len={}", mro.len());
                         // Find cls in MRO, start search from the next class
                         let start_idx = mro.iter().position(|m| {
                             if let (PyObjectRef::Mut(a), PyObjectRef::Mut(b)) = (cls, m) {
@@ -5751,6 +5762,7 @@ impl ObjectAccess for PyObject {
                                 false
                             }
                         }).unwrap_or(0) + 1;
+                        eprintln!("DEBUG Super.get_attribute start_idx={}", start_idx);
                         if start_idx < mro.len() {
                             let mut found = None;
                             for base in mro.iter().skip(start_idx) {

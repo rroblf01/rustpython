@@ -1123,8 +1123,12 @@ impl VirtualMachine {
                     let name = &self.frames[fi].code.names[name_idx];
                     let val = {
                         let f = &self.frames[self.frames.len() - 1];
-                        f.globals.borrow().get(name).cloned()
-                            .or_else(|| f.builtins.get(name).cloned())
+                        let v = f.globals.borrow().get(name).cloned()
+                            .or_else(|| f.builtins.get(name).cloned());
+                        if name == "type" || name == "super" {
+                            eprintln!("DEBUG LOAD_GLOBAL '{}' found: {:?}", name, v.as_ref().map(|x| format!("{}", x.borrow().type_name())));
+                        }
+                        v
                     };
                     match val {
                         Some(v) => {
@@ -1888,9 +1892,10 @@ impl VirtualMachine {
                                 return Ok(None);
                             }
                             if name == "__class__" {
-                                eprintln!("DEBUG LOAD_ATTR __class__ on Instance");
+                                eprintln!("DEBUG LOAD_ATTR __class__ on Instance type_name={:?}", typ.borrow().type_name());
                                 let cls = typ.clone();
                                 drop(obj_borrowed);
+                                eprintln!("DEBUG LOAD_ATTR __class__ pushing type");
                                 self.frames[fi].push(cls);
                                 return Ok(None);
                             }
