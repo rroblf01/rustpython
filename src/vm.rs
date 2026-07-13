@@ -226,6 +226,9 @@ impl VirtualMachine {
           // Native ssl module (CPython C extension replacement for urllib3 compatibility)
           modules.insert("ssl".to_string(), create_module("ssl", create_ssl_dict()));
 
+          // Native time module
+          modules.insert("time".to_string(), create_module("time", create_time_dict()));
+
           // Native C extension replacements for CPython stdlib compatibility
           let weakref_dict = create_weakref_dict();
           modules.insert("_weakref".to_string(), create_module("_weakref", weakref_dict.clone()));
@@ -771,6 +774,13 @@ impl VirtualMachine {
                                 self.modules.insert(full_name.clone(), empty_mod.clone());
                                 let module = self.exec_module_source(&source, candidate, &full_name)?;
                                 self.modules.insert(full_name.clone(), module.clone());
+                                // Register subpackage in parent module's dict
+                                if let Some(parent_mod) = self.modules.get(&current_name) {
+                                    if let PyObject::Module { dict, .. } = &mut *parent_mod.borrow_mut() {
+                                        let child_name = full_name.rsplit('.').next().unwrap_or(&full_name);
+                                        dict.insert(child_name.to_string(), module.clone());
+                                    }
+                                }
                                 current_name = full_name;
                                 parent_path = None;
                                 break;
@@ -796,12 +806,13 @@ impl VirtualMachine {
 
         // Search sys.path for the module
         let search_paths = self.get_sys_path();
+        let py_name = name.replace('.', "/");
         eprintln!("DEBUG import: searching sys.path for '{}', paths={:?}", name, search_paths);
         for base in &search_paths {
             let py_path = if base.ends_with('/') {
-                format!("{}{}.py", base, name)
+                format!("{}{}.py", base, py_name)
             } else {
-                format!("{}/{}.py", base, name)
+                format!("{}/{}.py", base, py_name)
             };
             if let Ok(source) = std::fs::read_to_string(&py_path) {
                 let empty_mod = create_module(name, HashMap::new());
@@ -818,9 +829,9 @@ impl VirtualMachine {
                 return Ok(module);
             }
             let init_path = if base.ends_with('/') {
-                format!("{}{}/__init__.py", base, name)
+                format!("{}{}/__init__.py", base, py_name)
             } else {
-                format!("{}/{}/__init__.py", base, name)
+                format!("{}/{}/__init__.py", base, py_name)
             };
             if let Ok(source) = std::fs::read_to_string(&init_path) {
                 let pkg_dir = std::path::Path::new(&init_path).parent()
@@ -2694,8 +2705,28 @@ impl VirtualMachine {
                         if let Some(val) = dict.get(&name) {
                             self.frames[fi].push(val.clone());
                         } else {
-                            return Err(PyError::ImportError(format!("cannot import name '{}' from '{}'", name,
-                                module.borrow().type_name())));
+                            // Try to import as submodule
+                            let module_name = module.borrow().get_attribute("__name__")
+                                .ok().map(|n| n.str()).unwrap_or_default();
+                            let submodule_name = if module_name.is_empty() {
+                                name.clone()
+                            } else {
+                                format!("{}.{}", module_name, name)
+                            };
+                            match self.import_module_from_file(&submodule_name) {
+                                Ok(submod) => {
+                                    self.modules.insert(submodule_name.clone(), submod.clone());
+                                    // Register in parent's dict
+                                    if let PyObject::Module { dict, .. } = &mut *module.borrow_mut() {
+                                        dict.insert(name.clone(), submod.clone());
+                                    }
+                                    self.frames[fi].push(submod);
+                                }
+                                Err(_) => {
+                                    return Err(PyError::ImportError(format!("cannot import name '{}' from '{}'", name,
+                                        module.borrow().type_name())));
+                                }
+                            }
                         }
                     }
                     _ => return Err(PyError::runtime_error("IMPORT_FROM on non-module")),
