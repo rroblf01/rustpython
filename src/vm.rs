@@ -2733,7 +2733,12 @@ impl VirtualMachine {
                         name.clone()
                     }
                 };
+                eprintln!("DEBUG IMPORT_NAME: name='{}' resolved='{}' fi={} stack={}", name, resolved, fi, self.frames[fi].stack.len());
                 if let Some(module) = self.modules.get(&resolved) {
+                    if resolved.contains("apps.config") {
+                        eprintln!("DEBUG IMPORT_NAME '{}' FOUND in modules, pushing to frame {} stack={}", 
+                            resolved, fi, self.frames[fi].stack.len());
+                    }
                     self.frames[fi].push(module.clone());
                 } else {
                     match self.import_module_from_file(&resolved) {
@@ -2768,6 +2773,7 @@ impl VirtualMachine {
                 let name = self.frames[fi].code.names.get(name_idx).ok_or_else(|| {
                     PyError::runtime_error("name index out of range")
                 })?.clone();
+                eprintln!("DEBUG IMPORT_FROM '{}' fi={} stack_before={}", name, fi, self.frames[fi].stack.len());
                 let module = self.frames[fi].peek(0)?;
                 // Check if name is in module's dict first (without holding borrow)
                 let found = {
