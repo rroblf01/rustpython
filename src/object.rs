@@ -136,6 +136,12 @@ impl PyObjectRef {
             PyObjectRef::Imm(rc) => (**rc).truthy(),
         }
     }
+    /// Return a raw pointer to the inner PyObject for identity comparison.
+    /// For inline variants (SmallInt, SmallBool, SmallFloat, SmallStr, None),
+    /// the address of the PyObjectRef itself is returned as a unique identity.
+    pub fn raw_ptr(&self) -> *const PyObjectRef {
+        self as *const PyObjectRef
+    }
     pub fn hash(&self) -> PyResult<usize> {
         match self {
             PyObjectRef::SmallInt(n) => {
@@ -1558,6 +1564,12 @@ impl Compare for PyObject {
                 for item in a.to_vec() { if !b.contains(&item)? { return Ok(false); } }
                 Ok(true)
             }
+            (PyObject::Tuple(a), PyObject::Tuple(b)) => {
+                for (x, y) in a.iter().zip(b.iter()) {
+                    if !x.equals(y)? { return x.borrow().lt(y); }
+                }
+                Ok(a.len() < b.len())
+            }
             (PyObject::None, PyObject::None) => Ok(false),
             _ => Err(PyError::type_error(format!("'<' not supported between instances of '{}' and '{}'",
                 self.type_name(), other.type_name()))),
@@ -1616,11 +1628,17 @@ impl Compare for PyObject {
                 for item in b.to_vec() { if !a.contains(&item)? { return Ok(false); } }
                 Ok(true)
             }
+            (PyObject::Tuple(a), PyObject::Tuple(b)) => {
+                for (x, y) in a.iter().zip(b.iter()) {
+                    if !x.equals(y)? { return x.borrow().gt(y); }
+                }
+                Ok(a.len() >= b.len())
+            }
             _ => Err(PyError::type_error(format!("'>=' not supported between instances of '{}' and '{}'",
                 self.type_name(), other.type_name()))),
         }
     }
-
+    
     fn ne(&self, other: &PyObjectRef) -> PyResult<bool> {
         self.equals(other).map(|b| !b)
     }
@@ -3133,6 +3151,81 @@ pub fn builtin_help(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Ok(py_none())
 }
 
+// ---- __import__ builtin ----
+
+pub fn builtin_import(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() {
+        return Err(PyError::type_error("__import__() requires at least 1 argument (module name)"));
+    }
+    let name = args[0].str();
+    // Handle fromlist: if provided, return the rightmost submodule
+    let fromlist = if args.len() > 3 {
+        match &*args[3].borrow() {
+            PyObject::List(items) => Some(items.clone()),
+            PyObject::Tuple(items) => Some(items.iter().cloned().collect()),
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    let vm_ptr = VM_PTR.with(|p| *p.borrow());
+    let vm = if let Some(ptr) = vm_ptr {
+        unsafe { &mut *ptr }
+    } else {
+        return Err(PyError::ImportError("__import__: no active VM".to_string()));
+    };
+
+    // Resolve the module name (handle dotted names)
+    let resolved_name = if name.contains('.') {
+        // For dotted names, import the top-level package
+        name.split('.').next().unwrap_or(&name).to_string()
+    } else {
+        name.clone()
+    };
+
+    // Check if already loaded
+    if let Some(module) = vm.modules.get(&resolved_name) {
+        if fromlist.is_some() && name.contains('.') {
+            // Return the rightmost submodule when fromlist is provided
+            let mut current = module.clone();
+            for part in name.split('.') {
+                let n = part.to_string();
+                let obj = {
+                    let b = current.borrow();
+                    match &*b {
+                        PyObject::Module { dict, .. } => dict.get(&n).cloned(),
+                        _ => None,
+                    }
+                };
+                match obj {
+                    Some(sub) => current = sub,
+                    None => break,
+                }
+            }
+            return Ok(current);
+        }
+        return Ok(module.clone());
+    }
+
+    // Try to import the module from file
+    match vm.import_module_from_file(&resolved_name) {
+        Ok(module) => {
+            vm.modules.insert(resolved_name.clone(), module.clone());
+            // Also add to sys.modules
+            if let Some(sys_mod) = vm.modules.get("sys") {
+                if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
+                    if let Some(mod_dict) = dict.get("modules") {
+                        mod_dict.borrow_mut().set_attribute(&resolved_name, module.clone()).ok();
+                    }
+                }
+            }
+            Ok(module)
+        }
+        Err(e) => Err(PyError::ImportError(format!("__import__ error: {}", e))),
+    }
+}
+
 pub fn builtin_eval(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
         return Err(PyError::type_error("eval() requires at least 1 argument"));
@@ -3142,8 +3235,15 @@ pub fn builtin_eval(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let program = parser.parse_program().map_err(|e| PyError::type_error(format!("eval parse error: {}", e)))?;
     let mut compiler = crate::compiler::Compiler::new();
     let code = compiler.compile(&program, "<eval>").map_err(|e| PyError::type_error(format!("eval compile error: {}", e)))?;
-    let mut vm = crate::vm::VirtualMachine::new();
-    vm.run(code).map_err(|e| PyError::type_error(format!("eval error: {}", e)))
+    // Use current VM if available via VM_PTR so exec() shares modules, sys.path, etc.
+    let vm_ptr = VM_PTR.with(|p| *p.borrow());
+    if let Some(ptr) = vm_ptr {
+        let vm = unsafe { &mut *ptr };
+        vm.run(code).map_err(|e| PyError::type_error(format!("eval error: {}", e)))
+    } else {
+        let mut vm = crate::vm::VirtualMachine::new();
+        vm.run(code).map_err(|e| PyError::type_error(format!("eval error: {}", e)))
+    }
 }
 
 pub fn builtin_exec(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
@@ -3163,8 +3263,15 @@ pub fn builtin_exec(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             })().map_err(|e| PyError::type_error(format!("exec error: {}", e)))?
         ),
     };
-    let mut vm = crate::vm::VirtualMachine::new();
-    vm.run(*code).map_err(|e| PyError::type_error(format!("exec error: {}", e)))?;
+    // Use current VM if available via VM_PTR so exec() shares modules, sys.path, etc.
+    let vm_ptr = VM_PTR.with(|p| *p.borrow());
+    if let Some(ptr) = vm_ptr {
+        let vm = unsafe { &mut *ptr };
+        vm.run(*code).map_err(|e| PyError::type_error(format!("exec error: {}", e)))?;
+    } else {
+        let mut vm = crate::vm::VirtualMachine::new();
+        vm.run(*code).map_err(|e| PyError::type_error(format!("exec error: {}", e)))?;
+    }
     Ok(py_none())
 }
 
@@ -5891,6 +5998,7 @@ make_exception_func!(builtin_make_exception_systemexit, "SystemExit");
 make_exception_func!(builtin_make_exception_modulenotfounderror, "ModuleNotFoundError");
 make_exception_func!(builtin_make_exception_stopasynciteration, "StopAsyncIteration");
 make_exception_func!(builtin_make_exception_eoferror, "EOFError");
+make_exception_func!(builtin_make_exception_syntaxerror, "SyntaxError");
 make_exception_func!(builtin_make_exception_connectionerror, "ConnectionError");
 make_exception_func!(builtin_make_exception_brokenpipeerror, "BrokenPipeError");
 make_exception_func!(builtin_make_exception_connectionrefusederror, "ConnectionRefusedError");

@@ -65,6 +65,7 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     add_func!("help", builtin_help);
     add_func!("eval", builtin_eval);
     add_func!("exec", builtin_exec);
+    add_func!("__import__", builtin_import);
     add_func!("compile", builtin_compile);
     add_func!("super", builtin_super);
     add_func!("map", builtin_map);
@@ -125,6 +126,7 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     add_exc_type!("ModuleNotFoundError", builtin_make_exception_modulenotfounderror);
     add_exc_type!("StopAsyncIteration", builtin_make_exception_stopasynciteration);
     add_exc_type!("EOFError", builtin_make_exception_eoferror);
+    add_exc_type!("SyntaxError", builtin_make_exception_syntaxerror);
     add_exc_type!("ConnectionError", builtin_make_exception_connectionerror);
     add_exc_type!("BrokenPipeError", builtin_make_exception_brokenpipeerror);
     add_exc_type!("ConnectionRefusedError", builtin_make_exception_connectionrefusederror);
@@ -242,6 +244,8 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
     d.insert("path".to_string(), py_list(vec![]));
     d.insert("modules".to_string(), py_dict());
     d.insert("version".to_string(), py_str("3.12.0 (RustPython 0.1.0)"));
+    d.insert("version_info".to_string(), py_tuple(vec![py_int(3), py_int(12), py_int(0)]));
+    d.insert("hexversion".to_string(), py_int(0x030c0000));
     d.insert("stdin".to_string(), PyObjectRef::new(PyObject::File {
         file: std::rc::Rc::new(std::cell::RefCell::new(std::fs::File::open("/dev/stdin").unwrap_or_else(|_| {
             // Fallback: create a temporary file

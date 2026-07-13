@@ -1649,6 +1649,27 @@ pub fn create_logging_dict() -> HashMap<String, PyObjectRef> {
         Ok(instance)
     });
 
+    // NullHandler class (needed by urllib3 and other libs)
+    d.insert("NullHandler".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "NullHandler".to_string(),
+        func: |_| {
+            Ok(create_module("NullHandler", HashMap::from([
+                ("emit".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "emit".to_string(),
+                    func: |_| Ok(py_none()),
+                })),
+                ("handle".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "handle".to_string(),
+                    func: |_| Ok(py_none()),
+                })),
+                ("setLevel".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "setLevel".to_string(),
+                    func: |_| Ok(py_none()),
+                })),
+            ])))
+        },
+    }));
+
     // Add level constants
     d.insert("CRITICAL".to_string(), py_int(50));
     d.insert("ERROR".to_string(), py_int(40));
@@ -1657,6 +1678,36 @@ pub fn create_logging_dict() -> HashMap<String, PyObjectRef> {
     d.insert("DEBUG".to_string(), py_int(10));
     d.insert("NOTSET".to_string(), py_int(0));
 
+    d
+}
+
+thread_local! {
+    static EXIT_CALLBACKS: std::cell::RefCell<Vec<PyObjectRef>> = std::cell::RefCell::new(Vec::new());
+}
+
+pub fn create_atexit_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    d.insert("register".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "register".to_string(),
+        func: |args| {
+            if args.is_empty() { return Err(PyError::type_error("register() requires a callable argument")); }
+            EXIT_CALLBACKS.with(|cb| cb.borrow_mut().push(args[0].clone()));
+            Ok(py_none())
+        },
+    }));
+    d.insert("unregister".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "unregister".to_string(),
+        func: |args| {
+            if args.is_empty() { return Err(PyError::type_error("unregister() requires a callable argument")); }
+            // Remove all occurrences of the given callable
+            EXIT_CALLBACKS.with(|cb| {
+                let mut callbacks = cb.borrow_mut();
+                callbacks.retain(|c| !std::ptr::eq(c, &args[0]));
+            });
+            Ok(py_none())
+        },
+    }));
+    d.insert("__name__".to_string(), py_str("atexit"));
     d
 }
 
@@ -4337,3 +4388,234 @@ pub fn create_asyncio_dict() -> HashMap<String, PyObjectRef> {
 
     d
 }
+
+pub fn create_ssl_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! ssl_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    // Version constants
+    d.insert("OPENSSL_VERSION".to_string(), py_str("OpenSSL 3.0.13 30 Jan 2024"));
+    d.insert("OPENSSL_VERSION_INFO".to_string(), py_list(vec![py_int(3), py_int(0), py_int(13), py_int(0), py_int(0)]));
+    d.insert("OPENSSL_VERSION_NUMBER".to_string(), py_int(0x300000f0));
+
+    // Feature flags
+    d.insert("HAS_SNI".to_string(), py_bool(true));
+    d.insert("HAS_ALPN".to_string(), py_bool(true));
+    d.insert("HAS_TLSv1_3".to_string(), py_bool(true));
+    d.insert("HAS_SSLv2".to_string(), py_bool(false));
+    d.insert("HAS_SSLv3".to_string(), py_bool(false));
+    d.insert("HAS_ECDH".to_string(), py_bool(true));
+    d.insert("HAS_NPN".to_string(), py_bool(false));
+
+    // Certificate verification constants
+    d.insert("CERT_NONE".to_string(), py_int(0));
+    d.insert("CERT_OPTIONAL".to_string(), py_int(1));
+    d.insert("CERT_REQUIRED".to_string(), py_int(2));
+
+    // Protocol constants
+    d.insert("PROTOCOL_TLS".to_string(), py_int(2));
+    d.insert("PROTOCOL_TLS_CLIENT".to_string(), py_int(5));
+    d.insert("PROTOCOL_TLS_SERVER".to_string(), py_int(4));
+    d.insert("PROTOCOL_SSLv23".to_string(), py_int(2));
+    d.insert("PROTOCOL_SSLv3".to_string(), py_int(3));
+
+    // SSL options
+    d.insert("OP_ALL".to_string(), py_int(0x80000));
+    d.insert("OP_NO_SSLv2".to_string(), py_int(0x100));
+    d.insert("OP_NO_SSLv3".to_string(), py_int(0x200));
+    d.insert("OP_NO_TLSv1".to_string(), py_int(0x400));
+    d.insert("OP_NO_TLSv1_1".to_string(), py_int(0x800));
+    d.insert("OP_NO_TLSv1_2".to_string(), py_int(0x1000));
+    d.insert("OP_NO_TLSv1_3".to_string(), py_int(0x2000));
+    d.insert("OP_SINGLE_DH_USE".to_string(), py_int(0x100000));
+    d.insert("OP_SINGLE_ECDH_USE".to_string(), py_int(0x80000));
+    d.insert("OP_CIPHER_SERVER_PREFERENCE".to_string(), py_int(0x400000));
+    d.insert("OP_NO_COMPRESSION".to_string(), py_int(0x20000));
+
+    // Alert description constants
+    d.insert("ALERT_DESCRIPTION_CLOSE_NOTIFY".to_string(), py_int(0));
+    d.insert("ALERT_DESCRIPTION_HANDSHAKE_FAILURE".to_string(), py_int(40));
+    d.insert("ALERT_DESCRIPTION_BAD_CERTIFICATE".to_string(), py_int(42));
+    d.insert("ALERT_DESCRIPTION_UNSUPPORTED_CERTIFICATE".to_string(), py_int(43));
+    d.insert("ALERT_DESCRIPTION_CERTIFICATE_REVOKED".to_string(), py_int(44));
+    d.insert("ALERT_DESCRIPTION_CERTIFICATE_EXPIRED".to_string(), py_int(45));
+    d.insert("ALERT_DESCRIPTION_CERTIFICATE_UNKNOWN".to_string(), py_int(46));
+    d.insert("ALERT_DESCRIPTION_INTERNAL_ERROR".to_string(), py_int(80));
+
+    // Verify flags
+    d.insert("VERIFY_DEFAULT".to_string(), py_int(0));
+    d.insert("VERIFY_CRL_CHECK_LEAF".to_string(), py_int(0x10));
+    d.insert("VERIFY_CRL_CHECK_CHAIN".to_string(), py_int(0x20));
+    d.insert("VERIFY_X509_STRICT".to_string(), py_int(0x20));
+
+    // Error constants
+    d.insert("SSL_ERROR_ZERO_RETURN".to_string(), py_int(0));
+    d.insert("SSL_ERROR_WANT_READ".to_string(), py_int(1));
+    d.insert("SSL_ERROR_WANT_WRITE".to_string(), py_int(2));
+    d.insert("SSL_ERROR_WANT_X509_LOOKUP".to_string(), py_int(3));
+    d.insert("SSL_ERROR_SYSCALL".to_string(), py_int(5));
+    d.insert("SSL_ERROR_SSL".to_string(), py_int(6));
+    d.insert("SSL_ERROR_WANT_CONNECT".to_string(), py_int(7));
+    d.insert("SSL_ERROR_EOF".to_string(), py_int(8));
+    d.insert("SSL_ERROR_INVALID_ERROR_CODE".to_string(), py_int(20));
+
+    // wrap_socket function — returns the socket as-is
+    ssl_func!("wrap_socket", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("wrap_socket() missing required argument: sock"));
+        }
+        Ok(args[0].clone())
+    });
+
+    // get_default_verify_paths — stub
+    ssl_func!("get_default_verify_paths", |_| {
+        let mut p = HashMap::new();
+        p.insert("openssl_cafile".to_string(), py_str("/etc/ssl/certs/ca-certificates.crt"));
+        p.insert("openssl_capath".to_string(), py_str("/etc/ssl/certs"));
+        p.insert("ssl_default_verify_paths".to_string(), py_str("(stub)"));
+        Ok(create_module("_VerifyPaths", p))
+    });
+
+    // SSLContext stub — returns a module-like object with wrap_socket and other methods
+    d.insert("SSLContext".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "SSLContext".to_string(),
+        func: |_args| {
+            let mut ctx_dict = HashMap::new();
+
+            ctx_dict.insert("wrap_socket".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "wrap_socket".to_string(),
+                func: |wargs| {
+                    if wargs.is_empty() {
+                        return Err(PyError::type_error("wrap_socket() missing required argument: sock"));
+                    }
+                    Ok(wargs[0].clone())
+                },
+            }));
+
+            ctx_dict.insert("load_default_certs".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "load_default_certs".to_string(),
+                func: |_| Ok(py_none()),
+            }));
+
+            ctx_dict.insert("load_verify_locations".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "load_verify_locations".to_string(),
+                func: |_| Ok(py_none()),
+            }));
+
+            ctx_dict.insert("load_cert_chain".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "load_cert_chain".to_string(),
+                func: |_| Ok(py_none()),
+            }));
+
+            ctx_dict.insert("set_alpn_protocols".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "set_alpn_protocols".to_string(),
+                func: |_| Ok(py_none()),
+            }));
+
+            ctx_dict.insert("set_npn_protocols".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "set_npn_protocols".to_string(),
+                func: |_| Ok(py_none()),
+            }));
+
+            ctx_dict.insert("set_ciphers".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "set_ciphers".to_string(),
+                func: |_| Ok(py_none()),
+            }));
+
+            ctx_dict.insert("set_servername_callback".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "set_servername_callback".to_string(),
+                func: |_| Ok(py_none()),
+            }));
+
+            ctx_dict.insert("get_ca_certs".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "get_ca_certs".to_string(),
+                func: |_| Ok(py_list(vec![])),
+            }));
+
+            ctx_dict.insert("cert_store_stats".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "cert_store_stats".to_string(),
+                func: |_| {
+                    let mut s = HashMap::new();
+                    s.insert("x509_ca".to_string(), py_int(0));
+                    s.insert("crl".to_string(), py_int(0));
+                    s.insert("x509".to_string(), py_int(0));
+                    Ok(create_module("_CertStoreStats", s))
+                },
+            }));
+
+            ctx_dict.insert("check_hostname".to_string(), py_bool(false));
+            ctx_dict.insert("verify_mode".to_string(), py_int(0));
+
+            Ok(create_module("SSLContext", ctx_dict))
+        },
+    }));
+
+    // SSLSession stub (used by urllib3)
+    ssl_func!("SSLSession", |_| Ok(py_none()));
+
+    // CertificateError exception
+    d.insert("CertificateError".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "CertificateError".to_string(),
+        func: |args| {
+            Ok(PyObjectRef::new(PyObject::Exception {
+                typ: "CertificateError".to_string(),
+                args: args.to_vec(),
+                cause: None,
+            }))
+        },
+    }));
+
+    // SSLError exception
+    d.insert("SSLError".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "SSLError".to_string(),
+        func: |args| {
+            Ok(PyObjectRef::new(PyObject::Exception {
+                typ: "SSLError".to_string(),
+                args: args.to_vec(),
+                cause: None,
+            }))
+        },
+    }));
+
+    ssl_func!("SSLWantReadError", |args| {
+        Ok(PyObjectRef::new(PyObject::Exception {
+            typ: "SSLWantReadError".to_string(),
+            args: args.to_vec(),
+            cause: None,
+        }))
+    });
+
+    ssl_func!("SSLWantWriteError", |args| {
+        Ok(PyObjectRef::new(PyObject::Exception {
+            typ: "SSLWantWriteError".to_string(),
+            args: args.to_vec(),
+            cause: None,
+        }))
+    });
+
+    ssl_func!("SSLSyscallError", |args| {
+        Ok(PyObjectRef::new(PyObject::Exception {
+            typ: "SSLSyscallError".to_string(),
+            args: args.to_vec(),
+            cause: None,
+        }))
+    });
+
+    ssl_func!("SSLEOFError", |args| {
+        Ok(PyObjectRef::new(PyObject::Exception {
+            typ: "SSLEOFError".to_string(),
+            args: args.to_vec(),
+            cause: None,
+        }))
+    });
+
+    d.insert("__name__".to_string(), py_str("ssl"));
+    d.insert("__doc__".to_string(), py_str("TLS/SSL wrapper for socket objects (stub)"));
+
+    d
+}
+
