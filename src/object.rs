@@ -5002,7 +5002,8 @@ impl ObjectAccess for PyObject {
             }
             PyObject::Function { name: func_name, dict, .. } => {
                 match name {
-                    "__name__" | "__qualname__" => Ok(py_str(func_name)),
+                    "__name__" => Ok(dict.get("__name__").cloned().unwrap_or(py_str(func_name))),
+                    "__qualname__" => Ok(dict.get("__qualname__").cloned().unwrap_or(py_str(func_name))),
                     "__doc__" => Ok(dict.get("__doc__").cloned().unwrap_or(py_none())),
                     "__code__" => Ok(dict.get("__code__").cloned().unwrap_or(py_none())),
                     "__globals__" => Ok(dict.get("__globals__").cloned().unwrap_or(py_none())),
