@@ -2272,7 +2272,7 @@ impl Compiler {
                         eprintln!("DEBUG PEP 3135: emitted LOAD_FAST 0");
                         extra_pos = 2;
                     } else {
-                        eprintln!("DEBUG PEP 3135: cannot expand super() - scope={:?} varnames.len={}", self.scope, self.code.varnames.len());
+                        eprintln!("DEBUG PEP 3135: cannot expand super() - varnames.len={}", self.code.varnames.len());
                     }
                 }
                 let npos = args.len() + extra_pos;

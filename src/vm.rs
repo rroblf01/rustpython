@@ -997,6 +997,11 @@ impl VirtualMachine {
         let op = self.frames[fi].code.instructions[ip].op;
         let arg = self.frames[fi].code.instructions[ip].arg;
         self.frames[fi].ip = ip + 1;
+        // Debug: print instruction
+        if matches!(op, Opcode::LOAD_GLOBAL | Opcode::LOAD_FAST | Opcode::CALL | Opcode::LOAD_ATTR | Opcode::RETURN_VALUE) {
+            let frame_name = &self.frames[fi].code.name;
+            eprintln!("DEBUG EXEC [{}]: ip={} arg={}", frame_name, ip, arg);
+        }
 
         // Use a macro to quickly access current frame's stack
         macro_rules! frame {
