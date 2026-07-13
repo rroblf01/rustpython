@@ -4,6 +4,7 @@ use std::fmt;
 use std::collections::HashMap;
 use num_bigint::{BigInt, Sign};
 use num_traits::{Zero, One, ToPrimitive, float::FloatCore, Signed};
+use regex::Regex;
 use crate::bytecode::{needs_arg, CodeObject};
 use crate::modules::*;
 
@@ -552,6 +553,11 @@ pub enum PyObject {
         frame: std::cell::RefCell<Option<super::vm::Frame>>,
     },
     Array(PyArray),
+    CompiledRegex {
+        regex: regex::Regex,
+        pattern: String,
+        flags: i32,
+    },
     Closure(Rc<dyn Fn(&[PyObjectRef]) -> PyResult<PyObjectRef>>),
 }
 
@@ -607,6 +613,7 @@ impl PyObject {
             PyObject::Generator { .. } => "generator",
             PyObject::Coroutine { .. } => "coroutine",
             PyObject::Array(_) => "array",
+            PyObject::CompiledRegex { .. } => "re.Pattern",
             PyObject::Closure(_) => "builtin_function_or_method",
         }.to_string()
     }
@@ -738,6 +745,7 @@ impl PyObject {
                 }).collect();
                 format!("array('{}', [{}])", arr.typecode, items.join(", "))
             },
+            PyObject::CompiledRegex { pattern, .. } => format!("re.compile('{}')", pattern),
             PyObject::Closure(_) => "<builtin function>".to_string(),
         }
     }
@@ -782,6 +790,7 @@ impl PyObject {
                 true
             }
             PyObject::Array(arr) => !arr.data.is_empty(),
+            PyObject::CompiledRegex { .. } => true,
             PyObject::Closure(_) => true,
             _ => true,
         }
@@ -874,6 +883,14 @@ impl PyObject {
                 }
                 Ok(h)
             }
+            PyObject::CompiledRegex { pattern, flags, .. } => {
+                let mut h: usize = 0x123456;
+                for b in pattern.bytes() {
+                    h = h.wrapping_mul(1000003).wrapping_add(b as usize);
+                }
+                h = h.wrapping_mul(1000003).wrapping_add(*flags as usize);
+                Ok(h)
+            }
             PyObject::Closure(_) => Err(PyError::type_error(format!("unhashable type: '{}'", self.type_name()))),
             _ => Err(PyError::type_error(format!("unhashable type: '{}'", self.type_name()))),
         }
@@ -946,6 +963,7 @@ impl PyObject {
                 }
             }
             (PyObject::Array(a), PyObject::Array(b)) => a.typecode == b.typecode && a.data == b.data,
+            (PyObject::CompiledRegex { pattern: a, flags: af, .. }, PyObject::CompiledRegex { pattern: b, flags: bf, .. }) => a == b && af == bf,
             _ => false,
         };
         Ok(result)
@@ -5603,6 +5621,96 @@ impl ObjectAccess for PyObject {
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
                     _ => Err(PyError::attribute_error(format!("'float' object has no attribute '{}'", name))),
+                }
+            }
+            PyObject::CompiledRegex { regex, pattern, flags } => {
+                let re = regex.clone();
+                let pat = pattern.clone();
+                let fl = *flags;
+                match name {
+                    "pattern" => Ok(py_str(&pat)),
+                    "flags" => Ok(py_int(fl as i64)),
+                    "match" => Ok(PyObjectRef::imm(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                        if args.len() < 1 {
+                            return Err(PyError::type_error("match() takes at least 1 argument"));
+                        }
+                        let string = args[0].str();
+                        match re.find_at(&string, 0) {
+                            Some(m) if m.start() == 0 => {
+                                Ok(PyObjectRef::new(PyObject::Tuple(vec![
+                                    py_int(m.start() as i64),
+                                    py_int(m.end() as i64),
+                                    py_str(m.as_str()),
+                                ])))
+                            }
+                            _ => Ok(py_none()),
+                        }
+                    })))),
+                    "search" => Ok(PyObjectRef::imm(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                        if args.len() < 1 {
+                            return Err(PyError::type_error("search() takes at least 1 argument"));
+                        }
+                        let string = args[0].str();
+                        match re.find(&string) {
+                            Some(m) => {
+                                Ok(PyObjectRef::new(PyObject::Tuple(vec![
+                                    py_int(m.start() as i64),
+                                    py_int(m.end() as i64),
+                                    py_str(m.as_str()),
+                                ])))
+                            }
+                            None => Ok(py_none()),
+                        }
+                    })))),
+                    "findall" => Ok(PyObjectRef::imm(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                        if args.len() < 1 {
+                            return Err(PyError::type_error("findall() takes at least 1 argument"));
+                        }
+                        let string = args[0].str();
+                        let results: Vec<PyObjectRef> = re.find_iter(&string)
+                            .map(|m| py_str(m.as_str()))
+                            .collect();
+                        Ok(py_list(results))
+                    })))),
+                    "sub" => Ok(PyObjectRef::imm(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                        if args.len() < 2 {
+                            return Err(PyError::type_error("sub() takes at least 2 arguments"));
+                        }
+                        let repl = args[0].str();
+                        let string = args[1].str();
+                        let result = re.replace_all(&string, repl.as_str());
+                        Ok(py_str(&result))
+                    })))),
+                    "split" => Ok(PyObjectRef::imm(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                        if args.len() < 1 {
+                            return Err(PyError::type_error("split() takes at least 1 argument"));
+                        }
+                        let string = args[0].str();
+                        let limit = if args.len() > 1 { args[1].as_i64().unwrap_or(0) as usize } else { 0 };
+                        let parts: Vec<PyObjectRef> = if limit > 0 {
+                            re.splitn(&string, limit).map(|s| py_str(s)).collect()
+                        } else {
+                            re.split(&string).map(|s| py_str(s)).collect()
+                        };
+                        Ok(py_list(parts))
+                    })))),
+                    "fullmatch" => Ok(PyObjectRef::imm(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                        if args.len() < 1 {
+                            return Err(PyError::type_error("fullmatch() takes at least 1 argument"));
+                        }
+                        let string = args[0].str();
+                        match re.find(&string) {
+                            Some(m) if m.start() == 0 && m.end() == string.len() => {
+                                Ok(PyObjectRef::new(PyObject::Tuple(vec![
+                                    py_int(m.start() as i64),
+                                    py_int(m.end() as i64),
+                                    py_str(m.as_str()),
+                                ])))
+                            }
+                            _ => Ok(py_none()),
+                        }
+                    })))),
+                    _ => Err(PyError::attribute_error(format!("'re.Pattern' object has no attribute '{}'", name))),
                 }
             }
             _ => Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", self.type_name(), name))),

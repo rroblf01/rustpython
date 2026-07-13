@@ -240,6 +240,15 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
         } else { 0 };
         Err(PyError::SystemExit(code))
     });
+    sys_func!("displayhook", |args| {
+        if args.is_empty() { return Ok(py_none()); }
+        let val = &args[0];
+        if matches!(&*val.borrow(), PyObject::None) {
+            return Ok(py_none());
+        }
+        println!("{}", val.repr());
+        Ok(py_none())
+    });
     d.insert("argv".to_string(), py_list(argv.into_iter().map(|s| py_str(&s)).collect()));
     d.insert("path".to_string(), py_list(vec![]));
     d.insert("modules".to_string(), py_dict());

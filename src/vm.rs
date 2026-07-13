@@ -3137,6 +3137,10 @@ impl VirtualMachine {
             return Ok(class);
         }
 
+        if let PyObject::Closure(c) = &*callable.borrow() {
+            return c(&args);
+        }
+
         if let PyObject::Instance { typ, .. } = &*callable.borrow() {
             let f = {
                 let typ_ref = typ.borrow();

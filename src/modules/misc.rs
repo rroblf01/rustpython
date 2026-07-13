@@ -105,6 +105,24 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         }
     });
 
+    re_func!("compile", |args| {
+        if args.len() < 1 {
+            return Err(PyError::type_error("compile() takes at least 1 argument"));
+        }
+        let pattern = args[0].str();
+        let flags = if args.len() > 1 { args[1].as_i64().unwrap_or(0) as i32 } else { 0 };
+        match regex::Regex::new(&pattern) {
+            Ok(re) => {
+                Ok(PyObjectRef::new(PyObject::CompiledRegex {
+                    regex: re,
+                    pattern: pattern.to_string(),
+                    flags,
+                }))
+            }
+            Err(e) => Err(PyError::ValueError(format!("invalid regex: {}", e))),
+        }
+    });
+
     d
 }
 

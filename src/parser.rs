@@ -241,6 +241,7 @@ impl Parser {
 
     fn parse_stmt_tail(&mut self, expr: Expr) -> Result<Stmt, String> {
         if self.eat(&Token::Equal) {
+            let mut targets = vec![expr];
             let mut value = self.parse_conditional_expr()?;
             if self.at(&Token::Comma) && !self.at(&Token::Semicolon) && !self.at(&Token::Newline) {
                 let mut elts = vec![value];
@@ -252,9 +253,9 @@ impl Parser {
                 }
                 value = Expr::Tuple(elts);
             }
-            let mut targets = vec![expr];
             while self.eat(&Token::Equal) {
-                targets.push(self.parse_conditional_expr()?);
+                targets.push(value);
+                value = self.parse_conditional_expr()?;
             }
             self.expect_newline_or_eof();
             Ok(Stmt::Assign { targets, value: Box::new(value) })
@@ -768,7 +769,20 @@ impl Parser {
     fn parse_return(&mut self) -> Result<Stmt, String> {
         self.expect(&Token::Return)?;
         let value = if !self.at(&Token::Newline) && !self.at(&Token::Semicolon) && !self.at(&Token::EndOfFile) {
-            Some(Box::new(self.parse_conditional_expr()?))
+            let first = self.parse_conditional_expr()?;
+            // return x, y → return (x, y) (tuple return)
+            if self.at(&Token::Comma) {
+                let mut elts = vec![first];
+                while self.eat(&Token::Comma) {
+                    if self.at(&Token::Newline) || self.at(&Token::Semicolon) || self.at(&Token::EndOfFile) {
+                        break;
+                    }
+                    elts.push(self.parse_conditional_expr()?);
+                }
+                Some(Box::new(Expr::Tuple(elts)))
+            } else {
+                Some(Box::new(first))
+            }
         } else {
             None
         };
@@ -1594,7 +1608,12 @@ impl Parser {
                     if self.eat(&Token::Comma) {
                         let mut elts = vec![first];
                         while !self.at(&Token::RightParen) && !self.at(&Token::EndOfFile) {
-                            elts.push(self.parse_expr()?);
+                            if self.at(&Token::Star) {
+                                self.next();
+                                elts.push(Expr::Starred(Box::new(self.parse_expr()?)));
+                            } else {
+                                elts.push(self.parse_expr()?);
+                            }
                             if !self.eat(&Token::Comma) { break; }
                         }
                         self.expect(&Token::RightParen)?;
@@ -1943,11 +1962,40 @@ impl Parser {
                 && !self.at(&Token::Colon) && !self.at(&Token::Comma)
                 && !self.at(&Token::Semicolon) && !self.at(&Token::EndOfFile)
             {
-                Some(Box::new(self.parse_conditional_expr()?))
+                let first = self.parse_conditional_expr()?;
+                // yield x, y → yield (x, y)  (tuple yield)
+                if self.at(&Token::Comma) {
+                    let mut elts = vec![first];
+                    while self.eat(&Token::Comma) {
+                        if self.at(&Token::Newline) || self.at(&Token::Semicolon)
+                            || self.at(&Token::RightParen) || self.at(&Token::RightBracket)
+                            || self.at(&Token::RightBrace) || self.at(&Token::EndOfFile) {
+                            break;
+                        }
+                        elts.push(self.parse_conditional_expr()?);
+                    }
+                    Some(Box::new(Expr::Tuple(elts)))
+                } else {
+                    Some(Box::new(first))
+                }
             } else {
                 None
             };
             Ok(Expr::Yield(expr))
         }
     }
+}
+
+/// Try to parse a source string as a single expression.
+/// Used by the REPL to detect expression statements whose value should
+/// be displayed via sys.displayhook instead of being discarded by POP_TOP.
+pub fn try_parse_as_expression(source: &str) -> Result<Program, String> {
+    let mut parser = Parser::new(source);
+    let expr = parser.parse_expr()?;
+    // Consume trailing newlines
+    while parser.eat(&Token::Newline) || parser.eat(&Token::Semicolon) {}
+    if !parser.at(&Token::EndOfFile) {
+        return Err("extra tokens after expression".to_string());
+    }
+    Ok(Program::Expression(Box::new(expr)))
 }

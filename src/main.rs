@@ -14,10 +14,10 @@ mod sync;
 
 use std::env;
 use std::fs;
-use std::io::{self, Write, BufRead};
-use parser::Parser;
+use parser::{Parser, try_parse_as_expression};
 use compiler::Compiler;
 use vm::VirtualMachine;
+use object::{PyObject, ObjectAccess};
 use object::PyError;
 
 fn run_source(source: &str, filename: &str) -> Result<(), String> {
@@ -53,69 +53,138 @@ fn run_source_with_vm(vm: &mut VirtualMachine, source: &str) -> Result<(), Strin
     vm.run(code).map(|_| ()).map_err(|e| format!("Runtime error: {}", e))
 }
 
+fn call_displayhook(vm: &VirtualMachine, val: &object::PyObjectRef) {
+    if let Some(sys_mod) = vm.modules.get("sys") {
+        if let Ok(hook) = sys_mod.borrow().get_attribute("displayhook") {
+            let hook_borrowed = hook.borrow();
+            if let PyObject::BuiltinFunction { func, .. } = &*hook_borrowed {
+                let _ = func(&[val.clone()]);
+            }
+        }
+    }
+}
+
+fn run_repl_source(vm: &mut VirtualMachine, source: &str) -> Result<object::PyObjectRef, String> {
+    // Try expression mode first — preserves the value for sys.displayhook
+    if let Ok(program) = try_parse_as_expression(source) {
+        let mut compiler = Compiler::new();
+        let code = compiler.compile(&program, "<stdin>")
+            .map_err(|e| format!("Compile error: {}", e))?;
+        return vm.run(code).map_err(|e| format!("{}", e));
+    }
+    // Fall back to module/statement mode
+    let mut parser = Parser::new(source);
+    let program = parser.parse_program().map_err(|e| format!("Parse error: {}", e))?;
+    let mut compiler = Compiler::new();
+    let code = compiler.compile(&program, "<stdin>")
+        .map_err(|e| format!("Compile error: {}", e))?;
+    vm.run(code).map_err(|e| format!("{}", e))
+}
+
+fn should_indent(line: &str) -> bool {
+    line.trim().ends_with(':')
+}
+
+fn calculate_indent(line: &str, current: usize) -> usize {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        0
+    } else if should_indent(line) {
+        current + 4
+    } else {
+        // Count actual leading whitespace of this line, then stay or dedent
+        let leading = line.len() - trimmed.len();
+        if leading < current {
+            leading  // dedent to match this line's actual indent
+        } else {
+            current
+        }
+    }
+}
+
 fn run_repl() {
     println!("RustPython 0.1.0 - A Python 3 reimplementation in Rust");
     println!("Type 'exit()' or Ctrl-D to quit");
     println!();
 
-    let mut source_buf = String::new();
     let mut vm = VirtualMachine::new();
-    let mut history: std::collections::VecDeque<String> = std::collections::VecDeque::new();
-    const MAX_HISTORY: usize = 100;
+    let mut rl = rustyline::DefaultEditor::new().map_err(|e| format!("Failed to create editor: {}", e)).unwrap();
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let history_path = std::path::Path::new(&home).join(".rustpython_history");
+    let _ = rl.load_history(&history_path);
+
+    let mut source_buf = String::new();
+    let mut indent_level = 0;
 
     loop {
         let prompt = if source_buf.is_empty() { ">>> " } else { "... " };
-        print!("{}", prompt);
-        io::stdout().flush().unwrap();
 
-        let mut line = String::new();
-        match io::stdin().lock().read_line(&mut line) {
-            Ok(0) => {
-                println!();
-                break;
-            }
-            Ok(_) => {
+        let line = if source_buf.is_empty() {
+            rl.readline(prompt)
+        } else {
+            let initial = " ".repeat(indent_level);
+            rl.readline_with_initial(prompt, (&initial, ""))
+        };
+
+        match line {
+            Ok(line) => {
+                // readline returns the line without newline
+
+                if !line.is_empty() {
+                    rl.add_history_entry(&line);
+                }
+
                 let trimmed = line.trim();
+
+                // Handle exit/quit
                 if trimmed == "exit()" || trimmed == "quit()" {
                     break;
                 }
-                if !trimmed.is_empty() {
-                    if history.back().map_or(true, |last| last != trimmed) {
-                        history.push_back(trimmed.to_string());
-                        if history.len() > MAX_HISTORY {
-                            history.pop_front();
-                        }
-                    }
-                }
+
+                // Empty line while in multi-line mode → force execute
                 if trimmed.is_empty() && !source_buf.is_empty() {
                     source_buf.push('\n');
-                    match run_source_in_vm(&mut vm, &source_buf, "<stdin>") {
-                        Ok(val) => {
-                            if !matches!(&*val.borrow(), object::PyObject::None) {
-                                println!("{}", val.repr());
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("{}", e);
-                        }
+                    match run_repl_source(&mut vm, &source_buf) {
+                        Ok(val) => call_displayhook(&vm, &val),
+                        Err(e) => eprintln!("{}", e),
                     }
                     source_buf.clear();
-                } else {
-                    source_buf.push_str(&line);
-                    if is_complete_statement(&source_buf) {
-                        match run_source_in_vm(&mut vm, &source_buf, "<stdin>") {
-                            Ok(val) => {
-                                if !matches!(&*val.borrow(), object::PyObject::None) {
-                                    println!("{}", val.repr());
-                                }
-                            }
-                            Err(e) => {
-                                eprintln!("{}", e);
-                            }
-                        }
-                        source_buf.clear();
-                    }
+                    indent_level = 0;
+                    continue;
                 }
+
+                // Empty line at top level → skip
+                if trimmed.is_empty() {
+                    continue;
+                }
+
+                source_buf.push_str(&line);
+                source_buf.push('\n');
+
+                // Check if the accumulated input is a complete statement
+                if is_complete_statement(&source_buf) {
+                    match run_repl_source(&mut vm, &source_buf) {
+                        Ok(val) => call_displayhook(&vm, &val),
+                        Err(e) => eprintln!("{}", e),
+                    }
+                    source_buf.clear();
+                    indent_level = 0;
+                } else {
+                    // Still in multi-line mode — update indent for next prompt
+                    indent_level = calculate_indent(&line, indent_level);
+                }
+            }
+            Err(rustyline::error::ReadlineError::Interrupted) => {
+                // Ctrl-C: clear buffer and start fresh
+                source_buf.clear();
+                indent_level = 0;
+                println!();
+                continue;
+            }
+            Err(rustyline::error::ReadlineError::Eof) => {
+                // Ctrl-D
+                println!();
+                break;
             }
             Err(e) => {
                 eprintln!("Error reading input: {}", e);
@@ -123,6 +192,8 @@ fn run_repl() {
             }
         }
     }
+
+    let _ = rl.save_history(&history_path);
 }
 
 fn is_complete_statement(s: &str) -> bool {
