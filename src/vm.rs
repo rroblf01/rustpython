@@ -772,30 +772,8 @@ impl VirtualMachine {
                 eprintln!("DEBUG chain: importing '{}' from '{}'", full_name, current_name);
                                 let empty_mod = create_module(&full_name, empty_dict);
                                 self.modules.insert(full_name.clone(), empty_mod.clone());
-                                // Register in sys.modules for code that checks sys.modules[__name__]
-                                {
-                                    let mod_dict = self.modules.get("sys").and_then(|sys_mod| {
-                                        if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
-                                            dict.get("modules").cloned()
-                                        } else { None }
-                                    });
-                                    if let Some(md) = mod_dict {
-                                        md.borrow_mut().set_attribute(&full_name, empty_mod.clone()).ok();
-                                    }
-                                }
                                 let module = self.exec_module_source(&source, candidate, &full_name)?;
                                 self.modules.insert(full_name.clone(), module.clone());
-                                // Update sys.modules with the full module
-                                {
-                                    let mod_dict = self.modules.get("sys").and_then(|sys_mod| {
-                                        if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
-                                            dict.get("modules").cloned()
-                                        } else { None }
-                                    });
-                                    if let Some(md) = mod_dict {
-                                        md.borrow_mut().set_attribute(&full_name, module.clone()).ok();
-                                    }
-                                }
                                 current_name = full_name;
                                 parent_path = None;
                                 break;
@@ -2715,10 +2693,11 @@ impl VirtualMachine {
                     match self.import_module_from_file(&resolved) {
                         Ok(module) => {
                             self.modules.insert(resolved.clone(), module.clone());
+                            // Register in sys.modules (safe: module fully loaded)
                             if let Some(sys_mod) = self.modules.get("sys") {
                                 if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
-                                    if let Some(mod_dict) = dict.get("modules").cloned() {
-                                        mod_dict.borrow_mut().set_attribute(&resolved, module.clone()).ok();
+                                    if let Some(md) = dict.get("modules").cloned() {
+                                        md.borrow_mut().set_attribute(&resolved, module.clone()).ok();
                                     }
                                 }
                             }
