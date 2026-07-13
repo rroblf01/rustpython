@@ -1215,6 +1215,11 @@ pub fn create_operator_dict() -> HashMap<String, PyObjectRef> {
         py_setitem(&args[0], &args[1], args[2].clone())?;
         Ok(py_none())
     });
+    op_func!("delitem", |args| {
+        if args.len() < 2 { return Err(PyError::type_error("operator.delitem requires 2 arguments")); }
+        py_delitem(&args[0], &args[1])?;
+        Ok(py_none())
+    });
     op_func!("contains", |args| {
         if args.len() < 2 { return Err(PyError::type_error("operator.contains requires 2 arguments")); }
         py_contains(&args[0], &args[1])

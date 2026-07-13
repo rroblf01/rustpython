@@ -3707,7 +3707,7 @@ pub trait ObjectAccess {
 impl ObjectAccess for PyObject {
     fn get_attribute(&self, name: &str) -> PyResult<PyObjectRef> {
         match self {
-            PyObject::Module { dict, .. } => {
+            PyObject::Module { dict, name: mod_name } => {
                 if name == "__dict__" {
                     // Convert module's HashMap to a PyDict
                     use crate::object::ObjectAccess;
@@ -3717,7 +3717,12 @@ impl ObjectAccess for PyObject {
                     }
                     return Ok(PyObjectRef::new(PyObject::Dict(pd)));
                 }
-                dict.get(name).cloned().ok_or_else(|| PyError::attribute_error(format!("module has no attribute '{}'", name)))
+                if name == "__name__" {
+                    return Ok(py_str(mod_name));
+                }
+                dict.get(name).cloned().ok_or_else(|| PyError::attribute_error(format!(
+                    "'module' object has no attribute '{}'", name
+                )))
             }
             PyObject::Type { dict, mro, bases, name: type_name } => {
                 if name == "__mro__" {
@@ -6086,6 +6091,50 @@ pub fn py_setitem(obj: &PyObjectRef, index: &PyObjectRef, value: PyObjectRef) ->
             d.set(index.clone(), value)
         }
         _ => Err(PyError::type_error(format!("'{}' object does not support item assignment", o.type_name()))),
+    }
+}
+
+pub fn py_delitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<()> {
+    // Check for __delitem__ on custom classes
+    let f = {
+        let o = obj.borrow();
+        match &*o {
+            PyObject::Instance { typ, .. } => {
+                let typ_ref = typ.borrow();
+                match &*typ_ref {
+                    PyObject::Type { dict: type_dict, .. } => type_dict.get("__delitem__").cloned(),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    };
+    if let Some(f) = f {
+        call_bound_method(f, obj.clone(), vec![index.clone()])?;
+        return Ok(());
+    }
+    let mut o = obj.borrow_mut();
+    match &mut *o {
+        PyObject::List(items) => {
+            let idx = index.borrow();
+            if let PyObject::Int(i) = &*idx {
+                let i = i.to_isize().ok_or_else(|| PyError::index_error("list index out of range"))?;
+                let len = items.len() as isize;
+                let i = if i < 0 { len + i } else { i };
+                if i < 0 || i >= len {
+                    return Err(PyError::index_error("list index out of range"));
+                }
+                items.remove(i as usize);
+                Ok(())
+            } else {
+                Err(PyError::type_error("list indices must be integers"))
+            }
+        }
+        PyObject::Dict(d) => {
+            d.remove(index)?;
+            Ok(())
+        }
+        _ => Err(PyError::type_error(format!("'{}' object does not support item deletion", o.type_name()))),
     }
 }
 
