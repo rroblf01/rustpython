@@ -464,12 +464,12 @@ impl Parser {
         })
     }
 
-    fn parse_for(&mut self, is_async: bool) -> Result<Stmt, String> {
-        self.expect(&Token::For)?;
+    /// Parse a `for` target expression, handling tuple unpacking.
+    /// Track parenthesis depth so commas inside parenthesized sub-expressions
+    /// (e.g., `for (a, b) in ...`) don't confuse tuple element separators.
+    /// Also works for comprehension `for` clauses.
+    fn parse_for_target(&mut self) -> Result<Expr, String> {
         let mut target = self.parse_bitwise_or()?;
-        // Handle tuple unpacking: 'for a, b in ...'
-        // Track parenthesis depth so commas inside function calls
-        // (e.g., "for a, b in func(x, y)") don't break parsing.
         if self.at(&Token::Comma) {
             let mut elts = vec![target];
             let mut paren_depth = 0usize;
@@ -480,7 +480,7 @@ impl Parser {
                 if paren_depth == 0 && self.at(&Token::In) {
                     break;
                 }
-                // Skip parenthesized expressions — commas inside ( ) don't count as tuple separators
+                // Track parenthesized expressions — commas inside ( ) don't count as tuple separators
                 if self.at(&Token::LeftParen) {
                     paren_depth += 1;
                 } else if self.at(&Token::RightParen) {
@@ -492,6 +492,12 @@ impl Parser {
             }
             target = Expr::Tuple(elts);
         }
+        Ok(target)
+    }
+
+    fn parse_for(&mut self, is_async: bool) -> Result<Stmt, String> {
+        self.expect(&Token::For)?;
+        let mut target = self.parse_for_target()?;
         self.expect(&Token::In)?;
         let iter = self.parse_expr()?;
         self.expect(&Token::Colon)?;
@@ -1366,7 +1372,7 @@ impl Parser {
                             // Check for generator expression as sole argument: f(x for x in lst)
                             if self.at(&Token::For) && args.is_empty() && keywords.is_empty() {
                                 self.next(); // consume 'for'
-                                let target = self.parse_bitwise_or()?;
+                                let target = self.parse_for_target()?;
                                 self.expect(&Token::In)?;
                                 let iter = self.parse_or_expr()?;
                                 let mut generators = vec![Comprehension {
@@ -1376,7 +1382,7 @@ impl Parser {
                                     is_async: false,
                                 }];
                                 while self.eat(&Token::For) {
-                                    let t = self.parse_bitwise_or()?;
+                                    let t = self.parse_for_target()?;
                                     self.expect(&Token::In)?;
                                     let i = self.parse_or_expr()?;
                                     generators.push(Comprehension {
@@ -1499,6 +1505,7 @@ impl Parser {
             Token::True => { self.next(); Ok(Expr::Constant(Constant::Bool(true))) }
             Token::False => { self.next(); Ok(Expr::Constant(Constant::Bool(false))) }
             Token::Ellipsis => { self.next(); Ok(Expr::Constant(Constant::Ellipsis)) }
+            Token::Underscore => { self.next(); Ok(Expr::Name("_".to_string())) }
 
             Token::Number(s) => {
                 let s = s.clone();
@@ -1645,15 +1652,15 @@ impl Parser {
                         first
                     }
                 } else {
-                    let first = self.parse_bitwise_or()?;
+                    let first = self.parse_expr()?;
                     if self.eat(&Token::For) {
                         // Generator expression: (expr for x in iter)
-                        let target = self.parse_bitwise_or()?;
+                        let target = self.parse_for_target()?;
                         self.expect(&Token::In)?;
                         let iter = self.parse_or_expr()?;
                         let mut generators = vec![Comprehension { target: Box::new(target), iter: Box::new(iter), ifs: Vec::new(), is_async: false }];
                         while self.eat(&Token::For) {
-                            let t = self.parse_bitwise_or()?;
+                            let t = self.parse_for_target()?;
                             self.expect(&Token::In)?;
                             let i = self.parse_or_expr()?;
                             generators.push(Comprehension { target: Box::new(t), iter: Box::new(i), ifs: Vec::new(), is_async: false });
@@ -1713,12 +1720,12 @@ impl Parser {
                 }
                 // Check for list comprehension: [expr for ...]
                 if elts.len() == 1 && self.eat(&Token::For) {
-                    let target = self.parse_bitwise_or()?;
+                    let target = self.parse_for_target()?;
                     self.expect(&Token::In)?;
                     let iter = self.parse_or_expr()?;
                     let mut generators = vec![Comprehension { target: Box::new(target), iter: Box::new(iter), ifs: Vec::new(), is_async: false }];
                     while self.eat(&Token::For) {
-                        let t = self.parse_bitwise_or()?;
+                        let t = self.parse_for_target()?;
                         self.expect(&Token::In)?;
                         let i = self.parse_or_expr()?;
                         generators.push(Comprehension { target: Box::new(t), iter: Box::new(i), ifs: Vec::new(), is_async: false });
@@ -1760,12 +1767,12 @@ impl Parser {
                             let value = self.parse_expr()?;
                             // Check for dict comprehension: {k: v for ...}
                             if self.eat(&Token::For) {
-                                let target = self.parse_bitwise_or()?;
+                                let target = self.parse_for_target()?;
                                 self.expect(&Token::In)?;
                                 let iter = self.parse_or_expr()?;
                                 let mut generators = vec![Comprehension { target: Box::new(target), iter: Box::new(iter), ifs: Vec::new(), is_async: false }];
                                 while self.eat(&Token::For) {
-                                    let t = self.parse_bitwise_or()?;
+                                    let t = self.parse_for_target()?;
                                     self.expect(&Token::In)?;
                                     let i = self.parse_or_expr()?;
                                     generators.push(Comprehension { target: Box::new(t), iter: Box::new(i), ifs: Vec::new(), is_async: false });
@@ -1791,12 +1798,12 @@ impl Parser {
                         } else {
                             // Check for set comprehension: {expr for ...}
                             if self.eat(&Token::For) {
-                                let target = self.parse_bitwise_or()?;
+                                let target = self.parse_for_target()?;
                                 self.expect(&Token::In)?;
                                 let iter = self.parse_or_expr()?;
                                 let mut generators = vec![Comprehension { target: Box::new(target), iter: Box::new(iter), ifs: Vec::new(), is_async: false }];
                                 while self.eat(&Token::For) {
-                                    let t = self.parse_bitwise_or()?;
+                                    let t = self.parse_for_target()?;
                                     self.expect(&Token::In)?;
                                     let i = self.parse_or_expr()?;
                                     generators.push(Comprehension { target: Box::new(t), iter: Box::new(i), ifs: Vec::new(), is_async: false });
