@@ -94,7 +94,21 @@ impl PyObjectRef {
     }
 
     pub fn borrow_mut(&self) -> std::cell::RefMut<'_, PyObject> {
-        match self { PyObjectRef::Mut(rc) => rc.borrow_mut(), _ => panic!("borrow_mut on non-mutable value") }
+        match self {
+            PyObjectRef::Mut(rc) => {
+                let result = rc.try_borrow_mut();
+                match result {
+                    Ok(guard) => guard,
+                    Err(_) => {
+                        use std::io::Write;
+                        let _ = std::io::stderr().write_all(b"RefCell CONFLICT - borrow_mut while borrowed\n");
+                        let _ = std::io::stderr().flush();
+                        panic!("RefCell already borrowed");
+                    }
+                }
+            }
+            _ => panic!("borrow_mut on non-mutable value"),
+        }
     }
 
     /// Fast path: extract i64 without borrow()

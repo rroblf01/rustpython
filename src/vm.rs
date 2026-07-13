@@ -772,6 +772,21 @@ impl VirtualMachine {
                 eprintln!("DEBUG chain: importing '{}' from '{}'", full_name, current_name);
                                 let empty_mod = create_module(&full_name, empty_dict);
                                 self.modules.insert(full_name.clone(), empty_mod.clone());
+                                // Register in sys.modules BEFORE executing (needed by code that checks sys.modules[__name__])
+                                // Using cloned PyObjectRef to avoid holding borrow across exec_module_source
+                                let sys_modules = self.modules.get("sys").and_then(|m| {
+                                    let b = m.borrow();
+                                    match &*b {
+                                        PyObject::Module { dict, .. } => dict.get("modules").cloned(),
+                                        _ => None,
+                                    }
+                                });
+                                if let Some(sm) = sys_modules {
+                                    let mut b = sm.borrow_mut();
+                                    if let PyObject::Dict(ref mut d) = &mut *b {
+                                        d.set(py_str(&full_name), empty_mod.clone()).ok();
+                                    }
+                                }
                                 let module = self.exec_module_source(&source, candidate, &full_name)?;
                                 self.modules.insert(full_name.clone(), module.clone());
                                 current_name = full_name;
@@ -786,8 +801,10 @@ impl VirtualMachine {
                 }
                 if all_resolved {
                     if let Some(result) = self.modules.get(&current_name).cloned() {
+                        eprintln!("DEBUG chain: returning module '{}' from all_resolved", current_name);
                         return Ok(result);
                     }
+                    eprintln!("DEBUG chain: all_resolved true but '{}' not found in modules!", current_name);
                 }
                 // If we resolved some but not all, continue to search
                 // from the last unresolved parent
@@ -2738,9 +2755,14 @@ impl VirtualMachine {
                     } else {
                         format!("{}.{}", module_name, name)
                     };
+                    eprintln!("DEBUG IMPORT_FROM auto-import: trying '{}' from '{}'", name, module_name);
                     match self.import_module_from_file(&submodule_name) {
                         Ok(submod) => {
                             self.modules.insert(submodule_name.clone(), submod.clone());
+                            // Register in parent module dict (scoped borrow to avoid RefCell conflict)
+                            if let PyObject::Module { dict, .. } = &mut *module.borrow_mut() {
+                                dict.insert(name.clone(), submod.clone());
+                            }
                             self.frames[fi].push(submod);
                         }
                         Err(_) => {
