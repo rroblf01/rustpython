@@ -561,6 +561,13 @@ pub enum PyObject {
         flags: i32,
     },
     Closure(Rc<dyn Fn(&[PyObjectRef]) -> PyResult<PyObjectRef>>),
+    /// Implements the await protocol for Futures.
+    /// __await__ returns this, and SEND drives it: first yield the future,
+    /// then on second send (via send(None) from the event loop), return the result.
+    FutureAwaitIterator {
+        future: PyObjectRef,
+        yielded: bool,
+    },
 }
 
 pub enum SocketInner {
@@ -619,6 +626,7 @@ impl PyObject {
             PyObject::Array(_) => "array",
             PyObject::CompiledRegex { .. } => "re.Pattern",
             PyObject::Closure(_) => "builtin_function_or_method",
+            PyObject::FutureAwaitIterator { .. } => "future_await_iterator",
         }.to_string()
     }
 
@@ -753,6 +761,9 @@ impl PyObject {
             },
             PyObject::CompiledRegex { pattern, .. } => format!("re.compile('{}')", pattern),
             PyObject::Closure(_) => "<builtin function>".to_string(),
+            PyObject::FutureAwaitIterator { future, yielded } => {
+                format!("<future_await_iterator future={} yielded={}>", future.repr(), yielded)
+            }
         }
     }
 
@@ -3738,6 +3749,14 @@ impl ObjectAccess for PyObject {
                 )))
             }
             PyObject::Type { dict, mro, bases, name: type_name } => {
+                if name == "__dict__" {
+                    // Return type's dict as a PyDict
+                    let mut pd = PyDict::new();
+                    for (k, v) in dict.iter() {
+                        let _ = pd.set(py_str(k), v.clone());
+                    }
+                    return Ok(PyObjectRef::new(PyObject::Dict(pd)));
+                }
                 if name == "__mro__" {
                     return Ok(PyObjectRef::new(PyObject::Tuple(mro.clone())));
                 }
@@ -5957,6 +5976,79 @@ impl ObjectAccess for PyObject {
                 Err(PyError::attribute_error(
                     format!("'super' object has no attribute '{}'", name)
                 ))
+            }
+            PyObject::FutureAwaitIterator { future, yielded } => {
+                match name {
+                    "__iter__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__iter__".to_string(),
+                        func: |args| Ok(args[0].clone()),
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__next__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__next__".to_string(),
+                        func: |args| {
+                            if args.is_empty() { return Err(PyError::type_error("__next__ needs self")); }
+                            let self_ref = args[0].borrow();
+                            let (done, result) = match &*self_ref {
+                                PyObject::FutureAwaitIterator { future, yielded } => {
+                                    if *yielded {
+                                        let done = future.borrow().get_attribute("_done")
+                                            .ok().map(|d| d.truthy()).unwrap_or(false);
+                                        let result = future.borrow().get_attribute("_result")
+                                            .unwrap_or_else(|_| py_none());
+                                        (Some(done), Some(result))
+                                    } else {
+                                        let f = future.clone();
+                                        drop(self_ref);
+                                        return Ok(f);
+                                    }
+                                }
+                                _ => return Err(PyError::runtime_error("__next__ on non-FutureAwaitIterator")),
+                            };
+                            drop(self_ref);
+                            if let Some(true) = done {
+                                Err(PyError::Exception("StopIteration".to_string(), result.unwrap_or_else(|| py_none())))
+                            } else {
+                                Ok(py_none())
+                            }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "send" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "send".to_string(),
+                        func: |args| {
+                            if args.is_empty() { return Err(PyError::type_error("send needs self")); }
+                            let (is_first, future_clone) = match &*args[0].borrow() {
+                                PyObject::FutureAwaitIterator { future, yielded } => {
+                                    (!*yielded, future.clone())
+                                }
+                                _ => return Err(PyError::runtime_error("send on non-FutureAwaitIterator")),
+                            };
+                            if is_first {
+                                let mut obj = args[0].borrow_mut();
+                                if let PyObject::FutureAwaitIterator { yielded, .. } = &mut *obj {
+                                    *yielded = true;
+                                }
+                                drop(obj);
+                                // Return the future as the yielded value
+                                Ok(future_clone)
+                            } else {
+                                // Second send: check if future is done
+                                let done = future_clone.borrow().get_attribute("_done")
+                                    .ok().map(|d| d.truthy()).unwrap_or(false);
+                                let result = future_clone.borrow().get_attribute("_result")
+                                    .unwrap_or_else(|_| py_none());
+                                if done {
+                                    Err(PyError::Exception("StopIteration".to_string(), result))
+                                } else {
+                                    Ok(future_clone)
+                                }
+                            }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    _ => Err(PyError::attribute_error(format!("'future_await_iterator' object has no attribute '{}'", name))),
+                }
             }
             _ => Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", self.type_name(), name))),
         }

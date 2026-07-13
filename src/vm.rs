@@ -545,10 +545,10 @@ impl VirtualMachine {
             let venv = std::env::var("VIRTUAL_ENV").ok()
                 .or_else(|| {
                     let cwd = std::env::current_dir().ok();
-                    eprintln!("DEBUG venv: VIRTUAL_ENV not set, checking CWD .venv");
+                    if cfg!(feature = "profile") { eprintln!("DEBUG venv: VIRTUAL_ENV not set, checking CWD .venv"); }
                     if let Some(ref d) = cwd {
                         let dotvenv = d.join(".venv");
-                        eprintln!("DEBUG venv: checking {}. is_dir={}", dotvenv.display(), dotvenv.is_dir());
+                        if cfg!(feature = "profile") { eprintln!("DEBUG venv: checking {}. is_dir={}", dotvenv.display(), dotvenv.is_dir()); }
                     }
                     cwd
                         .filter(|d| d.join(".venv").is_dir())
@@ -667,7 +667,7 @@ impl VirtualMachine {
 
             // Check if we already have the top-level module
             if !self.modules.contains_key(&current_name) {
-                eprintln!("DEBUG import: top-level '{}' NOT in modules", current_name);
+                if cfg!(feature = "profile") { eprintln!("DEBUG import: top-level '{}' NOT in modules", current_name); }
                 // Not in modules — fall through to regular file search below
             } else {
                 eprintln!("DEBUG import: top-level '{}' IS in modules", current_name);
@@ -1010,10 +1010,12 @@ impl VirtualMachine {
         let op = self.frames[fi].code.instructions[ip].op;
         let arg = self.frames[fi].code.instructions[ip].arg;
         self.frames[fi].ip = ip + 1;
-        // Debug: print instruction
-        if matches!(op, Opcode::LOAD_GLOBAL | Opcode::LOAD_FAST | Opcode::CALL | Opcode::LOAD_ATTR | Opcode::RETURN_VALUE) {
-            let frame_name = &self.frames[fi].code.name;
-            eprintln!("DEBUG EXEC [{}]: ip={} arg={}", frame_name, ip, arg);
+        // Debug: print instruction (only with profile feature)
+        if cfg!(feature = "profile") {
+            if matches!(op, Opcode::LOAD_GLOBAL | Opcode::LOAD_FAST | Opcode::CALL | Opcode::LOAD_ATTR | Opcode::RETURN_VALUE) {
+                let frame_name = &self.frames[fi].code.name;
+                eprintln!("DEBUG EXEC [{}]: ip={} arg={}", frame_name, ip, arg);
+            }
         }
 
         // Use a macro to quickly access current frame's stack

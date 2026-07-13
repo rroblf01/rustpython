@@ -1924,7 +1924,7 @@ impl Compiler {
                 if outer.scope == ScopeType::ClassBody {
                     if !self.code.cellvars.contains(&"__class__".to_string()) {
                         self.code.cellvars.push("__class__".to_string());
-                        eprintln!("DEBUG: added __class__ cell var for method {}", self.code.name);
+                        if cfg!(feature = "profile") { eprintln!("DEBUG: added __class__ cell var for method {}", self.code.name); }
                     }
                 }
             }
