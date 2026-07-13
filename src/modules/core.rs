@@ -345,12 +345,24 @@ pub fn create_importlib_resources_dict() -> HashMap<String, PyObjectRef> {
         Ok(py_none())
     }
 
-    // joinpath for traversable: args[0].name + args[1]
+    // joinpath for traversable: args[0].name + args[1], returns new Traversable
     fn trav_joinpath(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         if args.len() < 2 { return Ok(py_none()); }
         let base = mod_name(&args[0]);
         let child = args[1].str();
-        Ok(py_str(&format!("{}/{}", base.trim_end_matches('/'), child)))
+        let joined = format!("{}/{}", base.trim_end_matches('/'), child.trim_start_matches('/'));
+        let trav = create_module("_Traversable", HashMap::from([
+            ("name".to_string(), py_str(&joined)),
+        ]));
+        // Add joinpath as BuiltinMethod with self_obj = trav
+        if let PyObject::Module { dict, .. } = &mut *trav.borrow_mut() {
+            dict.insert("joinpath".to_string(), PyObjectRef::new(PyObject::BuiltinMethod {
+                name: "joinpath".to_string(),
+                func: trav_joinpath,
+                self_obj: trav.clone(),
+            }));
+        }
+        Ok(trav)
     }
 
     // as_file(traversable) -> context manager wrapping the path
@@ -360,18 +372,28 @@ pub fn create_importlib_resources_dict() -> HashMap<String, PyObjectRef> {
             if args.is_empty() {
                 return Err(PyError::type_error("as_file() requires 1 argument (traversable)"));
             }
-            let path_str = args[0].str();
+            let path_str = mod_name(&args[0]);
+            if path_str.is_empty() {
+                return Err(PyError::type_error("as_file() requires traversable with a valid name"));
+            }
             let cm = create_module("_CtxManager", HashMap::from([
-                ("__enter__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
-                    name: "__enter__".to_string(),
-                    func: enter_cm,
-                })),
-                ("__exit__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
-                    name: "__exit__".to_string(),
-                    func: exit_cm,
-                })),
                 ("name".to_string(), py_str(&path_str)),
             ]));
+            // Add __enter__/__exit__ as BuiltinMethod with self_obj = cm
+            // so that when called via module.__enter__(), the function receives
+            // the module itself as args[0] (via BuiltinMethod self-binding).
+            if let PyObject::Module { dict, .. } = &mut *cm.borrow_mut() {
+                dict.insert("__enter__".to_string(), PyObjectRef::new(PyObject::BuiltinMethod {
+                    name: "__enter__".to_string(),
+                    func: enter_cm,
+                    self_obj: cm.clone(),
+                }));
+                dict.insert("__exit__".to_string(), PyObjectRef::new(PyObject::BuiltinMethod {
+                    name: "__exit__".to_string(),
+                    func: exit_cm,
+                    self_obj: cm.clone(),
+                }));
+            }
             Ok(cm)
         },
     }));
@@ -412,12 +434,18 @@ pub fn create_importlib_resources_dict() -> HashMap<String, PyObjectRef> {
             };
 
             let trav = create_module("_Traversable", HashMap::from([
-                ("joinpath".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
-                    name: "joinpath".to_string(),
-                    func: trav_joinpath,
-                })),
                 ("name".to_string(), py_str(&pkg_path)),
             ]));
+            // Add joinpath as BuiltinMethod with self_obj = trav
+            // so that when called via traversable.joinpath(...), the function receives
+            // the traversable itself as args[0] (via BuiltinMethod self-binding).
+            if let PyObject::Module { dict, .. } = &mut *trav.borrow_mut() {
+                dict.insert("joinpath".to_string(), PyObjectRef::new(PyObject::BuiltinMethod {
+                    name: "joinpath".to_string(),
+                    func: trav_joinpath,
+                    self_obj: trav.clone(),
+                }));
+            }
             // __str__ via name attribute
             Ok(trav)
         },

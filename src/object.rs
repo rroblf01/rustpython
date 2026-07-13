@@ -1590,6 +1590,12 @@ impl Compare for PyObject {
                 for item in a.to_vec() { if !b.contains(&item)? { return Ok(false); } }
                 Ok(true)
             }
+            (PyObject::Tuple(a), PyObject::Tuple(b)) => {
+                for (x, y) in a.iter().zip(b.iter()) {
+                    if !x.equals(y)? { return x.borrow().lt(y); }
+                }
+                Ok(a.len() <= b.len())
+            }
             _ => Err(PyError::type_error(format!("'<=' not supported between instances of '{}' and '{}'",
                 self.type_name(), other.type_name()))),
         }
@@ -1608,6 +1614,12 @@ impl Compare for PyObject {
                 if a.len() <= b.len() { return Ok(false); }
                 for item in b.to_vec() { if !a.contains(&item)? { return Ok(false); } }
                 Ok(true)
+            }
+            (PyObject::Tuple(a), PyObject::Tuple(b)) => {
+                for (x, y) in a.iter().zip(b.iter()) {
+                    if !x.equals(y)? { return x.borrow().gt(y); }
+                }
+                Ok(a.len() > b.len())
             }
             _ => Err(PyError::type_error(format!("'>' not supported between instances of '{}' and '{}'",
                 self.type_name(), other.type_name()))),
@@ -3176,9 +3188,56 @@ pub fn builtin_import(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         return Err(PyError::ImportError("__import__: no active VM".to_string()));
     };
 
-    // Resolve the module name (handle dotted names)
-    let resolved_name = if name.contains('.') {
-        // For dotted names, import the top-level package
+    let has_dots = name.contains('.');
+    let has_fromlist = fromlist.as_ref().map_or(false, |fl| !fl.is_empty());
+
+    // With a non-empty fromlist and a dotted name, import the full module chain
+    // and return the rightmost module. CPython behavior:
+    //   __import__("certifi.core", ..., ["where"], 0)  -> imports certifi.core, returns certifi.core
+    //   __import__("certifi.core", ..., [], 0)          -> imports certifi, returns certifi
+    if has_dots && has_fromlist {
+        // First, ensure the top-level package is imported (import_module_from_file
+        // needs the parent in modules to resolve dotted names)
+        let top_name = name.split('.').next().unwrap_or(&name).to_string();
+        if !vm.modules.contains_key(&top_name) {
+            match vm.import_module_from_file(&top_name) {
+                Ok(module) => {
+                    vm.modules.insert(top_name.clone(), module.clone());
+                    if let Some(sys_mod) = vm.modules.get("sys") {
+                        if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
+                            if let Some(mod_dict) = dict.get("modules") {
+                                mod_dict.borrow_mut().set_attribute(&top_name, module.clone()).ok();
+                            }
+                        }
+                    }
+                }
+                Err(e) => return Err(PyError::ImportError(format!("__import__ error: {}", e))),
+            }
+        }
+
+        // Now import the full chain - import_module_from_file handles dotted
+        // names when the parent is already in modules
+        if let Some(module) = vm.modules.get(&name) {
+            return Ok(module.clone());
+        }
+        return match vm.import_module_from_file(&name) {
+            Ok(module) => {
+                vm.modules.insert(name.to_string(), module.clone());
+                if let Some(sys_mod) = vm.modules.get("sys") {
+                    if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
+                        if let Some(mod_dict) = dict.get("modules") {
+                            mod_dict.borrow_mut().set_attribute(&name, module.clone()).ok();
+                        }
+                    }
+                }
+                Ok(module)
+            }
+            Err(e) => Err(PyError::ImportError(format!("__import__ error: {}", e))),
+        };
+    }
+
+    // Without fromlist (or non-dotted name), import only the top-level package
+    let resolved_name = if has_dots {
         name.split('.').next().unwrap_or(&name).to_string()
     } else {
         name.clone()
@@ -3186,25 +3245,6 @@ pub fn builtin_import(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 
     // Check if already loaded
     if let Some(module) = vm.modules.get(&resolved_name) {
-        if fromlist.is_some() && name.contains('.') {
-            // Return the rightmost submodule when fromlist is provided
-            let mut current = module.clone();
-            for part in name.split('.') {
-                let n = part.to_string();
-                let obj = {
-                    let b = current.borrow();
-                    match &*b {
-                        PyObject::Module { dict, .. } => dict.get(&n).cloned(),
-                        _ => None,
-                    }
-                };
-                match obj {
-                    Some(sub) => current = sub,
-                    None => break,
-                }
-            }
-            return Ok(current);
-        }
         return Ok(module.clone());
     }
 
