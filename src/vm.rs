@@ -782,9 +782,16 @@ impl VirtualMachine {
                                     }
                                 });
                                 if let Some(sm) = sys_modules {
-                                    let mut b = sm.borrow_mut();
-                                    if let PyObject::Dict(ref mut d) = &mut *b {
-                                        d.set(py_str(&full_name), empty_mod.clone()).ok();
+                                    // Use try_borrow_mut to avoid RefCell panic if already borrowed
+                                    match &sm {
+                                        PyObjectRef::Mut(rc) => {
+                                            if let Ok(mut guard) = rc.try_borrow_mut() {
+                                                if let PyObject::Dict(ref mut d) = &mut *guard {
+                                                    d.set(py_str(&full_name), empty_mod.clone()).ok();
+                                                }
+                                            }
+                                        }
+                                        _ => {}
                                     }
                                 }
                                 let module = self.exec_module_source(&source, candidate, &full_name)?;
@@ -920,10 +927,30 @@ impl VirtualMachine {
                 globals_map.insert("__package__".to_string(), py_str(name));
             }
         } else {
-            // For non-package modules, __package__ should be empty string
-            globals_map.insert("__package__".to_string(), py_str(""));
+            // For non-package modules, __package__ should be set to the parent package name
+            // (e.g., "django.apps" for "django.apps.registry") so relative imports work
+            let pkg = name.rfind('.').map(|dot| &name[..dot]).unwrap_or("");
+            globals_map.insert("__package__".to_string(), 
+                if pkg.is_empty() { py_str("") } else { py_str(pkg) });
         }
         let module_globals = Rc::new(RefCell::new(globals_map));
+        // Register module in sys.modules BEFORE executing (needed for sys.modules[__name__] checks)
+        if let Some(sys_mod) = self.modules.get("sys") {
+            if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
+                if let Some(sm) = dict.get("modules").cloned() {
+                    match &sm {
+                        PyObjectRef::Mut(rc) => {
+                            if let Ok(mut guard) = rc.try_borrow_mut() {
+                                if let PyObject::Dict(ref mut d) = &mut *guard {
+                                    d.set(py_str(name), py_str(&format!("<module '{}' (loaded)>", name))).ok();
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
         eprintln!("DEBUG exec_module_source: executing '{}'...", name);
         self.exec_code(code, Some(Rc::clone(&module_globals))).map_err(|e| {
             eprintln!("DEBUG exec_module_source: '{}' FAILED: {:?}", name, e);
@@ -2716,7 +2743,16 @@ impl VirtualMachine {
                             if let Some(sys_mod) = self.modules.get("sys") {
                                 if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
                                     if let Some(md) = dict.get("modules").cloned() {
-                                        md.borrow_mut().set_attribute(&resolved, module.clone()).ok();
+                                        match &md {
+                                            PyObjectRef::Mut(rc) => {
+                                                if let Ok(mut guard) = rc.try_borrow_mut() {
+                                                    if let PyObject::Dict(ref mut d) = &mut *guard {
+                                                        d.set(py_str(&resolved), module.clone()).ok();
+                                                    }
+                                                }
+                                            }
+                                            _ => {}
+                                        }
                                     }
                                 }
                             }
