@@ -946,6 +946,7 @@ impl Parser {
                 } else if self.eat(&Token::Star) {
                     if self.at(&Token::RightParen) || self.at(&Token::Comma) {
                         // bare * means keyword-only args follow
+                        self.eat(&Token::Comma); // consume trailing comma if present
                         continue;
                     }
                     let name = self.expect_name()?;
@@ -1429,6 +1430,17 @@ impl Parser {
             return Ok(Expr::Slice { lower: None, upper, step });
         }
         let lower = self.parse_expr()?;
+        // Handle comma-separated expressions in subscript: X[a, b, c]
+        if self.eat(&Token::Comma) {
+            let mut elts = vec![lower];
+            loop {
+                while self.at(&Token::Newline) { self.next(); }
+                if self.at(&Token::RightBracket) { break; }
+                elts.push(self.parse_expr()?);
+                if !self.eat(&Token::Comma) { break; }
+            }
+            return Ok(Expr::Tuple(elts));
+        }
         if self.eat(&Token::Colon) {
             let upper = if !self.at(&Token::RightBracket) && !self.at(&Token::Comma) {
                 Some(Box::new(self.parse_expr()?))
@@ -1477,21 +1489,34 @@ impl Parser {
             Token::String(s) => {
                 let mut parts = vec![s.clone()];
                 self.next();
-                // Implicit string concatenation: adjacent strings with optional newlines
-                while {
+                // Implicit string concatenation: adjacent strings and f-strings
+                // with optional newlines. Chain via BinOp::Add since we can't
+                // pre-compute f-strings at parse time.
+                let mut expr = Expr::Constant(Constant::String(parts.concat()));
+                loop {
                     while self.at(&Token::Newline) { self.next(); }
-                    matches!(&self.current, Token::String(_))
-                } {
-                    if let Token::String(next) = &self.current {
-                        parts.push(next.clone());
-                        self.next();
+                    match &self.current {
+                        Token::String(s2) => {
+                            let s = s2.clone();
+                            self.next();
+                            expr = Expr::BinOp {
+                                left: Box::new(expr),
+                                op: Operator::Add,
+                                right: Box::new(Expr::Constant(Constant::String(s))),
+                            };
+                        }
+                        Token::FStringStart => {
+                            let fstr = self.parse_fstring()?;
+                            expr = Expr::BinOp {
+                                left: Box::new(expr),
+                                op: Operator::Add,
+                                right: Box::new(fstr),
+                            };
+                        }
+                        _ => break,
                     }
                 }
-                if parts.len() == 1 {
-                    Ok(Expr::Constant(Constant::String(parts[0].clone())))
-                } else {
-                    Ok(Expr::Constant(Constant::String(parts.concat())))
-                }
+                Ok(expr)
             }
 
             Token::Bytes(b) => {

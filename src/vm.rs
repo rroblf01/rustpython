@@ -500,6 +500,9 @@ impl VirtualMachine {
 
           modules.insert("inspect".to_string(), create_module("inspect", create_inspect_dict()));
 
+          // Native __future__ module (needed by requests, etc.)
+          modules.insert("__future__".to_string(), create_module("__future__", create_future_dict()));
+
           // Native asyncio module (basic event loop)
           modules.insert("asyncio".to_string(), create_module("asyncio", create_asyncio_dict()));
 

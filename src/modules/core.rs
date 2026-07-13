@@ -1182,3 +1182,41 @@ pub fn create_operator_dict() -> HashMap<String, PyObjectRef> {
 use std::rc::Rc;
 use std::cell::RefCell;
 use num_traits::ToPrimitive;
+
+/// Native __future__ module: defines _Feature tuples and feature flags.
+pub fn create_future_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+
+    // _Feature helper: tuples of (flag, name, first_release, optional_since)
+    let feature = |flag: i64, name: &str, first: &str, optional: &str| -> PyObjectRef {
+        PyObjectRef::imm(PyObject::Tuple(vec![
+            py_int(flag),
+            py_str(name),
+            py_str(first),
+            py_str(optional),
+        ]))
+    };
+
+    d.insert("nested_scopes".to_string(), feature(0x01, "nested_scopes", "2.1.0", "2.2.0"));
+    d.insert("generators".to_string(), feature(0x02, "generators", "2.2.0", "2.3.0"));
+    d.insert("division".to_string(), feature(0x04, "division", "2.2.0", "3.0.0"));
+    d.insert("absolute_import".to_string(), feature(0x08, "absolute_import", "2.5.0", "3.0.0"));
+    d.insert("with_statement".to_string(), feature(0x10, "with_statement", "2.5.0", "2.6.0"));
+    d.insert("print_function".to_string(), feature(0x20, "print_function", "2.6.0", "3.0.0"));
+    d.insert("unicode_literals".to_string(), feature(0x40, "unicode_literals", "2.6.0", "3.0.0"));
+    d.insert("barry_as_FLUFL".to_string(), feature(0x80, "barry_as_FLUFL", "3.1.0", "4.0.0"));
+    d.insert("generator_stop".to_string(), feature(0x100, "generator_stop", "3.5.0", "3.7.0"));
+    d.insert("annotations".to_string(), feature(0x200, "annotations", "3.7.0", "3.11.0"));
+
+    d.insert("all_feature_names".to_string(), py_list(vec![
+        py_str("nested_scopes"), py_str("generators"), py_str("division"),
+        py_str("absolute_import"), py_str("with_statement"), py_str("print_function"),
+        py_str("unicode_literals"), py_str("barry_as_FLUFL"), py_str("generator_stop"),
+        py_str("annotations"),
+    ]));
+
+    d.insert("__doc__".to_string(), py_str("Future feature statements (from __future__)"));
+    d.insert("__name__".to_string(), py_str("__future__"));
+    d.insert("__package__".to_string(), py_str(""));
+    d
+}
