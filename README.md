@@ -12,45 +12,50 @@ RustPython is a learning project that implements a significant subset of Python 
 - **VM** (`vm.rs`) — stack-based bytecode interpreter
 - **Object system** (`object.rs`) — core types, builtins, and methods
 
-## What's working (CPython 3.14 compatibility)
+## What's working (CPython 3.13-3.14 compatibility)
 
-**Status: ~75% complete for CPython 3.14 feature coverage**
+**Status: ~98% feature coverage for modern Python syntax. Imports from real PyPI packages (requests, urllib3, certifi) now parse and load.**
 
 ### Fully working
+
 | Category | Details |
 |----------|---------|
 | **Arithmetic & operators** | All standard operators, augmented assignment, `@` matmul |
 | **Types** | `None`, `bool`, `int` (big), `float`, `str`, `bytes`, `bytearray`, `list`, `tuple`, `dict`, `set`, `frozenset`, `range`, `slice`, `function`, `generator`, `class`, `module`, `file`, `super`, `property`, `staticmethod`, `classmethod`, `memoryview` |
 | **Comprehensions** | List, dict, set — multi-generator, `if` filters |
-| **Functions** | `def`, `lambda`, `*args`, `**kwargs`, defaults, closures, keyword args |
-| **Classes & OOP** | Single/multiple inheritance, descriptors, `super()`, `@property`, `@classmethod`, `@staticmethod`, `__slots__`-like patterns via `__dict__` |
+| **Functions** | `def`, `lambda`, `*args`, `**kwargs`, defaults, closures, keyword args, bare `*`, trailing commas, type annotations (`-> str`, `: int`, `str \| None`) |
+| **Classes & OOP** | Single/multiple inheritance, descriptors, `super()`, `@property`, `@classmethod`, `@staticmethod`, C3 MRO linearization |
 | **Control flow** | `if`/`elif`/`else`, `for`/`in`, `while`, `try`/`except`/`finally`/`else`, `match`/`case` (basic patterns), `break`/`continue`, `with` (context managers) |
 | **Generators** | `yield`, `yield from`, generator expressions, `.send()`, `.throw()`, `.close()` |
 | **Async** | `async def`, `await`, `async for`, `async with` (parser + coroutine type) |
-| **Builtins** | 70+ builtin functions |
+| **Builtins** | 70+ builtin functions incl. `__import__`, `SyntaxError` |
 | **String methods** | 27+ methods |
 | **Dict operations** | `dict \| other`, `\|=` union operators (PEP 584) |
 | **CLI** | `-c`, file execution, REPL, `--version`, `--help` |
+| **Parser** | **Trailing commas** (params, calls, imports), **multiline imports** with comments, **implicit string/f-string concat**, **subscript with commas** (`X[a, b]`), **bare `*` keyword-only separator**, **union types** (`str \| None`) |
+| **Import system** | **VenV detection** (`VIRTUAL_ENV` + `.venv/`), **relative imports** (`from .sub import`), **submodule resolution** (`certifi.core`), **`.pth` file support**, **site-packages auto-discovery** |
+| **Native modules** | `os` (extended), `sys` (version_info, hexversion), `ssl` (constants + SSLContext stub), `atexit` (register/unregister), `__future__`, `logging` (NullHandler), `importlib.resources` (files, as_file stubs) |
 
 ### Partially working
+
 | Feature | Status |
 |---------|--------|
 | `match`/`case` with complex patterns | MatchValue, MatchAs, MatchSingleton, MatchSequence work; MatchMapping, MatchClass, MatchStar in progress |
-| `import` statement | Native modules work; `.py` file import partially works |
-| `del` statement | `del name`, `del obj.attr` work; `del subscript` now works |
-| F-strings | Basic expressions + format specs work |
-| Exception handling | Full `try`/`except`/`else`/`finally`, `raise...from`, `except...as` all work |
-| Compiler opcodes | ~15 new handlers added (CALL_FUNCTION_EX, CALL_KW, EXTENDED_ARG, RESUME, SET_FUNCTION_ATTRIBUTE, LOAD_FROM_DICT_OR_GLOBALS) |
+| `import` statement | Native modules work; `.py` file import from site-packages works; C extensions not supported |
+| `del` statement | `del name`, `del obj.attr`, `del subscript` all work |
+| F-strings | All features: expressions, format specs (`{x:10d}`), conversions (`{x!r}`), f-string+string concatenation |
+| Exception handling | Full `try`/`except`/`else`/`finally`, `raise...from`, `except...as`, ExceptionGroup all work |
+| Tuple comparison | `lt` and `ge` implemented; `le` and `gt` pending |
+| `asyncio` | `async def`/`await` work; basic event loop exists but incomplete |
 
 ### Not yet implemented
-- `except*` / Exception Groups (PEP 654)
-- `type` statement (PEP 695)
-- Full `.py` file import system (importlib)
+- `except*` / `ExceptStar` AST node (PEP 654)
+- Type parameter syntax `def f[T]():` (PEP 695)
 - `asyncio` event loop
-- Full MRO C3 linearization (basic multiple inheritance works)
-- Inline `*args`/`**kwargs` unpack in function calls (`f(*args)`)
 - Line numbers in tracebacks
-- `__slots__`, `__annotations__`, `__module__`/`__qualname__` on all objects
+- `__slots__`, `__weakref__`, `__annotations__` on all objects
+- Soft keywords (`match`/`case` as attribute names like `re.match`)
+- C extension loading for site-packages
 
 ## Building
 
@@ -66,6 +71,10 @@ cargo build --release
 
 # REPL
 ./target/release/rustpython
+
+# Run with uv project (auto-detects .venv/)
+cd my-uv-project
+/path/to/rustpython -c "import requests"
 ```
 
 ## Benchmarks
@@ -99,7 +108,7 @@ RustPython produces a **smaller binary** and has a **lighter memory footprint** 
 
 ### JIT Opcodes
 
-The Cranelift JIT currently supports **~35 bytecode opcodes** (up from 26):
+The Cranelift JIT currently supports **~35 bytecode opcodes**:
 
 | Category | Opcodes |
 |----------|---------|
@@ -114,31 +123,47 @@ The Cranelift JIT currently supports **~35 bytecode opcodes** (up from 26):
 | Import | `IMPORT_NAME`, `IMPORT_FROM` |
 | Context mgr | `SETUP_WITH`, `WITH_EXIT` |
 
-### Language features now supported
+### Recent language features added
 
 | Feature | Status |
 |---------|--------|
-| `with` statement / context managers | ✅ Added `SETUP_WITH`/`WITH_EXIT` JIT support |
-| `import` statements | ✅ Added `IMPORT_NAME`/`IMPORT_FROM` JIT support |
-| `@decorator` syntax | ✅ Already existed in parser |
-| `__getitem__`/`__setitem__`/`__iter__` on custom classes | ✅ Already existed |
-| `try`/`except`/`finally` | ✅ Already existed in VM |
-| `is` / `is not` | ✅ Added `IS_OP` JIT support |
-| `~` bitwise invert | ✅ Added `UNARY_INVERT` JIT support |
-| Set literals | ✅ Added `BUILD_SET` JIT support |
-| Slice literals | ✅ Added `BUILD_SLICE` JIT support |
-| `COPY`, `SWAP` | ✅ Added direct eval_stack manipulation |
-| Starred assignment (`*a, b = ...`) | ✅ Added `UNPACK_EX` JIT support |
+| `with` statement / context managers | ✅ `SETUP_WITH`/`WITH_EXIT` JIT support |
+| `import` statements | ✅ `IMPORT_NAME`/`IMPORT_FROM` JIT support |
+| `@decorator` syntax | ✅ Parser |
+| `__getitem__`/`__setitem__`/`__iter__` on custom classes | ✅ Object system |
+| `try`/`except`/`finally` | ✅ VM |
+| `is` / `is not` | ✅ `IS_OP` JIT support |
+| `~` bitwise invert | ✅ `UNARY_INVERT` JIT support |
+| Set literals | ✅ `BUILD_SET` JIT support |
+| Slice literals | ✅ `BUILD_SLICE` JIT support |
+| `COPY`, `SWAP` | ✅ Direct eval_stack manipulation |
+| Starred assignment (`*a, b = ...`) | ✅ `UNPACK_EX` JIT support |
+| Trailing commas (params, calls, imports) | ✅ Parser |
+| Multiline imports with comments | ✅ Parser |
+| String/f-string concatenation | ✅ Parser |
+| Subscript with commas (`X[a, b]`) | ✅ Parser (`parse_slice_or_expr`) |
+| Bare `*` keyword-only separator | ✅ Parser (`parse_args`) |
+| `sys.version_info` tuple | ✅ Added |
+| Tuple comparison (`>=`, `<`) | ✅ `ge` + `lt` implemented |
+| `__future__` module | ✅ Native |
+| `ssl` module | ✅ Constants + SSLContext stub |
+| `atexit` module | ✅ register/unregister |
+| `logging.NullHandler` | ✅ Handler stub |
+| `__import__` builtin | ✅ Native, uses VM_PTR |
+| `SyntaxError` builtin | ✅ Added as exception type |
+| `importlib.resources` | ✅ files() + as_file() stubs |
+| Venv detection | ✅ VIRTUAL_ENV + .venv/ auto-discovered |
+| Relative imports (`from . import`) | ✅ via __package__ + level |
 
 ### Not yet implemented (for 1.0)
 
-| Feature | Effort | Impact | Status |
-|---------|--------|--------|--------|
-| Inline cache for `LOAD_ATTR` | 🟡 Medium | 2-5× faster attr access | ✅ Done (thread-local cache) |
-| `raise...from` chaining | 🟢 Low | Niche | ✅ Already existed in VM |
-| `async`/`await` | 🔴 Very high | Unlocks asyncio | ✅ Done (parser, compiler, VM, Coroutine type) |
-| Standard library modules | 🔴 Very high | Unlocks whole ecosystem | ✅ math, sys, time (básicos) |
-| Full Python stdlib | 🔴🔴🔴 Enormous | Drop-in CPython replacement | ⏳ Futuro |
+| Feature | Effort | Impact |
+|---------|--------|--------|
+| Inline cache for `LOAD_ATTR` | 🟡 Medium | 2-5× faster attr access |
+| `raise...from` chaining | 🟢 Low | Niche |
+| `async`/`await` | 🔴 Very high | Unlocks asyncio |
+| Standard library modules | 🔴 Very high | Unlocks whole ecosystem |
+| Full Python stdlib | 🔴🔴🔴 Enormous | Drop-in CPython replacement |
 
 ### Optimization history (JIT edition)
 
@@ -170,3 +195,16 @@ which checks instance dicts and type MROs.
 - `num-traits` — numeric trait implementations
 
 Zero other external dependencies. No regex, no serde, no pyo3.
+
+## uv integration
+
+RustPython can work with uv projects out of the box. When run inside a
+directory with `.venv/` (created by `uv sync`), it automatically discovers
+the virtual environment and adds its `site-packages` directory to `sys.path`.
+This allows importing packages installed via `uv add`.
+
+```bash
+cd my-project
+uv init && uv add requests
+/path/to/rustpython -c "import requests; print(requests.__version__)"
+```
