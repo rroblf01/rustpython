@@ -2256,30 +2256,26 @@ impl Compiler {
                 if is_bare_super {
                     // PEP 3135: inject type(self) and self for super()
                     if self.scope == ScopeType::Function && !self.code.varnames.is_empty() {
-                        eprintln!("DEBUG PEP 3135: expanding super() in method {}", self.code.name);
+                        // Load 'super' first (callable goes at bottom of stack)
+                        self.compile_expr(func)?;
                         // Load type builtin
                         let type_name_idx = self.get_name_index("type") as u32;
                         self.emit(Opcode::LOAD_GLOBAL, type_name_idx);
-                        eprintln!("DEBUG PEP 3135: emitted LOAD_GLOBAL type at idx={}", type_name_idx);
                         // Load self (first arg)
                         self.emit(Opcode::LOAD_FAST, 0);
-                        eprintln!("DEBUG PEP 3135: emitted LOAD_FAST 0");
                         // Call type(self)
                         self.emit(Opcode::CALL, 1);
-                        eprintln!("DEBUG PEP 3135: emitted CALL 1");
                         // Load self (first arg) again
                         self.emit(Opcode::LOAD_FAST, 0);
-                        eprintln!("DEBUG PEP 3135: emitted LOAD_FAST 0");
                         extra_pos = 2;
                     } else {
-                        eprintln!("DEBUG PEP 3135: cannot expand super() - varnames.len={}", self.code.varnames.len());
+                        self.compile_expr(func)?;
                     }
+                } else {
+                    self.compile_expr(func)?;
                 }
                 let npos = args.len() + extra_pos;
                 let nkw = keywords.len();
-
-
-                self.compile_expr(func)?;
 
                 for arg in args {
                     self.compile_expr(arg)?;

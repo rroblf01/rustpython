@@ -1883,16 +1883,15 @@ impl VirtualMachine {
                     PyError::runtime_error("name index out of range")
                 })?.clone();
                 let obj = self.frames[fi].pop()?;
-                // Check if obj is Super
-                {
-                    let obj_borrowed = obj.borrow();
-                    if matches!(&*obj_borrowed, PyObject::Super { .. }) {
-                        panic!("LOAD_ATTR obj is Super BEFORE match");
-                    }
-                }
                 let result = {
                     let obj_borrowed = obj.borrow();
                     match &*obj_borrowed {
+                        PyObject::Super { cls, obj: super_obj } => {
+                            // super(cls, obj).attr: walk MRO of obj's type, starting after cls
+                            drop(obj_borrowed);
+                            let attr = obj.borrow().get_attribute(&name)?;
+                            Ok(attr)
+                        }
                         PyObject::Instance { dict, typ } => {
                             if name == "__dict__" {
                                 let mut pd = crate::object::PyDict::new();
@@ -1992,10 +1991,6 @@ impl VirtualMachine {
                         }
                         _ => {
                             let type_name = obj_borrowed.type_name();
-                            // If type is super, crash here to see if reached
-                            if type_name == "super" {
-                                panic!("REACHED CATCH-ALL FOR SUPER");
-                            }
                             // Check inline cache first
                             let cached = ATTR_CACHE.with(|c| c.borrow().get(&(type_name.clone(), name.clone())).copied());
                             if let Some(func) = cached {
