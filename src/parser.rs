@@ -468,11 +468,25 @@ impl Parser {
         self.expect(&Token::For)?;
         let mut target = self.parse_bitwise_or()?;
         // Handle tuple unpacking: 'for a, b in ...'
+        // Track parenthesis depth so commas inside function calls
+        // (e.g., "for a, b in func(x, y)") don't break parsing.
         if self.at(&Token::Comma) {
             let mut elts = vec![target];
-            while self.eat(&Token::Comma) {
-                if self.at(&Token::In) {
+            let mut paren_depth = 0usize;
+            loop {
+                if !self.eat(&Token::Comma) {
                     break;
+                }
+                if paren_depth == 0 && self.at(&Token::In) {
+                    break;
+                }
+                // Skip parenthesized expressions — commas inside ( ) don't count as tuple separators
+                if self.at(&Token::LeftParen) {
+                    paren_depth += 1;
+                } else if self.at(&Token::RightParen) {
+                    if paren_depth > 0 {
+                        paren_depth -= 1;
+                    }
                 }
                 elts.push(self.parse_bitwise_or()?);
             }
