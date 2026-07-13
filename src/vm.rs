@@ -510,6 +510,14 @@ impl VirtualMachine {
               }
               modules.insert("importlib.resources".to_string(), resources_mod);
           }
+          // Wire importlib.util as a submodule
+          {
+              let util_mod = create_module("importlib.util", create_importlib_util_dict());
+              if let PyObject::Module { dict, .. } = &mut *importlib_mod.borrow_mut() {
+                  dict.insert("util".to_string(), util_mod.clone());
+              }
+              modules.insert("importlib.util".to_string(), util_mod);
+          }
           modules.insert("importlib".to_string(), importlib_mod);
 
           modules.insert("inspect".to_string(), create_module("inspect", create_inspect_dict()));

@@ -314,22 +314,231 @@ pub fn create_importlib_dict() -> HashMap<String, PyObjectRef> {
         };
     }
 
+    /// Helper: resolve a module name with relative import support
+    fn resolve_name(name: &str, package: Option<&str>) -> Result<String, PyError> {
+        if !name.starts_with('.') {
+            return Ok(name.to_string());
+        }
+        let pkg = match package {
+            Some(p) => p.to_string(),
+            None => return Err(PyError::type_error(
+                "import_module() requires 'package' argument for relative import"
+            )),
+        };
+        let level = name.chars().take_while(|&c| c == '.').count();
+        let rel_part = &name[level..];
+        let pkg_parts: Vec<&str> = pkg.split('.').collect();
+        if level > pkg_parts.len() {
+            return Err(PyError::ImportError(
+                "attempted relative import beyond top-level package".to_string()
+            ));
+        }
+        let base = &pkg_parts[..pkg_parts.len() - level];
+        if base.is_empty() {
+            Ok(rel_part.to_string())
+        } else if rel_part.is_empty() {
+            Ok(base.join("."))
+        } else {
+            Ok(format!("{}.{}", base.join("."), rel_part))
+        }
+    }
+
+    /// Helper: import a dotted module chain, ensuring parents are loaded first
+    fn import_dotted(vm: &mut crate::vm::VirtualMachine, name: &str) -> Result<PyObjectRef, String> {
+        // If it's already loaded, return it
+        if let Some(module) = vm.modules.get(name) {
+            return Ok(module.clone());
+        }
+        // For dotted names, load the chain step by step
+        if name.contains('.') {
+            let parts: Vec<&str> = name.split('.').collect();
+            let mut current = String::new();
+            for part in &parts {
+                if current.is_empty() {
+                    current = part.to_string();
+                } else {
+                    current = format!("{}.{}", current, part);
+                }
+                if !vm.modules.contains_key(&current) {
+                    let module = vm.import_module_from_file(&current)?;
+                    vm.modules.insert(current.clone(), module.clone());
+                    // Also sync to sys.modules
+                    if let Some(sys_mod) = vm.modules.get("sys") {
+                        if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
+                            if let Some(mod_dict) = dict.get("modules") {
+                                mod_dict.borrow_mut().set_attribute(&current, module).ok();
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(module) = vm.modules.get(name) {
+                return Ok(module.clone());
+            }
+            return Err(format!("No module named '{}'", name));
+        }
+        // Simple name
+        let module = vm.import_module_from_file(name)?;
+        vm.modules.insert(name.to_string(), module.clone());
+        if let Some(sys_mod) = vm.modules.get("sys") {
+            if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
+                if let Some(mod_dict) = dict.get("modules") {
+                    mod_dict.borrow_mut().set_attribute(name, module.clone()).ok();
+                }
+            }
+        }
+        Ok(module)
+    }
+
     // import_module(name, package=None) -> module
     importlib_func!("import_module", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("import_module() takes at least 1 argument"));
+            return Err(PyError::type_error("import_module() missing required argument 'name'"));
         }
         let name = args[0].str();
-        // We can't easily access the VM from a builtin function.
-        // For now, return an error guiding users to use built-in import.
-        // This is a stub — the real import_module is available as __import__.
-        Err(PyError::ImportError(format!(
-            "importlib.import_module() is not yet implemented in RustPython; use built-in 'import' statement instead"
-        )))
+        let package: Option<String> = if args.len() >= 2 {
+            let pkg = args[1].str();
+            if pkg.is_empty() { None } else { Some(pkg) }
+        } else { None };
+
+        // Resolve relative imports
+        let resolved = resolve_name(&name, package.as_deref())?;
+
+        // Get VM
+        let vm_ptr = crate::object::VM_PTR.with(|p| *p.borrow());
+        let vm = if let Some(ptr) = vm_ptr {
+            unsafe { &mut *ptr }
+        } else {
+            return Err(PyError::ImportError("import_module: no active VM".to_string()));
+        };
+
+        // Check if already loaded
+        if let Some(module) = vm.modules.get(&resolved) {
+            return Ok(module.clone());
+        }
+
+        // Import the module (handles dotted names)
+        match import_dotted(vm, &resolved) {
+            Ok(module) => Ok(module),
+            Err(e) => Err(PyError::ImportError(format!("import_module error: {}", e))),
+        }
     });
 
     // __version__ — indicates importlib metadata
     d.insert("__version__".to_string(), py_str("1.0.0"));
+    d
+}
+
+/// Native importlib.util module providing find_spec().
+pub fn create_importlib_util_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! util_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    // find_spec(name, package=None) -> ModuleSpec or None
+    util_func!("find_spec", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("find_spec() missing required argument 'name'"));
+        }
+        let name = args[0].str();
+        let package = if args.len() >= 2 {
+            let pkg = args[1].str();
+            if pkg.is_empty() { None } else { Some(pkg) }
+        } else { None };
+
+        // Resolve the full module name (handle relative imports)
+        let resolved_name = if let Some(ref pkg) = package {
+            if name.starts_with('.') {
+                let level = name.chars().take_while(|&c| c == '.').count();
+                let rel_part = &name[level..];
+                let pkg_parts: Vec<&str> = pkg.split('.').collect();
+                if level > pkg_parts.len() {
+                    return Ok(py_none());
+                }
+                let base = &pkg_parts[..pkg_parts.len() - level];
+                if base.is_empty() {
+                    rel_part.to_string()
+                } else if rel_part.is_empty() {
+                    base.join(".")
+                } else {
+                    format!("{}.{}", base.join("."), rel_part)
+                }
+            } else if !name.contains('.') {
+                format!("{}.{}", pkg, name)
+            } else {
+                name.to_string()
+            }
+        } else {
+            name.to_string()
+        };
+
+        // Get VM
+        let vm_ptr = crate::object::VM_PTR.with(|p| *p.borrow());
+        let vm = if let Some(ptr) = vm_ptr {
+            unsafe { &mut *ptr }
+        } else {
+            return Ok(py_none());
+        };
+
+        // Check if already loaded in modules
+        if vm.modules.contains_key(&resolved_name) {
+            return Ok(create_module("ModuleSpec", HashMap::from([
+                ("name".to_string(), py_str(&resolved_name)),
+                ("origin".to_string(), py_str("built-in")),
+            ])));
+        }
+
+        // Get sys.path manually to search for the module file
+        let search_paths = {
+            let mut paths = Vec::new();
+            if let Some(sys_mod) = vm.modules.get("sys") {
+                if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
+                    if let Some(path_list) = dict.get("path") {
+                        if let PyObject::List(items) = &*path_list.borrow() {
+                            for item in items {
+                                if let PyObject::Str(s) = &*item.borrow() {
+                                    paths.push(s.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            paths
+        };
+
+        // For dotted names, we need to find the file for the top-level
+        let top_name = if resolved_name.contains('.') {
+            resolved_name.split('.').next().unwrap().to_string()
+        } else {
+            resolved_name.clone()
+        };
+
+        // Search the filesystem for the module
+        for base in &search_paths {
+            let base_trimmed = base.trim_end_matches('/');
+            let py_path = format!("{}/{}.py", base_trimmed, top_name);
+            if std::path::Path::new(&py_path).exists() {
+                return Ok(create_module("ModuleSpec", HashMap::from([
+                    ("name".to_string(), py_str(&resolved_name)),
+                    ("origin".to_string(), py_str(&py_path)),
+                ])));
+            }
+            let init_path = format!("{}/{}/__init__.py", base_trimmed, top_name);
+            if std::path::Path::new(&init_path).exists() {
+                return Ok(create_module("ModuleSpec", HashMap::from([
+                    ("name".to_string(), py_str(&resolved_name)),
+                    ("origin".to_string(), py_str(&init_path)),
+                ])));
+            }
+        }
+
+        Ok(py_none())
+    });
+
     d
 }
 
