@@ -4955,6 +4955,13 @@ impl ObjectAccess for PyObject {
             PyObject::Function { name: func_name, dict, .. } => {
                 match name {
                     "__name__" | "__qualname__" => Ok(py_str(func_name)),
+                    "__doc__" => Ok(dict.get("__doc__").cloned().unwrap_or(py_none())),
+                    "__code__" => Ok(dict.get("__code__").cloned().unwrap_or(py_none())),
+                    "__globals__" => Ok(dict.get("__globals__").cloned().unwrap_or(py_none())),
+                    "__defaults__" => Ok(dict.get("__defaults__").cloned().unwrap_or(py_none())),
+                    "__closure__" => Ok(dict.get("__closure__").cloned().unwrap_or(py_none())),
+                    "__module__" => Ok(dict.get("__module__").cloned().unwrap_or(py_none())),
+                    "__annotations__" => Ok(dict.get("__annotations__").cloned().unwrap_or(py_none())),
                     _ => dict.get(name).cloned().ok_or_else(|| PyError::attribute_error(format!(
                         "'function' object has no attribute '{}'", name
                     ))),

@@ -572,6 +572,7 @@ impl Compiler {
         body: &[Stmt],
         global_names: &HashSet<String>,
         nonlocal_names: &HashSet<String>,
+        enclosing_names: Option<&HashSet<String>>,
     ) -> (Vec<String>, Vec<String>) {
         // Find nonlocal declarations within this function's body
         let (body_globals, body_nonlocals) = Self::scan_global_nonlocal_decls(body);
@@ -606,7 +607,10 @@ impl Compiler {
         // All names from outer scope = own_refs (not local) + nested_refs
         let mut all_outer_refs = nested_refs.clone();
         for name in &own_refs {
-            if !local_names.contains(name) && !effective_global.contains(name) {
+            if !local_names.contains(name)
+                && !effective_global.contains(name)
+                && enclosing_names.map_or(true, |en| en.contains(name))
+            {
                 all_outer_refs.insert(name.clone());
             }
         }
@@ -626,10 +630,12 @@ impl Compiler {
             .cloned()
             .collect();
         // Also include name referenced directly in this function that aren't local
+        // but only if they exist in an enclosing function's scope (not module globals)
         for name in &own_refs {
             if !local_names.contains(name)
                 && !free_vars.contains(name)
                 && !effective_global.contains(name)
+                && enclosing_names.map_or(true, |en| en.contains(name))
             {
                 free_vars.push(name.clone());
             }
@@ -1905,8 +1911,10 @@ impl Compiler {
         self.enter_scope(ScopeType::Function);
 
         // Pre-analyze the function to determine cell vars and free vars
+        // Pass enclosing function's varnames so module globals aren't treated as free vars
+        let enclosing_varnames: std::collections::HashSet<String> = old_code.varnames.iter().cloned().collect();
         let (cell_vars, free_vars) =
-            Self::analyze_function(args, body, &self.global_names, &self.nonlocal_names);
+            Self::analyze_function(args, body, &self.global_names, &self.nonlocal_names, Some(&enclosing_varnames));
         self.code.cellvars = cell_vars;
         self.code.freevars = free_vars;
 
