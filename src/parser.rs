@@ -176,7 +176,10 @@ impl Parser {
             return self.parse_try();
         }
         if matches!(&self.current, Token::Name(n) if n == "match") {
-            return self.parse_match();
+            // Soft keyword: only parse as match statement if NOT followed by '=' (assignment)
+            if self.peek() != &Token::Equal {
+                return self.parse_match();
+            }
         }
         if matches!(&self.current, Token::Name(n) if n == "type") {
             return self.parse_type_alias();

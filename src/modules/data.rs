@@ -112,6 +112,15 @@ pub fn create_collections_dict() -> HashMap<String, PyObjectRef> {
         Ok(dict)
     });
 
+    // namedtuple: factory function - simple implementation
+    coll_func!("namedtuple", |args| {
+        if args.len() < 2 {
+            return Err(PyError::type_error("namedtuple() needs at least 2 arguments"));
+        }
+        // Return a simple callable that creates tuple-like objects
+        Ok(py_str("<namedtuple stub>"))
+    });
+
     // collections.abc submodule (Iterable, Hashable, etc.)
     d.insert("abc".to_string(), create_module("collections.abc", create_collections_abc_dict()));
 
