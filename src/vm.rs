@@ -1222,6 +1222,8 @@ impl VirtualMachine {
                     let val = {
                         let f = &self.frames[self.frames.len() - 1];
                         let v = f.globals.borrow().get(name).cloned()
+                            .or_else(|| f.module_globals.as_ref()
+                                .and_then(|mg| mg.borrow().get(name).cloned()))
                             .or_else(|| f.builtins.get(name).cloned());
                         if name == "type" || name == "super" {
                             eprintln!("DEBUG LOAD_GLOBAL '{}' found: {:?}", name, v.as_ref().map(|x| format!("{}", x.borrow().type_name())));
