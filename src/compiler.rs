@@ -1924,6 +1924,7 @@ impl Compiler {
                 if outer.scope == ScopeType::ClassBody {
                     if !self.code.cellvars.contains(&"__class__".to_string()) {
                         self.code.cellvars.push("__class__".to_string());
+                        eprintln!("DEBUG: added __class__ cell var for method {}", self.code.name);
                     }
                 }
             }
@@ -2253,13 +2254,15 @@ impl Compiler {
                     false
                 };
                 if is_bare_super {
-                    // PEP 3135: inject self.__class__ and self for super()
+                    // PEP 3135: inject type(self) and self for super()
                     if self.scope == ScopeType::Function && !self.code.varnames.is_empty() {
-                        // Load self (first arg) for getting __class__
+                        // Load type builtin
+                        let type_name_idx = self.get_name_index("type") as u32;
+                        self.emit(Opcode::LOAD_GLOBAL, type_name_idx);
+                        // Load self (first arg)
                         self.emit(Opcode::LOAD_FAST, 0);
-                        // Get __class__ from self: self.__class__
-                        let name_idx = self.get_name_index("__class__") as u32;
-                        self.emit(Opcode::LOAD_ATTR, name_idx);
+                        // Call type(self)
+                        self.emit(Opcode::CALL, 1);
                         // Load self (first arg) again
                         self.emit(Opcode::LOAD_FAST, 0);
                         extra_pos = 2;

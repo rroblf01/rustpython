@@ -1888,6 +1888,7 @@ impl VirtualMachine {
                                 return Ok(None);
                             }
                             if name == "__class__" {
+                                eprintln!("DEBUG LOAD_ATTR __class__ on Instance");
                                 let cls = typ.clone();
                                 drop(obj_borrowed);
                                 self.frames[fi].push(cls);
