@@ -413,6 +413,10 @@ impl Parser {
         let test = self.parse_expr()?;
         self.expect(&Token::Colon)?;
         let body = self.parse_block()?;
+        // Skip newlines/comments between if-body and elif/else
+        while self.at(&Token::Newline) {
+            self.next();
+        }
         let mut orelse = Vec::new();
         if self.eat(&Token::Elif) {
             let elif = self.parse_if_elif()?;

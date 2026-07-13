@@ -842,7 +842,7 @@ impl VirtualMachine {
     fn exec_module_source(&mut self, source: &str, path: &str, name: &str) -> Result<PyObjectRef, String> {
         eprintln!("DEBUG exec_module_source: parsing '{}'...", name);
         let mut parser = crate::parser::Parser::new(source);
-        let program = parser.parse_program().map_err(|e| format!("Parse error: {}", e))?;
+        let program = parser.parse_program().map_err(|e| format!("Parse error in '{}': {}", name, e))?;
         eprintln!("DEBUG exec_module_source: compiling '{}'...", name);
         let mut compiler = crate::compiler::Compiler::new();
         let code = compiler.compile(&program, path).map_err(|e| format!("Compile error: {}", e))?;
