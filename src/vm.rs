@@ -3120,10 +3120,22 @@ impl VirtualMachine {
 
             // __set_name__ protocol: for each descriptor in the class dict that has __set_name__, call it
             for (attr_name, value) in namespace_dict.iter() {
-                let has_set_name = value.borrow().get_attribute("__set_name__").is_ok();
+                // Get __set_name__ from the TYPE (not the instance) to avoid double-binding
+                let typ = match &*value.borrow() {
+                    PyObject::Instance { typ, .. } => Some(typ.clone()),
+                    _ => None,
+                };
+                let has_set_name = if let Some(t) = &typ {
+                    t.borrow().get_attribute("__set_name__").is_ok()
+                } else {
+                    false
+                };
                 if has_set_name {
-                    let set_name_method = value.borrow().get_attribute("__set_name__").unwrap();
-                    let _ = self.call_function(set_name_method, vec![class.clone(), py_str(attr_name)], vec![]);
+                    if let Some(t) = typ {
+                        let set_name_method = t.borrow().get_attribute("__set_name__").unwrap();
+                        // Call with explicit self=value, then owner=class, name=attr_name
+                        let _ = self.call_function(set_name_method, vec![value.clone(), class.clone(), py_str(attr_name)], vec![]);
+                    }
                 }
             }
 
