@@ -1668,6 +1668,21 @@ pub fn create_logging_dict() -> HashMap<String, PyObjectRef> {
                     func: logging_error,
                     self_obj: py_none(),
                 }));
+                type_dict.insert("setLevel".to_string(), PyObjectRef::imm(PyObject::BuiltinMethod {
+                    name: "setLevel".to_string(),
+                    func: |args| {
+                        if args.len() < 2 { return Err(PyError::type_error("setLevel requires level argument")); }
+                        // Store level in instance dict
+                        let instance = args[0].clone();
+                        let level = args[1].clone();
+                        let mut dict = instance.borrow_mut();
+                        if let PyObject::Instance { dict: inst_dict, .. } = &mut *dict {
+                            inst_dict.insert("level".to_string(), level);
+                        }
+                        Ok(py_none())
+                    },
+                    self_obj: py_none(),
+                }));
                 type_dict.insert("addHandler".to_string(), PyObjectRef::imm(PyObject::BuiltinMethod {
                     name: "addHandler".to_string(),
                     func: |args| {

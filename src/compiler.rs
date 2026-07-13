@@ -2324,10 +2324,24 @@ impl Compiler {
                 self.emit(Opcode::BINARY_OP, 13); // SUBSCR = 13
             }
             Expr::List(elts) => {
-                for elt in elts {
-                    self.compile_expr(elt)?;
+                if elts.iter().any(|e| matches!(e, Expr::Starred(_))) {
+                    // Star unpacking present — use incremental building with LIST_APPEND/LIST_EXTEND
+                    self.emit(Opcode::BUILD_LIST, 0);
+                    for elt in elts {
+                        if let Expr::Starred(inner) = elt {
+                            self.compile_expr(inner)?;
+                            self.emit(Opcode::LIST_EXTEND, 0);
+                        } else {
+                            self.compile_expr(elt)?;
+                            self.emit(Opcode::LIST_APPEND, 0);
+                        }
+                    }
+                } else {
+                    for elt in elts {
+                        self.compile_expr(elt)?;
+                    }
+                    self.emit(Opcode::BUILD_LIST, elts.len() as u32);
                 }
-                self.emit(Opcode::BUILD_LIST, elts.len() as u32);
             }
             Expr::Tuple(elts) => {
                 for elt in elts {

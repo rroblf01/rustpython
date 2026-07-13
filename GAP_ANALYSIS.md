@@ -53,7 +53,7 @@ Remaining gaps: runtime module coverage (ssl, importlib.resources stubs started)
 |--------|-----------|------------|--------|
 | ~~`DELETE_SUBSCR` (110)~~ | bytecode.rs:56 | ✅ **FIXED** | `del lst[idx]` works |
 | ~~`SET_FUNCTION_ATTRIBUTE` (104)~~ | bytecode.rs:49 | ✅ **FIXED** | Function metadata set |
-| ~~`LIST_EXTEND` (75)~~ | bytecode.rs:31 | ✅ **HANDLED** | `list.extend()` via bytecode |
+| ~~`LIST_EXTEND` (75)~~ | bytecode.rs:31, vm.rs:2189 | ✅ **HANDLED** | `list.extend()` via bytecode + star unpack `[*a, b, *c]` |
 | ~~`LOAD_FROM_DICT_OR_GLOBALS` (87)~~ | bytecode.rs:37 | ✅ **FIXED** | Class body name resolution |
 | ~~`CALL_FUNCTION_EX` (4)~~ | bytecode.rs:13 | ✅ **FIXED** | `func(*args, **kwargs)` call syntax |
 | ~~`CALL_KW` (53)~~ | bytecode.rs:14 | ✅ **FIXED** | Keyword argument calls |

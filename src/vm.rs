@@ -2018,6 +2018,13 @@ impl VirtualMachine {
                                                     self_obj: obj.clone(),
                                                 }));
                                             }
+                                            PyObject::BuiltinMethod { name: n, func, .. } => {
+                                                return Some(PyObjectRef::imm(PyObject::BuiltinMethod {
+                                                    name: n.clone(),
+                                                    func: *func,
+                                                    self_obj: obj.clone(),
+                                                }));
+                                            }
                                             _ => {
                                                 return Some(val.clone());
                                             }
@@ -2185,6 +2192,29 @@ impl VirtualMachine {
                     v.push(val);
                 } else {
                     return Err(PyError::runtime_error("LIST_APPEND on non-list"));
+                }
+            }
+
+            Opcode::LIST_EXTEND => {
+                let val = self.frames[fi].pop()?;
+                let items = {
+                    let val_ref = val.borrow();
+                    match &*val_ref {
+                        PyObject::List(v) => v.clone(),
+                        PyObject::Tuple(v) => v.clone(),
+                        _ => {
+                            return Err(PyError::runtime_error(
+                                "LIST_EXTEND requires a list or tuple",
+                            ));
+                        }
+                    }
+                };
+                let list = self.frames[fi].peek(arg as usize)?;
+                let mut obj = list.borrow_mut();
+                if let PyObject::List(v) = &mut *obj {
+                    v.extend(items);
+                } else {
+                    return Err(PyError::runtime_error("LIST_EXTEND on non-list"));
                 }
             }
 
