@@ -5734,6 +5734,59 @@ impl ObjectAccess for PyObject {
                     _ => Err(PyError::attribute_error(format!("'re.Pattern' object has no attribute '{}'", name))),
                 }
             }
+            PyObject::Super { cls, obj } => {
+                // super(cls, obj).attr: walk MRO of obj's type, starting after cls
+                let obj_type = if let PyObject::Instance { typ, .. } = &*obj.borrow() {
+                    Some(typ.clone())
+                } else {
+                    obj.borrow().get_attribute("__class__").ok()
+                };
+                if let Some(obj_type) = obj_type {
+                    if let PyObject::Type { mro, .. } = &*obj_type.borrow() {
+                        // Find cls in MRO, start search from the next class
+                        let start_idx = mro.iter().position(|m| {
+                            if let (PyObjectRef::Mut(a), PyObjectRef::Mut(b)) = (cls, m) {
+                                std::ptr::eq(a.as_ptr(), b.as_ptr())
+                            } else {
+                                false
+                            }
+                        }).unwrap_or(0) + 1;
+                        if start_idx < mro.len() {
+                            let mut found = None;
+                            for base in mro.iter().skip(start_idx) {
+                                if let PyObject::Type { dict, .. } = &*base.borrow() {
+                                    if let Some(val) = dict.get(name) {
+                                        let val_borrowed = val.borrow();
+                                        match &*val_borrowed {
+                                            PyObject::Function { .. } | PyObject::BuiltinFunction { .. } => {
+                                                found = Some(PyObjectRef::new(PyObject::BoundMethod {
+                                                    func: val.clone(),
+                                                    self_obj: obj.clone(),
+                                                }));
+                                                break;
+                                            }
+                                            PyObject::Property { getter: Some(g), .. } => {
+                                                found = Some(builtin_call(g, &[obj.clone()]).unwrap_or_else(|_| val.clone()));
+                                                break;
+                                            }
+                                            _ => {
+                                                found = Some(val.clone());
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if let Some(found) = found {
+                                return Ok(found);
+                            }
+                        }
+                    }
+                }
+                Err(PyError::attribute_error(
+                    format!("'super' object has no attribute '{}'", name)
+                ))
+            }
             _ => Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", self.type_name(), name))),
         }
     }
