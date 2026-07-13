@@ -1918,6 +1918,17 @@ impl Compiler {
         self.code.cellvars = cell_vars;
         self.code.freevars = free_vars;
 
+        // PEP 3135: Add __class__ as cell var for methods inside a class body
+        if self.scope == ScopeType::Function {
+            if let Some(outer) = self.scope_stack.last() {
+                if outer.scope == ScopeType::ClassBody {
+                    if !self.code.cellvars.contains(&"__class__".to_string()) {
+                        self.code.cellvars.push("__class__".to_string());
+                    }
+                }
+            }
+        }
+
         // Separate regular args, vararg, kwarg
         let mut num_positional = 0;
         let mut defaults_count = 0;
@@ -2234,8 +2245,29 @@ impl Compiler {
                 args,
                 keywords,
             } => {
-                let npos = args.len();
+                // PEP 3135: super() without args in methods -> super(__class__, self)
+                let mut extra_pos = 0usize;
+                let is_bare_super = if let Expr::Name(n) = func.as_ref() {
+                    n == "super" && args.is_empty() && keywords.is_empty()
+                } else {
+                    false
+                };
+                if is_bare_super {
+                    // PEP 3135: inject self.__class__ and self for super()
+                    if self.scope == ScopeType::Function && !self.code.varnames.is_empty() {
+                        // Load self (first arg) for getting __class__
+                        self.emit(Opcode::LOAD_FAST, 0);
+                        // Get __class__ from self: self.__class__
+                        let name_idx = self.get_name_index("__class__") as u32;
+                        self.emit(Opcode::LOAD_ATTR, name_idx);
+                        // Load self (first arg) again
+                        self.emit(Opcode::LOAD_FAST, 0);
+                        extra_pos = 2;
+                    }
+                }
+                let npos = args.len() + extra_pos;
                 let nkw = keywords.len();
+
 
                 self.compile_expr(func)?;
 

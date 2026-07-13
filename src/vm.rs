@@ -1887,6 +1887,12 @@ impl VirtualMachine {
                                 self.frames[fi].push(PyObjectRef::new(PyObject::Dict(pd)));
                                 return Ok(None);
                             }
+                            if name == "__class__" {
+                                let cls = typ.clone();
+                                drop(obj_borrowed);
+                                self.frames[fi].push(cls);
+                                return Ok(None);
+                            }
                             let attr = dict.get(&name).cloned().or_else(|| {
                                 let typ_ref = typ.borrow();
                                 if let PyObject::Type { dict: type_dict, mro, .. } = &*typ_ref {
