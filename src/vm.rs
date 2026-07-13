@@ -1466,6 +1466,7 @@ impl VirtualMachine {
                     keywords.push((name, value));
                 }
                 let callable = self.frames[fi].pop()?;
+                if cfg!(feature = "profile") { eprintln!("DEBUG CALL: callable type={} callable={:?}", callable.borrow().type_name(), callable.repr()); }
                 let result = self.call_function(callable, args, keywords)?;
                 self.frames[fi].push(result);
             }
@@ -2928,6 +2929,7 @@ impl VirtualMachine {
 
     fn call_function(&mut self, callable: PyObjectRef, args: Vec<PyObjectRef>, keywords: Vec<(String, PyObjectRef)>) -> PyResult<PyObjectRef> {
         let type_name = callable.borrow().type_name();
+        if cfg!(feature = "profile") { eprintln!("DEBUG call_function: type={} name={:?}", type_name, callable.repr()); }
 
         if let PyObject::BuiltinFunction { func, .. } = &*callable.borrow() {
             let func = *func;
