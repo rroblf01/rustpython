@@ -857,6 +857,7 @@ impl Lexer {
                         let mut format_spec = String::new();
                         let mut debug: bool = false;
                         let mut state: u8 = 0; // 0=expr, 1=after_conv_marker, 2=format_spec
+                        let mut bracket_depth: u32 = 0; // track ()[] nesting
                         while depth > 0 {
                             match self.advance() {
                                 Some('{') => {
@@ -883,7 +884,7 @@ impl Lexer {
                                 Some('r') if state == 1 => { conversion = 1; state = 0; }
                                 Some('s') if state == 1 => { conversion = 2; state = 0; }
                                 Some('a') if state == 1 => { conversion = 3; state = 0; }
-                                Some(':') if depth == 1 && state == 0 => {
+                                Some(':') if depth == 1 && state == 0 && bracket_depth == 0 => {
                                     state = 2;
                                 }
                                 Some(c) => {
@@ -896,6 +897,9 @@ impl Lexer {
                                         format_spec.push(c);
                                     } else {
                                         expr.push(c);
+                                        // Track bracket nesting for format spec : detection
+                                        if c == '(' || c == '[' { bracket_depth += 1; }
+                                        else if c == ')' || c == ']' { if bracket_depth > 0 { bracket_depth -= 1; } }
                                     }
                                 }
                                 None => break,
