@@ -531,6 +531,9 @@ impl VirtualMachine {
           // Native atexit module (register/unregister exit callbacks)
           modules.insert("atexit".to_string(), create_module("atexit", create_atexit_dict()));
 
+          // Native contextvars module (ContextVar with thread-local storage)
+          modules.insert("contextvars".to_string(), create_module("contextvars", create_contextvars_dict()));
+
           // Populate sys.path with default search paths
         if let PyObject::List(path_list) = &mut *sys_dict.get("path").unwrap().borrow_mut() {
             path_list.push(py_str("."));

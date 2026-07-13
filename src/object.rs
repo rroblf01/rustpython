@@ -529,6 +529,8 @@ pub enum PyObject {
     },
     Thread(std::sync::Arc<std::sync::Mutex<ThreadInner>>),
     Lock(std::sync::Arc<std::sync::Mutex<LockInner>>),
+    RLock(std::sync::Arc<std::sync::Mutex<RLockInner>>),
+    Event(std::sync::Arc<EventInner>),
     Queue(std::sync::Arc<std::sync::Mutex<QueueInner>>),
     Super {
         cls: PyObjectRef,
@@ -605,6 +607,8 @@ impl PyObject {
             PyObject::Socket { .. } => "socket",
             PyObject::Thread(_) => "Thread",
             PyObject::Lock(_) => "lock",
+            PyObject::RLock(_) => "RLock",
+            PyObject::Event(_) => "Event",
             PyObject::Queue(_) => "Queue",
             PyObject::Super { .. } => "super",
             PyObject::Property { .. } => "property",
@@ -728,6 +732,8 @@ impl PyObject {
             PyObject::Socket { .. } => format!("<socket object>"),
             PyObject::Thread(_) => "<Thread>".to_string(),
             PyObject::Lock(_) => "<lock>".to_string(),
+            PyObject::RLock(_) => "<RLock>".to_string(),
+            PyObject::Event(_) => "<Event>".to_string(),
             PyObject::Queue(_) => "<Queue>".to_string(),
             PyObject::Super { .. } => format!("<super object>"),
             PyObject::Property { .. } => format!("<property object>"),
@@ -5503,6 +5509,159 @@ impl ObjectAccess for PyObject {
                     _ => Err(PyError::attribute_error(format!("'lock' object has no attribute '{}'", name))),
                 }
             }
+            PyObject::RLock(inner_arc) => {
+                let inner_arc = inner_arc.clone();
+                match name {
+                    "acquire" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "acquire".to_string(),
+                        func: |args| {
+                            let obj = args[0].borrow();
+                            if let PyObject::RLock(inner_arc) = &*obj {
+                                let mut inner = inner_arc.lock().unwrap();
+                                let current_id = std::thread::current().id();
+                                if let Some(owner) = inner.owner {
+                                    if owner == current_id {
+                                        inner.count += 1;
+                                        return Ok(py_bool(true));
+                                    }
+                                }
+                                // Spin waiting for lock
+                                while inner.owner.is_some() {
+                                    drop(inner);
+                                    std::thread::yield_now();
+                                    inner = inner_arc.lock().unwrap();
+                                }
+                                inner.owner = Some(current_id);
+                                inner.count = 1;
+                            }
+                            Ok(py_bool(true))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "release" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "release".to_string(),
+                        func: |args| {
+                            let obj = args[0].borrow();
+                            if let PyObject::RLock(inner_arc) = &*obj {
+                                let mut inner = inner_arc.lock().unwrap();
+                                let current_id = std::thread::current().id();
+                                if inner.owner != Some(current_id) {
+                                    return Err(PyError::runtime_error("cannot release un-acquired lock"));
+                                }
+                                inner.count -= 1;
+                                if inner.count == 0 {
+                                    inner.owner = None;
+                                }
+                            }
+                            Ok(py_none())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__enter__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__enter__".to_string(),
+                        func: |args| {
+                            let obj = args[0].borrow();
+                            if let PyObject::RLock(inner_arc) = &*obj {
+                                let mut inner = inner_arc.lock().unwrap();
+                                let current_id = std::thread::current().id();
+                                if let Some(owner) = inner.owner {
+                                    if owner == current_id {
+                                        inner.count += 1;
+                                        return Ok(args[0].clone());
+                                    }
+                                }
+                                while inner.owner.is_some() {
+                                    drop(inner);
+                                    std::thread::yield_now();
+                                    inner = inner_arc.lock().unwrap();
+                                }
+                                inner.owner = Some(current_id);
+                                inner.count = 1;
+                            }
+                            Ok(args[0].clone())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__exit__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__exit__".to_string(),
+                        func: |args| {
+                            let obj = args[0].borrow();
+                            if let PyObject::RLock(inner_arc) = &*obj {
+                                let mut inner = inner_arc.lock().unwrap();
+                                let current_id = std::thread::current().id();
+                                if inner.owner != Some(current_id) {
+                                    return Err(PyError::runtime_error("cannot release un-acquired lock"));
+                                }
+                                inner.count -= 1;
+                                if inner.count == 0 {
+                                    inner.owner = None;
+                                }
+                            }
+                            Ok(py_none())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    _ => Err(PyError::attribute_error(format!("'RLock' object has no attribute '{}'", name))),
+                }
+            }
+            PyObject::Event(inner_arc) => {
+                let inner_arc = inner_arc.clone();
+                match name {
+                    "is_set" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "is_set".to_string(),
+                        func: |args| {
+                            let obj = args[0].borrow();
+                            if let PyObject::Event(inner_arc) = &*obj {
+                                let flag = inner_arc.flag.lock().unwrap();
+                                return Ok(py_bool(*flag));
+                            }
+                            Ok(py_bool(false))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "set" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "set".to_string(),
+                        func: |args| {
+                            let obj = args[0].borrow();
+                            if let PyObject::Event(inner_arc) = &*obj {
+                                let mut flag = inner_arc.flag.lock().unwrap();
+                                *flag = true;
+                                inner_arc.condvar.notify_all();
+                            }
+                            Ok(py_none())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "clear" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "clear".to_string(),
+                        func: |args| {
+                            let obj = args[0].borrow();
+                            if let PyObject::Event(inner_arc) = &*obj {
+                                let mut flag = inner_arc.flag.lock().unwrap();
+                                *flag = false;
+                            }
+                            Ok(py_none())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "wait" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "wait".to_string(),
+                        func: |args| {
+                            let obj = args[0].borrow();
+                            if let PyObject::Event(inner_arc) = &*obj {
+                                let mut flag = inner_arc.flag.lock().unwrap();
+                                while !*flag {
+                                    flag = inner_arc.condvar.wait(flag).unwrap();
+                                }
+                                return Ok(py_bool(true));
+                            }
+                            Ok(py_bool(true))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    _ => Err(PyError::attribute_error(format!("'Event' object has no attribute '{}'", name))),
+                }
+            }
             PyObject::Queue(inner_arc) => {
                 let inner_arc = inner_arc.clone();
                 match name {
@@ -6686,6 +6845,16 @@ pub struct PyArray {
 
 pub struct LockInner {
     pub lock: std::sync::atomic::AtomicBool,
+}
+
+pub struct RLockInner {
+    pub owner: Option<std::thread::ThreadId>,
+    pub count: u32,
+}
+
+pub struct EventInner {
+    pub flag: std::sync::Mutex<bool>,
+    pub condvar: std::sync::Condvar,
 }
 
 pub struct QueueInner {

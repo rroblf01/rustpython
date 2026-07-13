@@ -92,6 +92,26 @@ pub fn create_collections_dict() -> HashMap<String, PyObjectRef> {
         Ok(dict)
     });
 
+    // defaultdict: dict subclass that calls factory for missing keys
+    coll_func!("defaultdict", |args| {
+        let dict = crate::object::py_dict();
+        // Note: source dict copy not implemented (private buckets field)
+        // defaultdict(default_factory) and defaultdict(default_factory, initial_dict)
+        // work with the initial_dict as a separate argument.
+        let factory = if args.len() > 0 { Some(args[0].clone()) } else { None };
+        if let Some(f) = factory {
+            let _ = dict.borrow_mut().set_attribute("default_factory", f);
+        }
+        Ok(dict)
+    });
+
+    // OrderedDict: remembers insertion order (handled by PyDict ordering)
+    coll_func!("OrderedDict", |args| {
+        let dict = crate::object::py_dict();
+        // Note: source dict copy not implemented (private buckets field)
+        Ok(dict)
+    });
+
     // collections.abc submodule (Iterable, Hashable, etc.)
     d.insert("abc".to_string(), create_module("collections.abc", create_collections_abc_dict()));
 
@@ -185,7 +205,7 @@ pub fn create_functools_dict() -> HashMap<String, PyObjectRef> {
         };
         Ok(PyObjectRef::new(PyObject::Closure(Rc::new(decorator))))
     });
-    // Simple lru_cache that stores results in a dict
+    // lru_cache(maxsize): simple memoization cache
     ft_func!("lru_cache", |args| {
         let maxsize = if !args.is_empty() {
             match &*args[0].borrow() {
@@ -223,6 +243,38 @@ pub fn create_functools_dict() -> HashMap<String, PyObjectRef> {
         };
         Ok(PyObjectRef::new(PyObject::Closure(Rc::new(decorator))))
     });
+
+    // cache: alias for lru_cache(maxsize=None) (unbounded cache)
+    ft_func!("cache", |args| {
+            let decorator = move |dec_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                if dec_args.is_empty() {
+                    return Err(PyError::type_error("cache requires a function argument"));
+                }
+                let func = dec_args[0].clone();
+                let cache = std::rc::Rc::new(std::cell::RefCell::new(
+                    std::collections::HashMap::<String, PyObjectRef>::new(),
+                ));
+                let func_for_cache = func.clone();
+                let cache_wrapper = move |inner_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                    let key = inner_args
+                        .iter()
+                        .map(|a| format!("{:?}", a))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    let mut c = cache.borrow_mut();
+                    if let Some(result) = c.get(&key) {
+                        return Ok(result.clone());
+                    }
+                    let result = builtin_call(&func_for_cache, inner_args)?;
+                    c.insert(key, result.clone());
+                    Ok(result)
+                };
+                let wrapper = PyObjectRef::new(PyObject::Closure(Rc::new(cache_wrapper)));
+                let _ = wrapper.borrow_mut().set_attribute("__wrapped__", func);
+                Ok(wrapper)
+            };
+            Ok(PyObjectRef::new(PyObject::Closure(Rc::new(decorator))))
+        });
 
     d
 }
