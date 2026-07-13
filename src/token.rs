@@ -573,6 +573,14 @@ impl Lexer {
                     while self.peek() != Some('\n') && self.peek().is_some() {
                         self.advance();
                     }
+                    if self.paren_level > 0 {
+                        // Inside parentheses/brackets/braces, skip newlines (implicit continuation)
+                        if self.peek() == Some('\n') {
+                            self.advance(); // consume the newline char
+                        }
+                        self.at_line_start = true;
+                        continue;
+                    }
                     if self.peek().is_some() {
                         self.at_line_start = true;
                     }

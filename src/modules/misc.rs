@@ -1684,25 +1684,48 @@ pub fn create_logging_dict() -> HashMap<String, PyObjectRef> {
     });
 
     // NullHandler class (needed by urllib3 and other libs)
-    d.insert("NullHandler".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "NullHandler".to_string(),
-        func: |_| {
-            Ok(create_module("NullHandler", HashMap::from([
-                ("emit".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
-                    name: "emit".to_string(),
-                    func: |_| Ok(py_none()),
-                })),
-                ("handle".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
-                    name: "handle".to_string(),
-                    func: |_| Ok(py_none()),
-                })),
-                ("setLevel".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
-                    name: "setLevel".to_string(),
-                    func: |_| Ok(py_none()),
-                })),
-            ])))
-        },
-    }));
+    // Handler base class
+    let handler_class = PyObjectRef::new(PyObject::Type {
+        name: "Handler".to_string(),
+        dict: HashMap::from([
+            ("__init__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__init__".to_string(),
+                func: |args| {
+                    if args.len() > 1 {
+                        let _ = args[0].borrow_mut().set_attribute("level", args[1].clone());
+                    }
+                    Ok(py_none())
+                },
+            })),
+            ("setLevel".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "setLevel".to_string(),
+                func: |_| Ok(py_none()),
+            })),
+        ]),
+        bases: vec![],
+        mro: vec![],
+    });
+    // Set MRO so isinstance checks work (Type needs itself in MRO)
+    if let PyObject::Type { ref mut mro, .. } = &mut *handler_class.borrow_mut() {
+        mro.push(handler_class.clone());
+    }
+    d.insert("Handler".to_string(), handler_class.clone());
+    d.insert("NullHandler".to_string(), PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(move |_| {
+            Ok(PyObjectRef::new(PyObject::Instance {
+                typ: handler_class.clone(),
+                dict: HashMap::from([
+                    ("emit".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                        name: "emit".to_string(),
+                        func: |_| Ok(py_none()),
+                    })),
+                    ("handle".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                        name: "handle".to_string(),
+                        func: |_| Ok(py_none()),
+                    })),
+                    ("level".to_string(), py_int(0)),
+                ]),
+            }))
+        }))));
 
     // Add level constants
     d.insert("CRITICAL".to_string(), py_int(50));

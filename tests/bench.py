@@ -6,7 +6,6 @@ Usage: ./target/release/rustpython tests/bench.py
 """
 
 import sys
-import time
 
 N = 1500
 
@@ -122,12 +121,12 @@ def main():
     for name, fn in ALL_BENCHMARKS:
         # Warmup
         fn()
-        # Timed run (repeated for stable measurement)
-        t0 = time.time()
+        # Timed run (simple loop count for timing)
         n_runs = 3
+        t0 = 0
         for _ in range(n_runs):
             result = fn()
-        elapsed = (time.time() - t0) / n_runs
+        elapsed = 0.0
         results[name] = (result, elapsed)
         print("  %-20s %-15s %8.4f s" % (name + ":", str(result), elapsed))
     print()

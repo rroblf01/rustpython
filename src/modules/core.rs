@@ -286,8 +286,22 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
     d.insert("maxunicode".to_string(), py_int(1114111));
     d.insert("api_version".to_string(), py_int(1013));
     d.insert("executable".to_string(), py_str(&std::env::current_exe().map(|p| p.to_string_lossy().to_string()).unwrap_or_default()));
-    // Detect virtual environment (uv, venv, virtualenv)
+    // Detect virtual environment (uv, venv, virtualenv, conda, poetry, pixi)
     let venv_path = std::env::var("VIRTUAL_ENV").ok()
+        .or_else(|| std::env::var("CONDA_PREFIX").ok())
+        .or_else(|| {
+            // Poetry: POETRY_ACTIVE is set when inside a poetry shell
+            // Also check POETRY_VIRTUAL_ENV which poetry sets explicitly
+            if std::env::var("POETRY_ACTIVE").is_ok() {
+                std::env::var("POETRY_VIRTUAL_ENV").ok()
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            // Pixi environments
+            std::env::var("PIXI_IN_SHELL").ok().and_then(|_| std::env::var("PIXI_PROJECT_ROOT").ok())
+        })
         .or_else(|| {
             // Also look for .venv in CWD
             let cwd = std::env::current_dir().ok()?;

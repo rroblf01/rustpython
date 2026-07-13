@@ -499,10 +499,7 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! inspect_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
-                name: $name.to_string(),
-                func: $func,
-            }));
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
         };
     }
 
@@ -600,6 +597,227 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
     inspect_func!("stack", |_args| Ok(py_list(vec![])));
     inspect_func!("getouterframes", |_args| Ok(py_list(vec![])));
     inspect_func!("getinnerframes", |_args| Ok(py_list(vec![])));
+
+    d
+}
+
+// ─── profile module ────────────────────────────────────────────────────────
+
+pub fn create_profile_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! prof_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    prof_func!("run", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("run() missing required argument (statement)"));
+        }
+        let cmd = args[0].str();
+        let vm_ptr = crate::object::VM_PTR.with(|p| *p.borrow());
+        if let Some(ptr) = vm_ptr {
+            let vm = unsafe { &mut *ptr };
+            let mut parser = crate::parser::Parser::new(&cmd);
+            if let Ok(program) = parser.parse_program() {
+                let mut compiler = crate::compiler::Compiler::new();
+                if let Ok(code) = compiler.compile(&program, "<profile>") {
+                    let _ = vm.exec_code(code, None);
+                }
+            }
+        }
+        Ok(py_none())
+    });
+
+    prof_func!("runctx", |args| {
+        if args.len() < 3 {
+            return Err(PyError::type_error("runctx() requires 3 arguments (statement, globals, locals)"));
+        }
+        let cmd = args[0].str();
+        let _globals = &args[1];
+        let _locals = &args[2];
+        let vm_ptr = crate::object::VM_PTR.with(|p| *p.borrow());
+        if let Some(ptr) = vm_ptr {
+            let vm = unsafe { &mut *ptr };
+            let mut parser = crate::parser::Parser::new(&cmd);
+            if let Ok(program) = parser.parse_program() {
+                let mut compiler = crate::compiler::Compiler::new();
+                if let Ok(code) = compiler.compile(&program, "<profile>") {
+                    let _ = vm.exec_code(code, None);
+                }
+            }
+        }
+        Ok(py_none())
+    });
+
+    // Profiler stub class
+    prof_func!("Profile", |_args| {
+        let mut inst_dict = HashMap::new();
+        inst_dict.insert("enable".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "enable".to_string(),
+            func: |_| Ok(py_none()),
+        }));
+        inst_dict.insert("disable".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "disable".to_string(),
+            func: |_| Ok(py_none()),
+        }));
+        inst_dict.insert("create_stats".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "create_stats".to_string(),
+            func: |_| Ok(py_none()),
+        }));
+        inst_dict.insert("print_stats".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "print_stats".to_string(),
+            func: |_| Ok(py_none()),
+        }));
+        inst_dict.insert("dump_stats".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "dump_stats".to_string(),
+            func: |_| Ok(py_none()),
+        }));
+        Ok(PyObjectRef::new(PyObject::Instance {
+            typ: py_str("Profile"),
+            dict: inst_dict,
+        }))
+    });
+
+    d
+}
+
+// ─── cProfile module ───────────────────────────────────────────────────────
+
+pub fn create_cprofile_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = create_profile_dict();
+    d.insert("__name__".to_string(), py_str("cProfile"));
+    d
+}
+
+// ─── resource module ──────────────────────────────────────────────────────
+
+pub fn create_resource_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! res_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    // Resource usage constants (POSIX standard)
+    d.insert("RUSAGE_SELF".to_string(), py_int(0));
+    d.insert("RUSAGE_CHILDREN".to_string(), py_int(-1));
+    d.insert("RUSAGE_BOTH".to_string(), py_int(-2));
+    d.insert("RUSAGE_THREAD".to_string(), py_int(1));
+
+    // Priority constants
+    d.insert("PRIO_PROCESS".to_string(), py_int(0));
+    d.insert("PRIO_PGRP".to_string(), py_int(1));
+    d.insert("PRIO_USER".to_string(), py_int(2));
+
+    // RLIMIT constants (common ones)
+    d.insert("RLIMIT_CPU".to_string(), py_int(0));
+    d.insert("RLIMIT_FSIZE".to_string(), py_int(1));
+    d.insert("RLIMIT_DATA".to_string(), py_int(2));
+    d.insert("RLIMIT_STACK".to_string(), py_int(3));
+    d.insert("RLIMIT_CORE".to_string(), py_int(4));
+    d.insert("RLIMIT_NOFILE".to_string(), py_int(7));
+    d.insert("RLIMIT_AS".to_string(), py_int(9));
+
+    res_func!("getrusage", |_args| {
+        let mut result_dict = HashMap::new();
+        let zero = py_int(0);
+        result_dict.insert("ru_utime".to_string(), py_float(0.0));
+        result_dict.insert("ru_stime".to_string(), py_float(0.0));
+        result_dict.insert("ru_maxrss".to_string(), zero.clone());
+        result_dict.insert("ru_ixrss".to_string(), zero.clone());
+        result_dict.insert("ru_idrss".to_string(), zero.clone());
+        result_dict.insert("ru_isrss".to_string(), zero.clone());
+        result_dict.insert("ru_minflt".to_string(), zero.clone());
+        result_dict.insert("ru_majflt".to_string(), zero.clone());
+        result_dict.insert("ru_nswap".to_string(), zero.clone());
+        result_dict.insert("ru_inblock".to_string(), zero.clone());
+        result_dict.insert("ru_oublock".to_string(), zero.clone());
+        result_dict.insert("ru_msgsnd".to_string(), zero.clone());
+        result_dict.insert("ru_msgrcv".to_string(), zero.clone());
+        result_dict.insert("ru_nsignals".to_string(), zero.clone());
+        result_dict.insert("ru_nvcsw".to_string(), zero.clone());
+        result_dict.insert("ru_nivcsw".to_string(), zero.clone());
+        Ok(PyObjectRef::new(PyObject::Instance {
+            typ: py_str("struct_rusage"),
+            dict: result_dict,
+        }))
+    });
+
+    res_func!("getpagesize", |_| {
+        Ok(py_int(4096))
+    });
+
+    res_func!("getrlimit", |_args| {
+        // Return (soft, hard) as tuple with large defaults
+        Ok(py_tuple(vec![py_int(999999), py_int(999999)]))
+    });
+
+    res_func!("setrlimit", |_args| {
+        Ok(py_none())
+    });
+
+    d
+}
+
+// ─── trace module ─────────────────────────────────────────────────────────
+
+pub fn create_trace_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! trace_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    trace_func!("Trace", |_args| {
+        let mut inst_dict = HashMap::new();
+        inst_dict.insert("run".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "run".to_string(),
+            func: |args| {
+                let cmd = if !args.is_empty() { args[0].str() } else { String::new() };
+                let vm_ptr = crate::object::VM_PTR.with(|p| *p.borrow());
+                if let Some(ptr) = vm_ptr {
+                    let vm = unsafe { &mut *ptr };
+                    let mut parser = crate::parser::Parser::new(&cmd);
+                    if let Ok(program) = parser.parse_program() {
+                        let mut compiler = crate::compiler::Compiler::new();
+                        if let Ok(code) = compiler.compile(&program, "<trace>") {
+                            let _ = vm.exec_code(code, None);
+                        }
+                    }
+                }
+                Ok(py_none())
+            },
+        }));
+        inst_dict.insert("runctx".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "runctx".to_string(),
+            func: |_| Ok(py_none()),
+        }));
+        inst_dict.insert("results".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "results".to_string(),
+            func: |_| Ok(py_none()),
+        }));
+        Ok(PyObjectRef::new(PyObject::Instance {
+            typ: py_str("Trace"),
+            dict: inst_dict,
+        }))
+    });
+
+    // Coverage results class
+    trace_func!("CoverageResults", |_args| {
+        let mut inst_dict = HashMap::new();
+        inst_dict.insert("write_results".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "write_results".to_string(),
+            func: |_| Ok(py_none()),
+        }));
+        Ok(PyObjectRef::new(PyObject::Instance {
+            typ: py_str("CoverageResults"),
+            dict: inst_dict,
+        }))
+    });
 
     d
 }

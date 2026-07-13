@@ -3797,6 +3797,11 @@ impl ObjectAccess for PyObject {
                     }
                     return Ok(PyObjectRef::new(PyObject::Dict(pd)));
                 }
+                if name == "__weakref__" {
+                    // __weakref__ slot exists but returns None by default
+                    // A full implementation would return a WeakRef object if one exists
+                    return Ok(py_none());
+                }
                 // If __slots__ is defined, verify the attribute is allowed
                 if let Some(slots) = get_instance_slots(typ) {
                     if !slots.iter().any(|s| s == name) {
@@ -5025,9 +5030,11 @@ impl ObjectAccess for PyObject {
                             if let PyObject::Generator { frame } = &*gen {
                                 let mut frame_opt = frame.borrow_mut();
                                 if let Some(f) = frame_opt.as_mut() {
-                                    // For send(), push the sent value onto the stack
-                                    if args.len() > 1 && args[1].borrow().type_name() != "function" {
+                                    // Push the sent value onto the stack (None for __next__, value for send())
+                                    if args.len() > 1 {
                                         f.stack.push(args[1].clone());
+                                    } else {
+                                        f.stack.push(crate::object::py_none());
                                     }
                                     let mut vm = super::vm::VirtualMachine::new();
                                     vm.frames.push(f.clone());
@@ -5105,6 +5112,8 @@ impl ObjectAccess for PyObject {
                                 if let Some(f) = frame_opt.as_mut() {
                                     if args.len() > 1 {
                                         f.stack.push(args[1].clone());
+                                    } else {
+                                        f.stack.push(crate::object::py_none());
                                     }
                                     let mut vm = super::vm::VirtualMachine::new();
                                     vm.frames.push(f.clone());
@@ -6162,10 +6171,23 @@ pub fn to_index(obj: &PyObjectRef) -> PyResult<BigInt> {
 }
 
 pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRef> {
-    // Check for __getitem__ on custom classes
+    // Check for __getitem__ on custom classes and __class_getitem__ on types (PEP 560)
     let f = {
         let o = obj.borrow();
         match &*o {
+            PyObject::Type { dict: type_dict, mro, .. } => {
+                // PEP 560: cls[args] checks for __class_getitem__ on the type and its MRO
+                type_dict.get("__class_getitem__").cloned().or_else(|| {
+                    for base in mro.iter().skip(1) {
+                        if let PyObject::Type { dict: base_dict, .. } = &*base.borrow() {
+                            if let Some(val) = base_dict.get("__class_getitem__") {
+                                return Some(val.clone());
+                            }
+                        }
+                    }
+                    None
+                })
+            }
             PyObject::Instance { typ, .. } => {
                 let typ_ref = typ.borrow();
                 match &*typ_ref {

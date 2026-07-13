@@ -1074,7 +1074,7 @@ impl Parser {
     // ---- Expressions ----
 
     fn parse_expr(&mut self) -> Result<Expr, String> {
-        self.parse_or_expr()
+        self.parse_conditional_expr()
     }
 
     fn parse_conditional_expr(&mut self) -> Result<Expr, String> {
@@ -1710,6 +1710,9 @@ impl Parser {
                 if !self.at(&Token::RightBracket) {
                     loop {
                         if self.eat(&Token::DoubleStar) {
+                            let expr = self.parse_expr()?;
+                            elts.push(Expr::Starred(Box::new(expr)));
+                        } else if self.eat(&Token::Star) {
                             let expr = self.parse_expr()?;
                             elts.push(Expr::Starred(Box::new(expr)));
                         } else {

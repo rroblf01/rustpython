@@ -534,6 +534,31 @@ impl VirtualMachine {
           // Native contextvars module (ContextVar with thread-local storage)
           modules.insert("contextvars".to_string(), create_module("contextvars", create_contextvars_dict()));
 
+          // Native profile module
+          modules.insert("profile".to_string(), create_module("profile", create_profile_dict()));
+
+          // Native cProfile module
+          modules.insert("cProfile".to_string(), create_module("cProfile", create_cprofile_dict()));
+
+          // Native resource module (POSIX resource usage stubs)
+          modules.insert("resource".to_string(), create_module("resource", create_resource_dict()));
+
+          // Native trace module (code tracing / coverage stubs)
+          modules.insert("trace".to_string(), create_module("trace", create_trace_dict()));
+
+          // Native _concurrent module (concurrent.futures backend)
+          let concurrent_futures_mod = create_module("concurrent.futures", create_concurrent_futures_dict());
+          // Create intermediate concurrent package and wire futures under it
+          let concurrent_mod = create_module("concurrent", HashMap::new());
+          {
+              let mut conc_mut = concurrent_mod.borrow_mut();
+              if let PyObject::Module { dict, .. } = &mut *conc_mut {
+                  dict.insert("futures".to_string(), concurrent_futures_mod.clone());
+              }
+          }
+          modules.insert("concurrent".to_string(), concurrent_mod);
+          modules.insert("concurrent.futures".to_string(), concurrent_futures_mod);
+
           // Populate sys.path with default search paths
         if let PyObject::List(path_list) = &mut *sys_dict.get("path").unwrap().borrow_mut() {
             path_list.push(py_str("."));
@@ -541,8 +566,19 @@ impl VirtualMachine {
             // Add CPython stdlib path for importing .py files from the system
             path_list.push(py_str("/usr/lib/python3.13/"));
 
-            // Detect virtual environment (VIRTUAL_ENV env var or .venv in CWD)
+            // Detect virtual environment (VIRTUAL_ENV, conda, poetry, pixi, or .venv in CWD)
             let venv = std::env::var("VIRTUAL_ENV").ok()
+                .or_else(|| std::env::var("CONDA_PREFIX").ok())
+                .or_else(|| {
+                    if std::env::var("POETRY_ACTIVE").is_ok() {
+                        std::env::var("POETRY_VIRTUAL_ENV").ok()
+                    } else {
+                        None
+                    }
+                })
+                .or_else(|| {
+                    std::env::var("PIXI_IN_SHELL").ok().and_then(|_| std::env::var("PIXI_PROJECT_ROOT").ok())
+                })
                 .or_else(|| {
                     let cwd = std::env::current_dir().ok();
                     if cfg!(feature = "profile") { eprintln!("DEBUG venv: VIRTUAL_ENV not set, checking CWD .venv"); }
