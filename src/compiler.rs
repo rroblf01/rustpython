@@ -965,8 +965,12 @@ impl Compiler {
 
                 self.compile_function(name.clone(), args, body, *is_async)?;
 
-                for _ in decorator_list {
+                for decorator in decorator_list {
+                    self.emit(Opcode::DUP_TOP, 0);
+                    self.compile_expr(&decorator)?;
+                    self.emit(Opcode::SWAP, 1);
                     self.emit(Opcode::CALL, 1);
+                    self.emit(Opcode::POP_TOP, 0);
                 }
                 let name_idx = self.get_name_index(name) as u32;
                 self.emit(Opcode::STORE_NAME, name_idx);
@@ -1019,8 +1023,15 @@ impl Compiler {
                     self.emit(Opcode::STORE_ATTR, doc_attr_idx);
                 }
                 let name_idx = self.get_name_index(name) as u32;
-                for _ in decorator_list {
+                if !decorator_list.is_empty() {
+                    eprintln!("DEBUG compiler: class '{}' has {} decorator(s)!", name, decorator_list.len());
+                }
+                for decorator in decorator_list {
+                    self.emit(Opcode::DUP_TOP, 0);
+                    self.compile_expr(&decorator)?;
+                    self.emit(Opcode::SWAP, 1);
                     self.emit(Opcode::CALL, 1);
+                    self.emit(Opcode::POP_TOP, 0);
                 }
                 self.emit(Opcode::STORE_NAME, name_idx);
             }

@@ -90,7 +90,17 @@ impl Frame {
     }
 
     pub fn pop(&mut self) -> PyResult<PyObjectRef> {
-        self.stack.pop().ok_or_else(|| PyError::runtime_error("stack underflow"))
+        self.stack.pop().ok_or_else(|| {
+            let instr_ip = if self.ip > 0 { self.ip - 1 } else { 0 };
+            let op_str = if instr_ip < self.code.instructions.len() {
+                format!("{:?}", self.code.instructions[instr_ip].op)
+            } else {
+                "END".to_string()
+            };
+            let arg = if instr_ip < self.code.instructions.len() { self.code.instructions[instr_ip].arg } else { 0 };
+            eprintln!("DEBUG stack underflow POP: instr_ip={}, code_name='{}', op={}, arg={}", instr_ip, self.code.name, op_str, arg);
+            PyError::runtime_error("stack underflow")
+        })
     }
 
     pub fn peek(&self, depth: usize) -> PyResult<PyObjectRef> {
@@ -1571,6 +1581,21 @@ impl VirtualMachine {
                 let npos = arg as usize & 0xFF;
                 let nkw = (arg as usize >> 8) & 0xFF;
                 let total = npos + 2 * nkw;
+                eprintln!("DEBUG CALL at ip={}: npos={}, nkw={}, total={}, stack={}", 
+                    self.frames[fi].ip - 1, npos, nkw, total, self.frames[fi].stack.len());
+                if npos == 1 && self.frames[fi].stack.len() <= 1 {
+                    // Show surrounding instructions for debugging
+                    let code = &self.frames[fi].code;
+                    let ip = self.frames[fi].ip - 1;
+                    for j in (ip.saturating_sub(5)..=ip.saturating_add(1)) {
+                        if j < code.instructions.len() {
+                            let instr = &code.instructions[j];
+                            let names_idx = instr.arg as usize;
+                            let name = code.names.get(names_idx).map(|s| s.as_str()).unwrap_or("?");
+                            eprintln!("DEBUG  [ip={}] op={:?} arg={} name='{}'", j, instr.op, instr.arg, name);
+                        }
+                    }
+                }
                 let mut items = Vec::with_capacity(total);
                 for _ in 0..total {
                     items.push(self.frames[fi].pop()?);
@@ -2086,6 +2111,11 @@ impl VirtualMachine {
                                                 if let PyObject::Instance { typ: inst_typ, .. } = &*cls {
                                                     return Some(self.call_function(func.clone(), vec![inst_typ.clone()], vec![]).unwrap_or_else(|_| val.clone()));
                                                 }
+                                                // When accessing classmethod on a type itself (e.g. MyClass.method),
+                                                // pass the type as the first argument
+                                                if let PyObject::Type { .. } = &*cls {
+                                                    return Some(self.call_function(func.clone(), vec![obj.clone()], vec![]).unwrap_or_else(|_| val.clone()));
+                                                }
                                                 return Some(val.clone());
                                             }
                                             PyObject::Function { .. } => {
@@ -2158,6 +2188,17 @@ impl VirtualMachine {
                                     Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", obj_borrowed.type_name(), name)))
                                 })?;
                                 drop(obj_borrowed);
+                                // Resolve classmethod descriptor for type attribute access
+                                {
+                                    let ab = attr.borrow();
+                                    if let PyObject::ClassMethod { func } = &*ab {
+                                        drop(ab);
+                                        let result = self.call_function(func.clone(), vec![obj.clone()], vec![]);
+                                        if let Ok(res) = result {
+                                            return Ok(res);
+                                        }
+                                    }
+                                }
                                 let is_builtin_method = matches!(&*attr.borrow(), PyObject::BuiltinMethod { .. });
                                 let is_function = matches!(&*attr.borrow(), PyObject::Function { .. });
                                 if is_builtin_method {

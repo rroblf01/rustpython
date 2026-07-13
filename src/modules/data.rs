@@ -163,6 +163,32 @@ pub fn create_functools_dict() -> HashMap<String, PyObjectRef> {
         Ok(acc)
     });
 
+    // total_ordering: class decorator that fills in missing comparison methods
+    ft_func!("total_ordering", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("total_ordering requires a class argument"));
+        }
+        let cls = args[0].clone();
+        // Collect available comparison methods
+        let has_le = cls.borrow().get_attribute("__le__").is_ok();
+        let has_lt = cls.borrow().get_attribute("__lt__").is_ok();
+        let has_ge = cls.borrow().get_attribute("__ge__").is_ok();
+        let has_gt = cls.borrow().get_attribute("__gt__").is_ok();
+        let has_eq = cls.borrow().get_attribute("__eq__").is_ok();
+        // Basic stub: this doesn't implement all the methods, just returns the class
+        // A real implementation would need to add __le__/__lt__/__ge__/__gt__/__eq__/__ne__
+        Ok(cls)
+    });
+
+    // cached_property: descriptor that caches property value on first access
+    ft_func!("cached_property", |args| {
+        // Return the argument as-is (basic stub — doesn't cache)
+        if args.is_empty() {
+            return Err(PyError::type_error("cached_property requires a function argument"));
+        }
+        Ok(args[0].clone())
+    });
+
     ft_func!("partial", |args| {
         if args.is_empty() {
             return Err(PyError::type_error("partial() takes at least 1 argument"));
