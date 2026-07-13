@@ -1022,9 +1022,8 @@ impl Compiler {
                 for alias in names {
                     let name_idx = self.get_name_index(&alias.name) as u32;
                     let const_none = self.get_const_index(ConstValue::None) as u32;
-                    self.emit(Opcode::LOAD_CONST, const_none);
-                    self.emit(Opcode::LOAD_CONST, const_none);
-                    self.emit(Opcode::LOAD_CONST, const_none);
+                    self.emit(Opcode::LOAD_CONST, const_none); // fromlist = None
+                    self.emit(Opcode::LOAD_CONST, const_none); // level = 0 (None == 0)
                     self.emit(Opcode::IMPORT_NAME, name_idx);
                     if let Some(asname) = &alias.asname {
                         let store_idx = self.get_name_index(asname) as u32;
@@ -1044,14 +1043,17 @@ impl Compiler {
             Stmt::ImportFrom {
                 module,
                 names,
-                level: _,
+                level,
             } => {
                 let module_name = module.clone().unwrap_or_default();
                 let name_idx = self.get_name_index(&module_name) as u32;
                 let const_none = self.get_const_index(ConstValue::None) as u32;
+                // fromlist = tuple of imported names (None for now, simplified)
                 self.emit(Opcode::LOAD_CONST, const_none);
-                self.emit(Opcode::LOAD_CONST, const_none);
-                self.emit(Opcode::LOAD_CONST, const_none);
+                // level = number of dots (0 for absolute, 1+ for relative)
+                let level_val = level.unwrap_or(0);
+                let level_idx = self.get_const_index(ConstValue::Int(level_val.to_string())) as u32;
+                self.emit(Opcode::LOAD_CONST, level_idx);
                 self.emit(Opcode::IMPORT_NAME, name_idx);
                 for alias in names {
                     let import_name_idx = self.get_name_index(&alias.name) as u32;
@@ -1064,6 +1066,8 @@ impl Compiler {
                         self.emit(Opcode::STORE_NAME, store_idx);
                     }
                 }
+                // Pop the module reference left on stack after IMPORT_FROM loop
+                self.emit(Opcode::POP_TOP, 0);
             }
             Stmt::Global(names) => {
                 for name in names {

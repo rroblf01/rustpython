@@ -504,12 +504,80 @@ impl VirtualMachine {
           modules.insert("asyncio".to_string(), create_module("asyncio", create_asyncio_dict()));
 
           // Populate sys.path with default search paths
-         if let PyObject::List(path_list) = &mut *sys_dict.get("path").unwrap().borrow_mut() {
-             path_list.push(py_str("."));
-             path_list.push(py_str("./Lib"));
-             // Add CPython stdlib path for importing .py files from the system
-             path_list.push(py_str("/usr/lib/python3.13/"));
-         }
+        if let PyObject::List(path_list) = &mut *sys_dict.get("path").unwrap().borrow_mut() {
+            path_list.push(py_str("."));
+            path_list.push(py_str("./Lib"));
+            // Add CPython stdlib path for importing .py files from the system
+            path_list.push(py_str("/usr/lib/python3.13/"));
+
+            // Detect virtual environment (VIRTUAL_ENV env var or .venv in CWD)
+            let venv = std::env::var("VIRTUAL_ENV").ok()
+                .or_else(|| {
+                    std::env::current_dir().ok()
+                        .filter(|d| d.join(".venv").is_dir())
+                        .map(|d| d.join(".venv").to_string_lossy().to_string())
+                });
+
+            if let Some(ref venv_path) = venv {
+                // Try to read pyvenv.cfg to determine the Python version
+                let py_version = std::fs::read_to_string(format!("{}/pyvenv.cfg", venv_path))
+                    .ok()
+                    .and_then(|cfg| {
+                        for line in cfg.lines() {
+                            if let Some(ver) = line.strip_prefix("version = ") {
+                                // Parse "3.13.2" -> "3.13"
+                                let parts: Vec<&str> = ver.splitn(2, '.').collect();
+                                if parts.len() == 2 {
+                                    let major_minor = if let Some(dot2) = parts[1].find('.') {
+                                        &parts[1][..dot2]
+                                    } else {
+                                        parts[1]
+                                    };
+                                    return Some(format!("{}.{}", parts[0], major_minor));
+                                }
+                            }
+                        }
+                        None
+                    })
+                    .unwrap_or_else(|| "3.13".to_string());
+
+                // Add site-packages directory
+                let site_pkg = format!("{}/lib/python{}/site-packages", venv_path, py_version);
+                if std::path::Path::new(&site_pkg).is_dir() {
+                    path_list.push(py_str(&site_pkg));
+
+                    // Process .pth files in site-packages (e.g., easy-install.pth, distutils-precedence.pth)
+                    if let Ok(entries) = std::fs::read_dir(&site_pkg) {
+                        for entry in entries.flatten() {
+                            let entry_path = entry.path();
+                            if entry_path.extension().map_or(false, |e| e == "pth") {
+                                if let Ok(content) = std::fs::read_to_string(&entry_path) {
+                                    for line in content.lines() {
+                                        let trimmed = line.trim();
+                                        if trimmed.is_empty() || trimmed.starts_with('#') {
+                                            continue;
+                                        }
+                                        if trimmed.starts_with('.') || trimmed.starts_with('/') {
+                                            let resolved = if trimmed.starts_with('.') {
+                                                format!("{}/{}", site_pkg, trimmed)
+                                            } else {
+                                                trimmed.to_string()
+                                            };
+                                            if !path_list.iter().any(|p| {
+                                                p.borrow().str() == resolved
+                                            }) {
+                                                path_list.push(py_str(&resolved));
+                                            }
+                                        }
+                                        // 'import' directives in .pth are skipped for now
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
          // Populate sys.modules with already-loaded modules
          if let PyObject::Dict(mod_dict) = &mut *sys_dict.get("modules").unwrap().borrow_mut() {
              for (name, module) in &modules {
@@ -553,6 +621,54 @@ impl VirtualMachine {
     }
 
     pub fn import_module_from_file(&mut self, name: &str) -> Result<PyObjectRef, String> {
+        // Handle dotted names: e.g. "certifi.core" -> find parent "certifi" in modules,
+        // then search its __path__ for "core.py" or "core/__init__.py"
+        if let Some(dot_pos) = name.find('.') {
+            let parent_name = &name[..dot_pos];
+            let child_name = &name[dot_pos + 1..];
+            if let Some(parent_mod) = self.modules.get(parent_name) {
+                let child_paths = {
+                    let parent = parent_mod.borrow();
+                    if let PyObject::Module { dict, .. } = &*parent {
+                        let pkg_path = dict.get("__path__").and_then(|p| {
+                            if let PyObject::List(items) = &*p.borrow() {
+                                items.first().and_then(|i| {
+                                    if let PyObject::Str(s) = &*i.borrow() { Some(s.clone()) } else { None }
+                                })
+                            } else { None }
+                        });
+                        if let Some(ref base) = pkg_path {
+                            let base_trimmed = base.trim_end_matches('/');
+                            vec![
+                                format!("{}/{}.py", base_trimmed, child_name),
+                                format!("{}/{}/__init__.py", base_trimmed, child_name),
+                            ]
+                        } else { vec![] }
+                    } else { vec![] }
+                };
+                for candidate in &child_paths {
+                    if let Ok(source) = std::fs::read_to_string(candidate) {
+                        let full_child_name = format!("{}.{}", parent_name, child_name);
+                        // Create empty module and insert into modules BEFORE executing
+                        let empty_mod = create_module(&full_child_name, HashMap::new());
+                        self.modules.insert(full_child_name.clone(), empty_mod.clone());
+                        if let Some(sys_mod) = self.modules.get("sys") {
+                            if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
+                                if let Some(mod_dict) = dict.get("modules") {
+                                    mod_dict.borrow_mut().set_attribute(&full_child_name, empty_mod.clone()).ok();
+                                }
+                            }
+                        }
+                        let module = self.exec_module_source(&source, candidate, &full_child_name)?;
+                        self.modules.insert(full_child_name.clone(), module.clone());
+                        return Ok(module);
+                    }
+                }
+                let child_full = format!("{}.{}", parent_name, child_name);
+                return Err(format!("No module named '{}' (submodule of '{}' not found)", child_full, parent_name));
+            }
+            // If parent not found, fall through to regular search
+        }
         let search_paths = self.get_sys_path();
         for base in &search_paths {
             let py_path = if base.ends_with('/') {
@@ -561,7 +677,19 @@ impl VirtualMachine {
                 format!("{}/{}.py", base, name)
             };
             if let Ok(source) = std::fs::read_to_string(&py_path) {
-                return self.exec_module_source(&source, &py_path, name);
+                // Insert into modules BEFORE executing (for circular/relative import resolution)
+                let empty_mod = create_module(name, HashMap::new());
+                self.modules.insert(name.to_string(), empty_mod.clone());
+                if let Some(sys_mod) = self.modules.get("sys") {
+                    if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
+                        if let Some(mod_dict) = dict.get("modules") {
+                            mod_dict.borrow_mut().set_attribute(name, empty_mod.clone()).ok();
+                        }
+                    }
+                }
+                let module = self.exec_module_source(&source, &py_path, name)?;
+                self.modules.insert(name.to_string(), module.clone());
+                return Ok(module);
             }
             let init_path = if base.ends_with('/') {
                 format!("{}{}/__init__.py", base, name)
@@ -569,7 +697,25 @@ impl VirtualMachine {
                 format!("{}/{}/__init__.py", base, name)
             };
             if let Ok(source) = std::fs::read_to_string(&init_path) {
-                return self.exec_module_source(&source, &init_path, name);
+                // Insert into modules BEFORE executing (for circular/relative import resolution)
+                let pkg_dir = std::path::Path::new(&init_path).parent()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let mut empty_dict = HashMap::new();
+                empty_dict.insert("__path__".to_string(), py_list(vec![py_str(&pkg_dir)]));
+                empty_dict.insert("__package__".to_string(), py_str(name));
+                let empty_mod = create_module(name, empty_dict);
+                self.modules.insert(name.to_string(), empty_mod.clone());
+                if let Some(sys_mod) = self.modules.get("sys") {
+                    if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
+                        if let Some(mod_dict) = dict.get("modules") {
+                            mod_dict.borrow_mut().set_attribute(name, empty_mod.clone()).ok();
+                        }
+                    }
+                }
+                let module = self.exec_module_source(&source, &init_path, name)?;
+                self.modules.insert(name.to_string(), module.clone());
+                return Ok(module);
             }
             // Try loading as a .so C extension
             let so_path = if base.ends_with('/') {
@@ -612,11 +758,23 @@ impl VirtualMachine {
         let program = parser.parse_program().map_err(|e| format!("Parse error: {}", e))?;
         let mut compiler = crate::compiler::Compiler::new();
         let code = compiler.compile(&program, path).map_err(|e| format!("Compile error: {}", e))?;
-        let module_globals = Rc::new(RefCell::new(HashMap::from([
+        let is_package = path.ends_with("__init__.py");
+        let mut globals_map = HashMap::from([
             ("__name__".to_string(), py_str(name)),
             ("__file__".to_string(), py_str(path)),
             ("__builtins__".to_string(), create_module("builtins", self.builtins.as_ref().clone())),
-        ])));
+        ]);
+        if is_package {
+            if let Some(pkg_dir) = std::path::Path::new(path).parent() {
+                let pkg_dir_str = pkg_dir.to_string_lossy().to_string();
+                globals_map.insert("__path__".to_string(), py_list(vec![py_str(&pkg_dir_str)]));
+                globals_map.insert("__package__".to_string(), py_str(name));
+            }
+        } else {
+            // For non-package modules, __package__ should be empty string
+            globals_map.insert("__package__".to_string(), py_str(""));
+        }
+        let module_globals = Rc::new(RefCell::new(globals_map));
         self.exec_code(code, Some(Rc::clone(&module_globals))).map_err(|e| format!("{}", e))?;
         let globals_copy = module_globals.borrow().clone();
         Ok(create_module(name, globals_copy))
@@ -2259,23 +2417,62 @@ impl VirtualMachine {
                 let name = self.frames[fi].code.names.get(name_idx).ok_or_else(|| {
                     PyError::runtime_error("name index out of range")
                 })?.clone();
-                self.frames[fi].pop()?;
-                self.frames[fi].pop()?;
-                if let Some(module) = self.modules.get(&name) {
+                // Pop level (int, TOS) and fromlist (TOS1)
+                let level_val = self.frames[fi].pop()?;
+                let _fromlist = self.frames[fi].pop()?;
+                // Resolve relative imports: if level > 0, use __package__ from frame globals
+                let resolved = {
+                    let level = {
+                        let obj = level_val.borrow();
+                        match &*obj {
+                            PyObject::Int(i) => i.to_i64().unwrap_or(0) as usize,
+                            _ => 0,
+                        }
+                    };
+                    if level > 0 {
+                        let pkg = self.frames[fi].globals.borrow()
+                            .get("__package__").cloned()
+                            .and_then(|p| {
+                                let p = p.borrow();
+                                if let PyObject::Str(s) = &*p { Some(s.clone()) } else { None }
+                            });
+                        match pkg {
+                            Some(p) if !p.is_empty() => {
+                                if name.is_empty() { p } else { format!("{}.{}", p, name) }
+                            }
+                            // Fallback: use __name__ up to last dot as package
+                            _ => {
+                                let n = self.frames[fi].globals.borrow()
+                                    .get("__name__").cloned()
+                                    .and_then(|n| {
+                                        let n = n.borrow();
+                                        if let PyObject::Str(s) = &*n { Some(s.clone()) } else { None }
+                                    }).unwrap_or_default();
+                                if let Some(dot) = n.rfind('.') {
+                                    let base = &n[..dot];
+                                    if name.is_empty() { base.to_string() } else { format!("{}.{}", base, name) }
+                                } else { name.clone() }
+                            }
+                        }
+                    } else {
+                        name.clone()
+                    }
+                };
+                if let Some(module) = self.modules.get(&resolved) {
                     self.frames[fi].push(module.clone());
-                } else if let Ok(module) = self.import_module_from_file(&name) {
-                    self.modules.insert(name.clone(), module.clone());
+                } else if let Ok(module) = self.import_module_from_file(&resolved) {
+                    self.modules.insert(resolved.clone(), module.clone());
                     // Also add to sys.modules if available
                     if let Some(sys_mod) = self.modules.get("sys") {
                         if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
                             if let Some(mod_dict) = dict.get("modules") {
-                                mod_dict.borrow_mut().set_attribute(&name, module.clone()).ok();
+                                mod_dict.borrow_mut().set_attribute(&resolved, module.clone()).ok();
                             }
                         }
                     }
                     self.frames[fi].push(module);
                 } else {
-                    return Err(PyError::ImportError(format!("No module named '{}'", name)));
+                    return Err(PyError::ImportError(format!("No module named '{}'", resolved)));
                 }
             }
 

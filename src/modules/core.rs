@@ -265,8 +265,21 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
     d.insert("maxunicode".to_string(), py_int(1114111));
     d.insert("api_version".to_string(), py_int(1013));
     d.insert("executable".to_string(), py_str(&std::env::current_exe().map(|p| p.to_string_lossy().to_string()).unwrap_or_default()));
-    d.insert("prefix".to_string(), py_str("/usr"));
-    d.insert("exec_prefix".to_string(), py_str("/usr"));
+    // Detect virtual environment (uv, venv, virtualenv)
+    let venv_path = std::env::var("VIRTUAL_ENV").ok()
+        .or_else(|| {
+            // Also look for .venv in CWD
+            let cwd = std::env::current_dir().ok()?;
+            let dot_venv = cwd.join(".venv");
+            if dot_venv.is_dir() { Some(dot_venv.to_string_lossy().to_string()) } else { None }
+        });
+    let (prefix, exec_prefix) = if let Some(ref venv) = venv_path {
+        (venv.clone(), venv.clone())
+    } else {
+        ("/usr".to_string(), "/usr".to_string())
+    };
+    d.insert("prefix".to_string(), py_str(&prefix));
+    d.insert("exec_prefix".to_string(), py_str(&exec_prefix));
     d.insert("winver".to_string(), py_str("3.12"));
     d
 }
