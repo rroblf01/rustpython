@@ -2106,17 +2106,27 @@ impl VirtualMachine {
                                                 return Some(func.clone());
                                             }
                                             PyObject::ClassMethod { func } => {
+                                                let func_clone = func.clone();
+                                                drop(val_borrowed);
                                                 drop(typ_ref);
                                                 let cls = obj.borrow();
                                                 if let PyObject::Instance { typ: inst_typ, .. } = &*cls {
-                                                    return Some(self.call_function(func.clone(), vec![inst_typ.clone()], vec![]).unwrap_or_else(|_| val.clone()));
+                                                    // Return a BoundMethod that will prepend the class when called
+                                                    let class_obj = inst_typ.clone();
+                                                    drop(cls);
+                                                    return Some(PyObjectRef::imm(PyObject::BoundMethod {
+                                                        func: func_clone,
+                                                        self_obj: class_obj,
+                                                    }));
                                                 }
                                                 // When accessing classmethod on a type itself (e.g. MyClass.method),
-                                                // pass the type as the first argument
-                                                if let PyObject::Type { .. } = &*cls {
-                                                    return Some(self.call_function(func.clone(), vec![obj.clone()], vec![]).unwrap_or_else(|_| val.clone()));
-                                                }
-                                                return Some(val.clone());
+                                                // bind the type as self so it becomes the first arg on call
+                                                let class_obj = obj.clone();
+                                                drop(cls);
+                                                return Some(PyObjectRef::imm(PyObject::BoundMethod {
+                                                    func: func_clone,
+                                                    self_obj: class_obj,
+                                                }));
                                             }
                                             PyObject::Function { .. } => {
                                                 let is_instance_obj = matches!(&*obj.borrow(), PyObject::Instance { .. });
@@ -2195,6 +2205,7 @@ impl VirtualMachine {
                                         let func_clone = func.clone();
                                         let cls_obj = obj.clone();
                                         drop(ab);
+                                        eprintln!("DEBUG ClassMethod Type path: returning BoundMethod for {}", name);
                                         let bound = PyObjectRef::new(PyObject::BoundMethod {
                                             func: func_clone,
                                             self_obj: cls_obj,

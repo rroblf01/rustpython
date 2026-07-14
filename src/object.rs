@@ -1875,6 +1875,12 @@ pub fn builtin_type_of(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 }
 
 pub fn builtin_int(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() > 0 {
+        let t = args[0].borrow().type_name().to_string();
+        if t == "instance" {
+            eprintln!("DEBUG int() got Instance in ipaddress: repr={:?}", args[0].repr());
+        }
+    }
     if args.is_empty() { return Ok(py_int(0)); }
     let obj = args[0].borrow();
     match &*obj {
@@ -1911,6 +1917,30 @@ pub fn builtin_int(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             Ok(obj)
         }
         PyObject::Bool(b) => Ok(py_int(if *b { 1 } else { 0 })),
+        PyObject::Instance { dict, typ } => {
+            drop(obj);
+            // Try calling __int__ method on the instance
+            let args0 = &args[0];
+            eprintln!("DEBUG int() Instance: trying __int__ on {:?}", args0.repr());
+            if let Ok(int_method) = args0.borrow().get_attribute("__int__") {
+                eprintln!("DEBUG int() Instance: found __int__ method, calling...");
+                let instance = args[0].clone();
+                let result = builtin_call(&int_method, &[instance]);
+                eprintln!("DEBUG int() Instance: __int__ result: {:?}", result.as_ref().map(|r| r.repr()));
+                if let Ok(val) = result {
+                    if let Some(n) = val.as_i64() {
+                        return Ok(py_int(n));
+                    }
+                    // Maybe it returns a BigInt
+                    let is_int = matches!(&*val.borrow(), PyObject::Int(_));
+                    if is_int {
+                        return Ok(val);
+                    }
+                }
+            }
+            Err(PyError::type_error(format!("int() argument must be a string or number, not '{}'", 
+                args0.borrow().type_name())))
+        }
         _ => Err(PyError::type_error(format!("int() argument must be a string or number, not '{}'", obj.type_name()))),
     }
 }
@@ -2202,6 +2232,20 @@ pub fn builtin_frozenset(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             PyObject::Tuple(v) => {
                 let mut set = PySet::new();
                 for item in v { set.add(item.clone())?; }
+                Ok(PyObjectRef::imm(PyObject::FrozenSet(set)))
+            }
+            PyObject::Str(s) => {
+                let mut set = PySet::new();
+                for ch in s.chars() {
+                    set.add(py_str(&ch.to_string()))?;
+                }
+                Ok(PyObjectRef::imm(PyObject::FrozenSet(set)))
+            }
+            PyObject::Bytes(b) => {
+                let mut set = PySet::new();
+                for &byte in b {
+                    set.add(py_int(byte as i64))?;
+                }
                 Ok(PyObjectRef::imm(PyObject::FrozenSet(set)))
             }
             _ => Err(PyError::type_error(format!("cannot convert '{}' to frozenset", obj.type_name()))),
@@ -3603,14 +3647,19 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
             } else { unreachable!() }
         }
         3 => {
-            let bf = {
+            let (bf, self_obj) = {
                 let obj = f.borrow();
-                if let PyObject::BoundMethod { func: bf, .. } = &*obj {
-                    bf.clone()
+                if let PyObject::BoundMethod { func: bf, self_obj: s, .. } = &*obj {
+                    (bf.clone(), s.clone())
                 } else { return Err(PyError::type_error("not a bound method")); }
             };
-            let mut all_args = vec![];
+            let mut all_args = vec![self_obj];
+            let a_len = a.len();
             all_args.extend(a);
+            eprintln!("DEBUG builtin_call BoundMethod: all_args.len={}, a.len={}", all_args.len(), a_len);
+            for (i, arg) in all_args.iter().enumerate() {
+                eprintln!("DEBUG builtin_call arg[{}] type={} repr={:?}", i, arg.borrow().type_name(), arg.repr());
+            }
             builtin_call(&bf, &all_args)
         }
         4 => {
