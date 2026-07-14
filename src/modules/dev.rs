@@ -1,6 +1,8 @@
 use crate::object::*;
 use crate::bytecode::{CodeObject, needs_arg};
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 pub fn create_pdb_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
@@ -818,6 +820,246 @@ pub fn create_trace_dict() -> HashMap<String, PyObjectRef> {
             dict: inst_dict,
         }))
     });
+
+    d
+}
+
+/// Native _warnings module — CPython C extension replacement
+pub fn create_warnings_c_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! warn_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+    warn_func!("warn", |args| {
+        let msg = if !args.is_empty() { args[0].str() } else { String::new() };
+        eprintln!("Warning: {}", msg);
+        Ok(py_none())
+    });
+    d
+}
+
+pub fn create_marshal_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! m_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+    m_func!("loads", |args| {
+        if args.len() < 2 { return Err(PyError::type_error("loads() takes 1 argument")); }
+        Ok(args[1].clone())
+    });
+    m_func!("dumps", |args| {
+        if args.len() < 2 { return Err(PyError::type_error("dumps() takes 1 argument")); }
+        Ok(PyObjectRef::imm(PyObject::Bytes(vec![0u8; 4])))
+    });
+    d
+}
+
+pub fn create_imp_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! imp_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    imp_func!("acquire_lock", |_| Ok(py_none()));
+    imp_func!("release_lock", |_| Ok(py_none()));
+    imp_func!("lock_held", |_| Ok(py_bool(false)));
+    imp_func!("is_frozen", |_| Ok(py_bool(false)));
+    imp_func!("is_builtin", |_| Ok(py_bool(false)));
+    imp_func!("is_frozen_package", |_| Ok(py_bool(false)));
+    imp_func!("find_frozen", |_| Err(PyError::ImportError("frozen modules not supported".to_string())));
+    imp_func!("init_frozen", |_| Ok(py_none()));
+    imp_func!("get_frozen_object", |_| Err(PyError::ImportError("frozen modules not supported".to_string())));
+    imp_func!("create_builtin", |args| {
+        // Return a new module object for builtin modules
+        let spec = if !args.is_empty() { args[0].borrow() } else { return Err(PyError::type_error("create_builtin requires spec")); };
+        let name = spec.get_attribute("name").ok().map(|n| n.str()).unwrap_or_else(|| "unknown".to_string());
+        Ok(create_module(&name, HashMap::new()))
+    });
+    imp_func!("exec_builtin", |args| {
+        // No-op: module is already registered
+        Ok(py_none())
+    });
+    imp_func!("create_dynamic", |_| Err(PyError::ImportError("dynamic extensions not supported".to_string())));
+    imp_func!("exec_dynamic", |_| Err(PyError::ImportError("dynamic extensions not supported".to_string())));
+
+    imp_func!("extension_suffixes", |_| {
+        let arch = if cfg!(target_os = "linux") { "x86_64-linux-gnu" }
+                   else if cfg!(target_os = "macos") { "darwin" }
+                   else { "win-amd64" };
+        Ok(py_list(vec![
+            py_str(&format!(".cpython-313-{}.so", arch)),
+            py_str(".abi3.so"),
+            py_str(".so"),
+        ]))
+    });
+
+    imp_func!("source_hash", |_| Ok(PyObjectRef::imm(PyObject::Bytes(vec![0u8; 8]))));
+    imp_func!("_fix_co_filename", |_| Ok(py_none()));
+
+    d.insert("check_hash_based_pycs".to_string(), py_str("never"));
+    d.insert("_frozen_module_names".to_string(), py_list(vec![]));
+    d.insert("_override_frozen_modules_for_tests".to_string(), py_none());
+    d.insert("_override_multi_interp_extensions_check".to_string(), py_none());
+
+    d
+}
+
+pub fn create_zipimport_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! zip_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+    zip_func!("zipimporter", |args| {
+        let path = if !args.is_empty() { args[0].str() } else { String::new() };
+        let mut inst_dict = HashMap::new();
+        inst_dict.insert("find_spec".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "find_spec".to_string(), func: |_| Ok(py_none()),
+        }));
+        inst_dict.insert("find_module".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "find_module".to_string(), func: |_| Ok(py_none()),
+        }));
+        inst_dict.insert("get_code".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "get_code".to_string(), func: |_| Ok(py_none()),
+        }));
+        inst_dict.insert("get_source".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "get_source".to_string(), func: |_| Ok(py_none()),
+        }));
+        Ok(PyObjectRef::new(PyObject::Instance {
+            typ: py_str("zipimporter"),
+            dict: inst_dict,
+        }))
+    });
+    d.insert("_zip_directory_cache".to_string(), py_dict());
+    d
+}
+
+/// Native _io module — CPython C extension replacement
+pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
+    use std::io::{Read, Write};
+    let mut d = HashMap::new();
+    macro_rules! io_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    // FileIO — wraps std::fs::File via builtin_open
+    io_func!("FileIO", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("FileIO() missing required argument"));
+        }
+        let filename = args[0].str();
+        let mode = if args.len() > 1 { args[1].str() } else { "r".to_string() };
+        let file = if let Some(fd) = args[0].as_i64() {
+            use std::os::unix::io::FromRawFd;
+            unsafe { std::fs::File::from_raw_fd(fd as i32) }
+        } else {
+            std::fs::File::options()
+                .read(mode.contains('r') || mode == "wb")
+                .write(mode.contains('w') || mode.contains('a'))
+                .append(mode.contains('a'))
+                .create(mode.contains('w') || mode.contains('a'))
+                .truncate(mode.contains('w'))
+                .open(&filename)
+                .map_err(|e| PyError::OsError(format!("{}", e)))?
+        };
+        Ok(PyObjectRef::new(PyObject::File { file: Rc::new(RefCell::new(file)) }))
+    });
+
+    // BytesIO — in-memory bytes buffer
+    io_func!("BytesIO", |args| {
+        let buf = if !args.is_empty() {
+            let a = args[0].borrow();
+            match &*a {
+                PyObject::Bytes(b) => b.clone(),
+                PyObject::Str(s) => s.as_bytes().to_vec(),
+                _ => vec![],
+            }
+        } else {
+            vec![]
+        };
+        let buf_rc = Rc::new(RefCell::new(buf));
+        let pos_rc = Rc::new(RefCell::new(0usize));
+        let mut type_dict = HashMap::new();
+        let b1 = buf_rc.clone();
+        let p1 = pos_rc.clone();
+        type_dict.insert("read".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
+            let data = b1.borrow()[*p1.borrow()..].to_vec();
+            Ok(PyObjectRef::imm(PyObject::Bytes(data)))
+        }))));
+        let b2 = buf_rc.clone();
+        let p2 = pos_rc.clone();
+        type_dict.insert("readline".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
+            let remaining = &b2.borrow()[*p2.borrow()..];
+            let end = remaining.iter().position(|&c| c == b'\n').map(|i| i + 1).unwrap_or(remaining.len());
+            Ok(PyObjectRef::imm(PyObject::Bytes(remaining[..end].to_vec())))
+        }))));
+        type_dict.insert("close".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| Ok(py_none())))));
+        Ok(PyObjectRef::new(PyObject::Instance {
+            typ: PyObjectRef::new(PyObject::Type { name: "BytesIO".to_string(), dict: type_dict, bases: vec![], mro: vec![] }),
+            dict: HashMap::new(),
+        }))
+    });
+
+    // IncrementalNewlineDecoder — stub
+    io_func!("IncrementalNewlineDecoder", |_args| {
+        let mut type_dict = HashMap::new();
+        type_dict.insert("decode".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "decode".to_string(),
+            func: |m_args| {
+                if m_args.len() < 2 { return Err(PyError::type_error("decode() takes 1 argument")); }
+                match &*m_args[1].borrow() {
+                    PyObject::Bytes(b) => Ok(py_str(&String::from_utf8_lossy(b))),
+                    _ => Err(PyError::type_error("decode() argument must be bytes")),
+                }
+                },
+                }));
+                Ok(PyObjectRef::new(PyObject::Instance {
+                typ: py_str("IncrementalNewlineDecoder"), dict: type_dict,
+        }))
+    });
+
+    io_func!("open_code", |args| {
+        if args.is_empty() { return Err(PyError::type_error("open_code() missing argument")); }
+        let path = args[0].str();
+        let file = std::fs::File::open(&path).map_err(|e| PyError::OsError(format!("{}", e)))?;
+        Ok(PyObjectRef::new(PyObject::File { file: Rc::new(RefCell::new(file)) }))
+    });
+
+    io_func!("text_encoding", |args| {
+        if args.is_empty() { return Err(PyError::type_error("text_encoding() missing argument")); }
+        Ok(py_str(&args[0].str()))
+    });
+
+    d.insert("open".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "open".to_string(), func: builtin_open,
+    }));
+    d.insert("DEFAULT_BUFFER_SIZE".to_string(), py_int(8192));
+    d.insert("BlockingIOError".to_string(), py_str("BlockingIOError"));
+    d.insert("UnsupportedOperation".to_string(), py_str("UnsupportedOperation"));
+    d.insert("_IOBase".to_string(), py_str("_IOBase"));
+    d.insert("_RawIOBase".to_string(), py_str("_RawIOBase"));
+    d.insert("_BufferedIOBase".to_string(), py_str("_BufferedIOBase"));
+    d.insert("_TextIOBase".to_string(), py_str("_TextIOBase"));
+    d.insert("IOBase".to_string(), py_str("IOBase"));
+    d.insert("RawIOBase".to_string(), py_str("RawIOBase"));
+    d.insert("BufferedIOBase".to_string(), py_str("BufferedIOBase"));
+    d.insert("TextIOBase".to_string(), py_str("TextIOBase"));
+    d.insert("BufferedReader".to_string(), py_str("BufferedReader"));
+    d.insert("BufferedWriter".to_string(), py_str("BufferedWriter"));
+    d.insert("BufferedRWPair".to_string(), py_str("BufferedRWPair"));
+    d.insert("BufferedRandom".to_string(), py_str("BufferedRandom"));
+    d.insert("TextIOWrapper".to_string(), py_str("TextIOWrapper"));
+    d.insert("StringIO".to_string(), py_str("StringIO"));
+    d.insert("_WindowsConsoleIO".to_string(), py_str("_WindowsConsoleIO"));
 
     d
 }

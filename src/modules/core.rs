@@ -862,12 +862,13 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
     d.insert("O_TRUNC".to_string(), py_int(512));
     d.insert("O_APPEND".to_string(), py_int(1024));
 
-    // environ dict
-    let mut environ_dict = HashMap::new();
+    // environ dict — use a proper PyDict instead of Module so methods like
+    // .setdefault(), .get(), .keys(), 'x in environ', etc. all work (Django req.)
+    let mut environ_pydict = PyDict::new();
     for (key, val) in std::env::vars() {
-        environ_dict.insert(key, py_str(&val));
+        environ_pydict.set(py_str(&key), py_str(&val)).ok();
     }
-    d.insert("environ".to_string(), create_module("environ", environ_dict));
+    d.insert("environ".to_string(), PyObjectRef::new(PyObject::Dict(environ_pydict)));
 
     // --- os.getpid() ---
     os_func!("getpid", |_| {
@@ -1128,6 +1129,12 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
     d.insert("S_IROTH".to_string(), py_int(0o004));
     d.insert("S_IWOTH".to_string(), py_int(0o002));
     d.insert("S_IXOTH".to_string(), py_int(0o001));
+
+    // OS constants needed by stdlib code
+    d.insert("name".to_string(), py_str("posix"));
+    d.insert("sep".to_string(), py_str("/"));
+    d.insert("linesep".to_string(), py_str("\n"));
+    d.insert("pathsep".to_string(), py_str(":"));
 
     // os.path sub-module will be wired as a proper submodule in vm.rs
     // The path attribute is set there (not inline) to allow proper os.path import

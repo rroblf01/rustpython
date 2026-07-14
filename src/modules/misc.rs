@@ -4287,6 +4287,16 @@ pub fn create_argparse_dict() -> HashMap<String, PyObjectRef> {
     });
 
     d.insert("ArgumentParser".to_string(), parser_type);
+    // Action subclasses needed by Django management commands
+    fn make_action(name: &str) -> PyObjectRef {
+        PyObjectRef::new(PyObject::Type { name: name.to_string(), dict: HashMap::new(), bases: vec![], mro: vec![] })
+    }
+    d.insert("HelpFormatter".to_string(), make_action("HelpFormatter"));
+    d.insert("SUPPRESS".to_string(), py_str("==SUPPRESS=="));
+    d.insert("_AppendConstAction".to_string(), make_action("_AppendConstAction"));
+    d.insert("_CountAction".to_string(), make_action("_CountAction"));
+    d.insert("_StoreConstAction".to_string(), make_action("_StoreConstAction"));
+    d.insert("_SubParsersAction".to_string(), make_action("_SubParsersAction"));
     d
 }
 

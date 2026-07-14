@@ -1189,6 +1189,11 @@ pub fn py_add(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
             v.extend(b.clone());
             Ok(py_tuple(v))
         }
+        (PyObject::Bytes(a), PyObject::Bytes(b)) => {
+            let mut v = a.clone();
+            v.extend(b);
+            Ok(PyObjectRef::imm(PyObject::Bytes(v)))
+        }
         _ => Err(PyError::type_error(format!("unsupported operand type(s) for +: '{}' and '{}'", 
             a_obj.type_name(), b_obj.type_name())))
     }
@@ -5899,6 +5904,79 @@ impl ObjectAccess for PyObject {
                             if let PyObject::Int(v) = &*args[0].borrow() {
                                 Ok(py_int(v.bits() as i64))
                             } else { Err(PyError::runtime_error("bit_length on non-int")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "to_bytes" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "to_bytes".to_string(),
+                        func: |args| {
+                            if args.len() < 3 { return Err(PyError::type_error("to_bytes() takes at least 2 arguments (1 given)")); }
+                            if let PyObject::Int(val) = &*args[0].borrow() {
+                                let length = args[1].as_i64().ok_or_else(|| PyError::type_error("length must be int"))?;
+                                let byteorder = args[2].str();
+                                let signed = if args.len() > 3 { args[3].truthy() } else { false };
+                                if length <= 0 {
+                                    return Err(PyError::type_error("length must be positive"));
+                                }
+                                let len = length as usize;
+                                let (_, mut bytes) = if byteorder == "little" {
+                                    val.to_bytes_le()
+                                } else {
+                                    val.to_bytes_be()
+                                };
+                                // Handle negative numbers for signed=True
+                                if signed && val.sign() == num_bigint::Sign::Minus {
+                                    // For signed negative, compute two's complement
+                                    let abs_val = -val.clone();
+                                    let (_, abs_bytes) = if byteorder == "little" {
+                                        abs_val.to_bytes_le()
+                                    } else {
+                                        abs_val.to_bytes_be()
+                                    };
+                                    // Create two's complement
+                                    let mut result = vec![0u8; len];
+                                    for i in 0..abs_bytes.len().min(len) {
+                                        result[if byteorder == "little" { i } else { len - 1 - i }] = abs_bytes[i];
+                                    }
+                                    // Two's complement: invert bits and add 1
+                                    for b in result.iter_mut() {
+                                        *b = !*b;
+                                    }
+                                    // Add 1
+                                    let mut carry = 1u16;
+                                    if byteorder == "little" {
+                                        for b in result.iter_mut() {
+                                            let v = *b as u16 + carry;
+                                            *b = v as u8;
+                                            carry = v >> 8;
+                                        }
+                                    } else {
+                                        for b in result.iter_mut().rev() {
+                                            let v = *b as u16 + carry;
+                                            *b = v as u8;
+                                            carry = v >> 8;
+                                        }
+                                    }
+                                    Ok(PyObjectRef::imm(PyObject::Bytes(result)))
+                                } else {
+                                    // Pad or truncate to fit length
+                                    if bytes.len() > len {
+                                        return Err(PyError::type_error("int too big to convert"));
+                                    }
+                                    let mut result = vec![0u8; len];
+                                    if byteorder == "little" {
+                                        for i in 0..bytes.len() {
+                                            result[i] = bytes[i];
+                                        }
+                                    } else {
+                                        let offset = len - bytes.len();
+                                        for i in 0..bytes.len() {
+                                            result[offset + i] = bytes[i];
+                                        }
+                                    }
+                                    Ok(PyObjectRef::imm(PyObject::Bytes(result)))
+                                }
+                            } else { Err(PyError::runtime_error("to_bytes on non-int")) }
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),

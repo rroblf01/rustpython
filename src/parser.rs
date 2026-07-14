@@ -1077,7 +1077,18 @@ impl Parser {
     // ---- Expressions ----
 
     fn parse_expr(&mut self) -> Result<Expr, String> {
-        self.parse_conditional_expr()
+        let expr = self.parse_conditional_expr()?;
+        // Walrus operator (:=) — named expressions, allowed at top expr level
+        // e.g. `if spec := getattr(...):`
+        if self.eat(&Token::Walrus) {
+            let value = self.parse_expr()?;
+            Ok(Expr::NamedExpr {
+                target: Box::new(expr),
+                value: Box::new(value),
+            })
+        } else {
+            Ok(expr)
+        }
     }
 
     fn parse_conditional_expr(&mut self) -> Result<Expr, String> {

@@ -112,13 +112,22 @@ pub fn create_collections_dict() -> HashMap<String, PyObjectRef> {
         Ok(dict)
     });
 
-    // namedtuple: factory function - simple implementation
+    // namedtuple: factory function
     coll_func!("namedtuple", |args| {
         if args.len() < 2 {
             return Err(PyError::type_error("namedtuple() needs at least 2 arguments"));
         }
-        // Return a simple callable that creates tuple-like objects
-        Ok(py_str("<namedtuple stub>"))
+        let name = args[0].str();
+        let fields_str = args[1].str();
+        let fields: Vec<&str> = fields_str.split_whitespace().collect();
+        // Return a simple Type object so setting __doc__ works
+        let type_dict = HashMap::new();
+        Ok(PyObjectRef::new(PyObject::Type {
+            name,
+            dict: type_dict,
+            bases: vec![],
+            mro: vec![],
+        }))
     });
 
     // collections.abc submodule (Iterable, Hashable, etc.)
@@ -310,6 +319,99 @@ pub fn create_functools_dict() -> HashMap<String, PyObjectRef> {
             };
             Ok(PyObjectRef::new(PyObject::Closure(Rc::new(decorator))))
         });
+
+    // singledispatch: generic function dispatcher
+    // Used by pkgutil, among others
+    ft_func!("singledispatch", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("singledispatch() requires at least 1 argument"));
+        }
+        let func = args[0].clone();
+        let registry = Rc::new(std::cell::RefCell::new(
+            std::collections::HashMap::<String, PyObjectRef>::new(),
+        ));
+        {
+            let mut reg = registry.borrow_mut();
+            reg.insert("object".to_string(), func.clone());
+        }
+        let func_name = func.borrow().get_attribute("__name__").ok();
+        let registry_clone = registry.clone();
+        let dispatch_func = move |call_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+            if call_args.is_empty() {
+                return Err(PyError::type_error("singledispatch requires at least 1 argument"));
+            }
+            let first_arg = &call_args[0];
+            let arg_type = first_arg.borrow().type_name();
+            let reg = registry_clone.borrow();
+            let impl_func = reg.get(&arg_type)
+                .or_else(|| reg.get("object"))
+                .cloned()
+                .ok_or_else(|| PyError::runtime_error("singledispatch: no implementation found"))?;
+            builtin_call(&impl_func, call_args)
+        };
+        // Use Instance with __call__ so set_attribute works (Closure doesn't support attribute setting)
+        let mut call_type_dict = HashMap::new();
+        let dispatch_rc = Rc::new(dispatch_func);
+        call_type_dict.insert("__call__".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+            dispatch_rc(args)
+        }))));
+        let dispatcher = PyObjectRef::new(PyObject::Instance {
+            typ: PyObjectRef::new(PyObject::Type {
+                name: "singledispatch".to_string(),
+                dict: call_type_dict,
+                bases: vec![],
+                mro: vec![],
+            }),
+            dict: HashMap::new(), // attributes like .register, .registry go here
+        });
+        {
+            let mut py_registry = PyDict::new();
+            let reg = registry.borrow();
+            for (type_name, impl_func) in reg.iter() {
+                py_registry.set(py_str(type_name), impl_func.clone()).ok();
+            }
+            let _ = dispatcher.borrow_mut().set_attribute("registry", PyObjectRef::new(PyObject::Dict(py_registry)));
+        }
+        let reg_register = registry.clone();
+        let dispatch_clone = dispatcher.clone();
+        let register_method = move |m_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+            if m_args.is_empty() {
+                return Err(PyError::type_error("register() requires at least 1 argument"));
+            }
+            let typ_arg = m_args[0].clone();
+            let type_name = typ_arg.borrow().type_name();
+            let type_key = if type_name == "type" {
+                typ_arg.borrow().get_attribute("__name__")
+                    .map(|n| n.str())
+                    .unwrap_or_else(|_| type_name.clone())
+            } else {
+                type_name.clone()
+            };
+            if m_args.len() >= 2 {
+                reg_register.borrow_mut().insert(type_key, m_args[1].clone());
+                Ok(py_none())
+            } else {
+                let reg_register_clone = reg_register.clone();
+                let decorator = move |d_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                    if d_args.is_empty() {
+                        return Err(PyError::type_error("register decorator requires a function argument"));
+                    }
+                    reg_register_clone.borrow_mut().insert(type_key.clone(), d_args[0].clone());
+                    Ok(d_args[0].clone())
+                };
+                Ok(PyObjectRef::new(PyObject::Closure(Rc::new(decorator))))
+            }
+        };
+        let _ = dispatcher.borrow_mut().set_attribute(
+            "register",
+            PyObjectRef::new(PyObject::Closure(Rc::new(register_method))),
+        );
+        if let Some(name) = func_name {
+            let _ = dispatcher.borrow_mut().set_attribute("__name__", name);
+        }
+        let _ = dispatcher.borrow_mut().set_attribute("__wrapped__", func);
+        Ok(dispatcher)
+    });
 
     d
 }

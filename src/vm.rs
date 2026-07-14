@@ -162,6 +162,8 @@ impl VirtualMachine {
          // Native os module
          let os_mod = create_module("os", create_os_dict());
          modules.insert("os".to_string(), os_mod.clone());
+         // posix is the C extension behind os — alias it for importlib compatibility
+         modules.insert("posix".to_string(), os_mod.clone());
 
          // Native os.path submodule (path manipulation functions)
          let os_path_mod = create_module("os.path", create_os_path_dict());
@@ -521,6 +523,17 @@ impl VirtualMachine {
           // Native argparse module (ArgumentParser stub)
           modules.insert("argparse".to_string(), create_module("argparse", create_argparse_dict()));
 
+          // Native _imp module (CPython C extension replacement needed by importlib._bootstrap)
+          modules.insert("_imp".to_string(), create_module("_imp", create_imp_dict()));
+          // Native _warnings module (CPython C extension replacement)
+          modules.insert("_warnings".to_string(), create_module("_warnings", create_warnings_c_dict()));
+          // Native marshal module (CPython C extension replacement)
+          modules.insert("marshal".to_string(), create_module("marshal", create_marshal_dict()));
+          // Native zipimport module stub
+          modules.insert("zipimport".to_string(), create_module("zipimport", create_zipimport_dict()));
+          // Native _io module (CPython C extension replacement needed by importlib._bootstrap_external)
+          modules.insert("_io".to_string(), create_module("_io", create_io_module_dict()));
+
           // Native importlib stub module
           let importlib_mod = create_module("importlib", create_importlib_dict());
           // Wire importlib.resources as a submodule
@@ -538,6 +551,12 @@ impl VirtualMachine {
                   dict.insert("util".to_string(), util_mod.clone());
               }
               modules.insert("importlib.util".to_string(), util_mod);
+          }
+          // Add __path__ so dotted imports like importlib.machinery can find filesystem submodules
+          {
+              if let PyObject::Module { dict, .. } = &mut *importlib_mod.borrow_mut() {
+                  dict.insert("__path__".to_string(), py_list(vec![py_str("./Lib/importlib"), py_str("/usr/lib/python3.13/importlib")]));
+              }
           }
           modules.insert("importlib".to_string(), importlib_mod);
 
@@ -814,6 +833,16 @@ impl VirtualMachine {
                                 }
                                 let module = self.exec_module_source(&source, candidate, &full_name)?;
                                 self.modules.insert(full_name.clone(), module.clone());
+                                // Wire submodule into parent module namespace for attribute access
+                                if let Some(dot_pos) = full_name.rfind('.') {
+                                    let parent_name = full_name[..dot_pos].to_string();
+                                    let child_name = full_name[dot_pos+1..].to_string();
+                                    if let Some(parent_mod) = self.modules.get(&parent_name).cloned() {
+                                        if let PyObject::Module { dict, .. } = &mut *parent_mod.borrow_mut() {
+                                            dict.insert(child_name, module.clone());
+                                        }
+                                    }
+                                }
                                 current_name = full_name;
                                 parent_path = None;
                                 break;
@@ -861,6 +890,16 @@ impl VirtualMachine {
                 }
                 let module = self.exec_module_source(&source, &py_path, name)?;
                 self.modules.insert(name.to_string(), module.clone());
+                // Wire submodule into parent module namespace
+                if let Some(dot_pos) = name.rfind('.') {
+                    let parent_name = name[..dot_pos].to_string();
+                    let child_name = name[dot_pos+1..].to_string();
+                    if let Some(parent_mod) = self.modules.get(&parent_name).cloned() {
+                        if let PyObject::Module { dict, .. } = &mut *parent_mod.borrow_mut() {
+                            dict.insert(child_name, module.clone());
+                        }
+                    }
+                }
                 return Ok(module);
             }
             let init_path = if base.ends_with('/') {
@@ -1953,6 +1992,10 @@ impl VirtualMachine {
                     PyObject::Range { start, stop, step } => {
                         self.frames[fi].push(PyObjectRef::new(PyObject::RangeIter { current: *start, stop: *stop, step: *step }));
                     }
+                    PyObject::Dict(ref pydict) => {
+                        let keys: Vec<PyObjectRef> = pydict.keys();
+                        self.frames[fi].push(PyObjectRef::new(PyObject::ListIter { list: keys, index: 0 }));
+                    }
                     PyObject::EnumerateIter { .. } => {
                         drop(obj);
                         self.frames[fi].push(val);
@@ -2812,7 +2855,25 @@ impl VirtualMachine {
                         eprintln!("DEBUG IMPORT_NAME '{}' FOUND in modules, pushing to frame {} stack={}", 
                             resolved, fi, self.frames[fi].stack.len());
                     }
-                    self.frames[fi].push(module.clone());
+                    // For 'import a.b.c' where fromlist is empty (regular import, not 'from a.b import X'),
+                    // push the top-level module so STORE_NAME stores the package, not the submodule
+                    let is_from_import = {
+                        let obj = _fromlist.borrow();
+                        matches!(&*obj, PyObject::Tuple(items) if !items.is_empty())
+                    };
+                    if resolved.contains('.') && !is_from_import {
+                        if let Some(top) = resolved.split('.').next() {
+                            if let Some(top_mod) = self.modules.get(top) {
+                                self.frames[fi].push(top_mod.clone());
+                            } else {
+                                self.frames[fi].push(module.clone());
+                            }
+                        } else {
+                            self.frames[fi].push(module.clone());
+                        }
+                    } else {
+                        self.frames[fi].push(module.clone());
+                    }
                 } else {
                     match self.import_module_from_file(&resolved) {
                         Ok(module) => {
@@ -2835,6 +2896,20 @@ impl VirtualMachine {
                                 }
                             }
                             self.frames[fi].push(module);
+                            // For 'import a.b.c' where fromlist is empty,
+                            // push top-level module instead of deepest module
+                            let is_from_import = {
+                                let obj = _fromlist.borrow();
+                                matches!(&*obj, PyObject::Tuple(items) if !items.is_empty())
+                            };
+                            if resolved.contains('.') && !is_from_import {
+                                if let Some(top) = resolved.split('.').next() {
+                                    if let Some(top_mod) = self.modules.get(top) {
+                                        self.frames[fi].pop();
+                                        self.frames[fi].push(top_mod.clone());
+                                    }
+                                }
+                            }
                         }
                         Err(msg) => return Err(PyError::ImportError(msg)),
                     }

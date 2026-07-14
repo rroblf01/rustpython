@@ -805,6 +805,22 @@ impl Lexer {
             }
         }
         if self.peek().is_none() || self.peek() == Some('\n') {
+            // Still need to handle indent/dedent for comment-only lines
+            // followed by blank lines (the # handler consumes the \n but
+            // the indent check is skipped due to early return)
+            let current = *self.indent_stack.last().unwrap();
+            if indent > current {
+                self.indent_stack.push(indent);
+                self.pending.push(Token::Indent);
+            } else if indent < current {
+                while let Some(level) = self.indent_stack.last().cloned() {
+                    if level == indent {
+                        break;
+                    }
+                    self.indent_stack.pop();
+                    self.pending.push(Token::Dedent);
+                }
+            }
             return;
         }
         let current = *self.indent_stack.last().unwrap();
