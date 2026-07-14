@@ -2192,11 +2192,15 @@ impl VirtualMachine {
                                 {
                                     let ab = attr.borrow();
                                     if let PyObject::ClassMethod { func } = &*ab {
+                                        let func_clone = func.clone();
+                                        let cls_obj = obj.clone();
                                         drop(ab);
-                                        let result = self.call_function(func.clone(), vec![obj.clone()], vec![]);
-                                        if let Ok(res) = result {
-                                            return Ok(res);
-                                        }
+                                        let bound = PyObjectRef::new(PyObject::BoundMethod {
+                                            func: func_clone,
+                                            self_obj: cls_obj,
+                                        });
+                                        self.frames[fi].push(bound);
+                                        return Ok(None);
                                     }
                                 }
                                 let is_builtin_method = matches!(&*attr.borrow(), PyObject::BuiltinMethod { .. });

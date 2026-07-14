@@ -1915,6 +1915,42 @@ pub fn builtin_int(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
 }
 
+/// int.from_bytes(bytes, byteorder, *, signed=False)
+pub fn builtin_int_from_bytes(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() < 2 {
+        return Err(PyError::type_error("int.from_bytes() needs at least 2 arguments"));
+    }
+    let bytes_val = &args[0];
+    let byteorder = &args[1];
+    let order_str = byteorder.str();
+    let big_endian = order_str == "big";
+    let byte_data: Vec<u8> = match &*bytes_val.borrow() {
+        PyObject::Bytes(b) => b.clone(),
+        PyObject::List(items) => {
+            items.iter().map(|x| x.as_i64().unwrap_or(0) as u8).collect()
+        }
+        _ => {
+            let mut v = Vec::new();
+            if let Ok(it) = builtin_iter(&[bytes_val.clone()]) {
+                loop {
+                    match builtin_next(&[it.clone()]) {
+                        Ok(x) => v.push(x.as_i64().unwrap_or(0) as u8),
+                        Err(PyError::StopIteration) => break,
+                        Err(e) => return Err(e),
+                    }
+                }
+            }
+            v
+        }
+    };
+    let n = if big_endian {
+        byte_data.iter().fold(0i64, |acc, &b| (acc << 8) | b as i64)
+    } else {
+        byte_data.iter().rev().fold(0i64, |acc, &b| (acc << 8) | b as i64)
+    };
+    Ok(py_int(n))
+}
+
 pub fn builtin_float(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() { return Ok(py_float(0.0)); }
     let obj = args[0].borrow();
@@ -6106,6 +6142,15 @@ impl ObjectAccess for PyObject {
                     })),
                     _ => Err(PyError::attribute_error(format!("'future_await_iterator' object has no attribute '{}'", name))),
                 }
+            }
+            PyObject::BuiltinFunction { name: bf_name, .. } => {
+                if bf_name == "int" && name == "from_bytes" {
+                    return Ok(PyObjectRef::imm(PyObject::BuiltinFunction {
+                        name: "from_bytes".to_string(),
+                        func: builtin_int_from_bytes,
+                    }));
+                }
+                Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", self.type_name(), name)))
             }
             _ => Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", self.type_name(), name))),
         }

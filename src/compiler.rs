@@ -966,11 +966,10 @@ impl Compiler {
                 self.compile_function(name.clone(), args, body, *is_async)?;
 
                 for decorator in decorator_list {
-                    self.emit(Opcode::DUP_TOP, 0);
                     self.compile_expr(&decorator)?;
                     self.emit(Opcode::SWAP, 1);
                     self.emit(Opcode::CALL, 1);
-                    self.emit(Opcode::POP_TOP, 0);
+                    // Result stays on stack
                 }
                 let name_idx = self.get_name_index(name) as u32;
                 self.emit(Opcode::STORE_NAME, name_idx);
@@ -1027,11 +1026,10 @@ impl Compiler {
                     eprintln!("DEBUG compiler: class '{}' has {} decorator(s)!", name, decorator_list.len());
                 }
                 for decorator in decorator_list {
-                    self.emit(Opcode::DUP_TOP, 0);
                     self.compile_expr(&decorator)?;
                     self.emit(Opcode::SWAP, 1);
                     self.emit(Opcode::CALL, 1);
-                    self.emit(Opcode::POP_TOP, 0);
+                    // Decorated class stays on stack
                 }
                 self.emit(Opcode::STORE_NAME, name_idx);
             }
