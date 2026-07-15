@@ -68,7 +68,7 @@ pub enum PyObjectRef {
     SmallStr(SmallStr),  // Inline short string (<16 bytes)
     None,
     Mut(Rc<RefCell<PyObject>>),  // Mutable: List, Dict, Set, Instance
-    Imm(Rc<PyObject>),           // Immutable: Int, Str, Float, Tuple, Bytes, ByteArray, Range, Slice, Code, Function
+    Imm(Rc<RefCell<PyObject>>),  // Immutable: Int, Str, Float, Tuple, Bytes, Code, Function
 }
 
 impl PyObjectRef {
@@ -79,7 +79,7 @@ impl PyObjectRef {
 
     /// Create an IMMUTABLE PyObjectRef (for Int, Str, Float, etc.)
     pub fn imm(obj: PyObject) -> Self {
-        PyObjectRef::Imm(Rc::new(obj))
+        PyObjectRef::Imm(Rc::new(RefCell::new(obj)))
     }
 
     pub fn borrow(&self) -> RefOrOwned<'_> {
@@ -90,7 +90,7 @@ impl PyObjectRef {
             PyObjectRef::SmallStr(s) => RefOrOwned::Owned(PyObject::Str(s.to_string())),
             PyObjectRef::None => RefOrOwned::Owned(PyObject::None),
             PyObjectRef::Mut(rc) => RefOrOwned::Ref(rc.borrow()),
-            PyObjectRef::Imm(rc) => RefOrOwned::RcRef(Rc::clone(rc)),
+            PyObjectRef::Imm(rc) => RefOrOwned::Ref(rc.borrow()),
         }
     }
 
@@ -108,8 +108,24 @@ impl PyObjectRef {
                     }
                 }
             }
+            PyObjectRef::Imm(rc) => {
+                let result = rc.try_borrow_mut();
+                match result {
+                    Ok(guard) => guard,
+                    Err(_) => {
+                        use std::io::Write;
+                        let _ = std::io::stderr().write_all(b"RefCell CONFLICT - Imm borrow_mut while borrowed\n");
+                        let _ = std::io::stderr().flush();
+                        panic!("RefCell already borrowed (Imm)");
+                    }
+                }
+            }
             _ => panic!("borrow_mut on non-mutable value"),
         }
+    }
+
+    pub fn is_imm(&self) -> bool {
+        matches!(self, PyObjectRef::Imm(_))
     }
 
     /// Fast path: extract i64 without borrow()
@@ -149,7 +165,7 @@ impl PyObjectRef {
             PyObjectRef::SmallStr(s) => !s.as_str().is_empty(),
             PyObjectRef::None => false,
             PyObjectRef::Mut(rc) => rc.borrow().truthy(),
-            PyObjectRef::Imm(rc) => (**rc).truthy(),
+            PyObjectRef::Imm(rc) => rc.borrow().truthy(),
         }
     }
     /// Return a raw pointer to the inner PyObject for identity comparison.
@@ -179,7 +195,7 @@ impl PyObjectRef {
             }
             PyObjectRef::None => Ok(0),
             PyObjectRef::Mut(rc) => rc.borrow().hash(),
-            PyObjectRef::Imm(rc) => (**rc).hash(),
+            PyObjectRef::Imm(rc) => rc.borrow().hash(),
         }
     }
     pub fn equals(&self, other: &PyObjectRef) -> PyResult<bool> {
@@ -201,7 +217,7 @@ impl PyObjectRef {
     pub fn get_id(&self) -> usize {
         match self {
             PyObjectRef::Mut(rc) => Rc::as_ptr(rc) as *const PyObject as usize,
-            PyObjectRef::Imm(rc) => Rc::as_ptr(rc) as usize,
+            PyObjectRef::Imm(rc) => &*rc as *const _ as usize,
             inline => inline as *const PyObjectRef as usize,
         }
     }
