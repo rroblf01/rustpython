@@ -99,7 +99,8 @@ impl Frame {
                 "END".to_string()
             };
             let arg = if instr_ip < self.code.instructions.len() { self.code.instructions[instr_ip].arg } else { 0 };
-            PyError::runtime_error("stack underflow")
+            let line_no = if instr_ip < self.code.instructions.len() { self.code.instructions[instr_ip].line_no.unwrap_or(0) } else { 0 };
+            PyError::runtime_error(format!("stack underflow at {} arg={} line={} code={}", op_str, arg, line_no, self.code.name))
         })
     }
 

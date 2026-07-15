@@ -369,6 +369,15 @@ impl PySet {
         for item in vec { set.add(item)?; }
         Ok(set)
     }
+    pub fn is_superset(&self, other: &PySet) -> bool {
+        for item in other.to_vec() {
+            if self.contains(&item).unwrap_or(false) == false { return false; }
+        }
+        true
+    }
+    pub fn is_subset(&self, other: &PySet) -> bool {
+        other.is_superset(self)
+    }
 }
 
 // ---- PyDict: hash-based dict with arbitrary hashable keys ----
@@ -1079,6 +1088,25 @@ pub fn py_bool(b: bool) -> PyObjectRef {
 
 pub fn py_none() -> PyObjectRef {
     PyObjectRef::None
+}
+
+/// Convert a Python object to a PySet by checking common iterable types.
+/// Used as a replacement for the non-existent `py_set_from_iter`.
+pub fn convert_to_set(obj: &PyObjectRef) -> PyResult<PySet> {
+    let borrowed = obj.borrow();
+    match &*borrowed {
+        PyObject::Set(s) => Ok(s.clone()),
+        PyObject::FrozenSet(s) => Ok(s.clone()),
+        PyObject::List(v) => Ok(PySet::from_vec(v.clone())?),
+        PyObject::Tuple(items) => Ok(PySet::from_vec(items.clone())?),
+        PyObject::Str(s) => {
+            let chars: Vec<PyObjectRef> = s.chars().map(|c| py_str(&c.to_string())).collect();
+            Ok(PySet::from_vec(chars)?)
+        }
+        _ => Err(PyError::type_error(format!(
+            "cannot convert '{}' to set", borrowed.type_name()
+        ))),
+    }
 }
 
 pub fn py_float(f: f64) -> PyObjectRef {
@@ -2038,6 +2066,31 @@ pub fn builtin_int(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 if let Ok(n) = i64::from_str_radix(bin, 2) { py_int(sign * n) }
                 else if let Some(n) = BigInt::parse_bytes(bin.as_bytes(), 2) { py_int(if sign < 0 { -n } else { n }) }
                 else { return Err(make_err()); }
+            } else if args.len() > 1 {
+                // int(x, base): parse x in given base
+                drop(obj);
+                let base_val = args[1].borrow();
+                let base = if let PyObject::Int(i) = &*base_val { i.to_i64().unwrap_or(10) as u32 }
+                    else { return Err(PyError::type_error("int() base must be an integer")) };
+                if base < 2 || base > 36 {
+                    return Err(PyError::value_error("int() base must be >= 2 and <= 36"));
+                }
+                // Re-borrow the string
+                let obj2 = args[0].borrow();
+                if let PyObject::Str(s) = &*obj2 {
+                    let s_trim = s.trim();
+                    let s_clean: String = s_trim.chars().filter(|&c| c != '_').collect();
+                    let (sign, body) = match s_clean.as_bytes().first() {
+                        Some(b'-') => (-1, &s_clean[1..]),
+                        Some(b'+') => (1, &s_clean[1..]),
+                        _ => (1, &s_clean[..]),
+                    };
+                    if let Ok(n) = i64::from_str_radix(body, base) { return Ok(py_int(sign * n)); }
+                    else if let Some(n) = BigInt::parse_bytes(body.as_bytes(), base) { return Ok(py_int(if sign < 0 { -n } else { n })); }
+                    else { return Err(PyError::value_error(format!("invalid literal for int(): '{}'", s))); }
+                } else {
+                    return Err(PyError::type_error("int() can convert strings only with base"));
+                }
             } else {
                 if let Ok(n) = body.parse::<i64>() { py_int(sign * n) }
                 else if let Ok(n) = body.parse::<BigInt>() { py_int(if sign < 0 { -n } else { n }) }
@@ -5219,10 +5272,8 @@ impl ObjectAccess for PyObject {
                             if args.len() < 2 { return Err(PyError::type_error("issubset() takes exactly one argument")); }
                             let s = args[0].borrow();
                             if let PyObject::Set(set) = &*s {
-                                let other = args[1].borrow();
-                                if let PyObject::Set(other_set) = &*other {
-                                    Ok(py_bool(set.to_vec().iter().all(|item| other_set.contains(item).unwrap_or(false))))
-                                } else { Err(PyError::type_error("issubset() argument must be a set")) }
+                                let other_set = convert_to_set(&args[1])?;
+                                Ok(py_bool(set.to_vec().iter().all(|item| other_set.contains(item).unwrap_or(false))))
                             } else { Err(PyError::runtime_error("issubset on non-set")) }
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
@@ -5233,10 +5284,8 @@ impl ObjectAccess for PyObject {
                             if args.len() < 2 { return Err(PyError::type_error("issuperset() takes exactly one argument")); }
                             let s = args[0].borrow();
                             if let PyObject::Set(set) = &*s {
-                                let other = args[1].borrow();
-                                if let PyObject::Set(other_set) = &*other {
-                                    Ok(py_bool(other_set.to_vec().iter().all(|item| set.contains(item).unwrap_or(false))))
-                                } else { Err(PyError::type_error("issuperset() argument must be a set")) }
+                                let other_set = convert_to_set(&args[1])?;
+                                Ok(py_bool(other_set.to_vec().iter().all(|item| set.contains(item).unwrap_or(false))))
                             } else { Err(PyError::runtime_error("issuperset on non-set")) }
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
@@ -6479,6 +6528,37 @@ impl ObjectAccess for PyObject {
                     }));
                 }
                 Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", self.type_name(), name)))
+            }
+            PyObject::FrozenSet(items) | PyObject::Set(items) => {
+                match name {
+                    "issuperset" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "issuperset".to_string(),
+                        func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                            let self_set = if let PyObject::FrozenSet(s) = &*args[0].borrow() { s.clone() }
+                                else if let PyObject::Set(s) = &*args[0].borrow() { s.clone() }
+                                else { return Err(PyError::type_error("issuperset requires a set/frozenset")) };
+                            let other = if args.len() < 2 { return Err(PyError::type_error("issuperset requires 1 argument")) }
+                                else { &args[1] };
+                            let other_set = convert_to_set(other)?;
+                            Ok(py_bool(self_set.is_superset(&other_set)))
+                        },
+                        self_obj: py_none(),
+                    })),
+                    "issubset" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "issubset".to_string(),
+                        func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                            let self_set = if let PyObject::FrozenSet(s) = &*args[0].borrow() { s.clone() }
+                                else if let PyObject::Set(s) = &*args[0].borrow() { s.clone() }
+                                else { return Err(PyError::type_error("issubset requires a set/frozenset")) };
+                            let other = if args.len() < 2 { return Err(PyError::type_error("issubset requires 1 argument")) }
+                                else { &args[1] };
+                            let other_set = convert_to_set(other)?;
+                            Ok(py_bool(self_set.is_subset(&other_set)))
+                        },
+                        self_obj: py_none(),
+                    })),
+                    _ => Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", self.type_name(), name))),
+                }
             }
             _ => Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", self.type_name(), name))),
         }
