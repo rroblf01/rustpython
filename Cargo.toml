@@ -35,3 +35,4 @@ sha-1 = "0.10"
 sha2 = "0.10"
 flate2 = "1"
 rustyline = "15"
+mimalloc = { version = "0.1", default-features = false }

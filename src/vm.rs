@@ -777,10 +777,8 @@ impl VirtualMachine {
         if cfg!(feature = "profile") {
             if let Ok(status) = std::fs::read_to_string(format!("/proc/{}/status", std::process::id())) {
                 if let Some(rss_line) = status.lines().find(|l| l.starts_with("VmRSS:")) {
-                    eprintln!("[MEM] START import '{}' RSS: {}", name, rss_line.trim());
                 }
                 if let Some(peak_line) = status.lines().find(|l| l.starts_with("VmPeak:")) {
-                    eprintln!("[MEM] START import '{}' PEAK: {}", name, peak_line.trim());
                 }
             }
         }
@@ -1056,9 +1054,6 @@ impl VirtualMachine {
                         ]);
                         if magic == PYC_MAGIC && version == PYC_VERSION && ts == source_mtime {
                             if let Ok(code) = CodeObject::from_bytes(&pyc_data[14..]) {
-                                if cfg!(feature = "profile") {
-                                    eprintln!("DEBUG .pyc cache HIT: {}", pyc_path.display());
-                                }
                                 cached_code = Some(code);
                             }
                         }
@@ -1150,21 +1145,6 @@ impl VirtualMachine {
             format!("{}", e)
         })?;
         let globals_copy = module_globals.borrow().clone();
-        // Memory tracking after module execution
-        if cfg!(feature = "profile") {
-            if let Ok(status) = std::fs::read_to_string(format!("/proc/{}/status", std::process::id())) {
-                if let Some(rss_line) = status.lines().find(|l| l.starts_with("VmRSS:")) {
-                    eprintln!("[MEM] after exec '{}' RSS: {}", name, rss_line.trim());
-                }
-                if let Some(peak_line) = status.lines().find(|l| l.starts_with("VmPeak:")) {
-                    eprintln!("[MEM] after exec '{}' PEAK: {}", name, peak_line.trim());
-                }
-            }
-            let allocs = crate::object::ALLOC_COUNT.load(std::sync::atomic::Ordering::Relaxed);
-            let imms = crate::object::IMM_COUNT.load(std::sync::atomic::Ordering::Relaxed);
-            eprintln!("[OBJ] after exec '{}' Mut allocs: {}, Imm allocs: {}, total: {}",
-                name, allocs, imms, allocs + imms);
-        }
         Ok(create_module(name, globals_copy))
     }
 
@@ -1316,7 +1296,6 @@ impl VirtualMachine {
         if cfg!(feature = "profile") {
             if matches!(op, Opcode::LOAD_GLOBAL | Opcode::LOAD_FAST | Opcode::CALL | Opcode::LOAD_ATTR | Opcode::RETURN_VALUE) {
                 let frame_name = &self.frames[fi].code.name;
-                eprintln!("DEBUG EXEC [{}]: ip={} arg={}", frame_name, ip, arg);
             }
         }
 

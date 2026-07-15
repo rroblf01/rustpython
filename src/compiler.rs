@@ -1902,12 +1902,12 @@ impl Compiler {
         });
 
         let body = if docstring.is_some() {
-            eprintln!("DEBUG fn '{}': docstring FOUND, slicing body[1..] -> len={}", name, body.len().saturating_sub(1));
+            
             &body[1..]
         } else {
             body
         };
-        eprintln!("DEBUG fn '{}': body after docstring.strip: len={}", name, body.len());
+        
 
         // Save outer code BEFORE enter_scope (which takes cellvars/freevars from self.code)
         let old_code = std::mem::replace(&mut self.code, CodeObject::new(name.clone()));
@@ -1918,9 +1918,7 @@ impl Compiler {
         self.current_line = 1;
 
         self.enter_scope(ScopeType::Function);
-        eprintln!("DEBUG compile_function '{}': scope={:?}, stack_depth={}, args={:?}",
-            name, self.scope, self.scope_stack.len(),
-            args.iter().map(|a| &a.arg).collect::<Vec<_>>());
+        
 
         // Pre-analyze the function to determine cell vars and free vars
         // Pass enclosing function's varnames so module globals aren't treated as free vars
@@ -1936,7 +1934,7 @@ impl Compiler {
                 if outer.scope == ScopeType::ClassBody {
                     if !self.code.cellvars.contains(&"__class__".to_string()) {
                         self.code.cellvars.push("__class__".to_string());
-                        if cfg!(feature = "profile") { eprintln!("DEBUG: added __class__ cell var for method {}", self.code.name); }
+                        if cfg!(feature = "profile") {  }
                     }
                 }
             }
@@ -1996,11 +1994,9 @@ impl Compiler {
             self.code.flags |= 0x100;
         }
 
-        eprintln!("DEBUG compile_function BEFORE body '{}': scope={:?}, code_name={}, varnames={:?}",
-            name, self.scope, self.code.name, self.code.varnames);
+        
         self.compile_stmts(body)?;
-        eprintln!("DEBUG compile_function AFTER body '{}': scope={:?}, code_name={}, varnames={:?}",
-            name, self.scope, self.code.name, self.code.varnames);
+        
 
         // Implicit return None
         let has_return = body.iter().any(|s| matches!(s, Stmt::Return(_)));
@@ -2088,7 +2084,7 @@ impl Compiler {
     }
 
     fn compile_class_body(&mut self, name: String, body: &[Stmt]) -> Result<(), String> {
-        eprintln!("DEBUG compile_class_body ENTER '{}': scope={:?}, code={}, self_addr={:p}", name, self.scope, self.code.name, self);
+        
 
         // Skip docstring if first statement is a string literal
         let body = if let Some(Stmt::Expr(expr)) = body.first() {
@@ -2102,10 +2098,10 @@ impl Compiler {
         };
 
         self.enter_scope(ScopeType::ClassBody);
-        eprintln!("DEBUG   after enter_scope: scope={:?}, stack_depth={}, self_addr={:p}", self.scope, self.scope_stack.len(), self);
+        
 
         let old_code = std::mem::replace(&mut self.code, CodeObject::new(name.clone()));
-        eprintln!("DEBUG   after replace: code_name={}, old_code_name={}, self_addr={:p}", self.code.name, old_code.name, self);
+        
 
         let old_labels = std::mem::replace(&mut self.labels, Vec::new());
         let old_label_stack = std::mem::replace(&mut self.label_stack, Vec::new());
@@ -2116,12 +2112,12 @@ impl Compiler {
         self.code.arg_count = 0;
 
         // Check self fields RIGHT BEFORE calling compile_stmts
-        eprintln!("DEBUG   before compile_stmts: scope={:?}, code_name={}, body.len={}, self_addr={:p}", self.scope, self.code.name, body.len(), self);
+        
 
         self.compile_stmts(body)?;
 
         // Check self fields RIGHT AFTER calling compile_stmts
-        eprintln!("DEBUG   after compile_stmts: scope={:?}, code_name={}, self_addr={:p}", self.scope, self.code.name, self);
+        
 
         let const_none = self.get_const_index(ConstValue::None) as u32;
 
@@ -2166,35 +2162,34 @@ impl Compiler {
                 self.emit(Opcode::LOAD_CONST, idx);
             }
             Expr::Name(name) => {
-                eprintln!("DEBUG compile_expr Name({:?}) scope={:?} varnames={:?} cellvars={:?} freevars={:?}",
-                    name, self.scope, self.code.varnames, self.code.cellvars, self.code.freevars);
+                
                 if self.scope == ScopeType::Module
                     || self.scope == ScopeType::ClassBody
                     || self.global_names.contains(name)
                 {
                     let name_idx = self.get_name_index(name) as u32;
-                    eprintln!("DEBUG   → LOAD_NAME idx={} names={:?}", name_idx, self.code.names);
+                    
                     self.emit(Opcode::LOAD_NAME, name_idx);
                 } else if self.scope == ScopeType::Function && self.code.freevars.contains(name) {
                     let fv_idx = self.code.freevars.iter().position(|n| n == name).unwrap();
                     let idx = self.code.cellvars.len() + fv_idx;
-                    eprintln!("DEBUG   → LOAD_DEREF (freevar) idx={}", idx);
+                    
                     self.emit(Opcode::LOAD_DEREF, idx as u32);
                 } else if self.scope == ScopeType::Function && self.code.cellvars.contains(name) {
                     let idx = self.code.cellvars.iter().position(|n| n == name).unwrap() as u32;
-                    eprintln!("DEBUG   → LOAD_DEREF (cellvar) idx={}", idx);
+                    
                     self.emit(Opcode::LOAD_DEREF, idx);
                 } else if self.scope == ScopeType::Function && self.get_var_index(name).is_some() {
                     let idx = self.get_var_index(name).unwrap() as u32;
-                    eprintln!("DEBUG   → LOAD_FAST idx={}", idx);
+                    
                     self.emit(Opcode::LOAD_FAST, idx);
                 } else if self.scope == ScopeType::Function {
                     let name_idx = self.get_name_index(name) as u32;
-                    eprintln!("DEBUG   → LOAD_GLOBAL idx={}", name_idx);
+                    
                     self.emit(Opcode::LOAD_GLOBAL, name_idx);
                 } else {
                     let name_idx = self.get_name_index(name) as u32;
-                    eprintln!("DEBUG   → LOAD_NAME (else) idx={}", name_idx);
+                    
                     self.emit(Opcode::LOAD_NAME, name_idx);
                 }
             }
