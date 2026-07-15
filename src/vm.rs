@@ -100,7 +100,7 @@ impl Frame {
             };
             let arg = if instr_ip < self.code.instructions.len() { self.code.instructions[instr_ip].arg } else { 0 };
             let line_no = if instr_ip < self.code.instructions.len() { self.code.instructions[instr_ip].line_no.unwrap_or(0) } else { 0 };
-            PyError::runtime_error(format!("stack underflow at {} arg={} line={} code={}", op_str, arg, line_no, self.code.name))
+            PyError::runtime_error(format!("stack underflow at {} arg={} line={} code={} file={}", op_str, arg, line_no, self.code.name, self.code.filename))
         })
     }
 
@@ -1057,6 +1057,8 @@ impl VirtualMachine {
         let code: CodeObject = match cached_code {
             Some(cached) => cached,
             None => {
+                eprintln!("TRACE LOAD: {} ({})", name, path);
+                
                 let mut parser = crate::parser::Parser::new(source);
                 let program = parser.parse_program()
                     .map_err(|e| format!("Parse error in '{}': {}", name, e))?;
@@ -3157,13 +3159,13 @@ impl VirtualMachine {
                             }
                             self.frames[fi].push(submod);
                         }
-                        Err(_) => {
+                        Err(inner_err) => {
                             let obj = module.borrow();
                             let type_name = match &*obj {
                                 PyObject::Module { name: mn, .. } => mn.clone(),
                                 _ => module.borrow().type_name(),
                             };
-                            return Err(PyError::ImportError(format!("cannot import name '{}' from '{}'", name, type_name)));
+                            return Err(PyError::ImportError(format!("cannot import name '{}' from '{}' (inner: {})", name, type_name, inner_err)));
                         }
                     }
                 }

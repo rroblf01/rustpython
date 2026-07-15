@@ -804,6 +804,34 @@ pub fn create_datetime_dict() -> HashMap<String, PyObjectRef> {
         Ok(py_float(s.as_secs_f64()))
     });
 
+    // Minimal datetime.time class stub — needed by django.utils.encoding
+    dt_func!("time", |args| {
+        let hour = if args.len() > 0 { args[0].str().parse::<u32>().unwrap_or(0) } else { 0 };
+        let minute = if args.len() > 1 { args[1].str().parse::<u32>().unwrap_or(0) } else { 0 };
+        let second = if args.len() > 2 { args[2].str().parse::<u32>().unwrap_or(0) } else { 0 };
+        Ok(py_str(&format!("{:02}:{:02}:{:02}", hour, minute, second)))
+    });
+    dt_func!("timedelta", |args| {
+        Ok(PyObjectRef::new(PyObject::Instance {
+            typ: PyObjectRef::new(PyObject::Type {
+                name: "timedelta".to_string(),
+                dict: HashMap::new(),
+                bases: vec![],
+                mro: vec![],
+            }),
+            dict: HashMap::new(),
+        }))
+    });
+    dt_func!("tzinfo", |args| {
+        Ok(py_none())
+    });
+    dt_func!("timezone", |args| {
+        Ok(py_none())
+    });
+    dt_func!("UTC", |args| {
+        Ok(py_none())
+    });
+
     d
 }
 
