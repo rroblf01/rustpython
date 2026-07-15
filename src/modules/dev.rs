@@ -169,6 +169,9 @@ pub fn create_typing_dict() -> HashMap<String, PyObjectRef> {
         },
     }));
 
+    // Module-level constants
+    d.insert("TYPE_CHECKING".to_string(), py_bool(false));
+
     d
 }
 

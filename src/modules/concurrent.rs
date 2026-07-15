@@ -13,6 +13,15 @@ pub fn create_concurrent_futures_dict() -> HashMap<String, PyObjectRef> {
     }
 
     // ── ThreadPoolExecutor ─────────────────────────────────────────────
+    
+    // Executor base class (used by asgiref for type hints)
+    let executor_type = PyObjectRef::new(PyObject::Type {
+        name: "Executor".to_string(),
+        dict: HashMap::new(),
+        bases: vec![],
+        mro: vec![],
+    });
+    d.insert("Executor".to_string(), executor_type);
 
     cf_func!("ThreadPoolExecutor", |args| {
         let max_workers = if args.len() > 0 {

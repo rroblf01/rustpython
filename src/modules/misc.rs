@@ -4670,6 +4670,31 @@ pub fn create_asyncio_dict() -> HashMap<String, PyObjectRef> {
         Ok(crate::object::py_list(results))
     });
 
+    // asyncio.iscoroutinefunction(func): Check if func is a coroutine function
+    asyncio_func!("iscoroutinefunction", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("iscoroutinefunction() missing required argument"));
+        }
+        let func = &args[0];
+        let borrowed = func.borrow();
+        // Check for __code__ with CO_COROUTINE flag (0x80)
+        if let Ok(code) = borrowed.get_attribute("__code__") {
+            if let Ok(flags) = code.borrow().get_attribute("co_flags") {
+                if let PyObject::Int(n) = &*flags.borrow() {
+                    if n & BigInt::from(0x80) != BigInt::from(0) {
+                        return Ok(py_bool(true));
+                    }
+                }
+            }
+        }
+        // Check if it's a coroutine type
+        let type_name = borrowed.type_name();
+        if type_name == "coroutine" || type_name == "coroutine_function" {
+            return Ok(py_bool(true));
+        }
+        Ok(py_bool(false))
+    });
+
     d
 }
 

@@ -394,7 +394,8 @@ impl VirtualMachine {
           modules.insert("abc".to_string(), create_module("abc", create_abc_dict()));
 
           // Native typing module (type annotation stubs)
-          modules.insert("typing".to_string(), create_module("typing", create_typing_dict()));
+          // Comment out native typing - use Lib/typing.py instead
+          // modules.insert("typing".to_string(), create_module("typing", create_typing_dict()));
 
           // Native pickle module
           modules.insert("pickle".to_string(), create_module("pickle", create_pickle_dict()));
