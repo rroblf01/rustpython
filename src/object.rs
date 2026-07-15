@@ -93,7 +93,7 @@ impl PyObjectRef {
             PyObjectRef::SmallInt(n) => RefOrOwned::Owned(PyObject::Int(BigInt::from(*n))),
             PyObjectRef::SmallBool(b) => RefOrOwned::Owned(PyObject::Bool(*b)),
             PyObjectRef::SmallFloat(f) => RefOrOwned::Owned(PyObject::Float(*f)),
-            PyObjectRef::SmallStr(s) => RefOrOwned::Owned(PyObject::Str(s.to_string())),
+            PyObjectRef::SmallStr(s) => RefOrOwned::Owned(PyObject::Str(compact_str::CompactString::from(s.as_str()))),
             PyObjectRef::None => RefOrOwned::Owned(PyObject::None),
             PyObjectRef::Mut(rc) => RefOrOwned::Ref(rc.borrow()),
             PyObjectRef::Imm(rc) => RefOrOwned::Ref(rc.borrow()),
@@ -482,7 +482,7 @@ pub enum PyObject {
     Bool(bool),
     Int(BigInt),
     Float(f64),
-    Str(String),
+    Str(compact_str::CompactString),
     Bytes(Vec<u8>),
     ByteArray(Vec<u8>),
     List(Vec<PyObjectRef>),
@@ -823,7 +823,7 @@ impl PyObject {
 
     pub fn str(&self) -> String {
         match self {
-            PyObject::Str(s) => s.clone(),
+            PyObject::Str(s) => s.to_string(),
             _ => self.repr(),
         }
     }
@@ -1142,7 +1142,7 @@ pub fn py_str(s: &str) -> PyObjectRef {
     if let Some(small) = SmallStr::new(s) {
         return PyObjectRef::SmallStr(small);
     }
-    PyObjectRef::imm(PyObject::Str(s.to_string()))
+    PyObjectRef::imm(PyObject::Str(compact_str::CompactString::from(s)))
 }
 
 pub fn py_list(items: Vec<PyObjectRef>) -> PyObjectRef {
@@ -1601,6 +1601,7 @@ pub fn py_lshift(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
 pub fn py_rshift(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
         if bi < 0 { return Err(PyError::value_error("negative shift count")); }
+        if bi >= 64 { return Ok(py_int(if ai < 0 { -1i64 } else { 0i64 })); }
         return Ok(py_int(ai.wrapping_shr(bi as u32)));
     }
     if let Some(r) = try_dunder_binop(a, b, "__rshift__")? { return Ok(r); }
@@ -2049,7 +2050,7 @@ pub fn builtin_type_of(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             PyObject::Type { .. } => Ok(args[0].clone()),
             _ => {
                 let name = borrowed.type_name();
-                Ok(PyObjectRef::imm(PyObject::Str(name)))
+                Ok(PyObjectRef::imm(PyObject::Str(compact_str::CompactString::from(name))))
             }
         }
     } else if args.len() == 3 {
@@ -3409,7 +3410,7 @@ pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             let obj_type = args[0].borrow().type_name();
             let class_name = match &*class {
                 PyObject::BuiltinFunction { name, .. } => name.clone(),
-                PyObject::Str(s) => s.clone(),
+                PyObject::Str(s) => s.to_string(),
                 PyObject::Type { name, .. } => name.clone(),
                 _ => class.str(),
             };
@@ -4102,15 +4103,15 @@ fn extract_slots(slots_val: &PyObjectRef, result: &mut Vec<String>) {
     let borrowed = slots_val.borrow();
     match &*borrowed {
         PyObject::Str(s) => {
-            if !result.contains(s) {
-                result.push(s.clone());
+            if !result.iter().any(|x| x.as_str() == s.as_str()) {
+                result.push(s.to_string());
             }
         }
         PyObject::Tuple(items) => {
             for item in items {
                 if let PyObject::Str(s) = &*item.borrow() {
-                    if !result.contains(s) {
-                        result.push(s.clone());
+                    if !result.iter().any(|x| x.as_str() == s.as_str()) {
+                        result.push(s.to_string());
                     }
                 }
             }
@@ -4118,8 +4119,8 @@ fn extract_slots(slots_val: &PyObjectRef, result: &mut Vec<String>) {
         PyObject::List(items) => {
             for item in items {
                 if let PyObject::Str(s) = &*item.borrow() {
-                    if !result.contains(s) {
-                        result.push(s.clone());
+                    if !result.iter().any(|x| x.as_str() == s.as_str()) {
+                        result.push(s.to_string());
                     }
                 }
             }
@@ -4127,8 +4128,8 @@ fn extract_slots(slots_val: &PyObjectRef, result: &mut Vec<String>) {
         PyObject::Set(set) => {
             for item in set.to_vec() {
                 if let PyObject::Str(s) = &*item.borrow() {
-                    if !result.contains(s) {
-                        result.push(s.clone());
+                    if !result.iter().any(|x| x.as_str() == s.as_str()) {
+                        result.push(s.to_string());
                     }
                 }
             }
@@ -7602,7 +7603,7 @@ fn socket_addr_to_string(addr: &PyObjectRef) -> PyResult<String> {
             let port = items[1].as_i64().ok_or_else(|| PyError::type_error("port must be int"))?;
             Ok(format!("{}:{}", host, port))
         }
-        PyObject::Str(s) => Ok(s.clone()),
+        PyObject::Str(s) => Ok(s.to_string()),
         _ => {
             // Fallback: use str representation
             Ok(addr.str())

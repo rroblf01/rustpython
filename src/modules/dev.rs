@@ -881,7 +881,7 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
     inspect_func!("getmodule", |args| {
         if args.len() < 1 { return Err(PyError::type_error("getmodule() requires 1 argument")); }
         let module_name = args[0].borrow().get_attribute("__module__").ok()
-            .and_then(|v| { if let PyObject::Str(s) = &*v.borrow() { Some(s.clone()) } else { None } });
+            .and_then(|v| { if let PyObject::Str(s) = &*v.borrow() { Some(s.to_string()) } else { None } });
         Ok(if let Some(name) = module_name { py_str(&name) } else { py_none() })
     });
 

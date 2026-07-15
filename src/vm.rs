@@ -563,7 +563,7 @@ impl VirtualMachine {
           // Add __path__ so dotted imports like importlib.machinery can find filesystem submodules
           {
               if let PyObject::Module { dict, .. } = &mut *importlib_mod.borrow_mut() {
-                  dict.insert("__path__".to_string(), py_list(vec![py_str("./Lib/importlib"), py_str("/usr/lib/python3.13/importlib")]));
+                  dict.insert("__path__".to_string(), py_list(vec![py_str("./Lib/importlib")]));
               }
           }
           modules.insert("importlib".to_string(), importlib_mod);
@@ -611,8 +611,6 @@ impl VirtualMachine {
         if let PyObject::List(path_list) = &mut *sys_dict.get("path").unwrap().borrow_mut() {
             path_list.push(py_str("."));
             path_list.push(py_str("./Lib"));
-            // Add CPython stdlib path for importing .py files from the system
-            path_list.push(py_str("/usr/lib/python3.13/"));
             // Add site-packages for user-installed packages (uv, pip, etc.)
             path_list.push(py_str("/opt/data/home/.local/share/uv/tools/django/lib/python3.13/site-packages/"));
 
@@ -715,7 +713,7 @@ impl VirtualMachine {
               globals,
               #[cfg(feature = "jit")]
              jit: RefCell::new(JitCompiler::new()),
-              sys_path: vec!["./".to_string(), "./Lib/".to_string(), "/usr/lib/python3.13/".to_string()],
+              sys_path: vec!["./".to_string(), "./Lib/".to_string()],
               profile: RefCell::new(HashMap::new()),
               last_error_line: None,
               type_registry: HashMap::new(),
@@ -815,7 +813,7 @@ impl VirtualMachine {
                                 let p = dict.get("__path__").and_then(|pl| {
                                     if let PyObject::List(items) = &*pl.borrow() {
                                         items.first().and_then(|i| {
-                                            if let PyObject::Str(s) = &*i.borrow() { Some(s.clone()) } else { None }
+                                            if let PyObject::Str(s) = &*i.borrow() { Some(s.to_string()) } else { None }
                                         })
                                     } else { None }
                                 });
@@ -1008,7 +1006,7 @@ impl VirtualMachine {
                 if let Some(path_list) = dict.get("path") {
                     if let PyObject::List(items) = &*path_list.borrow() {
                         return items.iter().filter_map(|item| {
-                            if let PyObject::Str(s) = &*item.borrow() { Some(s.clone()) } else { None }
+                            if let PyObject::Str(s) = &*item.borrow() { Some(s.to_string()) } else { None }
                         }).collect();
                     }
                 }
@@ -1786,7 +1784,7 @@ impl VirtualMachine {
                         if let PyObject::Str(_) = &*items[i+1].borrow() {
                             // Both name and value are strings - but is it a real keyword or **kwargs dict?
                             // Check if the name looks like a valid Python identifier
-                            keywords.push((name.clone(), items[i+1].clone()));
+                            keywords.push((name.to_string(), items[i+1].clone()));
                             i += 2;
                             continue;
                         }
@@ -2771,7 +2769,7 @@ impl VirtualMachine {
                 let expected = self.frames[fi].pop()?;
                 let exc = self.frames[fi].pop()?;
                 let expected_name = match &*expected.borrow() {
-                    PyObject::Str(s) => s.clone(),
+                    PyObject::Str(s) => s.to_string(),
                     PyObject::Type { name, .. } => name.clone(),
                     PyObject::BuiltinFunction { name, .. } => name.clone(),
                     _ => return Err(PyError::type_error("exceptions must derive from BaseException")),
@@ -2793,7 +2791,7 @@ impl VirtualMachine {
                 let exc_dup = self.frames[fi].pop()?;
                 let exc_orig = self.frames[fi].pop()?;
                 let expected_name = match &*expected.borrow() {
-                    PyObject::Str(s) => s.clone(),
+                    PyObject::Str(s) => s.to_string(),
                     PyObject::Type { name, .. } => name.clone(),
                     PyObject::BuiltinFunction { name, .. } => name.clone(),
                     _ => return Err(PyError::type_error("exceptions must derive from BaseException")),
@@ -2931,7 +2929,7 @@ impl VirtualMachine {
                             exc
                         };
                         let msg = match &*exc.borrow() {
-                            PyObject::Str(s) => s.clone(),
+                            PyObject::Str(s) => s.to_string(),
                             PyObject::Exception { args, .. } => {
                                 if !args.is_empty() { args[0].str() } else { "".to_string() }
                             }
@@ -3016,7 +3014,7 @@ impl VirtualMachine {
                             .get("__package__").cloned()
                             .and_then(|p| {
                                 let p = p.borrow();
-                                if let PyObject::Str(s) = &*p { Some(s.clone()) } else { None }
+                                if let PyObject::Str(s) = &*p { Some(s.to_string()) } else { None }
                             });
                         match pkg {
                             Some(p) if !p.is_empty() => {
@@ -3028,7 +3026,7 @@ impl VirtualMachine {
                                     .get("__name__").cloned()
                                     .and_then(|n| {
                                         let n = n.borrow();
-                                        if let PyObject::Str(s) = &*n { Some(s.clone()) } else { None }
+                                        if let PyObject::Str(s) = &*n { Some(s.to_string()) } else { None }
                                     }).unwrap_or_default();
                                 if let Some(dot) = n.rfind('.') {
                                     let base = &n[..dot];
@@ -3119,7 +3117,7 @@ impl VirtualMachine {
                             match &*all_borrowed {
                                 PyObject::Tuple(items) | PyObject::List(items) => {
                                     items.iter().filter_map(|n| {
-                                        if let PyObject::Str(s) = &*n.borrow() { Some(s.clone()) } else { None }
+                                        if let PyObject::Str(s) = &*n.borrow() { Some(s.to_string()) } else { None }
                                     }).collect()
                                 }
                                 _ => dict.keys().filter(|k| !k.starts_with('_')).cloned().collect(),
@@ -3687,7 +3685,7 @@ impl VirtualMachine {
             let bases = args[2].clone();
 
             let name_str = match &*name.borrow() {
-                PyObject::Str(s) => s.clone(),
+                PyObject::Str(s) => s.to_string(),
                 _ => return Err(PyError::type_error("class name must be a string")),
             };
 

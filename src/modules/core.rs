@@ -45,7 +45,7 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     builtins.insert("None".to_string(), py_none());
     builtins.insert("True".to_string(), py_bool(true));
     builtins.insert("False".to_string(), py_bool(false));
-    builtins.insert("Ellipsis".to_string(), PyObjectRef::imm(PyObject::Str("...".to_string())));
+    builtins.insert("Ellipsis".to_string(), PyObjectRef::imm(PyObject::Str(compact_str::CompactString::from("..."))));
 
     macro_rules! add_func {
         ($name:expr, $func:expr) => {
@@ -1105,7 +1105,7 @@ pub fn create_importlib_util_dict() -> HashMap<String, PyObjectRef> {
                         if let PyObject::List(items) = &*path_list.borrow() {
                             for item in items {
                                 if let PyObject::Str(s) = &*item.borrow() {
-                                    paths.push(s.clone());
+                                    paths.push(s.to_string());
                                 }
                             }
                         }
@@ -1158,7 +1158,7 @@ pub fn create_importlib_resources_dict() -> HashMap<String, PyObjectRef> {
         if let PyObject::Module { dict, .. } = &*b {
             if let Some(name) = dict.get("name") {
                 if let PyObject::Str(s) = &*name.borrow() {
-                    return s.clone();
+                    return s.to_string();
                 }
             }
         }
@@ -1247,7 +1247,7 @@ pub fn create_importlib_resources_dict() -> HashMap<String, PyObjectRef> {
                                 if let PyObject::List(items) = &*path_list.borrow() {
                                     if let Some(first) = items.first() {
                                         if let PyObject::Str(s) = &*first.borrow() {
-                                            Ok(s.clone())
+                                            Ok(s.to_string())
                                         } else { Ok(format!("./{}", pkg_name)) }
                                     } else { Ok(format!("./{}", pkg_name)) }
                                 } else { Ok(format!("./{}", pkg_name)) }

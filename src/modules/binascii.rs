@@ -200,7 +200,7 @@ pub fn create_binascii_dict() -> HashMap<String, PyObjectRef> {
         let hex_str = match &*args[0].borrow() {
             PyObject::Bytes(b) => String::from_utf8_lossy(b).to_string(),
             PyObject::ByteArray(b) => String::from_utf8_lossy(b).to_string(),
-            PyObject::Str(s) => s.clone(),
+            PyObject::Str(s) => s.to_string(),
             _ => return Err(PyError::type_error("argument must be bytes, bytearray, or str")),
         };
         let clean: String = hex_str.chars().filter(|c| !c.is_whitespace()).collect();

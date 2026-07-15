@@ -126,7 +126,7 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
         if args.len() != 1 { return Err(PyError::type_error("b64decode() takes exactly one argument")); }
         let data = args[0].borrow();
         let s = match &*data {
-            PyObject::Str(s) => s.clone(),
+            PyObject::Str(s) => s.to_string(),
             _ => return Err(PyError::type_error("b64decode() argument must be a string")),
         };
         match b64_decode(&s) {
