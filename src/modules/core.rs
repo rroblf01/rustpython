@@ -2,6 +2,10 @@ use crate::object::*;
 use std::collections::HashMap;
 use num_traits::Signed;
 
+thread_local! {
+    static CODEC_SEARCH_FUNCTIONS: std::cell::RefCell<Vec<crate::object::PyObjectRef>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 // ── Safe wrappers for raw file descriptor operations ──────────────────────
 // These encapsulate the `from_raw_fd` unsafe dereference so callers don't
 // need `unsafe` blocks.  The fd ownership pattern is: create File, use it,
@@ -460,6 +464,18 @@ pub fn create_codecs_dict() -> HashMap<String, PyObjectRef> {
     d.insert("decode".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
         name: "decode".to_string(),
         func: _codecs_decode_func,
+    }));
+    d.insert("register".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "register".to_string(),
+        func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+            if args.len() < 1 {
+                return Err(PyError::type_error("register() requires at least 1 argument"));
+            }
+            CODEC_SEARCH_FUNCTIONS.with(|fns| {
+                fns.borrow_mut().push(args[0].clone());
+            });
+            Ok(py_none())
+        },
     }));
     d
 }
