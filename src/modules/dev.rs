@@ -102,6 +102,19 @@ pub fn create_abc_dict() -> HashMap<String, PyObjectRef> {
         }
     });
 
+    // ABCMeta — minimal metaclass stub (needed by io.py et al)
+    abc_func!("ABCMeta", |args| {
+        // In CPython, ABCMeta(name, bases, namespace) -> new class
+        // For our stub, return a Type object with the given name
+        let name = if !args.is_empty() { args[0].str() } else { "ABCMeta".to_string() };
+        Ok(PyObjectRef::new(PyObject::Type {
+            name,
+            dict: HashMap::new(),
+            bases: vec![],
+            mro: vec![],
+        }))
+    });
+
     d
 }
 
@@ -1350,13 +1363,32 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
         name: "open".to_string(), func: builtin_open,
     }));
     d.insert("DEFAULT_BUFFER_SIZE".to_string(), py_int(8192));
-    d.insert("BlockingIOError".to_string(), py_str("BlockingIOError"));
-    d.insert("UnsupportedOperation".to_string(), py_str("UnsupportedOperation"));
+
+    // BlockingIOError — exception type (needs to support attribute setting like __module__)
+    d.insert("BlockingIOError".to_string(), PyObjectRef::new(PyObject::Type {
+        name: "BlockingIOError".to_string(),
+        dict: HashMap::new(),
+        bases: vec![],
+        mro: vec![],
+    }));
+
+    // UnsupportedOperation — exception type (needs __module__ set by io.py)
+    let mut uo_dict = HashMap::new();
+    uo_dict.insert("__init__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "__init__".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
+    }));
+    d.insert("UnsupportedOperation".to_string(), PyObjectRef::new(PyObject::Type {
+        name: "UnsupportedOperation".to_string(),
+        dict: uo_dict,
+        bases: vec![],
+        mro: vec![],
+    }));
 
     // ── IO Base Classes ─────────────────────────────────────────────────────────
 
     // IOBase — abstract base class with close, closed, __enter__, __exit__
     let mut iobase_dict = HashMap::new();
+    iobase_dict.insert("__doc__".to_string(), py_str("IOBase abstract class"));
     iobase_dict.insert("__init__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
         name: "__init__".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
     }));
@@ -1383,6 +1415,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
 
     // RawIOBase — extends IOBase
     let mut raw_dict = HashMap::new();
+    raw_dict.insert("__doc__".to_string(), py_str("RawIOBase abstract class"));
     raw_dict.insert("__init__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
         name: "__init__".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
     }));
@@ -1398,6 +1431,9 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
     raw_dict.insert("close".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
         name: "close".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
     }));
+    raw_dict.insert("register".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "register".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
+    }));
     let raw_cls = PyObjectRef::new(PyObject::Type {
         name: "RawIOBase".to_string(), dict: raw_dict,
         bases: vec![iobase_cls.clone()], mro: vec![iobase_cls.clone()],
@@ -1407,6 +1443,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
 
     // BufferedIOBase — extends IOBase
     let mut buf_dict = HashMap::new();
+    buf_dict.insert("__doc__".to_string(), py_str("BufferedIOBase abstract class"));
     buf_dict.insert("__init__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
         name: "__init__".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
     }));
@@ -1422,6 +1459,9 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
     buf_dict.insert("close".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
         name: "close".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
     }));
+    buf_dict.insert("register".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "register".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
+    }));
     let buf_cls = PyObjectRef::new(PyObject::Type {
         name: "BufferedIOBase".to_string(), dict: buf_dict,
         bases: vec![iobase_cls.clone()], mro: vec![iobase_cls.clone()],
@@ -1431,6 +1471,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
 
     // TextIOBase — text I/O base class (extends IOBase)
     let mut text_dict = HashMap::new();
+    text_dict.insert("__doc__".to_string(), py_str("TextIOBase abstract class"));
     text_dict.insert("__init__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
         name: "__init__".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
     }));
@@ -1442,6 +1483,9 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
     }));
     text_dict.insert("close".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
         name: "close".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
+    }));
+    text_dict.insert("register".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "register".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
     }));
     let text_cls = PyObjectRef::new(PyObject::Type {
         name: "TextIOBase".to_string(), dict: text_dict,

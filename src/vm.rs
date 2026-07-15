@@ -3699,6 +3699,11 @@ impl VirtualMachine {
 
             let namespace_dict = namespace.borrow().clone();
 
+            // Extract metaclass from keyword arguments (if any)
+            let metaclass = keywords.iter()
+                .find(|(k, _)| k == "metaclass")
+                .map(|(_, v)| v.clone());
+
             let bases_vec = if matches!(&*bases.borrow(), PyObject::None) {
                 vec![]
             } else if let PyObject::Tuple(t) = &*bases.borrow() {
@@ -3732,6 +3737,25 @@ impl VirtualMachine {
             } else {
                 bases_vec
             };
+
+            // If a metaclass was specified, delegate class creation to it
+            if let Some(mc) = metaclass {
+                // Build a PyDict from the namespace HashMap for the metaclass call
+                let namespace_py_dict = {
+                    let mut pd = PyDict::new();
+                    for (k, v) in &namespace_dict {
+                        pd.set(py_str(k), v.clone())?;
+                    }
+                    PyObjectRef::new(PyObject::Dict(pd))
+                };
+                let bases_tuple = PyObjectRef::imm(PyObject::Tuple(bases_vec));
+                let mc_result = self.call_function(
+                    mc,
+                    vec![name.clone(), bases_tuple, namespace_py_dict],
+                    vec![],
+                )?;
+                return Ok(mc_result);
+            }
 
             let class = PyObjectRef::new(PyObject::Type {
                 name: name_str,

@@ -2034,17 +2034,68 @@ pub fn builtin_range(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 }
 
 pub fn builtin_type_of(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.len() != 1 {
-        return Err(PyError::type_error("type() takes exactly one argument"));
-    }
-    let borrowed = args[0].borrow();
-    match &*borrowed {
-        PyObject::Instance { typ, .. } => Ok(typ.clone()),
-        PyObject::Type { .. } => Ok(args[0].clone()),
-        _ => {
-            let name = borrowed.type_name();
-            Ok(PyObjectRef::imm(PyObject::Str(name)))
+    if args.len() == 1 {
+        // type(obj) -> return the type of an object
+        let borrowed = args[0].borrow();
+        match &*borrowed {
+            PyObject::Instance { typ, .. } => Ok(typ.clone()),
+            PyObject::Type { .. } => Ok(args[0].clone()),
+            _ => {
+                let name = borrowed.type_name();
+                Ok(PyObjectRef::imm(PyObject::Str(name)))
+            }
         }
+    } else if args.len() == 3 {
+        // type(name, bases, dict) -> create a new class (metaclass usage)
+        let name_str = args[0].str();
+        let bases_vec = if let PyObject::Tuple(t) = &*args[1].borrow() {
+            t.clone()
+        } else if matches!(&*args[1].borrow(), PyObject::None) {
+            vec![]
+        } else {
+            vec![args[1].clone()]
+        };
+        let namespace_dict = {
+            let b = args[2].borrow();
+            match &*b {
+                PyObject::Dict(d) => {
+                    let mut h = HashMap::new();
+                    for (k, v) in d.items() {
+                        h.insert(k.str(), v);
+                    }
+                    h
+                }
+                _ => return Err(PyError::type_error("type() third argument must be a dict")),
+            }
+        };
+        // Look up the 'object' type from builtins to use as default base
+        // Since we're in object.rs we can't easily access builtins, so we
+        // create the class without implicit object base if no bases given
+        let class = PyObjectRef::new(PyObject::Type {
+            name: name_str,
+            dict: namespace_dict,
+            bases: bases_vec.clone(),
+            mro: vec![],
+        });
+        // Simple MRO: class itself + each base's linearization
+        let mut mro = vec![class.clone()];
+        for base in &bases_vec {
+            let base_mro = match &*base.borrow() {
+                PyObject::Type { mro: b_mro, .. } if !b_mro.is_empty() => b_mro.clone(),
+                _ => vec![base.clone()],
+            };
+            for item in base_mro {
+                if !mro.iter().any(|m| m.is(&item)) {
+                    mro.push(item);
+                }
+            }
+        }
+        if let PyObject::Type { mro: mro_field, .. } = &mut *class.borrow_mut() {
+            *mro_field = mro;
+        }
+        Ok(class)
+    } else {
+        Err(PyError::type_error("type() takes exactly one or three arguments"))
     }
 }
 
