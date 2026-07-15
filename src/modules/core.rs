@@ -172,6 +172,7 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     add_exc_type!("UnicodeEncodeError", builtin_make_exception_unicodeencodeerror);
     add_exc_type!("ExceptionGroup", builtin_make_exception_exceptiongroup);
     add_exc_type!("BaseExceptionGroup", builtin_make_exception_baseexceptiongroup);
+    add_exc_type!("SystemError", builtin_make_exception_systemerror);
 
     let math_module = PyObjectRef::new(PyObject::Module {
         name: "math".to_string(),

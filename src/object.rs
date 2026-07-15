@@ -7139,6 +7139,7 @@ make_exception_func!(builtin_make_exception_interruptederror, "InterruptedError"
 make_exception_func!(builtin_make_exception_timeouterror, "TimeoutError");
 make_exception_func!(builtin_make_exception_unicodedecodeerror, "UnicodeDecodeError");
 make_exception_func!(builtin_make_exception_unicodeencodeerror, "UnicodeEncodeError");
+make_exception_func!(builtin_make_exception_systemerror, "SystemError");
 
 // ExceptionGroup and BaseExceptionGroup factory functions (PEP 654)
 pub fn builtin_make_exception_exceptiongroup(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
