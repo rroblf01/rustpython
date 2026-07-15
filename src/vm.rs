@@ -2220,6 +2220,12 @@ impl VirtualMachine {
                                 *current += *step;
                                 v
                             }
+                            PyObject::EnumerateIter { items, pos, start } => {
+                                let idx = *start + *pos;
+                                let val = items[*pos].clone();
+                                *pos += 1;
+                                py_tuple(vec![py_int(idx as i64), val])
+                            }
                             _ => unreachable!()
                         }
                     };

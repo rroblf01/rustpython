@@ -1280,52 +1280,62 @@ impl Parser {
     }
 
     fn parse_term(&mut self) -> Result<Expr, String> {
-        let mut expr = self.parse_factor()?;
+        let mut expr = self.parse_mul()?;
         loop {
             if self.eat(&Token::Plus) {
-                let right = self.parse_factor()?;
+                let right = self.parse_mul()?;
                 expr = Expr::BinOp {
                     left: Box::new(expr),
                     op: Operator::Add,
                     right: Box::new(right),
                 };
             } else if self.eat(&Token::Minus) {
-                let right = self.parse_factor()?;
+                let right = self.parse_mul()?;
                 expr = Expr::BinOp {
                     left: Box::new(expr),
                     op: Operator::Sub,
                     right: Box::new(right),
                 };
-            } else if self.eat(&Token::Star) {
-                let right = self.parse_factor()?;
+            } else {
+                break;
+            }
+        }
+        Ok(expr)
+    }
+
+    fn parse_mul(&mut self) -> Result<Expr, String> {
+        let mut expr = self.parse_unary()?;
+        loop {
+            if self.eat(&Token::Star) {
+                let right = self.parse_unary()?;
                 expr = Expr::BinOp {
                     left: Box::new(expr),
                     op: Operator::Mult,
                     right: Box::new(right),
                 };
             } else if self.eat(&Token::Slash) {
-                let right = self.parse_factor()?;
+                let right = self.parse_unary()?;
                 expr = Expr::BinOp {
                     left: Box::new(expr),
                     op: Operator::Div,
                     right: Box::new(right),
                 };
             } else if self.eat(&Token::DoubleSlash) {
-                let right = self.parse_factor()?;
+                let right = self.parse_unary()?;
                 expr = Expr::BinOp {
                     left: Box::new(expr),
                     op: Operator::FloorDiv,
                     right: Box::new(right),
                 };
             } else if self.eat(&Token::Percent) {
-                let right = self.parse_factor()?;
+                let right = self.parse_unary()?;
                 expr = Expr::BinOp {
                     left: Box::new(expr),
                     op: Operator::Mod,
                     right: Box::new(right),
                 };
             } else if self.eat(&Token::At) {
-                let right = self.parse_factor()?;
+                let right = self.parse_unary()?;
                 expr = Expr::BinOp {
                     left: Box::new(expr),
                     op: Operator::MatMult,
