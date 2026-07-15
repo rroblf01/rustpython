@@ -1005,10 +1005,86 @@ impl VirtualMachine {
     }
 
     fn exec_module_source(&mut self, source: &str, path: &str, name: &str) -> Result<PyObjectRef, String> {
-        let mut parser = crate::parser::Parser::new(source);
-        let program = parser.parse_program().map_err(|e| format!("Parse error in '{}': {}", name, e))?;
-        let mut compiler = crate::compiler::Compiler::new();
-        let code = compiler.compile(&program, path).map_err(|e| format!("Compile error: {}", e))?;
+        // ── .pyc cache support ─────────────────────────────────────────
+        // Try to load a previously-compiled .pyc file. If valid (matching
+        // magic + version + source timestamp), skip parsing and compilation.
+        const PYC_MAGIC: u32 = 0x52535079; // "RSPy"
+        const PYC_VERSION: u16 = 1;
+
+        let py_path = std::path::Path::new(path);
+        let source_mtime = std::fs::metadata(path)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let mut cached_code: Option<CodeObject> = None;
+
+        // Compute __pycache__/basename.pyc path
+        if let Some(parent) = py_path.parent() {
+            if let Some(stem) = py_path.file_stem().and_then(|s| s.to_str()) {
+                let pyc_dir = parent.join("__pycache__");
+                let pyc_filename = format!("{}.rustpython-0.pyc", stem);
+                let pyc_path = pyc_dir.join(&pyc_filename);
+
+                if let Ok(pyc_data) = std::fs::read(&pyc_path) {
+                    // Minimum size: magic(4) + version(2) + timestamp(8) = 14 bytes
+                    if pyc_data.len() >= 14 {
+                        let magic = u32::from_le_bytes([
+                            pyc_data[0], pyc_data[1], pyc_data[2], pyc_data[3],
+                        ]);
+                        let version = u16::from_le_bytes([pyc_data[4], pyc_data[5]]);
+                        let ts = u64::from_le_bytes([
+                            pyc_data[6], pyc_data[7], pyc_data[8], pyc_data[9],
+                            pyc_data[10], pyc_data[11], pyc_data[12], pyc_data[13],
+                        ]);
+                        if magic == PYC_MAGIC && version == PYC_VERSION && ts == source_mtime {
+                            if let Ok(code) = CodeObject::from_bytes(&pyc_data[14..]) {
+                                if cfg!(feature = "profile") {
+                                    eprintln!("DEBUG .pyc cache HIT: {}", pyc_path.display());
+                                }
+                                cached_code = Some(code);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Parse and compile, or deserialise from cache
+        let code: CodeObject = match cached_code {
+            Some(cached) => cached,
+            None => {
+                let mut parser = crate::parser::Parser::new(source);
+                let program = parser.parse_program()
+                    .map_err(|e| format!("Parse error in '{}': {}", name, e))?;
+                let mut compiler = crate::compiler::Compiler::new();
+                let compiled = compiler.compile(&program, path)
+                    .map_err(|e| format!("Compile error: {}", e))?;
+
+                // Write .pyc cache for future imports
+                if let Some(parent) = py_path.parent() {
+                    if let Some(stem) = py_path.file_stem().and_then(|s| s.to_str()) {
+                        let pyc_dir = parent.join("__pycache__");
+                        let pyc_filename = format!("{}.rustpython-0.pyc", stem);
+                        let pyc_path = pyc_dir.join(&pyc_filename);
+
+                        let mut pyc_data = Vec::new();
+                        pyc_data.extend_from_slice(&PYC_MAGIC.to_le_bytes());
+                        pyc_data.extend_from_slice(&PYC_VERSION.to_le_bytes());
+                        pyc_data.extend_from_slice(&source_mtime.to_le_bytes());
+                        pyc_data.extend_from_slice(&compiled.to_bytes());
+
+                        let _ = std::fs::create_dir_all(&pyc_dir);
+                        let _ = std::fs::write(&pyc_path, &pyc_data);
+                    }
+                }
+
+                compiled
+            }
+        };
+
         let is_package = path.ends_with("__init__.py");
         let mut globals_map = HashMap::from([
             ("__name__".to_string(), py_str(name)),

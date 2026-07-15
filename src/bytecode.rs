@@ -1,4 +1,5 @@
 use std::fmt;
+use std::io::{Read, Write};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(non_camel_case_types)]
@@ -301,6 +302,339 @@ impl CodeObject {
             kwarg_name: None,
             num_defaults: 0,
         }
+    }
+
+    /// Serialize this CodeObject to a byte vector.
+    /// The format is:
+    ///   name: str
+    ///   arg_count: u32
+    ///   kwonlyarg_count: u32
+    ///   nlocals: u32
+    ///   instructions: Instr[]
+    ///   consts: ConstValue[]
+    ///   names: str[]
+    ///   varnames: str[]
+    ///   freevars: str[]
+    ///   cellvars: str[]
+    ///   filename: str
+    ///   first_lineno: u32
+    ///   flags: u16
+    ///   vararg_name: Option<str>
+    ///   kwarg_name: Option<str>
+    ///   num_defaults: u32
+    ///
+    /// Strings are length-prefixed: u16 length + UTF-8 bytes.
+    /// Vectors are length-prefixed: u32 count.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        write_str(&mut buf, &self.name);
+        write_u32(&mut buf, self.arg_count as u32);
+        write_u32(&mut buf, self.kwonlyarg_count as u32);
+        write_u32(&mut buf, self.nlocals as u32);
+
+        // Instructions
+        write_u32(&mut buf, self.instructions.len() as u32);
+        for instr in &self.instructions {
+            write_u16(&mut buf, instr.op as u16);
+            write_u32(&mut buf, instr.arg);
+            match instr.line_no {
+                Some(ln) => {
+                    write_u8(&mut buf, 1);
+                    write_u32(&mut buf, ln as u32);
+                }
+                None => {
+                    write_u8(&mut buf, 0);
+                }
+            }
+        }
+
+        // Constants
+        write_u32(&mut buf, self.consts.len() as u32);
+        for c in &self.consts {
+            write_const_value(&mut buf, c);
+        }
+
+        // String vectors
+        write_str_vec(&mut buf, &self.names);
+        write_str_vec(&mut buf, &self.varnames);
+        write_str_vec(&mut buf, &self.freevars);
+        write_str_vec(&mut buf, &self.cellvars);
+
+        // Remaining fields
+        write_str(&mut buf, &self.filename);
+        write_u32(&mut buf, self.first_lineno as u32);
+        write_u16(&mut buf, self.flags);
+
+        // vararg_name
+        match &self.vararg_name {
+            Some(s) => { write_u8(&mut buf, 1); write_str(&mut buf, s); }
+            None => { write_u8(&mut buf, 0); }
+        }
+
+        // kwarg_name
+        match &self.kwarg_name {
+            Some(s) => { write_u8(&mut buf, 1); write_str(&mut buf, s); }
+            None => { write_u8(&mut buf, 0); }
+        }
+
+        write_u32(&mut buf, self.num_defaults as u32);
+
+        buf
+    }
+
+    /// Deserialize a CodeObject from a byte slice.
+    /// Returns the CodeObject and the number of bytes consumed.
+    pub fn from_bytes(data: &[u8]) -> Result<Self, String> {
+        let mut pos: usize = 0;
+
+        let name = read_str(data, &mut pos)?;
+        let arg_count = read_u32(data, &mut pos)? as usize;
+        let kwonlyarg_count = read_u32(data, &mut pos)? as usize;
+        let nlocals = read_u32(data, &mut pos)? as usize;
+
+        // Instructions
+        let instr_count = read_u32(data, &mut pos)? as usize;
+        let mut instructions = Vec::with_capacity(instr_count);
+        for _ in 0..instr_count {
+            let op_val = read_u16(data, &mut pos)?;
+            let op = Opcode::from_u16(op_val).ok_or_else(|| format!("Unknown opcode: {}", op_val))?;
+            let arg = read_u32(data, &mut pos)?;
+            let has_line = read_u8(data, &mut pos)?;
+            let line_no = if has_line != 0 {
+                Some(read_u32(data, &mut pos)? as usize)
+            } else {
+                None
+            };
+            instructions.push(Instr { op, arg, line_no });
+        }
+
+        // Constants
+        let const_count = read_u32(data, &mut pos)? as usize;
+        let mut consts = Vec::with_capacity(const_count);
+        for _ in 0..const_count {
+            consts.push(read_const_value(data, &mut pos)?);
+        }
+
+        // String vectors
+        let names = read_str_vec(data, &mut pos)?;
+        let varnames = read_str_vec(data, &mut pos)?;
+        let freevars = read_str_vec(data, &mut pos)?;
+        let cellvars = read_str_vec(data, &mut pos)?;
+
+        // Remaining fields
+        let filename = read_str(data, &mut pos)?;
+        let first_lineno = read_u32(data, &mut pos)? as usize;
+        let flags = read_u16(data, &mut pos)?;
+
+        // vararg_name
+        let vararg_name = if read_u8(data, &mut pos)? != 0 {
+            Some(read_str(data, &mut pos)?)
+        } else {
+            None
+        };
+
+        // kwarg_name
+        let kwarg_name = if read_u8(data, &mut pos)? != 0 {
+            Some(read_str(data, &mut pos)?)
+        } else {
+            None
+        };
+
+        let num_defaults = read_u32(data, &mut pos)? as usize;
+
+        Ok(CodeObject {
+            name,
+            arg_count,
+            kwonlyarg_count,
+            nlocals,
+            instructions,
+            consts,
+            names,
+            varnames,
+            freevars,
+            cellvars,
+            filename,
+            first_lineno,
+            flags,
+            vararg_name,
+            kwarg_name,
+            num_defaults,
+        })
+    }
+}
+
+// ── Serialization helpers ──────────────────────────────────────────
+
+fn write_u8(buf: &mut Vec<u8>, v: u8) {
+    buf.push(v);
+}
+
+fn write_u16(buf: &mut Vec<u8>, v: u16) {
+    buf.extend_from_slice(&v.to_le_bytes());
+}
+
+fn write_u32(buf: &mut Vec<u8>, v: u32) {
+    buf.extend_from_slice(&v.to_le_bytes());
+}
+
+fn write_str(buf: &mut Vec<u8>, s: &str) {
+    let bytes = s.as_bytes();
+    if bytes.len() > 65535 {
+        // Truncate gracefully for safety; realistically code objects won't have
+        // strings > 64 KiB in their metadata fields.
+        write_u16(buf, 65535);
+        buf.extend_from_slice(&bytes[..65535]);
+    } else {
+        write_u16(buf, bytes.len() as u16);
+        buf.extend_from_slice(bytes);
+    }
+}
+
+fn write_str_vec(buf: &mut Vec<u8>, vec: &[String]) {
+    write_u32(buf, vec.len() as u32);
+    for s in vec {
+        write_str(buf, s);
+    }
+}
+
+fn write_const_value(buf: &mut Vec<u8>, cv: &ConstValue) {
+    match cv {
+        ConstValue::None => {
+            write_u8(buf, 0);
+        }
+        ConstValue::Bool(v) => {
+            write_u8(buf, 1);
+            write_u8(buf, if *v { 1 } else { 0 });
+        }
+        ConstValue::Int(s) => {
+            write_u8(buf, 2);
+            write_str(buf, s);
+        }
+        ConstValue::Float(s) => {
+            write_u8(buf, 3);
+            write_str(buf, s);
+        }
+        ConstValue::Complex { real, imag } => {
+            write_u8(buf, 4);
+            write_str(buf, real);
+            write_str(buf, imag);
+        }
+        ConstValue::String(s) => {
+            write_u8(buf, 5);
+            write_str(buf, s);
+        }
+        ConstValue::Bytes(b) => {
+            write_u8(buf, 6);
+            write_u32(buf, b.len() as u32);
+            buf.extend_from_slice(b);
+        }
+        ConstValue::Code(code) => {
+            write_u8(buf, 7);
+            let code_bytes = code.to_bytes();
+            write_u32(buf, code_bytes.len() as u32);
+            buf.extend_from_slice(&code_bytes);
+        }
+        ConstValue::Tuple(items) => {
+            write_u8(buf, 8);
+            write_str_vec(buf, items);
+        }
+    }
+}
+
+// ── Deserialization helpers ────────────────────────────────────────
+
+fn read_u8(data: &[u8], pos: &mut usize) -> Result<u8, String> {
+    if *pos + 1 > data.len() {
+        return Err("Unexpected end of data (u8)".to_string());
+    }
+    let v = data[*pos];
+    *pos += 1;
+    Ok(v)
+}
+
+fn read_u16(data: &[u8], pos: &mut usize) -> Result<u16, String> {
+    if *pos + 2 > data.len() {
+        return Err("Unexpected end of data (u16)".to_string());
+    }
+    let bytes: [u8; 2] = [data[*pos], data[*pos + 1]];
+    *pos += 2;
+    Ok(u16::from_le_bytes(bytes))
+}
+
+fn read_u32(data: &[u8], pos: &mut usize) -> Result<u32, String> {
+    if *pos + 4 > data.len() {
+        return Err("Unexpected end of data (u32)".to_string());
+    }
+    let bytes: [u8; 4] = [data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]];
+    *pos += 4;
+    Ok(u32::from_le_bytes(bytes))
+}
+
+fn read_str(data: &[u8], pos: &mut usize) -> Result<String, String> {
+    let len = read_u16(data, &mut *pos)? as usize;
+    if *pos + len > data.len() {
+        return Err("Unexpected end of data (str)".to_string());
+    }
+    let s = std::str::from_utf8(&data[*pos..*pos + len])
+        .map_err(|e| format!("Invalid UTF-8: {}", e))?;
+    *pos += len;
+    Ok(s.to_string())
+}
+
+fn read_str_vec(data: &[u8], pos: &mut usize) -> Result<Vec<String>, String> {
+    let count = read_u32(data, pos)? as usize;
+    let mut vec = Vec::with_capacity(count);
+    for _ in 0..count {
+        vec.push(read_str(data, pos)?);
+    }
+    Ok(vec)
+}
+
+fn read_const_value(data: &[u8], pos: &mut usize) -> Result<ConstValue, String> {
+    let tag = read_u8(data, pos)?;
+    match tag {
+        0 => Ok(ConstValue::None),
+        1 => {
+            let v = read_u8(data, pos)? != 0;
+            Ok(ConstValue::Bool(v))
+        }
+        2 => {
+            let s = read_str(data, pos)?;
+            Ok(ConstValue::Int(s))
+        }
+        3 => {
+            let s = read_str(data, pos)?;
+            Ok(ConstValue::Float(s))
+        }
+        4 => {
+            let real = read_str(data, pos)?;
+            let imag = read_str(data, pos)?;
+            Ok(ConstValue::Complex { real, imag })
+        }
+        5 => {
+            let s = read_str(data, pos)?;
+            Ok(ConstValue::String(s))
+        }
+        6 => {
+            let len = read_u32(data, pos)? as usize;
+            if *pos + len > data.len() {
+                return Err("Unexpected end of data (Bytes)".to_string());
+            }
+            let v = data[*pos..*pos + len].to_vec();
+            *pos += len;
+            Ok(ConstValue::Bytes(v))
+        }
+        7 => {
+            let code_len = read_u32(data, pos)? as usize;
+            let code = CodeObject::from_bytes(&data[*pos..*pos + code_len])?;
+            *pos += code_len;
+            Ok(ConstValue::Code(Box::new(code)))
+        }
+        8 => {
+            let items = read_str_vec(data, pos)?;
+            Ok(ConstValue::Tuple(items))
+        }
+        _ => Err(format!("Unknown ConstValue tag: {}", tag)),
     }
 }
 
