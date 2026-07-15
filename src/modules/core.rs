@@ -522,28 +522,23 @@ fn _abc_init(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 _ => vec![],
             }
         };
-        let mut impl_set = Vec::new();
+        let mut impl_set = PySet::new();
         for base in &bases {
             // Each ABC base contributes its _abc_impl (or itself)
             if let Ok(abc_impl) = base.borrow().get_attribute("_abc_impl") {
                 if let PyObject::FrozenSet(items) = &*abc_impl.borrow() {
-                    impl_set.extend(items.clone());
+                    for item in items.to_vec() {
+                        impl_set.add(item)?;
+                    }
                 }
             }
             // Also add base itself if it's an instance of ABCMeta (has _abc_impl)
             if base.borrow().get_attribute("_abc_impl").is_ok() {
-                impl_set.push(base.clone());
-            }
-        }
-        // Deduplicate by pointer identity
-        let mut deduped = Vec::new();
-        for item in impl_set {
-            if !deduped.iter().any(|d: &PyObjectRef| d.is(&item)) {
-                deduped.push(item);
+                impl_set.add(base.clone())?;
             }
         }
         cls.borrow_mut().set_attribute("_abc_impl",
-            PyObjectRef::imm(PyObject::FrozenSet(deduped)))?;
+            PyObjectRef::imm(PyObject::FrozenSet(impl_set)))?;
     }
     // Ensure standard ABC attributes exist
     for attr in &["_abc_registry", "_abc_cache", "_abc_negative_cache"] {
@@ -565,25 +560,28 @@ fn _abc_register(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
     let cls = &args[0];
     let subclass = &args[1].clone();
-    // Ensure registry exists — use a FrozenSet (list-like) to avoid PySet field access issues
+    // Ensure registry exists — use a FrozenSet
     if cls.borrow().get_attribute("_abc_registry").is_err() {
         cls.borrow_mut().set_attribute("_abc_registry",
-            PyObjectRef::imm(PyObject::FrozenSet(vec![])))?;
+            PyObjectRef::imm(PyObject::FrozenSet(PySet::new())))?;
     }
     // Get current registry, add subclass if not already present
-    let mut registered: Vec<PyObjectRef> = {
+    let mut registered = {
         let r = cls.borrow().get_attribute("_abc_registry")?;
         let b = r.borrow();
         match &*b {
-            PyObject::FrozenSet(items) => items.clone(),
+            PyObject::FrozenSet(items) => items.to_vec(),
             _ => vec![],
         }
     };
     if !registered.iter().any(|r| r.is(subclass)) {
         registered.push(subclass.clone());
     }
+    // Build PySet from registered Vec
+    let mut reg_set = PySet::new();
+    for item in &registered { reg_set.add(item.clone())?; }
     cls.borrow_mut().set_attribute("_abc_registry",
-        PyObjectRef::imm(PyObject::FrozenSet(registered)))?;
+        PyObjectRef::imm(PyObject::FrozenSet(reg_set)))?;
     // Invalidate cache
     ABC_CACHE_TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     Ok(args[1].clone())
