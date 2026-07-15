@@ -3838,7 +3838,9 @@ impl VirtualMachine {
                 }
             };
             if let Some(f) = f {
-                return self.call_function(f, args, vec![]);
+                let mut call_args = vec![callable.clone()];
+                call_args.extend(args.iter().cloned());
+                return self.call_function(f, call_args, vec![]);
             }
         }
 
