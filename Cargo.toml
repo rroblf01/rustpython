@@ -4,10 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [profile.release]
-lto = "fat"
-codegen-units = 1
-opt-level = 3
-panic = "abort"
+opt-level = "z"     # Optimizar por tamaño
+lto = true          # Link-time optimization
+codegen-units = 1   # Máxima optimización
+strip = "symbols"   # Quitar símbolos de debugging
+panic = "abort"     # Abortar en panic (menos código)
 
 [features]
 default = []
@@ -24,6 +25,7 @@ cranelift-module = { version = "0.109.1", optional = true }
 cranelift-native = { version = "0.109.1", optional = true }
 num-bigint = "0.4"
 num-traits = "0.2"
+libm = "0.2"
 regex = "1"
 smallvec = "1"
 once_cell = "1"

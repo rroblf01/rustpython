@@ -643,88 +643,51 @@ pub fn create_itertools_dict() -> HashMap<String, PyObjectRef> {
         Ok(py_list(result.into_iter().map(|v| py_tuple(v)).collect()))
     });
 
-    d
-}
-
-pub fn create_random_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! rnd_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    rnd_func!("random", |args| {
-        Ok(py_float(fast_random_f64()))
-    });
-
-    rnd_func!("randint", |args| {
-        if args.len() < 2 {
-            return Err(PyError::type_error("randint() takes at least 2 arguments"));
-        }
-        let a = args[0].as_i64().ok_or_else(|| PyError::type_error("randint() argument must be int"))?;
-        let b = args[1].as_i64().ok_or_else(|| PyError::type_error("randint() argument must be int"))?;
-        if a > b {
-            return Err(PyError::ValueError("randint() empty range".to_string()));
-        }
-        let range = (b - a + 1) as u64;
-        let n = fast_random_u64() % range;
-        Ok(py_int(a + n as i64))
-    });
-
-    rnd_func!("choice", |args| {
-        if args.is_empty() {
-            return Err(PyError::type_error("choice() takes at least 1 argument"));
-        }
-        let seq = &args[0];
-        let seq_borrowed = seq.borrow();
-        let len = match &*seq_borrowed {
-            PyObject::List(v) => v.len(),
-            PyObject::Tuple(v) => v.len(),
-            PyObject::Str(s) => s.len(),
-            _ => return Err(PyError::type_error("choice() argument must be a sequence")),
-        };
-        if len == 0 {
-            return Err(PyError::IndexError("cannot choose from an empty sequence".to_string()));
-        }
-        let idx = (fast_random_u64() % len as u64) as usize;
-        let val = match &*seq_borrowed {
-            PyObject::List(v) => v[idx].clone(),
-            PyObject::Tuple(v) => v[idx].clone(),
-            PyObject::Str(s) => py_str(&s[idx..=idx]),
-            _ => unreachable!(),
-        };
-        Ok(val)
-    });
-
-    rnd_func!("uniform", |args| {
-        if args.len() < 2 {
-            return Err(PyError::type_error("uniform() takes at least 2 arguments"));
-        }
-        let a = args[0].as_i64().unwrap_or(0) as f64;
-        let b = args[1].as_i64().unwrap_or(1) as f64;
-        Ok(py_float(a + (b - a) * fast_random_f64()))
-    });
-
-    rnd_func!("shuffle", |args| {
-        if args.is_empty() {
-            return Err(PyError::type_error("shuffle() takes at least 1 argument"));
-        }
-        let seq = &args[0];
-        let seq_borrowed = seq.borrow();
-        if let PyObject::List(items) = &*seq_borrowed {
-            let mut items = items.clone();
-            drop(seq_borrowed);
-            let len = items.len();
-            for i in (1..len).rev() {
-                let j = (fast_random_u64() % (i + 1) as u64) as usize;
-                items.swap(i, j);
-            }
-            *seq.borrow_mut() = PyObject::List(items);
-            Ok(py_none())
+    it_func!("repeat", |args| {
+        if args.is_empty() { return Err(PyError::type_error("repeat() missing argument")); }
+        let obj = args[0].clone();
+        let times = if args.len() > 1 {
+            args[1].as_i64().ok_or_else(|| PyError::type_error("times must be int"))? as usize
         } else {
-            Err(PyError::type_error("shuffle() argument must be a list"))
+            0 // signal for infinite
+        };
+        if times == 0 {
+            // Infinite repeat — return a list of 1000 items (enough for random.py)
+            let mut items = Vec::with_capacity(1000);
+            for _ in 0..1000 {
+                items.push(obj.clone());
+            }
+            Ok(py_list(items))
+        } else {
+            let mut items = Vec::with_capacity(times);
+            for _ in 0..times {
+                items.push(obj.clone());
+            }
+            Ok(py_list(items))
         }
+    });
+
+    it_func!("accumulate", |args| {
+        if args.is_empty() { return Err(PyError::type_error("accumulate() missing argument")); }
+        let mut items = Vec::new();
+        if let Ok(it) = builtin_iter(&[args[0].clone()]) {
+            let mut total: Option<i64> = None;
+            loop {
+                match builtin_next(&[it.clone()]) {
+                    Ok(v) => {
+                        if let Some(n) = v.as_i64() {
+                            total = Some(total.unwrap_or(0) + n);
+                            items.push(py_int(total.unwrap()));
+                        } else {
+                            items.push(v);
+                        }
+                    }
+                    Err(PyError::StopIteration) => break,
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        Ok(py_list(items))
     });
 
     d
@@ -1370,6 +1333,202 @@ pub fn create_calendar_dict() -> HashMap<String, PyObjectRef> {
         Ok(py_none())
     });
 
+    d
+}
+
+// ── Native _random module (C extension stub for CPython's random.py) ──────
+pub fn create_random_cmodule_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+
+    // Helper: read _seed from an instance's dict
+    fn read_seed(obj: &PyObjectRef) -> u64 {
+        let dict = obj.borrow();
+        if let PyObject::Instance { dict: inst_dict, .. } = &*dict {
+            if let Some(v) = inst_dict.get("_seed") {
+                match &*v.borrow() {
+                    PyObject::Int(i) => {
+                        if let Some(n) = i.to_i64() {
+                            return n as u64;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        1u64
+    }
+
+    // Helper: write _seed to an instance's dict
+    fn write_seed(obj: &PyObjectRef, seed: u64) {
+        let mut dict = obj.borrow_mut();
+        if let PyObject::Instance { dict: inst_dict, .. } = &mut *dict {
+            inst_dict.insert("_seed".to_string(), py_int(seed as i64));
+        }
+    }
+
+    // Helper: advance LCG and return new seed + result for random()
+    fn lcg_step(state: u64) -> (u64, f64) {
+        let new_seed = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let result = (new_seed >> 11) as f64 / (1u64 << 53) as f64;
+        (new_seed, result)
+    }
+
+    // Create Random type definition
+    let mut type_dict = HashMap::new();
+
+    // __init__(self, x=None)
+    type_dict.insert("__init__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "__init__".to_string(),
+        func: |args| {
+            if args.len() < 1 {
+                return Err(PyError::type_error("__init__() missing self argument"));
+            }
+            let seed = if args.len() >= 2 {
+                match &*args[1].borrow() {
+                    PyObject::None => None,
+                    PyObject::Int(i) => i.to_i64(),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            let s = seed.unwrap_or_else(|| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos() as i64
+            });
+            write_seed(&args[0], s as u64);
+            Ok(py_none())
+        },
+    }));
+
+    // random(self) -> float in [0.0, 1.0)
+    type_dict.insert("random".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "random".to_string(),
+        func: |args| {
+            if args.len() < 1 {
+                return Err(PyError::type_error("random() missing self argument"));
+            }
+            let old_seed = read_seed(&args[0]);
+            let (new_seed, val) = lcg_step(old_seed);
+            write_seed(&args[0], new_seed);
+            Ok(py_float(val))
+        },
+    }));
+
+    // seed(self, n=None)
+    type_dict.insert("seed".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "seed".to_string(),
+        func: |args| {
+            if args.len() < 2 {
+                return Err(PyError::type_error("seed() missing self or n argument"));
+            }
+            let n = match &*args[1].borrow() {
+                PyObject::None => {
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos() as i64
+                }
+                PyObject::Int(i) => i.to_i64().unwrap_or(0),
+                _ => return Err(PyError::type_error("n must be an int or None")),
+            };
+            write_seed(&args[0], n as u64);
+            Ok(py_none())
+        },
+    }));
+
+    // getrandbits(self, k) -> int with k random bits
+    type_dict.insert("getrandbits".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "getrandbits".to_string(),
+        func: |args| {
+            if args.len() < 2 {
+                return Err(PyError::type_error("getrandbits() missing self or k argument"));
+            }
+            let k = if let Some(n) = args[1].as_i64() {
+                n as u32
+            } else {
+                match &*args[1].borrow() {
+                    PyObject::Int(i) => i.to_u32().unwrap_or(0),
+                    _ => return Err(PyError::type_error("k must be an integer")),
+                }
+            };
+            if k == 0 {
+                return Ok(py_int(0));
+            }
+            let old_seed = read_seed(&args[0]);
+            let (new_seed, _) = lcg_step(old_seed);
+            write_seed(&args[0], new_seed);
+
+            if k <= 64 {
+                let bits = new_seed >> (64 - k);
+                Ok(py_int(bits as i64))
+            } else {
+                // For >64 bits, generate multiple u64 chunks as BigInt
+                let mut value = num_bigint::BigInt::from(0);
+                let mut remaining = k;
+                let mut current = new_seed;
+                while remaining > 0 {
+                    let chunk_bits = remaining.min(64);
+                    let chunk = current >> (64 - chunk_bits);
+                    value = (&value << chunk_bits) | num_bigint::BigInt::from(chunk as i64);
+                    remaining -= chunk_bits;
+                    if remaining > 0 {
+                        let (next, _) = lcg_step(current);
+                        current = next;
+                        write_seed(&args[0], current);
+                    }
+                }
+                // Mask to exactly k bits
+                let mask = (num_bigint::BigInt::from(1i64) << k) - 1i64;
+                Ok(py_int(value & mask))
+            }
+        },
+    }));
+
+    // getstate(self) -> tuple (version, state) for pickling
+    type_dict.insert("getstate".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "getstate".to_string(),
+        func: |args| {
+            if args.len() < 1 {
+                return Err(PyError::type_error("getstate() missing self argument"));
+            }
+            let seed = read_seed(&args[0]);
+            // Return (3, seed) — version 3 format like CPython's Mersenne Twister
+            Ok(py_tuple(vec![py_int(3i64), py_int(seed as i64)]))
+        },
+    }));
+
+    // setstate(self, state) -> None for pickling
+    type_dict.insert("setstate".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "setstate".to_string(),
+        func: |args| {
+            if args.len() < 2 {
+                return Err(PyError::type_error("setstate() missing self or state argument"));
+            }
+            let state_borrowed = args[1].borrow();
+            if let PyObject::Tuple(items) = &*state_borrowed {
+                if items.len() >= 2 {
+                    if let Some(seed) = items[1].as_i64() {
+                        drop(state_borrowed);
+                        write_seed(&args[0], seed as u64);
+                        return Ok(py_none());
+                    }
+                }
+            }
+            Err(PyError::value_error("invalid state"))
+        },
+    }));
+
+    let random_type = PyObjectRef::new(PyObject::Type {
+        name: "Random".to_string(),
+        dict: type_dict,
+        bases: vec![],
+        mro: vec![],
+    });
+
+    d.insert("Random".to_string(), random_type);
     d
 }
 

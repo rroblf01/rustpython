@@ -196,8 +196,6 @@ impl VirtualMachine {
           let itertools_dict = create_itertools_dict();
           modules.insert("itertools".to_string(), create_module("itertools", itertools_dict));
 
-          let random_dict = create_random_dict();
-          modules.insert("random".to_string(), create_module("random", random_dict));
 
           let datetime_dict = create_datetime_dict();
           modules.insert("datetime".to_string(), create_module("datetime", datetime_dict));
@@ -314,6 +312,9 @@ impl VirtualMachine {
           // Native base64 module
           modules.insert("base64".to_string(), create_module("base64", create_base64_dict()));
 
+          // Native binascii module
+          modules.insert("binascii".to_string(), create_module("binascii", create_binascii_dict()));
+
           // Native uuid module
           modules.insert("uuid".to_string(), create_module("uuid", create_uuid_dict()));
 
@@ -368,8 +369,11 @@ impl VirtualMachine {
           // Native getpass module
           modules.insert("getpass".to_string(), create_module("getpass", create_getpass_dict()));
 
-          // Native tempfile module
-          modules.insert("tempfile".to_string(), create_module("tempfile", create_tempfile_dict()));
+          // Native errno module
+          modules.insert("errno".to_string(), create_module("errno", create_errno_dict()));
+
+          // Native _random module (C extension stub for CPython's random.py)
+          modules.insert("_random".to_string(), create_module("_random", create_random_cmodule_dict()));
 
           // Native shutil module
           modules.insert("shutil".to_string(), create_module("shutil", create_shutil_dict()));
@@ -770,6 +774,16 @@ impl VirtualMachine {
     }
 
     pub fn import_module_from_file(&mut self, name: &str) -> Result<PyObjectRef, String> {
+        if cfg!(feature = "profile") {
+            if let Ok(status) = std::fs::read_to_string(format!("/proc/{}/status", std::process::id())) {
+                if let Some(rss_line) = status.lines().find(|l| l.starts_with("VmRSS:")) {
+                    eprintln!("[MEM] START import '{}' RSS: {}", name, rss_line.trim());
+                }
+                if let Some(peak_line) = status.lines().find(|l| l.starts_with("VmPeak:")) {
+                    eprintln!("[MEM] START import '{}' PEAK: {}", name, peak_line.trim());
+                }
+            }
+        }
         // Handle dotted names: e.g. "certifi.core" or "django.utils.version"
         // Walk through each segment, importing missing packages as we go
         if let Some(dot_pos) = name.find('.') {
@@ -1057,30 +1071,37 @@ impl VirtualMachine {
         let code: CodeObject = match cached_code {
             Some(cached) => cached,
             None => {
-                eprintln!("TRACE LOAD: {} ({})", name, path);
-                
                 let mut parser = crate::parser::Parser::new(source);
                 let program = parser.parse_program()
                     .map_err(|e| format!("Parse error in '{}': {}", name, e))?;
+                drop(parser);  // Free parser memory (AST is now in `program`)
+
                 let mut compiler = crate::compiler::Compiler::new();
                 let compiled = compiler.compile(&program, path)
                     .map_err(|e| format!("Compile error: {}", e))?;
+                drop(compiler);  // Free compiler internal tables
+                drop(program);   // Free AST — CodeObject is now self-contained
 
-                // Write .pyc cache for future imports
-                if let Some(parent) = py_path.parent() {
-                    if let Some(stem) = py_path.file_stem().and_then(|s| s.to_str()) {
-                        let pyc_dir = parent.join("__pycache__");
-                        let pyc_filename = format!("{}.rustpython-0.pyc", stem);
-                        let pyc_path = pyc_dir.join(&pyc_filename);
+                // Write .pyc cache for future imports (skip for stdlib modules).
+                // Stdlib modules under /usr/ are stable + huge; serialising them
+                // costs CPU + a temporary Vec<u8> allocation, and writing usually
+                // fails silently anyway due to permissions on /usr/lib/__pycache__/.
+                if !path.starts_with("/usr") {
+                    if let Some(parent) = py_path.parent() {
+                        if let Some(stem) = py_path.file_stem().and_then(|s| s.to_str()) {
+                            let pyc_dir = parent.join("__pycache__");
+                            let pyc_filename = format!("{}.rustpython-0.pyc", stem);
+                            let pyc_path = pyc_dir.join(&pyc_filename);
 
-                        let mut pyc_data = Vec::new();
-                        pyc_data.extend_from_slice(&PYC_MAGIC.to_le_bytes());
-                        pyc_data.extend_from_slice(&PYC_VERSION.to_le_bytes());
-                        pyc_data.extend_from_slice(&source_mtime.to_le_bytes());
-                        pyc_data.extend_from_slice(&compiled.to_bytes());
+                            let mut pyc_data = Vec::new();
+                            pyc_data.extend_from_slice(&PYC_MAGIC.to_le_bytes());
+                            pyc_data.extend_from_slice(&PYC_VERSION.to_le_bytes());
+                            pyc_data.extend_from_slice(&source_mtime.to_le_bytes());
+                            pyc_data.extend_from_slice(&compiled.to_bytes());
 
-                        let _ = std::fs::create_dir_all(&pyc_dir);
-                        let _ = std::fs::write(&pyc_path, &pyc_data);
+                            let _ = std::fs::create_dir_all(&pyc_dir);
+                            let _ = std::fs::write(&pyc_path, &pyc_data);
+                        }
                     }
                 }
 
@@ -1129,6 +1150,21 @@ impl VirtualMachine {
             format!("{}", e)
         })?;
         let globals_copy = module_globals.borrow().clone();
+        // Memory tracking after module execution
+        if cfg!(feature = "profile") {
+            if let Ok(status) = std::fs::read_to_string(format!("/proc/{}/status", std::process::id())) {
+                if let Some(rss_line) = status.lines().find(|l| l.starts_with("VmRSS:")) {
+                    eprintln!("[MEM] after exec '{}' RSS: {}", name, rss_line.trim());
+                }
+                if let Some(peak_line) = status.lines().find(|l| l.starts_with("VmPeak:")) {
+                    eprintln!("[MEM] after exec '{}' PEAK: {}", name, peak_line.trim());
+                }
+            }
+            let allocs = crate::object::ALLOC_COUNT.load(std::sync::atomic::Ordering::Relaxed);
+            let imms = crate::object::IMM_COUNT.load(std::sync::atomic::Ordering::Relaxed);
+            eprintln!("[OBJ] after exec '{}' Mut allocs: {}, Imm allocs: {}, total: {}",
+                name, allocs, imms, allocs + imms);
+        }
         Ok(create_module(name, globals_copy))
     }
 

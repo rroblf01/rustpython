@@ -506,7 +506,30 @@ impl Parser {
         self.expect(&Token::For)?;
         let mut target = self.parse_for_target()?;
         self.expect(&Token::In)?;
-        let iter = self.parse_expr()?;
+        // Parse the iterable expression — may be a comma-separated tuple without parens
+        // e.g. `for x in 'a', 'b', 'c':`  (CPython accepts this syntax)
+        let first_expr = self.parse_expr()?;
+        let iter = if self.eat(&Token::Comma) {
+            if self.at(&Token::Colon) || self.at(&Token::Newline) || self.at(&Token::Semicolon) {
+                // Single-item tuple with trailing comma: `for x in 'a',:`
+                Expr::Tuple(vec![first_expr])
+            } else {
+                let mut elts = vec![first_expr];
+                loop {
+                    if self.at(&Token::Colon) || self.at(&Token::Newline) || self.at(&Token::Semicolon) || self.at(&Token::EndOfFile) {
+                        break;
+                    }
+                    elts.push(self.parse_expr()?);
+                    if !self.eat(&Token::Comma) { break; }
+                    if self.at(&Token::Colon) || self.at(&Token::Newline) || self.at(&Token::Semicolon) {
+                        break;
+                    }
+                }
+                Expr::Tuple(elts)
+            }
+        } else {
+            first_expr
+        };
         self.expect(&Token::Colon)?;
         let body = self.parse_block()?;
         let mut orelse = Vec::new();

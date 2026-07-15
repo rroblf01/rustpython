@@ -794,8 +794,36 @@ pub fn create_math_dict() -> HashMap<String, PyObjectRef> {
         let v = args[0].borrow();
         match &*v { PyObject::Int(i) => Ok(py_float(i.to_f64().unwrap_or(0.0).abs())), PyObject::Float(f) => Ok(py_float(f.abs())), _ => Err(PyError::type_error("abs() argument must be a number")) }
     });
+    // ── New math functions needed by CPython's random.py ──────────────────
+    math_func!("acos", |args| {
+        if args.len() != 1 { return Err(PyError::type_error("acos() takes exactly one argument")); }
+        let v = args[0].borrow();
+        match &*v { PyObject::Int(i) => Ok(py_float(i.to_f64().unwrap_or(0.0).acos())), PyObject::Float(f) => Ok(py_float(f.acos())), _ => Err(PyError::type_error("acos() argument must be a number")) }
+    });
+    math_func!("fabs", |args| {
+        if args.len() != 1 { return Err(PyError::type_error("fabs() takes exactly one argument")); }
+        let v = args[0].borrow();
+        match &*v { PyObject::Int(i) => Ok(py_float(i.to_f64().unwrap_or(0.0).abs())), PyObject::Float(f) => Ok(py_float(f.abs())), _ => Err(PyError::type_error("fabs() argument must be a number")) }
+    });
+    math_func!("isfinite", |args| {
+        if args.len() != 1 { return Err(PyError::type_error("isfinite() takes exactly one argument")); }
+        let v = args[0].borrow();
+        match &*v { PyObject::Int(_) => Ok(py_bool(true)), PyObject::Float(f) => Ok(py_bool(f.is_finite())), _ => Err(PyError::type_error("isfinite() argument must be a number")) }
+    });
+    math_func!("lgamma", |args| {
+        if args.len() != 1 { return Err(PyError::type_error("lgamma() takes exactly one argument")); }
+        let v = args[0].borrow();
+        match &*v { PyObject::Int(i) => Ok(py_float(libm::lgamma(i.to_f64().unwrap_or(0.0)))), PyObject::Float(f) => Ok(py_float(libm::lgamma(*f))), _ => Err(PyError::type_error("lgamma() argument must be a number")) }
+    });
+    math_func!("log2", |args| {
+        if args.len() != 1 { return Err(PyError::type_error("log2() takes exactly one argument")); }
+        let v = args[0].borrow();
+        match &*v { PyObject::Int(i) => Ok(py_float(i.to_f64().unwrap_or(0.0).log2())), PyObject::Float(f) => Ok(py_float(f.log2())), _ => Err(PyError::type_error("log2() argument must be a number")) }
+    });
+    // ── Constants ─────────────────────────────────────────────────────────
     d.insert("pi".to_string(), py_float(std::f64::consts::PI));
     d.insert("e".to_string(), py_float(std::f64::consts::E));
+    d.insert("tau".to_string(), py_float(std::f64::consts::TAU));
     d
 }
 
@@ -835,16 +863,19 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
             // Fallback: create a temporary file
             std::fs::File::create("/dev/null").unwrap()
         }))),
+        name: "<stdin>".to_string(),
     }));
     d.insert("stdout".to_string(), PyObjectRef::new(PyObject::File {
         file: std::rc::Rc::new(std::cell::RefCell::new(std::fs::File::create("/dev/stdout").unwrap_or_else(|_| {
             std::fs::File::create("/dev/null").unwrap()
         }))),
+        name: "<stdout>".to_string(),
     }));
     d.insert("stderr".to_string(), PyObjectRef::new(PyObject::File {
         file: std::rc::Rc::new(std::cell::RefCell::new(std::fs::File::create("/dev/stderr").unwrap_or_else(|_| {
             std::fs::File::create("/dev/null").unwrap()
         }))),
+        name: "<stderr>".to_string(),
     }));
     d.insert("platform".to_string(), py_str(std::env::consts::OS));
     // sys.implementation — CPython returns a namespace with name, cache_tag, etc.
@@ -1274,11 +1305,19 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
     });
     os_func!("remove", |args| {
         if args.is_empty() { return Err(PyError::type_error("remove() takes at least 1 argument")); }
-        match std::fs::remove_file(&args[0].str()) {
-            Ok(()) => Ok(py_none()),
-            Err(e) => Err(PyError::OsError(format!("{}", e))),
-        }
+        let path = args[0].str();
+        std::fs::remove_file(&path).map_err(|e| PyError::OsError(format!("{}", e)))?;
+        Ok(py_none())
     });
+
+    // os.unlink = os.remove (POSIX alias)
+    os_func!("unlink", |args| {
+        if args.is_empty() { return Err(PyError::type_error("unlink() takes at least 1 argument")); }
+        let path = args[0].str();
+        std::fs::remove_file(&path).map_err(|e| PyError::OsError(format!("{}", e)))?;
+        Ok(py_none())
+    });
+
     os_func!("rename", |args| {
         if args.len() < 2 { return Err(PyError::type_error("rename() takes 2 arguments")); }
         match std::fs::rename(&args[0].str(), &args[1].str()) {
@@ -1396,11 +1435,27 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
         Ok(py_none())
     });
 
+    // os.urandom(size) -> random bytes from OS
+    os_func!("urandom", |args| {
+        if args.is_empty() { return Err(PyError::type_error("urandom() requires at least 1 argument")); }
+        let n = args[0].as_i64().ok_or_else(|| PyError::type_error("argument must be an integer"))?;
+        if n <= 0 {
+            return Ok(PyObjectRef::imm(PyObject::Bytes(Vec::new())));
+        }
+        let mut buf = vec![0u8; n as usize];
+        if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+            use std::io::Read;
+            let _ = f.read_exact(&mut buf);
+        }
+        Ok(PyObjectRef::imm(PyObject::Bytes(buf)))
+    });
+
     // OS flags for open()
     d.insert("O_RDONLY".to_string(), py_int(0));
     d.insert("O_WRONLY".to_string(), py_int(1));
     d.insert("O_RDWR".to_string(), py_int(2));
     d.insert("O_CREAT".to_string(), py_int(64));
+    d.insert("O_EXCL".to_string(), py_int(128));
     d.insert("O_TRUNC".to_string(), py_int(512));
     d.insert("O_APPEND".to_string(), py_int(1024));
 
@@ -2154,5 +2209,49 @@ pub fn create_future_dict() -> HashMap<String, PyObjectRef> {
     d.insert("__doc__".to_string(), py_str("Future feature statements (from __future__)"));
     d.insert("__name__".to_string(), py_str("__future__"));
     d.insert("__package__".to_string(), py_str(""));
+    d
+}
+
+/// Native errno module — POSIX error code constants
+pub fn create_errno_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    // Standard POSIX errno codes used by tempfile and os modules
+    d.insert("EPERM".to_string(), py_int(1));
+    d.insert("ENOENT".to_string(), py_int(2));
+    d.insert("ESRCH".to_string(), py_int(3));
+    d.insert("EINTR".to_string(), py_int(4));
+    d.insert("EIO".to_string(), py_int(5));
+    d.insert("ENXIO".to_string(), py_int(6));
+    d.insert("E2BIG".to_string(), py_int(7));
+    d.insert("ENOEXEC".to_string(), py_int(8));
+    d.insert("EBADF".to_string(), py_int(9));
+    d.insert("ECHILD".to_string(), py_int(10));
+    d.insert("EAGAIN".to_string(), py_int(11));
+    d.insert("ENOMEM".to_string(), py_int(12));
+    d.insert("EACCES".to_string(), py_int(13));
+    d.insert("EFAULT".to_string(), py_int(14));
+    d.insert("ENOTBLK".to_string(), py_int(15));
+    d.insert("EBUSY".to_string(), py_int(16));
+    d.insert("EEXIST".to_string(), py_int(17));
+    d.insert("EXDEV".to_string(), py_int(18));
+    d.insert("ENODEV".to_string(), py_int(19));
+    d.insert("ENOTDIR".to_string(), py_int(20));
+    d.insert("EISDIR".to_string(), py_int(21));
+    d.insert("EINVAL".to_string(), py_int(22));
+    d.insert("ENFILE".to_string(), py_int(23));
+    d.insert("EMFILE".to_string(), py_int(24));
+    d.insert("ENOTTY".to_string(), py_int(25));
+    d.insert("ETXTBSY".to_string(), py_int(26));
+    d.insert("EFBIG".to_string(), py_int(27));
+    d.insert("ENOSPC".to_string(), py_int(28));
+    d.insert("ESPIPE".to_string(), py_int(29));
+    d.insert("EROFS".to_string(), py_int(30));
+    d.insert("EMLINK".to_string(), py_int(31));
+    d.insert("EPIPE".to_string(), py_int(32));
+    d.insert("EDOM".to_string(), py_int(33));
+    d.insert("ERANGE".to_string(), py_int(34));
+    d.insert("ENOSYS".to_string(), py_int(38));
+    d.insert("EOPNOTSUPP".to_string(), py_int(95));
+    d.insert("__name__".to_string(), py_str("errno"));
     d
 }

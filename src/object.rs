@@ -2,6 +2,7 @@ use std::rc::Rc;
 use std::cell::RefCell;
 use std::fmt;
 use std::collections::HashMap;
+use std::sync::atomic::AtomicUsize;
 use num_bigint::{BigInt, Sign};
 use num_traits::{Zero, One, ToPrimitive, float::FloatCore, Signed};
 use regex::Regex;
@@ -9,6 +10,9 @@ use crate::bytecode::{needs_arg, CodeObject};
 use crate::modules::*;
 
 pub type BuiltinFunc = fn(&[PyObjectRef]) -> PyResult<PyObjectRef>;
+
+pub static ALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
+pub static IMM_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 /// Temporary owned, Rc-held, or RefCell-referenced PyObject
 pub enum RefOrOwned<'a> {
@@ -74,11 +78,13 @@ pub enum PyObjectRef {
 impl PyObjectRef {
     /// Create a MUTABLE PyObjectRef (for List, Dict, Set, Instance)
     pub fn new(obj: PyObject) -> Self {
+        ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
         PyObjectRef::Mut(Rc::new(RefCell::new(obj)))
     }
 
     /// Create an IMMUTABLE PyObjectRef (for Int, Str, Float, etc.)
     pub fn imm(obj: PyObject) -> Self {
+        IMM_COUNT.fetch_add(1, Ordering::Relaxed);
         PyObjectRef::Imm(Rc::new(RefCell::new(obj)))
     }
 
@@ -570,6 +576,7 @@ pub enum PyObject {
     },
     File {
         file: std::rc::Rc<std::cell::RefCell<std::fs::File>>,
+        name: String,
     },
     Socket {
         inner: std::rc::Rc<std::cell::RefCell<SocketInner>>,
@@ -783,7 +790,7 @@ impl PyObject {
             PyObject::BuildClass => "<builtin function __build_class__>".to_string(),
             PyObject::BoundMethod { func, .. } => format!("<bound method {}>", func.borrow().type_name()),
             PyObject::Partial { func, .. } => format!("<partial {}>", func.borrow().type_name()),
-            PyObject::File { .. } => format!("<_io.FileIO '...'>"),
+            PyObject::File { name, .. } => format!("<_io.FileIO '{}'>", name),
             PyObject::Socket { .. } => format!("<socket object>"),
             PyObject::Thread(_) => "<Thread>".to_string(),
             PyObject::Lock(_) => "<lock>".to_string(),
@@ -2464,6 +2471,33 @@ pub fn builtin_bytes(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
 }
 
+/// bytes.fromhex(string) -> bytes
+///
+/// Create a bytes object from a string of hexadecimal digits.
+pub fn builtin_bytes_fromhex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() {
+        return Err(PyError::type_error("bytes.fromhex() takes exactly 1 argument (0 given)"));
+    }
+    let s = args[0].str();
+    // Remove spaces (CPython allows spaces in the hex string)
+    let s = s.replace(' ', "");
+    if s.len() % 2 != 0 {
+        return Err(PyError::value_error("hex string must be of even length"));
+    }
+    let mut result = Vec::with_capacity(s.len() / 2);
+    let bytes = s.as_bytes();
+    for chunk in bytes.chunks(2) {
+        let hex_pair = std::str::from_utf8(chunk).map_err(|_| {
+            PyError::value_error("non-hexadecimal number found")
+        })?;
+        let byte = u8::from_str_radix(hex_pair, 16).map_err(|_| {
+            PyError::value_error(format!("non-hexadecimal number found in fromhex() arg at position {}", s.find(hex_pair).unwrap_or(0)))
+        })?;
+        result.push(byte);
+    }
+    Ok(PyObjectRef::imm(PyObject::Bytes(result)))
+}
+
 pub fn builtin_bytearray(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() { Ok(PyObjectRef::new(PyObject::ByteArray(Vec::new()))) }
     else {
@@ -3398,7 +3432,7 @@ pub fn builtin_open(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         .truncate(mode.contains('w'))
         .open(&filename)
         .map_err(|e| PyError::OsError(format!("{}", e)))?;
-    Ok(PyObjectRef::new(PyObject::File { file: std::rc::Rc::new(std::cell::RefCell::new(file)) }))
+    Ok(PyObjectRef::new(PyObject::File { file: std::rc::Rc::new(std::cell::RefCell::new(file)), name: filename }))
 }
 
 pub fn builtin_any(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
@@ -5620,13 +5654,20 @@ impl ObjectAccess for PyObject {
                     _ => Err(PyError::attribute_error(format!("'coroutine' object has no attribute '{}'", name))),
                 }
             }
-            PyObject::File { file: _ } => {
+            PyObject::File { file: _, .. } => {
                 match name {
+                    "name" => {
+                        if let PyObject::File { name: fname, .. } = &*self {
+                            Ok(py_str(fname))
+                        } else {
+                            Err(PyError::runtime_error("name access on non-file"))
+                        }
+                    }
                     "read" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "read".to_string(),
                         func: |args| {
                             use std::io::Read;
-                            if let PyObject::File { file } = &*args[0].borrow() {
+                            if let PyObject::File { file, .. } = &*args[0].borrow() {
                                 let mut buf = String::new();
                                 file.borrow_mut().read_to_string(&mut buf).map_err(|e| PyError::OsError(format!("{}", e)))?;
                                 Ok(py_str(&buf))
@@ -5639,7 +5680,7 @@ impl ObjectAccess for PyObject {
                         func: |args| {
                             use std::io::Write;
                             if args.len() < 2 { return Err(PyError::type_error("write() takes exactly one argument")); }
-                            if let PyObject::File { file } = &*args[0].borrow() {
+                            if let PyObject::File { file, .. } = &*args[0].borrow() {
                                 let text = args[1].str();
                                 file.borrow_mut().write_all(text.as_bytes()).map_err(|e| PyError::OsError(format!("{}", e)))?;
                                 Ok(py_int(text.len() as i64))
@@ -5650,7 +5691,7 @@ impl ObjectAccess for PyObject {
                     "close" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "close".to_string(),
                         func: |args| {
-                            if let PyObject::File { file } = &mut *args[0].borrow_mut() {
+                            if let PyObject::File { file, .. } = &mut *args[0].borrow_mut() {
                                 // Flush and drop by replacing with a closed file
                                 let _ = std::mem::replace(&mut *file.borrow_mut(), std::fs::File::create("/dev/null").unwrap_or(std::fs::File::open("/dev/null").unwrap_or_else(|_| panic!())));
                                 Ok(py_none())
@@ -5673,11 +5714,11 @@ impl ObjectAccess for PyObject {
                                               else if args.len() > 1 && matches!(&*args[1].borrow(), PyObject::File { .. }) { 1 }
                                               else { return Ok(py_none()) };
                             // Sync and flush data to disk
-                            if let PyObject::File { file } = &*args[file_obj_idx].borrow() {
+                            if let PyObject::File { file, .. } = &*args[file_obj_idx].borrow() {
                                 let _ = file.borrow().sync_all();
                             }
                             // Replace with /dev/null to close the actual file descriptor
-                            if let PyObject::File { file } = &mut *args[file_obj_idx].borrow_mut() {
+                            if let PyObject::File { file, .. } = &mut *args[file_obj_idx].borrow_mut() {
                                 let _ = std::mem::replace(&mut *file.borrow_mut(), std::fs::File::open("/dev/null").unwrap_or_else(|_| {
                                     std::fs::File::create("/dev/null").unwrap()
                                 }));
@@ -6576,6 +6617,12 @@ impl ObjectAccess for PyObject {
                 }
             }
             PyObject::BuiltinFunction { name: bf_name, .. } => {
+                if bf_name == "bytes" && name == "fromhex" {
+                    return Ok(PyObjectRef::imm(PyObject::BuiltinFunction {
+                        name: "fromhex".to_string(),
+                        func: builtin_bytes_fromhex,
+                    }));
+                }
                 if bf_name == "int" && name == "from_bytes" {
                     return Ok(PyObjectRef::imm(PyObject::BuiltinFunction {
                         name: "from_bytes".to_string(),

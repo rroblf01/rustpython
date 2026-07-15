@@ -1020,7 +1020,6 @@ impl Compiler {
                 }
                 let name_idx = self.get_name_index(name) as u32;
                 if !decorator_list.is_empty() {
-                    eprintln!("DEBUG compiler: class '{}' has {} decorator(s)!", name, decorator_list.len());
                 }
                 for decorator in decorator_list {
                     self.compile_expr(&decorator)?;

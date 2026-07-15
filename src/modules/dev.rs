@@ -1291,7 +1291,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
                 .open(&filename)
                 .map_err(|e| PyError::OsError(format!("{}", e)))?
         };
-        Ok(PyObjectRef::new(PyObject::File { file: Rc::new(RefCell::new(file)) }))
+        Ok(PyObjectRef::new(PyObject::File { file: Rc::new(RefCell::new(file)), name: filename.clone() }))
     });
 
     // BytesIO — in-memory bytes buffer
@@ -1351,7 +1351,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
         if args.is_empty() { return Err(PyError::type_error("open_code() missing argument")); }
         let path = args[0].str();
         let file = std::fs::File::open(&path).map_err(|e| PyError::OsError(format!("{}", e)))?;
-        Ok(PyObjectRef::new(PyObject::File { file: Rc::new(RefCell::new(file)) }))
+        Ok(PyObjectRef::new(PyObject::File { file: Rc::new(RefCell::new(file)), name: path.clone() }))
     });
 
     io_func!("text_encoding", |args| {

@@ -17,5 +17,7 @@ mod misc;
 mod time;
 pub use misc::*;
 pub use time::*;
+mod binascii;
+pub use binascii::*;
 mod concurrent;
 pub use concurrent::*;

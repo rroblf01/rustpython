@@ -778,6 +778,24 @@ pub fn create_bisect_dict() -> HashMap<String, PyObjectRef> {
         Ok(py_int(lo as i64))
     });
 
+    // bisect = bisect_right (CPython convention)
+    bisect_func!("bisect", |args| {
+        if args.len() < 2 { return Err(PyError::type_error("bisect_right() requires at least 2 arguments (list, item)")); }
+        let items = {
+            let a = args[0].borrow();
+            match &*a { PyObject::List(v) => v.clone(), _ => return Err(PyError::type_error("bisect_right() argument must be a list")) }
+        };
+        let x = &args[1];
+        let mut lo = if args.len() > 2 { args[2].as_i64().ok_or_else(|| PyError::type_error("lo must be an integer"))? as usize } else { 0 };
+        let mut hi = if args.len() > 3 { args[3].as_i64().ok_or_else(|| PyError::type_error("hi must be an integer"))? as usize } else { items.len() };
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if x.borrow().lt(&items[mid])? { hi = mid; } else { lo = mid + 1; }
+        }
+        Ok(py_int(lo as i64))
+    });
+
+    // bisect_right = bisect (CPython alias)
     bisect_func!("bisect_right", |args| {
         if args.len() < 2 { return Err(PyError::type_error("bisect_right() requires at least 2 arguments (list, item)")); }
         let items = {
