@@ -12,19 +12,22 @@ panic = "abort"
 [features]
 default = []
 profile = []  # Enable execution profiling for PGO JIT
+gc = []       # Enable experimental tracing garbage collector
+jit = ["cranelift", "cranelift-frontend", "cranelift-jit", "cranelift-module", "cranelift-native"]  # Enable Cranelift JIT compilation for hot bytecode
+ffi = ["libloading"]      # Enable CPython C extension loading (.so files)
 
 [dependencies]
-cranelift = "0.109.1"
-cranelift-frontend = "0.109.1"
-cranelift-jit = "0.109.1"
-cranelift-module = "0.109.1"
-cranelift-native = "0.109.1"
+cranelift = { version = "0.109.1", optional = true }
+cranelift-frontend = { version = "0.109.1", optional = true }
+cranelift-jit = { version = "0.109.1", optional = true }
+cranelift-module = { version = "0.109.1", optional = true }
+cranelift-native = { version = "0.109.1", optional = true }
 num-bigint = "0.4"
 num-traits = "0.2"
 regex = "1"
 smallvec = "1"
 once_cell = "1"
-libloading = "0.8"
+libloading = { version = "0.8", optional = true }
 md-5 = "0.10"
 sha-1 = "0.10"
 sha2 = "0.10"

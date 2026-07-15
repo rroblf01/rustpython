@@ -106,24 +106,67 @@ pub fn create_collections_dict() -> HashMap<String, PyObjectRef> {
     });
 
     // OrderedDict: remembers insertion order (handled by PyDict ordering)
-    coll_func!("OrderedDict", |args| {
-        let dict = crate::object::py_dict();
-        // Note: source dict copy not implemented (private buckets field)
-        Ok(dict)
-    });
+    coll_func!("OrderedDict", |args| { Ok(crate::object::py_dict()) });
 
-    // namedtuple: factory function
+    // namedtuple: factory function — creates simple types with named fields
     coll_func!("namedtuple", |args| {
         if args.len() < 2 {
-            return Err(PyError::type_error("namedtuple() needs at least 2 arguments"));
+            return Err(PyError::type_error(
+                "namedtuple() needs at least 2 arguments",
+            ));
         }
-        let name = args[0].str();
-        let fields_str = args[1].str();
-        let fields: Vec<&str> = fields_str.split_whitespace().collect();
-        // Return a simple Type object so setting __doc__ works
-        let type_dict = HashMap::new();
+        let typename = args[0].str();
+        let field_str = args[1].str();
+        let fields: Vec<String> = field_str.split_whitespace().map(|s| s.to_string()).collect();
+        if fields.is_empty() {
+            return Err(PyError::type_error(
+                "namedtuple() requires at least 1 field name",
+            ));
+        }
+        let n = fields.len();
+        let f_clone = fields.clone();
+        let tn_clone = typename.clone();
+        // __init__: called by Type handler after creating empty Instance
+        let init_fn = move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+            if args.len() < 1 {
+                return Err(PyError::type_error("__init__ missing self"));
+            }
+            let self_obj = &args[0];
+            let pos_args = &args[1..];
+            if pos_args.len() != n {
+                return Err(PyError::type_error(format!(
+                    "{} expects {} arguments, got {}",
+                    tn_clone, n, pos_args.len()
+                )));
+            }
+            // Set field values as attributes on self
+            for (i, f) in f_clone.iter().enumerate() {
+                self_obj.borrow_mut().set_attribute(f, pos_args[i].clone()).ok();
+            }
+            self_obj.borrow_mut().set_attribute("_fields",
+                PyObjectRef::new(PyObject::List(
+                    f_clone.iter().map(|f| py_str(f)).collect()
+                ))
+            ).ok();
+            Ok(py_none())
+        };
+        let init_obj = PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(init_fn)));
+        let mut type_dict = HashMap::new();
+        type_dict.insert("__init__".to_string(), init_obj);
+        // Add field names as class-level attributes (for __doc__ setting support)
+        for f in &fields {
+            type_dict.insert(f.clone(), PyObjectRef::new(PyObject::Instance {
+                typ: PyObjectRef::new(PyObject::Type {
+                    name: "member_descriptor".to_string(),
+                    dict: HashMap::new(),
+                    bases: vec![],
+                    mro: vec![],
+                }),
+                dict: HashMap::new(),
+            }));
+        }
         Ok(PyObjectRef::new(PyObject::Type {
-            name,
+            name: typename,
             dict: type_dict,
             bases: vec![],
             mro: vec![],
@@ -411,6 +454,117 @@ pub fn create_functools_dict() -> HashMap<String, PyObjectRef> {
         }
         let _ = dispatcher.borrow_mut().set_attribute("__wrapped__", func);
         Ok(dispatcher)
+    });
+
+    // cmp_to_key: convert old-style comparison function to a key class for sorted()/min()/max()
+    ft_func!("cmp_to_key", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("cmp_to_key requires at least 1 argument"));
+        }
+        let mycmp = args[0].clone();
+        let mycmp_for_factory = mycmp.clone();
+        // Return a callable that acts as the key class
+        let key_factory = move |k_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+            if k_args.is_empty() {
+                return Err(PyError::type_error("cmp_to_key() key factory missing required argument"));
+            }
+            let obj = k_args[0].clone();
+            let mycmp_rc = std::rc::Rc::new(mycmp_for_factory.clone());
+            let obj_rc = std::rc::Rc::new(obj);
+
+            // __lt__(self, other): mycmp(self.obj, other.obj) < 0
+            let lt_mycmp = mycmp_rc.clone();
+            let lt_obj = obj_rc.clone();
+            let lt = move |lt_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                if lt_args.len() < 2 {
+                    return Err(PyError::type_error("__lt__ requires 2 arguments"));
+                }
+                let cmp_result = builtin_call(&lt_mycmp, &[(*lt_obj).clone(), lt_args[1].clone()])?;
+                Ok(py_bool(cmp_result.as_i64().map_or(false, |n| n < 0)))
+            };
+
+            // __le__(self, other): mycmp(self.obj, other.obj) <= 0
+            let le_mycmp = mycmp_rc.clone();
+            let le_obj = obj_rc.clone();
+            let le = move |le_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                if le_args.len() < 2 {
+                    return Err(PyError::type_error("__le__ requires 2 arguments"));
+                }
+                let cmp_result = builtin_call(&le_mycmp, &[(*le_obj).clone(), le_args[1].clone()])?;
+                Ok(py_bool(cmp_result.as_i64().map_or(false, |n| n <= 0)))
+            };
+
+            // __gt__(self, other): mycmp(self.obj, other.obj) > 0
+            let gt_mycmp = mycmp_rc.clone();
+            let gt_obj = obj_rc.clone();
+            let gt = move |gt_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                if gt_args.len() < 2 {
+                    return Err(PyError::type_error("__gt__ requires 2 arguments"));
+                }
+                let cmp_result = builtin_call(&gt_mycmp, &[(*gt_obj).clone(), gt_args[1].clone()])?;
+                Ok(py_bool(cmp_result.as_i64().map_or(false, |n| n > 0)))
+            };
+
+            // __ge__(self, other): mycmp(self.obj, other.obj) >= 0
+            let ge_mycmp = mycmp_rc.clone();
+            let ge_obj = obj_rc.clone();
+            let ge = move |ge_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                if ge_args.len() < 2 {
+                    return Err(PyError::type_error("__ge__ requires 2 arguments"));
+                }
+                let cmp_result = builtin_call(&ge_mycmp, &[(*ge_obj).clone(), ge_args[1].clone()])?;
+                Ok(py_bool(cmp_result.as_i64().map_or(false, |n| n >= 0)))
+            };
+
+            // __eq__(self, other): mycmp(self.obj, other.obj) == 0
+            let eq_mycmp = mycmp_rc.clone();
+            let eq_obj = obj_rc.clone();
+            let eq = move |eq_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                if eq_args.len() < 2 {
+                    return Err(PyError::type_error("__eq__ requires 2 arguments"));
+                }
+                let cmp_result = builtin_call(&eq_mycmp, &[(*eq_obj).clone(), eq_args[1].clone()])?;
+                Ok(py_bool(cmp_result.as_i64().map_or(false, |n| n == 0)))
+            };
+
+            // __ne__(self, other): mycmp(self.obj, other.obj) != 0
+            let ne_mycmp = mycmp_rc.clone();
+            let ne_obj = obj_rc.clone();
+            let ne = move |ne_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                if ne_args.len() < 2 {
+                    return Err(PyError::type_error("__ne__ requires 2 arguments"));
+                }
+                let cmp_result = builtin_call(&ne_mycmp, &[(*ne_obj).clone(), ne_args[1].clone()])?;
+                Ok(py_bool(cmp_result.as_i64().map_or(false, |n| n != 0)))
+            };
+
+            // __hash__: cmp_to_key objects are unhashable (comparison may not be consistent)
+            let hash_err = |_: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                Err(PyError::type_error("comparison function yields unhashable object"))
+            };
+
+            let mut type_dict = std::collections::HashMap::new();
+            type_dict.insert("__lt__".to_string(), PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(lt))));
+            type_dict.insert("__le__".to_string(), PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(le))));
+            type_dict.insert("__gt__".to_string(), PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(gt))));
+            type_dict.insert("__ge__".to_string(), PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(ge))));
+            type_dict.insert("__eq__".to_string(), PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(eq))));
+            type_dict.insert("__ne__".to_string(), PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(ne))));
+            type_dict.insert("__hash__".to_string(), PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(hash_err))));
+
+            let key_obj = PyObjectRef::new(PyObject::Instance {
+                typ: PyObjectRef::new(PyObject::Type {
+                    name: "cmp_to_key".to_string(),
+                    dict: type_dict,
+                    bases: vec![],
+                    mro: vec![],
+                }),
+                dict: std::collections::HashMap::new(),
+            });
+            let _ = key_obj.borrow_mut().set_attribute("obj", obj_rc.as_ref().clone());
+            Ok(key_obj)
+        };
+        Ok(PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(key_factory))))
     });
 
     d

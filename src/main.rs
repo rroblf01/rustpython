@@ -6,11 +6,13 @@ mod compiler;
 mod object;
 mod modules;
 mod vm;
+#[cfg(feature = "jit")]
 mod jit;
 mod interner;
+#[cfg(feature = "gc")]
 mod gc;
+#[cfg(feature = "ffi")]
 mod ffi_bridge;
-mod sync;
 
 use std::env;
 use std::fs;

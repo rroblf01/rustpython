@@ -1,3 +1,5 @@
+#![cfg(feature = "ffi")]
+
 /// CPython C API Bridge — allows loading CPython C extensions in RustPython.
 ///
 /// ## Architecture
@@ -26,6 +28,9 @@
 /// All functions in this module are `unsafe` because they dereference raw
 /// pointers passed from C code.  The C extension is responsible for passing
 /// valid pointers; we validate where possible.
+///
+/// This entire module is only compiled when the `ffi` feature is enabled,
+/// since it depends on `libloading` and exposes C-ABI functions.
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_double, c_int, c_long, c_void};

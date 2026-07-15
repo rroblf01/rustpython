@@ -314,4 +314,5 @@ pub enum ConstValue {
     String(String),
     Bytes(Vec<u8>),
     Code(Box<CodeObject>),
+    Tuple(Vec<String>),
 }

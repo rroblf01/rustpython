@@ -818,7 +818,7 @@ impl Lexer {
                         break;
                     }
                     self.indent_stack.pop();
-                    self.pending.push(Token::Dedent);
+                    self.pending.insert(0, Token::Dedent);
                 }
             }
             return;
@@ -828,12 +828,17 @@ impl Lexer {
             self.indent_stack.push(indent);
             self.pending.push(Token::Indent);
         } else if indent < current {
+            let mut dedents = Vec::new();
             while let Some(&level) = self.indent_stack.last() {
                 if level == indent {
                     break;
                 }
                 self.indent_stack.pop();
-                self.pending.push(Token::Dedent);
+                dedents.push(Token::Dedent);
+            }
+            // Push dedents in reverse so that innermost dedent is emitted first
+            for d in dedents.into_iter().rev() {
+                self.pending.push(d);
             }
         }
     }

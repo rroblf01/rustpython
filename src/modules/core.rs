@@ -1,6 +1,40 @@
 use crate::object::*;
 use std::collections::HashMap;
 use num_traits::Signed;
+
+// ── Safe wrappers for raw file descriptor operations ──────────────────────
+// These encapsulate the `from_raw_fd` unsafe dereference so callers don't
+// need `unsafe` blocks.  The fd ownership pattern is: create File, use it,
+// then `forget()` to return ownership to the caller (who still owns the fd).
+
+/// Read from a raw file descriptor without taking ownership of the fd.
+fn read_fd(fd: i32, buf: &mut Vec<u8>) -> std::io::Result<usize> {
+    use std::os::unix::io::FromRawFd;
+    use std::io::Read;
+    // SAFETY: from_raw_fd takes ownership, but we use forget() to return it.
+    let mut f = unsafe { std::fs::File::from_raw_fd(fd) };
+    let result = f.read(buf);
+    std::mem::forget(f); // Don't close the fd — caller still owns it
+    result
+}
+
+/// Write to a raw file descriptor without taking ownership of the fd.
+fn write_fd(fd: i32, data: &[u8]) -> std::io::Result<usize> {
+    use std::os::unix::io::FromRawFd;
+    use std::io::Write;
+    let mut f = unsafe { std::fs::File::from_raw_fd(fd) };
+    let result = f.write(data);
+    std::mem::forget(f);
+    result
+}
+
+/// Close a raw file descriptor by wrapping it in a File and dropping it.
+fn close_fd(fd: i32) {
+    use std::os::unix::io::FromRawFd;
+    let file = unsafe { std::fs::File::from_raw_fd(fd) };
+    drop(file); // Closes the fd
+}
+
 pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     let mut builtins = HashMap::new();
     builtins.insert("None".to_string(), py_none());
@@ -144,6 +178,116 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
         dict: create_math_dict(),
     });
     builtins.insert("math".to_string(), math_module.clone());
+
+    // Create a proper object TYPE with basic dunder methods.
+    // This is used as the implicit base class for all classes without explicit bases.
+    let mut object_dict = HashMap::new();
+    // __setattr__(self, name, value): sets an attribute on the instance
+    object_dict.insert("__setattr__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "__setattr__".to_string(),
+        func: |args| {
+            if args.len() < 3 {
+                return Err(PyError::type_error("__setattr__ requires at least 3 arguments (self, name, value)"));
+            }
+            let name = args[1].str();
+            args[0].borrow_mut().set_attribute(&name, args[2].clone())?;
+            Ok(py_none())
+        },
+    }));
+    // __getattribute__(self, name): gets an attribute from the instance
+    object_dict.insert("__getattribute__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "__getattribute__".to_string(),
+        func: |args| {
+            if args.len() < 2 {
+                return Err(PyError::type_error("__getattribute__ requires at least 2 arguments (self, name)"));
+            }
+            let name = args[1].str();
+            args[0].borrow().get_attribute(&name)
+        },
+    }));
+    // __init__(self): no-op
+    object_dict.insert("__init__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "__init__".to_string(),
+        func: |_args| Ok(py_none()),
+    }));
+    // __repr__(self): <object at 0x...>
+    object_dict.insert("__repr__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "__repr__".to_string(),
+        func: |args| {
+            if args.is_empty() {
+                return Err(PyError::type_error("__repr__ requires at least 1 argument (self)"));
+            }
+            let obj = &args[0];
+            let obj_ref = obj.borrow();
+            let type_name = obj_ref.type_name();
+            let ptr = format!("{:p}", &*obj_ref as *const _ as *const u8);
+            // Only show hex digits after 0x
+            let ptr_hex = &ptr[2..];
+            Ok(py_str(&format!("<{} object at 0x{}>", type_name, ptr_hex)))
+        },
+    }));
+    // __eq__(self, other): identity comparison
+    object_dict.insert("__eq__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "__eq__".to_string(),
+        func: |args| {
+            if args.len() < 2 {
+                return Err(PyError::type_error("__eq__ requires 2 arguments"));
+            }
+            Ok(py_bool(args[0].borrow().type_name() == args[1].borrow().type_name()))
+        },
+    }));
+    // __ne__(self, other): inverse of __eq__
+    object_dict.insert("__ne__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "__ne__".to_string(),
+        func: |args| {
+            if args.len() < 2 {
+                return Err(PyError::type_error("__ne__ requires 2 arguments"));
+            }
+            Ok(py_bool(args[0].borrow().type_name() != args[1].borrow().type_name()))
+        },
+    }));
+    // __hash__(self): hash based on pointer
+    object_dict.insert("__hash__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "__hash__".to_string(),
+        func: |args| {
+            if args.is_empty() {
+                return Err(PyError::type_error("__hash__ requires at least 1 argument (self)"));
+            }
+            let ptr: *const PyObject = &*args[0].borrow();
+            Ok(py_int(ptr as i64))
+        },
+    }));
+    // __new__(cls): creates a new instance of cls
+    object_dict.insert("__new__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "__new__".to_string(),
+        func: |args| {
+            if args.is_empty() {
+                return Err(PyError::type_error("__new__ requires at least 1 argument (cls)"));
+            }
+            let cls = args[0].clone();
+            Ok(PyObjectRef::new(PyObject::Instance {
+                typ: cls,
+                dict: HashMap::new(),
+            }))
+        },
+    }));
+    let object_type = PyObjectRef::new(PyObject::Type {
+        name: "object".to_string(),
+        dict: object_dict,
+        bases: vec![],
+        mro: vec![],
+    });
+    // Set MRO so isinstance works
+    if let PyObject::Type { mro, .. } = &mut *object_type.borrow_mut() {
+        *mro = vec![object_type.clone()];
+    }
+    // Register in builtins both as a type (for __build_class__) and as a callable (for object())
+    builtins.insert("object".to_string(), object_type);
+    // Also keep the function for direct use
+    builtins.insert("_object_func".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "object".to_string(),
+        func: builtin_object,
+    }));
 
     builtins
 }
@@ -418,24 +562,16 @@ pub fn create_importlib_dict() -> HashMap<String, PyObjectRef> {
         // Resolve relative imports
         let resolved = resolve_name(&name, package.as_deref())?;
 
-        // Get VM
-        let vm_ptr = crate::object::VM_PTR.with(|p| *p.borrow());
-        let vm = if let Some(ptr) = vm_ptr {
-            unsafe { &mut *ptr }
-        } else {
-            return Err(PyError::ImportError("import_module: no active VM".to_string()));
-        };
-
-        // Check if already loaded
-        if let Some(module) = vm.modules.get(&resolved) {
-            return Ok(module.clone());
-        }
-
-        // Import the module (handles dotted names)
-        match import_dotted(vm, &resolved) {
-            Ok(module) => Ok(module),
-            Err(e) => Err(PyError::ImportError(format!("import_module error: {}", e))),
-        }
+        // Use with_vm_mut for VM-dependent part
+        with_vm_mut(|vm| -> PyResult<PyObjectRef> {
+            if let Some(module) = vm.modules.get(&resolved) {
+                return Ok(module.clone());
+            }
+            match import_dotted(vm, &resolved) {
+                Ok(module) => Ok(module),
+                Err(e) => Err(PyError::ImportError(format!("import_module error: {}", e))),
+            }
+        })?
     });
 
     // __version__ — indicates importlib metadata
@@ -489,16 +625,9 @@ pub fn create_importlib_util_dict() -> HashMap<String, PyObjectRef> {
             name.to_string()
         };
 
-        // Get VM
-        let vm_ptr = crate::object::VM_PTR.with(|p| *p.borrow());
-        let vm = if let Some(ptr) = vm_ptr {
-            unsafe { &mut *ptr }
-        } else {
-            return Ok(py_none());
-        };
-
-        // Check if already loaded in modules
-        if vm.modules.contains_key(&resolved_name) {
+        // Get VM and check if already loaded
+        let resolved_name2 = resolved_name.clone();
+        if with_vm_mut(|vm| Ok(vm.modules.contains_key(&resolved_name2)))?? {
             return Ok(create_module("ModuleSpec", HashMap::from([
                 ("name".to_string(), py_str(&resolved_name)),
                 ("origin".to_string(), py_str("built-in")),
@@ -506,7 +635,7 @@ pub fn create_importlib_util_dict() -> HashMap<String, PyObjectRef> {
         }
 
         // Get sys.path manually to search for the module file
-        let search_paths = {
+        let search_paths: Vec<String> = with_vm_mut(|vm| -> PyResult<Vec<String>> {
             let mut paths = Vec::new();
             if let Some(sys_mod) = vm.modules.get("sys") {
                 if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
@@ -521,8 +650,8 @@ pub fn create_importlib_util_dict() -> HashMap<String, PyObjectRef> {
                     }
                 }
             }
-            paths
-        };
+            Ok(paths)
+        })??;
 
         // For dotted names, we need to find the file for the top-level
         let top_name = if resolved_name.contains('.') {
@@ -647,31 +776,25 @@ pub fn create_importlib_resources_dict() -> HashMap<String, PyObjectRef> {
             }
             let pkg_name = args[0].str();
             // Look up the package's __path__ via VM_PTR
-            let pkg_path = {
-                let vm_ptr = crate::object::VM_PTR.with(|p| *p.borrow());
-                if let Some(ptr) = vm_ptr {
-                    let vm = unsafe { &mut *ptr };
-                    match vm.modules.get(&pkg_name) {
-                        Some(mod_obj) => {
-                            let borrowed = mod_obj.borrow();
-                            if let PyObject::Module { dict, .. } = &*borrowed {
-                                if let Some(path_list) = dict.get("__path__") {
-                                    if let PyObject::List(items) = &*path_list.borrow() {
-                                        if let Some(first) = items.first() {
-                                            if let PyObject::Str(s) = &*first.borrow() {
-                                                s.clone()
-                                            } else { format!("./{}", pkg_name) }
-                                        } else { format!("./{}", pkg_name) }
-                                    } else { format!("./{}", pkg_name) }
-                                } else { format!("./{}", pkg_name) }
-                            } else { format!("./{}", pkg_name) }
-                        }
-                        None => format!("./{}", pkg_name),
+            let pkg_path: String = with_vm_mut(|vm| -> PyResult<String> {
+                match vm.modules.get(&pkg_name) {
+                    Some(mod_obj) => {
+                        let borrowed = mod_obj.borrow();
+                        if let PyObject::Module { dict, .. } = &*borrowed {
+                            if let Some(path_list) = dict.get("__path__") {
+                                if let PyObject::List(items) = &*path_list.borrow() {
+                                    if let Some(first) = items.first() {
+                                        if let PyObject::Str(s) = &*first.borrow() {
+                                            Ok(s.clone())
+                                        } else { Ok(format!("./{}", pkg_name)) }
+                                    } else { Ok(format!("./{}", pkg_name)) }
+                                } else { Ok(format!("./{}", pkg_name)) }
+                            } else { Ok(format!("./{}", pkg_name)) }
+                        } else { Ok(format!("./{}", pkg_name)) }
                     }
-                } else {
-                    format!("./{}", pkg_name)
+                    None => Ok(format!("./{}", pkg_name)),
                 }
-            };
+            })??;
 
             let trav = create_module("_Traversable", HashMap::from([
                 ("name".to_string(), py_str(&pkg_path)),
@@ -807,18 +930,13 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
         if args.len() < 2 { return Err(PyError::type_error("read() requires at least 2 arguments")); }
         let fd = args[0].as_i64().unwrap_or(-1) as i32;
         let n = args[1].as_i64().unwrap_or(0) as usize;
-        use std::os::unix::io::FromRawFd;
         let mut buf = vec![0u8; n];
-        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
-        use std::io::Read;
-        match file.read(&mut buf) {
+        match read_fd(fd, &mut buf) {
             Ok(count) => {
                 buf.truncate(count);
-                std::mem::forget(file); // Don't close the fd
                 Ok(PyObjectRef::new(PyObject::Bytes(buf)))
             }
             Err(e) => {
-                std::mem::forget(file);
                 Err(PyError::OsError(format!("{}", e)))
             }
         }
@@ -831,16 +949,11 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
             PyObject::Str(s) => s.as_bytes().to_vec(),
             _ => return Err(PyError::type_error("write() argument 2 must be bytes or str")),
         };
-        use std::os::unix::io::FromRawFd;
-        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
-        use std::io::Write;
-        match file.write(&data) {
+        match write_fd(fd, &data) {
             Ok(count) => {
-                std::mem::forget(file);
                 Ok(py_int(count as i64))
             }
             Err(e) => {
-                std::mem::forget(file);
                 Err(PyError::OsError(format!("{}", e)))
             }
         }
@@ -848,9 +961,7 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
     os_func!("close", |args| {
         if args.is_empty() { return Err(PyError::type_error("close() requires at least 1 argument")); }
         let fd = args[0].as_i64().unwrap_or(-1) as i32;
-        use std::os::unix::io::FromRawFd;
-        let file = unsafe { std::fs::File::from_raw_fd(fd) };
-        drop(file); // Closes the fd
+        close_fd(fd);
         Ok(py_none())
     });
 

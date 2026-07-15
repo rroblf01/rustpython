@@ -49,8 +49,9 @@ impl SmallStr {
     }
 
     pub fn as_str(&self) -> &str {
-        // Safe: we only store valid UTF-8
-        unsafe { std::str::from_utf8_unchecked(&self.data[..self.len as usize]) }
+        // We only store valid UTF-8 (checked in `new()` via `s.as_bytes()`)
+        std::str::from_utf8(&self.data[..self.len as usize])
+            .expect("SmallStr: invalid UTF-8 data")
     }
 
     pub fn to_string(&self) -> String {
@@ -374,12 +375,13 @@ impl PySet {
 
 #[derive(Clone)]
 pub struct PyDict {
-    buckets: std::collections::HashMap<usize, Vec<(PyObjectRef, PyObjectRef)>>,
-    size: usize,
+    pub buckets: std::collections::HashMap<usize, Vec<(PyObjectRef, PyObjectRef)>>,
+    pub size: usize,
+    pub instance_ref: Option<PyObjectRef>,
 }
 
 impl PyDict {
-    pub fn new() -> Self { PyDict { buckets: std::collections::HashMap::new(), size: 0 } }
+    pub fn new() -> Self { PyDict { buckets: std::collections::HashMap::new(), size: 0, instance_ref: None } }
     pub fn is_empty(&self) -> bool { self.size == 0 }
     pub fn len(&self) -> usize { self.size }
     pub fn clear(&mut self) { self.buckets.clear(); self.size = 0; }
@@ -402,8 +404,14 @@ impl PyDict {
         let h = key.hash()?;
         let bucket = self.buckets.entry(h).or_default();
         match Self::find(bucket, &key) {
-            Some(i) => bucket[i].1 = value,
-            None => { bucket.push((key, value)); self.size += 1; }
+            Some(i) => bucket[i].1 = value.clone(),
+            None => { bucket.push((key.clone(), value.clone())); self.size += 1; }
+        }
+        // Propagate to Instance dict if this is a __dict__ view
+        if let Some(ref inst_ref) = self.instance_ref {
+            if let PyObject::Instance { dict, .. } = &mut *inst_ref.borrow_mut() {
+                dict.insert(key.str(), value);
+            }
         }
         Ok(())
     }
@@ -1030,6 +1038,33 @@ thread_local! {
     pub static VM_PTR: std::cell::RefCell<Option<*mut super::vm::VirtualMachine>> = std::cell::RefCell::new(None);
 }
 
+/// Safely access the current VM via VM_PTR.
+///
+/// Returns `Err(runtime_error)` if no VM is active.
+/// The single `unsafe` dereference for VM_PTR access lives here;
+/// all callers use this safe wrapper instead of inline `unsafe { &*ptr }`.
+pub fn with_vm_mut<F, R>(f: F) -> PyResult<R>
+where
+    F: FnOnce(&mut super::vm::VirtualMachine) -> R,
+{
+    VM_PTR.with(|p| {
+        let opt = p.borrow();
+        if let Some(ptr) = *opt {
+            // SAFETY:
+            // - VM_PTR is set in `VirtualMachine::execute()` before execution begins
+            //   and remains valid for the duration of the call.
+            // - It is only set on the current thread (thread_local!).
+            // - The pointer is cleared after execution completes.
+            // - Therefore, while we are inside a builtin function being called by the VM,
+            //   the pointer is guaranteed to point to a live VirtualMachine.
+            let vm = unsafe { &mut *ptr };
+            Ok(f(vm))
+        } else {
+            Err(PyError::runtime_error("no active VM"))
+        }
+    })
+}
+
 pub fn py_int(i: impl Into<BigInt>) -> PyObjectRef {
     let big = i.into();
     if let Some(n) = big.to_i64() {
@@ -1080,30 +1115,113 @@ fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String, String> {
     let mut result = String::new();
     let mut chars = fmt.chars();
 
+    // Handle tuple/list arguments: consume one element per format spec
+    let mut arg_iter: Option<Box<dyn Iterator<Item = PyObjectRef>>> = None;
+    let arg0 = arg.clone();
+    {
+        let obj = arg0.borrow();
+        match &*obj {
+            PyObject::Tuple(items) => {
+                let vec = items.clone();
+                let iter = vec.into_iter();
+                arg_iter = Some(Box::new(iter));
+            }
+            PyObject::List(items) => {
+                let vec = items.clone();
+                let iter = vec.into_iter();
+                arg_iter = Some(Box::new(iter));
+            }
+            _ => {}
+        }
+    }
+    // Helper: get next arg (consume from tuple/list iterator, or always use the single arg)
+    let mut get_arg = || -> PyObjectRef {
+        if let Some(ref mut it) = arg_iter {
+            it.next().unwrap_or_else(|| py_str(""))
+        } else {
+            arg.clone()
+        }
+    };
+
     while let Some(ch) = chars.next() {
         if ch == '%' {
+            // Parse optional width specifier (e.g., %03o, %02d, %3s, %4d)
+            let mut width: Option<usize> = None;
+            // Check for flags (only '0' flag supported)
+            let mut flags = String::new();
+            let mut peek = chars.clone();
+            if let Some(c) = peek.as_str().chars().next() {
+                if c == '0' {
+                    flags.push('0');
+                    chars.next();
+                }
+            }
+            // Parse width (digits)
+            let mut width_str = String::new();
+            loop {
+                let mut peek2 = chars.clone();
+                match peek2.next() {
+                    Some(c) if c.is_ascii_digit() => { width_str.push(c); chars.next(); }
+                    _ => break,
+                }
+            }
+            if !width_str.is_empty() {
+                width = Some(width_str.parse::<usize>().map_err(|_| "invalid width".to_string())?);
+            }
+
             match chars.next() {
                 None => return Err("incomplete format: trailing %".to_string()),
                 Some('%') => result.push('%'),
-                Some('s') => {
-                    let val = arg.str();
-                    result.push_str(&val);
-                }
-                Some('d') | Some('i') => {
-                    let val = if let Some(i) = arg.as_i64() {
-                        i.to_string()
-                    } else {
-                        arg.str()
+                Some(conv @ 's') | Some(conv @ 'r') | Some(conv @ 'f') | Some(conv @ 'd') | Some(conv @ 'i')
+                | Some(conv @ 'o') | Some(conv @ 'x') | Some(conv @ 'X') => {
+                    let raw = get_arg();
+
+                    let formatted = match conv {
+                        's' => raw.str(),
+                        'r' => format!("'{}'", raw.str()),
+                        'f' => raw.str(),
+                        'd' | 'i' => {
+                            if let Some(i) = raw.as_i64() {
+                                i.to_string()
+                            } else {
+                                "0".to_string()
+                            }
+                        }
+                        'o' => {
+                            if let Some(i) = raw.as_i64() {
+                                format!("{:o}", i)
+                            } else {
+                                "0".to_string()
+                            }
+                        }
+                        'x' => {
+                            if let Some(i) = raw.as_i64() {
+                                format!("{:x}", i)
+                            } else {
+                                "0".to_string()
+                            }
+                        }
+                        'X' => {
+                            if let Some(i) = raw.as_i64() {
+                                format!("{:X}", i)
+                            } else {
+                                "0".to_string()
+                            }
+                        }
+                        _ => unreachable!(),
                     };
-                    result.push_str(&val);
-                }
-                Some('r') => {
-                    let val = format!("'{}'", arg.str());
-                    result.push_str(&val);
-                }
-                Some('f') => {
-                    let val = arg.str();
-                    result.push_str(&val);
+
+                    // Apply width
+                    let padded = if let Some(w) = width {
+                        if flags.contains('0') {
+                            format!("{:0>width$}", formatted, width = w)
+                        } else {
+                            format!("{:>width$}", formatted, width = w)
+                        }
+                    } else {
+                        formatted
+                    };
+                    result.push_str(&padded);
                 }
                 Some(c) => return Err(format!("unsupported format character '{}'", c)),
             }
@@ -1374,6 +1492,13 @@ pub fn py_pow(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
         if bi < 0 { return Ok(py_float((ai as f64).powi(bi as i32))); }
         if bi == 0 { return Ok(py_int(1)); }
         if bi == 1 { return Ok(py_int(ai)); }
+        if bi > 63 {
+            // Use BigInt for large exponents to avoid overflow
+            let big_a = BigInt::from(ai);
+            let big_b = BigInt::from(bi);
+            let result = big_a.pow(bi as u32);
+            return Ok(py_int(result));
+        }
         let mut result: i64 = 1;
         for _ in 0..bi { result = result.wrapping_mul(ai); }
         return Ok(py_int(result));
@@ -1883,7 +2008,6 @@ pub fn builtin_int(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() > 0 {
         let t = args[0].borrow().type_name().to_string();
         if t == "instance" {
-            eprintln!("DEBUG int() got Instance in ipaddress: repr={:?}", args[0].repr());
         }
     }
     if args.is_empty() { return Ok(py_int(0)); }
@@ -1926,12 +2050,9 @@ pub fn builtin_int(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             drop(obj);
             // Try calling __int__ method on the instance
             let args0 = &args[0];
-            eprintln!("DEBUG int() Instance: trying __int__ on {:?}", args0.repr());
             if let Ok(int_method) = args0.borrow().get_attribute("__int__") {
-                eprintln!("DEBUG int() Instance: found __int__ method, calling...");
                 let instance = args[0].clone();
                 let result = builtin_call(&int_method, &[instance]);
-                eprintln!("DEBUG int() Instance: __int__ result: {:?}", result.as_ref().map(|r| r.repr()));
                 if let Ok(val) = result {
                     if let Some(n) = val.as_i64() {
                         return Ok(py_int(n));
@@ -2112,6 +2233,26 @@ pub fn builtin_set(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         match &*obj {
             PyObject::List(v) => Ok(PyObjectRef::new(PyObject::Set(PySet::from_vec(v.clone())?))),
             PyObject::Tuple(v) => Ok(PyObjectRef::new(PyObject::Set(PySet::from_vec(v.clone())?))),
+            PyObject::Range { start, stop, step } => {
+                let mut elts = Vec::new();
+                let mut i = *start;
+                if *step > 0 {
+                    while i < *stop { elts.push(py_int(i)); i += step; }
+                } else {
+                    while i > *stop { elts.push(py_int(i)); i += step; }
+                }
+                Ok(PyObjectRef::new(PyObject::Set(PySet::from_vec(elts)?)))
+            }
+            PyObject::Str(s) => {
+                let elts: Vec<PyObjectRef> = s.chars().map(|c| py_int(c as i64)).collect();
+                Ok(PyObjectRef::new(PyObject::Set(PySet::from_vec(elts)?)))
+            }
+            PyObject::Bytes(b) => {
+                let elts: Vec<PyObjectRef> = b.iter().map(|&c| py_int(c as i64)).collect();
+                Ok(PyObjectRef::new(PyObject::Set(PySet::from_vec(elts)?)))
+            }
+            PyObject::Set(s) => Ok(PyObjectRef::new(PyObject::Set(s.clone()))),
+            PyObject::FrozenSet(s) => Ok(PyObjectRef::new(PyObject::Set(s.clone()))),
             _ => Err(PyError::type_error(format!("cannot convert '{}' to set", obj.type_name()))),
         }
     }
@@ -2160,6 +2301,40 @@ pub fn builtin_bytes(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                         result.push(n as u8);
                     } else {
                         return Err(PyError::type_error("bytes() argument must be an integer or iterable"));
+                    }
+                }
+                Ok(PyObjectRef::imm(PyObject::Bytes(result)))
+            }
+            PyObject::Set(items) => {
+                let vec = items.to_vec();
+                let mut result = Vec::new();
+                for item in vec {
+                    let item_b = item.borrow();
+                    if let PyObject::Int(i) = &*item_b {
+                        let n = i.to_i64().ok_or_else(|| PyError::value_error("bytes() requires int in range 0-255"))?;
+                        if n < 0 || n > 255 {
+                            return Err(PyError::value_error("bytes() requires int in range 0-255"));
+                        }
+                        result.push(n as u8);
+                    } else {
+                        return Err(PyError::type_error("bytes() argument must be integer or iterable"));
+                    }
+                }
+                Ok(PyObjectRef::imm(PyObject::Bytes(result)))
+            }
+            PyObject::FrozenSet(items) => {
+                let vec = items.to_vec();
+                let mut result = Vec::new();
+                for item in vec {
+                    let item_b = item.borrow();
+                    if let PyObject::Int(i) = &*item_b {
+                        let n = i.to_i64().ok_or_else(|| PyError::value_error("bytes() requires int in range 0-255"))?;
+                        if n < 0 || n > 255 {
+                            return Err(PyError::value_error("bytes() requires int in range 0-255"));
+                        }
+                        result.push(n as u8);
+                    } else {
+                        return Err(PyError::type_error("bytes() argument must be integer or iterable"));
                     }
                 }
                 Ok(PyObjectRef::imm(PyObject::Bytes(result)))
@@ -2445,9 +2620,7 @@ pub fn builtin_dir(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 }
 
 pub fn builtin_globals(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    let vm_ptr = VM_PTR.with(|p| *p.borrow());
-    if let Some(ptr) = vm_ptr {
-        let vm = unsafe { &*ptr };
+    with_vm_mut(|vm| {
         let frame = vm.frames.last().ok_or_else(|| PyError::runtime_error("no frame"))?;
         let globals = frame.globals.borrow();
         let mut d = crate::object::PyDict::new();
@@ -2455,24 +2628,18 @@ pub fn builtin_globals(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             d.set(py_str(k), v.clone())?;
         }
         Ok(PyObjectRef::new(PyObject::Dict(d)))
-    } else {
-        Ok(py_dict())
-    }
+    })?
 }
 
 pub fn builtin_locals(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    let vm_ptr = VM_PTR.with(|p| *p.borrow());
-    if let Some(ptr) = vm_ptr {
-        let vm = unsafe { &*ptr };
+    with_vm_mut(|vm| {
         let frame = vm.frames.last().ok_or_else(|| PyError::runtime_error("no frame"))?;
         let mut d = crate::object::PyDict::new();
         for (k, v) in frame.locals.iter() {
             d.set(py_str(k), v.clone())?;
         }
         Ok(PyObjectRef::new(PyObject::Dict(d)))
-    } else {
-        Ok(py_dict())
-    }
+    })?
 }
 
 pub fn builtin_divmod(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
@@ -3354,16 +3521,16 @@ pub fn builtin_import(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     } else {
         None
     };
-
-    let vm_ptr = VM_PTR.with(|p| *p.borrow());
-    let vm = if let Some(ptr) = vm_ptr {
-        unsafe { &mut *ptr }
-    } else {
-        return Err(PyError::ImportError("__import__: no active VM".to_string()));
-    };
-
     let has_dots = name.contains('.');
     let has_fromlist = fromlist.as_ref().map_or(false, |fl| !fl.is_empty());
+
+    // Use a raw pointer to avoid closure lifetime issues with long function
+    let vm_ptr = match with_vm_mut(|vm| vm as *mut super::vm::VirtualMachine) {
+        Ok(ptr) => ptr,
+        Err(_) => return Err(PyError::runtime_error("__import__: no active VM")),
+    };
+    // SAFETY: VM_PTR is valid during builtin execution
+    let vm = unsafe { &mut *vm_ptr };
 
     // With a non-empty fromlist and a dotted name, import the full module chain
     // and return the rightmost module. CPython behavior:
@@ -3449,14 +3616,15 @@ pub fn builtin_eval(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let program = parser.parse_program().map_err(|e| PyError::type_error(format!("eval parse error: {}", e)))?;
     let mut compiler = crate::compiler::Compiler::new();
     let code = compiler.compile(&program, "<eval>").map_err(|e| PyError::type_error(format!("eval compile error: {}", e)))?;
+    let code2 = code.clone();
     // Use current VM if available via VM_PTR so exec() shares modules, sys.path, etc.
-    let vm_ptr = VM_PTR.with(|p| *p.borrow());
-    if let Some(ptr) = vm_ptr {
-        let vm = unsafe { &mut *ptr };
-        vm.run(code).map_err(|e| PyError::type_error(format!("eval error: {}", e)))
-    } else {
-        let mut vm = crate::vm::VirtualMachine::new();
-        vm.run(code).map_err(|e| PyError::type_error(format!("eval error: {}", e)))
+    match with_vm_mut(|vm| vm.run(code)) {
+        Ok(Ok(val)) => Ok(val),
+        Ok(Err(e)) => Err(PyError::type_error(format!("eval error: {}", e))),
+        Err(_) => {
+            let mut new_vm = crate::vm::VirtualMachine::new();
+            new_vm.run(code2).map_err(|e| PyError::type_error(format!("eval error: {}", e)))
+        }
     }
 }
 
@@ -3477,16 +3645,17 @@ pub fn builtin_exec(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             })().map_err(|e| PyError::type_error(format!("exec error: {}", e)))?
         ),
     };
+    let code2 = (*code).clone();
     // Use current VM if available via VM_PTR so exec() shares modules, sys.path, etc.
-    let vm_ptr = VM_PTR.with(|p| *p.borrow());
-    if let Some(ptr) = vm_ptr {
-        let vm = unsafe { &mut *ptr };
-        vm.run(*code).map_err(|e| PyError::type_error(format!("exec error: {}", e)))?;
-    } else {
-        let mut vm = crate::vm::VirtualMachine::new();
-        vm.run(*code).map_err(|e| PyError::type_error(format!("exec error: {}", e)))?;
+    match with_vm_mut(|vm| vm.run(*code)) {
+        Ok(Ok(ref _val)) => Ok(py_none()),
+        Ok(Err(e)) => Err(PyError::type_error(format!("exec error: {}", e))),
+        Err(_) => {
+            let mut new_vm = crate::vm::VirtualMachine::new();
+            new_vm.run(code2).map_err(|e| PyError::type_error(format!("exec error: {}", e)))?;
+            Ok(py_none())
+        }
     }
-    Ok(py_none())
 }
 
 pub fn builtin_compile(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
@@ -3661,10 +3830,6 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
             let mut all_args = vec![self_obj];
             let a_len = a.len();
             all_args.extend(a);
-            eprintln!("DEBUG builtin_call BoundMethod: all_args.len={}, a.len={}", all_args.len(), a_len);
-            for (i, arg) in all_args.iter().enumerate() {
-                eprintln!("DEBUG builtin_call arg[{}] type={} repr={:?}", i, arg.borrow().type_name(), arg.repr());
-            }
             builtin_call(&bf, &all_args)
         }
         4 => {
@@ -3906,21 +4071,44 @@ impl ObjectAccess for PyObject {
                 if name == "__qualname__" {
                     return Ok(py_str(type_name));
                 }
-                dict.get(name).cloned().or_else(|| {
-                    for base in mro.iter().skip(1) {
-                        if let PyObject::Type { dict: base_dict, .. } = &*base.borrow() {
-                            if let Some(val) = base_dict.get(name) {
-                                return Some(val.clone());
-                            }
+                // Check own dict first
+                if let Some(val) = dict.get(name).cloned() {
+                    return Ok(val);
+                }
+                // Check MRO (skip self)
+                for base in mro.iter().skip(1) {
+                    if let PyObject::Type { dict: base_dict, .. } = &*base.borrow() {
+                        if let Some(val) = base_dict.get(name) {
+                            return Ok(val.clone());
                         }
                     }
-                    None
-                }).ok_or_else(|| PyError::attribute_error(format!("type has no attribute '{}'", name)))
+                }
+                // Fallback: for dict-derived types, provide common dict methods
+                if name == "__iter__" || name == "items" || name == "keys" || name == "values"
+                {
+                    static DICT_METHODS: std::sync::OnceLock<std::collections::HashMap<String, BuiltinFunc>> = std::sync::OnceLock::new();
+                    let methods = DICT_METHODS.get_or_init(|| {
+                        let mut m = std::collections::HashMap::new();
+                        m.insert("__iter__".to_string(), dict_method_iter as BuiltinFunc);
+                        m.insert("items".to_string(), dict_method_items as BuiltinFunc);
+                        m.insert("keys".to_string(), dict_method_keys as BuiltinFunc);
+                        m.insert("values".to_string(), dict_method_values as BuiltinFunc);
+                        m
+                    });
+                    if let Some(func) = methods.get(name) {
+                        let func = *func;
+                        return Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                            name: name.to_string(),
+                            func,
+                            self_obj: py_none(),
+                        }));
+                    }
+                }
+                Err(PyError::attribute_error(format!("type has no attribute '{}'", name)))
             }
             PyObject::Instance { dict, typ } => {
                 if name == "__dict__" {
-                    eprintln!("DEBUG get_attribute __dict__ on Instance: dict has {} items, {:?}", dict.len(), dict.keys().collect::<Vec<_>>());
-                    // Convert instance's HashMap to a PyDict
+                    // Return a copy of the instance's HashMap as a PyDict (no live view from here)
                     let mut pd = PyDict::new();
                     for (k, v) in dict.iter() {
                         let _ = pd.set(py_str(k), v.clone());
@@ -3962,6 +4150,12 @@ impl ObjectAccess for PyObject {
                                         return Some(val.clone());
                                     }
                                 }
+                            }
+                            // Fallback: provide common dict methods for dict-like instances
+                            if name == "__iter__" || name == "items" || name == "keys" || name == "values" {
+                                let dict_snapshot: Vec<(String, PyObjectRef)> = dict.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                                let result = instance_builtin_dict_method(name, dict_snapshot);
+                                return result;
                             }
                             None
                         })
@@ -6141,17 +6335,13 @@ impl ObjectAccess for PyObject {
             }
             PyObject::Super { cls, obj } => {
                 // super(cls, obj).attr: walk MRO of obj's type, starting after cls
-                eprintln!("DEBUG Super.get_attribute name={} cls_type={} obj_type_name={}", name, cls.borrow().type_name(), obj.borrow().type_name());
                 let obj_type = if let PyObject::Instance { typ, .. } = &*obj.borrow() {
-                    eprintln!("DEBUG Super.get_attribute obj is Instance, typ={}", typ.borrow().type_name());
                     Some(typ.clone())
                 } else {
-                    eprintln!("DEBUG Super.get_attribute obj is not Instance, trying __class__");
                     obj.borrow().get_attribute("__class__").ok()
                 };
                 if let Some(obj_type) = obj_type {
                     if let PyObject::Type { mro, .. } = &*obj_type.borrow() {
-                        eprintln!("DEBUG Super.get_attribute mro.len={}", mro.len());
                         // Find cls in MRO, start search from the next class
                         let start_idx = mro.iter().position(|m| {
                             if let (PyObjectRef::Mut(a), PyObjectRef::Mut(b)) = (cls, m) {
@@ -6160,7 +6350,6 @@ impl ObjectAccess for PyObject {
                                 false
                             }
                         }).unwrap_or(0) + 1;
-                        eprintln!("DEBUG Super.get_attribute start_idx={}", start_idx);
                         if start_idx < mro.len() {
                             let mut found = None;
                             for base in mro.iter().skip(start_idx) {
@@ -6275,6 +6464,18 @@ impl ObjectAccess for PyObject {
                     return Ok(PyObjectRef::imm(PyObject::BuiltinFunction {
                         name: "from_bytes".to_string(),
                         func: builtin_int_from_bytes,
+                    }));
+                }
+                if bf_name == "dict" && (name == "__setitem__" || name == "__getitem__") {
+                    let method_name = name.to_string();
+                    return Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: method_name.clone(),
+                        func: if method_name == "__setitem__" {
+                            builtin_dict_setitem as BuiltinFunc
+                        } else {
+                            builtin_dict_getitem as BuiltinFunc
+                        },
+                        self_obj: py_none(),
                     }));
                 }
                 Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", self.type_name(), name)))
@@ -6403,7 +6604,34 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
             PyObject::Instance { typ, .. } => {
                 let typ_ref = typ.borrow();
                 match &*typ_ref {
-                    PyObject::Type { dict: type_dict, .. } => type_dict.get("__getitem__").cloned(),
+                    PyObject::Type { dict: type_dict, mro, .. } => {
+                        type_dict.get("__getitem__").cloned().or_else(|| {
+                            for base in mro.iter().skip(1) {
+                                if let PyObject::Type { dict: base_dict, .. } = &*base.borrow() {
+                                    if let Some(val) = base_dict.get("__getitem__") {
+                                        return Some(val.clone());
+                                    }
+                                }
+                            }
+                            // Fallback: use builtin_dict_getitem for dict-derived instances
+                            None
+                        }).or_else(|| {
+                            // Check if any base is the builtin 'dict' function
+                            let is_dict_subclass = mro.iter().skip(1).any(|base| {
+                                let b = base.borrow();
+                                matches!(&*b, PyObject::BuiltinFunction { name, .. } if name == "dict")
+                                    || b.type_name() == "dict"
+                            });
+                            if is_dict_subclass {
+                                Some(PyObjectRef::new(PyObject::BuiltinFunction {
+                                    name: "__getitem__".to_string(),
+                                    func: builtin_dict_getitem,
+                                }))
+                            } else {
+                                None
+                            }
+                        })
+                    }
                     _ => None,
                 }
             }
@@ -6495,7 +6723,6 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                     Ok(py_tuple(result))
                 }
                 _ => {
-                    eprintln!("DEBUG tuple subscript: index type={:?}", index.borrow().type_name());
                     Err(PyError::type_error("tuple indices must be integers or slices"))
                 }
             }
@@ -6662,7 +6889,18 @@ pub fn py_setitem(obj: &PyObjectRef, index: &PyObjectRef, value: PyObjectRef) ->
             PyObject::Instance { typ, .. } => {
                 let typ_ref = typ.borrow();
                 match &*typ_ref {
-                    PyObject::Type { dict: type_dict, .. } => type_dict.get("__setitem__").cloned(),
+                    PyObject::Type { dict: type_dict, mro, .. } => {
+                        type_dict.get("__setitem__").cloned().or_else(|| {
+                            for base in mro.iter().skip(1) {
+                                if let PyObject::Type { dict: base_dict, .. } = &*base.borrow() {
+                                    if let Some(val) = base_dict.get("__setitem__") {
+                                        return Some(val.clone());
+                                    }
+                                }
+                            }
+                            None
+                        })
+                    }
                     _ => None,
                 }
             }
@@ -6672,6 +6910,19 @@ pub fn py_setitem(obj: &PyObjectRef, index: &PyObjectRef, value: PyObjectRef) ->
     if let Some(f) = f {
         call_bound_method(f, obj.clone(), vec![index.clone(), value])?;
         return Ok(());
+    }
+    // Default Instance __setitem__: store key/value in the instance dict (HashMap)
+    {
+        let o = obj.borrow();
+        if let PyObject::Instance { dict, .. } = &*o {
+            let key = index.str();
+            drop(o);
+            let mut o = obj.borrow_mut();
+            if let PyObject::Instance { dict, .. } = &mut *o {
+                dict.insert(key, value);
+                return Ok(());
+            }
+        }
     }
     let mut o = obj.borrow_mut();
     match &mut *o {
@@ -7502,7 +7753,6 @@ pub fn logging_debug(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             String::new()
         }
     };
-    eprintln!("DEBUG:{}:{}", logger_name, msg);
     Ok(py_none())
 }
 
@@ -8514,4 +8764,167 @@ pub fn create_urllib_parse_dict() -> HashMap<String, PyObjectRef> {
     });
 
     d
+}
+
+/// Helper: provide dict methods (items, keys, values, __iter__) for Instance objects
+/// that inherit from dict but can't access the built-in dict methods.
+fn instance_builtin_dict_method(name: &str, dict_snapshot: Vec<(String, PyObjectRef)>) -> Option<PyObjectRef> {
+    let method_name = name.to_string();
+    Some(PyObjectRef::new(PyObject::Closure(Rc::new(move |_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+        match method_name.as_str() {
+            "__iter__" => {
+                let keys: Vec<PyObjectRef> = dict_snapshot.iter().map(|(k, _)| py_str(k)).collect();
+                Ok(PyObjectRef::new(PyObject::List(keys)))
+            }
+            "items" => {
+                let items: Vec<PyObjectRef> = dict_snapshot.iter().map(|(k, v)| {
+                    py_tuple(vec![py_str(k), v.clone()])
+                }).collect();
+                Ok(PyObjectRef::new(PyObject::List(items)))
+            }
+            "keys" => {
+                let keys: Vec<PyObjectRef> = dict_snapshot.iter().map(|(k, _)| py_str(k)).collect();
+                Ok(PyObjectRef::new(PyObject::List(keys)))
+            }
+            "values" => {
+                let values: Vec<PyObjectRef> = dict_snapshot.iter().map(|(_, v)| v.clone()).collect();
+                Ok(PyObjectRef::new(PyObject::List(values)))
+            }
+            _ => Err(PyError::type_error(format!("unsupported dict method: {}", method_name))),
+        }
+    }))))
+}
+
+/// Static dict method: get
+pub fn dict_method_get(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() < 2 { return Err(PyError::type_error("get() requires at least 1 argument")); }
+    let instance = &args[0];
+    let borrowed = instance.borrow();
+    if let PyObject::Instance { dict, .. } = &*borrowed {
+        let key = args[1].str();
+        let val = dict.get(&key).cloned().unwrap_or_else(|| {
+            if args.len() > 2 { args[2].clone() } else { py_none() }
+        });
+        drop(borrowed);
+        Ok(val)
+    } else {
+        Err(PyError::type_error("get() requires a dict-like instance"))
+    }
+}
+
+/// Static dict method: __iter__
+pub fn dict_method_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() { return Err(PyError::type_error("__iter__ requires self")); }
+    let instance = &args[0];
+    let borrowed = instance.borrow();
+    if let PyObject::Instance { dict, .. } = &*borrowed {
+        let keys: Vec<PyObjectRef> = dict.keys().map(|k| py_str(k)).collect();
+        drop(borrowed);
+        Ok(PyObjectRef::new(PyObject::List(keys)))
+    } else {
+        Err(PyError::type_error("__iter__ requires a dict-like instance"))
+    }
+}
+
+/// Static dict method: items
+pub fn dict_method_items(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() { return Err(PyError::type_error("items() requires self")); }
+    let instance = &args[0];
+    let borrowed = instance.borrow();
+    if let PyObject::Instance { dict, .. } = &*borrowed {
+        let items: Vec<PyObjectRef> = dict.iter().map(|(k, v)| {
+            py_tuple(vec![py_str(k), v.clone()])
+        }).collect();
+        drop(borrowed);
+        Ok(PyObjectRef::new(PyObject::List(items)))
+    } else {
+        Err(PyError::type_error("items() requires a dict-like instance"))
+    }
+}
+
+/// Static dict method: keys
+pub fn dict_method_keys(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() { return Err(PyError::type_error("keys() requires self")); }
+    let instance = &args[0];
+    let borrowed = instance.borrow();
+    if let PyObject::Instance { dict, .. } = &*borrowed {
+        let keys: Vec<PyObjectRef> = dict.keys().map(|k| py_str(k)).collect();
+        drop(borrowed);
+        Ok(PyObjectRef::new(PyObject::List(keys)))
+    } else {
+        Err(PyError::type_error("keys() requires a dict-like instance"))
+    }
+}
+
+/// Static dict method: values
+pub fn dict_method_values(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() { return Err(PyError::type_error("values() requires self")); }
+    let instance = &args[0];
+    let borrowed = instance.borrow();
+    if let PyObject::Instance { dict, .. } = &*borrowed {
+        let values: Vec<PyObjectRef> = dict.values().cloned().collect();
+        drop(borrowed);
+        Ok(PyObjectRef::new(PyObject::List(values)))
+    } else {
+        Err(PyError::type_error("values() requires a dict-like instance"))
+    }
+}
+
+/// dict.__setitem__ function: allows dict.__setitem__(instance, key, value)
+pub fn builtin_dict_setitem(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    // Handle both calling conventions:
+    // - Direct: [instance, key, value] (3 args)
+    // - Via BuiltinMethod: [py_none(), instance, key, value] (4 args)
+    let instance = if args.len() >= 4 { &args[1] } else if args.len() >= 3 { &args[0] } else {
+        return Err(PyError::type_error("dict.__setitem__() requires at least 2 arguments"));
+    };
+    let key = if args.len() >= 4 { args[2].str() } else if args.len() >= 3 { args[1].str() } else {
+        return Err(PyError::type_error("dict.__setitem__() requires at least 2 arguments"));
+    };
+    let value = if args.len() >= 4 { args[3].clone() } else if args.len() >= 3 { args[2].clone() } else {
+        return Err(PyError::type_error("dict.__setitem__() requires at least 2 arguments"));
+    };
+    // Directly insert into the Instance's dict, bypassing py_setitem (which would recurse)
+    let mut obj = instance.borrow_mut();
+    if let PyObject::Instance { dict, .. } = &mut *obj {
+        dict.insert(key, value);
+    } else if let PyObject::Dict(pd) = &mut *obj {
+        pd.set(py_str(&key), value).ok();
+    } else {
+        drop(obj);
+        // Fall back to py_setitem for non-Instance types
+        py_setitem(instance, &args[if args.len() >= 4 { 2 } else { 1 }], args[if args.len() >= 4 { 3 } else { 2 }].clone())?;
+    }
+    Ok(py_none())
+}
+
+/// dict.__getitem__ function: allows dict.__getitem__(instance, key)
+pub fn builtin_dict_getitem(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    // Handle both calling conventions:
+    // - Direct: [instance, key] (2 args)
+    // - Via BuiltinMethod: [py_none(), instance, key] (3 args)
+    let instance = if args.len() >= 3 { &args[1] } else if args.len() >= 2 { &args[0] } else {
+        return Err(PyError::type_error("dict.__getitem__() requires at least 1 argument"));
+    };
+    let key_ref = if args.len() >= 3 { &args[2] } else if args.len() >= 2 { &args[1] } else {
+        return Err(PyError::type_error("dict.__getitem__() requires at least 1 argument"));
+    };
+    let key = key_ref.str();
+    // Directly read from the Instance's dict, bypassing py_getitem (which would recurse)
+    let obj = instance.borrow();
+    if let PyObject::Instance { dict, .. } = &*obj {
+        let val = dict.get(&key).cloned().ok_or_else(|| {
+            PyError::key_error(format!("'{}'", key))
+        })?;
+        drop(obj);
+        Ok(val)
+    } else if let PyObject::Dict(pd) = &*obj {
+        let val = pd.get(key_ref)?.unwrap_or_else(py_none);
+        drop(obj);
+        Ok(val)
+    } else {
+        drop(obj);
+        // Fall back to py_getitem for non-Instance/Dict types
+        py_getitem(instance, key_ref)
+    }
 }

@@ -1528,13 +1528,17 @@ impl Parser {
             Token::Number(s) => {
                 let s = s.clone();
                 self.next();
-                if s.contains('.') || s.contains('e') || s.contains('E') {
-                    Ok(Expr::Constant(Constant::float_from_str(&s)))
+                // Hex/binary/octal numbers may contain 'e'/'E'/'B'/'O' as valid digits
+                // so we must check for float exponent only in decimal/octal numbers
+                if (s.starts_with("0x") || s.starts_with("0X") || s.starts_with("0b") || s.starts_with("0B") || s.starts_with("0o") || s.starts_with("0O"))
+                    || (!s.contains('.') && !s.contains('e') && !s.contains('E'))
+                {
+                    Ok(Expr::Constant(Constant::int_from_str(&s)))
                 } else if s.ends_with('j') || s.ends_with('J') {
                     let real = s[..s.len()-1].to_string();
                     Ok(Expr::Constant(Constant::Complex { real: "0".to_string(), imag: real }))
                 } else {
-                    Ok(Expr::Constant(Constant::int_from_str(&s)))
+                    Ok(Expr::Constant(Constant::float_from_str(&s)))
                 }
             }
 
@@ -1641,6 +1645,20 @@ impl Parser {
                 self.next();
                 let expr = if self.eat(&Token::RightParen) {
                     Expr::Tuple(Vec::new()) // empty tuple
+                } else if self.at(&Token::Star) {
+                    // Unpacking inside tuple: (*a, *b)
+                    let mut elts = Vec::new();
+                    while !self.at(&Token::RightParen) && !self.at(&Token::EndOfFile) {
+                        if self.at(&Token::Star) {
+                            self.next();
+                            elts.push(Expr::Starred(Box::new(self.parse_expr()?)));
+                        } else {
+                            elts.push(self.parse_expr()?);
+                        }
+                        if !self.eat(&Token::Comma) { break; }
+                    }
+                    self.expect(&Token::RightParen)?;
+                    Expr::Tuple(elts)
                 } else if self.peek() == &Token::Comma || (self.peek() == &Token::Equal && matches!(&self.current, Token::Name(_))) {
                     // Single-element tuple or named expression
                     let first = self.parse_expr()?;

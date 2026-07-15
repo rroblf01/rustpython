@@ -375,6 +375,302 @@ pub fn create_unittest_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
+/// Create a pure-Python `io` module replacement.
+/// The real io.py wraps _io, but RustPython can't load io.py,
+/// so we provide the interface natively.
+/// Provides: open, StringIO, TextIOWrapper, DEFAULT_BUFFER_SIZE, IOBase, TextIOBase, BytesIO, UnsupportedOperation
+pub fn create_io_pure_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! io_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    // DEFAULT_BUFFER_SIZE constant
+    d.insert("DEFAULT_BUFFER_SIZE".to_string(), py_int(8192));
+
+    // UnsupportedOperation — OSError subclass
+    io_func!("UnsupportedOperation", |args| {
+        let msg = if !args.is_empty() { args[0].str() } else { "unsupported operation".to_string() };
+        Err(PyError::OsError(msg))
+    });
+
+    // IOBase — abstract base class for IO
+    io_func!("IOBase", |_args| {
+        let mut type_dict = HashMap::new();
+        // __enter__ / __exit__ for context manager support
+        type_dict.insert("__enter__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__enter__".to_string(),
+            func: |args| if args.is_empty() { Ok(py_none()) } else { Ok(args[0].clone()) },
+        }));
+        type_dict.insert("__exit__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__exit__".to_string(),
+            func: |_| Ok(py_none()),
+        }));
+        Ok(PyObjectRef::new(PyObject::Type {
+            name: "IOBase".to_string(),
+            dict: type_dict,
+            bases: vec![],
+            mro: vec![],
+        }))
+    });
+
+    // TextIOBase — abstract base for text streams (direct Type object)
+    {
+        let mut type_dict = HashMap::new();
+        let enter_func = PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__enter__".to_string(),
+            func: |args| if args.is_empty() { Ok(py_none()) } else { Ok(args[0].clone()) },
+        });
+        type_dict.insert("__enter__".to_string(), enter_func);
+        d.insert("TextIOBase".to_string(), PyObjectRef::new(PyObject::Type {
+            name: "TextIOBase".to_string(),
+            dict: type_dict,
+            bases: vec![],
+            mro: vec![],
+        }));
+    }
+
+    // RawIOBase — abstract base for raw binary streams
+    d.insert("RawIOBase".to_string(), PyObjectRef::new(PyObject::Type {
+        name: "RawIOBase".to_string(),
+        dict: HashMap::new(),
+        bases: vec![],
+        mro: vec![],
+    }));
+
+    // BufferedIOBase — abstract base for buffered binary streams
+    d.insert("BufferedIOBase".to_string(), PyObjectRef::new(PyObject::Type {
+        name: "BufferedIOBase".to_string(),
+        dict: HashMap::new(),
+        bases: vec![],
+        mro: vec![],
+    }));
+
+    // StringIO — in-memory text stream
+    io_func!("StringIO", |args| {
+        let mut type_dict = HashMap::new();
+        type_dict.insert("read".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "read".to_string(), func: |args| {
+            let n = if args.len() > 1 {
+                args[1].as_i64().unwrap_or(i64::MAX) as usize
+            } else { usize::MAX };
+            // Get _buffer and _pos from self (args[0])
+            let buf = args[0].borrow().get_attribute("_buffer").unwrap_or_else(|_| py_str(""));
+            let pos = args[0].borrow().get_attribute("_pos").unwrap_or(py_int(0));
+            let pos_val = pos.as_i64().unwrap_or(0) as usize;
+            let s = buf.str();
+            let available = s.len() - pos_val.min(s.len());
+            let take = n.min(available);
+            let result = s[pos_val..pos_val + take].to_string();
+            // Update _pos
+            let _ = args[0].borrow_mut().set_attribute("_pos", py_int((pos_val + take) as i64));
+            Ok(py_str(&result))
+        }}));
+        type_dict.insert("write".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "write".to_string(), func: |args| {
+            let text = if args.len() > 1 { args[1].str() } else { String::new() };
+            let mut buf = args[0].borrow().get_attribute("_buffer").unwrap_or_else(|_| py_str(""));
+            let pos = args[0].borrow().get_attribute("_pos").unwrap_or(py_int(0));
+            let pos_val = pos.as_i64().unwrap_or(0) as usize;
+
+            let old = buf.str();
+            let mut new = old[..pos_val].to_string();
+            new.push_str(&text);
+            let _ = args[0].borrow_mut().set_attribute("_buffer", py_str(&new));
+            let _ = args[0].borrow_mut().set_attribute("_pos", py_int((pos_val + text.len()) as i64));
+            Ok(py_int(text.len() as i64))
+        }}));
+        type_dict.insert("getvalue".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "getvalue".to_string(), func: |args| {
+            let buf = args[0].borrow().get_attribute("_buffer").unwrap_or_else(|_| py_str(""));
+            Ok(buf)
+        }}));
+        type_dict.insert("readline".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "readline".to_string(), func: |args| {
+            let buf = args[0].borrow().get_attribute("_buffer").unwrap_or_else(|_| py_str(""));
+            let pos = args[0].borrow().get_attribute("_pos").unwrap_or(py_int(0));
+            let pos_val = pos.as_i64().unwrap_or(0) as usize;
+            let s = buf.str();
+            if pos_val >= s.len() { return Ok(py_str("")); }
+            let remaining = &s[pos_val..];
+            let end = remaining.find('\n').map(|i| i + 1).unwrap_or(remaining.len());
+            let result = remaining[..end].to_string();
+            let _ = args[0].borrow_mut().set_attribute("_pos", py_int((pos_val + end) as i64));
+            Ok(py_str(&result))
+        }}));
+        type_dict.insert("seek".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "seek".to_string(), func: |args| {
+            let offset = if args.len() > 1 { args[1].as_i64().unwrap_or(0) } else { 0 };
+            let whence = if args.len() > 2 { args[2].as_i64().unwrap_or(0) } else { 0 };
+            let buf = args[0].borrow().get_attribute("_buffer").unwrap_or_else(|_| py_str(""));
+            let s = buf.str();
+            let new_pos = match whence {
+                0 => offset,
+                1 => {
+                    let pos = args[0].borrow().get_attribute("_pos").unwrap_or(py_int(0));
+                    pos.as_i64().unwrap_or(0) + offset
+                }
+                2 => s.len() as i64 + offset,
+                _ => return Err(PyError::value_error("invalid whence value")),
+            };
+            let _ = args[0].borrow_mut().set_attribute("_pos", py_int(new_pos.max(0)));
+            Ok(py_int(new_pos.max(0)))
+        }}));
+        type_dict.insert("tell".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "tell".to_string(), func: |args| {
+            let pos = args[0].borrow().get_attribute("_pos").unwrap_or(py_int(0));
+            Ok(pos)
+        }}));
+        type_dict.insert("close".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "close".to_string(), func: |_| Ok(py_none()) }));
+        type_dict.insert("__enter__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "__enter__".to_string(), func: |args| if args.is_empty() { Ok(py_none()) } else { Ok(args[0].clone()) } }));
+        type_dict.insert("__exit__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "__exit__".to_string(), func: |_| Ok(py_none()) }));
+        type_dict.insert("__iter__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "__iter__".to_string(), func: |args| if args.is_empty() { Ok(py_none()) } else { Ok(args[0].clone()) } }));
+        type_dict.insert("__next__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "__next__".to_string(), func: |args| {
+            let buf = args[0].borrow().get_attribute("_buffer").unwrap_or_else(|_| py_str(""));
+            let pos = args[0].borrow().get_attribute("_pos").unwrap_or(py_int(0));
+            let pos_val = pos.as_i64().unwrap_or(0) as usize;
+            let s = buf.str();
+            if pos_val >= s.len() { return Err(PyError::StopIteration); }
+            let remaining = &s[pos_val..];
+            let end = remaining.find('\n').map(|i| i + 1).unwrap_or(remaining.len());
+            let result = remaining[..end].to_string();
+            let _ = args[0].borrow_mut().set_attribute("_pos", py_int((pos_val + end) as i64));
+            Ok(py_str(&result))
+        }}));
+        let typ = PyObjectRef::new(PyObject::Type {
+            name: "StringIO".to_string(),
+            dict: type_dict,
+            bases: vec![],
+            mro: vec![],
+        });
+        let mut instance_dict = HashMap::new();
+        let initial = if !args.is_empty() { args[0].str() } else { String::new() };
+        instance_dict.insert("_buffer".to_string(), py_str(&initial));
+        instance_dict.insert("_pos".to_string(), py_int(0));
+        Ok(PyObjectRef::new(PyObject::Instance {
+            typ,
+            dict: instance_dict,
+        }))
+    });
+
+    // BytesIO — in-memory binary stream
+    io_func!("BytesIO", |args| {
+        let mut type_dict = HashMap::new();
+        type_dict.insert("read".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "read".to_string(), func: |args| {
+            let n = if args.len() > 1 { args[1].as_i64().unwrap_or(i64::MAX) as usize } else { usize::MAX };
+            let buf = args[0].borrow().get_attribute("_buffer").unwrap_or_else(|_| PyObjectRef::imm(PyObject::Bytes(vec![])));
+            let pos = args[0].borrow().get_attribute("_pos").unwrap_or(py_int(0));
+            let pos_val = pos.as_i64().unwrap_or(0) as usize;
+            let data = match &*buf.borrow() { PyObject::Bytes(b) => b.clone(), _ => vec![] };
+            let available = data.len() - pos_val.min(data.len());
+            let take = n.min(available);
+            let result = data[pos_val..pos_val + take].to_vec();
+            let _ = args[0].borrow_mut().set_attribute("_pos", py_int((pos_val + take) as i64));
+            Ok(PyObjectRef::imm(PyObject::Bytes(result)))
+        }}));
+        type_dict.insert("write".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "write".to_string(), func: |args| {
+            let data = if args.len() > 1 {
+                match &*args[1].borrow() { PyObject::Bytes(b) => b.clone(), _ => return Err(PyError::type_error("a bytes-like object is required")) }
+            } else { vec![] };
+            let pos = args[0].borrow().get_attribute("_pos").unwrap_or(py_int(0));
+            let pos_val = pos.as_i64().unwrap_or(0) as usize;
+            let buf = args[0].borrow().get_attribute("_buffer").unwrap_or_else(|_| PyObjectRef::imm(PyObject::Bytes(vec![])));
+            let old = match &*buf.borrow() { PyObject::Bytes(b) => b.clone(), _ => vec![] };
+            let mut new = old[..pos_val].to_vec();
+            new.extend_from_slice(&data);
+            let _ = args[0].borrow_mut().set_attribute("_buffer", PyObjectRef::imm(PyObject::Bytes(new)));
+            let _ = args[0].borrow_mut().set_attribute("_pos", py_int((pos_val + data.len()) as i64));
+            Ok(py_int(data.len() as i64))
+        }}));
+        type_dict.insert("getvalue".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "getvalue".to_string(), func: |args| {
+            let buf = args[0].borrow().get_attribute("_buffer").unwrap_or_else(|_| PyObjectRef::imm(PyObject::Bytes(vec![])));
+            Ok(buf)
+        }}));
+        type_dict.insert("readline".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "readline".to_string(), func: |args| {
+            let buf = args[0].borrow().get_attribute("_buffer").unwrap_or_else(|_| PyObjectRef::imm(PyObject::Bytes(vec![])));
+            let pos = args[0].borrow().get_attribute("_pos").unwrap_or(py_int(0));
+            let pos_val = pos.as_i64().unwrap_or(0) as usize;
+            let data = match &*buf.borrow() { PyObject::Bytes(b) => b.clone(), _ => vec![] };
+            if pos_val >= data.len() { return Ok(PyObjectRef::imm(PyObject::Bytes(vec![]))); }
+            let remaining = &data[pos_val..];
+            let end = remaining.iter().position(|&b| b == b'\n').map(|i| i + 1).unwrap_or(remaining.len());
+            let result = data[pos_val..pos_val + end].to_vec();
+            let _ = args[0].borrow_mut().set_attribute("_pos", py_int((pos_val + end) as i64));
+            Ok(PyObjectRef::imm(PyObject::Bytes(result)))
+        }}));
+        type_dict.insert("seek".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "seek".to_string(), func: |args| {
+            let offset = if args.len() > 1 { args[1].as_i64().unwrap_or(0) } else { 0 };
+            let whence = if args.len() > 2 { args[2].as_i64().unwrap_or(0) } else { 0 };
+            let buf = args[0].borrow().get_attribute("_buffer").unwrap_or_else(|_| PyObjectRef::imm(PyObject::Bytes(vec![])));
+            let data = match &*buf.borrow() { PyObject::Bytes(b) => b.clone(), _ => vec![] };
+            let new_pos = match whence {
+                0 => offset,
+                1 => { let p = args[0].borrow().get_attribute("_pos").unwrap_or(py_int(0)); p.as_i64().unwrap_or(0) + offset }
+                2 => data.len() as i64 + offset,
+                _ => return Err(PyError::value_error("invalid whence value")),
+            };
+            let _ = args[0].borrow_mut().set_attribute("_pos", py_int(new_pos.max(0)));
+            Ok(py_int(new_pos.max(0)))
+        }}));
+        type_dict.insert("tell".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "tell".to_string(), func: |args| {
+            let pos = args[0].borrow().get_attribute("_pos").unwrap_or(py_int(0));
+            Ok(pos)
+        }}));
+        type_dict.insert("close".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "close".to_string(), func: |_| Ok(py_none()) }));
+        type_dict.insert("__enter__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "__enter__".to_string(), func: |args| if args.is_empty() { Ok(py_none()) } else { Ok(args[0].clone()) } }));
+        type_dict.insert("__exit__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "__exit__".to_string(), func: |_| Ok(py_none()) }));
+        let typ = PyObjectRef::new(PyObject::Type {
+            name: "BytesIO".to_string(),
+            dict: type_dict,
+            bases: vec![],
+            mro: vec![],
+        });
+        let mut instance_dict = HashMap::new();
+        let initial = if !args.is_empty() {
+            match &*args[0].borrow() { PyObject::Bytes(b) => b.clone(), _ => vec![] }
+        } else { vec![] };
+        instance_dict.insert("_buffer".to_string(), PyObjectRef::imm(PyObject::Bytes(initial)));
+        instance_dict.insert("_pos".to_string(), py_int(0));
+        Ok(PyObjectRef::new(PyObject::Instance {
+            typ,
+            dict: instance_dict,
+        }))
+    });
+
+    // TextIOWrapper — wraps a buffered stream for text I/O
+    io_func!("TextIOWrapper", |args| {
+        let mut type_dict = HashMap::new();
+        type_dict.insert("read".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "read".to_string(), func: |args| {
+            // Delegate to wrapped buffer's read if available
+            if args.len() > 1 {
+                // Try to call read on args[0] (self) — but this is a wrapper, not buffered
+                // For now, return empty string
+                Ok(py_str(""))
+            } else { Ok(py_str("")) }
+        }}));
+        type_dict.insert("write".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "write".to_string(), func: |args| {
+            Ok(py_int(0))
+        }}));
+        type_dict.insert("close".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "close".to_string(), func: |_| Ok(py_none()) }));
+        type_dict.insert("__enter__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "__enter__".to_string(), func: |args| if args.is_empty() { Ok(py_none()) } else { Ok(args[0].clone()) } }));
+        type_dict.insert("__exit__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "__exit__".to_string(), func: |_| Ok(py_none()) }));
+        let typ = PyObjectRef::new(PyObject::Type {
+            name: "TextIOWrapper".to_string(),
+            dict: type_dict,
+            bases: vec![],
+            mro: vec![],
+        });
+        Ok(PyObjectRef::new(PyObject::Instance {
+            typ,
+            dict: HashMap::new(),
+        }))
+    });
+
+    // open — reference to builtin open
+    d.insert("open".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "open".to_string(),
+        func: |args| crate::object::builtin_open(args),
+    }));
+
+    d
+}
+
 pub fn create_dis_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! dis_func {
@@ -600,6 +896,17 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
     inspect_func!("getouterframes", |_args| Ok(py_list(vec![])));
     inspect_func!("getinnerframes", |_args| Ok(py_list(vec![])));
 
+    // Parameter class stub (needed by Django's inspect module usage)
+    let mut param_type_dict = HashMap::new();
+    param_type_dict.insert("POSITIONAL_ONLY".to_string(), py_int(0));
+    param_type_dict.insert("POSITIONAL_OR_KEYWORD".to_string(), py_int(1));
+    param_type_dict.insert("VAR_POSITIONAL".to_string(), py_int(2));
+    param_type_dict.insert("KEYWORD_ONLY".to_string(), py_int(3));
+    param_type_dict.insert("VAR_KEYWORD".to_string(), py_int(4));
+    param_type_dict.insert("empty".to_string(), py_none());
+    d.insert("Parameter".to_string(), PyObjectRef::new(PyObject::Type { name: "Parameter".to_string(), dict: param_type_dict, bases: vec![], mro: vec![] }));
+    d.insert("Signature".to_string(), PyObjectRef::new(PyObject::Type { name: "Signature".to_string(), dict: HashMap::new(), bases: vec![], mro: vec![] }));
+
     d
 }
 
@@ -618,9 +925,7 @@ pub fn create_profile_dict() -> HashMap<String, PyObjectRef> {
             return Err(PyError::type_error("run() missing required argument (statement)"));
         }
         let cmd = args[0].str();
-        let vm_ptr = crate::object::VM_PTR.with(|p| *p.borrow());
-        if let Some(ptr) = vm_ptr {
-            let vm = unsafe { &mut *ptr };
+        let _ = crate::object::with_vm_mut(|vm| {
             let mut parser = crate::parser::Parser::new(&cmd);
             if let Ok(program) = parser.parse_program() {
                 let mut compiler = crate::compiler::Compiler::new();
@@ -628,7 +933,7 @@ pub fn create_profile_dict() -> HashMap<String, PyObjectRef> {
                     let _ = vm.exec_code(code, None);
                 }
             }
-        }
+        });
         Ok(py_none())
     });
 
@@ -639,9 +944,7 @@ pub fn create_profile_dict() -> HashMap<String, PyObjectRef> {
         let cmd = args[0].str();
         let _globals = &args[1];
         let _locals = &args[2];
-        let vm_ptr = crate::object::VM_PTR.with(|p| *p.borrow());
-        if let Some(ptr) = vm_ptr {
-            let vm = unsafe { &mut *ptr };
+        let _ = crate::object::with_vm_mut(|vm| {
             let mut parser = crate::parser::Parser::new(&cmd);
             if let Ok(program) = parser.parse_program() {
                 let mut compiler = crate::compiler::Compiler::new();
@@ -649,7 +952,7 @@ pub fn create_profile_dict() -> HashMap<String, PyObjectRef> {
                     let _ = vm.exec_code(code, None);
                 }
             }
-        }
+        });
         Ok(py_none())
     });
 
@@ -780,9 +1083,7 @@ pub fn create_trace_dict() -> HashMap<String, PyObjectRef> {
             name: "run".to_string(),
             func: |args| {
                 let cmd = if !args.is_empty() { args[0].str() } else { String::new() };
-                let vm_ptr = crate::object::VM_PTR.with(|p| *p.borrow());
-                if let Some(ptr) = vm_ptr {
-                    let vm = unsafe { &mut *ptr };
+                let _ = crate::object::with_vm_mut(|vm| {
                     let mut parser = crate::parser::Parser::new(&cmd);
                     if let Ok(program) = parser.parse_program() {
                         let mut compiler = crate::compiler::Compiler::new();
@@ -790,7 +1091,7 @@ pub fn create_trace_dict() -> HashMap<String, PyObjectRef> {
                             let _ = vm.exec_code(code, None);
                         }
                     }
-                }
+                });
                 Ok(py_none())
             },
         }));
@@ -960,6 +1261,12 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
         let mode = if args.len() > 1 { args[1].str() } else { "r".to_string() };
         let file = if let Some(fd) = args[0].as_i64() {
             use std::os::unix::io::FromRawFd;
+            if fd < 0 {
+                return Err(PyError::OsError("invalid file descriptor".to_string()));
+            }
+            // SAFETY: from_raw_fd is inherently unsafe because the caller must
+            // guarantee the fd is valid and ownership is transferred. We at least
+            // verify fd >= 0 as a basic sanity check.
             unsafe { std::fs::File::from_raw_fd(fd as i32) }
         } else {
             std::fs::File::options()
@@ -1045,20 +1352,178 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
     d.insert("DEFAULT_BUFFER_SIZE".to_string(), py_int(8192));
     d.insert("BlockingIOError".to_string(), py_str("BlockingIOError"));
     d.insert("UnsupportedOperation".to_string(), py_str("UnsupportedOperation"));
-    d.insert("_IOBase".to_string(), py_str("_IOBase"));
-    d.insert("_RawIOBase".to_string(), py_str("_RawIOBase"));
-    d.insert("_BufferedIOBase".to_string(), py_str("_BufferedIOBase"));
-    d.insert("_TextIOBase".to_string(), py_str("_TextIOBase"));
-    d.insert("IOBase".to_string(), py_str("IOBase"));
-    d.insert("RawIOBase".to_string(), py_str("RawIOBase"));
-    d.insert("BufferedIOBase".to_string(), py_str("BufferedIOBase"));
-    d.insert("TextIOBase".to_string(), py_str("TextIOBase"));
-    d.insert("BufferedReader".to_string(), py_str("BufferedReader"));
-    d.insert("BufferedWriter".to_string(), py_str("BufferedWriter"));
-    d.insert("BufferedRWPair".to_string(), py_str("BufferedRWPair"));
-    d.insert("BufferedRandom".to_string(), py_str("BufferedRandom"));
-    d.insert("TextIOWrapper".to_string(), py_str("TextIOWrapper"));
-    d.insert("StringIO".to_string(), py_str("StringIO"));
+
+    // ── IO Base Classes ─────────────────────────────────────────────────────────
+
+    // IOBase — abstract base class with close, closed, __enter__, __exit__
+    let mut iobase_dict = HashMap::new();
+    iobase_dict.insert("__init__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "__init__".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
+    }));
+    iobase_dict.insert("close".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "close".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
+    }));
+    let closed_getter = PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "closed".to_string(), func: |_: &[PyObjectRef]| Ok(py_bool(false)),
+    });
+    iobase_dict.insert("closed".to_string(), PyObjectRef::new(PyObject::Property {
+        getter: Some(closed_getter), setter: None, deleter: None, doc: None,
+    }));
+    iobase_dict.insert("__enter__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "__enter__".to_string(), func: |args: &[PyObjectRef]| Ok(args[0].clone()),
+    }));
+    iobase_dict.insert("__exit__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "__exit__".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
+    }));
+    let iobase_cls = PyObjectRef::new(PyObject::Type {
+        name: "IOBase".to_string(), dict: iobase_dict, bases: vec![], mro: vec![],
+    });
+    d.insert("IOBase".to_string(), iobase_cls.clone());
+    d.insert("_IOBase".to_string(), iobase_cls.clone());
+
+    // RawIOBase — extends IOBase
+    let mut raw_dict = HashMap::new();
+    raw_dict.insert("__init__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "__init__".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
+    }));
+    raw_dict.insert("read".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "read".to_string(), func: |_: &[PyObjectRef]| Ok(PyObjectRef::imm(PyObject::Bytes(vec![]))),
+    }));
+    raw_dict.insert("readinto".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "readinto".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
+    }));
+    raw_dict.insert("write".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "write".to_string(), func: |_: &[PyObjectRef]| Ok(py_int(0)),
+    }));
+    raw_dict.insert("close".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "close".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
+    }));
+    let raw_cls = PyObjectRef::new(PyObject::Type {
+        name: "RawIOBase".to_string(), dict: raw_dict,
+        bases: vec![iobase_cls.clone()], mro: vec![iobase_cls.clone()],
+    });
+    d.insert("RawIOBase".to_string(), raw_cls.clone());
+    d.insert("_RawIOBase".to_string(), raw_cls.clone());
+
+    // BufferedIOBase — extends IOBase
+    let mut buf_dict = HashMap::new();
+    buf_dict.insert("__init__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "__init__".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
+    }));
+    buf_dict.insert("read".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "read".to_string(), func: |_: &[PyObjectRef]| Ok(PyObjectRef::imm(PyObject::Bytes(vec![]))),
+    }));
+    buf_dict.insert("read1".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "read1".to_string(), func: |_: &[PyObjectRef]| Ok(PyObjectRef::imm(PyObject::Bytes(vec![]))),
+    }));
+    buf_dict.insert("write".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "write".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
+    }));
+    buf_dict.insert("close".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "close".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
+    }));
+    let buf_cls = PyObjectRef::new(PyObject::Type {
+        name: "BufferedIOBase".to_string(), dict: buf_dict,
+        bases: vec![iobase_cls.clone()], mro: vec![iobase_cls.clone()],
+    });
+    d.insert("BufferedIOBase".to_string(), buf_cls.clone());
+    d.insert("_BufferedIOBase".to_string(), buf_cls.clone());
+
+    // TextIOBase — text I/O base class (extends IOBase)
+    let mut text_dict = HashMap::new();
+    text_dict.insert("__init__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "__init__".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
+    }));
+    text_dict.insert("read".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "read".to_string(), func: |_: &[PyObjectRef]| Ok(py_str("")),
+    }));
+    text_dict.insert("write".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "write".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
+    }));
+    text_dict.insert("close".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "close".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
+    }));
+    let text_cls = PyObjectRef::new(PyObject::Type {
+        name: "TextIOBase".to_string(), dict: text_dict,
+        bases: vec![iobase_cls.clone()], mro: vec![iobase_cls.clone()],
+    });
+    d.insert("TextIOBase".to_string(), text_cls.clone());
+    d.insert("_TextIOBase".to_string(), text_cls.clone());
+
+    // StringIO — in-memory text buffer, factory with Rc<RefCell<String>> via Closures
+    let stringio_closure: Rc<dyn Fn(&[PyObjectRef]) -> PyResult<PyObjectRef>> = Rc::new(move |args: &[PyObjectRef]| {
+        let initial_value = if !args.is_empty() { args[0].str() } else { String::new() };
+        let buffer = Rc::new(RefCell::new(initial_value));
+        let mut type_dict = HashMap::new();
+
+        // __init__ — no-op (initial_value already consumed by factory)
+        type_dict.insert("__init__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__init__".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
+        }));
+
+        // read — return full buffer contents
+        let b_read = buffer.clone();
+        type_dict.insert("read".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
+            Ok(py_str(&b_read.borrow()))
+        }))));
+
+        // write — append text to buffer
+        let b_write = buffer.clone();
+        type_dict.insert("write".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |w_args: &[PyObjectRef]| {
+            let text = if !w_args.is_empty() { w_args[0].str() } else { String::new() };
+            b_write.borrow_mut().push_str(&text);
+            Ok(py_int(text.len()))
+        }))));
+
+        // getvalue — return current buffer contents
+        let b_get = buffer.clone();
+        type_dict.insert("getvalue".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
+            Ok(py_str(&b_get.borrow()))
+        }))));
+
+        // close — no-op
+        type_dict.insert("close".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
+            Ok(py_none())
+        }))));
+
+        // seek — stub
+        type_dict.insert("seek".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
+            Ok(py_int(0))
+        }))));
+
+        // tell — stub
+        type_dict.insert("tell".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
+            Ok(py_int(0))
+        }))));
+
+        Ok(PyObjectRef::new(PyObject::Instance {
+            typ: PyObjectRef::new(PyObject::Type {
+                name: "StringIO".to_string(), dict: type_dict,
+                bases: vec![text_cls.clone()], mro: vec![text_cls.clone()],
+            }),
+            dict: HashMap::new(),
+        }))
+    });
+    d.insert("StringIO".to_string(), PyObjectRef::new(PyObject::Closure(stringio_closure)));
+
+    // BufferedReader, BufferedWriter, BufferedRWPair, BufferedRandom — stubs
+    let br_dict = HashMap::new(); let br_cls = PyObjectRef::new(PyObject::Type { name: "BufferedReader".to_string(), dict: br_dict, bases: vec![buf_cls.clone()], mro: vec![buf_cls.clone()] });
+    d.insert("BufferedReader".to_string(), br_cls.clone());
+    let bw_dict = HashMap::new(); let bw_cls = PyObjectRef::new(PyObject::Type { name: "BufferedWriter".to_string(), dict: bw_dict, bases: vec![buf_cls.clone()], mro: vec![buf_cls.clone()] });
+    d.insert("BufferedWriter".to_string(), bw_cls.clone());
+    let brp_dict = HashMap::new(); let brp_cls = PyObjectRef::new(PyObject::Type { name: "BufferedRWPair".to_string(), dict: brp_dict, bases: vec![buf_cls.clone()], mro: vec![buf_cls.clone()] });
+    d.insert("BufferedRWPair".to_string(), brp_cls.clone());
+    let brnd_dict = HashMap::new(); let brnd_cls = PyObjectRef::new(PyObject::Type { name: "BufferedRandom".to_string(), dict: brnd_dict, bases: vec![buf_cls.clone()], mro: vec![buf_cls.clone()] });
+    d.insert("BufferedRandom".to_string(), brnd_cls.clone());
+
+    // TextIOWrapper — stub type needed by io.py
+    let mut tiw_dict = HashMap::new();
+    tiw_dict.insert("read".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "read".to_string(), func: |_: &[PyObjectRef]| Ok(py_str("")) }));
+    tiw_dict.insert("write".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "write".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()) }));
+    tiw_dict.insert("close".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "close".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()) }));
+    let tiw_cls = PyObjectRef::new(PyObject::Type { name: "TextIOWrapper".to_string(), dict: tiw_dict, bases: vec![], mro: vec![] });
+    d.insert("TextIOWrapper".to_string(), tiw_cls);
+
     d.insert("_WindowsConsoleIO".to_string(), py_str("_WindowsConsoleIO"));
 
     d

@@ -1,3 +1,8 @@
+// Only compile the JIT when the `jit` feature is enabled.
+// The JIT uses Cranelift to compile hot Python bytecode to native code.
+// Without this feature, all Python code runs purely in the interpreter.
+#![cfg(feature = "jit")]
+
 use std::collections::HashSet;
 use std::collections::HashMap;
 use std::cell::RefCell;
@@ -771,6 +776,9 @@ impl JitCompiler {
                 crate::object::py_str(&s)
             }
             ConstValue::Code(_) => crate::object::py_none(),
+            ConstValue::Tuple(items) => crate::object::PyObjectRef::imm(crate::object::PyObject::Tuple(
+                items.iter().map(|s| crate::object::py_str(s)).collect()
+            )),
         }).collect()
     }
 

@@ -1,6 +1,115 @@
 use crate::object::*;
 use std::collections::HashMap;
 
+/// Build a re.Match object with group(), groups(), start(), end(), span() methods.
+/// Returns None if the regex didn't match.
+fn make_match_object(re_match: Option<regex::Match<'_>>, num_groups: usize) -> PyObjectRef {
+    match re_match {
+        Some(m) => {
+            let start_pos = m.start();
+            let end_pos = m.end();
+            let text = m.as_str().to_string();
+
+            let mut type_dict = HashMap::new();
+
+            // group() — returns the matched text
+            type_dict.insert("group".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "group".to_string(),
+                func: |args| {
+                    let text_attr = args[0].borrow().get_attribute("_text").unwrap_or_else(|_| py_str(""));
+                    Ok(text_attr)
+                },
+            }));
+
+            // groups() — returns tuple of captured groups (empty tuple for no captures)
+            type_dict.insert("groups".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "groups".to_string(),
+                func: |args| {
+                    let groups_attr = args[0].borrow().get_attribute("_groups").unwrap_or_else(|_| py_tuple(vec![]));
+                    Ok(groups_attr)
+                },
+            }));
+
+            // start() — returns start position
+            type_dict.insert("start".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "start".to_string(),
+                func: |args| {
+                    let start_attr = args[0].borrow().get_attribute("_start").unwrap_or(py_int(0));
+                    Ok(start_attr)
+                },
+            }));
+
+            // end() — returns end position
+            type_dict.insert("end".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "end".to_string(),
+                func: |args| {
+                    let end_attr = args[0].borrow().get_attribute("_end").unwrap_or(py_int(0));
+                    Ok(end_attr)
+                },
+            }));
+
+            // span() — returns (start, end) tuple
+            type_dict.insert("span".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "span".to_string(),
+                func: |args| {
+                    let start_attr = args[0].borrow().get_attribute("_start").unwrap_or(py_int(0));
+                    let end_attr = args[0].borrow().get_attribute("_end").unwrap_or(py_int(0));
+                    Ok(py_tuple(vec![start_attr, end_attr]))
+                },
+            }));
+
+            // __getitem__ — match[0] returns full match, match[n] returns group
+            type_dict.insert("__getitem__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__getitem__".to_string(),
+                func: |args| {
+                    if args.len() < 2 { return Err(PyError::type_error("__getitem__ requires index")); }
+                    let idx = args[1].as_i64().unwrap_or(0) as usize;
+                    if idx == 0 {
+                        let text_attr = args[0].borrow().get_attribute("_text").unwrap_or_else(|_| py_str(""));
+                        Ok(text_attr)
+                    } else {
+                        let obj = args[0].borrow();
+                        let groups_attr = obj.get_attribute("_groups").unwrap_or_else(|_| py_tuple(vec![]));
+                        let groups_borrowed = groups_attr.borrow();
+                        match &*groups_borrowed {
+                            PyObject::Tuple(items) => {
+                                if idx - 1 < items.len() { Ok(items[idx - 1].clone()) }
+                                else { Ok(py_none()) }
+                            }
+                            _ => Ok(py_none()),
+                        }
+                    }
+                },
+            }));
+
+            // __bool__ — always True for a successful match
+            type_dict.insert("__bool__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__bool__".to_string(),
+                func: |_| Ok(py_bool(true)),
+            }));
+
+            let typ = PyObjectRef::new(PyObject::Type {
+                name: "Match".to_string(),
+                dict: type_dict,
+                bases: vec![],
+                mro: vec![],
+            });
+
+            let mut instance_dict = HashMap::new();
+            instance_dict.insert("_text".to_string(), py_str(&text));
+            instance_dict.insert("_start".to_string(), py_int(start_pos as i64));
+            instance_dict.insert("_end".to_string(), py_int(end_pos as i64));
+            instance_dict.insert("_groups".to_string(), py_tuple(vec![])); // No capture groups for now
+
+            PyObjectRef::new(PyObject::Instance {
+                typ,
+                dict: instance_dict,
+            })
+        }
+        None => py_none(),
+    }
+}
+
 pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! re_func {
@@ -17,15 +126,8 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         let string = args[1].str();
         match regex::Regex::new(&pattern) {
             Ok(re) => {
-                match re.find(&string) {
-                    Some(m) => {
-                        let start = m.start();
-                        let end = m.end();
-                        let text = m.as_str().to_string();
-                        Ok(py_tuple(vec![py_int(start as i64), py_int(end as i64), py_str(&text)]))
-                    }
-                    None => Ok(py_none()),
-                }
+                let matched = re.find(&string);
+                Ok(make_match_object(matched, 0))
             }
             Err(e) => Err(PyError::ValueError(format!("invalid regex: {}", e))),
         }
@@ -39,14 +141,29 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         let string = args[1].str();
         match regex::Regex::new(&pattern) {
             Ok(re) => {
-                match re.find_at(&string, 0) {
-                    Some(m) if m.start() == 0 => {
-                        let end = m.end();
-                        let text = m.as_str().to_string();
-                        Ok(py_tuple(vec![py_int(0), py_int(end as i64), py_str(&text)]))
-                    }
-                    _ => Ok(py_none()),
-                }
+                let matched = re.find_at(&string, 0);
+                // Only succeed if match starts at position 0
+                let result = match matched {
+                    Some(m) if m.start() == 0 => Some(m),
+                    _ => None,
+                };
+                Ok(make_match_object(result, 0))
+            }
+            Err(e) => Err(PyError::ValueError(format!("invalid regex: {}", e))),
+        }
+    });
+
+    re_func!("fullmatch", |args| {
+        if args.len() < 2 {
+            return Err(PyError::type_error("fullmatch() takes at least 2 arguments"));
+        }
+        let pattern = args[0].str();
+        let string = args[1].str();
+        match regex::Regex::new(&pattern) {
+            Ok(re) => {
+                let result = re.find(&string)
+                    .filter(|m| m.start() == 0 && m.end() == string.len());
+                Ok(make_match_object(result, 0))
             }
             Err(e) => Err(PyError::ValueError(format!("invalid regex: {}", e))),
         }
@@ -122,6 +239,46 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
             Err(e) => Err(PyError::ValueError(format!("invalid regex: {}", e))),
         }
     });
+
+    // finditer — returns a list of Match objects (not a lazy iterator, but sufficient for Django)
+    re_func!("finditer", |args| {
+        if args.len() < 2 {
+            return Err(PyError::type_error("finditer() takes at least 2 arguments"));
+        }
+        let pattern = args[0].str();
+        let string = args[1].str();
+        match regex::Regex::new(&pattern) {
+            Ok(re) => {
+                let matches: Vec<PyObjectRef> = re.find_iter(&string)
+                    .map(|m| make_match_object(Some(m), 0))
+                    .collect();
+                // Return a list that can be iterated over
+                Ok(py_list(matches))
+            }
+            Err(e) => Err(PyError::ValueError(format!("invalid regex: {}", e))),
+        }
+    });
+
+    re_func!("escape", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("escape() missing required argument"));
+        }
+        let s = args[0].str();
+        let escaped = regex::escape(&s);
+        Ok(py_str(&escaped))
+    });
+
+    // Regex compile flags
+    d.insert("IGNORECASE".to_string(), py_int(2));
+    d.insert("ASCII".to_string(), py_int(256));
+    d.insert("DOTALL".to_string(), py_int(16));
+    d.insert("MULTILINE".to_string(), py_int(8));
+    d.insert("VERBOSE".to_string(), py_int(64));
+    d.insert("I".to_string(), py_int(2));
+    d.insert("A".to_string(), py_int(256));
+    d.insert("S".to_string(), py_int(16));
+    d.insert("M".to_string(), py_int(8));
+    d.insert("X".to_string(), py_int(64));
 
     d
 }
@@ -501,6 +658,8 @@ pub fn create_types_dict() -> HashMap<String, PyObjectRef> {
     });
     d.insert("CodeType".to_string(), py_str("code"));
     d.insert("MappingProxyType".to_string(), py_str("mappingproxy"));
+    // GenericAlias — used for generic type annotations like list[int], dict[str, int]
+    d.insert("GenericAlias".to_string(), py_str("types.GenericAlias"));
 
     d
 }
@@ -2170,6 +2329,7 @@ pub fn create_gc_dict() -> HashMap<String, PyObjectRef> {
     }
 
     // Wire gc.collect() to the actual generational GC in gc.rs
+    #[cfg(feature = "gc")]
     gc_func!("collect", |_| {
         crate::gc::GC_HEAP.with(|heap| {
             heap.borrow_mut().collect();
@@ -2178,6 +2338,10 @@ pub fn create_gc_dict() -> HashMap<String, PyObjectRef> {
             *heap.borrow().stats()
         });
         Ok(py_int(stats.freed as i64))
+    });
+    #[cfg(not(feature = "gc"))]
+    gc_func!("collect", |_| {
+        Ok(py_int(0))
     });
 
     gc_func!("enable", |_| {
@@ -4414,40 +4578,33 @@ pub fn create_asyncio_dict() -> HashMap<String, PyObjectRef> {
     // asyncio.run(coro): Minimal event loop
     asyncio_func!("run", |args| {
         let coro = args[0].clone();
-        // Get the global VM pointer
-        let vm_ptr = crate::object::VM_PTR.with(|p| *p.borrow()).ok_or_else(|| {
-            crate::object::PyError::runtime_error("no active VM")
-        })?;
-        // Safety: VM is guaranteed alive during this call
-        let vm = unsafe { &mut *vm_ptr };
-        // Create a new frame to run the coroutine
-        let coro_borrowed = coro.borrow();
-        if let crate::object::PyObject::Coroutine { ref frame } = &*coro_borrowed {
-            let frame_borrowed = frame.borrow();
-            if let Some(ref coro_frame) = *frame_borrowed {
-                // We need to push this frame onto the VM and execute
-                let mut coro_frame_clone = coro_frame.clone();
-                coro_frame_clone.module_globals = None;
-                // Execute until completion
-                vm.frames.push(coro_frame_clone);
-                let result = vm.execute();
-                vm.frames.pop();
-                return result;
+        crate::object::with_vm_mut(|vm| {
+            let coro_borrowed = coro.borrow();
+            if let crate::object::PyObject::Coroutine { ref frame } = &*coro_borrowed {
+                let frame_borrowed = frame.borrow();
+                if let Some(ref coro_frame) = *frame_borrowed {
+                    let mut coro_frame_clone = coro_frame.clone();
+                    coro_frame_clone.module_globals = None;
+                    vm.frames.push(coro_frame_clone);
+                    let result = vm.execute();
+                    vm.frames.pop();
+                    return result;
+                }
             }
-        }
-        // If not a coroutine, try calling it directly
-        let coro_clone = coro.clone();
-        let send_attr = coro_clone.borrow().get_attribute("send").ok();
-        if let Some(send_method) = send_attr {
-            let result = crate::object::call_bound_method(send_method, coro.clone(), vec![crate::object::py_none()]);
-            match result {
-                Ok(val) => Ok(val),
-                Err(crate::object::PyError::StopIteration) => Ok(crate::object::py_none()),
-                Err(e) => Err(e),
+            // If not a coroutine, try calling it directly
+            let coro_clone = coro.clone();
+            let send_attr = coro_clone.borrow().get_attribute("send").ok();
+            if let Some(send_method) = send_attr {
+                let result = crate::object::call_bound_method(send_method, coro.clone(), vec![crate::object::py_none()]);
+                match result {
+                    Ok(val) => Ok(val),
+                    Err(crate::object::PyError::StopIteration) => Ok(crate::object::py_none()),
+                    Err(e) => Err(e),
+                }
+            } else {
+                crate::object::call_bound_method(coro.clone(), coro.clone(), vec![])
             }
-        } else {
-            crate::object::call_bound_method(coro.clone(), coro.clone(), vec![])
-        }
+        })?
     });
 
     // asyncio.sleep(delay) -> Future

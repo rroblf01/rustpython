@@ -1,3 +1,4 @@
+#![cfg(feature = "gc")]
 /// Simple mark-sweep garbage collector for RustPython.
 ///
 /// Replaces `Rc<RefCell<PyObject>>` with a tracing GC that:
