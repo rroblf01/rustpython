@@ -157,6 +157,7 @@ impl VirtualMachine {
          let mut modules = HashMap::new();
          modules.insert("builtins".to_string(), create_module("builtins", builtins.clone()));
          modules.insert("math".to_string(), create_module("math", create_math_dict()));
+         modules.insert("_codecs".to_string(), create_module("_codecs", create_codecs_dict()));
 
          let sys_dict = create_sys_dict(argv);
          modules.insert("sys".to_string(), create_module("sys", sys_dict.clone()));
@@ -3090,6 +3091,39 @@ impl VirtualMachine {
                     PyError::runtime_error("name index out of range")
                 })?.clone();
                 let module = self.frames[fi].peek(0)?;
+                // Handle 'from module import *' — when the imported name is '*',
+                // iterate over the module's dict and store all names in current scope
+                if name == "*" {
+                    let module_borrowed = module.borrow();
+                    if let PyObject::Module { dict, .. } = &*module_borrowed {
+                        // Use __all__ if present, otherwise all non-underscore names
+                        let names_to_import: Vec<String> = if let Some(all_val) = dict.get("__all__") {
+                            let all_borrowed = all_val.borrow();
+                            match &*all_borrowed {
+                                PyObject::Tuple(items) | PyObject::List(items) => {
+                                    items.iter().filter_map(|n| {
+                                        if let PyObject::Str(s) = &*n.borrow() { Some(s.clone()) } else { None }
+                                    }).collect()
+                                }
+                                _ => dict.keys().filter(|k| !k.starts_with('_')).cloned().collect(),
+                            }
+                        } else {
+                            dict.keys().filter(|k| !k.starts_with('_')).cloned().collect()
+                        };
+                        // Collect name-value pairs before dropping borrow
+                        let imports: Vec<(String, PyObjectRef)> = names_to_import.iter()
+                            .filter_map(|name| dict.get(name).map(|val| (name.clone(), val.clone())))
+                            .collect();
+                        drop(module_borrowed);
+                        for (import_name, val) in &imports {
+                            self.frames[fi].globals.borrow_mut().insert(import_name.clone(), val.clone());
+                        }
+                        // Push placeholder module result (the loop above already pushed values)
+                        // The POP_TOP after IMPORT_FROM loop will clean up
+                        self.frames[fi].push(py_none());
+                        return Ok(None);
+                    }
+                }
                 // Check if name is in module's dict first (without holding borrow)
                 let found = {
                     let obj = module.borrow();
