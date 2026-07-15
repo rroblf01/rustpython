@@ -1918,7 +1918,18 @@ pub fn contains_op(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<bool> {
             PyObject::Instance { typ, .. } => {
                 let typ_ref = typ.borrow();
                 match &*typ_ref {
-                    PyObject::Type { dict: type_dict, .. } => type_dict.get("__contains__").cloned(),
+                    PyObject::Type { dict: type_dict, mro, .. } => {
+                        type_dict.get("__contains__").cloned().or_else(|| {
+                            for base in mro.iter() {
+                                if let PyObject::Type { dict: base_dict, .. } = &*base.borrow() {
+                                    if let Some(val) = base_dict.get("__contains__") {
+                                        return Some(val.clone());
+                                    }
+                                }
+                            }
+                            None
+                        })
+                    }
                     _ => None,
                 }
             }
