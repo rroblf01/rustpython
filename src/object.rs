@@ -162,7 +162,28 @@ impl PyObjectRef {
     }
 
     pub fn repr(&self) -> String { self.borrow().repr() }
-    pub fn str(&self) -> String { self.borrow().str() }
+    pub fn str(&self) -> String {
+        // Check for __str__ on Instance types (user-defined objects)
+        let str_func = {
+            let obj = self.borrow();
+            match &*obj {
+                PyObject::Instance { typ, .. } => {
+                    let typ_ref = typ.borrow();
+                    match &*typ_ref {
+                        PyObject::Type { dict: type_dict, .. } => type_dict.get("__str__").cloned(),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            }
+        };
+        if let Some(f) = str_func {
+            if let Ok(result) = call_bound_method(f, self.clone(), vec![]) {
+                return result.str();
+            }
+        }
+        self.borrow().str()
+    }
     pub fn truthy(&self) -> bool {
         match self {
             PyObjectRef::SmallInt(n) => *n != 0,
@@ -2050,7 +2071,12 @@ pub fn builtin_type_of(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             PyObject::Type { .. } => Ok(args[0].clone()),
             _ => {
                 let name = borrowed.type_name();
-                Ok(PyObjectRef::imm(PyObject::Str(compact_str::CompactString::from(name))))
+                Ok(PyObjectRef::new(PyObject::Type {
+                    name,
+                    dict: HashMap::new(),
+                    bases: vec![],
+                    mro: vec![],
+                }))
             }
         }
     } else if args.len() == 3 {
@@ -2254,16 +2280,27 @@ pub fn builtin_str(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     else {
         let f = {
             let obj_borrowed = args[0].borrow();
-            match &*obj_borrowed {
-                PyObject::Instance { typ, .. } => {
-                    let typ_ref = typ.borrow();
-                    match &*typ_ref {
-                        PyObject::Type { dict: type_dict, .. } => type_dict.get("__str__").cloned(),
-                        _ => None,
+            if let PyObject::Instance { typ, .. } = &*obj_borrowed {
+                let typ_ref = typ.borrow();
+                if let PyObject::Type { dict: type_dict, mro, .. } = &*typ_ref {
+                    // Check own dict first
+                    let own = type_dict.get("__str__").cloned();
+                    if let Some(f) = own { Some(f) }
+                    else {
+                        // Walk MRO for inherited __str__
+                        let mut found = None;
+                        for base_type in mro {
+                            if let PyObject::Type { dict: base_dict, .. } = &*base_type.borrow() {
+                                if let Some(f) = base_dict.get("__str__") {
+                                    found = Some(f.clone());
+                                    break;
+                                }
+                            }
+                        }
+                        found
                     }
-                }
-                _ => None,
-            }
+                } else { None }
+            } else { None }
         };
         if let Some(f) = f {
             return call_bound_method(f, args[0].clone(), vec![]);
@@ -3174,6 +3211,9 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         PyObject::FrozenSet(s) => Ok(py_list(s.to_vec())),
         PyObject::Range { start, stop, step } => {
             Ok(PyObjectRef::new(PyObject::RangeIter { current: *start, stop: *stop, step: *step }))
+        }
+        PyObject::List(v) => {
+            Ok(PyObjectRef::new(PyObject::ListIter { list: v.clone(), index: 0 }))
         }
         _ => Ok(args[0].clone()),
     }
@@ -4228,12 +4268,24 @@ impl ObjectAccess for PyObject {
                 }
                 // Check own dict first
                 if let Some(val) = dict.get(name).cloned() {
+                    // Unwrap staticmethod descriptor so type access returns the function directly
+                    let b = val.borrow();
+                    if let PyObject::StaticMethod { func } = &*b {
+                        return Ok(func.clone());
+                    }
+                    drop(b);
                     return Ok(val);
                 }
                 // Check MRO (skip self)
                 for base in mro.iter().skip(1) {
                     if let PyObject::Type { dict: base_dict, .. } = &*base.borrow() {
                         if let Some(val) = base_dict.get(name) {
+                            // Unwrap staticmethod descriptor from MRO bases
+                            let b = val.borrow();
+                            if let PyObject::StaticMethod { func } = &*b {
+                                return Ok(func.clone());
+                            }
+                            drop(b);
                             return Ok(val.clone());
                         }
                     }
