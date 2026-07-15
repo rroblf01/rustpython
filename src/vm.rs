@@ -3898,13 +3898,12 @@ fn c3_linearize(bases: &[PyObjectRef]) -> PyResult<Vec<PyObjectRef>> {
         let mut found = false;
         'candidate: for list in &non_empty {
             let candidate = &list[0];
-            let candidate_name = candidate.borrow().type_name();
 
             // Check if candidate appears in the tail of any other non-empty list
             for other in &non_empty {
                 if other.len() > 1 {
                     for item in &other[1..] {
-                        if item.borrow().type_name() == candidate_name {
+                        if item.is(candidate) {
                             continue 'candidate;
                         }
                     }
@@ -3913,8 +3912,10 @@ fn c3_linearize(bases: &[PyObjectRef]) -> PyResult<Vec<PyObjectRef>> {
 
             // Candidate is valid — add to result and remove from all heads
             result.push(candidate.clone());
+            // Clone before mutable borrow to break borrow checker conflict
+            let candidate_clone = candidate.clone();
             for list in &mut lists {
-                if !list.is_empty() && list[0].borrow().type_name() == candidate_name {
+                if !list.is_empty() && list[0].is(&candidate_clone) {
                     list.remove(0);
                 }
             }
