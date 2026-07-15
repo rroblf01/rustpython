@@ -1901,9 +1901,7 @@ impl Compiler {
                 None
             }
         });
-        eprintln!("DEBUG fn '{}': body.len={}, docstring={:?}, stmt_kind={:?}",
-            name, body.len(), docstring,
-            body.first().map(|s| std::mem::discriminant(s)));
+
         let body = if docstring.is_some() {
             eprintln!("DEBUG fn '{}': docstring FOUND, slicing body[1..] -> len={}", name, body.len().saturating_sub(1));
             &body[1..]
