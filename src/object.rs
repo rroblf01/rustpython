@@ -2,7 +2,6 @@ use std::rc::Rc;
 use std::cell::RefCell;
 
 /// Extension trait adding InternedMap-compatible methods to HashMap<String, PyObjectRef>.
-/// Allows gradual migration: code uses get_str/insert_str, works with both HashMap and InternedMap.
 pub trait DictMap {
     fn get_str(&self, name: &str) -> Option<&PyObjectRef>;
     fn insert_str(&mut self, name: &str, val: PyObjectRef) -> Option<PyObjectRef>;
@@ -13,6 +12,7 @@ impl DictMap for HashMap<String, PyObjectRef> {
     fn insert_str(&mut self, name: &str, val: PyObjectRef) -> Option<PyObjectRef> { self.insert(name.to_string(), val) }
     fn contains_key_str(&self, name: &str) -> bool { self.contains_key(name) }
 }
+
 use std::fmt;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicUsize;
