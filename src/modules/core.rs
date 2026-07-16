@@ -291,6 +291,46 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
             }))
         },
     }));
+    // __init_subclass__(cls, **kwargs): no-op (PEP 487)
+    object_dict.insert("__init_subclass__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "__init_subclass__".to_string(),
+        func: |args| {
+            Ok(py_none())
+        },
+    }));
+    // __class_getitem__(cls, item): for generic types like List[int] (PEP 560)
+    object_dict.insert("__class_getitem__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "__class_getitem__".to_string(),
+        func: |args| {
+            if args.len() < 2 {
+                return Err(PyError::type_error("__class_getitem__ requires at least 2 arguments (cls, item)"));
+            }
+            Ok(py_tuple(vec![args[0].clone(), args[1].clone()]))
+        },
+    }));
+    // __format__(self, format_spec): basic format support
+    object_dict.insert("__format__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "__format__".to_string(),
+        func: |args| {
+            if args.is_empty() {
+                return Err(PyError::type_error("__format__ requires at least 1 argument (self)"));
+            }
+            let obj = &args[0];
+            let spec = if args.len() > 1 { args[1].str() } else { String::new() };
+            if spec.is_empty() {
+                Ok(py_str(&obj.repr()))
+            } else {
+                Err(PyError::value_error(format!("unknown format code '{}' for object", spec)))
+            }
+        },
+    }));
+    // __reduce__(self): basic pickle support
+    object_dict.insert("__reduce__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "__reduce__".to_string(),
+        func: |args| {
+            Ok(py_none())
+        },
+    }));
     let object_type = PyObjectRef::new(PyObject::Type {
         name: "object".to_string(),
         dict: object_dict,
