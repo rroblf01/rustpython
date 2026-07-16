@@ -562,6 +562,17 @@ pub enum PyObject {
         pos: usize,
         start: usize,
     },
+    MapIterator {
+        func: PyObjectRef,
+        iterator: Box<PyObjectRef>,
+    },
+    FilterIterator {
+        func: PyObjectRef,
+        iterator: Box<PyObjectRef>,
+    },
+    ZipIterator {
+        iterators: Vec<PyObjectRef>,
+    },
     Slice {
         start: PyObjectRef,
         stop: PyObjectRef,
@@ -702,6 +713,9 @@ impl PyObject {
             PyObject::RangeIter { .. } => "range_iterator",
             PyObject::ListIter { .. } => "list_iterator",
             PyObject::EnumerateIter { .. } => "enumerate",
+            PyObject::MapIterator { .. } => "map",
+            PyObject::FilterIterator { .. } => "filter",
+            PyObject::ZipIterator { .. } => "zip",
             PyObject::Slice { .. } => "slice",
             PyObject::Code(_) => "code",
             PyObject::Function { .. } => "function",
@@ -816,6 +830,9 @@ impl PyObject {
             PyObject::RangeIter { .. } => "<range_iterator object>".to_string(),
             PyObject::ListIter { .. } => "<list_iterator object>".to_string(),
             PyObject::EnumerateIter { .. } => "<enumerate object>".to_string(),
+            PyObject::MapIterator { .. } => "<map object>".to_string(),
+            PyObject::FilterIterator { .. } => "<filter object>".to_string(),
+            PyObject::ZipIterator { .. } => "<zip object>".to_string(),
             PyObject::Slice { start, stop, step } => {
                 format!("slice({}, {}, {})", start.repr(), stop.repr(), step.repr())
             }
@@ -3371,6 +3388,55 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 Ok(py_tuple(vec![py_int(idx as i64), val]))
             }
         }
+        PyObject::MapIterator { func, iterator } => {
+            let iter = iterator.as_ref().clone();
+            let next = builtin_next(&[iter]);
+            match next {
+                Ok(val) => {
+                    if func.borrow().type_name() == "NoneType" {
+                        Ok(val)
+                    } else {
+                        let mapped = builtin_call(func, &[val])?;
+                        Ok(mapped)
+                    }
+                }
+                Err(e) => {
+                    if args.len() >= 2 { Ok(args[1].clone()) }
+                    else { Err(e) }
+                }
+            }
+        }
+        PyObject::FilterIterator { func, iterator } => {
+            let iter = iterator.as_ref().clone();
+            loop {
+                let next = builtin_next(&[iter.clone()]);
+                match next {
+                    Ok(val) => {
+                        let should_keep = func.borrow().type_name() == "NoneType" || builtin_call(func, &[val.clone()])?.truthy();
+                        if should_keep {
+                            return Ok(val);
+                        }
+                    }
+                    Err(e) => {
+                        if args.len() >= 2 { return Ok(args[1].clone()) }
+                        else { return Err(e) }
+                    }
+                }
+            }
+        }
+        PyObject::ZipIterator { iterators } => {
+            let mut results = Vec::with_capacity(iterators.len());
+            for it in iterators.iter() {
+                match builtin_next(&[it.clone()]) {
+                    Ok(val) => results.push(val),
+                    Err(e) => {
+                        if args.len() >= 2 { return Ok(args[1].clone()) }
+                        else { return Err(e) }
+                    }
+                }
+            }
+            Ok(py_tuple(results))
+        }
         PyObject::RangeIter { current, stop, step } => {
             if (*step > 0 && *current >= *stop) || (*step < 0 && *current <= *stop) {
                 if args.len() >= 2 { Ok(args[1].clone()) }
@@ -3965,18 +4031,10 @@ pub fn builtin_map(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
     let func = args[0].clone();
     let iter = builtin_iter(&[args[1].clone()])?;
-    let mut results = Vec::new();
-    loop {
-        match builtin_next(&[iter.clone()]) {
-            Ok(val) => {
-                let mapped = builtin_call(&func, &[val])?;
-                results.push(mapped);
-            }
-            Err(PyError::StopIteration) => break,
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(py_list(results))
+    Ok(PyObjectRef::new(PyObject::MapIterator {
+        func,
+        iterator: Box::new(iter),
+    }))
 }
 
 pub fn builtin_filter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
@@ -3985,41 +4043,18 @@ pub fn builtin_filter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
     let func = args[0].clone();
     let iter = builtin_iter(&[args[1].clone()])?;
-    let mut results = Vec::new();
-    loop {
-        match builtin_next(&[iter.clone()]) {
-            Ok(val) => {
-                let keep = if matches!(&*func.borrow(), PyObject::None) {
-                    val.truthy()
-                } else {
-                    builtin_call(&func, &[val.clone()])?.truthy()
-                };
-                if keep { results.push(val); }
-            }
-            Err(PyError::StopIteration) => break,
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(py_list(results))
+    Ok(PyObjectRef::new(PyObject::FilterIterator {
+        func,
+        iterator: Box::new(iter),
+    }))
 }
 
 pub fn builtin_zip(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
         return Err(PyError::type_error("zip() requires at least 1 argument"));
     }
-    let mut iters: Vec<PyObjectRef> = args.iter().map(|a| builtin_iter(&[a.clone()])).collect::<PyResult<Vec<_>>>()?;
-    let mut results = Vec::new();
-    loop {
-        let mut group = Vec::new();
-        for it in iters.iter_mut() {
-            match builtin_next(&[it.clone()]) {
-                Ok(val) => group.push(val),
-                Err(PyError::StopIteration) => return Ok(py_list(results)),
-                Err(e) => return Err(e),
-            }
-        }
-        results.push(py_tuple(group));
-    }
+    let iters: Vec<PyObjectRef> = args.iter().map(|a| builtin_iter(&[a.clone()])).collect::<PyResult<Vec<_>>>()?;
+    Ok(PyObjectRef::new(PyObject::ZipIterator { iterators: iters }))
 }
 
 pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
