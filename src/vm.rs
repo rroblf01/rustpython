@@ -535,6 +535,26 @@ impl VirtualMachine {
           modules.insert("email.mime".to_string(), email_mime_mod);
           modules.insert("email.mime.text".to_string(), email_mime_text_mod);
 
+          // Native email.utils submodule (formatdate, etc.)
+          let email_utils_mod = create_module("email.utils", create_email_utils_dict());
+          {
+              let mut email_mut = email_mod.borrow_mut();
+              if let PyObject::Module { dict: email_dict, .. } = &mut *email_mut {
+                  email_dict.insert("utils".to_string(), email_utils_mod.clone());
+              }
+          }
+          modules.insert("email.utils".to_string(), email_utils_mod);
+
+          // Native email.header submodule (Header class)
+          let email_header_mod = create_module("email.header", create_email_header_dict());
+          {
+              let mut email_mut = email_mod.borrow_mut();
+              if let PyObject::Module { dict: email_dict, .. } = &mut *email_mut {
+                  email_dict.insert("header".to_string(), email_header_mod.clone());
+              }
+          }
+          modules.insert("email.header".to_string(), email_header_mod);
+
           // Native configparser module
           modules.insert("configparser".to_string(), create_module("configparser", create_configparser_dict()));
 
@@ -605,6 +625,9 @@ impl VirtualMachine {
 
           // Native contextvars module (ContextVar with thread-local storage)
           modules.insert("contextvars".to_string(), create_module("contextvars", create_contextvars_dict()));
+
+          // Native unicodedata module (basic Unicode category/normalize)
+          modules.insert("unicodedata".to_string(), create_module("unicodedata", create_unicodedata_dict()));
 
           // Native profile module
           modules.insert("profile".to_string(), create_module("profile", create_profile_dict()));

@@ -394,6 +394,27 @@ fn http_response_read(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 pub fn create_http_client_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
 
+    // HTTP status code to phrase mapping
+    let mut responses = crate::object::py_dict();
+    if let crate::object::PyObject::Dict(ref mut resp_dict) = &mut *responses.borrow_mut() {
+        let codes = [
+            (200, "OK"), (201, "Created"), (202, "Accepted"),
+            (204, "No Content"), (301, "Moved Permanently"),
+            (302, "Found"), (303, "See Other"),
+            (304, "Not Modified"), (307, "Temporary Redirect"),
+            (400, "Bad Request"), (401, "Unauthorized"),
+            (403, "Forbidden"), (404, "Not Found"),
+            (405, "Method Not Allowed"), (408, "Request Timeout"),
+            (418, "I'm a Teapot"), (429, "Too Many Requests"),
+            (500, "Internal Server Error"), (502, "Bad Gateway"),
+            (503, "Service Unavailable"), (504, "Gateway Timeout"),
+        ];
+        for (code, phrase) in &codes {
+            let _ = resp_dict.set(crate::object::py_int(*code), crate::object::py_str(phrase));
+        }
+    }
+    d.insert("responses".to_string(), responses);
+
     // ---- HTTPResponse type ----
     let mut resp_dict = HashMap::new();
     resp_dict.insert(

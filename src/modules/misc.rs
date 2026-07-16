@@ -615,6 +615,10 @@ pub fn create_collections_abc_dict() -> HashMap<String, PyObjectRef> {
     d.insert("KeysView".to_string(), py_str("KeysView"));
     d.insert("ValuesView".to_string(), py_str("ValuesView"));
     d.insert("Container".to_string(), py_str("Container"));
+    d.insert("Awaitable".to_string(), py_str("Awaitable"));
+    d.insert("Coroutine".to_string(), py_str("Coroutine"));
+    d.insert("AsyncIterable".to_string(), py_str("AsyncIterable"));
+    d.insert("AsyncIterator".to_string(), py_str("AsyncIterator"));
 
     d
 }
@@ -3152,6 +3156,59 @@ pub fn create_email_mime_text_dict() -> HashMap<String, PyObjectRef> {
             }))
         },
     }));
+    d
+}
+
+pub fn create_email_header_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    // Header class stub — used by django.http.response
+    d.insert("Header".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "Header".to_string(),
+        func: |args| {
+            let text = if args.is_empty() { String::new() } else { args[0].str() };
+            // Return a string wrapped as an object with __str__ for compatibility
+            Ok(PyObjectRef::new(PyObject::Instance {
+                typ: PyObjectRef::new(PyObject::Type {
+                    name: "email.header.Header".to_string(),
+                    dict: HashMap::new(),
+                    bases: vec![],
+                    mro: vec![],
+                }),
+                dict: HashMap::from([
+                    ("_text".to_string(), py_str(&text)),
+                    ("__str__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                        name: "__str__".to_string(),
+                        func: |a| {
+                            let inst = a[0].borrow();
+                            if let PyObject::Instance { dict, .. } = &*inst {
+                                if let Some(t) = dict.get("_text") {
+                                    return Ok(t.clone());
+                                }
+                            }
+                            Ok(py_str(""))
+                        },
+                    })),
+                ]),
+            }))
+        },
+    }));
+    d
+}
+
+pub fn create_email_utils_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! eu_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                name: $name.to_string(), func: $func,
+            }));
+        };
+    }
+    // formatdate(timeval=None, localtime=False, usegmt=False) -> string
+    eu_func!("formatdate", |args| {
+        let _secs = if args.len() > 0 { args[0].as_f64().unwrap_or(0.0) } else { 0.0 };
+        Ok(py_str("Thu, 01 Jan 2025 00:00:00 +0000"))
+    });
     d
 }
 

@@ -12,6 +12,30 @@ pub fn create_concurrent_futures_dict() -> HashMap<String, PyObjectRef> {
         };
     }
 
+    // Standard exceptions
+    d.insert("InvalidStateError".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "InvalidStateError".to_string(),
+        func: |args| {
+            let msg = if args.is_empty() { String::new() } else { args[0].str() };
+            Ok(PyObjectRef::new(PyObject::Exception {
+                typ: "InvalidStateError".to_string(),
+                args: vec![py_str(&msg)],
+                cause: None,
+            }))
+        },
+    }));
+    d.insert("TimeoutError".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "TimeoutError".to_string(),
+        func: |args| {
+            let msg = if args.is_empty() { String::new() } else { args[0].str() };
+            Ok(PyObjectRef::new(PyObject::Exception {
+                typ: "TimeoutError".to_string(),
+                args: vec![py_str(&msg)],
+                cause: None,
+            }))
+        },
+    }));
+
     // ── ThreadPoolExecutor ─────────────────────────────────────────────
     
     // Executor base class (used by asgiref for type hints)

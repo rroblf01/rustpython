@@ -466,6 +466,16 @@ impl Lexer {
                             None => s.push('\\'),
                         }
                     }
+                    Some(c) if c == '\\' && raw => {
+                        // In raw strings, \" is two content chars (backslash + quote)
+                        if self.peek() == Some(quote) {
+                            s.push('\\');
+                            s.push(quote);
+                            self.advance();
+                        } else {
+                            s.push('\\');
+                        }
+                    }
                     Some(c) if c == '{' && fstring => {
                         if self.peek() == Some('{') {
                             s.push('{');

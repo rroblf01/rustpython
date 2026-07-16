@@ -169,6 +169,19 @@ fn uu_decode(data: &[u8]) -> Result<Vec<u8>, String> {
 pub fn create_binascii_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
 
+    // Standard binascii.Error exception
+    d.insert("Error".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "Error".to_string(),
+        func: |args| {
+            let msg = if args.is_empty() { String::new() } else { args[0].str() };
+            Ok(PyObjectRef::new(PyObject::Exception {
+                typ: "Error".to_string(),
+                args: vec![py_str(&msg)],
+                cause: None,
+            }))
+        },
+    }));
+
     macro_rules! bin_func {
         ($name:expr, $func:expr) => {
             d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
