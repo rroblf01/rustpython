@@ -847,11 +847,32 @@ pub fn create_datetime_dict() -> HashMap<String, PyObjectRef> {
         Ok(py_none())
     });
     dt_func!("timezone", |args| {
+        // timezone(offset, name=None) — simplified
         Ok(py_none())
     });
-    dt_func!("UTC", |args| {
-        Ok(py_none())
+    // UTC tzinfo singleton with utcoffset/dst/tzname methods
+    let utc_instance = PyObjectRef::new(PyObject::Instance {
+        typ: PyObjectRef::new(PyObject::Type {
+            name: "datetime.timezone".to_string(),
+            dict: HashMap::new(),
+            bases: vec![],
+            mro: vec![],
+        }),
+        dict: HashMap::new(),
     });
+    let _ = utc_instance.borrow_mut().set_attribute("utcoffset", PyObjectRef::imm(PyObject::BuiltinFunction {
+        name: "utcoffset".to_string(),
+        func: |args| { Ok(py_int(0)) },
+    }));
+    let _ = utc_instance.borrow_mut().set_attribute("dst", PyObjectRef::imm(PyObject::BuiltinFunction {
+        name: "dst".to_string(),
+        func: |args| { Ok(py_int(0)) },
+    }));
+    let _ = utc_instance.borrow_mut().set_attribute("tzname", PyObjectRef::imm(PyObject::BuiltinFunction {
+        name: "tzname".to_string(),
+        func: |args| { Ok(py_str("UTC")) },
+    }));
+    d.insert("UTC".to_string(), utc_instance);
 
     d
 }

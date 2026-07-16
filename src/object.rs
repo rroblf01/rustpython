@@ -1,6 +1,7 @@
 use std::rc::Rc;
 use std::cell::RefCell;
 
+/// DictMap trait: provides get_str/insert_str/contains_key_str for HashMap and InternedMap.
 pub trait DictMap {
     fn get_str(&self, name: &str) -> Option<&PyObjectRef>;
     fn insert_str(&mut self, name: &str, val: PyObjectRef) -> Option<PyObjectRef>;
