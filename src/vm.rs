@@ -1921,8 +1921,9 @@ impl VirtualMachine {
                 // and regular function calls.
                 let globals = self.frames[fi].module_globals.clone()
                     .unwrap_or_else(|| self.frames[fi].globals.clone());
+                let code_obj = code.clone();
                 let mut func = PyObjectRef::new(PyObject::Function {
-                    code,
+                    code: code_obj.clone(),
                     globals,
                     name,
                     defaults,
@@ -1931,7 +1932,10 @@ impl VirtualMachine {
                     jit_ptr: std::cell::Cell::new(0),
                     jit_consts: std::cell::RefCell::new(Vec::new()),
                 });
-                // Set __module__ from module_globals if available
+                // Set __code__ and __module__ on the function
+                if let PyObject::Function { dict, .. } = &mut *func.borrow_mut() {
+                    dict.insert("__code__".to_string(), PyObjectRef::imm(PyObject::Code(Box::new(code_obj))));
+                }
                 if let Some(ref mg) = self.frames[fi].module_globals {
                     let mg = mg.borrow();
                     if let Some(module_name) = mg.get("__name__") {

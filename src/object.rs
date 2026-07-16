@@ -6779,6 +6779,17 @@ impl ObjectAccess for PyObject {
                     _ => Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", self.type_name(), name))),
                 }
             }
+            PyObject::Code(c) => {
+                match name {
+                    "co_filename" => Ok(py_str(&c.filename)),
+                    "co_name" => Ok(py_str(&c.name)),
+                    "co_argcount" => Ok(py_int(c.arg_count as i64)),
+                    "co_nlocals" => Ok(py_int(c.nlocals as i64)),
+                    "co_varnames" => Ok(py_tuple(c.varnames.iter().map(|v| py_str(v)).collect())),
+                    "co_flags" => Ok(py_int(c.flags as i64)),
+                    _ => Err(PyError::attribute_error(format!("'code' object has no attribute '{}'", name))),
+                }
+            }
             _ => Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", self.type_name(), name))),
         }
     }

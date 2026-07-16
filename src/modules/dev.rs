@@ -877,9 +877,43 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
         Ok(doc.unwrap_or(py_none()))
     });
 
-    inspect_func!("getfile", |_args| Ok(py_str("<unknown>")));
-    inspect_func!("getsourcefile", |_args| Ok(py_none()));
-    inspect_func!("getsource", |_args| Ok(py_str("Source not available in RustPython")));
+    inspect_func!("getfile", |args| {
+        if args.is_empty() { return Err(PyError::type_error("getfile() requires 1 argument")); }
+        let obj = args[0].borrow();
+        // Try to get __code__ attribute
+        if let Ok(code) = obj.get_attribute("__code__") {
+            let code_borrowed = code.borrow();
+            if let PyObject::Code(c) = &*code_borrowed {
+                return Ok(py_str(&c.filename));
+            }
+        }
+        Ok(py_str("<unknown>"))
+    });
+    inspect_func!("getsourcefile", |args| {
+        if args.is_empty() { return Err(PyError::type_error("getsourcefile() requires 1 argument")); }
+        let obj = args[0].borrow();
+        if let Ok(code) = obj.get_attribute("__code__") {
+            let code_borrowed = code.borrow();
+            if let PyObject::Code(c) = &*code_borrowed {
+                return Ok(py_str(&c.filename));
+            }
+        }
+        Ok(py_none())
+    });
+    inspect_func!("getsource", |args| {
+        if args.is_empty() { return Err(PyError::type_error("getsource() requires 1 argument")); }
+        let obj = args[0].borrow();
+        let filename = obj.get_attribute("__code__").ok().and_then(|code| {
+            let code_borrowed = code.borrow();
+            if let PyObject::Code(c) = &*code_borrowed { Some(c.filename.clone()) } else { None }
+        });
+        if let Some(fname) = filename {
+            if let Ok(src) = std::fs::read_to_string(&fname) {
+                return Ok(py_str(&src));
+            }
+        }
+        Ok(py_str("Source not available in RustPython"))
+    });
 
     inspect_func!("getmodule", |args| {
         if args.len() < 1 { return Err(PyError::type_error("getmodule() requires 1 argument")); }

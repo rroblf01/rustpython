@@ -1916,7 +1916,9 @@ impl Compiler {
         
 
         // Save outer code BEFORE enter_scope (which takes cellvars/freevars from self.code)
-        let old_code = std::mem::replace(&mut self.code, CodeObject::new(name.clone()));
+        let mut new_code = CodeObject::new(name.clone());
+        new_code.filename = self.code.filename.clone();
+        let old_code = std::mem::replace(&mut self.code, new_code);
         let old_labels = std::mem::replace(&mut self.labels, Vec::new());
         let old_label_stack = std::mem::replace(&mut self.label_stack, Vec::new());
         let old_loop_stack = std::mem::replace(&mut self.loop_stack, Vec::new());
