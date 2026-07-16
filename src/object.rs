@@ -4893,6 +4893,62 @@ impl ObjectAccess for PyObject {
             }
             PyObject::Str(_s) => {
                 match name {
+                    "format" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "format".to_string(),
+                        func: |args| {
+                            if args.is_empty() { return Err(PyError::type_error("format() takes at least 1 argument")); }
+                            let fmt = args[0].str();
+                            let mut result = String::new();
+                            let mut chars = fmt.chars();
+                            let mut pos = 0usize;
+                            let mut next_auto = 0usize;
+                            while let Some(c) = chars.next() {
+                                if c == '{' {
+                                    // Check for {{ escape
+                                    if chars.as_str().starts_with('{') {
+                                        result.push('{');
+                                        chars.next();
+                                        continue;
+                                    }
+                                    // Parse field name: {name} or {0} or {}
+                                    let mut field = String::new();
+                                    loop {
+                                        match chars.next() {
+                                            Some('}') => break,
+                                            Some(c) => field.push(c),
+                                            None => return Err(PyError::value_error("unterminated format field")),
+                                        }
+                                    }
+                                    // Determine the value
+                                    let val = if field.is_empty() {
+                                        // Auto-numbering: {}
+                                        let idx = next_auto;
+                                        next_auto += 1;
+                                        if idx + 1 < args.len() { Some(args[idx + 1].clone()) } else { None }
+                                    } else if let Ok(n) = field.parse::<usize>() {
+                                        // Positional: {0}, {1}
+                                        if n + 1 < args.len() { Some(args[n + 1].clone()) } else { None }
+                                    } else {
+                                        // Named: {name}
+                                        None  // Named args not supported in this simplified version
+                                    };
+                                    match val {
+                                        Some(v) => result.push_str(&v.str()),
+                                        None => result.push_str(&field),
+                                    }
+                                } else if c == '}' {
+                                    if chars.as_str().starts_with('}') {
+                                        result.push('}');
+                                        chars.next();
+                                    }
+                                } else {
+                                    result.push(c);
+                                }
+                            }
+                            Ok(py_str(&result))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     "split" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "split".to_string(),
                         func: |args| {
