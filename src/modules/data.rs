@@ -740,8 +740,22 @@ pub fn create_datetime_dict() -> HashMap<String, PyObjectRef> {
             m += 1;
         }
         let d = remaining + 1;
-        let date_str = format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", y, m, d, hours, minutes, seconds);
-        Ok(py_str(&date_str))
+        let dt = PyObjectRef::new(PyObject::Instance {
+            typ: PyObjectRef::new(PyObject::Type {
+                name: "datetime".to_string(),
+                dict: HashMap::new(),
+                bases: vec![],
+                mro: vec![],
+            }),
+            dict: HashMap::new(),
+        });
+        let _ = dt.borrow_mut().set_attribute("year", py_int(y));
+        let _ = dt.borrow_mut().set_attribute("month", py_int(m as i64));
+        let _ = dt.borrow_mut().set_attribute("day", py_int(d));
+        let _ = dt.borrow_mut().set_attribute("hour", py_int(hours as i64));
+        let _ = dt.borrow_mut().set_attribute("minute", py_int(minutes as i64));
+        let _ = dt.borrow_mut().set_attribute("second", py_int(seconds as i64));
+        Ok(dt)
     });
 
     dt_func!("date", |args| {
@@ -785,7 +799,7 @@ pub fn create_datetime_dict() -> HashMap<String, PyObjectRef> {
         Ok(py_str(&format!("{:02}:{:02}:{:02}", hour, minute, second)))
     });
     dt_func!("timedelta", |args| {
-        Ok(PyObjectRef::new(PyObject::Instance {
+        let td = PyObjectRef::new(PyObject::Instance {
             typ: PyObjectRef::new(PyObject::Type {
                 name: "timedelta".to_string(),
                 dict: HashMap::new(),
@@ -793,7 +807,28 @@ pub fn create_datetime_dict() -> HashMap<String, PyObjectRef> {
                 mro: vec![],
             }),
             dict: HashMap::new(),
-        }))
+        });
+        // timedelta(days=X) -> first arg may be a dict with keyword arguments
+        if args.len() > 0 {
+            let first = &args[0];
+            if let PyObject::Dict(kwargs) = &*first.borrow() {
+                if let Ok(Some(days_val)) = kwargs.get(&crate::object::py_str("days")) {
+                    let _ = td.borrow_mut().set_attribute("days", days_val);
+                }
+                if let Ok(Some(secs_val)) = kwargs.get(&crate::object::py_str("seconds")) {
+                    let _ = td.borrow_mut().set_attribute("seconds", secs_val);
+                }
+                if let Ok(Some(micro_val)) = kwargs.get(&crate::object::py_str("microseconds")) {
+                    let _ = td.borrow_mut().set_attribute("microseconds", micro_val);
+                }
+            } else if let PyObject::Int(i) = &*first.borrow() {
+                // Positional: timedelta(5) means days=5
+                if let Some(days) = i.to_i64() {
+                    let _ = td.borrow_mut().set_attribute("days", py_int(days));
+                }
+            }
+        }
+        Ok(td)
     });
     dt_func!("tzinfo", |args| {
         Ok(py_none())

@@ -1858,7 +1858,6 @@ impl VirtualMachine {
                         break;
                     }
                 }
-                if cfg!(feature = "profile") { eprintln!("DEBUG CALL: callable type={} callable={:?}", callable.borrow().type_name(), callable.repr()); }
                 let result = self.call_function(callable, args, keywords)?;
                 self.frames[fi].push(result);
             }
@@ -3574,6 +3573,16 @@ impl VirtualMachine {
 
         if let PyObject::BuiltinFunction { func, .. } = &*callable.borrow() {
             let func = *func;
+            // Pack keyword arguments into a dict and append as last arg
+            if !keywords.is_empty() {
+                let mut dict = crate::object::PyDict::new();
+                for (k, v) in &keywords {
+                    let _ = dict.set(crate::object::py_str(k), v.clone());
+                }
+                let mut new_args = args;
+                new_args.push(crate::object::PyObjectRef::new(crate::object::PyObject::Dict(dict)));
+                return func(&new_args);
+            }
             return func(&args);
         }
 
