@@ -784,23 +784,28 @@ impl VirtualMachine {
         // Handle dotted names: e.g. "certifi.core" or "django.utils.version"
         // Walk through each segment, importing missing packages as we go
         if let Some(dot_pos) = name.find('.') {
+            eprintln!("DEBUG import_module_from_file: dotted name='{}'", name);
             let parts: Vec<&str> = name.split('.').collect();
             let mut current_name = parts[0].to_string();
             let mut parent_path: Option<String> = None;
 
             // Check if we already have the top-level module
             if !self.modules.contains_key(&current_name) {
+                eprintln!("DEBUG import dotted: top-level '{}' NOT in modules", current_name);
                 if cfg!(feature = "profile") { eprintln!("DEBUG import: top-level '{}' NOT in modules", current_name); }
                 // Not in modules — fall through to regular file search below
             } else {
+                eprintln!("DEBUG import dotted: top-level '{}' IS in modules", current_name);
                 // Walk the chain: for each part after the first, resolve the child
                 let mut all_resolved = true;
                 for i in 1..parts.len() {
                     let child = parts[i];
                     let full_name = format!("{}.{}", current_name, child);
+                    eprintln!("DEBUG import dotted: iter i={} child='{}' full='{}'", i, child, full_name);
 
                     // If already in modules, skip to next
                     if self.modules.contains_key(&full_name) {
+                        eprintln!("DEBUG import dotted: '{}' already in modules, skip", full_name);
                         current_name = full_name;
                         parent_path = None;
                         continue;
@@ -808,6 +813,7 @@ impl VirtualMachine {
 
                     // Get the parent's __path__
                     if parent_path.is_none() {
+                        eprintln!("DEBUG import dotted: getting __path__ from '{}'", current_name);
                         if let Some(parent_mod) = self.modules.get(&current_name) {
                             let borrowed = parent_mod.borrow();
                             if let PyObject::Module { dict, .. } = &*borrowed {
@@ -868,9 +874,10 @@ impl VirtualMachine {
                                         _ => {}
                                     }
                                 }
+                                // Execute the module source
                                 let module = self.exec_module_source(&source, candidate, &full_name)?;
                                 self.modules.insert(full_name.clone(), module.clone());
-                                // Wire submodule into parent module namespace for attribute access
+                                // Wire into parent module namespace
                                 if let Some(dot_pos) = full_name.rfind('.') {
                                     let parent_name = full_name[..dot_pos].to_string();
                                     let child_name = full_name[dot_pos+1..].to_string();
@@ -3023,7 +3030,8 @@ impl VirtualMachine {
                                 let p = p.borrow();
                                 if let PyObject::Str(s) = &*p { Some(s.to_string()) } else { None }
                             });
-                        match pkg {
+                        let pkg_debug = pkg.clone();
+                        let resolved_name = match pkg {
                             Some(p) if !p.is_empty() => {
                                 if name.is_empty() { p } else { format!("{}.{}", p, name) }
                             }
@@ -3040,8 +3048,11 @@ impl VirtualMachine {
                                     if name.is_empty() { base.to_string() } else { format!("{}.{}", base, name) }
                                 } else { name.clone() }
                             }
-                        }
+                        };
+                        eprintln!("DEBUG IMPORT_NAME: name='{}', level={}, __package__={:?}, resolved='{}'", name, level, pkg_debug, resolved_name);
+                        resolved_name
                     } else {
+                        eprintln!("DEBUG IMPORT_NAME: name='{}', level={}, resolved='{}' (absolute)", name, level, name);
                         name.clone()
                     }
                 };
@@ -3112,6 +3123,7 @@ impl VirtualMachine {
                 let name = self.frames[fi].code.names.get(name_idx).ok_or_else(|| {
                     PyError::runtime_error("name index out of range")
                 })?.clone();
+                eprintln!("DEBUG IMPORT_FROM: name='{}'", name);
                 let module = self.frames[fi].peek(0)?;
                 // Handle 'from module import *' — when the imported name is '*',
                 // iterate over the module's dict and store all names in current scope
