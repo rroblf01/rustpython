@@ -1,5 +1,18 @@
 use std::rc::Rc;
 use std::cell::RefCell;
+
+/// Extension trait adding InternedMap-compatible methods to HashMap<String, PyObjectRef>.
+/// Allows gradual migration: code uses get_str/insert_str, works with both HashMap and InternedMap.
+pub trait DictMap {
+    fn get_str(&self, name: &str) -> Option<&PyObjectRef>;
+    fn insert_str(&mut self, name: &str, val: PyObjectRef) -> Option<PyObjectRef>;
+    fn contains_key_str(&self, name: &str) -> bool;
+}
+impl DictMap for HashMap<String, PyObjectRef> {
+    fn get_str(&self, name: &str) -> Option<&PyObjectRef> { self.get(name) }
+    fn insert_str(&mut self, name: &str, val: PyObjectRef) -> Option<PyObjectRef> { self.insert(name.to_string(), val) }
+    fn contains_key_str(&self, name: &str) -> bool { self.contains_key(name) }
+}
 use std::fmt;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicUsize;
@@ -170,7 +183,7 @@ impl PyObjectRef {
                 PyObject::Instance { typ, .. } => {
                     let typ_ref = typ.borrow();
                     match &*typ_ref {
-                        PyObject::Type { dict: type_dict, .. } => type_dict.get("__str__").cloned(),
+                        PyObject::Type { dict: type_dict, .. } => type_dict.get_str("__str__").cloned(),
                         _ => None,
                     }
                 }
@@ -870,7 +883,7 @@ impl PyObject {
                 let f = {
                     let typ_ref = typ.borrow();
                     match &*typ_ref {
-                        PyObject::Type { dict: type_dict, .. } => type_dict.get("__bool__").cloned(),
+                        PyObject::Type { dict: type_dict, .. } => type_dict.get_str("__bool__").cloned(),
                         _ => None,
                     }
                 };
@@ -946,7 +959,7 @@ impl PyObject {
                 let f = {
                     let typ_ref = typ.borrow();
                     match &*typ_ref {
-                        PyObject::Type { dict: type_dict, .. } => type_dict.get("__hash__").cloned(),
+                        PyObject::Type { dict: type_dict, .. } => type_dict.get_str("__hash__").cloned(),
                         _ => None,
                     }
                 };
@@ -1799,7 +1812,7 @@ fn try_get_method(obj: &PyObjectRef, name: &str) -> Option<PyObjectRef> {
         PyObject::Instance { typ, .. } => {
             let typ_ref = typ.borrow();
             match &*typ_ref {
-                PyObject::Type { dict: type_dict, .. } => type_dict.get(name).cloned(),
+                PyObject::Type { dict: type_dict, .. } => type_dict.get_str(&name).cloned(),
                 _ => None,
             }
         }
@@ -1936,10 +1949,10 @@ pub fn contains_op(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<bool> {
                 let typ_ref = typ.borrow();
                 match &*typ_ref {
                     PyObject::Type { dict: type_dict, mro, .. } => {
-                        type_dict.get("__contains__").cloned().or_else(|| {
+                        type_dict.get_str("__contains__").cloned().or_else(|| {
                             for base in mro.iter() {
                                 if let PyObject::Type { dict: base_dict, .. } = &*base.borrow() {
-                                    if let Some(val) = base_dict.get("__contains__") {
+                                    if let Some(val) = base_dict.get_str("__contains__") {
                                         return Some(val.clone());
                                     }
                                 }
@@ -2034,7 +2047,7 @@ pub fn builtin_len(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             let f = {
                 let typ_ref = typ.borrow();
                 match &*typ_ref {
-                    PyObject::Type { dict: type_dict, .. } => type_dict.get("__len__").cloned(),
+                    PyObject::Type { dict: type_dict, .. } => type_dict.get_str("__len__").cloned(),
                     _ => None,
                 }
             };
@@ -2312,14 +2325,14 @@ pub fn builtin_str(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 let typ_ref = typ.borrow();
                 if let PyObject::Type { dict: type_dict, mro, .. } = &*typ_ref {
                     // Check own dict first
-                    let own = type_dict.get("__str__").cloned();
+                    let own = type_dict.get_str("__str__").cloned();
                     if let Some(f) = own { Some(f) }
                     else {
                         // Walk MRO for inherited __str__
                         let mut found = None;
                         for base_type in mro {
                             if let PyObject::Type { dict: base_dict, .. } = &*base_type.borrow() {
-                                if let Some(f) = base_dict.get("__str__") {
+                                if let Some(f) = base_dict.get_str("__str__") {
                                     found = Some(f.clone());
                                     break;
                                 }
@@ -2347,7 +2360,7 @@ pub fn builtin_repr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             PyObject::Instance { typ, .. } => {
                 let typ_ref = typ.borrow();
                 match &*typ_ref {
-                    PyObject::Type { dict: type_dict, .. } => type_dict.get("__repr__").cloned(),
+                    PyObject::Type { dict: type_dict, .. } => type_dict.get_str("__repr__").cloned(),
                     _ => None,
                 }
             }
@@ -2945,7 +2958,7 @@ pub fn builtin_delattr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             PyObject::Instance { typ, .. } => {
                 let typ_ref = typ.borrow();
                 match &*typ_ref {
-                    PyObject::Type { dict: type_dict, .. } => type_dict.get("__delattr__").cloned(),
+                    PyObject::Type { dict: type_dict, .. } => type_dict.get_str("__delattr__").cloned(),
                     _ => None,
                 }
             }
@@ -3218,7 +3231,7 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             PyObject::Instance { typ, .. } => {
                 let typ_ref = typ.borrow();
                 match &*typ_ref {
-                    PyObject::Type { dict: type_dict, .. } => type_dict.get("__iter__").cloned(),
+                    PyObject::Type { dict: type_dict, .. } => type_dict.get_str("__iter__").cloned(),
                     _ => None,
                 }
             }
@@ -3259,7 +3272,7 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             PyObject::Instance { typ, .. } => {
                 let typ_ref = typ.borrow();
                 match &*typ_ref {
-                    PyObject::Type { dict: type_dict, .. } => type_dict.get("__next__").cloned(),
+                    PyObject::Type { dict: type_dict, .. } => type_dict.get_str("__next__").cloned(),
                     _ => None,
                 }
             }
@@ -4062,7 +4075,7 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
                     typ: f.clone(),
                     dict: std::collections::HashMap::new(),
                 });
-                if let Some(init) = type_dict.get("__init__").cloned() {
+                if let Some(init) = type_dict.get_str("__init__").cloned() {
                     call_bound_method(init, instance.clone(), a)?;
                 }
                 Ok(instance)
@@ -4215,7 +4228,7 @@ fn get_instance_slots(typ: &PyObjectRef) -> Option<Vec<String>> {
         let mut all_slots = Vec::new();
 
         // Check the type's own __slots__
-        if let Some(slots_val) = type_dict.get("__slots__") {
+        if let Some(slots_val) = type_dict.get_str("__slots__") {
             extract_slots(slots_val, &mut all_slots);
         }
 
@@ -4223,7 +4236,7 @@ fn get_instance_slots(typ: &PyObjectRef) -> Option<Vec<String>> {
         for base in mro.iter().skip(1) {
             let base_ref = base.borrow();
             if let PyObject::Type { dict: base_dict, .. } = &*base_ref {
-                if let Some(slots_val) = base_dict.get("__slots__") {
+                if let Some(slots_val) = base_dict.get_str("__slots__") {
                     extract_slots(slots_val, &mut all_slots);
                 }
             }
@@ -4270,7 +4283,7 @@ impl ObjectAccess for PyObject {
                 if name == "__name__" {
                     return Ok(py_str(mod_name));
                 }
-                dict.get(name).cloned().ok_or_else(|| PyError::attribute_error(format!(
+                dict.get_str(&name).cloned().ok_or_else(|| PyError::attribute_error(format!(
                     "'module' object has no attribute '{}'", name
                 )))
             }
@@ -4296,7 +4309,7 @@ impl ObjectAccess for PyObject {
                     return Ok(py_str(type_name));
                 }
                 // Check own dict first
-                if let Some(val) = dict.get(name).cloned() {
+                if let Some(val) = dict.get_str(&name).cloned() {
                     // Unwrap staticmethod descriptor so type access returns the function directly
                     let b = val.borrow();
                     if let PyObject::StaticMethod { func } = &*b {
@@ -4308,7 +4321,7 @@ impl ObjectAccess for PyObject {
                 // Check MRO (skip self)
                 for base in mro.iter().skip(1) {
                     if let PyObject::Type { dict: base_dict, .. } = &*base.borrow() {
-                        if let Some(val) = base_dict.get(name) {
+                        if let Some(val) = base_dict.get_str(&name) {
                             // Unwrap staticmethod descriptor from MRO bases
                             let b = val.borrow();
                             if let PyObject::StaticMethod { func } = &*b {
@@ -4362,9 +4375,9 @@ impl ObjectAccess for PyObject {
                         // Check if it's a class-level attribute (method, etc.) — those are always allowed
                         let typ_ref = typ.borrow();
                         let is_in_type = if let PyObject::Type { dict: type_dict, mro, .. } = &*typ_ref {
-                            type_dict.contains_key(name) || mro.iter().skip(1).any(|base| {
+                            type_dict.contains_key_str(&name) || mro.iter().skip(1).any(|base| {
                                 if let PyObject::Type { dict: base_dict, .. } = &*base.borrow() {
-                                    base_dict.contains_key(name)
+                                    base_dict.contains_key_str(&name)
                                 } else { false }
                             })
                         } else { false };
@@ -4376,13 +4389,13 @@ impl ObjectAccess for PyObject {
                         }
                     }
                 }
-                dict.get(name).cloned().or_else(|| {
+                dict.get_str(&name).cloned().or_else(|| {
                     let typ_ref = typ.borrow();
                     if let PyObject::Type { dict: type_dict, mro, .. } = &*typ_ref {
-                        type_dict.get(name).cloned().or_else(|| {
+                        type_dict.get_str(&name).cloned().or_else(|| {
                             for base in mro.iter().skip(1) {
                                 if let PyObject::Type { dict: base_dict, .. } = &*base.borrow() {
-                                    if let Some(val) = base_dict.get(name) {
+                                    if let Some(val) = base_dict.get_str(&name) {
                                         return Some(val.clone());
                                     }
                                 }
@@ -5582,7 +5595,7 @@ impl ObjectAccess for PyObject {
                     "__closure__" => Ok(dict.get("__closure__").cloned().unwrap_or(py_none())),
                     "__module__" => Ok(dict.get("__module__").cloned().unwrap_or(py_none())),
                     "__annotations__" => Ok(dict.get("__annotations__").cloned().unwrap_or(py_none())),
-                    _ => dict.get(name).cloned().ok_or_else(|| PyError::attribute_error(format!(
+                    _ => dict.get_str(&name).cloned().ok_or_else(|| PyError::attribute_error(format!(
                         "'function' object has no attribute '{}'", name
                     ))),
                 }
@@ -6603,7 +6616,7 @@ impl ObjectAccess for PyObject {
                             let mut found = None;
                             for base in mro.iter().skip(start_idx) {
                                 if let PyObject::Type { dict, .. } = &*base.borrow() {
-                                    if let Some(val) = dict.get(name) {
+                                    if let Some(val) = dict.get_str(&name) {
                                         let val_borrowed = val.borrow();
                                         match &*val_borrowed {
                                             PyObject::Function { .. } | PyObject::BuiltinFunction { .. } => {
@@ -6782,19 +6795,19 @@ impl ObjectAccess for PyObject {
                         ));
                     }
                 }
-                dict.insert(name.to_string(), value);
+                dict.insert_str(&name, value);
                 Ok(())
             }
             PyObject::Module { dict, .. } => {
-                dict.insert(name.to_string(), value);
+                dict.insert_str(&name, value);
                 Ok(())
             }
             PyObject::Type { dict, .. } => {
-                dict.insert(name.to_string(), value);
+                dict.insert_str(&name, value);
                 Ok(())
             }
             PyObject::Function { dict, .. } => {
-                dict.insert(name.to_string(), value);
+                dict.insert_str(&name, value);
                 Ok(())
             }
             PyObject::Dict(_) | PyObject::List(_) | PyObject::Tuple(_) | PyObject::Set(_) | PyObject::FrozenSet(_) => {
@@ -6853,7 +6866,7 @@ pub fn to_index(obj: &PyObjectRef) -> PyResult<BigInt> {
                 PyObject::Instance { typ, .. } => {
                     let typ_ref = typ.borrow();
                     match &*typ_ref {
-                        PyObject::Type { dict: type_dict, .. } => type_dict.get("__index__").cloned(),
+                        PyObject::Type { dict: type_dict, .. } => type_dict.get_str("__index__").cloned(),
                         _ => None,
                     }
                 }
@@ -6884,10 +6897,10 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
         match &*o {
             PyObject::Type { dict: type_dict, mro, .. } => {
                 // PEP 560: cls[args] checks for __class_getitem__ on the type and its MRO
-                type_dict.get("__class_getitem__").cloned().or_else(|| {
+                type_dict.get_str("__class_getitem__").cloned().or_else(|| {
                     for base in mro.iter().skip(1) {
                         if let PyObject::Type { dict: base_dict, .. } = &*base.borrow() {
-                            if let Some(val) = base_dict.get("__class_getitem__") {
+                            if let Some(val) = base_dict.get_str("__class_getitem__") {
                                 return Some(val.clone());
                             }
                         }
@@ -6899,10 +6912,10 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                 let typ_ref = typ.borrow();
                 match &*typ_ref {
                     PyObject::Type { dict: type_dict, mro, .. } => {
-                        type_dict.get("__getitem__").cloned().or_else(|| {
+                        type_dict.get_str("__getitem__").cloned().or_else(|| {
                             for base in mro.iter().skip(1) {
                                 if let PyObject::Type { dict: base_dict, .. } = &*base.borrow() {
-                                    if let Some(val) = base_dict.get("__getitem__") {
+                                    if let Some(val) = base_dict.get_str("__getitem__") {
                                         return Some(val.clone());
                                     }
                                 }
@@ -7200,10 +7213,10 @@ pub fn py_setitem(obj: &PyObjectRef, index: &PyObjectRef, value: PyObjectRef) ->
                 let typ_ref = typ.borrow();
                 match &*typ_ref {
                     PyObject::Type { dict: type_dict, mro, .. } => {
-                        type_dict.get("__setitem__").cloned().or_else(|| {
+                        type_dict.get_str("__setitem__").cloned().or_else(|| {
                             for base in mro.iter().skip(1) {
                                 if let PyObject::Type { dict: base_dict, .. } = &*base.borrow() {
-                                    if let Some(val) = base_dict.get("__setitem__") {
+                                    if let Some(val) = base_dict.get_str("__setitem__") {
                                         return Some(val.clone());
                                     }
                                 }
@@ -7266,7 +7279,7 @@ pub fn py_delitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<()> {
             PyObject::Instance { typ, .. } => {
                 let typ_ref = typ.borrow();
                 match &*typ_ref {
-                    PyObject::Type { dict: type_dict, .. } => type_dict.get("__delitem__").cloned(),
+                    PyObject::Type { dict: type_dict, .. } => type_dict.get_str("__delitem__").cloned(),
                     _ => None,
                 }
             }

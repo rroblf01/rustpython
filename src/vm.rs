@@ -2352,13 +2352,13 @@ impl VirtualMachine {
                                 self.frames[fi].push(cls);
                                 return Ok(None);
                             }
-                            let attr = dict.get(&name).cloned().or_else(|| {
+                            let attr = dict.get_str(&name).cloned().or_else(|| {
                                 let typ_ref = typ.borrow();
                                 if let PyObject::Type { dict: type_dict, mro, .. } = &*typ_ref {
-                                    let found = type_dict.get(&name).cloned().or_else(|| {
+                                    let found = type_dict.get_str(&name).cloned().or_else(|| {
                                         for base in mro.iter().skip(1) {
                                             if let PyObject::Type { dict: base_dict, .. } = &*base.borrow() {
-                                                if let Some(val) = base_dict.get(&name) {
+                                                if let Some(val) = base_dict.get_str(&name) {
                                                     return Some(val.clone());
                                                 }
                                             }
@@ -2482,7 +2482,7 @@ impl VirtualMachine {
                                     // Check for __getattr__ method on type before erroring
                                     let typ_ref = typ.borrow();
                                     if let PyObject::Type { dict: type_dict, .. } = &*typ_ref {
-                                        if let Some(getattr_method) = type_dict.get("__getattr__").cloned() {
+                                        if let Some(getattr_method) = type_dict.get_str("__getattr__").cloned() {
                                             drop(typ_ref);
                                             drop(obj_borrowed);
                                             self.call_function(getattr_method, vec![obj.clone(), py_str(&name)], vec![])
@@ -2568,7 +2568,7 @@ impl VirtualMachine {
                     if let PyObject::Instance { typ, .. } = &*obj_borrowed {
                         let typ_ref = typ.borrow();
                         if let PyObject::Type { dict: type_dict, .. } = &*typ_ref {
-                            if let Some(setattr_method) = type_dict.get("__setattr__").cloned() {
+                            if let Some(setattr_method) = type_dict.get_str("__setattr__").cloned() {
                                 drop(typ_ref);
                                 drop(obj_borrowed);
                                 // Call __setattr__ for side effects (validation, clearing caches)
@@ -2577,7 +2577,7 @@ impl VirtualMachine {
                                 // __dict__ returns a COPY and self.__dict__[key] = value inside
                                 // __setattr__ would modify the copy, not the original.
                                 if let PyObject::Instance { dict, .. } = &mut *obj.borrow_mut() {
-                                    dict.insert(name.clone(), val.clone());
+                                    dict.insert_str(&name, val.clone());
                                 }
                                 result?;
                                 return Ok(None);
@@ -2592,7 +2592,7 @@ impl VirtualMachine {
                     if let PyObject::Instance { typ, .. } = &*obj_borrowed {
                         let typ_ref = typ.borrow();
                         if let PyObject::Type { dict: type_dict, .. } = &*typ_ref {
-                            type_dict.get(&name).cloned()
+                            type_dict.get_str(&name).cloned()
                         } else { None }
                     } else { None }
                 };
@@ -2632,7 +2632,7 @@ impl VirtualMachine {
                     if let PyObject::Instance { typ, .. } = &*obj_borrowed {
                         let typ_ref = typ.borrow();
                         if let PyObject::Type { dict: type_dict, .. } = &*typ_ref {
-                            if let Some(delattr_method) = type_dict.get("__delattr__").cloned() {
+                            if let Some(delattr_method) = type_dict.get_str("__delattr__").cloned() {
                                 drop(typ_ref);
                                 drop(obj_borrowed);
                                 self.call_function(delattr_method, vec![obj.clone(), py_str(&name)], vec![])?;
@@ -2647,7 +2647,7 @@ impl VirtualMachine {
                     if let PyObject::Instance { typ, .. } = &*obj_borrowed {
                         let typ_ref = typ.borrow();
                         if let PyObject::Type { dict: type_dict, .. } = &*typ_ref {
-                            type_dict.get(&name).cloned()
+                            type_dict.get_str(&name).cloned()
                         } else { None }
                     } else { None }
                 };
@@ -3252,7 +3252,7 @@ impl VirtualMachine {
                         };
                         // Collect name-value pairs before dropping borrow
                         let imports: Vec<(String, PyObjectRef)> = names_to_import.iter()
-                            .filter_map(|name| dict.get(name).map(|val| (name.clone(), val.clone())))
+                            .filter_map(|name| dict.get_str(&name).map(|val| (name.clone(), val.clone())))
                             .collect();
                         drop(module_borrowed);
                         for (import_name, val) in &imports {
@@ -3268,7 +3268,7 @@ impl VirtualMachine {
                 let found = {
                     let obj = module.borrow();
                     match &*obj {
-                        PyObject::Module { dict, .. } => dict.get(&name).cloned(),
+                        PyObject::Module { dict, .. } => dict.get_str(&name).cloned(),
                         _ => return Err(PyError::runtime_error("IMPORT_FROM on non-module")),
                     }
                 };
@@ -3293,7 +3293,7 @@ impl VirtualMachine {
                             self.modules.insert(submodule_name.clone(), submod.clone());
                             // Register in parent module dict (scoped borrow to avoid RefCell conflict)
                             if let PyObject::Module { dict, .. } = &mut *module.borrow_mut() {
-                                dict.insert(name.clone(), submod.clone());
+                                dict.insert_str(&name, submod.clone());
                             }
                             self.frames[fi].push(submod);
                         }
@@ -3789,7 +3789,7 @@ impl VirtualMachine {
             let init_func = dict.get("__init__").cloned().or_else(|| {
                 for base in mro.iter().skip(1) {
                     if let PyObject::Type { dict: base_dict, .. } = &*base.borrow() {
-                        if let Some(val) = base_dict.get("__init__") {
+                        if let Some(val) = base_dict.get_str("__init__") {
                             return Some(val.clone());
                         }
                     }
@@ -4000,7 +4000,7 @@ impl VirtualMachine {
             let f = {
                 let typ_ref = typ.borrow();
                 match &*typ_ref {
-                    PyObject::Type { dict: type_dict, .. } => type_dict.get("__call__").cloned(),
+                    PyObject::Type { dict: type_dict, .. } => type_dict.get_str("__call__").cloned(),
                     _ => None,
                 }
             };
