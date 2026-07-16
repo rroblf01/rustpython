@@ -12,6 +12,14 @@ use cranelift_module::{Linkage, Module};
 use crate::object::PyObjectRef;
 use crate::bytecode::*;
 
+// The `extern "C" fn jit_*` functions below are called directly from
+// Cranelift-compiled machine code (see the CALL-with-known-target codegen
+// further down in this file) whenever an operation falls outside the
+// JIT's inline fast paths. SAFETY, shared by all of them: the JIT codegen
+// that emits calls to these functions always passes the address of a live
+// stack slot holding a valid `PyObjectRef` for every `*const`/`*mut
+// PyObjectRef` parameter — that invariant is enforced by construction in
+// this file's codegen, not by the callee, so it isn't re-derived per function.
 extern "C" fn jit_py_add(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
     unsafe { std::ptr::write(out, crate::object::py_add(&*a, &*b).unwrap_or_else(|_| crate::object::py_none())); }
 }
@@ -119,14 +127,11 @@ extern "C" fn jit_call(func: *const PyObjectRef, nargs: i64, args: *const PyObje
             return;
         }
         // For regular Python functions, delegate to VM via callback
-        let vm_ptr = crate::vm::VM_PTR.load(std::sync::atomic::Ordering::SeqCst) as *mut crate::vm::VirtualMachine;
-        if !vm_ptr.is_null() {
-            let func_val = (*func).clone();
-            let cb_result = (*vm_ptr).call_function(func_val, v, Vec::new());
-            match cb_result {
-                Ok(val) => { std::ptr::write(out, val); return; }
-                Err(_) => {}
-            }
+        let func_val = (*func).clone();
+        let cb_result = crate::object::with_vm_mut(|vm| vm.call_function(func_val, v, Vec::new()));
+        if let Ok(Ok(val)) = cb_result {
+            std::ptr::write(out, val);
+            return;
         }
         std::ptr::write(out, crate::object::py_none());
     }
@@ -1906,6 +1911,11 @@ impl JitCompiler {
         }
         self.module.finalize_definitions().ok()?;
         let code_ptr = self.module.get_finalized_function(func);
+        // SAFETY: `code_ptr` is the address of the machine code just emitted
+        // by this function's own IR-building above, which always declares
+        // `func` with exactly this signature (4 params: 2 `*const PyObjectRef`
+        // + usize + `*mut PyObjectRef` — see the `Signature` built earlier in
+        // `compile()`), so the transmute target matches the actual ABI.
         Some(unsafe { std::mem::transmute(code_ptr) })
     }
 }

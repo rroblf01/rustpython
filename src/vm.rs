@@ -15,12 +15,6 @@ thread_local! {
     static ATTR_CACHE: std::cell::RefCell<HashMap<(String, String), crate::object::BuiltinFunc>> = std::cell::RefCell::new(HashMap::new());
 }
 
-/// Raw pointer to the current VirtualMachine, set before JIT code runs.
-/// Used by jit_call to fall back to the VM for regular Python function calls.
-/// Only read from jit.rs, so it's dead code in a non-jit build.
-#[cfg_attr(not(feature = "jit"), allow(dead_code))]
-pub(crate) static VM_PTR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
 #[derive(Clone)]
 pub struct Frame {
     pub code: Rc<CodeObject>,
@@ -1084,10 +1078,20 @@ impl VirtualMachine {
                     format!("{}/{}.cpython-313-x86_64-linux-gnu.so", base, name)
                 };
                 if std::path::Path::new(&so_path).exists() {
-                    match crate::ffi_bridge::load_extension(&so_path, name) {
+                    // SAFETY: loading and running a CPython C extension's
+                    // PyInit_* entry point is inherently unsafe — there is no
+                    // way to verify the .so at `so_path` actually implements
+                    // the CPython C-API contract it claims to. This is the
+                    // deliberate, documented risk of the "ffi" feature: it
+                    // only runs when the caller opts in by enabling it and
+                    // pointing sys.path at a real compiled extension.
+                    let loaded = unsafe { crate::ffi_bridge::load_extension(&so_path, name) };
+                    match loaded {
                         Ok(()) => {
                             // Try to get the module from the extension registry
-                            if let Some(mod_obj) = crate::ffi_bridge::get_extension_module(name) {
+                            // SAFETY: see above — same trust boundary, reading
+                            // state populated by the load_extension call just above.
+                            if let Some(mod_obj) = unsafe { crate::ffi_bridge::get_extension_module(name) } {
                                 return Ok(mod_obj);
                             }
                         }
@@ -3766,8 +3770,10 @@ impl VirtualMachine {
                         *jit_consts.borrow_mut() = precomputed;
                     }
                 } else if jp != SENTINEL_FAILED {
-                    // Set VM pointer for jit_call fallback (regular Python functions)
-                    VM_PTR.store(self as *mut VirtualMachine as usize, std::sync::atomic::Ordering::SeqCst);
+                    // SAFETY: `jp` was just produced by `self.jit.borrow_mut().compile(code)`
+                    // above (or on a prior call for the same `code`), which only ever emits
+                    // machine code matching this exact `extern "C"` signature — the JIT
+                    // codegen in jit.rs is the sole producer of values stored in `jit_ptr`.
                     let func_ptr: extern "C" fn(*const PyObjectRef, usize, *const PyObjectRef, *mut PyObjectRef) =
                         unsafe { std::mem::transmute(jp) };
                     let n = args.len().min(code.arg_count as usize);
@@ -3778,7 +3784,6 @@ impl VirtualMachine {
                     let consts = jit_consts.borrow();
                     let mut result = PyObjectRef::None;
                     func_ptr(fast_locals.as_ptr(), fast_locals.len(), consts.as_ptr(), &mut result);
-                    VM_PTR.store(0, std::sync::atomic::Ordering::SeqCst);
                     return Ok(result);
                 }
             }

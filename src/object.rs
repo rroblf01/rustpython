@@ -3845,86 +3845,85 @@ pub fn builtin_import(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let has_dots = name.contains('.');
     let has_fromlist = fromlist.as_ref().map_or(false, |fl| !fl.is_empty());
 
-    // Use a raw pointer to avoid closure lifetime issues with long function
-    let vm_ptr = match with_vm_mut(|vm| vm as *mut super::vm::VirtualMachine) {
-        Ok(ptr) => ptr,
-        Err(_) => return Err(PyError::runtime_error("__import__: no active VM")),
-    };
-    // SAFETY: VM_PTR is valid during builtin execution
-    let vm = unsafe { &mut *vm_ptr };
-
-    // With a non-empty fromlist and a dotted name, import the full module chain
-    // and return the rightmost module. CPython behavior:
-    //   __import__("certifi.core", ..., ["where"], 0)  -> imports certifi.core, returns certifi.core
-    //   __import__("certifi.core", ..., [], 0)          -> imports certifi, returns certifi
-    if has_dots && has_fromlist {
-        // First, ensure the top-level package is imported (import_module_from_file
-        // needs the parent in modules to resolve dotted names)
-        let top_name = name.split('.').next().unwrap_or(&name).to_string();
-        if !vm.modules.contains_key(&top_name) {
-            match vm.import_module_from_file(&top_name) {
-                Ok(module) => {
-                    vm.modules.insert(top_name.clone(), module.clone());
-                    if let Some(sys_mod) = vm.modules.get("sys") {
-                        if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
-                            if let Some(mod_dict) = dict.get("modules") {
-                                mod_dict.borrow_mut().set_attribute(&top_name, module.clone()).ok();
+    let import_result = with_vm_mut(|vm| -> PyResult<PyObjectRef> {
+        // With a non-empty fromlist and a dotted name, import the full module chain
+        // and return the rightmost module. CPython behavior:
+        //   __import__("certifi.core", ..., ["where"], 0)  -> imports certifi.core, returns certifi.core
+        //   __import__("certifi.core", ..., [], 0)          -> imports certifi, returns certifi
+        if has_dots && has_fromlist {
+            // First, ensure the top-level package is imported (import_module_from_file
+            // needs the parent in modules to resolve dotted names)
+            let top_name = name.split('.').next().unwrap_or(&name).to_string();
+            if !vm.modules.contains_key(&top_name) {
+                match vm.import_module_from_file(&top_name) {
+                    Ok(module) => {
+                        vm.modules.insert(top_name.clone(), module.clone());
+                        if let Some(sys_mod) = vm.modules.get("sys") {
+                            if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
+                                if let Some(mod_dict) = dict.get("modules") {
+                                    mod_dict.borrow_mut().set_attribute(&top_name, module.clone()).ok();
+                                }
                             }
                         }
                     }
+                    Err(e) => return Err(PyError::ImportError(format!("__import__ error: {}", e))),
                 }
-                Err(e) => return Err(PyError::ImportError(format!("__import__ error: {}", e))),
             }
+
+            // Now import the full chain - import_module_from_file handles dotted
+            // names when the parent is already in modules
+            if let Some(module) = vm.modules.get(&name) {
+                return Ok(module.clone());
+            }
+            return match vm.import_module_from_file(&name) {
+                Ok(module) => {
+                    vm.modules.insert(name.to_string(), module.clone());
+                    if let Some(sys_mod) = vm.modules.get("sys") {
+                        if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
+                            if let Some(mod_dict) = dict.get("modules") {
+                                mod_dict.borrow_mut().set_attribute(&name, module.clone()).ok();
+                            }
+                        }
+                    }
+                    Ok(module)
+                }
+                Err(e) => Err(PyError::ImportError(format!("__import__ error: {}", e))),
+            };
         }
 
-        // Now import the full chain - import_module_from_file handles dotted
-        // names when the parent is already in modules
-        if let Some(module) = vm.modules.get(&name) {
+        // Without fromlist (or non-dotted name), import only the top-level package
+        let resolved_name = if has_dots {
+            name.split('.').next().unwrap_or(&name).to_string()
+        } else {
+            name.clone()
+        };
+
+        // Check if already loaded
+        if let Some(module) = vm.modules.get(&resolved_name) {
             return Ok(module.clone());
         }
-        return match vm.import_module_from_file(&name) {
+
+        // Try to import the module from file
+        match vm.import_module_from_file(&resolved_name) {
             Ok(module) => {
-                vm.modules.insert(name.to_string(), module.clone());
+                vm.modules.insert(resolved_name.clone(), module.clone());
+                // Also add to sys.modules
                 if let Some(sys_mod) = vm.modules.get("sys") {
                     if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
                         if let Some(mod_dict) = dict.get("modules") {
-                            mod_dict.borrow_mut().set_attribute(&name, module.clone()).ok();
+                            mod_dict.borrow_mut().set_attribute(&resolved_name, module.clone()).ok();
                         }
                     }
                 }
                 Ok(module)
             }
             Err(e) => Err(PyError::ImportError(format!("__import__ error: {}", e))),
-        };
-    }
-
-    // Without fromlist (or non-dotted name), import only the top-level package
-    let resolved_name = if has_dots {
-        name.split('.').next().unwrap_or(&name).to_string()
-    } else {
-        name.clone()
-    };
-
-    // Check if already loaded
-    if let Some(module) = vm.modules.get(&resolved_name) {
-        return Ok(module.clone());
-    }
-
-    // Try to import the module from file
-    match vm.import_module_from_file(&resolved_name) {
-        Ok(module) => {
-            vm.modules.insert(resolved_name.clone(), module.clone());
-            // Also add to sys.modules
-            if let Some(sys_mod) = vm.modules.get("sys") {
-                if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
-                    if let Some(mod_dict) = dict.get("modules") {
-                        mod_dict.borrow_mut().set_attribute(&resolved_name, module.clone()).ok();
-                    }
-                }
-            }
-            Ok(module)
         }
-        Err(e) => Err(PyError::ImportError(format!("__import__ error: {}", e))),
+    });
+
+    match import_result {
+        Ok(inner) => inner,
+        Err(_) => Err(PyError::runtime_error("__import__: no active VM")),
     }
 }
 

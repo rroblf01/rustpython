@@ -76,8 +76,11 @@ impl<T> Shared<T> {
     }
 }
 
-unsafe impl<T: Send + Sync> Send for Shared<T> {}
-unsafe impl<T: Send + Sync> Sync for Shared<T> {}
+// No manual Send/Sync impl: the `Single(Rc<RefCell<T>>)` variant is never
+// safe to share across threads (Rc's refcount isn't atomic), so `Shared<T>`
+// must stay !Send/!Sync regardless of T. Only `new_multi()`'s Arc<RwLock<T>>
+// payload is actually thread-safe — that's a property of the value, not the
+// type, so it can't be expressed as a trait impl here.
 
 fn Arc_as_ptr<T>(arc: &std::sync::Arc<T>) -> *const T {
     std::sync::Arc::as_ptr(arc)
@@ -217,10 +220,13 @@ mod tests {
     }
 
     #[test]
-    fn test_thread_send_sync() {
+    fn test_shared_multi_is_send_sync() {
+        // Only the Arc<RwLock<T>> payload is actually thread-safe — verify
+        // that directly rather than asserting it of the whole enum type
+        // (see the comment on Shared<T>'s definition for why).
         fn assert_send<T: Send>() {}
         fn assert_sync<T: Sync>() {}
-        assert_send::<Shared<i32>>();
-        assert_sync::<Shared<i32>>();
+        assert_send::<std::sync::Arc<std::sync::RwLock<i32>>>();
+        assert_sync::<std::sync::Arc<std::sync::RwLock<i32>>>();
     }
 }

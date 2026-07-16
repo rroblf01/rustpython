@@ -27,6 +27,7 @@ fn read_fd(fd: i32, buf: &mut Vec<u8>) -> std::io::Result<usize> {
 fn write_fd(fd: i32, data: &[u8]) -> std::io::Result<usize> {
     use std::os::unix::io::FromRawFd;
     use std::io::Write;
+    // SAFETY: from_raw_fd takes ownership, but we use forget() to return it.
     let mut f = unsafe { std::fs::File::from_raw_fd(fd) };
     let result = f.write(data);
     std::mem::forget(f);
@@ -36,6 +37,7 @@ fn write_fd(fd: i32, data: &[u8]) -> std::io::Result<usize> {
 /// Close a raw file descriptor by wrapping it in a File and dropping it.
 fn close_fd(fd: i32) {
     use std::os::unix::io::FromRawFd;
+    // SAFETY: from_raw_fd takes ownership; dropping it below closes the fd.
     let file = unsafe { std::fs::File::from_raw_fd(fd) };
     drop(file); // Closes the fd
 }

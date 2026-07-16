@@ -82,10 +82,16 @@ struct BumpRegion {
 impl BumpRegion {
     fn new(size: usize) -> Self {
         let layout = Layout::from_size_align(size, 16).unwrap();
+        // SAFETY: layout has a non-zero size (MIN_HEAP_SIZE); the null check
+        // below handles allocation failure before the pointer is used.
         let base = unsafe { alloc(layout) };
+        if base.is_null() {
+            std::alloc::handle_alloc_error(layout);
+        }
         BumpRegion {
             base,
             cur: base,
+            // SAFETY: base points to a `size`-byte allocation, so base+size is in-bounds (one-past-the-end).
             end: unsafe { base.add(size) },
         }
     }
@@ -93,7 +99,11 @@ impl BumpRegion {
     fn alloc(&mut self, size: usize) -> Option<*mut u8> {
         let aligned = (size + 15) & !15;
         let ptr = self.cur;
-        let next = unsafe { ptr.add(aligned) };
+        // `wrapping_add`, not `add`: this speculative offset can legitimately
+        // land past the end of the allocation (that's the "region full" case
+        // checked right below) — `add` requires staying in-bounds even
+        // without a dereference, so it would be UB here.
+        let next = ptr.wrapping_add(aligned);
         if next > self.end {
             return None; // Region full, promote to old gen
         }
@@ -165,6 +175,10 @@ impl GcHeap {
         if let Some(ptr) = self.young.alloc(total_size) {
             self.stats.young_allocated += 1;
             let header = ptr as *mut GcHeader;
+            // SAFETY: `young.alloc()` only returns Some(ptr) for a freshly
+            // reserved `total_size`-byte span, so `ptr` is valid for at least
+            // `header_size` bytes as a `GcHeader`, properly aligned (region is
+            // 16-byte aligned) and non-overlapping with any live object.
             unsafe {
                 (*header).colour = Colour::White;
                 (*header).kind = kind;
@@ -178,6 +192,7 @@ impl GcHeap {
                 self.collect();
             }
 
+            // SAFETY: header_size < total_size (the reserved span), so this stays in-bounds.
             return unsafe { ptr.add(header_size) };
         }
 
@@ -195,6 +210,8 @@ impl GcHeap {
             data: Vec::with_capacity(young_size),
         };
         // Copy all young objects to the old block
+        // SAFETY: young_size == self.young.used() <= the region's allocated
+        // size, so [base, base+young_size) is entirely within the allocation.
         unsafe {
             let src = std::slice::from_raw_parts(self.young.base, young_size);
             block.data.extend_from_slice(src);
@@ -206,8 +223,15 @@ impl GcHeap {
 
     fn alloc_old(&mut self, total_size: usize, kind: ObjectKind) -> *mut u8 {
         let layout = Layout::from_size_align(total_size, 16).unwrap();
+        // SAFETY: layout has a non-zero size (total_size includes the header);
+        // the null check below handles allocation failure.
         let ptr = unsafe { alloc(layout) };
+        if ptr.is_null() {
+            std::alloc::handle_alloc_error(layout);
+        }
         let header = ptr as *mut GcHeader;
+        // SAFETY: `ptr` was just allocated above with `total_size` bytes
+        // (>= header_size), 16-byte aligned, and is non-null (checked above).
         unsafe {
             (*header).colour = Colour::White;
             (*header).kind = kind;
@@ -215,17 +239,22 @@ impl GcHeap {
             (*header).size = (total_size - std::mem::size_of::<GcHeader>()) as u32;
         }
         self.total_allocated += total_size;
+        // SAFETY: header_size < total_size (the just-allocated block), so this stays in-bounds.
         unsafe { ptr.add(std::mem::size_of::<GcHeader>()) }
     }
 
     /// Register a GC root (a pointer that must be traced)
     pub fn add_root(&mut self, ptr: *mut u8, kind: ObjectKind) {
+        // SAFETY: `ptr` must be a data pointer previously returned by `alloc()`,
+        // which always places a `GcHeader` immediately before it — callers are
+        // required to uphold this (see the module doc / usage contract).
         let header = unsafe { (ptr as *mut GcHeader).sub(1) };
         unsafe { (*header).kind = kind };
         self.roots.push(header);
     }
 
     pub fn remove_root(&mut self, ptr: *mut u8) {
+        // SAFETY: see add_root — same contract on `ptr`.
         let header = unsafe { (ptr as *mut GcHeader).sub(1) };
         self.roots.retain(|&r| r != header);
     }
@@ -280,6 +309,13 @@ impl GcHeap {
     fn scan_object(&mut self, header: *mut GcHeader) {
         // Walk the object's fields and mark references
         // For built-in types, use the kind to determine which fields are GC pointers
+        //
+        // NOTE: nothing in the live interpreter currently calls `alloc()`/
+        // `add_root()` with real PyObject data (object.rs still uses
+        // Rc<RefCell<PyObject>>, not this heap) — `gc.collect()` only reaches
+        // here with an empty root set. The casts below assume a specific
+        // future in-heap layout for each ObjectKind that doesn't exist yet;
+        // they're unreachable today, not currently-exercised unsafe.
         unsafe {
             let kind = (*header).kind;
             let data_ptr = (header as *mut u8).add(std::mem::size_of::<GcHeader>());
@@ -335,9 +371,6 @@ impl GcHeap {
         }
     }
 }
-
-unsafe impl Send for GcHeap {}
-unsafe impl Sync for GcHeap {}
 
 /// Helper struct for function object field tracing
 #[repr(C)]

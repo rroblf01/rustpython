@@ -73,6 +73,11 @@ struct ExtensionModule {
     name: String,
 }
 
+// SAFETY: unlike Rc-based types, these are bare pointers with no thread-affine
+// refcount — a dlopen'd library handle and the C module pointer it produced
+// are fine to access from another thread. All access is already serialized
+// through EXTENSION_REGISTRY's Mutex, so Sync only needs Send to hold, and
+// nothing here does its own unsynchronized interior mutation.
 unsafe impl Send for ExtensionModule {}
 unsafe impl Sync for ExtensionModule {}
 
