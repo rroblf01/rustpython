@@ -37,3 +37,4 @@ sha2 = "0.10"
 flate2 = "1"
 rustyline = "15"
 mimalloc = { version = "0.1", default-features = false }
+rusqlite = "0.40.1"

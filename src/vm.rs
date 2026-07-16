@@ -631,6 +631,9 @@ impl VirtualMachine {
           modules.insert("concurrent".to_string(), concurrent_mod);
           modules.insert("concurrent.futures".to_string(), concurrent_futures_mod);
 
+          // Native sqlite3 module
+          modules.insert("sqlite3".to_string(), create_module("sqlite3", create_sqlite3_dict()));
+
           // Populate sys.path with default search paths
         if let PyObject::List(path_list) = &mut *sys_dict.get("path").unwrap().borrow_mut() {
             path_list.push(py_str("."));

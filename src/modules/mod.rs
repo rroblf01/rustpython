@@ -21,3 +21,5 @@ mod binascii;
 pub use binascii::*;
 mod concurrent;
 pub use concurrent::*;
+mod sqlite3;
+pub use sqlite3::*;
