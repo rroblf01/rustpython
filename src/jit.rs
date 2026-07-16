@@ -520,10 +520,9 @@ impl JitCompiler {
     pub fn new() -> Self {
         let flag_builder = settings::builder();
         #[cfg(debug_assertions)]
-        let flag_builder = flag_builder.set("is_pic", "false").unwrap();
-        let flags = settings::Flags::new(flag_builder);
+        let flag_builder = settings::builder();
         let isa_builder = cranelift_native::builder().unwrap();
-        let isa = isa_builder.finish(flags).unwrap();
+        let isa = isa_builder.finish(settings::Flags::new(flag_builder)).unwrap();
         let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
         builder.symbol("jit_py_add", jit_py_add as *const u8);
         builder.symbol("jit_py_sub", jit_py_sub as *const u8);

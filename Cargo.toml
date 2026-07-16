@@ -10,12 +10,20 @@ codegen-units = 4   # Más unidades = menos RAM por unidad de compilación
 strip = "symbols"   # Quitar símbolos de debugging
 panic = "abort"     # Abortar en panic (menos código)
 
+[profile.release-lite]
+inherits = "release"
+opt-level = 1
+lto = false
+codegen-units = 16
+strip = false
+
 [features]
 default = []
 profile = []  # Enable execution profiling for PGO JIT
 gc = []       # Enable experimental tracing garbage collector
 jit = ["cranelift", "cranelift-frontend", "cranelift-jit", "cranelift-module", "cranelift-native"]  # Enable Cranelift JIT compilation for hot bytecode
 ffi = ["libloading"]      # Enable CPython C extension loading (.so files)
+sqlite3 = ["rusqlite"]    # Enable sqlite3 native module (heavy dependency)
 
 [dependencies]
 cranelift = { version = "0.109.1", optional = true }
@@ -37,4 +45,4 @@ sha2 = "0.10"
 flate2 = "1"
 rustyline = "15"
 mimalloc = { version = "0.1", default-features = false }
-rusqlite = { version = "0.40.1", default-features = false, features = ["column_decltype"] }
+rusqlite = { version = "0.40.1", default-features = false, features = ["column_decltype"], optional = true }

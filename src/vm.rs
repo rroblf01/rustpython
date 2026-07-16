@@ -631,7 +631,8 @@ impl VirtualMachine {
           modules.insert("concurrent".to_string(), concurrent_mod);
           modules.insert("concurrent.futures".to_string(), concurrent_futures_mod);
 
-          // Native sqlite3 module
+          // Native sqlite3 module (requires --features sqlite3)
+          #[cfg(feature = "sqlite3")]
           modules.insert("sqlite3".to_string(), create_module("sqlite3", create_sqlite3_dict()));
 
           // Populate sys.path with default search paths

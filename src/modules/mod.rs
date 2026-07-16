@@ -21,5 +21,7 @@ mod binascii;
 pub use binascii::*;
 mod concurrent;
 pub use concurrent::*;
+#[cfg(feature = "sqlite3")]
 mod sqlite3;
+#[cfg(feature = "sqlite3")]
 pub use sqlite3::*;
