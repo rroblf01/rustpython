@@ -1005,11 +1005,17 @@ impl Compiler {
                     }
                     self.emit(Opcode::BUILD_TUPLE, bases.len() as u32);
                 }
-                let kw_count = kw.len() as u32;
+                let kw_count = kw.len();
                 for k in kw {
+                    // Push keyword name as a string constant
+                    let name_idx = self.get_const_index(
+                        ConstValue::String(k.arg.clone().unwrap_or_default())
+                    ) as u32;
+                    self.emit(Opcode::LOAD_CONST, name_idx);
                     self.compile_expr(&k.value)?;
                 }
-                self.emit(Opcode::CALL, 3 + kw_count);
+                let call_arg = 3 | ((kw_count as u32) << 8);
+                self.emit(Opcode::CALL, call_arg);
                 // Set __doc__ on class if present
                 if let Some(doc) = docstring {
                     self.emit(Opcode::DUP_TOP, 0);
@@ -1966,7 +1972,7 @@ impl Compiler {
         for arg in args {
             self.add_varname(&arg.arg);
         }
-        if self.code.arg_count == 0 {
+        if self.code.arg_count == 0 && self.code.vararg_name.is_none() && self.code.kwarg_name.is_none() {
             self.code.arg_count = args.len();
         }
 

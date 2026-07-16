@@ -12,7 +12,18 @@
 ///   - String keys in HashMaps are replaced by StrId keys
 ///   - Two-way mapping: str → StrId and StrId → &str
 use std::collections::HashMap;
-use std::fmt;
+
+thread_local! {
+    static GLOBAL_INTERNER: std::cell::RefCell<Interner> = std::cell::RefCell::new(Interner::new());
+}
+
+pub fn intern(s: &str) -> StrId {
+    GLOBAL_INTERNER.with(|i| i.borrow_mut().intern(s))
+}
+
+pub fn lookup(id: StrId) -> String {
+    GLOBAL_INTERNER.with(|i| i.borrow().lookup(id).to_string())
+}
 
 /// A compact string identifier (u32 index).
 /// 4 bytes instead of a String's 24 bytes + heap allocation.
@@ -175,6 +186,11 @@ impl<V: Clone> InternedMap<V> {
     }
 
     /// Build from a HashMap (for migration compatibility)
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.len = 0;
+    }
+
     pub fn from_hashmap(map: &HashMap<String, V>, interner: &mut Interner) -> Self
     where V: Clone {
         let mut im = InternedMap::with_capacity(map.len());

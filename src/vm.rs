@@ -5,6 +5,7 @@ use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 use smallvec::SmallVec;
 use crate::bytecode::*;
+use crate::interner::{self, InternedMap, StrId};
 use crate::modules::*;
 use crate::object::*;
 #[cfg(feature = "jit")]
@@ -14,10 +15,14 @@ thread_local! {
     static ATTR_CACHE: std::cell::RefCell<HashMap<(String, String), crate::object::BuiltinFunc>> = std::cell::RefCell::new(HashMap::new());
 }
 
+/// Raw pointer to the current VirtualMachine, set before JIT code runs.
+/// Used by jit_call to fall back to the VM for regular Python function calls.
+pub(crate) static VM_PTR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 #[derive(Clone)]
 pub struct Frame {
     pub code: Rc<CodeObject>,
-    pub locals: HashMap<String, PyObjectRef>,
+    pub locals: InternedMap<PyObjectRef>,
     pub fast_locals: Vec<Option<PyObjectRef>>,
     pub globals: Rc<RefCell<HashMap<String, PyObjectRef>>>,
     pub builtins: Rc<HashMap<String, PyObjectRef>>,
@@ -69,7 +74,7 @@ impl Frame {
         Frame {
             fast_locals: vec![None; code.nlocals],
             code,
-            locals: HashMap::new(),
+            locals: InternedMap::new(),
             globals,
             builtins,
             stack: SmallVec::new(),
@@ -120,6 +125,22 @@ impl Frame {
     pub fn stack_size(&self) -> usize {
         self.stack.len()
     }
+
+    pub fn insert_local(&mut self, name: &str, val: PyObjectRef) -> Option<PyObjectRef> {
+        self.locals.insert(interner::intern(name), val)
+    }
+
+    pub fn get_local(&self, name: &str) -> Option<&PyObjectRef> {
+        self.locals.get(interner::intern(name))
+    }
+
+    pub fn remove_local(&mut self, name: &str) -> Option<PyObjectRef> {
+        self.locals.remove(interner::intern(name))
+    }
+
+    pub fn contains_local(&self, name: &str) -> bool {
+        self.locals.contains_key(interner::intern(name))
+    }
 }
 
 pub struct VirtualMachine {
@@ -134,6 +155,7 @@ pub struct VirtualMachine {
     /// Indexed by (function_id, instruction_offset). Used by JIT to
     /// identify hot paths for native compilation.
     pub profile: RefCell<HashMap<usize, Vec<u32>>>,
+    pub frame_pool: Vec<Frame>,
     /// Line number of the last instruction executed. Used for error reporting.
     pub last_error_line: Option<usize>,
     /// Type registry: maps type names to PyObject::Type objects.
@@ -716,16 +738,53 @@ impl VirtualMachine {
              jit: RefCell::new(JitCompiler::new()),
               sys_path: vec!["./".to_string(), "./Lib/".to_string()],
               profile: RefCell::new(HashMap::new()),
-              last_error_line: None,
-              type_registry: HashMap::new(),
+               last_error_line: None,
+               frame_pool: Vec::new(),
+               type_registry: HashMap::new(),
           };
          vm.populate_type_registry();
          vm
     }
 
+    fn acquire_frame(
+        &mut self,
+        code: Rc<CodeObject>,
+        globals: Rc<RefCell<HashMap<String, PyObjectRef>>>,
+        builtins: Rc<HashMap<String, PyObjectRef>>,
+        module_globals: Option<Rc<RefCell<HashMap<String, PyObjectRef>>>>,
+    ) -> Frame {
+        if let Some(mut frame) = self.frame_pool.pop() {
+            let nlocals = code.nlocals;
+            frame.code = code;
+            frame.globals = globals;
+            frame.builtins = builtins;
+            frame.module_globals = module_globals;
+            frame.fast_locals.clear();
+            frame.fast_locals.resize(nlocals, None);
+            frame.locals.clear();
+            frame.stack.clear();
+            frame.ip = 0;
+            frame.base_sp = 0;
+            frame.exception_handlers.clear();
+            frame.return_value = None;
+            frame.closure.clear();
+            frame.active_exception = None;
+            frame.attr_cache.clear();
+            frame.global_cache.clear();
+            frame.registers.clear();
+            frame
+        } else {
+            Frame::new(code, globals, builtins, module_globals)
+        }
+    }
+
+    fn release_frame(&mut self, frame: Frame) {
+        self.frame_pool.push(frame);
+    }
+
     pub fn run(&mut self, code: CodeObject) -> PyResult<PyObjectRef> {
         // JIT compilation disabled — using stable interpreter path only
-        let frame = Frame::new(
+        let frame = self.acquire_frame(
             Rc::new(code),
             self.globals.clone(),
             Rc::clone(&self.builtins),
@@ -733,16 +792,20 @@ impl VirtualMachine {
         );
         self.frames.push(frame);
         let result = self.execute();
-        self.frames.pop();
+        if let Some(frame) = self.frames.pop() {
+            self.release_frame(frame);
+        }
         result
     }
 
     pub fn exec_code(&mut self, code: CodeObject, globals: Option<Rc<RefCell<HashMap<String, PyObjectRef>>>>) -> PyResult<PyObjectRef> {
         let g = globals.unwrap_or_else(|| self.globals.clone());
-        let frame = Frame::new(Rc::new(code), g, Rc::clone(&self.builtins), None);
+        let frame = self.acquire_frame(Rc::new(code), g, Rc::clone(&self.builtins), None);
         self.frames.push(frame);
         let result = self.execute();
-        self.frames.pop();
+        if let Some(frame) = self.frames.pop() {
+            self.release_frame(frame);
+        }
         result
     }
 
@@ -1384,7 +1447,7 @@ impl VirtualMachine {
                 let name = &self.frames[fi].code.names[name_idx];
                 let val = {
                     let f = &self.frames[self.frames.len() - 1];
-                    f.locals.get(name).cloned()
+                    f.get_local(name).cloned()
                         .or_else(|| f.globals.borrow().get(name).cloned())
                         .or_else(|| {
                             // Check module_globals (enclosing module scope for class bodies)
@@ -1431,7 +1494,7 @@ impl VirtualMachine {
                 let name = frame.code.varnames.get(var_idx).ok_or_else(|| {
                     PyError::runtime_error("varname index out of range")
                 })?.clone();
-                frame.locals.insert(name, val);
+                frame.insert_local(&name, val);
             }
 
             Opcode::LOAD_GLOBAL => {
@@ -1562,7 +1625,7 @@ impl VirtualMachine {
             Opcode::DELETE_FAST => {
                 let var_idx = arg as usize;
                 let name = self.frames[fi].code.varnames[var_idx].clone();
-                self.frames[fi].locals.remove(&name);
+                self.frames[fi].remove_local(&name);
             }
 
             Opcode::DELETE_NAME => {
@@ -1675,7 +1738,7 @@ impl VirtualMachine {
                 let name = self.frames[fi].code.varnames.get(var_idx).ok_or_else(|| {
                     PyError::runtime_error("varname index out of range")
                 })?.clone();
-                self.frames[fi].locals.insert(name, val);
+                self.frames[fi].insert_local(&name, val);
             }
             Opcode::REG_BINARY_OP => {
                 let dst = (arg >> 4) as usize;
@@ -1787,18 +1850,13 @@ impl VirtualMachine {
                 }
                 // Remaining items are keyword name+value pairs or **kwargs dict
                 while i + 1 < items.len() {
-                    // Try to extract keyword name
                     if let PyObject::Str(name) = &*items[i].borrow() {
-                        if let PyObject::Str(_) = &*items[i+1].borrow() {
-                            // Both name and value are strings - but is it a real keyword or **kwargs dict?
-                            // Check if the name looks like a valid Python identifier
-                            keywords.push((name.to_string(), items[i+1].clone()));
-                            i += 2;
-                            continue;
-                        }
+                        keywords.push((name.to_string(), items[i+1].clone()));
+                        i += 2;
+                    } else {
+                        // **kwargs dict or packed arg
+                        break;
                     }
-                    // Not a (name, value) pair - it's either a **kwargs dict or a packed arg
-                    break;
                 }
                 if cfg!(feature = "profile") { eprintln!("DEBUG CALL: callable type={} callable={:?}", callable.borrow().type_name(), callable.repr()); }
                 let result = self.call_function(callable, args, keywords)?;
@@ -2296,7 +2354,7 @@ impl VirtualMachine {
                                         }
                                         None
                                     });
-                                    // Handle descriptor protocol for Property, StaticMethod, ClassMethod
+                                    // Handle descriptor protocol for Property, StaticMethod, ClassMethod, and generic __get__
                                     if let Some(val) = found {
                                         let val_borrowed = val.borrow();
                                         match &*val_borrowed {
@@ -2356,6 +2414,22 @@ impl VirtualMachine {
                                                 }));
                                             }
                                             _ => {
+                                                // Generic descriptor protocol: if value has __get__, call it
+                                                drop(val_borrowed);
+                                                let cls = {
+                                                    let owner_type = obj.borrow();
+                                                    if let PyObject::Instance { typ: inst_typ, .. } = &*owner_type {
+                                                        Some(inst_typ.clone())
+                                                    } else {
+                                                        None
+                                                    }
+                                                };
+                                                if let Some(cls) = cls {
+                                                    if let Ok(__get__) = val.borrow().get_attribute("__get__") {
+                                                        let descriptor_args = vec![val.clone(), obj.clone(), cls];
+                                                        return Some(self.call_function(__get__, descriptor_args, vec![]).unwrap_or_else(|_| val.clone()));
+                                                    }
+                                                }
                                                 return Some(val.clone());
                                             }
                                         }
@@ -3494,7 +3568,7 @@ impl VirtualMachine {
         Ok(None)
     }
 
-    fn call_function(&mut self, callable: PyObjectRef, args: Vec<PyObjectRef>, keywords: Vec<(String, PyObjectRef)>) -> PyResult<PyObjectRef> {
+    pub(crate) fn call_function(&mut self, callable: PyObjectRef, args: Vec<PyObjectRef>, keywords: Vec<(String, PyObjectRef)>) -> PyResult<PyObjectRef> {
         let type_name = callable.borrow().type_name();
         if cfg!(feature = "profile") { eprintln!("DEBUG call_function: type={} name={:?}", type_name, callable.repr()); }
 
@@ -3533,8 +3607,38 @@ impl VirtualMachine {
             return self.call_function(func, all_args, keywords);
         }
 
-        if let PyObject::Function { code, globals: func_globals, defaults, closure, .. } = &*callable.borrow() {
-            // JIT compilation disabled — using stable interpreter path only
+        if let PyObject::Function { code, globals: func_globals, defaults, closure, jit_ptr, jit_consts, .. } = &*callable.borrow() {
+            // Try JIT compiled execution (fast path for hot functions)
+            #[cfg(feature = "jit")]
+            if defaults.is_empty() && keywords.is_empty() {
+                const SENTINEL_FAILED: usize = 1;
+                let jp = jit_ptr.get();
+                if jp == 0 {
+                    // First call: try to compile; set sentinel so we don't retry
+                    jit_ptr.set(SENTINEL_FAILED);
+                    if let Some(compiled_fn) = self.jit.borrow_mut().compile(code) {
+                        let precomputed = crate::jit::JitCompiler::precompute_with_names(code);
+                        jit_ptr.set(compiled_fn as usize);
+                        *jit_consts.borrow_mut() = precomputed;
+                    }
+                } else if jp != SENTINEL_FAILED {
+                    // Set VM pointer for jit_call fallback (regular Python functions)
+                    VM_PTR.store(self as *mut VirtualMachine as usize, std::sync::atomic::Ordering::SeqCst);
+                    let func_ptr: extern "C" fn(*const PyObjectRef, usize, *const PyObjectRef, *mut PyObjectRef) =
+                        unsafe { std::mem::transmute(jp) };
+                    let n = args.len().min(code.arg_count as usize);
+                    let mut fast_locals: Vec<PyObjectRef> = Vec::with_capacity(n);
+                    for i in 0..n {
+                        fast_locals.push(args[i].clone());
+                    }
+                    let consts = jit_consts.borrow();
+                    let mut result = PyObjectRef::None;
+                    func_ptr(fast_locals.as_ptr(), fast_locals.len(), consts.as_ptr(), &mut result);
+                    VM_PTR.store(0, std::sync::atomic::Ordering::SeqCst);
+                    return Ok(result);
+                }
+            }
+
             // Try simple execution without Frame creation
             if defaults.is_empty() && keywords.is_empty() {
                 if let Some(result) = Self::try_exec_simple(code, &args) {
@@ -3544,7 +3648,7 @@ impl VirtualMachine {
             let func_globals = func_globals.clone();
             let defaults = defaults.clone();
             let code_rc = Rc::new(code.clone());
-            let mut new_frame = Frame::new(Rc::clone(&code_rc), func_globals, Rc::clone(&self.builtins), None);
+            let mut new_frame = self.acquire_frame(Rc::clone(&code_rc), func_globals, Rc::clone(&self.builtins), None);
             new_frame.closure = closure.clone();
             let code = code;
 
@@ -3553,8 +3657,8 @@ impl VirtualMachine {
 
             // Assign positional args to named parameters
             for i in 0..npos.min(named_params) {
-                let arg_name = &new_frame.code.varnames[i];
-                new_frame.locals.insert(arg_name.clone(), args[i].clone());
+                let name_clone = new_frame.code.varnames[i].clone();
+                new_frame.insert_local(&name_clone, args[i].clone());
                 if i < new_frame.fast_locals.len() {
                     new_frame.fast_locals[i] = Some(args[i].clone());
                 }
@@ -3572,7 +3676,7 @@ impl VirtualMachine {
                         new_frame.fast_locals[idx] = Some(vararg_val.clone());
                     }
                 }
-                new_frame.locals.insert(vararg_name.clone(), vararg_val);
+                new_frame.insert_local(&vararg_name, vararg_val);
             }
 
             // Apply defaults for missing positional params
@@ -3585,13 +3689,13 @@ impl VirtualMachine {
                 for i in npos..named_params {
                     if i >= first_default {
                         let default_idx = i - first_default;
-                        let arg_name = &new_frame.code.varnames[i];
+                        let name_clone = new_frame.code.varnames[i].clone();
                         let val = if default_idx < defaults.len() {
                             defaults[default_idx].clone()
                         } else {
                             py_none()
                         };
-                        new_frame.locals.insert(arg_name.clone(), val.clone());
+                        new_frame.insert_local(&name_clone, val.clone());
                         if i < new_frame.fast_locals.len() {
                             new_frame.fast_locals[i] = Some(val);
                         }
@@ -3604,7 +3708,7 @@ impl VirtualMachine {
                 let mut kw_dict = py_dict();
                 for (key, value) in &keywords {
                     if let Some(idx) = new_frame.code.varnames.iter().position(|n| n == key) {
-                        new_frame.locals.insert(key.clone(), value.clone());
+                        new_frame.insert_local(&key, value.clone());
                         if idx < new_frame.fast_locals.len() {
                             new_frame.fast_locals[idx] = Some(value.clone());
                         }
@@ -3619,18 +3723,18 @@ impl VirtualMachine {
                         new_frame.fast_locals[idx] = Some(kw_dict.clone());
                     }
                 }
-                new_frame.locals.insert(kwarg_name.clone(), kw_dict);
+                new_frame.insert_local(&kwarg_name, kw_dict);
             } else {
                 // No **kwargs, just set keyword args directly
                 for (key, value) in &keywords {
-                    new_frame.locals.insert(key.clone(), value.clone());
+                    new_frame.insert_local(&key, value.clone());
                 }
             }
 
             self.frames.push(new_frame);
             let result = self.execute();
-            if !self.frames.is_empty() {
-                self.frames.pop();
+            if let Some(frame) = self.frames.pop() {
+                self.release_frame(frame);
             }
             return result;
         }
@@ -3667,20 +3771,23 @@ impl VirtualMachine {
                         // Set self at index 0
                         if !new_frame.code.varnames.is_empty() {
                             new_frame.fast_locals[0] = Some(instance.clone());
-                            new_frame.locals.insert(new_frame.code.varnames[0].clone(), instance.clone());
+                            new_frame.insert_local(&new_frame.code.varnames[0].clone(), instance.clone());
                         }
-                        for (i, arg_name) in new_frame.code.varnames.iter().enumerate().skip(1) {
+                        let varnames = new_frame.code.varnames.clone();
+                        for (i, arg_name) in varnames.iter().enumerate().skip(1) {
                             if i - 1 < args.len() {
                                 new_frame.fast_locals[i] = Some(args[i - 1].clone());
-                                new_frame.locals.insert(arg_name.clone(), args[i - 1].clone());
+                                new_frame.insert_local(arg_name, args[i - 1].clone());
                             } else {
                                 new_frame.fast_locals[i] = Some(py_none());
-                                new_frame.locals.insert(arg_name.clone(), py_none());
+                                new_frame.insert_local(arg_name, py_none());
                             }
                         }
                         self.frames.push(new_frame);
                         self.execute()?;
-                        self.frames.pop();
+                        if let Some(frame) = self.frames.pop() {
+                            self.release_frame(frame);
+                        }
                     }
                     PyObject::Closure(func) => {
                         let func_clone = func.clone();
@@ -3723,10 +3830,12 @@ impl VirtualMachine {
             match &*func.borrow() {
                 PyObject::Function { code, .. } => {
                     let code = code.clone();
-                    let mut new_frame = Frame::new(Rc::new(code), namespace.clone(), Rc::clone(&self.builtins), caller_module_globals);
+                    let mut new_frame = self.acquire_frame(Rc::new(code), namespace.clone(), Rc::clone(&self.builtins), caller_module_globals);
                     self.frames.push(new_frame);
                     self.execute()?;
-                    self.frames.pop();
+                    if let Some(frame) = self.frames.pop() {
+                        self.release_frame(frame);
+                    }
                 }
                 _ => return Err(PyError::type_error("class body must be a function")),
             }
@@ -3827,10 +3936,14 @@ impl VirtualMachine {
                 }
             }
 
-            // __init_subclass__ protocol: call on each base class
+            // __init_subclass__ protocol: call on each base class with non-metaclass kwargs
+            let init_subclass_kwargs: Vec<(String, PyObjectRef)> = keywords.iter()
+                .filter(|(k, _)| k != "metaclass")
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
             for base in &bases_vec {
                 if let Ok(init_subclass) = base.borrow().get_attribute("__init_subclass__") {
-                    let _ = self.call_function(init_subclass, vec![class.clone()], vec![]);
+                    let _ = self.call_function(init_subclass, vec![class.clone()], init_subclass_kwargs.clone());
                 }
             }
 

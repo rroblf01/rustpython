@@ -2839,7 +2839,8 @@ pub fn builtin_locals(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         let frame = vm.frames.last().ok_or_else(|| PyError::runtime_error("no frame"))?;
         let mut d = crate::object::PyDict::new();
         for (k, v) in frame.locals.iter() {
-            d.set(py_str(k), v.clone())?;
+            let name = crate::interner::lookup(k);
+            d.set(py_str(&name), v.clone())?;
         }
         Ok(PyObjectRef::new(PyObject::Dict(d)))
     })?
@@ -3060,7 +3061,7 @@ pub fn call_bound_method(func: PyObjectRef, self_obj: PyObjectRef, args: Vec<PyO
             // Set self at index 0
             if !code.varnames.is_empty() {
                 frame.fast_locals[0] = Some(self_obj.clone());
-                frame.locals.insert(code.varnames[0].clone(), self_obj);
+                frame.insert_local(&code.varnames[0].clone(), self_obj);
             }
             let npos = args.len();
             let named_params = if code.vararg_name.is_some() || code.kwarg_name.is_some() {
@@ -3074,7 +3075,7 @@ pub fn call_bound_method(func: PyObjectRef, self_obj: PyObjectRef, args: Vec<PyO
                 let idx = i + 1;
                 if idx < code.varnames.len() {
                     frame.fast_locals[idx] = Some(args[i].clone());
-                    frame.locals.insert(code.varnames[idx].clone(), args[i].clone());
+                    frame.insert_local(&code.varnames[idx].clone(), args[i].clone());
                 }
             }
             if let Some(vararg_name) = &code.vararg_name {
@@ -3082,7 +3083,7 @@ pub fn call_bound_method(func: PyObjectRef, self_obj: PyObjectRef, args: Vec<PyO
                 for i in (named_params.saturating_sub(1))..npos {
                     extra.push(args[i].clone());
                 }
-                frame.locals.insert(vararg_name.clone(), py_tuple(extra));
+                frame.insert_local(&vararg_name, py_tuple(extra));
             }
             if npos < named_params.saturating_sub(1) {
                 let num_defaults = code.num_defaults;
@@ -3093,7 +3094,7 @@ pub fn call_bound_method(func: PyObjectRef, self_obj: PyObjectRef, args: Vec<PyO
                         if default_idx < defaults.len() {
                             let val = defaults[default_idx].clone();
                             frame.fast_locals[idx] = Some(val.clone());
-                            frame.locals.insert(code.varnames[idx].clone(), val);
+                            frame.insert_local(&code.varnames[idx].clone(), val);
                         }
                     }
                 }
@@ -3997,7 +3998,7 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
                 for i in 0..npos.min(named_params) {
                     if i < code.varnames.len() {
                         frame.fast_locals[i] = Some(a[i].clone());
-                        frame.locals.insert(code.varnames[i].clone(), a[i].clone());
+                        frame.insert_local(&code.varnames[i].clone(), a[i].clone());
                     }
                 }
                 if let Some(vararg_name) = &code.vararg_name {
@@ -4005,20 +4006,20 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
                     for i in named_params..npos {
                         extra.push(a[i].clone());
                     }
-                    frame.locals.insert(vararg_name.clone(), py_tuple(extra));
+                    frame.insert_local(&vararg_name, py_tuple(extra));
                 }
                 if npos < named_params {
                     let num_defaults = code.num_defaults;
                     for i in npos..named_params {
                         let default_idx = num_defaults.saturating_sub(named_params - i);
                         if default_idx < defaults.len() {
-                            frame.locals.insert(code.varnames[i].clone(), defaults[default_idx].clone());
+                            frame.insert_local(&code.varnames[i].clone(), defaults[default_idx].clone());
                         }
                     }
                 }
                 if let Some(kwarg_name) = &code.kwarg_name {
-                    if !frame.locals.contains_key(kwarg_name) {
-                        frame.locals.insert(kwarg_name.clone(), py_dict());
+                    if !frame.contains_local(kwarg_name) {
+                        frame.insert_local(&kwarg_name, py_dict());
                     }
                 }
                 let mut vm = super::vm::VirtualMachine::new();
