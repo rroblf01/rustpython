@@ -17,12 +17,9 @@ pub fn create_hashlib_dict() -> HashMap<String, PyObjectRef> {
             PyObject::Str(s) => s.as_bytes().to_vec(),
             _ => return Err(PyError::type_error("sha256() argument must be bytes or str")),
         };
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::Hasher;
-        let mut hasher = DefaultHasher::new();
-        hasher.write(b"sha256");
-        hasher.write(&bytes);
-        Ok(py_str(&format!("{:016x}", hasher.finish())))
+        use sha2::Digest;
+        let hash = sha2::Sha256::digest(&bytes);
+        Ok(PyObjectRef::imm(PyObject::Bytes(hash.to_vec())))
     });
 
     hl_func!("md5", |args| {
@@ -33,12 +30,9 @@ pub fn create_hashlib_dict() -> HashMap<String, PyObjectRef> {
             PyObject::Str(s) => s.as_bytes().to_vec(),
             _ => return Err(PyError::type_error("md5() argument must be bytes or str")),
         };
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::Hasher;
-        let mut hasher = DefaultHasher::new();
-        hasher.write(b"md5");
-        hasher.write(&bytes);
-        Ok(py_str(&format!("{:016x}", hasher.finish())))
+        use sha2::digest::Digest;
+        let hash = md5::Md5::digest(&bytes);
+        Ok(PyObjectRef::imm(PyObject::Bytes(hash.to_vec())))
     });
 
     d
