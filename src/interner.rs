@@ -153,6 +153,11 @@ impl<V: Clone> InternedMap<V> {
         None
     }
 
+    /// Check if a string key exists (convenience — interns the string first)
+    pub fn contains_key_str(&self, name: &str) -> bool {
+        self.get_str(name).is_some()
+    }
+
     pub fn contains_key(&self, key: StrId) -> bool {
         self.get(key).is_some()
     }
