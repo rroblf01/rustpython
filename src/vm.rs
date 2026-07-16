@@ -2318,6 +2318,16 @@ impl VirtualMachine {
                             Ok(attr)
                         }
                         PyObject::Instance { dict, typ } => {
+                            // Inline attribute cache: skip full lookup if cached with matching type tag
+                            let type_tag = typ.get_id() as u64;
+                            let cached = self.frames[fi].attr_cache.get(name_idx)
+                                .and_then(|entry| entry.as_ref())
+                                .filter(|(tag, _)| *tag == type_tag)
+                                .map(|(_, val)| val.clone());
+                            if let Some(cached_val) = cached {
+                                self.frames[fi].push(cached_val);
+                                return Ok(None);
+                            }
                             if name == "__dict__" {
                                 // Return a live Dict view backed by the instance's HashMap
                                 let mut pd = crate::object::PyDict {
@@ -2461,7 +2471,13 @@ impl VirtualMachine {
                                 }
                             });
                             match attr {
-                                Some(val) => Ok(val),
+                                Some(val) => {
+                                    // Cache attribute for future accesses
+                                    if name_idx < self.frames[fi].attr_cache.len() {
+                                        self.frames[fi].attr_cache[name_idx] = Some((type_tag, val.clone()));
+                                    }
+                                    Ok(val)
+                                }
                                 None => {
                                     // Check for __getattr__ method on type before erroring
                                     let typ_ref = typ.borrow();
