@@ -779,7 +779,9 @@ impl VirtualMachine {
     }
 
     fn release_frame(&mut self, frame: Frame) {
-        self.frame_pool.push(frame);
+        if self.frame_pool.len() < 32 {
+            self.frame_pool.push(frame);
+        }
     }
 
     pub fn run(&mut self, code: CodeObject) -> PyResult<PyObjectRef> {

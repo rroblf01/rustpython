@@ -106,6 +106,11 @@ impl<V: Clone> InternedMap<V> {
         }
     }
 
+    /// Insert by string key (convenience — interns the string first)
+    pub fn insert_str(&mut self, name: &str, value: V) -> Option<V> {
+        self.insert(crate::interner::intern(name), value)
+    }
+
     pub fn insert(&mut self, key: StrId, value: V) -> Option<V> {
         // Linear scan — fast for small sizes (typical Python dicts)
         for entry in &mut self.entries {
@@ -119,6 +124,11 @@ impl<V: Clone> InternedMap<V> {
         self.entries.push(Some((key, value)));
         self.len += 1;
         None
+    }
+
+    /// Look up by string key (convenience — interns the string first)
+    pub fn get_str(&self, name: &str) -> Option<&V> {
+        self.get(crate::interner::intern(name))
     }
 
     pub fn get(&self, key: StrId) -> Option<&V> {

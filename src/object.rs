@@ -1118,9 +1118,26 @@ where
     })
 }
 
+thread_local! {
+    static SMALL_INT_CACHE: std::cell::RefCell<Vec<Option<PyObjectRef>>> = std::cell::RefCell::new(vec![None; 263]);
+}
+
 pub fn py_int(i: impl Into<BigInt>) -> PyObjectRef {
     let big = i.into();
     if let Some(n) = big.to_i64() {
+        if n >= -5 && n <= 257 {
+            let idx = (n + 5) as usize;
+            return SMALL_INT_CACHE.with(|cache| {
+                let mut cache = cache.borrow_mut();
+                if let Some(ref cached) = cache[idx] {
+                    cached.clone()
+                } else {
+                    let val = PyObjectRef::imm(PyObject::Int(BigInt::from(n)));
+                    cache[idx] = Some(val.clone());
+                    val
+                }
+            });
+        }
         return PyObjectRef::SmallInt(n);
     }
     PyObjectRef::imm(PyObject::Int(big))
