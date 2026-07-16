@@ -80,16 +80,26 @@ pub fn create_collections_dict() -> HashMap<String, PyObjectRef> {
                 }
             }
         }
-        let dict = crate::object::py_dict();
+        let counter = crate::object::PyObjectRef::imm(crate::object::PyObject::Instance {
+            typ: crate::object::py_str("Counter"),
+            dict: std::collections::HashMap::new(),
+        });
         for hash in &order {
             if let Some((item, count)) = counts.get(hash) {
                 let count_val = crate::object::py_int(*count);
-                if let crate::object::PyObject::Dict(d) = &mut *dict.borrow_mut() {
-                    d.set(item.clone(), count_val)?;
-                }
+                let key_str = item.str();
+                let _ = counter.borrow_mut().set_attribute(&key_str, count_val);
             }
         }
-        Ok(dict)
+        // Register __missing__ that returns 0 for missing keys (dict subclass protocol)
+        let missing = crate::object::PyObjectRef::imm(crate::object::PyObject::BuiltinFunction {
+            name: "__missing__".to_string(),
+            func: |args: &[crate::object::PyObjectRef]| -> crate::object::PyResult<crate::object::PyObjectRef> {
+                Ok(crate::object::py_int(0))
+            },
+        });
+        let _ = counter.borrow_mut().set_attribute("__missing__", missing);
+        Ok(counter)
     });
 
     // defaultdict: dict subclass that calls factory for missing keys

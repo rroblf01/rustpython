@@ -6770,6 +6770,14 @@ impl ObjectAccess for PyObject {
                 dict.insert(name.to_string(), value);
                 Ok(())
             }
+            PyObject::Dict(_) | PyObject::List(_) | PyObject::Tuple(_) | PyObject::Set(_) | PyObject::FrozenSet(_) => {
+                // Store attributes in a side dict (instance-like) for these built-in types
+                let mut pd = match self {
+                    PyObject::Dict(d) => Some(d.clone()),
+                    _ => None,
+                };
+                Err(PyError::attribute_error(format!("cannot set attribute '{}' on '{}'", name, self.type_name())))
+            }
             _ => Err(PyError::attribute_error(format!("cannot set attribute '{}' on '{}'", name, self.type_name()))),
         }
     }
@@ -7134,6 +7142,22 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                 }
             } else {
                 Err(PyError::type_error("array indices must be integers"))
+            }
+        }
+        PyObject::Instance { dict, .. } => {
+            let key = index.str();
+            let val = dict.get(&key).cloned();
+            drop(o);
+            if let Some(v) = val {
+                Ok(v)
+            } else {
+                // Check for __missing__ (dict subclass support, e.g. Counter)
+                let missing = obj.borrow().get_attribute("__missing__").ok()
+                    .and_then(|m| crate::object::call_function(&m, vec![obj.clone(), index.clone()]).ok());
+                match missing {
+                    Some(v) => Ok(v),
+                    None => Err(PyError::key_error(index.str())),
+                }
             }
         }
         _ => Err(PyError::type_error(format!("'{}' object is not subscriptable", o.type_name()))),
@@ -9170,6 +9194,12 @@ pub fn builtin_dict_getitem(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         return Err(PyError::type_error("dict.__getitem__() requires at least 1 argument"));
     };
     let key = key_ref.str();
+    // Check for __missing__ first (dict subclass support, e.g. Counter)
+    let missing_result = instance.borrow().get_attribute("__missing__").ok()
+        .and_then(|missing| crate::object::call_function(&missing, vec![instance.clone(), key_ref.clone()]).ok());
+    if let Some(val) = missing_result {
+        return Ok(val);
+    }
     // Directly read from the Instance's dict, bypassing py_getitem (which would recurse)
     let obj = instance.borrow();
     if let PyObject::Instance { dict, .. } = &*obj {
