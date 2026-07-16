@@ -5178,7 +5178,9 @@ impl ObjectAccess for PyObject {
                             if let PyObject::Dict(d) = &mut *args[0].borrow_mut() {
                                 let items = d.items();
                                 if items.is_empty() { return Err(PyError::key_error("popitem(): dictionary is empty")); }
-                                let (k, v) = items.into_iter().next().unwrap();
+                                let last = args.len() <= 2 || args[1].truthy();
+                                let (k, v) = if last { items.into_iter().last().unwrap() }
+                                    else { items.into_iter().next().unwrap() };
                                 d.remove(&k)?;
                                 Ok(py_tuple(vec![k, v]))
                             } else { Err(PyError::runtime_error("popitem on non-dict")) }
@@ -5270,6 +5272,14 @@ impl ObjectAccess for PyObject {
                             if let PyObject::Dict(d) = &*args[0].borrow() {
                                 Ok(py_bool(d.contains(&args[1])?))
                             } else { Err(PyError::runtime_error("__contains__ on non-dict")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "move_to_end" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "move_to_end".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("move_to_end() needs a key argument")); }
+                            Ok(py_none())
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),

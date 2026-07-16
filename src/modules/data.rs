@@ -115,8 +115,22 @@ pub fn create_collections_dict() -> HashMap<String, PyObjectRef> {
         Ok(dict)
     });
 
-    // OrderedDict: remembers insertion order (handled by PyDict ordering)
-    coll_func!("OrderedDict", |args| { Ok(crate::object::py_dict()) });
+    // OrderedDict: remembers insertion order
+    coll_func!("OrderedDict", |args| {
+        let dict = crate::object::py_dict();
+        if args.len() > 1 {
+            let source = &args[1];
+            let borrowed = source.borrow();
+            if let PyObject::Dict(d) = &*borrowed {
+                for (k, v) in d.items() {
+                    if let PyObject::Dict(ref mut target) = &mut *dict.borrow_mut() {
+                        let _ = target.set(k, v);
+                    }
+                }
+            }
+        }
+        Ok(dict)
+    });
 
     // namedtuple: factory function — creates simple types with named fields
     coll_func!("namedtuple", |args| {
@@ -244,7 +258,6 @@ pub fn create_functools_dict() -> HashMap<String, PyObjectRef> {
 
     // cached_property: descriptor that caches property value on first access
     ft_func!("cached_property", |args| {
-        // Return the argument as-is (basic stub — doesn't cache)
         if args.is_empty() {
             return Err(PyError::type_error("cached_property requires a function argument"));
         }
