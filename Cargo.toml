@@ -5,8 +5,8 @@ edition = "2021"
 
 [profile.release]
 opt-level = "z"     # Optimizar por tamaño
-lto = true          # Link-time optimization
-codegen-units = 1   # Máxima optimización
+lto = "thin"        # Thin LTO (menos RAM que full LTO)
+codegen-units = 4   # Más unidades = menos RAM por unidad de compilación
 strip = "symbols"   # Quitar símbolos de debugging
 panic = "abort"     # Abortar en panic (menos código)
 
@@ -37,4 +37,4 @@ sha2 = "0.10"
 flate2 = "1"
 rustyline = "15"
 mimalloc = { version = "0.1", default-features = false }
-rusqlite = "0.40.1"
+rusqlite = { version = "0.40.1", default-features = false, features = ["column_decltype"] }
