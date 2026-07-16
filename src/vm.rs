@@ -2583,15 +2583,11 @@ impl VirtualMachine {
                         descriptor.borrow().get_attribute("__set__").ok()
                     };
                     if let Some(setter_method) = setter_method {
-                        let (setter_func, setter_self) = {
-                            let b = setter_method.borrow();
-                            match &*b {
-                                PyObject::BuiltinMethod { func, self_obj, .. } => (func.clone(), self_obj.clone()),
-                                _ => return Err(PyError::runtime_error("expected __set__ method")),
-                            }
-                        };
-                        setter_func(&[setter_self, descriptor, obj.clone(), val])?;
-                        return Ok(None);
+                        let result = self.call_function(setter_method, vec![descriptor, obj.clone(), val.clone()], vec![]);
+                        match result {
+                            Ok(_) => return Ok(None),
+                            Err(e) => return Err(e),
+                        }
                     } else {
                         // Descriptor exists but no __set__ (non-data descriptor), fall through
                     }
@@ -2624,6 +2620,25 @@ impl VirtualMachine {
                                 self.call_function(delattr_method, vec![obj.clone(), py_str(&name)], vec![])?;
                                 return Ok(None);
                             }
+                        }
+                    }
+                }
+                // Check for __delete__ descriptor protocol
+                let descriptor = {
+                    let obj_borrowed = obj.borrow();
+                    if let PyObject::Instance { typ, .. } = &*obj_borrowed {
+                        let typ_ref = typ.borrow();
+                        if let PyObject::Type { dict: type_dict, .. } = &*typ_ref {
+                            type_dict.get(&name).cloned()
+                        } else { None }
+                    } else { None }
+                };
+                if let Some(ref desc) = descriptor {
+                    if let Ok(deleter) = desc.borrow().get_attribute("__delete__") {
+                        let result = self.call_function(deleter, vec![desc.clone(), obj.clone()], vec![]);
+                        match result {
+                            Ok(_) => return Ok(None),
+                            Err(e) => return Err(e),
                         }
                     }
                 }
