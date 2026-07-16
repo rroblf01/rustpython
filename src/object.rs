@@ -693,7 +693,7 @@ impl PyObject {
             PyObject::Instance { .. } => "instance",
             PyObject::Cell { .. } => "cell",
             PyObject::Capsule { .. } => "capsule",
-            PyObject::Exception { .. } => "Exception",
+            PyObject::Exception { typ, .. } => typ,
             PyObject::ExceptionGroup { typ, .. } => typ,
             PyObject::BuildClass => "builtin_function_or_method",
             PyObject::BoundMethod { .. } => "method",
@@ -3496,7 +3496,27 @@ pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 PyObject::Type { name, .. } => name.clone(),
                 _ => class.str(),
             };
-            Ok(py_bool(obj_type == class_name))
+            // Exception hierarchy: check if class is an ancestor of obj_type
+            let obj_ancestors: &[&str] = match &obj_type[..] {
+                "BaseException" => &["BaseException"],
+                "Exception" => &["Exception", "BaseException"],
+                "TypeError" => &["TypeError", "Exception", "BaseException"],
+                "ValueError" => &["ValueError", "Exception", "BaseException"],
+                "ZeroDivisionError" => &["ZeroDivisionError", "ArithmeticError", "Exception", "BaseException"],
+                "NameError" => &["NameError", "Exception", "BaseException"],
+                "AttributeError" => &["AttributeError", "Exception", "BaseException"],
+                "IndexError" => &["IndexError", "LookupError", "Exception", "BaseException"],
+                "KeyError" => &["KeyError", "LookupError", "Exception", "BaseException"],
+                "RuntimeError" => &["RuntimeError", "Exception", "BaseException"],
+                "StopIteration" => &["StopIteration", "Exception", "BaseException"],
+                "ImportError" => &["ImportError", "Exception", "BaseException"],
+                "OSError" => &["OSError", "Exception", "BaseException"],
+                "LookupError" => &["LookupError", "Exception", "BaseException"],
+                "ArithmeticError" => &["ArithmeticError", "Exception", "BaseException"],
+                _ => &[&obj_type],
+            };
+            let is_match = obj_ancestors.contains(&class_name.as_str());
+            Ok(py_bool(obj_type == class_name || is_match))
         }
     }
 }
