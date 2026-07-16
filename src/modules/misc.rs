@@ -1950,6 +1950,21 @@ pub fn create_logging_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
+pub fn create_logging_config_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! log_cfg_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+    log_cfg_func!("dictConfig", |args| {
+        // Simplified stub: accepts a dict but does nothing
+        // A full implementation would configure loggers, handlers, formatters from the dict
+        Ok(py_none())
+    });
+    d
+}
+
 thread_local! {
     static EXIT_CALLBACKS: std::cell::RefCell<Vec<PyObjectRef>> = std::cell::RefCell::new(Vec::new());
 }

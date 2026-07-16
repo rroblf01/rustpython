@@ -239,6 +239,7 @@ impl VirtualMachine {
 
           // Native logging module
           modules.insert("logging".to_string(), create_module("logging", create_logging_dict()));
+          modules.insert("logging.config".to_string(), create_module("logging.config", create_logging_config_dict()));
 
           // Native timeit module
           modules.insert("timeit".to_string(), create_module("timeit", create_timeit_dict()));
@@ -3170,6 +3171,14 @@ impl VirtualMachine {
                         matches!(&*obj, PyObject::Tuple(items) if !items.is_empty())
                     };
                     if resolved.contains('.') && !is_from_import {
+                        // Set sub-module as attribute on parent module (e.g. logging.config = <module>)
+                        if let Some(dot_pos) = resolved.rfind('.') {
+                            let parent_name = &resolved[..dot_pos];
+                            let child_name = &resolved[dot_pos+1..];
+                            if let Some(parent_mod) = self.modules.get(parent_name) {
+                                let _ = parent_mod.borrow_mut().set_attribute(child_name, module.clone());
+                            }
+                        }
                         if let Some(top) = resolved.split('.').next() {
                             if let Some(top_mod) = self.modules.get(top) {
                                 self.frames[fi].push(top_mod.clone());
