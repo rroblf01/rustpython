@@ -595,7 +595,20 @@ pub fn create_collections_abc_dict() -> HashMap<String, PyObjectRef> {
     d.insert("MutableSequence".to_string(), py_str("MutableSequence"));
     d.insert("Set".to_string(), py_str("Set"));
     d.insert("MutableSet".to_string(), py_str("MutableSet"));
-    d.insert("Mapping".to_string(), py_str("Mapping"));
+    d.insert("Mapping".to_string(), PyObjectRef::new(PyObject::Type {
+        name: "Mapping".to_string(),
+        dict: HashMap::from([
+            ("__class_getitem__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__class_getitem__".to_string(),
+                func: |args| {
+                    if args.len() < 2 { return Err(PyError::type_error("__class_getitem__ requires 2 args")); }
+                    Ok(args[1].clone())
+                },
+            })),
+        ]),
+        bases: vec![],
+        mro: vec![],
+    }));
     d.insert("MutableMapping".to_string(), py_str("MutableMapping"));
     d.insert("MappingView".to_string(), py_str("MappingView"));
     d.insert("ItemsView".to_string(), py_str("ItemsView"));

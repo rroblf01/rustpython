@@ -1355,15 +1355,12 @@ impl VirtualMachine {
         }
     }
 
-    #[inline(always)]
     fn execute_instruction(&mut self) -> PyResult<Option<PyObjectRef>> {
         let fi = self.frames.len() - 1;
-        // Borrow the frame local to avoid repeated Vec indexing
         let ip = self.frames[fi].ip;
         if ip >= self.frames[fi].code.instructions.len() {
             return Err(PyError::runtime_error("execution reached end of code"));
         }
-        // Save line number for error reporting before ip is incremented
         self.last_error_line = self.frames[fi].code.instructions[ip].line_no;
         let op = self.frames[fi].code.instructions[ip].op;
         let arg = self.frames[fi].code.instructions[ip].arg;
