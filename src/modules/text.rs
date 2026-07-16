@@ -618,7 +618,7 @@ pub fn create_difflib_dict() -> HashMap<String, PyObjectRef> {
     d.insert("SequenceMatcher".to_string(), seq_matcher);
 
     dfl_func!("get_close_matches", |args| {
-        let word = if args.len() > 0 { args[0].str() } else { return Err(PyError::type_error("get_close_matches() requires at least 1 argument")); };
+        let _word = if args.len() > 0 { args[0].str() } else { return Err(PyError::type_error("get_close_matches() requires at least 1 argument")); };
         // Return empty list (simple stub — doesn't implement actual matching)
         Ok(py_list(vec![]))
     });
@@ -679,6 +679,3 @@ pub fn create_html_parser_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
-use std::rc::Rc;
-use std::cell::RefCell;
-use num_traits::ToPrimitive;

@@ -5,7 +5,7 @@ use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 use smallvec::SmallVec;
 use crate::bytecode::*;
-use crate::interner::{self, InternedMap, StrId};
+use crate::interner::{self, InternedMap};
 use crate::modules::*;
 use crate::object::*;
 #[cfg(feature = "jit")]
@@ -17,6 +17,8 @@ thread_local! {
 
 /// Raw pointer to the current VirtualMachine, set before JIT code runs.
 /// Used by jit_call to fall back to the VM for regular Python function calls.
+/// Only read from jit.rs, so it's dead code in a non-jit build.
+#[cfg_attr(not(feature = "jit"), allow(dead_code))]
 pub(crate) static VM_PTR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 #[derive(Clone)]
@@ -54,13 +56,6 @@ pub struct Frame {
 pub struct ExceptionHandler {
     pub instr_addr: usize,
     pub stack_depth: usize,
-    pub handler_type: HandlerType,
-}
-
-#[derive(Clone)]
-pub enum HandlerType {
-    Except,
-    Finally,
 }
 
 impl Frame {
@@ -112,7 +107,7 @@ impl Frame {
     pub fn peek(&self, depth: usize) -> PyResult<PyObjectRef> {
         if depth >= self.stack.len() {
             let instr_ip = if self.ip > 0 { self.ip - 1 } else { 0 };
-            let op_str = if instr_ip < self.code.instructions.len() {
+            let _op_str = if instr_ip < self.code.instructions.len() {
                 format!("{:?}", self.code.instructions[instr_ip].op)
             } else {
                 "END".to_string()
@@ -120,10 +115,6 @@ impl Frame {
             return Err(PyError::runtime_error("stack underflow (peek)"));
         }
         Ok(self.stack[self.stack.len() - 1 - depth].clone())
-    }
-
-    pub fn stack_size(&self) -> usize {
-        self.stack.len()
     }
 
     pub fn insert_local(&mut self, name: &str, val: PyObjectRef) -> Option<PyObjectRef> {
@@ -150,7 +141,6 @@ pub struct VirtualMachine {
     pub globals: Rc<RefCell<HashMap<String, PyObjectRef>>>,
     #[cfg(feature = "jit")]
     pub jit: RefCell<JitCompiler>,
-    pub sys_path: Vec<String>,
     /// Execution profile counters — how many times each instruction ran.
     /// Indexed by (function_id, instruction_offset). Used by JIT to
     /// identify hot paths for native compilation.
@@ -589,6 +579,8 @@ impl VirtualMachine {
           modules.insert("zipimport".to_string(), create_module("zipimport", create_zipimport_dict()));
           // Native _io module (CPython C extension replacement needed by importlib._bootstrap_external)
           modules.insert("_io".to_string(), create_module("_io", create_io_module_dict()));
+          // Native queue module (Queue backed by PyObject::Queue)
+          modules.insert("queue".to_string(), create_module("queue", create_queue_dict()));
 
           // Native importlib stub module
           let importlib_mod = create_module("importlib", create_importlib_dict());
@@ -768,7 +760,6 @@ impl VirtualMachine {
               globals,
               #[cfg(feature = "jit")]
              jit: RefCell::new(JitCompiler::new()),
-              sys_path: vec!["./".to_string(), "./Lib/".to_string()],
               profile: RefCell::new(HashMap::new()),
                last_error_line: None,
                frame_pool: Vec::new(),
@@ -875,15 +866,15 @@ impl VirtualMachine {
     pub fn import_module_from_file(&mut self, name: &str) -> Result<PyObjectRef, String> {
         if cfg!(feature = "profile") {
             if let Ok(status) = std::fs::read_to_string(format!("/proc/{}/status", std::process::id())) {
-                if let Some(rss_line) = status.lines().find(|l| l.starts_with("VmRSS:")) {
+                if let Some(_rss_line) = status.lines().find(|l| l.starts_with("VmRSS:")) {
                 }
-                if let Some(peak_line) = status.lines().find(|l| l.starts_with("VmPeak:")) {
+                if let Some(_peak_line) = status.lines().find(|l| l.starts_with("VmPeak:")) {
                 }
             }
         }
         // Handle dotted names: e.g. "certifi.core" or "django.utils.version"
         // Walk through each segment, importing missing packages as we go
-        if let Some(dot_pos) = name.find('.') {
+        if let Some(_dot_pos) = name.find('.') {
             eprintln!("DEBUG import_module_from_file: dotted name='{}'", name);
             let parts: Vec<&str> = name.split('.').collect();
             let mut current_name = parts[0].to_string();
@@ -1404,13 +1395,8 @@ impl VirtualMachine {
         // Debug: print instruction (only with profile feature)
         if cfg!(feature = "profile") {
             if matches!(op, Opcode::LOAD_GLOBAL | Opcode::LOAD_FAST | Opcode::CALL | Opcode::LOAD_ATTR | Opcode::RETURN_VALUE) {
-                let frame_name = &self.frames[fi].code.name;
+                let _frame_name = &self.frames[fi].code.name;
             }
-        }
-
-        // Use a macro to quickly access current frame's stack
-        macro_rules! frame {
-            () => { &mut self.frames[fi] }
         }
 
         // Profile: increment counter for this instruction
@@ -2027,7 +2013,7 @@ impl VirtualMachine {
                 let globals = self.frames[fi].module_globals.clone()
                     .unwrap_or_else(|| self.frames[fi].globals.clone());
                 let code_obj = code.clone();
-                let mut func = PyObjectRef::new(PyObject::Function {
+                let func = PyObjectRef::new(PyObject::Function {
                     code: code_obj.clone(),
                     globals,
                     name,
@@ -2392,7 +2378,7 @@ impl VirtualMachine {
                                 *index += 1;
                                 v
                             }
-                            PyObject::RangeIter { current, stop, step } => {
+                            PyObject::RangeIter { current, stop: _, step } => {
                                 let v = py_int(*current);
                                 *current += *step;
                                 v
@@ -2421,7 +2407,7 @@ impl VirtualMachine {
                 let result = {
                     let obj_borrowed = obj.borrow();
                     match &*obj_borrowed {
-                        PyObject::Super { cls, obj: super_obj } => {
+                        PyObject::Super { cls: _, obj: _super_obj } => {
                             // super(cls, obj).attr: walk MRO of obj's type, starting after cls
                             drop(obj_borrowed);
                             let attr = obj.borrow().get_attribute(&name)?;
@@ -2918,7 +2904,6 @@ impl VirtualMachine {
                 let handler = ExceptionHandler {
                     instr_addr: arg as usize,
                     stack_depth,
-                    handler_type: HandlerType::Finally,
                 };
                 self.frames[fi].exception_handlers.push(handler);
             }
@@ -2928,7 +2913,6 @@ impl VirtualMachine {
                 let handler = ExceptionHandler {
                     instr_addr: arg as usize,
                     stack_depth,
-                    handler_type: HandlerType::Finally,
                 };
                 self.frames[fi].exception_handlers.push(handler);
             }
@@ -2967,7 +2951,7 @@ impl VirtualMachine {
                 let aiter_method = obj.borrow().get_attribute("__aiter__")
                     .map_err(|_| PyError::type_error("object does not support async iteration"))?;
                 let result = self.call_function(aiter_method, vec![], vec![])?;
-                self.frames[fi].pop();
+                let _ = self.frames[fi].pop();
                 self.frames[fi].push(result);
             }
 
@@ -2976,7 +2960,7 @@ impl VirtualMachine {
                 let obj = self.frames[fi].peek(0)?;
                 let anext_method = obj.borrow().get_attribute("__anext__")
                     .map_err(|_| PyError::type_error("async iterator has no __anext__"))?;
-                self.frames[fi].pop();
+                let _ = self.frames[fi].pop();
                 self.frames[fi].push(anext_method);
             }
 
@@ -3335,7 +3319,7 @@ impl VirtualMachine {
                             if resolved.contains('.') && !is_from_import {
                                 if let Some(top) = resolved.split('.').next() {
                                     if let Some(top_mod) = self.modules.get(top) {
-                                        self.frames[fi].pop();
+                                        let _ = self.frames[fi].pop();
                                         self.frames[fi].push(top_mod.clone());
                                     }
                                 }
@@ -3766,6 +3750,7 @@ impl VirtualMachine {
             return self.call_function(func, all_args, keywords);
         }
 
+        #[cfg_attr(not(feature = "jit"), allow(unused_variables))]
         if let PyObject::Function { code, globals: func_globals, defaults, closure, jit_ptr, jit_consts, .. } = &*callable.borrow() {
             // Try JIT compiled execution (fast path for hot functions)
             #[cfg(feature = "jit")]
@@ -3864,7 +3849,7 @@ impl VirtualMachine {
 
             // Handle **kwargs
             if let Some(kwarg_name) = &code.kwarg_name {
-                let mut kw_dict = py_dict();
+                let kw_dict = py_dict();
                 for (key, value) in &keywords {
                     if let Some(idx) = new_frame.code.varnames.iter().position(|n| n == key) {
                         new_frame.insert_local(&key, value.clone());
@@ -3989,7 +3974,7 @@ impl VirtualMachine {
             match &*func.borrow() {
                 PyObject::Function { code, .. } => {
                     let code = code.clone();
-                    let mut new_frame = self.acquire_frame(Rc::new(code), namespace.clone(), Rc::clone(&self.builtins), caller_module_globals);
+                    let new_frame = self.acquire_frame(Rc::new(code), namespace.clone(), Rc::clone(&self.builtins), caller_module_globals);
                     self.frames.push(new_frame);
                     self.execute()?;
                     if let Some(frame) = self.frames.pop() {
@@ -4139,7 +4124,7 @@ impl VirtualMachine {
                 frame.stack.truncate(handler.stack_depth);
                 frame.ip = handler.instr_addr;
                 let exc_obj = {
-                    let (typ, cause, is_group) = match error {
+                    let (typ, cause, _is_group) = match error {
                         PyError::TypeError(_) => ("TypeError".to_string(), None, false),
                         PyError::ValueError(_) => ("ValueError".to_string(), None, false),
                         PyError::NameError(_) => ("NameError".to_string(), None, false),
@@ -4149,7 +4134,6 @@ impl VirtualMachine {
                         PyError::ZeroDivisionError(_) => ("ZeroDivisionError".to_string(), None, false),
                         PyError::RuntimeError(_) => ("RuntimeError".to_string(), None, false),
                         PyError::StopIteration => ("StopIteration".to_string(), None, false),
-                        PyError::AssertionError(_) => ("AssertionError".to_string(), None, false),
                         PyError::ImportError(_) => ("ImportError".to_string(), None, false),
                         PyError::Exception(_, exc) => {
                             let exc_borrow = exc.borrow();
@@ -4334,7 +4318,7 @@ fn is_exception_subclass(child_type: &str, parent_type: &str) -> bool {
         "ImportWarning" | "UnicodeWarning" | "BytesWarning" |
         "ResourceWarning" => Some("Warning"),
         // Leaf exception types — directly under Exception, no subclasses
-        "TypeError" | "ValueError" | "NameError" | "AttributeError" |
+        "TypeError" | "NameError" | "AttributeError" |
         "StopIteration" | "StopAsyncIteration" | "AssertionError" |
         "BufferError" | "EOFError" | "MatchError" | "ReferenceError" |
         "MemoryError" => Some("Exception"),

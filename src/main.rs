@@ -27,39 +27,6 @@ use vm::VirtualMachine;
 use object::{PyObject, ObjectAccess};
 use object::PyError;
 
-fn run_source(source: &str, filename: &str) -> Result<(), String> {
-    let mut parser = Parser::new(source);
-    let program = parser.parse_program().map_err(|e| format!("Parse error: {}", e))?;
-
-    let mut compiler = Compiler::new();
-    let code = compiler.compile(&program, filename).map_err(|e| format!("Compile error: {}", e))?;
-
-    let mut vm = VirtualMachine::new();
-    match vm.run(code) {
-        Ok(_val) => {
-            Ok(())
-        }
-        Err(e) => {
-            if let PyError::SystemExit(code) = &e {
-                std::process::exit(*code);
-            }
-            let line = vm.last_error_line.map_or("???".to_string(), |l| l.to_string());
-            let msg = format!("{}", e);
-            Err(format!("Traceback (most recent call last):\n  File \"{}\", line {}\n{}{}", filename, line, msg, if msg.is_empty() { String::new() } else { format!("\n{}", msg) }))
-        }
-    }
-}
-
-fn run_source_with_vm(vm: &mut VirtualMachine, source: &str) -> Result<(), String> {
-    let mut parser = Parser::new(source);
-    let program = parser.parse_program().map_err(|e| format!("Parse error: {}", e))?;
-
-    let mut compiler = Compiler::new();
-    let code = compiler.compile(&program, "<string>").map_err(|e| format!("Compile error: {}", e))?;
-
-    vm.run(code).map(|_| ()).map_err(|e| format!("Runtime error: {}", e))
-}
-
 fn call_displayhook(vm: &VirtualMachine, val: &object::PyObjectRef) {
     if let Some(sys_mod) = vm.modules.get("sys") {
         if let Ok(hook) = sys_mod.borrow().get_attribute("displayhook") {
@@ -138,7 +105,7 @@ fn run_repl() {
                 // readline returns the line without newline
 
                 if !line.is_empty() {
-                    rl.add_history_entry(&line);
+                    let _ = rl.add_history_entry(&line);
                 }
 
                 let trimmed = line.trim();
@@ -213,19 +180,6 @@ fn is_complete_statement(s: &str) -> bool {
     parser.parse_program().is_ok()
 }
 
-fn run_source_in_vm(vm: &mut VirtualMachine, source: &str, filename: &str) -> Result<object::PyObjectRef, String> {
-    let mut parser = Parser::new(source);
-    let program = parser.parse_program().map_err(|e| format!("Parse error: {}", e))?;
-
-    let mut compiler = Compiler::new();
-    let code = compiler.compile(&program, filename).map_err(|e| format!("Compile error: {}", e))?;
-
-    vm.run(code).map_err(|e| {
-        let line = vm.last_error_line.map_or("???".to_string(), |l| l.to_string());
-        format!("Traceback (most recent call last):\n  File \"{}\", line {}\n{}", filename, line, e)
-    })
-}
-
 fn print_version() {
     println!("RustPython 0.1.0");
     println!("A Python 3 reimplementation in Rust");
@@ -246,10 +200,10 @@ fn main() {
     let raw_args: Vec<String> = env::args().collect();
 
     // Strip program name
-    let mut args: Vec<String> = raw_args.iter().skip(1).cloned().collect();
+    let args: Vec<String> = raw_args.iter().skip(1).cloned().collect();
 
     // Handle flags
-    let mut i = 0;
+    let i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--version" | "-V" => {
@@ -325,14 +279,14 @@ fn main() {
                 let mut vm = VirtualMachine::new_with_args(sys_argv);
 
                 // Create a __main__-like script that imports and runs the module
-                let main_script = format!(
+                let _main_script = format!(
                     "import runpy\nrunpy._run_module_as_main('{}', alter_argv=True)\n",
                     module_name.replace("'", "\\'")
                 );
 
                 // If runpy isn't available, try simpler approach:
                 // import the module and call its __main__.py equivalent
-                let alt_script = format!(
+                let _alt_script = format!(
                     "import {} as _runmod\nif hasattr(_runmod, 'main'):\n    _runmod.main()\n",
                     module_name
                 );
@@ -386,7 +340,6 @@ fn main() {
                 break;
             }
         }
-        i += 1;
     }
 
     // Get remaining args (file + script args)

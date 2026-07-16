@@ -11,8 +11,6 @@ pub struct Compiler {
     scope: ScopeType,
     global_names: HashSet<String>,
     nonlocal_names: HashSet<String>,
-    free_vars: HashSet<String>,
-    cell_vars: HashSet<String>,
     scope_stack: Vec<ScopeInfo>,
     current_line: usize,
 }
@@ -32,9 +30,7 @@ struct ScopeInfo {
 enum ScopeType {
     Module,
     Function,
-    Class,
     ClassBody,
-    Comprehension,
 }
 
 impl Compiler {
@@ -48,8 +44,6 @@ impl Compiler {
             scope: ScopeType::Module,
             global_names: HashSet::new(),
             nonlocal_names: HashSet::new(),
-            free_vars: HashSet::new(),
-            cell_vars: HashSet::new(),
             scope_stack: Vec::new(),
             current_line: 1,
         }
@@ -473,7 +467,7 @@ impl Compiler {
                 Stmt::Try {
                     body,
                     handlers,
-                    handlers_star,
+                    handlers_star: _,
                     orelse,
                     finalbody,
                 } => {
@@ -523,7 +517,7 @@ impl Compiler {
             match stmt {
                 Stmt::Expr(expr) => Self::collect_names_expr(expr, &mut names),
                 Stmt::Return(Some(expr)) => Self::collect_names_expr(expr, &mut names),
-                Stmt::Assign { targets, value } => {
+                Stmt::Assign { targets: _, value } => {
                     Self::collect_names_expr(value, &mut names);
                 }
                 Stmt::AugAssign { target, value, .. } => {
@@ -670,8 +664,8 @@ impl Compiler {
     fn collect_nested_refs_inner(
         stmts: &[Stmt],
         local_names: &HashSet<String>,
-        global_names: &HashSet<String>,
-        nonlocal_names: &HashSet<String>,
+        _global_names: &HashSet<String>,
+        _nonlocal_names: &HashSet<String>,
         refs: &mut HashSet<String>,
     ) {
         for stmt in stmts {
@@ -1267,7 +1261,7 @@ impl Compiler {
                     self.fix_label(end_label);
                 } else if !handlers.is_empty() || !handlers_star.is_empty() {
                     let cleanup = self.new_label();
-                    let else_label = self.new_label();
+                    let _else_label = self.new_label();
                     let end_label = self.new_label();
                     self.emit_jump(Opcode::SETUP_FINALLY, cleanup);
                     let body_end = self.new_label();
@@ -1743,7 +1737,7 @@ impl Compiler {
 
                             // Check positional patterns (access by attribute or position)
                             for pat in patterns {
-                                let pat_next = self.new_label();
+                                let _pat_next = self.new_label();
                                 self.emit(Opcode::DUP_TOP, 0); // dup subject
                                 match pat {
                                     Pattern::MatchValue(val) => {
@@ -2127,7 +2121,7 @@ impl Compiler {
         // Check self fields RIGHT AFTER calling compile_stmts
         
 
-        let const_none = self.get_const_index(ConstValue::None) as u32;
+        let _const_none = self.get_const_index(ConstValue::None) as u32;
 
         let const_none = self.get_const_index(ConstValue::None) as u32;
         self.emit(Opcode::LOAD_CONST, const_none);

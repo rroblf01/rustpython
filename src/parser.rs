@@ -1,5 +1,5 @@
 use crate::ast::*;
-use crate::token::{Lexer, LexerState, Token};
+use crate::token::{Lexer, Token};
 
 pub struct Parser {
     lexer: Lexer,
@@ -74,18 +74,6 @@ impl Parser {
         }
     }
 
-    fn at_name(&self, name: &str) -> bool {
-        matches!(&self.current, Token::Name(n) if n == name)
-    }
-
-    fn eat_name(&mut self, name: &str) -> bool {
-        if self.at_name(name) {
-            self.next();
-            true
-        } else {
-            false
-        }
-    }
 
     // ---- Program ----
 
@@ -112,17 +100,17 @@ impl Parser {
     fn parse_simple_stmt(&mut self) -> Result<Stmt, String> {
         if self.at(&Token::Pass) {
             self.next();
-            self.expect_newline_or_eof();
+            let _ = self.expect_newline_or_eof();
             return Ok(Stmt::Pass);
         }
         if self.at(&Token::Break) {
             self.next();
-            self.expect_newline_or_eof();
+            let _ = self.expect_newline_or_eof();
             return Ok(Stmt::Break);
         }
         if self.at(&Token::Continue) {
             self.next();
-            self.expect_newline_or_eof();
+            let _ = self.expect_newline_or_eof();
             return Ok(Stmt::Continue);
         }
         if self.at(&Token::Return) {
@@ -260,7 +248,7 @@ impl Parser {
                 targets.push(value);
                 value = self.parse_conditional_expr()?;
             }
-            self.expect_newline_or_eof();
+            let _ = self.expect_newline_or_eof();
             Ok(Stmt::Assign { targets, value: Box::new(value) })
         } else if self.at(&Token::PlusEqual) || self.at(&Token::MinusEqual)
             || self.at(&Token::StarEqual) || self.at(&Token::SlashEqual)
@@ -287,7 +275,7 @@ impl Parser {
                 _ => unreachable!(),
             };
             let value = self.parse_conditional_expr()?;
-            self.expect_newline_or_eof();
+            let _ = self.expect_newline_or_eof();
             Ok(Stmt::AugAssign {
                 target: Box::new(expr),
                 op,
@@ -302,14 +290,14 @@ impl Parser {
             } else {
                 None
             };
-            self.expect_newline_or_eof();
+            let _ = self.expect_newline_or_eof();
             Ok(Stmt::AnnAssign {
                 target: Box::new(expr),
                 annotation: Box::new(annotation),
                 value,
             })
         } else {
-            self.expect_newline_or_eof();
+            let _ = self.expect_newline_or_eof();
             Ok(Stmt::Expr(Box::new(expr)))
         }
     }
@@ -504,7 +492,7 @@ impl Parser {
 
     fn parse_for(&mut self, is_async: bool) -> Result<Stmt, String> {
         self.expect(&Token::For)?;
-        let mut target = self.parse_for_target()?;
+        let target = self.parse_for_target()?;
         self.expect(&Token::In)?;
         // Parse the iterable expression — may be a comma-separated tuple without parens
         // e.g. `for x in 'a', 'b', 'c':`  (CPython accepts this syntax)
@@ -655,7 +643,7 @@ impl Parser {
         }
         self.expect(&Token::Equal)?;
         let value = self.parse_expr()?;
-        self.expect_newline_or_eof();
+        let _ = self.expect_newline_or_eof();
         Ok(Stmt::TypeAlias { name, type_params, value: Box::new(value) })
     }
 
@@ -810,10 +798,6 @@ impl Parser {
         Ok(Pattern::MatchMapping { keys, rest })
     }
 
-    fn skip_over_blank_lines(&mut self) {
-        while self.eat(&Token::Newline) {}
-    }
-
     // ---- Other statements ----
 
     fn parse_return(&mut self) -> Result<Stmt, String> {
@@ -836,13 +820,13 @@ impl Parser {
         } else {
             None
         };
-        self.expect_newline_or_eof();
+        let _ = self.expect_newline_or_eof();
         Ok(Stmt::Return(value))
     }
 
     fn parse_yield_stmt(&mut self) -> Result<Stmt, String> {
         let expr = self.parse_yield_expr()?;
-        self.expect_newline_or_eof();
+        let _ = self.expect_newline_or_eof();
         Ok(Stmt::Expr(Box::new(expr)))
     }
 
@@ -852,7 +836,7 @@ impl Parser {
             let e = self.parse_expr()?;
             if self.eat(&Token::From) {
                 let cause = self.parse_expr()?;
-                self.expect_newline_or_eof();
+                let _ = self.expect_newline_or_eof();
                 return Ok(Stmt::Raise {
                     exc: Some(Box::new(e)),
                     cause: Some(Box::new(cause)),
@@ -862,7 +846,7 @@ impl Parser {
         } else {
             None
         };
-        self.expect_newline_or_eof();
+        let _ = self.expect_newline_or_eof();
         Ok(Stmt::Raise { exc, cause: None })
     }
 
@@ -872,7 +856,7 @@ impl Parser {
         while self.eat(&Token::Comma) {
             names.push(self.expect_name()?);
         }
-        self.expect_newline_or_eof();
+        let _ = self.expect_newline_or_eof();
         Ok(Stmt::Global(names))
     }
 
@@ -882,7 +866,7 @@ impl Parser {
         while self.eat(&Token::Comma) {
             names.push(self.expect_name()?);
         }
-        self.expect_newline_or_eof();
+        let _ = self.expect_newline_or_eof();
         Ok(Stmt::Nonlocal(names))
     }
 
@@ -894,7 +878,7 @@ impl Parser {
         } else {
             None
         };
-        self.expect_newline_or_eof();
+        let _ = self.expect_newline_or_eof();
         Ok(Stmt::Assert { test: Box::new(test), msg })
     }
 
@@ -904,7 +888,7 @@ impl Parser {
         while self.eat(&Token::Comma) {
             targets.push(self.parse_expr()?);
         }
-        self.expect_newline_or_eof();
+        let _ = self.expect_newline_or_eof();
         Ok(Stmt::Delete(targets))
     }
 
@@ -914,7 +898,7 @@ impl Parser {
         while self.eat(&Token::Comma) {
             names.push(self.parse_alias()?);
         }
-        self.expect_newline_or_eof();
+        let _ = self.expect_newline_or_eof();
         Ok(Stmt::Import(names))
     }
 
@@ -950,7 +934,7 @@ impl Parser {
             while self.eat(&Token::Newline) {}  // skip newlines before closing paren
             self.expect(&Token::RightParen)?;
         }
-        self.expect_newline_or_eof();
+        let _ = self.expect_newline_or_eof();
         Ok(Stmt::ImportFrom { module, names, level })
     }
 
@@ -1348,10 +1332,6 @@ impl Parser {
         Ok(expr)
     }
 
-    fn parse_factor(&mut self) -> Result<Expr, String> {
-        self.parse_unary()
-    }
-
     fn parse_unary(&mut self) -> Result<Expr, String> {
         if self.eat(&Token::Plus) {
             let expr = self.parse_unary()?;
@@ -1487,7 +1467,7 @@ impl Parser {
     fn parse_slice_or_expr(&mut self) -> Result<Expr, String> {
         if self.eat(&Token::Colon) {
             let mut upper = None;
-            let mut step = None;
+            let step;
             // Check for ::
             if self.eat(&Token::Colon) {
                 step = if !self.at(&Token::RightBracket) && !self.at(&Token::Comma) {
@@ -1576,7 +1556,7 @@ impl Parser {
             }
 
             Token::String(s) => {
-                let mut parts = vec![s.clone()];
+                let parts = vec![s.clone()];
                 self.next();
                 // Implicit string concatenation: adjacent strings and f-strings
                 // with optional newlines. Chain via BinOp::Add since we can't
@@ -1659,7 +1639,7 @@ impl Parser {
                 if parts.len() == 1 {
                     Ok(parts.into_iter().next().unwrap())
                 } else {
-                    let mut result = parts.into_iter().reduce(|a, b| Expr::BinOp {
+                    let result = parts.into_iter().reduce(|a, b| Expr::BinOp {
                         left: Box::new(a),
                         op: Operator::Add,
                         right: Box::new(b),
@@ -1975,8 +1955,8 @@ impl Parser {
                         conversion = *c;
                         self.next();
                     }
-                    // Check for FORMAT_SPEC token
-                    if let Token::FORMAT_SPEC(spec_text) = &self.current {
+                    // Check for FormatSpec token
+                    if let Token::FormatSpec(spec_text) = &self.current {
                         let spec = spec_text.clone();
                         self.next();
                         // Parse the format spec as a string constant (simple cases)

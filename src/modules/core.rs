@@ -294,7 +294,7 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     // __init_subclass__(cls, **kwargs): no-op (PEP 487)
     object_dict.insert("__init_subclass__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
         name: "__init_subclass__".to_string(),
-        func: |args| {
+        func: |_args| {
             Ok(py_none())
         },
     }));
@@ -327,7 +327,7 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     // __reduce__(self): basic pickle support
     object_dict.insert("__reduce__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
         name: "__reduce__".to_string(),
-        func: |args| {
+        func: |_args| {
             Ok(py_none())
         },
     }));
@@ -537,7 +537,7 @@ pub fn create_codecs_dict() -> HashMap<String, PyObjectRef> {
 /// Global invalidation counter for ABC virtual-subclass caches.
 static ABC_CACHE_TOKEN: AtomicI64 = AtomicI64::new(0);
 
-fn _abc_get_cache_token(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+fn _abc_get_cache_token(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Ok(py_int(ABC_CACHE_TOKEN.load(std::sync::atomic::Ordering::Relaxed)))
 }
 
@@ -2222,7 +2222,6 @@ pub fn create_operator_dict() -> HashMap<String, PyObjectRef> {
 }
 
 use std::rc::Rc;
-use std::cell::RefCell;
 use num_traits::ToPrimitive;
 
 /// Native __future__ module: defines _Feature tuples and feature flags.

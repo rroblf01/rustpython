@@ -94,7 +94,7 @@ pub fn create_collections_dict() -> HashMap<String, PyObjectRef> {
         // Register __missing__ that returns 0 for missing keys (dict subclass protocol)
         let missing = crate::object::PyObjectRef::imm(crate::object::PyObject::BuiltinFunction {
             name: "__missing__".to_string(),
-            func: |args: &[crate::object::PyObjectRef]| -> crate::object::PyResult<crate::object::PyObjectRef> {
+            func: |_args: &[crate::object::PyObjectRef]| -> crate::object::PyResult<crate::object::PyObjectRef> {
                 Ok(crate::object::py_int(0))
             },
         });
@@ -246,11 +246,11 @@ pub fn create_functools_dict() -> HashMap<String, PyObjectRef> {
         }
         let cls = args[0].clone();
         // Collect available comparison methods
-        let has_le = cls.borrow().get_attribute("__le__").is_ok();
-        let has_lt = cls.borrow().get_attribute("__lt__").is_ok();
-        let has_ge = cls.borrow().get_attribute("__ge__").is_ok();
-        let has_gt = cls.borrow().get_attribute("__gt__").is_ok();
-        let has_eq = cls.borrow().get_attribute("__eq__").is_ok();
+        let _has_le = cls.borrow().get_attribute("__le__").is_ok();
+        let _has_lt = cls.borrow().get_attribute("__lt__").is_ok();
+        let _has_ge = cls.borrow().get_attribute("__ge__").is_ok();
+        let _has_gt = cls.borrow().get_attribute("__gt__").is_ok();
+        let _has_eq = cls.borrow().get_attribute("__eq__").is_ok();
         // Basic stub: this doesn't implement all the methods, just returns the class
         // A real implementation would need to add __le__/__lt__/__ge__/__gt__/__eq__/__ne__
         Ok(cls)
@@ -355,7 +355,7 @@ pub fn create_functools_dict() -> HashMap<String, PyObjectRef> {
     });
 
     // cache: alias for lru_cache(maxsize=None) (unbounded cache)
-    ft_func!("cache", |args| {
+    ft_func!("cache", |_args| {
             let decorator = move |dec_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
                 if dec_args.is_empty() {
                     return Err(PyError::type_error("cache requires a function argument"));
@@ -439,7 +439,7 @@ pub fn create_functools_dict() -> HashMap<String, PyObjectRef> {
             let _ = dispatcher.borrow_mut().set_attribute("registry", PyObjectRef::new(PyObject::Dict(py_registry)));
         }
         let reg_register = registry.clone();
-        let dispatch_clone = dispatcher.clone();
+        let _dispatch_clone = dispatcher.clone();
         let register_method = move |m_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
             if m_args.is_empty() {
                 return Err(PyError::type_error("register() requires at least 1 argument"));
@@ -724,12 +724,12 @@ pub fn create_datetime_dict() -> HashMap<String, PyObjectRef> {
         };
     }
 
-    dt_func!("datetime", |args| {
+    dt_func!("datetime", |_args| {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
         let secs = now.as_secs() as i64;
-        let nanos = now.subsec_nanos();
+        let _nanos = now.subsec_nanos();
         // Format as ISO string
         let seconds = secs % 60;
         let minutes = (secs / 60) % 60;
@@ -771,7 +771,7 @@ pub fn create_datetime_dict() -> HashMap<String, PyObjectRef> {
         Ok(dt)
     });
 
-    dt_func!("date", |args| {
+    dt_func!("date", |_args| {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
@@ -797,7 +797,7 @@ pub fn create_datetime_dict() -> HashMap<String, PyObjectRef> {
         Ok(py_str(&format!("{:04}-{:02}-{:02}", y, m, d)))
     });
 
-    dt_func!("now", |args| {
+    dt_func!("now", |_args| {
         let s = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
@@ -843,10 +843,10 @@ pub fn create_datetime_dict() -> HashMap<String, PyObjectRef> {
         }
         Ok(td)
     });
-    dt_func!("tzinfo", |args| {
+    dt_func!("tzinfo", |_args| {
         Ok(py_none())
     });
-    dt_func!("timezone", |args| {
+    dt_func!("timezone", |_args| {
         // timezone(offset, name=None) — simplified
         Ok(py_none())
     });
@@ -862,15 +862,15 @@ pub fn create_datetime_dict() -> HashMap<String, PyObjectRef> {
     });
     let _ = utc_instance.borrow_mut().set_attribute("utcoffset", PyObjectRef::imm(PyObject::BuiltinFunction {
         name: "utcoffset".to_string(),
-        func: |args| { Ok(py_int(0)) },
+        func: |_args| { Ok(py_int(0)) },
     }));
     let _ = utc_instance.borrow_mut().set_attribute("dst", PyObjectRef::imm(PyObject::BuiltinFunction {
         name: "dst".to_string(),
-        func: |args| { Ok(py_int(0)) },
+        func: |_args| { Ok(py_int(0)) },
     }));
     let _ = utc_instance.borrow_mut().set_attribute("tzname", PyObjectRef::imm(PyObject::BuiltinFunction {
         name: "tzname".to_string(),
-        func: |args| { Ok(py_str("UTC")) },
+        func: |_args| { Ok(py_str("UTC")) },
     }));
     d.insert("UTC".to_string(), utc_instance);
 
@@ -1612,7 +1612,4 @@ pub fn create_random_cmodule_dict() -> HashMap<String, PyObjectRef> {
 }
 
 use std::rc::Rc;
-use std::cell::RefCell;
 use num_traits::ToPrimitive;
-use num_bigint::BigInt;
-use std::sync::atomic::{AtomicI64, Ordering};

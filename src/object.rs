@@ -17,9 +17,8 @@ use std::fmt;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicUsize;
 use num_bigint::{BigInt, Sign};
-use num_traits::{Zero, One, ToPrimitive, float::FloatCore, Signed};
-use regex::Regex;
-use crate::bytecode::{needs_arg, CodeObject};
+use num_traits::{Zero, One, ToPrimitive, Signed};
+use crate::bytecode::CodeObject;
 use crate::modules::*;
 
 pub type BuiltinFunc = fn(&[PyObjectRef]) -> PyResult<PyObjectRef>;
@@ -30,7 +29,6 @@ pub static IMM_COUNT: AtomicUsize = AtomicUsize::new(0);
 /// Temporary owned, Rc-held, or RefCell-referenced PyObject
 pub enum RefOrOwned<'a> {
     Ref(std::cell::Ref<'a, PyObject>),
-    RcRef(std::rc::Rc<PyObject>),
     Owned(PyObject),
 }
 
@@ -39,7 +37,6 @@ impl<'a> std::ops::Deref for RefOrOwned<'a> {
     fn deref(&self) -> &PyObject {
         match self {
             RefOrOwned::Ref(r) => &**r,
-            RefOrOwned::RcRef(r) => &**r,
             RefOrOwned::Owned(o) => o,
         }
     }
@@ -71,9 +68,6 @@ impl SmallStr {
             .expect("SmallStr: invalid UTF-8 data")
     }
 
-    pub fn to_string(&self) -> String {
-        self.as_str().to_string()
-    }
 }
 
 #[derive(Clone)]
@@ -143,15 +137,18 @@ impl PyObjectRef {
         }
     }
 
-    pub fn is_imm(&self) -> bool {
-        matches!(self, PyObjectRef::Imm(_))
-    }
-
-    /// Fast path: extract i64 without borrow()
+    /// Fast path: extract i64. Avoids borrow() for the inline variants —
+    /// `py_int()` caches -5..=257 as boxed `PyObject::Int` rather than
+    /// `SmallInt` (matching CPython's small-int cache range), so plain
+    /// integer arguments in that very common range need the borrow() path.
     pub fn as_i64(&self) -> Option<i64> {
         match self {
             PyObjectRef::SmallInt(n) => Some(*n),
-            _ => None,
+            PyObjectRef::SmallBool(_) | PyObjectRef::SmallFloat(_) | PyObjectRef::SmallStr(_) | PyObjectRef::None => None,
+            PyObjectRef::Imm(_) | PyObjectRef::Mut(_) => match &*self.borrow() {
+                PyObject::Int(b) => b.to_i64(),
+                _ => None,
+            },
         }
     }
 
@@ -159,7 +156,12 @@ impl PyObjectRef {
         match self {
             PyObjectRef::SmallFloat(f) => Some(*f),
             PyObjectRef::SmallInt(n) => Some(*n as f64),
-            _ => None,
+            PyObjectRef::SmallBool(_) | PyObjectRef::SmallStr(_) | PyObjectRef::None => None,
+            PyObjectRef::Imm(_) | PyObjectRef::Mut(_) => match &*self.borrow() {
+                PyObject::Int(b) => b.to_f64(),
+                PyObject::Float(f) => Some(*f),
+                _ => None,
+            },
         }
     }
 
@@ -207,12 +209,6 @@ impl PyObjectRef {
             PyObjectRef::Mut(rc) => rc.borrow().truthy(),
             PyObjectRef::Imm(rc) => rc.borrow().truthy(),
         }
-    }
-    /// Return a raw pointer to the inner PyObject for identity comparison.
-    /// For inline variants (SmallInt, SmallBool, SmallFloat, SmallStr, None),
-    /// the address of the PyObjectRef itself is returned as a unique identity.
-    pub fn raw_ptr(&self) -> *const PyObjectRef {
-        self as *const PyObjectRef
     }
     pub fn hash(&self) -> PyResult<usize> {
         match self {
@@ -289,9 +285,7 @@ pub enum PyError {
     RuntimeError(String),
     SystemExit(i32),
     Exception(String, PyObjectRef),
-    MatchError(String),
     StopIteration,
-    AssertionError(String),
     OsError(String),
     ImportError(String),
 }
@@ -309,9 +303,7 @@ impl PyError {
             PyError::RuntimeError(_) => "RuntimeError",
             PyError::SystemExit(_) => "SystemExit",
             PyError::Exception(_, _) => "Exception",
-            PyError::MatchError(_) => "MatchError",
             PyError::StopIteration => "StopIteration",
-            PyError::AssertionError(_) => "AssertionError",
             PyError::OsError(_) => "OSError",
             PyError::ImportError(_) => "ImportError",
         }
@@ -343,10 +335,6 @@ impl PyError {
     pub fn runtime_error(msg: impl Into<String>) -> Self {
         PyError::RuntimeError(msg.into())
     }
-    pub fn import_error(msg: impl Into<String>) -> Self {
-        PyError::ImportError(msg.into())
-    }
-
     pub fn message(&self) -> String {
         match self {
             PyError::TypeError(m) => m.clone(),
@@ -359,9 +347,7 @@ impl PyError {
             PyError::RuntimeError(m) => m.clone(),
             PyError::SystemExit(c) => format!("SystemExit({})", c),
             PyError::Exception(m, _) => m.clone(),
-            PyError::MatchError(m) => m.clone(),
             PyError::StopIteration => "".to_string(),
-            PyError::AssertionError(m) => m.clone(),
             PyError::OsError(m) => m.clone(),
             PyError::ImportError(m) => m.clone(),
         }
@@ -381,9 +367,7 @@ impl fmt::Display for PyError {
             PyError::RuntimeError(_) => "RuntimeError",
             PyError::SystemExit(_) => "SystemExit",
             PyError::Exception(_, _) => "Exception",
-            PyError::MatchError(_) => "MatchError",
             PyError::StopIteration => "StopIteration",
-            PyError::AssertionError(_) => "AssertionError",
             PyError::OsError(_) => "OSError",
             PyError::ImportError(_) => "ImportError",
         };
@@ -408,9 +392,6 @@ impl PySet {
     pub fn clear(&mut self) { self.buckets.clear(); self.size = 0; }
     fn bucket(&self, key: &PyObjectRef) -> PyResult<Option<&Vec<PyObjectRef>>> {
         let h = key.hash()?; Ok(self.buckets.get(&h))
-    }
-    fn bucket_mut(&mut self, key: &PyObjectRef) -> PyResult<&mut Vec<PyObjectRef>> {
-        let h = key.hash()?; Ok(self.buckets.entry(h).or_default())
     }
     fn find(bucket: &[PyObjectRef], key: &PyObjectRef) -> Option<usize> {
         bucket.iter().position(|k| k.equals(key).unwrap_or(false))
@@ -471,9 +452,6 @@ impl PyDict {
     pub fn clear(&mut self) { self.buckets.clear(); self.size = 0; }
     fn bucket(&self, key: &PyObjectRef) -> PyResult<Option<&Vec<(PyObjectRef, PyObjectRef)>>> {
         let h = key.hash()?; Ok(self.buckets.get(&h))
-    }
-    fn bucket_mut(&mut self, key: &PyObjectRef) -> PyResult<&mut Vec<(PyObjectRef, PyObjectRef)>> {
-        let h = key.hash()?; Ok(self.buckets.entry(h).or_default())
     }
     fn find(bucket: &[(PyObjectRef, PyObjectRef)], key: &PyObjectRef) -> Option<usize> {
         bucket.iter().position(|(k, _)| k.equals(key).unwrap_or(false))
@@ -615,6 +593,9 @@ pub enum PyObject {
     Cell {
         value: Option<PyObjectRef>,
     },
+    // Reserved for future C-extension capsule support (ffi_bridge.rs); not
+    // constructed anywhere yet.
+    #[allow(dead_code)]
     Capsule {
         name: String,
         pointer: *mut std::ffi::c_void,
@@ -682,6 +663,9 @@ pub enum PyObject {
     /// Implements the await protocol for Futures.
     /// __await__ returns this, and SEND drives it: first yield the future,
     /// then on second send (via send(None) from the event loop), return the result.
+    /// Fully handled elsewhere in this file, but not constructed yet — part
+    /// of the asyncio rewrite in PLAN.md.
+    #[allow(dead_code)]
     FutureAwaitIterator {
         future: PyObjectRef,
         yielded: bool,
@@ -1287,7 +1271,7 @@ fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String, String> {
             let mut width: Option<usize> = None;
             // Check for flags (only '0' flag supported)
             let mut flags = String::new();
-            let mut peek = chars.clone();
+            let peek = chars.clone();
             if let Some(c) = peek.as_str().chars().next() {
                 if c == '0' {
                     flags.push('0');
@@ -1633,7 +1617,7 @@ pub fn py_pow(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
         if bi > 63 {
             // Use BigInt for large exponents to avoid overflow
             let big_a = BigInt::from(ai);
-            let big_b = BigInt::from(bi);
+            let _big_b = BigInt::from(bi);
             let result = big_a.pow(bi as u32);
             return Ok(py_int(result));
         }
@@ -2277,7 +2261,7 @@ pub fn builtin_int(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             Ok(obj)
         }
         PyObject::Bool(b) => Ok(py_int(if *b { 1 } else { 0 })),
-        PyObject::Instance { dict, typ } => {
+        PyObject::Instance { dict: _, typ: _ } => {
             drop(obj);
             // Try calling __int__ method on the instance
             let args0 = &args[0];
@@ -2743,11 +2727,6 @@ pub fn builtin_format(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         }
         _ => Err(PyError::type_error("format() takes at most 2 arguments")),
     }
-}
-
-pub fn py_format(val: &PyObjectRef, spec: &str) -> PyResult<PyObjectRef> {
-    let args = [val.clone(), py_str(spec)];
-    builtin_format(&args)
 }
 
 pub fn builtin_object(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
@@ -3315,7 +3294,7 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             PyObject::Generator { .. } => {
                 drop(obj);
                 let next_func = args[0].borrow().get_attribute("__next__")?;
-                let (n, f) = {
+                let (_n, f) = {
                     let b = next_func.borrow();
                     if let PyObject::BuiltinMethod { name, func, .. } = &*b {
                         (name.clone(), *func)
@@ -4006,7 +3985,7 @@ pub fn builtin_compile(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
     let source = args[0].str();
     let filename = args[1].str();
-    let mode = args[2].str();
+    let _mode = args[2].str();
     let mut parser = crate::parser::Parser::new(&source);
     let program = parser.parse_program().map_err(|e| PyError::type_error(format!("SyntaxError: {}", e)))?;
     let mut compiler = crate::compiler::Compiler::new();
@@ -4139,7 +4118,7 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
                 } else { return Err(PyError::type_error("not a bound method")); }
             };
             let mut all_args = vec![self_obj];
-            let a_len = a.len();
+            let _a_len = a.len();
             all_args.extend(a);
             builtin_call(&bf, &all_args)
         }
@@ -4347,7 +4326,7 @@ impl ObjectAccess for PyObject {
             PyObject::Module { dict, name: mod_name } => {
                 if name == "__dict__" {
                     // Convert module's HashMap to a PyDict
-                    use crate::object::ObjectAccess;
+                    
                     let mut pd = PyDict::new();
                     for (k, v) in dict.iter() {
                         let _ = pd.set(py_str(k), v.clone());
@@ -4974,7 +4953,7 @@ impl ObjectAccess for PyObject {
                             let fmt = args[0].str();
                             let mut result = String::new();
                             let mut chars = fmt.chars();
-                            let mut pos = 0usize;
+                            let _pos = 0usize;
                             let mut next_auto = 0usize;
                             while let Some(c) = chars.next() {
                                 if c == '{' {
@@ -5192,8 +5171,8 @@ impl ObjectAccess for PyObject {
                             let len = chars.len();
                             let mut i = 0;
                             while i < len {
-                                let mut end = i;
-                                let mut line_end = i;
+                                let end;
+                                let line_end;
                                 if chars[i] == '\r' {
                                     if i + 1 < len && chars[i + 1] == '\n' {
                                         line_end = i + 2;
@@ -5463,7 +5442,7 @@ impl ObjectAccess for PyObject {
                     _ => Err(PyError::attribute_error(format!("'dict' object has no attribute '{}'", name))),
                 }
             }
-            PyObject::Set(s) => {
+            PyObject::Set(_s) => {
                 match name {
                     "add" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "add".to_string(),
@@ -5730,7 +5709,7 @@ impl ObjectAccess for PyObject {
                     ))),
                 }
             }
-            PyObject::Generator { frame: gen_frame } => {
+            PyObject::Generator { frame: _gen_frame } => {
                 match name {
                     "__next__" | "send" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: name.to_string(),
@@ -5965,7 +5944,7 @@ impl ObjectAccess for PyObject {
                     _ => Err(PyError::attribute_error(format!("'file' object has no attribute '{}'", name))),
                 }
             }
-            PyObject::Socket { inner } => {
+            PyObject::Socket { inner: _ } => {
                 match name {
                     "bind" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "bind".to_string(),
@@ -6141,14 +6120,14 @@ impl ObjectAccess for PyObject {
                 }
             }
             PyObject::Thread(inner_arc) => {
-                let inner_arc = inner_arc.clone();
+                let _inner_arc = inner_arc.clone();
                 match name {
                     "start" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "start".to_string(),
                         func: |args| {
                             let obj = args[0].borrow();
                             if let PyObject::Thread(inner_arc) = &*obj {
-                                let mut locked = inner_arc.lock().unwrap();
+                                let locked = inner_arc.lock().unwrap();
                                 if locked.handle.is_some() {
                                     return Err(PyError::runtime_error("thread already started"));
                                 }
@@ -6202,7 +6181,7 @@ impl ObjectAccess for PyObject {
                 }
             }
             PyObject::Lock(inner_arc) => {
-                let inner_arc = inner_arc.clone();
+                let _inner_arc = inner_arc.clone();
                 match name {
                     "__enter__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "__enter__".to_string(),
@@ -6262,7 +6241,7 @@ impl ObjectAccess for PyObject {
                 }
             }
             PyObject::RLock(inner_arc) => {
-                let inner_arc = inner_arc.clone();
+                let _inner_arc = inner_arc.clone();
                 match name {
                     "acquire" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "acquire".to_string(),
@@ -6357,7 +6336,7 @@ impl ObjectAccess for PyObject {
                 }
             }
             PyObject::Event(inner_arc) => {
-                let inner_arc = inner_arc.clone();
+                let _inner_arc = inner_arc.clone();
                 match name {
                     "is_set" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "is_set".to_string(),
@@ -6415,7 +6394,7 @@ impl ObjectAccess for PyObject {
                 }
             }
             PyObject::Queue(inner_arc) => {
-                let inner_arc = inner_arc.clone();
+                let _inner_arc = inner_arc.clone();
                 match name {
                     "put" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "put".to_string(),
@@ -6455,13 +6434,6 @@ impl ObjectAccess for PyObject {
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
                     _ => Err(PyError::attribute_error(format!("'Queue' object has no attribute '{}'", name))),
-                }
-            }
-            PyObject::Exception { typ, args, .. } => {
-                match name {
-                    "__name__" => Ok(py_str(typ)),
-                    "args" => Ok(py_tuple(args.clone())),
-                    _ => Err(PyError::attribute_error(format!("'Exception' object has no attribute '{}'", name))),
                 }
             }
             PyObject::Int(_i) => {
@@ -6505,7 +6477,7 @@ impl ObjectAccess for PyObject {
                                     return Err(PyError::type_error("length must be positive"));
                                 }
                                 let len = length as usize;
-                                let (_, mut bytes) = if byteorder == "little" {
+                                let (_, bytes) = if byteorder == "little" {
                                     val.to_bytes_le()
                                 } else {
                                     val.to_bytes_be()
@@ -6778,7 +6750,7 @@ impl ObjectAccess for PyObject {
                     format!("'super' object has no attribute '{}'", name)
                 ))
             }
-            PyObject::FutureAwaitIterator { future, yielded } => {
+            PyObject::FutureAwaitIterator { future: _, yielded: _ } => {
                 match name {
                     "__iter__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "__iter__".to_string(),
@@ -6878,7 +6850,7 @@ impl ObjectAccess for PyObject {
                 }
                 Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", self.type_name(), name)))
             }
-            PyObject::FrozenSet(items) | PyObject::Set(items) => {
+            PyObject::FrozenSet(_items) => {
                 match name {
                     "issuperset" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "issuperset".to_string(),
@@ -6953,7 +6925,7 @@ impl ObjectAccess for PyObject {
             }
             PyObject::Dict(_) | PyObject::List(_) | PyObject::Tuple(_) | PyObject::Set(_) | PyObject::FrozenSet(_) => {
                 // Store attributes in a side dict (instance-like) for these built-in types
-                let mut pd = match self {
+                let _pd = match self {
                     PyObject::Dict(d) => Some(d.clone()),
                     _ => None,
                 };
@@ -7378,7 +7350,7 @@ pub fn py_setitem(obj: &PyObjectRef, index: &PyObjectRef, value: PyObjectRef) ->
     // Default Instance __setitem__: store key/value in the instance dict (HashMap)
     {
         let o = obj.borrow();
-        if let PyObject::Instance { dict, .. } = &*o {
+        if let PyObject::Instance { dict: _, .. } = &*o {
             let key = index.str();
             drop(o);
             let mut o = obj.borrow_mut();
@@ -7456,22 +7428,6 @@ pub fn py_delitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<()> {
     }
 }
 
-// ---- String operations ----
-
-pub fn py_str_join(strings: &[PyObjectRef], sep: &str) -> PyResult<PyObjectRef> {
-    let parts: Vec<String> = strings.iter().map(|s| s.str()).collect();
-    Ok(py_str(&parts.join(sep)))
-}
-
-pub fn py_str_split(s: &str, sep: Option<&str>) -> PyResult<PyObjectRef> {
-    let parts: Vec<PyObjectRef> = if let Some(sep) = sep {
-        s.split(sep).map(|p| py_str(p)).collect()
-    } else {
-        s.split_whitespace().map(|p| py_str(p)).collect()
-    };
-    Ok(py_list(parts))
-}
-
 // ---- Exception constructor functions ----
 
 macro_rules! make_exception_func {
@@ -7527,7 +7483,7 @@ make_exception_func!(builtin_make_exception_systemerror, "SystemError");
 
 // ExceptionGroup and BaseExceptionGroup factory functions (PEP 654)
 pub fn builtin_make_exception_exceptiongroup(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    let message = if !args.is_empty() { args[0].str() } else { "".to_string() };
+    let _message = if !args.is_empty() { args[0].str() } else { "".to_string() };
     let exceptions = if args.len() > 1 {
         match &*args[1].borrow() {
             PyObject::List(items) => items.clone(),
@@ -7545,7 +7501,7 @@ pub fn builtin_make_exception_exceptiongroup(args: &[PyObjectRef]) -> PyResult<P
 }
 
 pub fn builtin_make_exception_baseexceptiongroup(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    let message = if !args.is_empty() { args[0].str() } else { "".to_string() };
+    let _message = if !args.is_empty() { args[0].str() } else { "".to_string() };
     let exceptions = if args.len() > 1 {
         match &*args[1].borrow() {
             PyObject::List(items) => items.clone(),
@@ -7560,39 +7516,6 @@ pub fn builtin_make_exception_baseexceptiongroup(args: &[PyObjectRef]) -> PyResu
         args: args.to_vec(),
         exceptions,
     }))
-}
-
-fn json_encode(val: &PyObjectRef) -> PyResult<PyObjectRef> {
-    match &*val.borrow() {
-        PyObject::None => Ok(py_str("null")),
-        PyObject::Bool(b) => Ok(py_str(if *b { "true" } else { "false" })),
-        PyObject::Int(i) => Ok(py_str(&i.to_string())),
-        PyObject::Float(f) => {
-            if f.is_nan() || f.is_infinite() {
-                return Err(PyError::ValueError("Out of range float values are not JSON compliant".to_string()));
-            }
-            Ok(py_str(&f.to_string()))
-        }
-        PyObject::Str(s) => Ok(py_str(&json_escape_string(s))),
-        PyObject::List(items) | PyObject::Tuple(items) => {
-            let mut parts = Vec::with_capacity(items.len());
-            for item in items {
-                let encoded = json_encode(item)?;
-                parts.push(encoded.str());
-            }
-            Ok(py_str(&format!("[{}]", parts.join(", "))))
-        }
-        PyObject::Dict(d) => {
-            let mut pairs = Vec::new();
-            for (key, val) in d.items() {
-                let k = json_encode(&key)?;
-                let v = json_encode(&val)?;
-                pairs.push(format!("{}: {}", k.str(), v.str()));
-            }
-            Ok(py_str(&format!("{{{}}}", pairs.join(", "))))
-        }
-        _ => Err(PyError::type_error(format!("Object of type '{}' is not JSON serializable", val.borrow().type_name()))),
-    }
 }
 
 fn json_escape_string(s: &str) -> String {
@@ -7860,10 +7783,6 @@ pub fn fast_random_u64() -> u64 {
         .wrapping_add(1442695040888963407)
 }
 
-pub fn fast_random_f64() -> f64 {
-    (fast_random_u64() >> 11) as f64 * (1.0 / 9007199254740992.0)
-}
-
 fn socket_addr_to_string(addr: &PyObjectRef) -> PyResult<String> {
     let borrowed = addr.borrow();
     match &*borrowed {
@@ -7967,236 +7886,6 @@ pub fn deepcopy_one(obj: &PyObjectRef, memo: &PyObjectRef) -> Result<PyObjectRef
 use std::sync::atomic::{AtomicI64, Ordering};
 pub static ENUM_AUTO_COUNTER: AtomicI64 = AtomicI64::new(1);
 
-// === IO MODULE ===
-pub fn io_stringio_read(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.is_empty() { return Err(PyError::type_error("read() missing required 'self' argument")); }
-    let self_obj = &args[0];
-    let inst = self_obj.borrow();
-    if let PyObject::Instance { dict, .. } = &*inst {
-        if let Some(buf) = dict.get("_buffer") {
-            let buf_str = buf.str();
-            let pos = dict.get("_pos").and_then(|p| p.as_i64()).unwrap_or(0) as usize;
-            let result = buf_str[pos..].to_string();
-            // Update position to end (full read consumed everything)
-            drop(inst);
-            if let PyObject::Instance { dict, .. } = &mut *self_obj.borrow_mut() {
-                dict.insert("_pos".to_string(), py_int(buf_str.len() as i64));
-            }
-            Ok(py_str(&result))
-        } else {
-            Ok(py_str(""))
-        }
-    } else {
-        Err(PyError::type_error("StringIO instance required"))
-    }
-}
-
-pub fn io_stringio_readline(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.is_empty() { return Err(PyError::type_error("readline() missing required 'self' argument")); }
-    let self_obj = &args[0];
-    let inst = self_obj.borrow();
-    if let PyObject::Instance { dict, .. } = &*inst {
-        if let Some(buf) = dict.get("_buffer") {
-            let buf_str = buf.str();
-            let pos = dict.get("_pos").and_then(|p| p.as_i64()).unwrap_or(0) as usize;
-            if pos >= buf_str.len() {
-                return Ok(py_str(""));
-            }
-            let remaining = &buf_str[pos..];
-            let end = remaining.find('\n').map(|i| i + 1).unwrap_or(remaining.len());
-            let result = &remaining[..end];
-            let new_pos = pos + end;
-            drop(inst);
-            if let PyObject::Instance { dict, .. } = &mut *self_obj.borrow_mut() {
-                dict.insert("_pos".to_string(), py_int(new_pos as i64));
-            }
-            Ok(py_str(result))
-        } else {
-            Ok(py_str(""))
-        }
-    } else {
-        Err(PyError::type_error("StringIO instance required"))
-    }
-}
-
-pub fn io_stringio_write(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.len() < 2 { return Err(PyError::type_error("write() missing required argument")); }
-    let self_obj = &args[0];
-    let text = args[1].str();
-    let inst = self_obj.borrow();
-    if let PyObject::Instance { dict, .. } = &*inst {
-        let pos = dict.get("_pos").and_then(|p| p.as_i64()).unwrap_or(0) as usize;
-        drop(inst);
-        if let PyObject::Instance { dict, .. } = &mut *self_obj.borrow_mut() {
-            let buf = dict.entry("_buffer".to_string()).or_insert_with(|| py_str(""));
-            let mut buf_str = buf.str();
-            // Insert at position
-            if pos <= buf_str.len() {
-                buf_str.insert_str(pos, &text);
-                *buf = py_str(&buf_str);
-            }
-            dict.insert("_pos".to_string(), py_int((pos + text.len()) as i64));
-        }
-        Ok(py_int(text.len() as i64))
-    } else {
-        Err(PyError::type_error("StringIO instance required"))
-    }
-}
-
-pub fn io_stringio_seek(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.len() < 2 { return Err(PyError::type_error("seek() missing required argument")); }
-    let self_obj = &args[0];
-    let pos = args[1].as_i64().unwrap_or(0);
-    if let PyObject::Instance { dict, .. } = &mut *self_obj.borrow_mut() {
-        dict.insert("_pos".to_string(), py_int(pos));
-    }
-    Ok(py_int(pos))
-}
-
-pub fn io_stringio_tell(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.is_empty() { return Err(PyError::type_error("tell() missing required 'self' argument")); }
-    let self_obj = &args[0];
-    let inst = self_obj.borrow();
-    if let PyObject::Instance { dict, .. } = &*inst {
-        Ok(dict.get("_pos").cloned().unwrap_or(py_int(0)))
-    } else {
-        Err(PyError::type_error("StringIO instance required"))
-    }
-}
-
-pub fn io_stringio_getvalue(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.is_empty() { return Err(PyError::type_error("getvalue() missing required 'self' argument")); }
-    let self_obj = &args[0];
-    let inst = self_obj.borrow();
-    if let PyObject::Instance { dict, .. } = &*inst {
-        Ok(dict.get("_buffer").cloned().unwrap_or(py_str("")))
-    } else {
-        Err(PyError::type_error("StringIO instance required"))
-    }
-}
-
-pub fn io_bytesio_read(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.is_empty() { return Err(PyError::type_error("read() missing required 'self' argument")); }
-    let self_obj = &args[0];
-    let inst = self_obj.borrow();
-    if let PyObject::Instance { dict, .. } = &*inst {
-        if let Some(buf) = dict.get("_buffer") {
-            let buf_bytes = match &*buf.borrow() {
-                PyObject::Bytes(b) => b.clone(),
-                _ => vec![],
-            };
-            let pos = dict.get("_pos").and_then(|p| p.as_i64()).unwrap_or(0) as usize;
-            let result = buf_bytes[pos..].to_vec();
-            drop(inst);
-            if let PyObject::Instance { dict, .. } = &mut *self_obj.borrow_mut() {
-                dict.insert("_pos".to_string(), py_int(buf_bytes.len() as i64));
-            }
-            Ok(PyObjectRef::imm(PyObject::Bytes(result)))
-        } else {
-            Ok(PyObjectRef::imm(PyObject::Bytes(vec![])))
-        }
-    } else {
-        Err(PyError::type_error("BytesIO instance required"))
-    }
-}
-
-pub fn io_bytesio_readline(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.is_empty() { return Err(PyError::type_error("readline() missing required 'self' argument")); }
-    let self_obj = &args[0];
-    let inst = self_obj.borrow();
-    if let PyObject::Instance { dict, .. } = &*inst {
-        if let Some(buf) = dict.get("_buffer") {
-            let buf_bytes = match &*buf.borrow() {
-                PyObject::Bytes(b) => b.clone(),
-                _ => vec![],
-            };
-            let pos = dict.get("_pos").and_then(|p| p.as_i64()).unwrap_or(0) as usize;
-            if pos >= buf_bytes.len() {
-                return Ok(PyObjectRef::imm(PyObject::Bytes(vec![])));
-            }
-            let remaining = &buf_bytes[pos..];
-            let end = remaining.iter().position(|&b| b == b'\n').map(|i| i + 1).unwrap_or(remaining.len());
-            let result = remaining[..end].to_vec();
-            let new_pos = pos + end;
-            drop(inst);
-            if let PyObject::Instance { dict, .. } = &mut *self_obj.borrow_mut() {
-                dict.insert("_pos".to_string(), py_int(new_pos as i64));
-            }
-            Ok(PyObjectRef::imm(PyObject::Bytes(result)))
-        } else {
-            Ok(PyObjectRef::imm(PyObject::Bytes(vec![])))
-        }
-    } else {
-        Err(PyError::type_error("BytesIO instance required"))
-    }
-}
-
-pub fn io_bytesio_write(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.len() < 2 { return Err(PyError::type_error("write() missing required argument")); }
-    let self_obj = &args[0];
-    let data = args[1].borrow();
-    let bytes = match &*data {
-        PyObject::Bytes(b) => b.clone(),
-        PyObject::Str(s) => s.as_bytes().to_vec(),
-        _ => return Err(PyError::type_error("write() argument must be bytes or str")),
-    };
-    let inst = self_obj.borrow();
-    if let PyObject::Instance { dict, .. } = &*inst {
-        let pos = dict.get("_pos").and_then(|p| p.as_i64()).unwrap_or(0) as usize;
-        drop(inst);
-        if let PyObject::Instance { dict, .. } = &mut *self_obj.borrow_mut() {
-            let buf = dict.entry("_buffer".to_string()).or_insert_with(|| PyObjectRef::imm(PyObject::Bytes(vec![])));
-            let mut buf_bytes = match &*buf.borrow() {
-                PyObject::Bytes(b) => b.clone(),
-                _ => vec![],
-            };
-            // Insert at position (overwrite)
-            if pos <= buf_bytes.len() {
-                buf_bytes.splice(pos..pos, bytes.iter().cloned());
-            } else {
-                buf_bytes.extend(&bytes);
-            }
-            *buf = PyObjectRef::imm(PyObject::Bytes(buf_bytes));
-            dict.insert("_pos".to_string(), py_int((pos + bytes.len()) as i64));
-        }
-        Ok(py_int(bytes.len() as i64))
-    } else {
-        Err(PyError::type_error("BytesIO instance required"))
-    }
-}
-
-pub fn io_bytesio_seek(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.len() < 2 { return Err(PyError::type_error("seek() missing required argument")); }
-    let self_obj = &args[0];
-    let pos = args[1].as_i64().unwrap_or(0);
-    if let PyObject::Instance { dict, .. } = &mut *self_obj.borrow_mut() {
-        dict.insert("_pos".to_string(), py_int(pos));
-    }
-    Ok(py_int(pos))
-}
-
-pub fn io_bytesio_tell(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.is_empty() { return Err(PyError::type_error("tell() missing required 'self' argument")); }
-    let self_obj = &args[0];
-    let inst = self_obj.borrow();
-    if let PyObject::Instance { dict, .. } = &*inst {
-        Ok(dict.get("_pos").cloned().unwrap_or(py_int(0)))
-    } else {
-        Err(PyError::type_error("BytesIO instance required"))
-    }
-}
-
-pub fn io_bytesio_getvalue(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.is_empty() { return Err(PyError::type_error("getvalue() missing required 'self' argument")); }
-    let self_obj = &args[0];
-    let inst = self_obj.borrow();
-    if let PyObject::Instance { dict, .. } = &*inst {
-        Ok(dict.get("_buffer").cloned().unwrap_or_else(|| PyObjectRef::imm(PyObject::Bytes(vec![]))))
-    } else {
-        Err(PyError::type_error("BytesIO instance required"))
-    }
-}
-
 // ---- logging module ----
 // basicConfig(level) stores level; getLogger(name) returns dict-like with .info/.debug/.warning/.error methods.
 thread_local! {
@@ -8209,8 +7898,8 @@ pub fn logging_debug(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if level != "DEBUG" && level != "INFO" && level != "WARNING" && level != "ERROR" && level != "CRITICAL" {
         return Ok(py_none());
     }
-    let msg = args[1].str();
-    let logger_name = {
+    let _msg = args[1].str();
+    let _logger_name = {
         let borrowed = args[0].borrow();
         if let PyObject::Instance { dict, .. } = &*borrowed {
             dict.get("name").map(|n| n.str()).unwrap_or_default()

@@ -153,6 +153,10 @@ pub struct Alias {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Pattern {
     MatchValue(Box<Expr>),
+    // Compiler (compiler.rs) fully handles this, but the parser never emits
+    // it yet — `case None`/`True`/`False` currently parse as MatchValue
+    // (equality) instead of identity comparison. Keep for when that's wired up.
+    #[allow(dead_code)]
     MatchSingleton(String),
     MatchSequence(Vec<Pattern>),
     MatchMapping {
@@ -239,6 +243,10 @@ pub enum Expr {
         keywords: Vec<Keyword>,
     },
     FString(Vec<FStringPart>),
+    // Superseded by FString/FStringPart; the compiler still has a handler
+    // for it but the parser never constructs one. Kept for compatibility
+    // with the existing compiler.rs arm rather than ripping both out.
+    #[allow(dead_code)]
     JoinedStr(Vec<Expr>),
     Constant(Constant),
     Attribute {

@@ -31,6 +31,7 @@ pub fn lookup(id: StrId) -> String {
 pub struct StrId(pub u32);
 
 impl StrId {
+    #[allow(dead_code)]
     pub const EMPTY: StrId = StrId(u32::MAX);
 }
 
@@ -68,10 +69,12 @@ impl Interner {
     }
 
     /// Number of interned strings.
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.strings.len()
     }
 
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.strings.is_empty()
     }
@@ -91,6 +94,10 @@ pub struct InternedMap<V> {
     len: usize,
 }
 
+// Only wired in for Frame::locals so far (see vm.rs); the HashMap-interop
+// convenience methods below (insert_str, to_hashmap, from_hashmap, etc.)
+// are for when globals/builtins get migrated off HashMap<String, V> too.
+#[allow(dead_code)]
 impl<V: Clone> InternedMap<V> {
     pub fn new() -> Self {
         InternedMap {

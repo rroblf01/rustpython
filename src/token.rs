@@ -9,7 +9,7 @@ pub enum Token {
     FStringStart,
     FStringMiddle(String),
     FStringEnd,
-    FORMAT_SPEC(String),
+    FormatSpec(String),
     FStringConversion(u8),
     Indent,
     Dedent,
@@ -105,9 +105,6 @@ pub enum Token {
     Yield,
 
     // Soft keywords
-    Match,
-    Case,
-    TypeKw,
     Underscore,
 }
 
@@ -132,7 +129,6 @@ pub struct Lexer {
     pending: Vec<Token>,
     at_line_start: bool,
     paren_level: usize,
-    source: String,
     fstring_quote: Option<char>,
     fstring_parts: Vec<(String, String, String, u8)>, // (literal, expr_text, format_spec, conversion)
     fstring_part_idx: usize,
@@ -151,16 +147,11 @@ impl Lexer {
             pending: Vec::new(),
             at_line_start: true,
             paren_level: 0,
-            source: source.to_string(),
             fstring_quote: None,
             fstring_parts: Vec::new(),
             fstring_part_idx: 0,
             fstring_expr_pending: Vec::new(),
         }
-    }
-
-    pub fn source_text(&self) -> &str {
-        &self.source
     }
 
     fn peek(&self) -> Option<char> {
@@ -189,12 +180,6 @@ impl Lexer {
             true
         } else {
             false
-        }
-    }
-
-    fn skip_whitespace(&mut self) {
-        while self.peek() == Some(' ') || self.peek() == Some('\t') {
-            self.advance();
         }
     }
 
@@ -532,9 +517,9 @@ impl Lexer {
                     if conversion != 0 {
                         to_push.push(Token::FStringConversion(conversion));
                     }
-                    // If there's a format spec, push the FORMAT_SPEC token
+                    // If there's a format spec, push the FormatSpec token
                     if !format_spec.is_empty() {
-                        to_push.push(Token::FORMAT_SPEC(format_spec.clone()));
+                        to_push.push(Token::FormatSpec(format_spec.clone()));
                     }
                 }
                 // If this is the last part, end the f-string
@@ -990,37 +975,3 @@ impl Lexer {
     }
 }
 
-#[derive(Clone)]
-pub struct LexerState {
-    pub pos: usize,
-    pub line: usize,
-    pub col: usize,
-    pub at_line_start: bool,
-    pub pending: Vec<Token>,
-    pub paren_level: usize,
-    pub indent_stack: Vec<usize>,
-}
-
-impl Lexer {
-    pub fn save_state(&self) -> LexerState {
-        LexerState {
-            pos: self.pos,
-            line: self.line,
-            col: self.col,
-            at_line_start: self.at_line_start,
-            pending: self.pending.clone(),
-            paren_level: self.paren_level,
-            indent_stack: self.indent_stack.clone(),
-        }
-    }
-
-    pub fn restore_state(&mut self, state: LexerState) {
-        self.pos = state.pos;
-        self.line = state.line;
-        self.col = state.col;
-        self.at_line_start = state.at_line_start;
-        self.pending = state.pending;
-        self.paren_level = state.paren_level;
-        self.indent_stack = state.indent_stack;
-    }
-}

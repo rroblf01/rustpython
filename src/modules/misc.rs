@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 /// Build a re.Match object with group(), groups(), start(), end(), span() methods.
 /// Returns None if the regex didn't match.
-fn make_match_object(re_match: Option<regex::Match<'_>>, num_groups: usize) -> PyObjectRef {
+fn make_match_object(re_match: Option<regex::Match<'_>>, _num_groups: usize) -> PyObjectRef {
     match re_match {
         Some(m) => {
             let start_pos = m.start();
@@ -383,7 +383,7 @@ pub fn create_weakref_weak_set() -> PyObjectRef {
         name: "WeakSet".to_string(),
         func: |args| {
             if args.len() > 0 {
-                if let PyObject::Set(s) = &*args[0].borrow() {
+                if let PyObject::Set(_s) = &*args[0].borrow() {
                     return Ok(args[0].clone());
                 }
                 if let PyObject::List(items) = &*args[0].borrow() {
@@ -577,7 +577,7 @@ pub fn create_collections_abc_dict() -> HashMap<String, PyObjectRef> {
     // Abstract base classes as simple markers
     let abc_meta = PyObjectRef::new(PyObject::BuiltinFunction {
         name: "ABCMeta".to_string(),
-        func: |args| {
+        func: |_args| {
             Ok(PyObjectRef::new(PyObject::Instance {
                 typ: py_dict(), // simplified type
                 dict: HashMap::new(),
@@ -1162,72 +1162,6 @@ pub fn create_csv_dict() -> HashMap<String, PyObjectRef> {
         } else {
             Err(PyError::type_error("writer() argument must be a list of lists"))
         }
-    });
-
-    d
-}
-
-pub fn create_io_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! io_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    io_func!("StringIO", |args| {
-        // Create the type on each call (no caching needed for native modules)
-        let mut type_dict = HashMap::new();
-        type_dict.insert("read".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "read".to_string(), func: io_stringio_read }));
-        type_dict.insert("readline".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "readline".to_string(), func: io_stringio_readline }));
-        type_dict.insert("write".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "write".to_string(), func: io_stringio_write }));
-        type_dict.insert("seek".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "seek".to_string(), func: io_stringio_seek }));
-        type_dict.insert("tell".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "tell".to_string(), func: io_stringio_tell }));
-        type_dict.insert("getvalue".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "getvalue".to_string(), func: io_stringio_getvalue }));
-        let typ = PyObjectRef::new(PyObject::Type {
-            name: "StringIO".to_string(),
-            dict: type_dict,
-            bases: vec![],
-            mro: vec![],
-        });
-        let mut instance_dict = HashMap::new();
-        let initial = if !args.is_empty() { args[0].str() } else { String::new() };
-        instance_dict.insert("_buffer".to_string(), py_str(&initial));
-        instance_dict.insert("_pos".to_string(), py_int(0));
-        Ok(PyObjectRef::new(PyObject::Instance {
-            typ,
-            dict: instance_dict,
-        }))
-    });
-
-    io_func!("BytesIO", |args| {
-        let mut type_dict = HashMap::new();
-        type_dict.insert("read".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "read".to_string(), func: io_bytesio_read }));
-        type_dict.insert("readline".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "readline".to_string(), func: io_bytesio_readline }));
-        type_dict.insert("write".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "write".to_string(), func: io_bytesio_write }));
-        type_dict.insert("seek".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "seek".to_string(), func: io_bytesio_seek }));
-        type_dict.insert("tell".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "tell".to_string(), func: io_bytesio_tell }));
-        type_dict.insert("getvalue".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "getvalue".to_string(), func: io_bytesio_getvalue }));
-        let typ = PyObjectRef::new(PyObject::Type {
-            name: "BytesIO".to_string(),
-            dict: type_dict,
-            bases: vec![],
-            mro: vec![],
-        });
-        let mut instance_dict = HashMap::new();
-        let initial = if !args.is_empty() {
-            let a = args[0].borrow();
-            match &*a {
-                PyObject::Bytes(b) => b.clone(),
-                _ => vec![],
-            }
-        } else { vec![] };
-        instance_dict.insert("_buffer".to_string(), PyObjectRef::imm(PyObject::Bytes(initial)));
-        instance_dict.insert("_pos".to_string(), py_int(0));
-        Ok(PyObjectRef::new(PyObject::Instance {
-            typ,
-            dict: instance_dict,
-        }))
     });
 
     d
@@ -1974,7 +1908,7 @@ pub fn create_logging_config_dict() -> HashMap<String, PyObjectRef> {
             d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
         };
     }
-    log_cfg_func!("dictConfig", |args| {
+    log_cfg_func!("dictConfig", |_args| {
         // Simplified stub: accepts a dict but does nothing
         // A full implementation would configure loggers, handlers, formatters from the dict
         Ok(py_none())
@@ -3007,7 +2941,7 @@ fn email_message_repr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
 }
 
-fn email_message_constructor(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+fn email_message_constructor(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // Create the EmailMessage type
     let mut type_dict = HashMap::new();
     type_dict.insert("__getitem__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
@@ -3260,7 +3194,7 @@ pub fn create_configparser_dict() -> HashMap<String, PyObjectRef> {
     // ConfigParser class — constructor
     d.insert("ConfigParser".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
         name: "ConfigParser".to_string(),
-        func: |args| {
+        func: |_args| {
             let mut type_dict = HashMap::new();
 
             // read_string(self, string) — parse INI from a string
@@ -3667,11 +3601,9 @@ pub fn create_configparser_dict() -> HashMap<String, PyObjectRef> {
 
 use std::rc::Rc;
 use std::cell::RefCell;
-use std::sync::{Arc, Mutex};
 use num_traits::ToPrimitive;
 use num_bigint::BigInt;
-use std::sync::atomic::{AtomicI64, Ordering};
-use crate::bytecode::{needs_arg, CodeObject};
+use std::sync::atomic::Ordering;
 
 // ---------------------------------------------------------------------------
 // numbers module — Number ABCs as py_str stubs
@@ -3886,7 +3818,7 @@ fn parse_literal(chars: &[char], pos: &mut usize) -> PyResult<PyObjectRef> {
         }
         // Number or keyword literal
         _ => {
-            let start = *pos;
+            let _start = *pos;
             let mut buf = String::new();
             // Accumulate identifier-like or number characters
             while *pos < chars.len() {
@@ -4484,13 +4416,13 @@ pub fn create_argparse_dict() -> HashMap<String, PyObjectRef> {
         };
     }
 
-    p_method!("__init__", |args| {
+    p_method!("__init__", |_args| {
         // Accept optional description (first arg after self)
         // self is args[0], description would be args[1]
         Ok(py_none())
     });
 
-    p_method!("add_argument", |args| {
+    p_method!("add_argument", |_args| {
         // Stub: return None
         Ok(py_none())
     });
@@ -4587,7 +4519,7 @@ pub fn create_asyncio_dict() -> HashMap<String, PyObjectRef> {
     }
     future_method!("__init__", |args| {
         let self_obj = args[0].clone();
-        let obj = self_obj.borrow_mut();
+        let _obj = self_obj.borrow_mut();
         // Future state stored in __dict__
         Ok(crate::object::py_none())
     });
@@ -4654,7 +4586,7 @@ pub fn create_asyncio_dict() -> HashMap<String, PyObjectRef> {
                     let self_clone = self_obj.clone();
                     let callback = PyObjectRef::new(PyObject::Closure(Rc::new(move |_args| {
                         // Step the task again
-                        let next_func2 = self_clone.borrow().get_attribute("_coro").ok()
+                        let _next_func2 = self_clone.borrow().get_attribute("_coro").ok()
                             .and_then(|c| c.borrow().get_attribute("send").ok());
                         Ok(crate::object::py_none())
                     })));

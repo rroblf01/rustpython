@@ -118,65 +118,6 @@ pub fn create_fnmatch_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
-pub fn create_tempfile_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! temp_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    // Simple random suffix generator using /dev/urandom or fallback
-    fn random_suffix(len: usize) -> String {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        // Mix time-based and random characters
-        let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
-        let mut result = String::with_capacity(len);
-        let chars = b"abcdefghijklmnopqrstuvwxyz0123456789";
-        let mut seed = ts;
-        for _ in 0..len {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            let idx = (seed as usize) % chars.len();
-            result.push(chars[idx] as char);
-        }
-        result
-    }
-
-    temp_func!("mkstemp", |_| {
-        // Try up to 10 times to create a unique temp file
-        for _ in 0..10 {
-            let suffix = random_suffix(8);
-            let name = format!("/tmp/tmp{}", suffix);
-            match std::fs::File::create_new(&name) {
-                Ok(file) => {
-                    use std::os::fd::AsRawFd;
-                    let fd = file.as_raw_fd();
-                    // Return (fd, name) as a tuple
-                    return Ok(py_tuple(vec![py_int(fd as i64), py_str(&name)]));
-                }
-                Err(_) => continue,
-            }
-        }
-        Err(PyError::runtime_error("could not create temporary file"))
-    });
-
-    temp_func!("mkdtemp", |_| {
-        for _ in 0..10 {
-            let suffix = random_suffix(8);
-            let name = format!("/tmp/tmp{}", suffix);
-            match std::fs::create_dir(&name) {
-                Ok(()) => return Ok(py_str(&name)),
-                Err(_) => continue,
-            }
-        }
-        Err(PyError::runtime_error("could not create temporary directory"))
-    });
-
-    // Add temporary directory path
-    d.insert("tempdir".to_string(), py_str("/tmp"));
-    d
-}
-
 pub fn create_shutil_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! shutil_func {
@@ -593,8 +534,3 @@ pub fn create_linecache_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
-use std::rc::Rc;
-use std::cell::RefCell;
-use std::sync::atomic::{AtomicI64, Ordering};
-use num_traits::ToPrimitive;
-use crate::bytecode::{needs_arg, CodeObject};

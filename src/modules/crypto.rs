@@ -385,5 +385,3 @@ pub fn create_zlib_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
-use std::rc::Rc;
-use std::cell::RefCell;

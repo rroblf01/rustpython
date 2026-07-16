@@ -96,7 +96,7 @@ pub fn create_time_dict() -> HashMap<String, PyObjectRef> {
     }
 
     // time() -> float seconds since epoch
-    time_func!("time", |args| {
+    time_func!("time", |_args| {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or(Duration::from_secs(0));
@@ -120,7 +120,7 @@ pub fn create_time_dict() -> HashMap<String, PyObjectRef> {
     });
 
     // monotonic() — monotonic clock in seconds
-    time_func!("monotonic", |args| {
+    time_func!("monotonic", |_args| {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or(Duration::from_secs(0));
@@ -193,7 +193,7 @@ pub fn create_time_dict() -> HashMap<String, PyObjectRef> {
     });
 
     // perf_counter() -> float (high-resolution monotonic)
-    time_func!("perf_counter", |args| {
+    time_func!("perf_counter", |_args| {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or(Duration::from_secs(0));

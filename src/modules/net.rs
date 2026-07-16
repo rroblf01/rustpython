@@ -350,7 +350,7 @@ pub fn create_html_entities_dict() -> HashMap<String, PyObjectRef> {
         ("clubs", "\u{2663}"), ("hearts", "\u{2665}"), ("diams", "\u{2666}"),
     ];
 
-    let mut py_dict_obj = py_dict();
+    let py_dict_obj = py_dict();
     if let PyObject::Dict(ref mut pd) = &mut *py_dict_obj.borrow_mut() {
         for (name, ch) in pairs {
             pd.set(py_str(name), py_str(ch)).ok();
@@ -370,7 +370,6 @@ pub fn create_urllib_dict() -> HashMap<String, PyObjectRef> {
 
 use std::rc::Rc;
 use std::cell::RefCell;
-use std::process::Command;
 
 // ---------------------------------------------------------------------------
 // http.client module - HTTPConnection class
@@ -395,7 +394,7 @@ pub fn create_http_client_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
 
     // HTTP status code to phrase mapping
-    let mut responses = crate::object::py_dict();
+    let responses = crate::object::py_dict();
     if let crate::object::PyObject::Dict(ref mut resp_dict) = &mut *responses.borrow_mut() {
         let codes = [
             (200, "OK"), (201, "Created"), (202, "Accepted"),

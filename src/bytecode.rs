@@ -1,8 +1,11 @@
 use std::fmt;
-use std::io::{Read, Write};
 
+// Some variants are reserved for planned work (register-based bytecode
+// phase in ROADMAP-v2.md; match-statement opcodes with a VM handler
+// but no compiler emission yet, per GAP_ANALYSIS.md) and aren't
+// constructed anywhere yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(non_camel_case_types)]
+#[allow(non_camel_case_types, dead_code)]
 pub enum Opcode {
     // Actual opcodes matching CPython
     BINARY_OP = 42,
@@ -218,10 +221,6 @@ pub struct Instr {
 }
 
 impl Instr {
-    pub fn new(op: Opcode) -> Self {
-        Instr { op, arg: 0, line_no: None }
-    }
-
     pub fn with_arg(op: Opcode, arg: u32) -> Self {
         Instr { op, arg, line_no: None }
     }
