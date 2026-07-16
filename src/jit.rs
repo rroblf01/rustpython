@@ -113,7 +113,22 @@ extern "C" fn jit_call(func: *const PyObjectRef, nargs: i64, args: *const PyObje
         for i in 0..nargs as isize {
             v.push((*args.offset(i)).clone());
         }
-        std::ptr::write(out, crate::object::call_function(func_ref, v).unwrap_or_else(|_| crate::object::py_none()));
+        // Try builtins/closures first (fast path)
+        if let Ok(val) = crate::object::call_function(func_ref, v.clone()) {
+            std::ptr::write(out, val);
+            return;
+        }
+        // For regular Python functions, delegate to VM via callback
+        let vm_ptr = crate::vm::VM_PTR.load(std::sync::atomic::Ordering::SeqCst) as *mut crate::vm::VirtualMachine;
+        if !vm_ptr.is_null() {
+            let func_val = (*func).clone();
+            let cb_result = (*vm_ptr).call_function(func_val, v, Vec::new());
+            match cb_result {
+                Ok(val) => { std::ptr::write(out, val); return; }
+                Err(_) => {}
+            }
+        }
+        std::ptr::write(out, crate::object::py_none());
     }
 }
 thread_local! {
@@ -185,7 +200,7 @@ extern "C" fn jit_store_attr(obj: *const PyObjectRef, names: *const PyObjectRef,
         let obj_ref = &*obj;
         let val_ref = &*val;
         let _ = obj_ref.borrow_mut().set_attribute(&name_str, val_ref.clone());
-        std::ptr::write(out, crate::object::py_none());
+        std::ptr::write(out, (*val).clone());
     }
 }
 
@@ -504,6 +519,8 @@ pub struct JitCompiler {
 impl JitCompiler {
     pub fn new() -> Self {
         let flag_builder = settings::builder();
+        #[cfg(debug_assertions)]
+        let flag_builder = flag_builder.set("is_pic", "false").unwrap();
         let flags = settings::Flags::new(flag_builder);
         let isa_builder = cranelift_native::builder().unwrap();
         let isa = isa_builder.finish(flags).unwrap();
@@ -821,6 +838,9 @@ impl JitCompiler {
         if code.instructions.is_empty() || code.instructions.len() > 200 {
             return None;
         }
+        // Only compile functions with loops (back edges) — JIT shines for loops
+        let has_loop = code.instructions.iter().any(|i| matches!(i.op, Opcode::JUMP_BACKWARD | Opcode::FOR_ITER));
+        if !has_loop { return None; }
 
         let supported: &[Opcode] = &[
             Opcode::LOAD_FAST, Opcode::LOAD_CONST,
@@ -848,7 +868,7 @@ impl JitCompiler {
             Opcode::SETUP_WITH, Opcode::WITH_EXIT,
         ];
         for instr in &code.instructions {
-            if !supported.contains(&instr.op) { return None; }
+            if !supported.contains(&instr.op) { eprintln!("JIT: unsupported opcode {:?} in '{}'", instr.op, code.name); return None; }
         }
 
         let _consts = Self::precompute_with_names(code);
@@ -916,7 +936,7 @@ impl JitCompiler {
                     targets.insert(i + 1);
                 }
                 Opcode::JUMP_BACKWARD => {
-                    let target = i.wrapping_sub(instr.arg as usize).wrapping_sub(1);
+                    let target = i.wrapping_sub(instr.arg as usize);
                     targets.insert(target);
                     targets.insert(i + 1);
                 }
@@ -971,33 +991,52 @@ impl JitCompiler {
         let result_ptr = builder.block_params(entry_block)[3];
 
         // Allocate locals array on stack
-        let locals_size = (code.nlocals.max(1) * 16) as u32;
+        let locals_size = (code.nlocals.max(1) * 24) as u32;
         let locals_slot = builder.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot, locals_size, 0,
         ));
 
         // Copy args to locals
         for i in 0..code.arg_count.min(code.nlocals) {
-            let src = builder.ins().iadd_imm(args_ptr, (i * 16) as i64);
-            let dst = builder.ins().stack_addr(types::I64, locals_slot, (i * 16) as i32);
+            let src = builder.ins().iadd_imm(args_ptr, (i * 24) as i64);
+            let dst = builder.ins().stack_addr(types::I64, locals_slot, (i * 24) as i32);
+            let zero = builder.ins().iconst(types::I64, 0);
             let lo = builder.ins().load(types::I64, cranelift::codegen::ir::MemFlags::new(), src, 0);
             let hi = builder.ins().load(types::I64, cranelift::codegen::ir::MemFlags::new(), src, 8);
             builder.ins().store(cranelift::codegen::ir::MemFlags::new(), lo, dst, 0);
             builder.ins().store(cranelift::codegen::ir::MemFlags::new(), hi, dst, 8);
+            builder.ins().store(cranelift::codegen::ir::MemFlags::new(), zero, dst, 16);
         }
 
         // Evaluation stack
         let mut eval_stack: Vec<[Value; 2]> = Vec::new();
 
+        // Pre-allocate temp stack slots for BINARY_OP, CALL, STORE_ATTR, etc.
+        let tmp_slot1 = builder.create_sized_stack_slot(StackSlotData::new(
+            cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+        ));
+        let tmp_slot2 = builder.create_sized_stack_slot(StackSlotData::new(
+            cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+        ));
+        let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
+            cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+        ));
+
+        if cfg!(feature = "profile") { eprintln!("JIT_DEBUG: starting codegen for {} instructions", code.instructions.len()); }
+        // Track whether current block has been terminated (needs jump for fallthrough)
+        let mut terminated = false;
         // Generate code for each instruction
         for i in 0..code.instructions.len() {
             let block = instr_to_block[&i];
 
             // Switch to the correct block if not already there
             if builder.current_block() != Some(block) {
-                // Switch to the new block
+                if !terminated {
+                    builder.ins().jump(block, &[]);
+                }
                 builder.switch_to_block(block);
                 blocks_entered.insert(block);
+                terminated = false;
             }
 
             let instr = &code.instructions[i];
@@ -1005,7 +1044,7 @@ impl JitCompiler {
                 Opcode::LOAD_FAST => {
                     let idx = instr.arg as i32;
                     let memflags = cranelift::codegen::ir::MemFlags::new();
-                    let src = builder.ins().stack_addr(types::I64, locals_slot, idx * 16);
+                    let src = builder.ins().stack_addr(types::I64, locals_slot, idx * 24);
                     let lo = builder.ins().load(types::I64, memflags, src, 0);
                     let hi = builder.ins().load(types::I64, memflags, src, 8);
                     eval_stack.push([lo, hi]);
@@ -1013,7 +1052,7 @@ impl JitCompiler {
                 Opcode::LOAD_CONST => {
                     let idx = instr.arg as i32;
                     let memflags = cranelift::codegen::ir::MemFlags::new();
-                    let src = builder.ins().iadd_imm(consts_ptr, (idx * 16) as i64);
+                    let src = builder.ins().iadd_imm(consts_ptr, (idx * 24) as i64);
                     let lo = builder.ins().load(types::I64, memflags, src, 0);
                     let hi = builder.ins().load(types::I64, memflags, src, 8);
                     eval_stack.push([lo, hi]);
@@ -1023,7 +1062,7 @@ impl JitCompiler {
                     let consts_count = code.consts.len() as i64;
                     let idx = name_idx as i64 + consts_count;
                     let memflags = cranelift::codegen::ir::MemFlags::new();
-                    let src = builder.ins().iadd_imm(consts_ptr, (idx * 16) as i64);
+                    let src = builder.ins().iadd_imm(consts_ptr, (idx * 24) as i64);
                     let lo = builder.ins().load(types::I64, memflags, src, 0);
                     let hi = builder.ins().load(types::I64, memflags, src, 8);
                     eval_stack.push([lo, hi]);
@@ -1032,101 +1071,30 @@ impl JitCompiler {
                     let b = eval_stack.pop().unwrap();
                     let a = eval_stack.pop().unwrap();
                     let memflags = cranelift::codegen::ir::MemFlags::new();
-
                     let tmp_a = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let tmp_b = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
-
                     let a_addr = builder.ins().stack_addr(types::I64, tmp_a, 0);
                     let b_addr = builder.ins().stack_addr(types::I64, tmp_b, 0);
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
-
                     builder.ins().store(memflags, a[0], a_addr, 0);
                     builder.ins().store(memflags, a[1], a_addr, 8);
                     builder.ins().store(memflags, b[0], b_addr, 0);
                     builder.ins().store(memflags, b[1], b_addr, 8);
-
-                    let a_tag = builder.ins().load(types::I32, memflags, a_addr, 0);
-                    let b_tag = builder.ins().load(types::I32, memflags, b_addr, 0);
-                    let zero = builder.ins().iconst(types::I32, 0);
-                    let a_small = builder.ins().icmp(IntCC::Equal, a_tag, zero);
-                    let b_small = builder.ins().icmp(IntCC::Equal, b_tag, zero);
-                    let both_small = builder.ins().band(a_small, b_small);
-
-                    let fast_block = builder.create_block();
-                    let fallback_block = builder.create_block();
-                    let merge_block = builder.create_block();
-
-                    builder.append_block_param(fast_block, types::I64);
-                    builder.append_block_param(fast_block, types::I64);
-                    builder.append_block_param(fast_block, types::I64);
-                    builder.append_block_param(fallback_block, types::I64);
-                    builder.append_block_param(fallback_block, types::I64);
-                    builder.append_block_param(fallback_block, types::I64);
-
-                    builder.ins().brif(both_small, fast_block, &[a_addr, b_addr, out_addr],
-                                                fallback_block, &[a_addr, b_addr, out_addr]);
-
-                    builder.seal_block(fast_block);
-                    builder.switch_to_block(fast_block);
-                    let a_fast = builder.block_params(fast_block)[0];
-                    let b_fast = builder.block_params(fast_block)[1];
-                    let out_fast = builder.block_params(fast_block)[2];
-                    let a_val = builder.ins().load(types::I64, memflags, a_fast, 8);
-                    let b_val = builder.ins().load(types::I64, memflags, b_fast, 8);
-                    let result_val = match instr.arg {
-                        0 => builder.ins().iadd(a_val, b_val),
-                        1 => builder.ins().isub(a_val, b_val),
-                        2 => builder.ins().imul(a_val, b_val),
-                        7 => builder.ins().ishl(a_val, b_val),
-                        8 => builder.ins().ushr(a_val, b_val),
-                        9 => builder.ins().bor(a_val, b_val),
-                        10 => builder.ins().band(a_val, b_val),
-                        11 => builder.ins().bxor(a_val, b_val),
-                        // div(3), floor_div(4), mod(5), pow(6) — use fallback
-                        _ => return None,
-                    };
-                    if instr.arg <= 2 || instr.arg >= 7 {
-                        // Bitwise ops (7-11) and add/sub/mul can use native i64 directly
-                        builder.ins().store(memflags, zero, out_fast, 0);
-                        builder.ins().store(memflags, result_val, out_fast, 8);
-                        builder.ins().jump(merge_block, &[]);
-                    } else {
-                        return None;
-                    }
-
-                    builder.seal_block(fallback_block);
-                    builder.switch_to_block(fallback_block);
-                    let a_fall = builder.block_params(fallback_block)[0];
-                    let b_fall = builder.block_params(fallback_block)[1];
-                    let out_fall = builder.block_params(fallback_block)[2];
                     let func_ref = match instr.arg {
-                        0 => add_func_ref,
-                        1 => sub_func_ref,
-                        2 => mul_func_ref,
-                        3 => div_func_ref,
-                        4 => floor_div_func_ref,
-                        5 => mod_func_ref,
-                        6 => pow_func_ref,
-                        7 => lshift_func_ref,
-                        8 => rshift_func_ref,
-                        9 => bit_or_func_ref,
-                        10 => bit_and_func_ref,
-                        11 => bit_xor_func_ref,
-                        _ => return None,
+                        0 => add_func_ref, 1 => sub_func_ref, 2 => mul_func_ref,
+                        3 => div_func_ref, 4 => floor_div_func_ref, 5 => mod_func_ref,
+                        6 => pow_func_ref, 7 => lshift_func_ref, 8 => rshift_func_ref,
+                        9 => bit_or_func_ref, 10 => bit_and_func_ref, 11 => bit_xor_func_ref,
+                        _ => unreachable!(),
                     };
-                    builder.ins().call(func_ref, &[a_fall, b_fall, out_fall]);
-                    builder.ins().jump(merge_block, &[]);
-
-                    builder.seal_block(merge_block);
-                    builder.switch_to_block(merge_block);
-
+                    builder.ins().call(func_ref, &[a_addr, b_addr, out_addr]);
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
                     eval_stack.push([res_lo, res_hi]);
@@ -1137,13 +1105,13 @@ impl JitCompiler {
                     let memflags = cranelift::codegen::ir::MemFlags::new();
 
                     let tmp_a = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let tmp_b = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
 
                     let a_addr = builder.ins().stack_addr(types::I64, tmp_a, 0);
@@ -1155,63 +1123,8 @@ impl JitCompiler {
                     builder.ins().store(memflags, b[0], b_addr, 0);
                     builder.ins().store(memflags, b[1], b_addr, 8);
 
-                    // SmallInt fast path: check if both operands are SmallInt (tag == 0)
-                    let a_tag = builder.ins().load(types::I32, memflags, a_addr, 0);
-                    let b_tag = builder.ins().load(types::I32, memflags, b_addr, 0);
-                    let zero_tag = builder.ins().iconst(types::I32, 0);
-                    let a_small = builder.ins().icmp(IntCC::Equal, a_tag, zero_tag);
-                    let b_small = builder.ins().icmp(IntCC::Equal, b_tag, zero_tag);
-                    let both_small = builder.ins().band(a_small, b_small);
-
-                    let fast_block = builder.create_block();
-                    let fallback_block = builder.create_block();
-                    let merge_block = builder.create_block();
-
-                    builder.append_block_param(fast_block, types::I64);
-                    builder.append_block_param(fast_block, types::I64);
-                    builder.append_block_param(fast_block, types::I64);
-                    builder.append_block_param(fallback_block, types::I64);
-                    builder.append_block_param(fallback_block, types::I64);
-                    builder.append_block_param(fallback_block, types::I64);
-
-                    builder.ins().brif(both_small, fast_block, &[a_addr, b_addr, out_addr],
-                                                fallback_block, &[a_addr, b_addr, out_addr]);
-
-                    // Fast path: inline comparison
-                    builder.seal_block(fast_block);
-                    builder.switch_to_block(fast_block);
-                    let a_fast = builder.block_params(fast_block)[0];
-                    let b_fast = builder.block_params(fast_block)[1];
-                    let out_fast = builder.block_params(fast_block)[2];
-                    let a_val = builder.ins().load(types::I64, memflags, a_fast, 8);
-                    let b_val = builder.ins().load(types::I64, memflags, b_fast, 8);
-                    let cmp_val = match instr.arg {
-                        0 => builder.ins().icmp(IntCC::Equal, a_val, b_val),
-                        1 => builder.ins().icmp(IntCC::NotEqual, a_val, b_val),
-                        2 => builder.ins().icmp(IntCC::SignedLessThan, a_val, b_val),
-                        3 => builder.ins().icmp(IntCC::SignedLessThanOrEqual, a_val, b_val),
-                        4 => builder.ins().icmp(IntCC::SignedGreaterThan, a_val, b_val),
-                        5 => builder.ins().icmp(IntCC::SignedGreaterThanOrEqual, a_val, b_val),
-                        _ => return None,
-                    };
-                    let cmp_i64 = builder.ins().uextend(types::I64, cmp_val);
-                    builder.ins().store(memflags, zero_tag, out_fast, 0);
-                    builder.ins().store(memflags, cmp_i64, out_fast, 8);
-                    builder.ins().jump(merge_block, &[]);
-
-                    // Fallback: call cmp_func_ref
-                    builder.seal_block(fallback_block);
-                    builder.switch_to_block(fallback_block);
-                    let a_fall = builder.block_params(fallback_block)[0];
-                    let b_fall = builder.block_params(fallback_block)[1];
-                    let out_fall = builder.block_params(fallback_block)[2];
                     let op_val = builder.ins().iconst(types::I64, instr.arg as i64);
-                    builder.ins().call(cmp_func_ref, &[a_fall, b_fall, op_val, out_fall]);
-                    builder.ins().jump(merge_block, &[]);
-
-                    builder.seal_block(merge_block);
-                    builder.switch_to_block(merge_block);
-
+                    builder.ins().call(cmp_func_ref, &[a_addr, b_addr, op_val, out_addr]);
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
                     eval_stack.push([res_lo, res_hi]);
@@ -1220,9 +1133,11 @@ impl JitCompiler {
                     let idx = instr.arg as i32;
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let val = eval_stack.pop().unwrap();
-                    let dst = builder.ins().stack_addr(types::I64, locals_slot, idx * 16);
+                    let zero = builder.ins().iconst(types::I64, 0);
+                    let dst = builder.ins().stack_addr(types::I64, locals_slot, idx * 24);
                     builder.ins().store(memflags, val[0], dst, 0);
                     builder.ins().store(memflags, val[1], dst, 8);
+                    builder.ins().store(memflags, zero, dst, 16);
                 }
                 Opcode::DUP_TOP => {
                     let val = eval_stack.last().unwrap();
@@ -1236,7 +1151,7 @@ impl JitCompiler {
                     let memflags = cranelift::codegen::ir::MemFlags::new();
 
                     let tmp_val = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
 
                     let val_addr = builder.ins().stack_addr(types::I64, tmp_val, 0);
@@ -1253,65 +1168,52 @@ impl JitCompiler {
                     let next_block = block_of[&(i + 1)];
 
                     builder.ins().brif(cmp, target_block, &[], next_block, &[]);
+                    terminated = true;
+                }
+                Opcode::POP_JUMP_IF_TRUE | Opcode::POP_JUMP_IF_NONE | Opcode::POP_JUMP_IF_NOT_NONE => {
+                    let val = eval_stack.pop().unwrap();
+                    let memflags = cranelift::codegen::ir::MemFlags::new();
+
+                    let tmp_val = builder.create_sized_stack_slot(StackSlotData::new(
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                    ));
+
+                    let val_addr = builder.ins().stack_addr(types::I64, tmp_val, 0);
+
+                    builder.ins().store(memflags, val[0], val_addr, 0);
+                    builder.ins().store(memflags, val[1], val_addr, 8);
+                    let truthy_inst = builder.ins().call(truthy_func_ref, &[val_addr]);
+                    let truthy = builder.inst_results(truthy_inst)[0];
+                    let zero = builder.ins().iconst(types::I64, 0);
+                    let cmp = builder.ins().icmp(IntCC::Equal, truthy, zero);
+
+                    let target = instr.arg as usize;
+                    let target_block = block_of[&target];
+                    let next_block = block_of[&(i + 1)];
+
+                    builder.ins().brif(cmp, target_block, &[], next_block, &[]);
+                    terminated = true;
                 }
                 Opcode::JUMP_BACKWARD => {
-                    let target = i.wrapping_sub(instr.arg as usize).wrapping_sub(1);
+                    let target = i.wrapping_sub(instr.arg as usize);
                     let target_block = block_of[&target];
                     builder.ins().jump(target_block, &[]);
+                    terminated = true;
                 }
                 Opcode::UNARY_NEGATIVE => {
                     let val = eval_stack.pop().unwrap();
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let tmp_val = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let val_addr = builder.ins().stack_addr(types::I64, tmp_val, 0);
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
                     builder.ins().store(memflags, val[0], val_addr, 0);
                     builder.ins().store(memflags, val[1], val_addr, 8);
-
-                    // SmallInt fast path: check if operand is SmallInt (tag == 0)
-                    let v_tag = builder.ins().load(types::I32, memflags, val_addr, 0);
-                    let zero_tag = builder.ins().iconst(types::I32, 0);
-                    let is_small = builder.ins().icmp(IntCC::Equal, v_tag, zero_tag);
-
-                    let fast_block = builder.create_block();
-                    let fallback_block = builder.create_block();
-                    let merge_block = builder.create_block();
-
-                    builder.append_block_param(fast_block, types::I64);
-                    builder.append_block_param(fast_block, types::I64);
-                    builder.append_block_param(fallback_block, types::I64);
-                    builder.append_block_param(fallback_block, types::I64);
-
-                    builder.ins().brif(is_small, fast_block, &[val_addr, out_addr],
-                                                fallback_block, &[val_addr, out_addr]);
-
-                    // Fast path: inline negation
-                    builder.seal_block(fast_block);
-                    builder.switch_to_block(fast_block);
-                    let v_fast = builder.block_params(fast_block)[0];
-                    let out_fast = builder.block_params(fast_block)[1];
-                    let v_val = builder.ins().load(types::I64, memflags, v_fast, 8);
-                    let neg_val = builder.ins().irsub_imm(v_val, 0);
-                    builder.ins().store(memflags, zero_tag, out_fast, 0);
-                    builder.ins().store(memflags, neg_val, out_fast, 8);
-                    builder.ins().jump(merge_block, &[]);
-
-                    // Fallback: call neg_func_ref
-                    builder.seal_block(fallback_block);
-                    builder.switch_to_block(fallback_block);
-                    let v_fall = builder.block_params(fallback_block)[0];
-                    let out_fall = builder.block_params(fallback_block)[1];
-                    builder.ins().call(neg_func_ref, &[v_fall, out_fall]);
-                    builder.ins().jump(merge_block, &[]);
-
-                    builder.seal_block(merge_block);
-                    builder.switch_to_block(merge_block);
-
+                    builder.ins().call(neg_func_ref, &[val_addr, out_addr]);
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
                     eval_stack.push([res_lo, res_hi]);
@@ -1320,10 +1222,10 @@ impl JitCompiler {
                     let val = eval_stack.pop().unwrap();
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let tmp_val = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let val_addr = builder.ins().stack_addr(types::I64, tmp_val, 0);
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
@@ -1340,17 +1242,17 @@ impl JitCompiler {
                     let mut items: Vec<[Value; 2]> = Vec::with_capacity(n);
                     for _ in 0..n { items.push(eval_stack.pop().unwrap()); }
                     items.reverse();
-                    let array_size = ((n * 16).max(16)) as u32;
+                    let array_size = ((n * 24).max(16)) as u32;
                     let array_slot = builder.create_sized_stack_slot(StackSlotData::new(
                         cranelift::codegen::ir::StackSlotKind::ExplicitSlot, array_size, 0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let array_addr = builder.ins().stack_addr(types::I64, array_slot, 0);
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
                     for (i, item) in items.iter().enumerate() {
-                        let offset = (i * 16) as i32;
+                        let offset = (i * 24) as i32;
                         let item_addr = builder.ins().iadd_imm(array_addr, offset as i64);
                         builder.ins().store(memflags, item[0], item_addr, 0);
                         builder.ins().store(memflags, item[1], item_addr, 8);
@@ -1367,17 +1269,17 @@ impl JitCompiler {
                     let mut items: Vec<[Value; 2]> = Vec::with_capacity(n);
                     for _ in 0..n { items.push(eval_stack.pop().unwrap()); }
                     items.reverse();
-                    let array_size = ((n * 16).max(16)) as u32;
+                    let array_size = ((n * 24).max(16)) as u32;
                     let array_slot = builder.create_sized_stack_slot(StackSlotData::new(
                         cranelift::codegen::ir::StackSlotKind::ExplicitSlot, array_size, 0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let array_addr = builder.ins().stack_addr(types::I64, array_slot, 0);
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
                     for (i, item) in items.iter().enumerate() {
-                        let offset = (i * 16) as i32;
+                        let offset = (i * 24) as i32;
                         let item_addr = builder.ins().iadd_imm(array_addr, offset as i64);
                         builder.ins().store(memflags, item[0], item_addr, 0);
                         builder.ins().store(memflags, item[1], item_addr, 8);
@@ -1393,13 +1295,13 @@ impl JitCompiler {
                     let lst = eval_stack.pop().unwrap();
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let tmp_lst = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let tmp_val = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let lst_addr = builder.ins().stack_addr(types::I64, tmp_lst, 0);
                     let val_addr = builder.ins().stack_addr(types::I64, tmp_val, 0);
@@ -1415,13 +1317,13 @@ impl JitCompiler {
                     let a = eval_stack.pop().unwrap();
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let tmp_a = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let tmp_b = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let a_addr = builder.ins().stack_addr(types::I64, tmp_a, 0);
                     let b_addr = builder.ins().stack_addr(types::I64, tmp_b, 0);
@@ -1439,10 +1341,10 @@ impl JitCompiler {
                     let val = eval_stack.pop().unwrap();
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let tmp_val = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let val_addr = builder.ins().stack_addr(types::I64, tmp_val, 0);
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
@@ -1460,15 +1362,15 @@ impl JitCompiler {
                     for _ in 0..nargs { args.push(eval_stack.pop().unwrap()); }
                     let func = eval_stack.pop().unwrap();
                     args.reverse();
-                    let array_size = ((nargs * 16).max(16)) as u32;
+                    let array_size = ((nargs * 24).max(16)) as u32;
                     let tmp_func = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let array_slot = builder.create_sized_stack_slot(StackSlotData::new(
                         cranelift::codegen::ir::StackSlotKind::ExplicitSlot, array_size, 0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let func_addr = builder.ins().stack_addr(types::I64, tmp_func, 0);
                     let array_addr = builder.ins().stack_addr(types::I64, array_slot, 0);
@@ -1476,7 +1378,7 @@ impl JitCompiler {
                     builder.ins().store(memflags, func[0], func_addr, 0);
                     builder.ins().store(memflags, func[1], func_addr, 8);
                     for (i, item) in args.iter().enumerate() {
-                        let offset = (i * 16) as i32;
+                        let offset = (i * 24) as i32;
                         let item_addr = builder.ins().iadd_imm(array_addr, offset as i64);
                         builder.ins().store(memflags, item[0], item_addr, 0);
                         builder.ins().store(memflags, item[1], item_addr, 8);
@@ -1493,16 +1395,16 @@ impl JitCompiler {
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let names_offset = code.consts.len() as i64;
                     let tmp_val = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let val_addr = builder.ins().stack_addr(types::I64, tmp_val, 0);
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
                     builder.ins().store(memflags, val[0], val_addr, 0);
                     builder.ins().store(memflags, val[1], val_addr, 8);
-                    let names_ptr = builder.ins().iadd_imm(consts_ptr, names_offset * 16);
+                    let names_ptr = builder.ins().iadd_imm(consts_ptr, names_offset * 24);
                     let name_idx_val = builder.ins().iconst(types::I64, name_idx);
                     builder.ins().call(load_attr_func_ref, &[val_addr, names_ptr, name_idx_val, out_addr]);
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
@@ -1512,18 +1414,21 @@ impl JitCompiler {
                 Opcode::RETURN_VALUE => {
                     let val = eval_stack.pop().unwrap();
                     let memflags = cranelift::codegen::ir::MemFlags::new();
+                    let zero = builder.ins().iconst(types::I64, 0);
                     builder.ins().store(memflags, val[0], result_ptr, 0);
                     builder.ins().store(memflags, val[1], result_ptr, 8);
+                    builder.ins().store(memflags, zero, result_ptr, 16);
                     builder.ins().return_(&[]);
+                    terminated = true;
                 }
                 Opcode::FOR_ITER => {
                     let iter = eval_stack.pop().unwrap();
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let tmp_iter = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let iter_addr = builder.ins().stack_addr(types::I64, tmp_iter, 0);
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
@@ -1548,17 +1453,17 @@ impl JitCompiler {
                     let mut items: Vec<[Value; 2]> = Vec::with_capacity(n * 2);
                     for _ in 0..n * 2 { items.push(eval_stack.pop().unwrap()); }
                     items.reverse();
-                    let array_size = ((n * 2 * 16).max(16)) as u32;
+                    let array_size = ((n * 2 * 24).max(16)) as u32;
                     let array_slot = builder.create_sized_stack_slot(StackSlotData::new(
                         cranelift::codegen::ir::StackSlotKind::ExplicitSlot, array_size, 0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let array_addr = builder.ins().stack_addr(types::I64, array_slot, 0);
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
                     for (i, item) in items.iter().enumerate() {
-                        let offset = (i * 16) as i32;
+                        let offset = (i * 24) as i32;
                         let item_addr = builder.ins().iadd_imm(array_addr, offset as i64);
                         builder.ins().store(memflags, item[0], item_addr, 0);
                         builder.ins().store(memflags, item[1], item_addr, 8);
@@ -1576,13 +1481,13 @@ impl JitCompiler {
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let names_offset = code.consts.len() as i64;
                     let tmp_obj = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let tmp_val = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let obj_addr = builder.ins().stack_addr(types::I64, tmp_obj, 0);
                     let val_addr = builder.ins().stack_addr(types::I64, tmp_val, 0);
@@ -1591,7 +1496,7 @@ impl JitCompiler {
                     builder.ins().store(memflags, obj[1], obj_addr, 8);
                     builder.ins().store(memflags, val[0], val_addr, 0);
                     builder.ins().store(memflags, val[1], val_addr, 8);
-                    let names_ptr = builder.ins().iadd_imm(consts_ptr, names_offset * 16);
+                    let names_ptr = builder.ins().iadd_imm(consts_ptr, names_offset * 24);
                     let name_idx_val = builder.ins().iconst(types::I64, name_idx);
                     builder.ins().call(store_attr_func_ref, &[obj_addr, names_ptr, name_idx_val, val_addr, out_addr]);
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
@@ -1603,14 +1508,14 @@ impl JitCompiler {
                     let seq = eval_stack.pop().unwrap();
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let tmp_seq = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
-                    let array_size = ((n * 16).max(16)) as u32;
+                    let array_size = ((n * 24).max(16)) as u32;
                     let array_slot = builder.create_sized_stack_slot(StackSlotData::new(
                         cranelift::codegen::ir::StackSlotKind::ExplicitSlot, array_size, 0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let seq_addr = builder.ins().stack_addr(types::I64, tmp_seq, 0);
                     let array_addr = builder.ins().stack_addr(types::I64, array_slot, 0);
@@ -1621,7 +1526,7 @@ impl JitCompiler {
                     builder.ins().call(unpack_sequence_func_ref, &[seq_addr, n_val, array_addr, out_addr]);
                     // Push unpacked items onto stack in order
                     for i in 0..n {
-                        let offset = (i * 16) as i32;
+                        let offset = (i * 24) as i32;
                         let item_addr = builder.ins().iadd_imm(array_addr, offset as i64);
                         let ilo = builder.ins().load(types::I64, memflags, item_addr, 0);
                         let ihi = builder.ins().load(types::I64, memflags, item_addr, 8);
@@ -1633,13 +1538,13 @@ impl JitCompiler {
                     let names_offset = code.consts.len() as i64;
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let tmp_locals = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let tmp_globals = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     // For simplicity, use the result_ptr as the "globals" reference
                     // In a real JIT we'd need the actual globals dict
@@ -1653,7 +1558,7 @@ impl JitCompiler {
                     builder.ins().store(memflags, consts_ptr, locals_addr, 8);
                     builder.ins().store(memflags, consts_ptr, globals_addr, 0);
                     builder.ins().store(memflags, consts_ptr, globals_addr, 8);
-                    let names_ptr = builder.ins().iadd_imm(consts_ptr, names_offset * 16);
+                    let names_ptr = builder.ins().iadd_imm(consts_ptr, names_offset * 24);
                     let name_idx_val = builder.ins().iconst(types::I64, name_idx);
                     builder.ins().call(load_name_func_ref, &[names_ptr, name_idx_val, locals_addr, globals_addr, out_addr]);
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
@@ -1675,7 +1580,7 @@ impl JitCompiler {
                     let val = eval_stack.pop().unwrap();
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let tmp_val = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let val_addr = builder.ins().stack_addr(types::I64, tmp_val, 0);
                     builder.ins().store(memflags, val[0], val_addr, 0);
@@ -1693,7 +1598,7 @@ impl JitCompiler {
                     let val = eval_stack.pop().unwrap();
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let tmp_val = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let val_addr = builder.ins().stack_addr(types::I64, tmp_val, 0);
                     builder.ins().store(memflags, val[0], val_addr, 0);
@@ -1711,7 +1616,7 @@ impl JitCompiler {
                     let val = eval_stack.pop().unwrap();
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let tmp_val = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let val_addr = builder.ins().stack_addr(types::I64, tmp_val, 0);
                     builder.ins().store(memflags, val[0], val_addr, 0);
@@ -1731,17 +1636,17 @@ impl JitCompiler {
                     let mut items: Vec<[Value; 2]> = Vec::with_capacity(n);
                     for _ in 0..n { items.push(eval_stack.pop().unwrap()); }
                     items.reverse();
-                    let array_size = ((n * 16).max(16)) as u32;
+                    let array_size = ((n * 24).max(16)) as u32;
                     let array_slot = builder.create_sized_stack_slot(StackSlotData::new(
                         cranelift::codegen::ir::StackSlotKind::ExplicitSlot, array_size, 0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let array_addr = builder.ins().stack_addr(types::I64, array_slot, 0);
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
                     for (i, item) in items.iter().enumerate() {
-                        let offset = (i * 16) as i32;
+                        let offset = (i * 24) as i32;
                         let item_addr = builder.ins().iadd_imm(array_addr, offset as i64);
                         builder.ins().store(memflags, item[0], item_addr, 0);
                         builder.ins().store(memflags, item[1], item_addr, 8);
@@ -1758,17 +1663,17 @@ impl JitCompiler {
                     let mut items: Vec<[Value; 2]> = Vec::with_capacity(n);
                     for _ in 0..n { items.push(eval_stack.pop().unwrap()); }
                     items.reverse();
-                    let array_size = ((n * 16).max(16)) as u32;
+                    let array_size = ((n * 24).max(16)) as u32;
                     let array_slot = builder.create_sized_stack_slot(StackSlotData::new(
                         cranelift::codegen::ir::StackSlotKind::ExplicitSlot, array_size, 0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let array_addr = builder.ins().stack_addr(types::I64, array_slot, 0);
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
                     for (i, item) in items.iter().enumerate() {
-                        let offset = (i * 16) as i32;
+                        let offset = (i * 24) as i32;
                         let item_addr = builder.ins().iadd_imm(array_addr, offset as i64);
                         builder.ins().store(memflags, item[0], item_addr, 0);
                         builder.ins().store(memflags, item[1], item_addr, 8);
@@ -1790,17 +1695,17 @@ impl JitCompiler {
                     // items now has [start, stop, step_or_none] but we need [start, stop, step]
                     // items were pushed: start (3rd pop), stop (2nd pop), [step (1st pop if nargs==3)]
                     items.reverse();
-                    let array_size = ((3 * 16).max(16)) as u32;
+                    let array_size = ((3 * 24).max(16)) as u32;
                     let array_slot = builder.create_sized_stack_slot(StackSlotData::new(
                         cranelift::codegen::ir::StackSlotKind::ExplicitSlot, array_size, 0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let array_addr = builder.ins().stack_addr(types::I64, array_slot, 0);
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
                     for (i, item) in items.iter().enumerate() {
-                        let offset = (i * 16) as i32;
+                        let offset = (i * 24) as i32;
                         let item_addr = builder.ins().iadd_imm(array_addr, offset as i64);
                         builder.ins().store(memflags, item[0], item_addr, 0);
                         builder.ins().store(memflags, item[1], item_addr, 8);
@@ -1817,16 +1722,16 @@ impl JitCompiler {
                     let obj = eval_stack.pop().unwrap();
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let tmp_obj = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let tmp_idx = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let tmp_val = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let obj_addr = builder.ins().stack_addr(types::I64, tmp_obj, 0);
                     let idx_addr = builder.ins().stack_addr(types::I64, tmp_idx, 0);
@@ -1846,13 +1751,13 @@ impl JitCompiler {
                     let a = eval_stack.pop().unwrap();
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let tmp_a = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let tmp_b = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let a_addr = builder.ins().stack_addr(types::I64, tmp_a, 0);
                     let b_addr = builder.ins().stack_addr(types::I64, tmp_b, 0);
@@ -1871,10 +1776,10 @@ impl JitCompiler {
                     let val = eval_stack.pop().unwrap();
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let tmp_val = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let val_addr = builder.ins().stack_addr(types::I64, tmp_val, 0);
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
@@ -1890,7 +1795,7 @@ impl JitCompiler {
                     let names_offset = code.consts.len() as i64;
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
                     let names_offset_val = builder.ins().iconst(types::I64, names_offset);
@@ -1906,10 +1811,10 @@ impl JitCompiler {
                     let module = *eval_stack.last().unwrap(); // peek, don't pop
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let tmp_module = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let module_addr = builder.ins().stack_addr(types::I64, tmp_module, 0);
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
@@ -1929,14 +1834,14 @@ impl JitCompiler {
                     let seq = eval_stack.pop().unwrap();
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let tmp_seq = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
-                    let array_size = ((n_total as usize * 16).max(16)) as u32;
+                    let array_size = ((n_total as usize * 24).max(16)) as u32;
                     let array_slot = builder.create_sized_stack_slot(StackSlotData::new(
                         cranelift::codegen::ir::StackSlotKind::ExplicitSlot, array_size, 0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let seq_addr = builder.ins().stack_addr(types::I64, tmp_seq, 0);
                     let array_addr = builder.ins().stack_addr(types::I64, array_slot, 0);
@@ -1948,7 +1853,7 @@ impl JitCompiler {
                     builder.ins().call(unpack_ex_func_ref, &[seq_addr, n_before_val, n_after_val, array_addr, out_addr]);
                     // Push unpacked items onto stack: items before *, starred list, items after *
                     for i in 0..n_total {
-                        let offset = (i as i32 * 16) as i32;
+                        let offset = (i as i32 * 24) as i32;
                         let item_addr = builder.ins().iadd_imm(array_addr, offset as i64);
                         let ilo = builder.ins().load(types::I64, memflags, item_addr, 0);
                         let ihi = builder.ins().load(types::I64, memflags, item_addr, 8);
@@ -1959,10 +1864,10 @@ impl JitCompiler {
                     let mgr = eval_stack.last().unwrap(); // peek, don't pop
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let tmp_mgr = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let mgr_addr = builder.ins().stack_addr(types::I64, tmp_mgr, 0);
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
@@ -1977,10 +1882,10 @@ impl JitCompiler {
                     let mgr = eval_stack.pop().unwrap();
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let tmp_mgr = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 16, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
                     let mgr_addr = builder.ins().stack_addr(types::I64, tmp_mgr, 0);
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
@@ -1991,25 +1896,17 @@ impl JitCompiler {
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
                     eval_stack.push([res_lo, res_hi]);
                 }
-                _ => return None,
+                _ => { eprintln!("JIT: codegen unsupported {:?} at instr {}", instr.op, i); return None; },
             }
         }
-
-        // Seal remaining unsealed blocks
-        for &idx in &sorted_targets {
-            let block = block_of[&idx];
-            if blocks_entered.contains(&block) {
-                builder.seal_block(block);
-            }
-        }
-
         builder.seal_all_blocks();
-
         builder.finalize();
-        self.module.define_function(func, &mut ctx).ok()?;
+        match self.module.define_function(func, &mut ctx) {
+            Ok(_) => {}
+            Err(_) => { return None; }
+        }
         self.module.finalize_definitions().ok()?;
         let code_ptr = self.module.get_finalized_function(func);
-        if code_ptr.is_null() { return None; }
         Some(unsafe { std::mem::transmute(code_ptr) })
     }
 }
