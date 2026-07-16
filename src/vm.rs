@@ -161,6 +161,10 @@ pub struct VirtualMachine {
     /// Type registry: maps type names to PyObject::Type objects.
     /// Used by builtin_type_of() to return real type objects instead of strings.
     pub type_registry: HashMap<String, PyObjectRef>,
+    /// Current exception info for sys.exc_info()
+    pub exc_type: Option<PyObjectRef>,
+    pub exc_value: Option<PyObjectRef>,
+    pub exc_traceback: Option<PyObjectRef>,
 }
 
 impl VirtualMachine {
@@ -769,7 +773,10 @@ impl VirtualMachine {
                last_error_line: None,
                frame_pool: Vec::new(),
                type_registry: HashMap::new(),
-          };
+               exc_type: None,
+               exc_value: None,
+               exc_traceback: None,
+           };
          vm.populate_type_registry();
          vm
     }
@@ -1357,7 +1364,13 @@ impl VirtualMachine {
                 *p.borrow_mut() = Some(self as *mut VirtualMachine);
             }
         });
-        self.execute_inner()
+        let result = self.execute_inner();
+        // Store exception info for sys.exc_info()
+        if let Err(ref e) = result {
+            self.exc_type = Some(py_str(&e.type_name()));
+            self.exc_value = Some(py_str(&format!("{}", e)));
+        }
+        result
     }
 
     fn execute_inner(&mut self) -> PyResult<PyObjectRef> {
@@ -3182,6 +3195,10 @@ impl VirtualMachine {
                                 return Err(PyError::StopIteration);
                             }
                         }
+                        // Store exc_info before returning error
+                        self.exc_type = Some(exc.clone());
+                        self.exc_value = Some(exc.clone());
+                        self.exc_traceback = Some(py_none());
                         return Err(PyError::Exception(msg, exc));
                     }
                     2 => {

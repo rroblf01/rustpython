@@ -962,6 +962,17 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
     d.insert("prefix".to_string(), py_str(&prefix));
     d.insert("exec_prefix".to_string(), py_str(&exec_prefix));
     d.insert("winver".to_string(), py_str("3.12"));
+    // sys.exc_info() — returns current exception info from VM
+    sys_func!("exc_info", |_args| {
+        let result = crate::object::with_vm_mut(|vm| {
+            py_tuple(vec![
+                vm.exc_type.clone().unwrap_or(py_none()),
+                vm.exc_value.clone().unwrap_or(py_none()),
+                vm.exc_traceback.clone().unwrap_or(py_none()),
+            ])
+        });
+        Ok(result.unwrap_or_else(|_| py_tuple(vec![py_none(), py_none(), py_none()])))
+    });
     d
 }
 

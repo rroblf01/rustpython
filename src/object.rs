@@ -297,6 +297,25 @@ pub enum PyError {
 }
 
 impl PyError {
+    pub fn type_name(&self) -> &str {
+        match self {
+            PyError::TypeError(_) => "TypeError",
+            PyError::ValueError(_) => "ValueError",
+            PyError::NameError(_) => "NameError",
+            PyError::AttributeError(_) => "AttributeError",
+            PyError::IndexError(_) => "IndexError",
+            PyError::KeyError(_) => "KeyError",
+            PyError::ZeroDivisionError(_) => "ZeroDivisionError",
+            PyError::RuntimeError(_) => "RuntimeError",
+            PyError::SystemExit(_) => "SystemExit",
+            PyError::Exception(_, _) => "Exception",
+            PyError::MatchError(_) => "MatchError",
+            PyError::StopIteration => "StopIteration",
+            PyError::AssertionError(_) => "AssertionError",
+            PyError::OsError(_) => "OSError",
+            PyError::ImportError(_) => "ImportError",
+        }
+    }
     pub fn type_error(msg: impl Into<String>) -> Self {
         PyError::TypeError(msg.into())
     }
