@@ -3299,28 +3299,23 @@ impl VirtualMachine {
                             _ => return Err(PyError::runtime_error("IMPORT_FROM on non-module")),
                         }
                     };
-                    let submodule_name = if module_name.is_empty() || module_name == "__builtins__" {
-                        name.clone()
-                    } else {
-                        format!("{}.{}", module_name, name)
-                    };
-                    match self.import_module_from_file(&submodule_name) {
-                        Ok(submod) => {
-                            self.modules.insert(submodule_name.clone(), submod.clone());
-                            // Register in parent module dict (scoped borrow to avoid RefCell conflict)
-                            if let PyObject::Module { dict, .. } = &mut *module.borrow_mut() {
-                                dict.insert_str(&name, submod.clone());
+                    // Try importing as sub-module (for dotted names like os.path)
+                    let submodule_name = format!("{}.{}", module_name, name);
+                    if submodule_name.contains('.') {
+                        match self.import_module_from_file(&submodule_name) {
+                            Ok(submod) => {
+                                self.modules.insert(submodule_name.clone(), submod.clone());
+                                if let PyObject::Module { dict, .. } = &mut *module.borrow_mut() {
+                                    dict.insert_str(&name, submod.clone());
+                                }
+                                self.frames[fi].push(submod);
                             }
-                            self.frames[fi].push(submod);
+                            Err(_) => {
+                                return Err(PyError::ImportError(format!("cannot import name '{}' from '{}'", name, module_name)));
+                            }
                         }
-                        Err(inner_err) => {
-                            let obj = module.borrow();
-                            let type_name = match &*obj {
-                                PyObject::Module { name: mn, .. } => mn.clone(),
-                                _ => module.borrow().type_name(),
-                            };
-                            return Err(PyError::ImportError(format!("cannot import name '{}' from '{}' (inner: {})", name, type_name, inner_err)));
-                        }
+                    } else {
+                        return Err(PyError::ImportError(format!("cannot import name '{}' from '{}'", name, module_name)));
                     }
                 }
             }
