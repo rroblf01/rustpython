@@ -273,6 +273,20 @@ pub fn create_functools_dict() -> HashMap<String, PyObjectRef> {
         Ok(PyObjectRef::new(PyObject::Partial { func, args: partial_args }))
     });
 
+    // partialmethod: real semantics auto-bind `self` as the first argument
+    // via the descriptor protocol when accessed on an instance. We don't
+    // implement that binding here — this just pre-binds the given args like
+    // partial() — so `descriptor.__get__`-based access won't insert self.
+    // Direct calls (e.g. `SomeClass.attr(instance, ...)`) still work.
+    ft_func!("partialmethod", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("partialmethod() takes at least 1 argument"));
+        }
+        let func = args[0].clone();
+        let partial_args: Vec<PyObjectRef> = args[1..].to_vec();
+        Ok(PyObjectRef::new(PyObject::Partial { func, args: partial_args }))
+    });
+
     ft_func!("update_wrapper", |args| {
         if args.len() < 2 {
             return Err(PyError::type_error("update_wrapper() requires at least 2 arguments"));

@@ -569,11 +569,13 @@ impl Lexer {
                         self.advance();
                     }
                     if self.paren_level > 0 {
-                        // Inside parentheses/brackets/braces, skip newlines (implicit continuation)
+                        // Inside parentheses/brackets/braces, skip newlines (implicit continuation).
+                        // Do NOT set at_line_start here — the logical line hasn't ended (matches
+                        // the plain '\n' branch below), otherwise this stale flag survives past the
+                        // closing paren and triggers a bogus indent check at the wrong column.
                         if self.peek() == Some('\n') {
                             self.advance(); // consume the newline char
                         }
-                        self.at_line_start = true;
                         continue;
                     }
                     if self.peek().is_some() {

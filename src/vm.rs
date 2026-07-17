@@ -151,6 +151,32 @@ pub struct VirtualMachine {
     pub exc_traceback: Option<PyObjectRef>,
 }
 
+/// Locate the bundled `Lib/` directory relative to the running executable
+/// rather than the current working directory, so the interpreter works when
+/// invoked from anywhere (not just the repo root). Walks up from the
+/// executable's directory looking for a `Lib` subdirectory (covers both
+/// `target/{debug,release}/rustpython` during development and a real
+/// install layout), falling back to the old CWD-relative behavior only if
+/// that search fails.
+fn find_lib_dir() -> String {
+    if let Ok(exe) = std::env::current_exe() {
+        let mut dir = exe.parent().map(|p| p.to_path_buf());
+        for _ in 0..5 {
+            match dir {
+                Some(d) => {
+                    let candidate = d.join("Lib");
+                    if candidate.is_dir() {
+                        return candidate.to_string_lossy().into_owned();
+                    }
+                    dir = d.parent().map(|p| p.to_path_buf());
+                }
+                None => break,
+            }
+        }
+    }
+    "./Lib".to_string()
+}
+
 impl VirtualMachine {
     pub fn new() -> Self {
         Self::new_with_args(std::env::args().collect())
@@ -277,8 +303,6 @@ impl VirtualMachine {
           weakref_mod_dict.insert("WeakValueDictionary".to_string(), create_weakref_weak_val_dict());
           weakref_mod_dict.insert("WeakKeyDictionary".to_string(), create_weakref_weak_key_dict());
           weakref_mod_dict.insert("WeakSet".to_string(), create_weakref_weak_set());
-          weakref_mod_dict.insert("WeakMethod".to_string(), py_str("WeakMethod"));
-          weakref_mod_dict.insert("finalize".to_string(), py_none());
           modules.insert("weakref".to_string(), create_module("weakref", weakref_mod_dict));
 
           // Native copy module (replaces CPython copy.py which uses unsupported syntax)
@@ -597,7 +621,7 @@ impl VirtualMachine {
           // Add __path__ so dotted imports like importlib.machinery can find filesystem submodules
           {
               if let PyObject::Module { dict, .. } = &mut *importlib_mod.borrow_mut() {
-                  dict.insert("__path__".to_string(), py_list(vec![py_str("./Lib/importlib")]));
+                  dict.insert("__path__".to_string(), py_list(vec![py_str(&format!("{}/importlib", find_lib_dir()))]));
               }
           }
           modules.insert("importlib".to_string(), importlib_mod);
@@ -651,9 +675,7 @@ impl VirtualMachine {
           // Populate sys.path with default search paths
         if let PyObject::List(path_list) = &mut *sys_dict.get("path").unwrap().borrow_mut() {
             path_list.push(py_str("."));
-            path_list.push(py_str("./Lib"));
-            // Add site-packages for user-installed packages (uv, pip, etc.)
-            path_list.push(py_str("/opt/data/home/.local/share/uv/tools/django/lib/python3.13/site-packages/"));
+            path_list.push(py_str(&find_lib_dir()));
 
             // Detect virtual environment (VIRTUAL_ENV, conda, poetry, pixi, or .venv in CWD)
             let venv = std::env::var("VIRTUAL_ENV").ok()

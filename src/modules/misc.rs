@@ -307,6 +307,23 @@ pub fn create_threading_dict() -> HashMap<String, PyObjectRef> {
         Ok(PyObjectRef::new(PyObject::Thread(inner)))
     });
 
+    // threading.local() — per-thread storage. This interpreter's object
+    // model (Rc<RefCell<PyObject>>) only ever runs Python code on one
+    // thread at a time, so a plain instance with its own attribute dict
+    // already has exactly the semantics real code depends on (each
+    // instance's attributes are independent of any other instance's).
+    thr_func!("local", |_| {
+        Ok(PyObjectRef::new(PyObject::Instance {
+            typ: PyObjectRef::new(PyObject::Type {
+                name: "local".to_string(),
+                dict: HashMap::new(),
+                bases: vec![],
+                mro: vec![],
+            }),
+            dict: HashMap::new(),
+        }))
+    });
+
     thr_func!("Lock", |_| {
         let inner = std::sync::Arc::new(std::sync::Mutex::new(LockInner {
             lock: std::sync::atomic::AtomicBool::new(false),
@@ -553,6 +570,48 @@ pub fn create_weakref_dict() -> HashMap<String, PyObjectRef> {
     wr_func!("getweakrefcount", |_| Ok(py_int(0)));
     wr_func!("getweakrefs", |_| Ok(py_list(vec![])));
 
+    // finalize(obj, func, *args, **kwargs) — real semantics call `func` when
+    // `obj` is garbage collected; this interpreter has no GC hooks to key
+    // that off of, so this only supports the "call it directly" path
+    // (finalize_obj()) — the common real-world use (e.g. Django's signal
+    // dispatcher) just registers cleanup and never inspects the return
+    // value, so not firing automatically on collection is a silent no-op
+    // rather than a crash.
+    wr_func!("finalize", |args| {
+        if args.len() < 2 {
+            return Err(PyError::type_error("finalize() requires at least 2 arguments (obj, func)"));
+        }
+        let func = args[1].clone();
+        let extra_args: Vec<PyObjectRef> = args[2..].to_vec();
+        Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+            name: "finalize".to_string(),
+            func: |args| {
+                // self_obj holds (func, extra_args) packed as a tuple
+                if let PyObject::Tuple(items) = &*args[0].borrow() {
+                    let func = items[0].clone();
+                    let extra = if let PyObject::Tuple(a) = &*items[1].borrow() { a.clone() } else { vec![] };
+                    return call_function(&func, extra);
+                }
+                Ok(py_none())
+            },
+            self_obj: PyObjectRef::imm(PyObject::Tuple(vec![func, PyObjectRef::imm(PyObject::Tuple(extra_args))])),
+        }))
+    });
+
+    // WeakMethod(bound_method) — like ref() but for bound methods; same
+    // simplification as ref() above (no real weak semantics, just holds on).
+    wr_func!("WeakMethod", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("WeakMethod() requires at least 1 argument"));
+        }
+        let obj = args[0].clone();
+        Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+            name: "weakmethod".to_string(),
+            func: |args| Ok(args[0].clone()),
+            self_obj: obj,
+        }))
+    });
+
     // Type constants
     d.insert("ReferenceType".to_string(), py_str("weakref"));
     d.insert("ProxyType".to_string(), py_str("weakproxy"));
@@ -586,39 +645,75 @@ pub fn create_collections_abc_dict() -> HashMap<String, PyObjectRef> {
     });
 
     d.insert("ABCMeta".to_string(), abc_meta);
-    d.insert("Hashable".to_string(), py_str("Hashable"));
-    d.insert("Iterable".to_string(), py_str("Iterable"));
-    d.insert("Iterator".to_string(), py_str("Iterator"));
-    d.insert("Sized".to_string(), py_str("Sized"));
-    d.insert("Callable".to_string(), py_str("Callable"));
-    d.insert("Sequence".to_string(), py_str("Sequence"));
-    d.insert("MutableSequence".to_string(), py_str("MutableSequence"));
-    d.insert("Set".to_string(), py_str("Set"));
-    d.insert("MutableSet".to_string(), py_str("MutableSet"));
-    d.insert("Mapping".to_string(), PyObjectRef::new(PyObject::Type {
-        name: "Mapping".to_string(),
-        dict: HashMap::from([
-            ("__class_getitem__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "__class_getitem__".to_string(),
-                func: |args| {
-                    if args.len() < 2 { return Err(PyError::type_error("__class_getitem__ requires 2 args")); }
-                    Ok(args[1].clone())
-                },
-            })),
-        ]),
-        bases: vec![],
-        mro: vec![],
-    }));
-    d.insert("MutableMapping".to_string(), py_str("MutableMapping"));
-    d.insert("MappingView".to_string(), py_str("MappingView"));
-    d.insert("ItemsView".to_string(), py_str("ItemsView"));
-    d.insert("KeysView".to_string(), py_str("KeysView"));
-    d.insert("ValuesView".to_string(), py_str("ValuesView"));
-    d.insert("Container".to_string(), py_str("Container"));
-    d.insert("Awaitable".to_string(), py_str("Awaitable"));
-    d.insert("Coroutine".to_string(), py_str("Coroutine"));
-    d.insert("AsyncIterable".to_string(), py_str("AsyncIterable"));
-    d.insert("AsyncIterator".to_string(), py_str("AsyncIterator"));
+
+    // collections.abc ABCs — real Type objects (not plain strings) so they
+    // support subscripting (`Sequence[int]`), which is pervasive in type
+    // hints across the ecosystem (PEP 585). __class_getitem__ returns a
+    // minimal placeholder "generic alias" Instance rather than a real one —
+    // it doesn't track __origin__/__args__ properly, but it does support
+    // `__or__` and further `[...]` subscripting so that annotations like
+    // `Callable[_P, int] | Callable[_P, str]` (real code seen in asgiref)
+    // don't crash — nothing at runtime actually inspects these values.
+    fn generic_alias_placeholder(repr: String) -> PyObjectRef {
+        let mut type_dict = HashMap::new();
+        type_dict.insert("__class_getitem__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__class_getitem__".to_string(),
+            func: |_args| Ok(generic_alias_placeholder("...".to_string())),
+        }));
+        type_dict.insert("__or__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__or__".to_string(),
+            func: |_args| Ok(generic_alias_placeholder("...".to_string())),
+        }));
+        PyObjectRef::new(PyObject::Instance {
+            typ: PyObjectRef::new(PyObject::Type {
+                name: repr,
+                dict: type_dict,
+                bases: vec![],
+                mro: vec![],
+            }),
+            dict: HashMap::new(),
+        })
+    }
+
+    macro_rules! abc_class {
+        ($name:expr) => {
+            PyObjectRef::new(PyObject::Type {
+                name: $name.to_string(),
+                dict: HashMap::from([
+                    ("__class_getitem__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                        name: "__class_getitem__".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("__class_getitem__ requires 2 args")); }
+                            Ok(generic_alias_placeholder(format!("{}[{}]", args[0].str(), args[1].str())))
+                        },
+                    })),
+                ]),
+                bases: vec![],
+                mro: vec![],
+            })
+        };
+    }
+
+    d.insert("Hashable".to_string(), abc_class!("Hashable"));
+    d.insert("Iterable".to_string(), abc_class!("Iterable"));
+    d.insert("Iterator".to_string(), abc_class!("Iterator"));
+    d.insert("Sized".to_string(), abc_class!("Sized"));
+    d.insert("Callable".to_string(), abc_class!("Callable"));
+    d.insert("Sequence".to_string(), abc_class!("Sequence"));
+    d.insert("MutableSequence".to_string(), abc_class!("MutableSequence"));
+    d.insert("Set".to_string(), abc_class!("Set"));
+    d.insert("MutableSet".to_string(), abc_class!("MutableSet"));
+    d.insert("Mapping".to_string(), abc_class!("Mapping"));
+    d.insert("MutableMapping".to_string(), abc_class!("MutableMapping"));
+    d.insert("MappingView".to_string(), abc_class!("MappingView"));
+    d.insert("ItemsView".to_string(), abc_class!("ItemsView"));
+    d.insert("KeysView".to_string(), abc_class!("KeysView"));
+    d.insert("ValuesView".to_string(), abc_class!("ValuesView"));
+    d.insert("Container".to_string(), abc_class!("Container"));
+    d.insert("Awaitable".to_string(), abc_class!("Awaitable"));
+    d.insert("Coroutine".to_string(), abc_class!("Coroutine"));
+    d.insert("AsyncIterable".to_string(), abc_class!("AsyncIterable"));
+    d.insert("AsyncIterator".to_string(), abc_class!("AsyncIterator"));
 
     d
 }
@@ -1099,6 +1194,104 @@ pub fn create_enum_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
+// Build a UUID instance from a 32-hex-char string (no dashes).
+fn make_uuid(hex32: String) -> PyObjectRef {
+    let mut type_dict = HashMap::new();
+
+    type_dict.insert("__str__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "__str__".to_string(),
+        func: |args| {
+            if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+                if let Some(h) = dict.get("_hex") {
+                    let s = h.str();
+                    return Ok(py_str(&format!("{}-{}-{}-{}-{}", &s[0..8], &s[8..12], &s[12..16], &s[16..20], &s[20..32])));
+                }
+            }
+            Err(PyError::runtime_error("UUID instance missing _hex"))
+        },
+    }));
+    type_dict.insert("__repr__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "__repr__".to_string(),
+        func: |args| {
+            if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+                if let Some(h) = dict.get("_hex") {
+                    let s = h.str();
+                    return Ok(py_str(&format!("UUID('{}-{}-{}-{}-{}')", &s[0..8], &s[8..12], &s[12..16], &s[16..20], &s[20..32])));
+                }
+            }
+            Err(PyError::runtime_error("UUID instance missing _hex"))
+        },
+    }));
+    type_dict.insert("__eq__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "__eq__".to_string(),
+        func: |args| {
+            let self_hex = if let PyObject::Instance { dict, .. } = &*args[0].borrow() { dict.get("_hex").map(|h| h.str()) } else { None };
+            let other_hex = if let PyObject::Instance { dict, .. } = &*args[1].borrow() { dict.get("_hex").map(|h| h.str()) } else { None };
+            Ok(py_bool(self_hex.is_some() && self_hex == other_hex))
+        },
+    }));
+    type_dict.insert("__hash__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "__hash__".to_string(),
+        func: |args| {
+            if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+                if let Some(h) = dict.get("_hex") {
+                    return builtin_hash(&[py_str(&h.str())]);
+                }
+            }
+            Err(PyError::runtime_error("UUID instance missing _hex"))
+        },
+    }));
+    let hex_getter = PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "hex".to_string(),
+        func: |args| {
+            if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+                if let Some(h) = dict.get("_hex") { return Ok(h.clone()); }
+            }
+            Err(PyError::runtime_error("UUID instance missing _hex"))
+        },
+    });
+    type_dict.insert("hex".to_string(), PyObjectRef::new(PyObject::Property {
+        getter: Some(hex_getter), setter: None, deleter: None, doc: None,
+    }));
+    let int_getter = PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "int".to_string(),
+        func: |args| {
+            if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+                if let Some(h) = dict.get("_hex") {
+                    let n = num_bigint::BigInt::parse_bytes(h.str().as_bytes(), 16).unwrap_or_else(|| num_bigint::BigInt::from(0));
+                    return Ok(py_int(n));
+                }
+            }
+            Err(PyError::runtime_error("UUID instance missing _hex"))
+        },
+    });
+    type_dict.insert("int".to_string(), PyObjectRef::new(PyObject::Property {
+        getter: Some(int_getter), setter: None, deleter: None, doc: None,
+    }));
+
+    let typ = PyObjectRef::new(PyObject::Type {
+        name: "UUID".to_string(),
+        dict: type_dict,
+        bases: vec![],
+        mro: vec![],
+    });
+    PyObjectRef::new(PyObject::Instance {
+        typ,
+        dict: HashMap::from([("_hex".to_string(), py_str(&hex32))]),
+    })
+}
+
+fn random_uuid_hex(version: u8) -> String {
+    let r1 = fast_random_u64();
+    let r2 = fast_random_u64();
+    let time_low = r1 as u32;
+    let time_mid = (r1 >> 32) as u16;
+    let time_hi_and_version = ((r1 >> 48) as u16 & 0x0FFF) | ((version as u16) << 12);
+    let clock_seq = (r2 as u16 & 0x3FFF) | 0x8000;
+    let node = (r2 >> 16) as u64;
+    format!("{:08x}{:04x}{:04x}{:04x}{:012x}", time_low, time_mid, time_hi_and_version, clock_seq, node)
+}
+
 pub fn create_uuid_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! uuid_func {
@@ -1109,15 +1302,24 @@ pub fn create_uuid_dict() -> HashMap<String, PyObjectRef> {
 
     uuid_func!("uuid4", |args| {
         if !args.is_empty() { return Err(PyError::type_error("uuid4() takes no arguments")); }
-        let r1 = fast_random_u64();
-        let r2 = fast_random_u64();
-        let time_low = r1 as u32;
-        let time_mid = (r1 >> 32) as u16;
-        let time_hi_and_version = ((r1 >> 48) as u16 & 0x0FFF) | 0x4000;
-        let clock_seq = (r2 as u16 & 0x3FFF) | 0x8000;
-        let node = (r2 >> 16) as u64;
-        Ok(py_str(&format!("{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
-            time_low, time_mid, time_hi_and_version, clock_seq, node)))
+        Ok(make_uuid(random_uuid_hex(4)))
+    });
+
+    uuid_func!("uuid1", |_args| {
+        Ok(make_uuid(random_uuid_hex(1)))
+    });
+
+    // UUID(hex=None, int=None, bytes=None) — supports the common construction forms.
+    uuid_func!("UUID", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("UUID() missing required argument"));
+        }
+        let hex_arg = args[0].str();
+        let cleaned: String = hex_arg.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+        if cleaned.len() != 32 {
+            return Err(PyError::value_error("badly formed hexadecimal UUID string"));
+        }
+        Ok(make_uuid(cleaned.to_lowercase()))
     });
 
     d

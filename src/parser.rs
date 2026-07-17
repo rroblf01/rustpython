@@ -70,6 +70,13 @@ impl Parser {
                 self.next();
                 Ok(s)
             }
+            // `_` is a regular identifier everywhere except match-statement
+            // wildcard patterns (which are parsed separately) — e.g. the
+            // common `from x import gettext_lazy as _` idiom.
+            Token::Underscore => {
+                self.next();
+                Ok("_".to_string())
+            }
             _ => unexpected_token!(self, "NAME"),
         }
     }
@@ -1399,7 +1406,15 @@ impl Parser {
                             keywords.push(Keyword { arg, value: Box::new(value) });
                         } else {
                             // Parse expression with full ternary support
-                            let expr = self.parse_conditional_expr()?;
+                            let mut expr = self.parse_conditional_expr()?;
+                            // Walrus operator as a call argument: f(x := expr)
+                            if self.eat(&Token::Walrus) {
+                                let value = self.parse_expr()?;
+                                expr = Expr::NamedExpr {
+                                    target: Box::new(expr),
+                                    value: Box::new(value),
+                                };
+                            }
                             // Check for generator expression as sole argument: f(x for x in lst)
                             if self.at(&Token::For) && args.is_empty() && keywords.is_empty() {
                                 self.next(); // consume 'for'
@@ -1761,7 +1776,7 @@ impl Parser {
                             let expr = self.parse_expr()?;
                             elts.push(Expr::Starred(Box::new(expr)));
                         } else {
-                            elts.push(self.parse_bitwise_or()?);
+                            elts.push(self.parse_conditional_expr()?);
                         }
                         if !self.eat(&Token::Comma) { break; }
                         // After eating a trailing comma, check if we're at the end
