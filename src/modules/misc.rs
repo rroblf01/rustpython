@@ -1,6 +1,51 @@
 use crate::object::*;
 use std::collections::HashMap;
 
+/// Python's `re` treats a `{` that doesn't form a valid `{n}`/`{n,}`/`{n,m}`
+/// counted-repetition quantifier as a literal character; Rust's `regex`
+/// crate instead rejects it as a parse error ("repetition operator missing
+/// expression"). Real-world patterns lean on this leniency constantly
+/// (e.g. Django's template-tag detector `{%.*?%}`), so translate patterns
+/// through this before compiling rather than surfacing the raw Rust error.
+fn escape_loose_braces(pattern: &str) -> String {
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut result = String::with_capacity(pattern.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\\' && i + 1 < chars.len() {
+            result.push(c);
+            result.push(chars[i + 1]);
+            i += 2;
+            continue;
+        }
+        if c == '{' {
+            let mut j = i + 1;
+            let mut saw_digit = false;
+            while j < chars.len() && chars[j].is_ascii_digit() { j += 1; saw_digit = true; }
+            if j < chars.len() && chars[j] == ',' {
+                j += 1;
+                while j < chars.len() && chars[j].is_ascii_digit() { j += 1; }
+            }
+            if saw_digit && j < chars.len() && chars[j] == '}' {
+                result.extend(&chars[i..=j]);
+                i = j + 1;
+            } else {
+                result.push_str("\\{");
+                i += 1;
+            }
+            continue;
+        }
+        result.push(c);
+        i += 1;
+    }
+    result
+}
+
+fn compile_python_regex(pattern: &str) -> Result<regex::Regex, regex::Error> {
+    regex::Regex::new(&escape_loose_braces(pattern))
+}
+
 /// Build a re.Match object with group(), groups(), start(), end(), span() methods.
 /// Returns None if the regex didn't match.
 fn make_match_object(re_match: Option<regex::Match<'_>>, _num_groups: usize) -> PyObjectRef {
@@ -124,7 +169,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         }
         let pattern = args[0].str();
         let string = args[1].str();
-        match regex::Regex::new(&pattern) {
+        match compile_python_regex(&pattern) {
             Ok(re) => {
                 let matched = re.find(&string);
                 Ok(make_match_object(matched, 0))
@@ -139,7 +184,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         }
         let pattern = args[0].str();
         let string = args[1].str();
-        match regex::Regex::new(&pattern) {
+        match compile_python_regex(&pattern) {
             Ok(re) => {
                 let matched = re.find_at(&string, 0);
                 // Only succeed if match starts at position 0
@@ -159,7 +204,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         }
         let pattern = args[0].str();
         let string = args[1].str();
-        match regex::Regex::new(&pattern) {
+        match compile_python_regex(&pattern) {
             Ok(re) => {
                 let result = re.find(&string)
                     .filter(|m| m.start() == 0 && m.end() == string.len());
@@ -175,7 +220,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         }
         let pattern = args[0].str();
         let string = args[1].str();
-        match regex::Regex::new(&pattern) {
+        match compile_python_regex(&pattern) {
             Ok(re) => {
                 let results: Vec<PyObjectRef> = re.find_iter(&string)
                     .map(|m| py_str(m.as_str()))
@@ -193,7 +238,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         let pattern = args[0].str();
         let repl = args[1].str();
         let string = args[2].str();
-        match regex::Regex::new(&pattern) {
+        match compile_python_regex(&pattern) {
             Ok(re) => {
                 let result = re.replace_all(&string, repl.as_str());
                 Ok(py_str(&result))
@@ -209,7 +254,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         let pattern = args[0].str();
         let string = args[1].str();
         let limit = if args.len() > 2 { args[2].as_i64().unwrap_or(0) as usize } else { 0 };
-        match regex::Regex::new(&pattern) {
+        match compile_python_regex(&pattern) {
             Ok(re) => {
                 let parts: Vec<PyObjectRef> = if limit > 0 {
                     re.splitn(&string, limit).map(|s| py_str(s)).collect()
@@ -228,7 +273,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         }
         let pattern = args[0].str();
         let flags = if args.len() > 1 { args[1].as_i64().unwrap_or(0) as i32 } else { 0 };
-        match regex::Regex::new(&pattern) {
+        match compile_python_regex(&pattern) {
             Ok(re) => {
                 Ok(PyObjectRef::new(PyObject::CompiledRegex {
                     regex: re,
@@ -247,7 +292,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         }
         let pattern = args[0].str();
         let string = args[1].str();
-        match regex::Regex::new(&pattern) {
+        match compile_python_regex(&pattern) {
             Ok(re) => {
                 let matches: Vec<PyObjectRef> = re.find_iter(&string)
                     .map(|m| make_match_object(Some(m), 0))
@@ -1387,6 +1432,9 @@ pub fn create_contextlib_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
+/// ContextDecorator source — see VirtualMachine::install_source_defined_stdlib.
+pub const CONTEXTLIB_SOURCE: &str = include_str!("contextlib_extra.py");
+
 pub fn create_platform_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! plat_func {
@@ -1568,102 +1616,244 @@ pub fn create_getpass_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
-pub fn create_graphlib_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! gl_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+// ---- graphlib.TopologicalSorter ----
+//
+// The graph is stored as a real dict (node -> list of predecessors) under a
+// reserved instance-dict key, keyed by genuine PyObjectRef equality/hashing
+// (via PyDict) so arbitrary hashable nodes work, not just strings.
+
+thread_local! {
+    static TOPOSORTER_TYPE: std::cell::RefCell<Option<PyObjectRef>> = std::cell::RefCell::new(None);
+}
+
+const TOPOSORTER_GRAPH_KEY: &str = "_graph";
+const TOPOSORTER_DONE_KEY: &str = "_done";
+
+fn toposorter_graph(obj: &PyObjectRef) -> Option<PyObjectRef> {
+    if let PyObject::Instance { dict, .. } = &*obj.borrow() { dict.get(TOPOSORTER_GRAPH_KEY).cloned() } else { None }
+}
+
+fn toposorter_ensure_node(graph: &PyObjectRef, node: &PyObjectRef) -> PyResult<()> {
+    let mut g = graph.borrow_mut();
+    if let PyObject::Dict(d) = &mut *g {
+        if d.get(node)?.is_none() {
+            d.set(node.clone(), py_list(vec![]))?;
+        }
+    }
+    Ok(())
+}
+
+fn toposorter_add_edge(graph: &PyObjectRef, node: &PyObjectRef, pred: &PyObjectRef) -> PyResult<()> {
+    toposorter_ensure_node(graph, pred)?;
+    let mut g = graph.borrow_mut();
+    if let PyObject::Dict(d) = &mut *g {
+        match d.get(node)? {
+            Some(preds_ref) => {
+                if let PyObject::List(items) = &mut *preds_ref.borrow_mut() {
+                    items.push(pred.clone());
+                }
+            }
+            None => {
+                d.set(node.clone(), py_list(vec![pred.clone()]))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Kahn's algorithm over the stored graph. Returns the sorted node list, or
+/// an error (CycleError) if the graph isn't a DAG.
+fn toposorter_sorted_order(graph: &PyObjectRef) -> PyResult<Vec<PyObjectRef>> {
+    let entries = {
+        let g = graph.borrow();
+        match &*g {
+            PyObject::Dict(d) => d.items(),
+            _ => return Err(PyError::runtime_error("corrupt TopologicalSorter graph")),
+        }
+    };
+    let mut remaining: Vec<(PyObjectRef, Vec<PyObjectRef>)> = Vec::with_capacity(entries.len());
+    for (node, preds_ref) in &entries {
+        let preds = match &*preds_ref.borrow() {
+            PyObject::List(items) => items.clone(),
+            _ => vec![],
+        };
+        remaining.push((node.clone(), preds));
+    }
+
+    let mut result: Vec<PyObjectRef> = Vec::with_capacity(remaining.len());
+    loop {
+        let mut ready = Vec::new();
+        let mut still_pending = Vec::new();
+        for (node, preds) in remaining {
+            let all_ready = preds.iter().all(|p| result.iter().any(|r| r.equals(p).unwrap_or(false)));
+            if all_ready {
+                ready.push(node);
+            } else {
+                still_pending.push((node, preds));
+            }
+        }
+        if ready.is_empty() {
+            remaining = still_pending;
+            break;
+        }
+        result.extend(ready);
+        remaining = still_pending;
+        if remaining.is_empty() {
+            break;
+        }
+    }
+
+    if !remaining.is_empty() {
+        let cycle_nodes: Vec<PyObjectRef> = remaining.into_iter().map(|(n, _)| n).collect();
+        return Err(PyError::Exception(
+            "CycleError".to_string(),
+            PyObjectRef::new(PyObject::Exception {
+                typ: "CycleError".to_string(),
+                args: vec![py_str("nodes are in a cycle"), py_list(cycle_nodes)],
+                cause: None,
+            }),
+        ));
+    }
+    Ok(result)
+}
+
+fn build_topological_sorter_type() -> PyObjectRef {
+    let mut type_dict: HashMap<String, PyObjectRef> = HashMap::new();
+    macro_rules! bf {
+        ($name:expr, $f:expr) => {
+            PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $f })
         };
     }
 
-    // TopologicalSorter — returns a sorted list from the given graph
-    gl_func!("TopologicalSorter", |args| {
-        // Accept a dict or list of pairs as graph
-        let mut edges: Vec<(String, String)> = Vec::new();
-        if args.len() >= 1 {
-            let graph = &args[0];
-            let borrowed = graph.borrow();
-            match &*borrowed {
-                PyObject::Dict(dict) => {
-                    for (key, val) in dict.items() {
-                        let k = key.str();
-                        let v = val.str();
-                        edges.push((k, v));
-                    }
-                }
-                PyObject::List(items) => {
-                    for item in items {
-                        if let PyObject::Tuple(pair) = &*item.borrow() {
-                            if pair.len() >= 2 {
-                                edges.push((pair[0].str(), pair[1].str()));
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
+    type_dict.insert("__init__".to_string(), bf!("__init__", |args| {
+        let graph = py_dict();
+        if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
+            dict.insert(TOPOSORTER_GRAPH_KEY.to_string(), graph.clone());
+            dict.insert(TOPOSORTER_DONE_KEY.to_string(), py_dict());
         }
-
-        // Simple topological sort: Kahn's algorithm
-        let mut in_degree: HashMap<String, usize> = HashMap::new();
-        let mut adj: HashMap<String, Vec<String>> = HashMap::new();
-        let mut nodes: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-        for (from, to) in &edges {
-            adj.entry(from.clone()).or_default().push(to.clone());
-            in_degree.entry(to.clone()).or_insert(0);
-            in_degree.entry(from.clone()).or_insert(0);
-            nodes.insert(from.clone());
-            nodes.insert(to.clone());
-        }
-
-        // Also handle nodes referenced only as keys/values in pairs
-        for n in &edges {
-            in_degree.entry(n.0.clone()).or_insert(0);
-            in_degree.entry(n.1.clone()).or_insert(0);
-            nodes.insert(n.0.clone());
-            nodes.insert(n.1.clone());
-        }
-
-        for (_, neighbors) in &adj {
-            for n in neighbors {
-                *in_degree.entry(n.clone()).or_insert(0) += 1;
-            }
-        }
-
-        let mut queue: Vec<String> = Vec::new();
-        for (node, deg) in &in_degree {
-            if *deg == 0 {
-                queue.push(node.clone());
-            }
-        }
-
-        let mut sorted: Vec<PyObjectRef> = Vec::new();
-        while !queue.is_empty() {
-            queue.sort_by(|a, b| b.cmp(a)); // use as stack
-            let node = queue.pop().unwrap();
-            sorted.push(py_str(&node));
-            if let Some(neighbors) = adj.get(&node) {
-                for n in neighbors {
-                    if let Some(deg) = in_degree.get_mut(n) {
-                        *deg -= 1;
-                        if *deg == 0 {
-                            queue.push(n.clone());
-                        }
-                    }
+        // Optional initial graph: {node: iterable_of_predecessors, ...}
+        if args.len() > 1 {
+            let entries = match &*args[1].borrow() {
+                PyObject::Dict(d) => d.items(),
+                PyObject::None => vec![],
+                _ => return Err(PyError::type_error("graph argument must be a dict")),
+            };
+            for (node, preds) in entries {
+                toposorter_ensure_node(&graph, &node)?;
+                let pred_items = match &*preds.borrow() {
+                    PyObject::List(v) | PyObject::Tuple(v) => v.clone(),
+                    PyObject::Set(s) => s.to_vec(),
+                    _ => vec![preds.clone()],
+                };
+                for p in pred_items {
+                    toposorter_add_edge(&graph, &node, &p)?;
                 }
             }
         }
-
-        // If any nodes remain unprocessed, there's a cycle — just return empty
-        // (stub behavior)
-        if sorted.len() != nodes.len() {
-            sorted.clear();
+        Ok(py_none())
+    }));
+    type_dict.insert("add".to_string(), bf!("add", |args| {
+        if args.len() < 2 { return Err(PyError::type_error("add() missing required argument: 'node'")); }
+        let graph = toposorter_graph(&args[0]).ok_or_else(|| PyError::runtime_error("not a TopologicalSorter"))?;
+        let node = &args[1];
+        if args.len() > 2 {
+            for pred in &args[2..] {
+                toposorter_add_edge(&graph, node, pred)?;
+            }
+        } else {
+            toposorter_ensure_node(&graph, node)?;
         }
+        Ok(py_none())
+    }));
+    type_dict.insert("prepare".to_string(), bf!("prepare", |args| {
+        let graph = toposorter_graph(&args[0]).ok_or_else(|| PyError::runtime_error("not a TopologicalSorter"))?;
+        // Validates the graph is acyclic up front, matching real prepare();
+        // static_order()/get_ready() below re-derive order from scratch
+        // rather than depending on this call having happened first.
+        toposorter_sorted_order(&graph)?;
+        Ok(py_none())
+    }));
+    type_dict.insert("static_order".to_string(), bf!("static_order", |args| {
+        let graph = toposorter_graph(&args[0]).ok_or_else(|| PyError::runtime_error("not a TopologicalSorter"))?;
+        let order = toposorter_sorted_order(&graph)?;
+        Ok(py_list(order))
+    }));
+    type_dict.insert("get_ready".to_string(), bf!("get_ready", |args| {
+        let graph = toposorter_graph(&args[0]).ok_or_else(|| PyError::runtime_error("not a TopologicalSorter"))?;
+        let done = if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+            dict.get(TOPOSORTER_DONE_KEY).cloned()
+        } else { None };
+        let done_items: Vec<PyObjectRef> = match done.as_ref().map(|d| d.borrow()) {
+            Some(guard) => match &*guard {
+                PyObject::Dict(d) => d.keys(),
+                _ => vec![],
+            },
+            None => vec![],
+        };
+        let entries = match &*graph.borrow() {
+            PyObject::Dict(d) => d.items(),
+            _ => vec![],
+        };
+        let mut ready = Vec::new();
+        for (node, preds_ref) in entries {
+            if done_items.iter().any(|d| d.equals(&node).unwrap_or(false)) {
+                continue;
+            }
+            let preds = match &*preds_ref.borrow() { PyObject::List(v) => v.clone(), _ => vec![] };
+            let all_done = preds.iter().all(|p| done_items.iter().any(|d| d.equals(p).unwrap_or(false)));
+            if all_done {
+                ready.push(node);
+            }
+        }
+        Ok(py_tuple(ready))
+    }));
+    type_dict.insert("done".to_string(), bf!("done", |args| {
+        if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
+            if let Some(done_ref) = dict.get(TOPOSORTER_DONE_KEY) {
+                if let PyObject::Dict(d) = &mut *done_ref.borrow_mut() {
+                    for node in &args[1..] {
+                        d.set(node.clone(), py_bool(true))?;
+                    }
+                }
+            }
+        }
+        Ok(py_none())
+    }));
+    type_dict.insert("is_active".to_string(), bf!("is_active", |args| {
+        let graph = toposorter_graph(&args[0]).ok_or_else(|| PyError::runtime_error("not a TopologicalSorter"))?;
+        let total = match &*graph.borrow() { PyObject::Dict(d) => d.len(), _ => 0 };
+        let done_count = if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+            match dict.get(TOPOSORTER_DONE_KEY) {
+                Some(done_ref) => match &*done_ref.borrow() { PyObject::Dict(d) => d.len(), _ => 0 },
+                None => 0,
+            }
+        } else { 0 };
+        Ok(py_bool(done_count < total))
+    }));
+    type_dict.insert("__bool__".to_string(), bf!("__bool__", |args| {
+        let graph = toposorter_graph(&args[0]).ok_or_else(|| PyError::runtime_error("not a TopologicalSorter"))?;
+        let non_empty = match &*graph.borrow() { PyObject::Dict(d) => !d.is_empty(), _ => false };
+        Ok(py_bool(non_empty))
+    }));
 
-        Ok(py_list(sorted))
-    });
+    PyObjectRef::new(PyObject::Type { name: "TopologicalSorter".to_string(), dict: type_dict, bases: vec![], mro: vec![] })
+}
 
+fn get_topological_sorter_type() -> PyObjectRef {
+    let existing = TOPOSORTER_TYPE.with(|c| c.borrow().clone());
+    if let Some(t) = existing { return t; }
+    let typ = build_topological_sorter_type();
+    TOPOSORTER_TYPE.with(|c| { *c.borrow_mut() = Some(typ.clone()); });
+    typ
+}
+
+pub fn create_graphlib_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    d.insert("TopologicalSorter".to_string(), get_topological_sorter_type());
+    d.insert("CycleError".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "CycleError".to_string(),
+        func: crate::object::builtin_make_exception_cycleerror,
+    }));
     d
 }
 
@@ -1905,6 +2095,9 @@ pub fn create_pickle_dict() -> HashMap<String, PyObjectRef> {
             );
         };
     }
+
+    d.insert("HIGHEST_PROTOCOL".to_string(), py_int(5));
+    d.insert("DEFAULT_PROTOCOL".to_string(), py_int(4));
 
     pickle_func!("dumps", |args| {
         if args.is_empty() {
@@ -3331,6 +3524,49 @@ pub fn create_email_header_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
+// Zeller's congruence, adjusted for a Monday=0..Sunday=6 result (RFC 2822 order)
+fn day_of_week(y: i64, m: i64, d: i64) -> usize {
+    let (y, m) = if m < 3 { (y - 1, m + 12) } else { (y, m) };
+    let k = y % 100;
+    let j = y / 100;
+    let h = (d + (13 * (m + 1)) / 5 + k + k / 4 + j / 4 + 5 * j) % 7;
+    // h: 0=Saturday, 1=Sunday, 2=Monday, ... -> convert to Monday=0..Sunday=6
+    ((h + 5) % 7) as usize
+}
+
+fn rfc2822_date(y: i64, mo: i64, d: i64, h: i64, mi: i64, s: i64) -> String {
+    const DAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    let wd = DAYS[day_of_week(y, mo, d)];
+    let mon = MONTHS[((mo - 1).clamp(0, 11)) as usize];
+    format!("{}, {:02} {} {:04} {:02}:{:02}:{:02} +0000", wd, d, mon, y, h, mi, s)
+}
+
+fn unix_secs_to_ymdhms(secs: i64) -> (i64, i64, i64, i64, i64, i64) {
+    let days = secs.div_euclid(86400);
+    let day_secs = secs.rem_euclid(86400);
+    let hours = day_secs / 3600;
+    let minutes = (day_secs / 60) % 60;
+    let seconds = day_secs % 60;
+    let mut y = 1970i64;
+    let mut remaining = days;
+    loop {
+        let year_days = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) { 366 } else { 365 };
+        if remaining >= year_days { remaining -= year_days; y += 1; }
+        else if remaining < 0 { y -= 1; let yd = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) { 366 } else { 365 }; remaining += yd; }
+        else { break; }
+    }
+    let is_leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let month_days = [31, if is_leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut m = 1i64;
+    for days_in_month in &month_days {
+        if remaining < *days_in_month { break; }
+        remaining -= days_in_month;
+        m += 1;
+    }
+    (y, m, remaining + 1, hours, minutes, seconds)
+}
+
 pub fn create_email_utils_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! eu_func {
@@ -3342,8 +3578,28 @@ pub fn create_email_utils_dict() -> HashMap<String, PyObjectRef> {
     }
     // formatdate(timeval=None, localtime=False, usegmt=False) -> string
     eu_func!("formatdate", |args| {
-        let _secs = if args.len() > 0 { args[0].as_f64().unwrap_or(0.0) } else { 0.0 };
-        Ok(py_str("Thu, 01 Jan 2025 00:00:00 +0000"))
+        let secs = if !args.is_empty() && !matches!(&*args[0].borrow(), PyObject::None) {
+            args[0].as_f64().unwrap_or(0.0) as i64
+        } else {
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64
+        };
+        let (y, mo, d, h, mi, s) = unix_secs_to_ymdhms(secs);
+        Ok(py_str(&rfc2822_date(y, mo, d, h, mi, s)))
+    });
+    // format_datetime(dt, usegmt=False) -> string — reads year/month/day/
+    // hour/minute/second attributes off the given datetime-like object.
+    eu_func!("format_datetime", |args| {
+        if args.is_empty() { return Err(PyError::type_error("format_datetime() missing required argument")); }
+        let get = |name: &str, default: i64| -> i64 {
+            args[0].borrow().get_attribute(name).ok().and_then(|v| v.as_i64()).unwrap_or(default)
+        };
+        let y = get("year", 1970);
+        let mo = get("month", 1);
+        let d = get("day", 1);
+        let h = get("hour", 0);
+        let mi = get("minute", 0);
+        let s = get("second", 0);
+        Ok(py_str(&rfc2822_date(y, mo, d, h, mi, s)))
     });
     d
 }

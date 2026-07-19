@@ -42,6 +42,25 @@ fn close_fd(fd: i32) {
     drop(file); // Closes the fd
 }
 
+/// Get an independently-owned, safely-droppable `File` for a standard
+/// stream fd (0/1/2) without ever opening `/dev/stdout`-style paths: doing
+/// so via `File::create` implies `O_TRUNC`, and every `VirtualMachine::new()`
+/// (including the disposable, throwaway VMs Rust builtins spin up to invoke
+/// a Python-level method — see `call_bound_method`) rebuilds `sys.stdout`,
+/// truncating the *real* process stdout out from under any output already
+/// written by the outer, real VM. `try_clone()` duplicates the fd instead
+/// (like `dup()`), sharing the real stream's file offset without truncating
+/// it and without risking the real fd getting closed when this VM drops.
+fn dup_std_fd(fd: i32) -> std::io::Result<std::fs::File> {
+    use std::os::unix::io::FromRawFd;
+    // SAFETY: from_raw_fd takes ownership, but we forget() it right after
+    // cloning so the real fd (0/1/2) is never closed by this wrapper.
+    let borrowed = unsafe { std::fs::File::from_raw_fd(fd) };
+    let dup = borrowed.try_clone();
+    std::mem::forget(borrowed);
+    dup
+}
+
 pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     let mut builtins = HashMap::new();
     builtins.insert("None".to_string(), py_none());
@@ -180,6 +199,29 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     add_exc_type!("ExceptionGroup", builtin_make_exception_exceptiongroup);
     add_exc_type!("BaseExceptionGroup", builtin_make_exception_baseexceptiongroup);
     add_exc_type!("SystemError", builtin_make_exception_systemerror);
+    add_exc_type!("Warning", builtin_make_exception_warning);
+    add_exc_type!("UserWarning", builtin_make_exception_userwarning);
+    add_exc_type!("DeprecationWarning", builtin_make_exception_deprecationwarning);
+    add_exc_type!("PendingDeprecationWarning", builtin_make_exception_pendingdeprecationwarning);
+    add_exc_type!("SyntaxWarning", builtin_make_exception_syntaxwarning);
+    add_exc_type!("RuntimeWarning", builtin_make_exception_runtimewarning);
+    add_exc_type!("FutureWarning", builtin_make_exception_futurewarning);
+    add_exc_type!("ImportWarning", builtin_make_exception_importwarning);
+    add_exc_type!("UnicodeWarning", builtin_make_exception_unicodewarning);
+    add_exc_type!("BytesWarning", builtin_make_exception_byteswarning);
+    add_exc_type!("ResourceWarning", builtin_make_exception_resourcewarning);
+    add_exc_type!("ReferenceError", builtin_make_exception_referenceerror);
+    add_exc_type!("BufferError", builtin_make_exception_buffererror);
+    add_exc_type!("MemoryError", builtin_make_exception_memoryerror);
+    add_exc_type!("NotADirectoryError", builtin_make_exception_notadirectoryerror);
+    add_exc_type!("IsADirectoryError", builtin_make_exception_isadirectoryerror);
+    add_exc_type!("FileExistsError", builtin_make_exception_fileexistserror);
+    add_exc_type!("ConnectionAbortedError", builtin_make_exception_connectionabortederror);
+    add_exc_type!("ConnectionResetError", builtin_make_exception_connectionreseterror);
+    add_exc_type!("ProcessLookupError", builtin_make_exception_processlookuperror);
+    add_exc_type!("UnicodeTranslateError", builtin_make_exception_unicodetranslateerror);
+    add_exc_type!("IndentationError", builtin_make_exception_indentationerror);
+    add_exc_type!("TabError", builtin_make_exception_taberror);
 
     let math_module = PyObjectRef::new(PyObject::Module {
         name: "math".to_string(),
@@ -901,20 +943,19 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
     d.insert("version_info".to_string(), py_tuple(vec![py_int(3), py_int(12), py_int(0)]));
     d.insert("hexversion".to_string(), py_int(0x030c0000));
     d.insert("stdin".to_string(), PyObjectRef::new(PyObject::File {
-        file: std::rc::Rc::new(std::cell::RefCell::new(std::fs::File::open("/dev/stdin").unwrap_or_else(|_| {
-            // Fallback: create a temporary file
-            std::fs::File::create("/dev/null").unwrap()
+        file: std::rc::Rc::new(std::cell::RefCell::new(dup_std_fd(0).unwrap_or_else(|_| {
+            std::fs::File::open("/dev/null").unwrap()
         }))),
         name: "<stdin>".to_string(),
     }));
     d.insert("stdout".to_string(), PyObjectRef::new(PyObject::File {
-        file: std::rc::Rc::new(std::cell::RefCell::new(std::fs::File::create("/dev/stdout").unwrap_or_else(|_| {
+        file: std::rc::Rc::new(std::cell::RefCell::new(dup_std_fd(1).unwrap_or_else(|_| {
             std::fs::File::create("/dev/null").unwrap()
         }))),
         name: "<stdout>".to_string(),
     }));
     d.insert("stderr".to_string(), PyObjectRef::new(PyObject::File {
-        file: std::rc::Rc::new(std::cell::RefCell::new(std::fs::File::create("/dev/stderr").unwrap_or_else(|_| {
+        file: std::rc::Rc::new(std::cell::RefCell::new(dup_std_fd(2).unwrap_or_else(|_| {
             std::fs::File::create("/dev/null").unwrap()
         }))),
         name: "<stderr>".to_string(),
@@ -1339,6 +1380,15 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
             d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
         };
     }
+    d.insert("curdir".to_string(), py_str("."));
+    d.insert("pardir".to_string(), py_str(".."));
+    d.insert("sep".to_string(), py_str(if cfg!(windows) { "\\" } else { "/" }));
+    d.insert("altsep".to_string(), if cfg!(windows) { py_str("/") } else { py_none() });
+    d.insert("extsep".to_string(), py_str("."));
+    d.insert("pathsep".to_string(), py_str(if cfg!(windows) { ";" } else { ":" }));
+    d.insert("linesep".to_string(), py_str(if cfg!(windows) { "\r\n" } else { "\n" }));
+    d.insert("defpath".to_string(), py_str(if cfg!(windows) { "." } else { ":/bin:/usr/bin" }));
+    d.insert("devnull".to_string(), py_str(if cfg!(windows) { "nul" } else { "/dev/null" }));
     os_func!("listdir", |args| {
         let path = if args.len() > 0 { args[0].str() } else { ".".to_string() };
         match std::fs::read_dir(&path) {
@@ -1802,6 +1852,15 @@ pub fn create_os_path_dict() -> HashMap<String, PyObjectRef> {
             d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
         };
     }
+
+    d.insert("curdir".to_string(), py_str("."));
+    d.insert("pardir".to_string(), py_str(".."));
+    d.insert("sep".to_string(), py_str(if cfg!(windows) { "\\" } else { "/" }));
+    d.insert("altsep".to_string(), if cfg!(windows) { py_str("/") } else { py_none() });
+    d.insert("extsep".to_string(), py_str("."));
+    d.insert("pathsep".to_string(), py_str(if cfg!(windows) { ";" } else { ":" }));
+    d.insert("defpath".to_string(), py_str(if cfg!(windows) { "." } else { ":/bin:/usr/bin" }));
+    d.insert("devnull".to_string(), py_str(if cfg!(windows) { "nul" } else { "/dev/null" }));
 
     // --- String-based path manipulation functions ---
 

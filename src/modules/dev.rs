@@ -587,7 +587,118 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
         Ok(py_list(members))
     });
 
-    inspect_func!("signature", |_args| Ok(py_str("<signature not available>")));
+    inspect_func!("getfullargspec", |args| {
+        if args.is_empty() { return Err(PyError::type_error("getfullargspec() requires 1 argument")); }
+        let target = match &*args[0].borrow() {
+            PyObject::BoundMethod { func, .. } => func.clone(),
+            _ => args[0].clone(),
+        };
+        let b = target.borrow();
+        if let PyObject::Function { code, defaults, .. } = &*b {
+            let arg_count = code.arg_count.min(code.varnames.len());
+            let positional_args: Vec<PyObjectRef> = code.varnames[..arg_count].iter().map(|n| py_str(n)).collect();
+            let kwonlyargs: Vec<PyObjectRef> = if code.kwonlyarg_count > 0 {
+                code.varnames.get(arg_count..arg_count + code.kwonlyarg_count)
+                    .map(|s| s.iter().map(|n| py_str(n)).collect())
+                    .unwrap_or_default()
+            } else {
+                vec![]
+            };
+            let varargs = code.vararg_name.as_ref().map(|n| py_str(n)).unwrap_or_else(py_none);
+            let varkw = code.kwarg_name.as_ref().map(|n| py_str(n)).unwrap_or_else(py_none);
+            let defaults_val = if defaults.is_empty() { py_none() } else { py_tuple(defaults.clone()) };
+            Ok(py_tuple(vec![
+                py_list(positional_args),
+                varargs,
+                varkw,
+                defaults_val,
+                py_list(kwonlyargs),
+                py_none(),
+                py_dict(),
+            ]))
+        } else {
+            Err(PyError::type_error("getfullargspec() requires a Python function"))
+        }
+    });
+
+    inspect_func!("unwrap", |args| {
+        if args.is_empty() { return Err(PyError::type_error("unwrap() requires 1 argument")); }
+        let mut current = args[0].clone();
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            let next = current.borrow().get_attribute("__wrapped__").ok();
+            match next {
+                Some(w) => {
+                    if !seen.insert(w.get_id()) { break; }
+                    current = w;
+                }
+                None => break,
+            }
+        }
+        Ok(current)
+    });
+
+    inspect_func!("signature", |args| {
+        if args.is_empty() { return Err(PyError::type_error("signature() requires 1 argument")); }
+        let target = match &*args[0].borrow() {
+            PyObject::BoundMethod { func, .. } => func.clone(),
+            _ => args[0].clone(),
+        };
+        let b = target.borrow();
+        if let PyObject::Function { code, defaults, .. } = &*b {
+            let mut param_type_dict = HashMap::new();
+            param_type_dict.insert("POSITIONAL_ONLY".to_string(), py_int(0));
+            param_type_dict.insert("POSITIONAL_OR_KEYWORD".to_string(), py_int(1));
+            param_type_dict.insert("VAR_POSITIONAL".to_string(), py_int(2));
+            param_type_dict.insert("KEYWORD_ONLY".to_string(), py_int(3));
+            param_type_dict.insert("VAR_KEYWORD".to_string(), py_int(4));
+            param_type_dict.insert("empty".to_string(), py_none());
+            let param_type = PyObjectRef::new(PyObject::Type { name: "Parameter".to_string(), dict: param_type_dict, bases: vec![], mro: vec![] });
+            let make_param = |pname: &str, kind: i64, default: PyObjectRef, param_type: &PyObjectRef| {
+                let mut inst_dict = HashMap::new();
+                inst_dict.insert("name".to_string(), py_str(pname));
+                inst_dict.insert("kind".to_string(), py_int(kind));
+                inst_dict.insert("default".to_string(), default);
+                PyObjectRef::new(PyObject::Instance { typ: param_type.clone(), dict: inst_dict })
+            };
+            let mut params = PyDict::new();
+            let arg_count = code.arg_count.min(code.varnames.len());
+            let num_defaults = defaults.len();
+            let first_default_idx = arg_count.saturating_sub(num_defaults);
+            for i in 0..arg_count {
+                let pname = code.varnames[i].clone();
+                let default = if i >= first_default_idx { defaults[i - first_default_idx].clone() } else { py_none() };
+                let p = make_param(&pname, 1, default, &param_type); // POSITIONAL_OR_KEYWORD
+                params.set(py_str(&pname), p)?;
+            }
+            if let Some(va) = &code.vararg_name {
+                let p = make_param(va, 2, py_none(), &param_type); // VAR_POSITIONAL
+                params.set(py_str(va), p)?;
+            }
+            // varnames layout is: positional args, then *args (if any), then
+            // kwonly args, then **kwargs (if any) — the vararg slot must be
+            // skipped when locating where kwonly names start.
+            let kwonly_start = arg_count + if code.vararg_name.is_some() { 1 } else { 0 };
+            if code.kwonlyarg_count > 0 {
+                if let Some(kwonly) = code.varnames.get(kwonly_start..kwonly_start + code.kwonlyarg_count) {
+                    for pname in kwonly {
+                        let p = make_param(pname, 3, py_none(), &param_type); // KEYWORD_ONLY
+                        params.set(py_str(pname), p)?;
+                    }
+                }
+            }
+            if let Some(kw) = &code.kwarg_name {
+                let p = make_param(kw, 4, py_none(), &param_type); // VAR_KEYWORD
+                params.set(py_str(kw), p)?;
+            }
+            let sig_type = PyObjectRef::new(PyObject::Type { name: "Signature".to_string(), dict: HashMap::new(), bases: vec![], mro: vec![] });
+            let mut sig_dict = HashMap::new();
+            sig_dict.insert("parameters".to_string(), PyObjectRef::new(PyObject::Dict(params)));
+            Ok(PyObjectRef::new(PyObject::Instance { typ: sig_type, dict: sig_dict }))
+        } else {
+            Err(PyError::type_error("signature() requires a Python function"))
+        }
+    });
     inspect_func!("currentframe", |_args| Ok(py_none()));
     inspect_func!("stack", |_args| Ok(py_list(vec![])));
     inspect_func!("getouterframes", |_args| Ok(py_list(vec![])));

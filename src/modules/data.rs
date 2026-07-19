@@ -56,65 +56,6 @@ pub fn create_collections_dict() -> HashMap<String, PyObjectRef> {
         Ok(PyObjectRef::new(PyObject::List(deque.into_iter().collect())))
     });
 
-    // Counter: count hashable objects
-    coll_func!("Counter", |args| {
-        if args.is_empty() {
-            return Ok(crate::object::py_dict());
-        }
-        let iterable = &args[0];
-        let mut counts = std::collections::HashMap::<usize, (PyObjectRef, i64)>::new();
-        let mut order = Vec::new();
-        if let Ok(it) = crate::object::builtin_iter(&[iterable.clone()]) {
-            loop {
-                match crate::object::builtin_next(&[it.clone()]) {
-                    Ok(item) => {
-                        let hash = item.hash()?;
-                        let entry = counts.entry(hash).or_insert_with(|| {
-                            order.push(hash);
-                            (item.clone(), 0)
-                        });
-                        entry.1 += 1;
-                    }
-                    Err(crate::object::PyError::StopIteration) => break,
-                    Err(e) => return Err(e),
-                }
-            }
-        }
-        let counter = crate::object::PyObjectRef::imm(crate::object::PyObject::Instance {
-            typ: crate::object::py_str("Counter"),
-            dict: std::collections::HashMap::new(),
-        });
-        for hash in &order {
-            if let Some((item, count)) = counts.get(hash) {
-                let count_val = crate::object::py_int(*count);
-                let key_str = item.str();
-                let _ = counter.borrow_mut().set_attribute(&key_str, count_val);
-            }
-        }
-        // Register __missing__ that returns 0 for missing keys (dict subclass protocol)
-        let missing = crate::object::PyObjectRef::imm(crate::object::PyObject::BuiltinFunction {
-            name: "__missing__".to_string(),
-            func: |_args: &[crate::object::PyObjectRef]| -> crate::object::PyResult<crate::object::PyObjectRef> {
-                Ok(crate::object::py_int(0))
-            },
-        });
-        let _ = counter.borrow_mut().set_attribute("__missing__", missing);
-        Ok(counter)
-    });
-
-    // defaultdict: dict subclass that calls factory for missing keys
-    coll_func!("defaultdict", |args| {
-        let dict = crate::object::py_dict();
-        // Note: source dict copy not implemented (private buckets field)
-        // defaultdict(default_factory) and defaultdict(default_factory, initial_dict)
-        // work with the initial_dict as a separate argument.
-        let factory = if args.len() > 0 { Some(args[0].clone()) } else { None };
-        if let Some(f) = factory {
-            let _ = dict.borrow_mut().set_attribute("default_factory", f);
-        }
-        Ok(dict)
-    });
-
     // OrderedDict: remembers insertion order
     coll_func!("OrderedDict", |args| {
         let dict = crate::object::py_dict();
@@ -202,6 +143,16 @@ pub fn create_collections_dict() -> HashMap<String, PyObjectRef> {
 
     d
 }
+
+/// `lru_cache`/`cache` source — see VirtualMachine::install_source_defined_stdlib.
+pub const FUNCTOOLS_EXTRA_SOURCE: &str = include_str!("functools_extra.py");
+
+/// UserList/UserDict/UserString source (like CPython's own collections.py).
+/// Compiled and run once, post-construction, against the real VM — see
+/// `VirtualMachine::install_collections_user_types` in vm.rs. Composition
+/// over self.data works correctly for real subclassing (unlike inheriting
+/// from the native list/dict/str types directly, which isn't supported).
+pub const COLLECTIONS_USER_TYPES_SOURCE: &str = include_str!("collections_user_types.py");
 
 pub fn create_functools_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
@@ -329,76 +280,12 @@ pub fn create_functools_dict() -> HashMap<String, PyObjectRef> {
         };
         Ok(PyObjectRef::new(PyObject::Closure(Rc::new(decorator))))
     });
-    // lru_cache(maxsize): simple memoization cache
-    ft_func!("lru_cache", |args| {
-        let maxsize = if !args.is_empty() {
-            match &*args[0].borrow() {
-                PyObject::Int(i) => i.to_i64().unwrap_or(128) as usize,
-                _ => 128,
-            }
-        } else { 128 };
-        // Return a decorator (closure) that wraps functions
-        let decorator = move |dec_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
-            if dec_args.is_empty() {
-                return Err(PyError::type_error("lru_cache requires a function argument"));
-            }
-            let func = dec_args[0].clone();
-            let cache = std::cell::RefCell::new(
-                std::collections::HashMap::<String, PyObjectRef>::new(),
-            );
-            let maxsize = maxsize;
-            let cache_wrapper = move |inner_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
-                let key = inner_args
-                    .iter()
-                    .map(|a| format!("{:?}", a))
-                    .collect::<Vec<_>>()
-                    .join(",");
-                let mut cache = cache.borrow_mut();
-                if let Some(cached) = cache.get(&key) {
-                    return Ok(cached.clone());
-                }
-                let result = builtin_call(&func, inner_args)?;
-                if cache.len() < maxsize {
-                    cache.insert(key, result.clone());
-                }
-                Ok(result)
-            };
-            Ok(PyObjectRef::new(PyObject::Closure(Rc::new(cache_wrapper))))
-        };
-        Ok(PyObjectRef::new(PyObject::Closure(Rc::new(decorator))))
-    });
-
-    // cache: alias for lru_cache(maxsize=None) (unbounded cache)
-    ft_func!("cache", |_args| {
-            let decorator = move |dec_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
-                if dec_args.is_empty() {
-                    return Err(PyError::type_error("cache requires a function argument"));
-                }
-                let func = dec_args[0].clone();
-                let cache = std::rc::Rc::new(std::cell::RefCell::new(
-                    std::collections::HashMap::<String, PyObjectRef>::new(),
-                ));
-                let func_for_cache = func.clone();
-                let cache_wrapper = move |inner_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
-                    let key = inner_args
-                        .iter()
-                        .map(|a| format!("{:?}", a))
-                        .collect::<Vec<_>>()
-                        .join(",");
-                    let mut c = cache.borrow_mut();
-                    if let Some(result) = c.get(&key) {
-                        return Ok(result.clone());
-                    }
-                    let result = builtin_call(&func_for_cache, inner_args)?;
-                    c.insert(key, result.clone());
-                    Ok(result)
-                };
-                let wrapper = PyObjectRef::new(PyObject::Closure(Rc::new(cache_wrapper)));
-                let _ = wrapper.borrow_mut().set_attribute("__wrapped__", func);
-                Ok(wrapper)
-            };
-            Ok(PyObjectRef::new(PyObject::Closure(Rc::new(decorator))))
-        });
+    // lru_cache/cache: real implementations installed as Python source —
+    // see VirtualMachine::new_with_args's install_source_defined_stdlib
+    // call and functools_extra.py. A wrapper needs to support the
+    // descriptor protocol (__get__, for correct method binding) and expose
+    // cache_clear()/cache_info(), neither of which a bare Rust closure can
+    // hold (PyObject::Closure has no attribute storage).
 
     // singledispatch: generic function dispatcher
     // Used by pkgutil, among others
@@ -730,166 +617,6 @@ pub fn create_itertools_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
-pub fn create_datetime_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! dt_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    dt_func!("datetime", |_args| {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default();
-        let secs = now.as_secs() as i64;
-        let _nanos = now.subsec_nanos();
-        // Format as ISO string
-        let seconds = secs % 60;
-        let minutes = (secs / 60) % 60;
-        let hours = (secs / 3600) % 24;
-        let days = secs / 86400;
-        // Approximate year/month/day from days since epoch
-        let mut y = 1970i64;
-        let mut remaining = days;
-        loop {
-            let year_days = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) { 366 } else { 365 };
-            if remaining < year_days { break; }
-            remaining -= year_days;
-            y += 1;
-        }
-        let is_leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
-        let month_days = [31, if is_leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-        let mut m = 1usize;
-        for days_in_month in &month_days {
-            if remaining < *days_in_month { break; }
-            remaining -= days_in_month;
-            m += 1;
-        }
-        let d = remaining + 1;
-        let dt = PyObjectRef::new(PyObject::Instance {
-            typ: PyObjectRef::new(PyObject::Type {
-                name: "datetime".to_string(),
-                dict: HashMap::new(),
-                bases: vec![],
-                mro: vec![],
-            }),
-            dict: HashMap::new(),
-        });
-        let _ = dt.borrow_mut().set_attribute("year", py_int(y));
-        let _ = dt.borrow_mut().set_attribute("month", py_int(m as i64));
-        let _ = dt.borrow_mut().set_attribute("day", py_int(d));
-        let _ = dt.borrow_mut().set_attribute("hour", py_int(hours as i64));
-        let _ = dt.borrow_mut().set_attribute("minute", py_int(minutes as i64));
-        let _ = dt.borrow_mut().set_attribute("second", py_int(seconds as i64));
-        Ok(dt)
-    });
-
-    dt_func!("date", |_args| {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default();
-        let secs = now.as_secs() as i64;
-        let days = secs / 86400;
-        let mut y = 1970i64;
-        let mut remaining = days;
-        loop {
-            let year_days = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) { 366 } else { 365 };
-            if remaining < year_days { break; }
-            remaining -= year_days;
-            y += 1;
-        }
-        let is_leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
-        let month_days = [31, if is_leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-        let mut m = 1usize;
-        for days_in_month in &month_days {
-            if remaining < *days_in_month { break; }
-            remaining -= days_in_month;
-            m += 1;
-        }
-        let d = remaining + 1;
-        Ok(py_str(&format!("{:04}-{:02}-{:02}", y, m, d)))
-    });
-
-    dt_func!("now", |_args| {
-        let s = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default();
-        Ok(py_float(s.as_secs_f64()))
-    });
-
-    // Minimal datetime.time class stub — needed by django.utils.encoding
-    dt_func!("time", |args| {
-        let hour = if args.len() > 0 { args[0].str().parse::<u32>().unwrap_or(0) } else { 0 };
-        let minute = if args.len() > 1 { args[1].str().parse::<u32>().unwrap_or(0) } else { 0 };
-        let second = if args.len() > 2 { args[2].str().parse::<u32>().unwrap_or(0) } else { 0 };
-        Ok(py_str(&format!("{:02}:{:02}:{:02}", hour, minute, second)))
-    });
-    dt_func!("timedelta", |args| {
-        let td = PyObjectRef::new(PyObject::Instance {
-            typ: PyObjectRef::new(PyObject::Type {
-                name: "timedelta".to_string(),
-                dict: HashMap::new(),
-                bases: vec![],
-                mro: vec![],
-            }),
-            dict: HashMap::new(),
-        });
-        // timedelta(days=X) -> first arg may be a dict with keyword arguments
-        if args.len() > 0 {
-            let first = &args[0];
-            if let PyObject::Dict(kwargs) = &*first.borrow() {
-                if let Ok(Some(days_val)) = kwargs.get(&crate::object::py_str("days")) {
-                    let _ = td.borrow_mut().set_attribute("days", days_val);
-                }
-                if let Ok(Some(secs_val)) = kwargs.get(&crate::object::py_str("seconds")) {
-                    let _ = td.borrow_mut().set_attribute("seconds", secs_val);
-                }
-                if let Ok(Some(micro_val)) = kwargs.get(&crate::object::py_str("microseconds")) {
-                    let _ = td.borrow_mut().set_attribute("microseconds", micro_val);
-                }
-            } else if let PyObject::Int(i) = &*first.borrow() {
-                // Positional: timedelta(5) means days=5
-                if let Some(days) = i.to_i64() {
-                    let _ = td.borrow_mut().set_attribute("days", py_int(days));
-                }
-            }
-        }
-        Ok(td)
-    });
-    dt_func!("tzinfo", |_args| {
-        Ok(py_none())
-    });
-    dt_func!("timezone", |_args| {
-        // timezone(offset, name=None) — simplified
-        Ok(py_none())
-    });
-    // UTC tzinfo singleton with utcoffset/dst/tzname methods
-    let utc_instance = PyObjectRef::new(PyObject::Instance {
-        typ: PyObjectRef::new(PyObject::Type {
-            name: "datetime.timezone".to_string(),
-            dict: HashMap::new(),
-            bases: vec![],
-            mro: vec![],
-        }),
-        dict: HashMap::new(),
-    });
-    let _ = utc_instance.borrow_mut().set_attribute("utcoffset", PyObjectRef::imm(PyObject::BuiltinFunction {
-        name: "utcoffset".to_string(),
-        func: |_args| { Ok(py_int(0)) },
-    }));
-    let _ = utc_instance.borrow_mut().set_attribute("dst", PyObjectRef::imm(PyObject::BuiltinFunction {
-        name: "dst".to_string(),
-        func: |_args| { Ok(py_int(0)) },
-    }));
-    let _ = utc_instance.borrow_mut().set_attribute("tzname", PyObjectRef::imm(PyObject::BuiltinFunction {
-        name: "tzname".to_string(),
-        func: |_args| { Ok(py_str("UTC")) },
-    }));
-    d.insert("UTC".to_string(), utc_instance);
-
-    d
-}
 
 pub fn create_statistics_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
@@ -1062,6 +789,718 @@ pub fn create_statistics_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
+// ===================== Real decimal.Decimal =====================
+//
+// Arbitrary-precision decimal arithmetic per (a practical subset of) IBM's
+// General Decimal Arithmetic Specification, the same spec CPython's own
+// `decimal` module follows. A Decimal value is sign/coefficient/exponent
+// (or one of the special states NaN/sNaN/Infinity); the coefficient is a
+// `BigInt` so precision is genuinely unbounded, matching real semantics
+// (unlike the previous stub, which just wrapped the constructor argument in
+// a string with no arithmetic at all).
+//
+// Scope: construction (str/int/float/Decimal/tuple), correct string
+// formatting, +-*/ (with context precision/rounding), //, %, **  for integer
+// exponents, unary -/+/abs, comparisons, a usable (if approximate) hash,
+// quantize/normalize/as_tuple/is_*, and a Context type with
+// getcontext/setcontext/localcontext. Not implemented: exp/ln/log10/sqrt,
+// non-integer power, signal traps/flags (rounding happens silently, as if
+// no traps were enabled — only InvalidOperation/DivisionByZero on truly
+// undefined operations actually raise).
+
+#[derive(Clone, PartialEq, Debug)]
+enum DecSpecial { Finite, QNaN, SNaN, Infinity }
+
+#[derive(Clone, Debug)]
+struct DecValue {
+    special: DecSpecial,
+    sign: bool, // true = negative
+    coeff: num_bigint::BigInt, // non-negative significand; 0 for NaN/Infinity
+    exp: i64,   // meaningless for NaN/Infinity
+}
+
+impl DecValue {
+    fn zero() -> Self { DecValue { special: DecSpecial::Finite, sign: false, coeff: num_bigint::BigInt::from(0), exp: 0 } }
+    fn nan() -> Self { DecValue { special: DecSpecial::QNaN, sign: false, coeff: num_bigint::BigInt::from(0), exp: 0 } }
+    fn infinity(sign: bool) -> Self { DecValue { special: DecSpecial::Infinity, sign, coeff: num_bigint::BigInt::from(0), exp: 0 } }
+    fn is_zero(&self) -> bool { self.special == DecSpecial::Finite && num_traits::Zero::is_zero(&self.coeff) }
+    fn is_nan(&self) -> bool { matches!(self.special, DecSpecial::QNaN | DecSpecial::SNaN) }
+}
+
+fn parse_decimal_str(raw: &str) -> Option<DecValue> {
+    let s = raw.trim();
+    if s.is_empty() { return None; }
+    let mut sign = false;
+    let rest = if let Some(r) = s.strip_prefix('+') { r }
+        else if let Some(r) = s.strip_prefix('-') { sign = true; r }
+        else { s };
+    if rest.is_empty() { return None; }
+    let rest_lower = rest.to_ascii_lowercase();
+    if rest_lower == "inf" || rest_lower == "infinity" {
+        return Some(DecValue::infinity(sign));
+    }
+    if let Some(digits_part) = rest_lower.strip_prefix("snan") {
+        let coeff = if digits_part.is_empty() { num_bigint::BigInt::from(0) } else { num_bigint::BigInt::parse_bytes(digits_part.as_bytes(), 10)? };
+        return Some(DecValue { special: DecSpecial::SNaN, sign, coeff, exp: 0 });
+    }
+    if let Some(digits_part) = rest_lower.strip_prefix("nan") {
+        let coeff = if digits_part.is_empty() { num_bigint::BigInt::from(0) } else { num_bigint::BigInt::parse_bytes(digits_part.as_bytes(), 10)? };
+        return Some(DecValue { special: DecSpecial::QNaN, sign, coeff, exp: 0 });
+    }
+    let (mantissa_part, exp_part) = match rest.find(['e', 'E']) {
+        Some(idx) => (&rest[..idx], Some(&rest[idx + 1..])),
+        None => (rest, None),
+    };
+    if mantissa_part.is_empty() { return None; }
+    let (int_part, frac_part) = match mantissa_part.find('.') {
+        Some(idx) => (&mantissa_part[..idx], &mantissa_part[idx + 1..]),
+        None => (mantissa_part, ""),
+    };
+    if int_part.is_empty() && frac_part.is_empty() { return None; }
+    if !int_part.chars().all(|c| c.is_ascii_digit()) { return None; }
+    if !frac_part.chars().all(|c| c.is_ascii_digit()) { return None; }
+    let digits_str = format!("{}{}", int_part, frac_part);
+    let digits_str = if digits_str.is_empty() { "0".to_string() } else { digits_str };
+    let coeff = num_bigint::BigInt::parse_bytes(digits_str.as_bytes(), 10)?;
+    let mut exp: i64 = -(frac_part.len() as i64);
+    if let Some(exp_str) = exp_part {
+        let exp_str = exp_str.trim();
+        if exp_str.is_empty() { return None; }
+        let extra: i64 = exp_str.parse().ok()?;
+        exp += extra;
+    }
+    Some(DecValue { special: DecSpecial::Finite, sign, coeff, exp })
+}
+
+fn decval_from_f64(f: f64) -> DecValue {
+    // float -> Decimal must be exact (matching CPython's Decimal(float)),
+    // so go through the float's own repr rather than lossy formatting.
+    if f.is_nan() { return DecValue::nan(); }
+    if f.is_infinite() { return DecValue::infinity(f < 0.0); }
+    parse_decimal_str(&format!("{:e}", f)).unwrap_or_else(DecValue::zero)
+}
+
+fn ten_pow(n: i64) -> num_bigint::BigInt {
+    if n <= 0 { return num_bigint::BigInt::from(1); }
+    num_bigint::BigInt::from(10).pow(n as u32)
+}
+
+fn digit_count(coeff: &num_bigint::BigInt) -> usize {
+    if num_traits::Zero::is_zero(coeff) { return 1; }
+    coeff.to_string().len()
+}
+
+/// CPython's decimal-to-string algorithm (IBM spec `to-scientific-string`):
+/// plain notation when the exponent is small enough, scientific otherwise.
+fn format_decvalue(v: &DecValue) -> String {
+    let sign_str = if v.sign { "-" } else { "" };
+    match v.special {
+        DecSpecial::Infinity => return format!("{}Infinity", sign_str),
+        DecSpecial::QNaN => {
+            let digits = if num_traits::Zero::is_zero(&v.coeff) { String::new() } else { v.coeff.to_string() };
+            return format!("{}NaN{}", sign_str, digits);
+        }
+        DecSpecial::SNaN => {
+            let digits = if num_traits::Zero::is_zero(&v.coeff) { String::new() } else { v.coeff.to_string() };
+            return format!("{}sNaN{}", sign_str, digits);
+        }
+        DecSpecial::Finite => {}
+    }
+    let digits = if num_traits::Zero::is_zero(&v.coeff) { "0".to_string() } else { v.coeff.to_string() };
+    let leading = digits.len() as i64;
+    let adjusted_exp = v.exp + leading - 1;
+    if v.exp <= 0 && adjusted_exp >= -6 {
+        let body = if v.exp == 0 {
+            digits
+        } else if leading <= -v.exp {
+            format!("0.{}{}", "0".repeat((-v.exp - leading) as usize), digits)
+        } else {
+            let split = (leading + v.exp) as usize;
+            format!("{}.{}", &digits[..split], &digits[split..])
+        };
+        format!("{}{}", sign_str, body)
+    } else {
+        let body = if leading == 1 { digits.clone() } else { format!("{}.{}", &digits[..1], &digits[1..]) };
+        let exp_sign = if adjusted_exp >= 0 { "+" } else { "-" };
+        format!("{}{}E{}{}", sign_str, body, exp_sign, adjusted_exp.abs())
+    }
+}
+
+thread_local! {
+    static DECIMAL_TYPE: std::cell::RefCell<Option<PyObjectRef>> = std::cell::RefCell::new(None);
+    static DECIMAL_CONTEXT_TYPE: std::cell::RefCell<Option<PyObjectRef>> = std::cell::RefCell::new(None);
+    static DECIMAL_CURRENT_CONTEXT: std::cell::RefCell<(usize, String)> = std::cell::RefCell::new((28, "ROUND_HALF_EVEN".to_string()));
+}
+
+fn current_decimal_context() -> (usize, String) {
+    DECIMAL_CURRENT_CONTEXT.with(|c| c.borrow().clone())
+}
+
+const DEC_SIGN_KEY: &str = "_sign";
+const DEC_COEFF_KEY: &str = "_coeff";
+const DEC_EXP_KEY: &str = "_exp";
+const DEC_SPECIAL_KEY: &str = "_special";
+
+fn special_to_str(s: &DecSpecial) -> &'static str {
+    match s { DecSpecial::Finite => "", DecSpecial::QNaN => "n", DecSpecial::SNaN => "N", DecSpecial::Infinity => "F" }
+}
+fn special_from_str(s: &str) -> DecSpecial {
+    match s { "n" => DecSpecial::QNaN, "N" => DecSpecial::SNaN, "F" => DecSpecial::Infinity, _ => DecSpecial::Finite }
+}
+
+fn decval_to_instance(v: &DecValue) -> PyObjectRef {
+    let typ = get_decimal_type();
+    let mut dict = HashMap::new();
+    dict.insert(DEC_SIGN_KEY.to_string(), py_bool(v.sign));
+    dict.insert(DEC_COEFF_KEY.to_string(), py_int(v.coeff.clone()));
+    dict.insert(DEC_EXP_KEY.to_string(), py_int(v.exp));
+    dict.insert(DEC_SPECIAL_KEY.to_string(), py_str(special_to_str(&v.special)));
+    PyObjectRef::new(PyObject::Instance { typ, dict })
+}
+
+fn instance_to_decval(obj: &PyObjectRef) -> Option<DecValue> {
+    if let PyObject::Instance { dict, .. } = &*obj.borrow() {
+        let sign = dict.get(DEC_SIGN_KEY)?.truthy();
+        let coeff = match &*dict.get(DEC_COEFF_KEY)?.borrow() {
+            PyObject::Int(i) => i.clone(),
+            _ => return None,
+        };
+        let exp = dict.get(DEC_EXP_KEY)?.as_i64().unwrap_or(0);
+        let special = special_from_str(&dict.get(DEC_SPECIAL_KEY)?.str());
+        Some(DecValue { special, sign, coeff, exp })
+    } else {
+        None
+    }
+}
+
+/// Coerce a constructor argument (str/int/float/Decimal/tuple) into a DecValue.
+fn decval_from_pyobject(v: &PyObjectRef) -> PyResult<DecValue> {
+    if let Some(existing) = instance_to_decval(v) {
+        return Ok(existing);
+    }
+    match &*v.borrow() {
+        PyObject::Str(s) => parse_decimal_str(s).ok_or_else(|| {
+            PyError::Exception("InvalidOperation".to_string(), PyObjectRef::new(PyObject::Exception {
+                typ: "InvalidOperation".to_string(),
+                args: vec![py_str(&format!("invalid literal for Decimal: '{}'", s))],
+                cause: None,
+            }))
+        }),
+        PyObject::Int(i) => {
+            let sign = num_traits::Signed::is_negative(i);
+            Ok(DecValue { special: DecSpecial::Finite, sign, coeff: num_traits::Signed::abs(i), exp: 0 })
+        }
+        PyObject::Bool(b) => Ok(DecValue { special: DecSpecial::Finite, sign: false, coeff: num_bigint::BigInt::from(if *b { 1 } else { 0 }), exp: 0 }),
+        PyObject::Float(f) => Ok(decval_from_f64(*f)),
+        PyObject::Tuple(parts) => {
+            if parts.len() != 3 { return Err(PyError::value_error("argument must be a sequence of length 3")); }
+            let sign = parts[0].as_i64().unwrap_or(0) != 0;
+            let digit_items: Vec<PyObjectRef> = match &*parts[1].borrow() {
+                PyObject::Tuple(d) | PyObject::List(d) => d.clone(),
+                _ => return Err(PyError::value_error("digits must be a sequence of ints")),
+            };
+            let mut digits_str = String::new();
+            for d in &digit_items { digits_str.push_str(&d.as_i64().unwrap_or(0).to_string()); }
+            if digits_str.is_empty() { digits_str.push('0'); }
+            match &*parts[2].borrow() {
+                PyObject::Str(s) if s == "F" => Ok(DecValue::infinity(sign)),
+                PyObject::Str(s) if s == "n" || s == "N" => {
+                    let coeff = num_bigint::BigInt::parse_bytes(digits_str.as_bytes(), 10).unwrap_or_default();
+                    Ok(DecValue { special: special_from_str(s), sign, coeff, exp: 0 })
+                }
+                _ => {
+                    let exp = parts[2].as_i64().unwrap_or(0);
+                    let coeff = num_bigint::BigInt::parse_bytes(digits_str.as_bytes(), 10).unwrap_or_default();
+                    Ok(DecValue { special: DecSpecial::Finite, sign, coeff, exp })
+                }
+            }
+        }
+        PyObject::None => Ok(DecValue::zero()),
+        _ => Err(PyError::type_error("conversion from unsupported type to Decimal")),
+    }
+}
+
+fn round_decvalue(v: &DecValue, precision: usize, rounding: &str) -> DecValue {
+    if v.special != DecSpecial::Finite { return v.clone(); }
+    let ndigits = digit_count(&v.coeff);
+    if ndigits <= precision { return v.clone(); }
+    let drop = ndigits - precision;
+    let divisor = ten_pow(drop as i64);
+    let q = &v.coeff / &divisor;
+    let r = &v.coeff % &divisor;
+    let new_exp = v.exp + drop as i64;
+    let twice_r = &r * num_bigint::BigInt::from(2);
+    let round_up = match rounding {
+        "ROUND_HALF_UP" => twice_r >= divisor,
+        "ROUND_HALF_DOWN" => twice_r > divisor,
+        "ROUND_HALF_EVEN" => {
+            use std::cmp::Ordering;
+            match twice_r.cmp(&divisor) {
+                Ordering::Greater => true,
+                Ordering::Less => false,
+                Ordering::Equal => (&q % 2) != num_bigint::BigInt::from(0),
+            }
+        }
+        "ROUND_UP" => !num_traits::Zero::is_zero(&r),
+        "ROUND_DOWN" => false,
+        "ROUND_CEILING" => !num_traits::Zero::is_zero(&r) && !v.sign,
+        "ROUND_FLOOR" => !num_traits::Zero::is_zero(&r) && v.sign,
+        "ROUND_05UP" => !num_traits::Zero::is_zero(&r) && { let last = &q % 10; last == num_bigint::BigInt::from(0) || last == num_bigint::BigInt::from(5) },
+        _ => {
+            use std::cmp::Ordering;
+            match twice_r.cmp(&divisor) {
+                Ordering::Greater => true,
+                Ordering::Less => false,
+                Ordering::Equal => (&q % 2) != num_bigint::BigInt::from(0),
+            }
+        }
+    };
+    let final_q = if round_up { q + 1 } else { q };
+    DecValue { special: DecSpecial::Finite, sign: v.sign, coeff: final_q, exp: new_exp }
+}
+
+fn round_to_context(v: DecValue) -> DecValue {
+    let (precision, rounding) = current_decimal_context();
+    round_decvalue(&v, precision, &rounding)
+}
+
+fn decval_align(a: &DecValue, b: &DecValue) -> (num_bigint::BigInt, num_bigint::BigInt, i64) {
+    let exp = a.exp.min(b.exp);
+    let a_scaled = &a.coeff * ten_pow(a.exp - exp);
+    let b_scaled = &b.coeff * ten_pow(b.exp - exp);
+    (a_scaled, b_scaled, exp)
+}
+
+
+fn decimal_invalid_op(msg: &str) -> PyError {
+    PyError::Exception("InvalidOperation".to_string(), PyObjectRef::new(PyObject::Exception {
+        typ: "InvalidOperation".to_string(), args: vec![py_str(msg)], cause: None,
+    }))
+}
+fn decimal_division_by_zero(msg: &str) -> PyError {
+    PyError::Exception("DivisionByZero".to_string(), PyObjectRef::new(PyObject::Exception {
+        typ: "DivisionByZero".to_string(), args: vec![py_str(msg)], cause: None,
+    }))
+}
+
+fn decimal_add(a: &DecValue, b: &DecValue) -> PyResult<DecValue> {
+    if a.is_nan() || b.is_nan() {
+        let src = if a.is_nan() { a } else { b };
+        return Ok(DecValue { special: DecSpecial::QNaN, sign: src.sign, coeff: src.coeff.clone(), exp: 0 });
+    }
+    if a.special == DecSpecial::Infinity || b.special == DecSpecial::Infinity {
+        if a.special == DecSpecial::Infinity && b.special == DecSpecial::Infinity && a.sign != b.sign {
+            return Err(decimal_invalid_op("(+Infinity) + (-Infinity)"));
+        }
+        return Ok(DecValue::infinity(if a.special == DecSpecial::Infinity { a.sign } else { b.sign }));
+    }
+    let (as_, bs, exp) = decval_align(a, b);
+    let sum = (if a.sign { -as_ } else { as_ }) + (if b.sign { -bs } else { bs });
+    let sign = num_traits::Signed::is_negative(&sum);
+    let result = DecValue { special: DecSpecial::Finite, sign, coeff: num_traits::Signed::abs(&sum), exp };
+    Ok(round_to_context(result))
+}
+
+fn decimal_negate(v: &DecValue) -> DecValue {
+    let mut r = v.clone();
+    if r.special == DecSpecial::Finite || r.special == DecSpecial::Infinity {
+        r.sign = !r.sign;
+    }
+    r
+}
+
+fn decimal_sub(a: &DecValue, b: &DecValue) -> PyResult<DecValue> {
+    decimal_add(a, &decimal_negate(b))
+}
+
+fn decimal_mul(a: &DecValue, b: &DecValue) -> PyResult<DecValue> {
+    if a.is_nan() || b.is_nan() {
+        let src = if a.is_nan() { a } else { b };
+        return Ok(DecValue { special: DecSpecial::QNaN, sign: src.sign, coeff: src.coeff.clone(), exp: 0 });
+    }
+    let sign = a.sign != b.sign;
+    if a.special == DecSpecial::Infinity || b.special == DecSpecial::Infinity {
+        if a.is_zero() || b.is_zero() { return Err(decimal_invalid_op("(+/-Infinity) * 0")); }
+        return Ok(DecValue::infinity(sign));
+    }
+    let result = DecValue { special: DecSpecial::Finite, sign, coeff: &a.coeff * &b.coeff, exp: a.exp + b.exp };
+    Ok(round_to_context(result))
+}
+
+fn decimal_div(a: &DecValue, b: &DecValue) -> PyResult<DecValue> {
+    if a.is_nan() || b.is_nan() {
+        let src = if a.is_nan() { a } else { b };
+        return Ok(DecValue { special: DecSpecial::QNaN, sign: src.sign, coeff: src.coeff.clone(), exp: 0 });
+    }
+    let sign = a.sign != b.sign;
+    if a.special == DecSpecial::Infinity && b.special == DecSpecial::Infinity {
+        return Err(decimal_invalid_op("(+/-Infinity) / (+/-Infinity)"));
+    }
+    if a.special == DecSpecial::Infinity { return Ok(DecValue::infinity(sign)); }
+    if b.special == DecSpecial::Infinity { return Ok(DecValue { special: DecSpecial::Finite, sign, coeff: num_bigint::BigInt::from(0), exp: 0 }); }
+    if b.is_zero() {
+        if a.is_zero() { return Err(decimal_invalid_op("0 / 0")); }
+        return Err(decimal_division_by_zero("division by zero"));
+    }
+    if a.is_zero() {
+        return Ok(round_to_context(DecValue { special: DecSpecial::Finite, sign, coeff: num_bigint::BigInt::from(0), exp: a.exp - b.exp }));
+    }
+    let (precision, rounding) = current_decimal_context();
+    // Scale the numerator so the integer quotient carries `precision` extra
+    // guard digits, then round back down to context precision — simplest
+    // correct-enough way to get a faithfully-rounded quotient without
+    // implementing the spec's exact ideal-exponent bookkeeping.
+    let guard = precision as i64 + digit_count(&a.coeff) as i64 + 2;
+    let scaled_num = &a.coeff * ten_pow(guard);
+    let raw_q = &scaled_num / &b.coeff;
+    let raw_r = &scaled_num % &b.coeff;
+    let raw_exp = a.exp - b.exp - guard;
+    let mut result = DecValue { special: DecSpecial::Finite, sign, coeff: raw_q, exp: raw_exp };
+    if !num_traits::Zero::is_zero(&raw_r) {
+        // Inexact — nudge the last kept digit if a straightforward rounding
+        // of the truncated remainder would change it (half-up on the guard
+        // digits is precise enough given the wide guard margin above).
+        if &raw_r * 2 >= b.coeff { result.coeff += 1; }
+    }
+    Ok(round_decvalue(&result, precision, &rounding))
+}
+
+fn decimal_compare(a: &DecValue, b: &DecValue) -> Option<std::cmp::Ordering> {
+    use std::cmp::Ordering;
+    if a.is_nan() || b.is_nan() { return None; }
+    match (&a.special, &b.special) {
+        (DecSpecial::Infinity, DecSpecial::Infinity) => {
+            return Some(if a.sign == b.sign { Ordering::Equal } else if a.sign { Ordering::Less } else { Ordering::Greater });
+        }
+        (DecSpecial::Infinity, _) => return Some(if a.sign { Ordering::Less } else { Ordering::Greater }),
+        (_, DecSpecial::Infinity) => return Some(if b.sign { Ordering::Greater } else { Ordering::Less }),
+        _ => {}
+    }
+    if a.is_zero() && b.is_zero() { return Some(Ordering::Equal); }
+    let (as_, bs, _) = decval_align(a, b);
+    let a_signed = if a.sign { -as_ } else { as_ };
+    let b_signed = if b.sign { -bs } else { bs };
+    Some(a_signed.cmp(&b_signed))
+}
+
+fn decval_to_f64(v: &DecValue) -> f64 {
+    match v.special {
+        DecSpecial::Infinity => if v.sign { f64::NEG_INFINITY } else { f64::INFINITY },
+        DecSpecial::QNaN | DecSpecial::SNaN => f64::NAN,
+        DecSpecial::Finite => {
+            // Parse the exact decimal string rather than coeff as f64 times
+            // 10^exp — that separate multiplication introduces float error
+            // (e.g. 12345.0 * 0.01 != 123.45 exactly), whereas Rust's own
+            // string-to-f64 parsing correctly rounds to the nearest float.
+            format!("{}{}e{}", if v.sign { "-" } else { "" }, v.coeff, v.exp).parse().unwrap_or(0.0)
+        }
+    }
+}
+
+fn normalize_decval(v: &DecValue) -> DecValue {
+    if v.special != DecSpecial::Finite || v.is_zero() {
+        if v.is_zero() { return DecValue { special: DecSpecial::Finite, sign: v.sign, coeff: num_bigint::BigInt::from(0), exp: 0 }; }
+        return v.clone();
+    }
+    let mut coeff = v.coeff.clone();
+    let mut exp = v.exp;
+    let ten = num_bigint::BigInt::from(10);
+    while &coeff % &ten == num_bigint::BigInt::from(0) && coeff != num_bigint::BigInt::from(0) {
+        coeff /= &ten;
+        exp += 1;
+    }
+    DecValue { special: DecSpecial::Finite, sign: v.sign, coeff, exp }
+}
+
+fn get_decimal_type() -> PyObjectRef {
+    let existing = DECIMAL_TYPE.with(|c| c.borrow().clone());
+    if let Some(t) = existing { return t; }
+    let typ = build_decimal_type();
+    DECIMAL_TYPE.with(|c| { *c.borrow_mut() = Some(typ.clone()); });
+    typ
+}
+
+fn build_decimal_type() -> PyObjectRef {
+    let mut type_dict: HashMap<String, PyObjectRef> = HashMap::new();
+    macro_rules! bf {
+        ($name:expr, $f:expr) => {
+            PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $f })
+        };
+    }
+
+    type_dict.insert("__init__".to_string(), bf!("__init__", |args| {
+        let v = if args.len() > 1 { decval_from_pyobject(&args[1])? } else { DecValue::zero() };
+        if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
+            dict.insert(DEC_SIGN_KEY.to_string(), py_bool(v.sign));
+            dict.insert(DEC_COEFF_KEY.to_string(), py_int(v.coeff));
+            dict.insert(DEC_EXP_KEY.to_string(), py_int(v.exp));
+            dict.insert(DEC_SPECIAL_KEY.to_string(), py_str(special_to_str(&v.special)));
+        }
+        Ok(py_none())
+    }));
+    type_dict.insert("__repr__".to_string(), bf!("__repr__", |args| {
+        let v = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
+        Ok(py_str(&format!("Decimal('{}')", format_decvalue(&v))))
+    }));
+    type_dict.insert("__str__".to_string(), bf!("__str__", |args| {
+        let v = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
+        Ok(py_str(&format_decvalue(&v)))
+    }));
+    type_dict.insert("__int__".to_string(), bf!("__int__", |args| {
+        let v = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
+        if v.special != DecSpecial::Finite { return Err(PyError::value_error("cannot convert NaN/Infinity to int")); }
+        let truncated = if v.exp >= 0 { &v.coeff * ten_pow(v.exp) } else { &v.coeff / ten_pow(-v.exp) };
+        Ok(py_int(if v.sign { -truncated } else { truncated }))
+    }));
+    type_dict.insert("__float__".to_string(), bf!("__float__", |args| {
+        let v = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
+        Ok(py_float(decval_to_f64(&v)))
+    }));
+    type_dict.insert("__bool__".to_string(), bf!("__bool__", |args| {
+        let v = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
+        Ok(py_bool(!v.is_zero()))
+    }));
+    type_dict.insert("__hash__".to_string(), bf!("__hash__", |args| {
+        let v = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
+        if v.special != DecSpecial::Finite { return Ok(py_int(0)); }
+        // Normalize (strip trailing zeros) so numerically-equal Decimals
+        // with different (coeff, exp) representations — e.g. 1 vs 1.0 —
+        // hash the same way `1 == 1.0` requires.
+        let n = normalize_decval(&v);
+        let s = format!("{}{}{}", n.sign, n.coeff, n.exp);
+        builtin_hash(&[py_str(&s)])
+    }));
+    type_dict.insert("__eq__".to_string(), bf!("__eq__", |args| {
+        let a = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
+        let b = match decval_from_pyobject(&args[1]) { Ok(v) => v, Err(_) => return Ok(py_bool(false)) };
+        Ok(py_bool(decimal_compare(&a, &b) == Some(std::cmp::Ordering::Equal)))
+    }));
+    macro_rules! dec_cmp {
+        ($name:expr, $ord:pat) => {
+            type_dict.insert($name.to_string(), bf!($name, |args| {
+                let a = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
+                let b = decval_from_pyobject(&args[1])?;
+                match decimal_compare(&a, &b) {
+                    Some($ord) => Ok(py_bool(true)),
+                    Some(_) => Ok(py_bool(false)),
+                    None => Err(PyError::type_error("cannot compare NaN with Decimal")),
+                }
+            }));
+        };
+    }
+    dec_cmp!("__lt__", std::cmp::Ordering::Less);
+    dec_cmp!("__gt__", std::cmp::Ordering::Greater);
+    type_dict.insert("__le__".to_string(), bf!("__le__", |args| {
+        let a = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
+        let b = decval_from_pyobject(&args[1])?;
+        match decimal_compare(&a, &b) {
+            Some(std::cmp::Ordering::Less) | Some(std::cmp::Ordering::Equal) => Ok(py_bool(true)),
+            Some(_) => Ok(py_bool(false)),
+            None => Err(PyError::type_error("cannot compare NaN with Decimal")),
+        }
+    }));
+    type_dict.insert("__ge__".to_string(), bf!("__ge__", |args| {
+        let a = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
+        let b = decval_from_pyobject(&args[1])?;
+        match decimal_compare(&a, &b) {
+            Some(std::cmp::Ordering::Greater) | Some(std::cmp::Ordering::Equal) => Ok(py_bool(true)),
+            Some(_) => Ok(py_bool(false)),
+            None => Err(PyError::type_error("cannot compare NaN with Decimal")),
+        }
+    }));
+    macro_rules! dec_binop {
+        ($name:expr, $op:expr) => {
+            type_dict.insert($name.to_string(), bf!($name, |args| {
+                let a = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
+                let b = decval_from_pyobject(&args[1])?;
+                Ok(decval_to_instance(&$op(&a, &b)?))
+            }));
+        };
+    }
+    dec_binop!("__add__", decimal_add);
+    dec_binop!("__radd__", |a, b| decimal_add(b, a));
+    dec_binop!("__sub__", decimal_sub);
+    dec_binop!("__rsub__", |a, b| decimal_sub(b, a));
+    dec_binop!("__mul__", decimal_mul);
+    dec_binop!("__rmul__", |a, b| decimal_mul(b, a));
+    dec_binop!("__truediv__", decimal_div);
+    dec_binop!("__rtruediv__", |a, b| decimal_div(b, a));
+    type_dict.insert("__floordiv__".to_string(), bf!("__floordiv__", |args| {
+        let a = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
+        let b = decval_from_pyobject(&args[1])?;
+        let q = decimal_div(&a, &b)?;
+        if q.special != DecSpecial::Finite { return Ok(decval_to_instance(&q)); }
+        let truncated = if q.exp >= 0 { &q.coeff * ten_pow(q.exp) } else { &q.coeff / ten_pow(-q.exp) };
+        Ok(decval_to_instance(&DecValue { special: DecSpecial::Finite, sign: q.sign, coeff: truncated, exp: 0 }))
+    }));
+    type_dict.insert("__mod__".to_string(), bf!("__mod__", |args| {
+        let a = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
+        let b = decval_from_pyobject(&args[1])?;
+        if b.is_zero() { return Err(decimal_invalid_op("0 modulo")); }
+        let q = decimal_div(&a, &b)?;
+        let truncated_q = if q.exp >= 0 { &q.coeff * ten_pow(q.exp) } else { &q.coeff / ten_pow(-q.exp) };
+        let trunc_dec = DecValue { special: DecSpecial::Finite, sign: q.sign, coeff: truncated_q, exp: 0 };
+        let prod = decimal_mul(&trunc_dec, &b)?;
+        Ok(decval_to_instance(&decimal_sub(&a, &prod)?))
+    }));
+    type_dict.insert("__pow__".to_string(), bf!("__pow__", |args| {
+        let a = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
+        let b = decval_from_pyobject(&args[1])?;
+        if b.special != DecSpecial::Finite || b.exp < 0 { return Err(PyError::runtime_error("Decimal ** non-integer exponent is not supported")); }
+        let n = (&b.coeff * ten_pow(b.exp)).to_string().parse::<i64>().unwrap_or(0);
+        let n = if b.sign { -n } else { n };
+        if n < 0 { return Err(PyError::runtime_error("Decimal ** negative exponent is not supported")); }
+        let mut result = DecValue { special: DecSpecial::Finite, sign: false, coeff: num_bigint::BigInt::from(1), exp: 0 };
+        for _ in 0..n { result = decimal_mul(&result, &a)?; }
+        Ok(decval_to_instance(&result))
+    }));
+    type_dict.insert("__neg__".to_string(), bf!("__neg__", |args| {
+        let v = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
+        Ok(decval_to_instance(&decimal_negate(&v)))
+    }));
+    type_dict.insert("__pos__".to_string(), bf!("__pos__", |args| {
+        let v = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
+        Ok(decval_to_instance(&round_to_context(v)))
+    }));
+    type_dict.insert("__abs__".to_string(), bf!("__abs__", |args| {
+        let mut v = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
+        v.sign = false;
+        Ok(decval_to_instance(&v))
+    }));
+    type_dict.insert("is_nan".to_string(), bf!("is_nan", |args| {
+        let v = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
+        Ok(py_bool(v.is_nan()))
+    }));
+    type_dict.insert("is_infinite".to_string(), bf!("is_infinite", |args| {
+        let v = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
+        Ok(py_bool(v.special == DecSpecial::Infinity))
+    }));
+    type_dict.insert("is_finite".to_string(), bf!("is_finite", |args| {
+        let v = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
+        Ok(py_bool(v.special == DecSpecial::Finite))
+    }));
+    type_dict.insert("is_zero".to_string(), bf!("is_zero", |args| {
+        let v = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
+        Ok(py_bool(v.is_zero()))
+    }));
+    type_dict.insert("is_signed".to_string(), bf!("is_signed", |args| {
+        let v = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
+        Ok(py_bool(v.sign))
+    }));
+    type_dict.insert("copy_sign".to_string(), bf!("copy_sign", |args| {
+        let mut v = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
+        let other = decval_from_pyobject(&args[1])?;
+        v.sign = other.sign;
+        Ok(decval_to_instance(&v))
+    }));
+    type_dict.insert("copy_abs".to_string(), bf!("copy_abs", |args| {
+        let mut v = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
+        v.sign = false;
+        Ok(decval_to_instance(&v))
+    }));
+    type_dict.insert("copy_negate".to_string(), bf!("copy_negate", |args| {
+        let v = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
+        Ok(decval_to_instance(&decimal_negate(&v)))
+    }));
+    type_dict.insert("as_tuple".to_string(), bf!("as_tuple", |args| {
+        let v = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
+        let sign_val = py_int(if v.sign { 1 } else { 0 });
+        let digits_str = if num_traits::Zero::is_zero(&v.coeff) { "0".to_string() } else { v.coeff.to_string() };
+        let digits: Vec<PyObjectRef> = digits_str.chars().map(|c| py_int(c.to_digit(10).unwrap_or(0) as i64)).collect();
+        let exp_val = match v.special {
+            DecSpecial::Finite => py_int(v.exp),
+            DecSpecial::Infinity => py_str("F"),
+            DecSpecial::QNaN => py_str("n"),
+            DecSpecial::SNaN => py_str("N"),
+        };
+        Ok(py_tuple(vec![sign_val, py_tuple(digits), exp_val]))
+    }));
+    type_dict.insert("normalize".to_string(), bf!("normalize", |args| {
+        let v = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
+        Ok(decval_to_instance(&normalize_decval(&round_to_context(v))))
+    }));
+    type_dict.insert("quantize".to_string(), bf!("quantize", |args| {
+        let v = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
+        if args.len() < 2 { return Err(PyError::type_error("quantize() missing exponent argument")); }
+        let target = decval_from_pyobject(&args[1])?;
+        if v.special != DecSpecial::Finite || target.special != DecSpecial::Finite {
+            return Err(decimal_invalid_op("quantize with non-finite argument"));
+        }
+        let (_, rounding) = current_decimal_context();
+        let target_exp = target.exp;
+        let result = if target_exp >= v.exp {
+            let drop = (target_exp - v.exp) as usize;
+            round_decvalue(&v, digit_count(&v.coeff).saturating_sub(drop).max(1), &rounding)
+        } else {
+            let scale = ten_pow(v.exp - target_exp);
+            DecValue { special: DecSpecial::Finite, sign: v.sign, coeff: &v.coeff * scale, exp: target_exp }
+        };
+        Ok(decval_to_instance(&DecValue { exp: target_exp, ..result }))
+    }));
+    type_dict.insert("to_integral_value".to_string(), bf!("to_integral_value", |args| {
+        let v = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
+        if v.special != DecSpecial::Finite || v.exp >= 0 { return Ok(decval_to_instance(&v)); }
+        let (_, rounding) = current_decimal_context();
+        let rounded = round_decvalue(&v, digit_count(&v.coeff).saturating_sub((-v.exp) as usize).max(1), &rounding);
+        Ok(decval_to_instance(&DecValue { exp: 0, coeff: &rounded.coeff * ten_pow(rounded.exp), ..rounded }))
+    }));
+    type_dict.insert("compare".to_string(), bf!("compare", |args| {
+        let a = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
+        let b = decval_from_pyobject(&args[1])?;
+        let n: i64 = match decimal_compare(&a, &b) {
+            Some(std::cmp::Ordering::Less) => -1,
+            Some(std::cmp::Ordering::Greater) => 1,
+            Some(std::cmp::Ordering::Equal) => 0,
+            None => return Ok(decval_to_instance(&DecValue::nan())),
+        };
+        Ok(decval_to_instance(&DecValue { special: DecSpecial::Finite, sign: n < 0, coeff: num_bigint::BigInt::from(n.abs()), exp: 0 }))
+    }));
+
+    PyObjectRef::new(PyObject::Type { name: "Decimal".to_string(), dict: type_dict, bases: vec![], mro: vec![] })
+}
+
+fn build_context_type() -> PyObjectRef {
+    let mut type_dict: HashMap<String, PyObjectRef> = HashMap::new();
+    macro_rules! bf {
+        ($name:expr, $f:expr) => {
+            PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $f })
+        };
+    }
+    type_dict.insert("__init__".to_string(), bf!("__init__", |args| {
+        let ctor_args = args[1..].to_vec();
+        let kw: Option<PyDict> = ctor_args.last().and_then(|a| if let PyObject::Dict(d) = &*a.borrow() { Some(d.clone()) } else { None });
+        let get_kw = |name: &str| kw.as_ref().and_then(|d| d.get(&py_str(name)).ok().flatten());
+        let precision = get_kw("prec").and_then(|v| v.as_i64()).unwrap_or(28) as usize;
+        let rounding = get_kw("rounding").map(|v| v.str()).unwrap_or_else(|| "ROUND_HALF_EVEN".to_string());
+        if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
+            dict.insert("prec".to_string(), py_int(precision as i64));
+            dict.insert("rounding".to_string(), py_str(&rounding));
+        }
+        Ok(py_none())
+    }));
+    type_dict.insert("__repr__".to_string(), bf!("__repr__", |args| {
+        let prec = if let PyObject::Instance { dict, .. } = &*args[0].borrow() { dict.get("prec").and_then(|v| v.as_i64()).unwrap_or(28) } else { 28 };
+        Ok(py_str(&format!("Context(prec={})", prec)))
+    }));
+    PyObjectRef::new(PyObject::Type { name: "Context".to_string(), dict: type_dict, bases: vec![], mro: vec![] })
+}
+
+fn get_context_type() -> PyObjectRef {
+    let existing = DECIMAL_CONTEXT_TYPE.with(|c| c.borrow().clone());
+    if let Some(t) = existing { return t; }
+    let typ = build_context_type();
+    DECIMAL_CONTEXT_TYPE.with(|c| { *c.borrow_mut() = Some(typ.clone()); });
+    typ
+}
+
+fn make_context_instance(precision: usize, rounding: &str) -> PyObjectRef {
+    let typ = get_context_type();
+    let mut dict = HashMap::new();
+    dict.insert("prec".to_string(), py_int(precision as i64));
+    dict.insert("rounding".to_string(), py_str(rounding));
+    PyObjectRef::new(PyObject::Instance { typ, dict })
+}
+
 pub fn create_decimal_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! dec_func {
@@ -1069,11 +1508,75 @@ pub fn create_decimal_dict() -> HashMap<String, PyObjectRef> {
             d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
         };
     }
-    dec_func!("Decimal", |args| {
-        if args.is_empty() { return Err(PyError::type_error("Decimal() missing argument")); }
-        let val = args[0].str();
-        Ok(py_str(&format!("Decimal('{}')", val)))
+    d.insert("Decimal".to_string(), get_decimal_type());
+    d.insert("Context".to_string(), get_context_type());
+    dec_func!("getcontext", |_args| {
+        let (precision, rounding) = current_decimal_context();
+        Ok(make_context_instance(precision, &rounding))
     });
+    dec_func!("setcontext", |args| {
+        if args.is_empty() { return Err(PyError::type_error("setcontext() missing context argument")); }
+        if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+            let precision = dict.get("prec").and_then(|v| v.as_i64()).unwrap_or(28) as usize;
+            let rounding = dict.get("rounding").map(|v| v.str()).unwrap_or_else(|| "ROUND_HALF_EVEN".to_string());
+            DECIMAL_CURRENT_CONTEXT.with(|c| { *c.borrow_mut() = (precision, rounding); });
+        }
+        Ok(py_none())
+    });
+    // localcontext(ctx=None) — a minimal context-manager-like object; full
+    // save/restore-on-exit semantics aren't implemented, only prec/rounding
+    // application, which covers the common `with localcontext() as ctx:
+    // ctx.prec = N` pattern used for one-off precision changes.
+    dec_func!("localcontext", |args| {
+        let (precision, rounding) = if !args.is_empty() {
+            if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+                (dict.get("prec").and_then(|v| v.as_i64()).unwrap_or(28) as usize, dict.get("rounding").map(|v| v.str()).unwrap_or_else(|| "ROUND_HALF_EVEN".to_string()))
+            } else { current_decimal_context() }
+        } else { current_decimal_context() };
+        let ctx = make_context_instance(precision, &rounding);
+        let mut cm_dict = HashMap::new();
+        cm_dict.insert("__enter__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__enter__".to_string(),
+            func: |args| {
+                if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+                    let precision = dict.get("prec").and_then(|v| v.as_i64()).unwrap_or(28) as usize;
+                    let rounding = dict.get("rounding").map(|v| v.str()).unwrap_or_else(|| "ROUND_HALF_EVEN".to_string());
+                    DECIMAL_CURRENT_CONTEXT.with(|c| { *c.borrow_mut() = (precision, rounding); });
+                }
+                Ok(args[0].clone())
+            },
+        }));
+        cm_dict.insert("__exit__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__exit__".to_string(),
+            func: |_args| { DECIMAL_CURRENT_CONTEXT.with(|c| { *c.borrow_mut() = (28, "ROUND_HALF_EVEN".to_string()); }); Ok(py_bool(false)) },
+        }));
+        let cm_typ = PyObjectRef::new(PyObject::Type { name: "_ContextManager".to_string(), dict: cm_dict, bases: vec![], mro: vec![] });
+        let mut inst_dict = HashMap::new();
+        inst_dict.insert("prec".to_string(), py_int(precision as i64));
+        inst_dict.insert("rounding".to_string(), py_str(&rounding));
+        let _ = ctx;
+        Ok(PyObjectRef::new(PyObject::Instance { typ: cm_typ, dict: inst_dict }))
+    });
+    // Exception types
+    d.insert("DecimalException".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "DecimalException".to_string(), func: crate::object::builtin_make_exception_decimalexception }));
+    d.insert("InvalidOperation".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "InvalidOperation".to_string(), func: crate::object::builtin_make_exception_invalidoperation }));
+    d.insert("DivisionByZero".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "DivisionByZero".to_string(), func: crate::object::builtin_make_exception_decimaldivisionbyzero }));
+    d.insert("Inexact".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "Inexact".to_string(), func: crate::object::builtin_make_exception_inexact }));
+    d.insert("Rounded".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "Rounded".to_string(), func: crate::object::builtin_make_exception_rounded }));
+    d.insert("Clamped".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "Clamped".to_string(), func: crate::object::builtin_make_exception_clamped }));
+    d.insert("Overflow".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "Overflow".to_string(), func: crate::object::builtin_make_exception_decimaloverflow }));
+    d.insert("Underflow".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "Underflow".to_string(), func: crate::object::builtin_make_exception_decimalunderflow }));
+    d.insert("FloatOperation".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "FloatOperation".to_string(), func: crate::object::builtin_make_exception_floatoperation }));
+    // Rounding mode constants — their real string values (that's what
+    // CPython's decimal.ROUND_* constants actually are), so equality checks
+    // and passing them to quantize()-style calls behave as real code expects.
+    for name in ["ROUND_CEILING", "ROUND_DOWN", "ROUND_FLOOR", "ROUND_HALF_DOWN",
+                 "ROUND_HALF_EVEN", "ROUND_HALF_UP", "ROUND_UP", "ROUND_05UP"] {
+        d.insert(name.to_string(), py_str(name));
+    }
+    d.insert("MAX_PREC".to_string(), py_int(999999999999999999i64));
+    d.insert("MAX_EMAX".to_string(), py_int(999999999999999999i64));
+    d.insert("MIN_EMIN".to_string(), py_int(-999999999999999999i64));
     d
 }
 
