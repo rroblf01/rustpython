@@ -8,10 +8,24 @@ pub struct Compiler {
     label_positions: Vec<usize>,
     label_stack: Vec<Vec<(usize, u32)>>,
     loop_stack: Vec<LoopInfo>,
+    // Active `with`-blocks currently being compiled (within the current
+    // function scope only — reset per function like loop_stack). A `return`
+    // compiled while this is non-empty must inline __exit__/__aexit__ calls
+    // for each entry (innermost first) before the actual RETURN_VALUE:
+    // CPython itself does this at compile time rather than having the VM
+    // unwind pending with/finally blocks on early return, and this VM's
+    // RETURN_VALUE never did the latter either — so without this, a
+    // `with cm(): return x` silently skipped `__exit__` entirely.
+    with_stack: Vec<bool>, // each entry: is_async
     scope: ScopeType,
     global_names: HashSet<String>,
     nonlocal_names: HashSet<String>,
     scope_stack: Vec<ScopeInfo>,
+    // Parallel to scope_stack: the varnames of the code object that was
+    // active immediately before each nested scope was entered. Lets us walk
+    // past intervening class-body scopes to find the nearest real enclosing
+    // function scope for closure-variable resolution.
+    varnames_stack: Vec<Vec<String>>,
     current_line: usize,
 }
 
@@ -41,10 +55,12 @@ impl Compiler {
             label_positions: Vec::new(),
             label_stack: Vec::new(),
             loop_stack: Vec::new(),
+            with_stack: Vec::new(),
             scope: ScopeType::Module,
             global_names: HashSet::new(),
             nonlocal_names: HashSet::new(),
             scope_stack: Vec::new(),
+            varnames_stack: Vec::new(),
             current_line: 1,
         }
     }
@@ -88,6 +104,34 @@ impl Compiler {
             self.global_names = info.global_names;
             self.nonlocal_names = info.nonlocal_names;
         }
+    }
+
+    /// Names visible as closure candidates from the nearest REAL enclosing
+    /// function scope, skipping over any class-body scopes in between (class
+    /// bodies don't participate in Python's closure lookup chain, but a
+    /// method nested inside one still needs to see past it to the function
+    /// that actually encloses the class).
+    /// Names a scope makes available to anything nested inside it: its plain
+    /// locals/args, plus its cellvars and freevars. Cellvars are already
+    /// mirrored into varnames, but freevars are not (they're only known to
+    /// need a varnames slot if something relays them further, which is
+    /// decided after this scope's body — and any further-nested scope — has
+    /// already been compiled), so they must be listed explicitly here.
+    fn enclosing_snapshot(code: &CodeObject) -> Vec<String> {
+        let mut names = code.varnames.clone();
+        names.extend(code.freevars.iter().cloned());
+        names
+    }
+
+    fn compute_enclosing_names(&self) -> HashSet<String> {
+        let mut idx = self.scope_stack.len();
+        while idx > 0 {
+            idx -= 1;
+            if self.scope_stack[idx].scope != ScopeType::ClassBody {
+                return self.varnames_stack[idx].iter().cloned().collect();
+            }
+        }
+        HashSet::new()
     }
 
     fn get_var_index(&mut self, name: &str) -> Option<usize> {
@@ -169,133 +213,6 @@ impl Compiler {
 
     // ---- Closure analysis ----
 
-    /// Find all Name expressions in a body of statements
-    fn collect_names_in_stmts(stmts: &[Stmt]) -> HashSet<String> {
-        let mut names = HashSet::new();
-        Self::collect_names_stmts_inner(stmts, &mut names);
-        names
-    }
-
-    fn collect_names_stmts_inner(stmts: &[Stmt], names: &mut HashSet<String>) {
-        for stmt in stmts {
-            match stmt {
-                Stmt::Expr(expr) => Self::collect_names_expr(expr, names),
-                Stmt::Pass | Stmt::Break | Stmt::Continue => {}
-                Stmt::Return(Some(expr)) => Self::collect_names_expr(expr, names),
-                Stmt::Return(None) => {}
-                Stmt::Assign { targets, value } => {
-                    Self::collect_names_expr(value, names);
-                    for t in targets {
-                        Self::collect_names_expr(t, names);
-                    }
-                }
-                Stmt::AugAssign { target, value, .. } => {
-                    Self::collect_names_expr(target, names);
-                    Self::collect_names_expr(value, names);
-                }
-                Stmt::AnnAssign { target, value, .. } => {
-                    Self::collect_names_expr(target, names);
-                    if let Some(v) = value {
-                        Self::collect_names_expr(v, names);
-                    }
-                }
-                Stmt::If { test, body, orelse } => {
-                    Self::collect_names_expr(test, names);
-                    Self::collect_names_stmts_inner(body, names);
-                    Self::collect_names_stmts_inner(orelse, names);
-                }
-                Stmt::While { test, body, orelse } => {
-                    Self::collect_names_expr(test, names);
-                    Self::collect_names_stmts_inner(body, names);
-                    Self::collect_names_stmts_inner(orelse, names);
-                }
-                Stmt::For {
-                    target,
-                    iter,
-                    body,
-                    orelse,
-                    ..
-                } => {
-                    Self::collect_names_expr(target, names);
-                    Self::collect_names_expr(iter, names);
-                    Self::collect_names_stmts_inner(body, names);
-                    Self::collect_names_stmts_inner(orelse, names);
-                }
-                Stmt::FunctionDef { .. } | Stmt::ClassDef { .. } => {
-                    // Do NOT recurse into function/class bodies — they have their own scope
-                }
-                Stmt::With { items, body, .. } => {
-                    for item in items {
-                        Self::collect_names_expr(&item.context_expr, names);
-                        if let Some(var) = &item.optional_vars {
-                            Self::collect_names_expr(var, names);
-                        }
-                    }
-                    Self::collect_names_stmts_inner(body, names);
-                }
-                Stmt::TypeAlias { name, .. } => {
-                    names.insert(name.clone());
-                }
-                Stmt::Match { subject, cases } => {
-                    Self::collect_names_expr(subject, names);
-                    for case in cases {
-                        Self::collect_names_stmts_inner(&case.body, names);
-                    }
-                }
-                Stmt::Raise { exc, cause } => {
-                    if let Some(e) = exc {
-                        Self::collect_names_expr(e, names);
-                    }
-                    if let Some(c) = cause {
-                        Self::collect_names_expr(c, names);
-                    }
-                }
-                Stmt::Try {
-                    body,
-                    handlers,
-                    handlers_star,
-                    orelse,
-                    finalbody,
-                } => {
-                    Self::collect_names_stmts_inner(body, names);
-                    for h in handlers {
-                        Self::collect_names_stmts_inner(&h.body, names);
-                    }
-                    for h in handlers_star {
-                        Self::collect_names_stmts_inner(&h.body, names);
-                    }
-                    Self::collect_names_stmts_inner(orelse, names);
-                    Self::collect_names_stmts_inner(finalbody, names);
-                }
-                Stmt::Assert { test, msg } => {
-                    Self::collect_names_expr(test, names);
-                    if let Some(m) = msg {
-                        Self::collect_names_expr(m, names);
-                    }
-                }
-                Stmt::Delete(targets) => {
-                    for t in targets {
-                        Self::collect_names_expr(t, names);
-                    }
-                }
-                Stmt::Import(names_list) => {
-                    for alias in names_list {
-                        names.insert(alias.name.clone());
-                    }
-                }
-                Stmt::ImportFrom {
-                    module: _,
-                    names: names_list,
-                    ..
-                } => {
-                    for alias in names_list {
-                        names.insert(alias.name.clone());
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
 
     fn collect_names_expr(expr: &Expr, names: &mut HashSet<String>) {
         match expr {
@@ -511,49 +428,116 @@ impl Compiler {
     }
 
     /// Collect names referenced in the current function's own body (NOT nested function bodies).
+    /// Names referenced anywhere in this function's own body — including
+    /// inside `if`/`while`/`for`/`with`/`try`/`match` bodies, which don't
+    /// introduce a new Python scope, so a name used only inside one of
+    /// those (e.g. `def outer(x):\n def inner():\n  if True: return x`)
+    /// must still be recognized as needing to come from an enclosing scope.
+    /// Does NOT descend into nested FunctionDef/ClassDef bodies — those have
+    /// their own scope and are handled separately (collect_nested_references).
     fn collect_own_referenced_names(stmts: &[Stmt]) -> HashSet<String> {
         let mut names = HashSet::new();
+        Self::collect_own_referenced_names_inner(stmts, &mut names);
+        names
+    }
+
+    fn collect_own_referenced_names_inner(stmts: &[Stmt], names: &mut HashSet<String>) {
         for stmt in stmts {
             match stmt {
-                Stmt::Expr(expr) => Self::collect_names_expr(expr, &mut names),
-                Stmt::Return(Some(expr)) => Self::collect_names_expr(expr, &mut names),
-                Stmt::Assign { targets: _, value } => {
-                    Self::collect_names_expr(value, &mut names);
+                Stmt::Expr(expr) => Self::collect_names_expr(expr, names),
+                Stmt::Return(Some(expr)) => Self::collect_names_expr(expr, names),
+                Stmt::Return(None) | Stmt::Pass | Stmt::Break | Stmt::Continue => {}
+                Stmt::Assign { targets, value } => {
+                    Self::collect_names_expr(value, names);
+                    for t in targets {
+                        Self::collect_names_expr(t, names);
+                    }
                 }
                 Stmt::AugAssign { target, value, .. } => {
-                    Self::collect_names_expr(target, &mut names);
-                    Self::collect_names_expr(value, &mut names);
+                    Self::collect_names_expr(target, names);
+                    Self::collect_names_expr(value, names);
                 }
-                Stmt::If { test, .. } => Self::collect_names_expr(test, &mut names),
-                Stmt::While { test, .. } => Self::collect_names_expr(test, &mut names),
-                Stmt::For { iter, .. } => Self::collect_names_expr(iter, &mut names),
+                Stmt::AnnAssign { target, value, .. } => {
+                    Self::collect_names_expr(target, names);
+                    if let Some(v) = value {
+                        Self::collect_names_expr(v, names);
+                    }
+                }
+                Stmt::If { test, body, orelse } => {
+                    Self::collect_names_expr(test, names);
+                    Self::collect_own_referenced_names_inner(body, names);
+                    Self::collect_own_referenced_names_inner(orelse, names);
+                }
+                Stmt::While { test, body, orelse } => {
+                    Self::collect_names_expr(test, names);
+                    Self::collect_own_referenced_names_inner(body, names);
+                    Self::collect_own_referenced_names_inner(orelse, names);
+                }
+                Stmt::For { target, iter, body, orelse, .. } => {
+                    Self::collect_names_expr(target, names);
+                    Self::collect_names_expr(iter, names);
+                    Self::collect_own_referenced_names_inner(body, names);
+                    Self::collect_own_referenced_names_inner(orelse, names);
+                }
+                Stmt::With { items, body, .. } => {
+                    for item in items {
+                        Self::collect_names_expr(&item.context_expr, names);
+                        if let Some(var) = &item.optional_vars {
+                            Self::collect_names_expr(var, names);
+                        }
+                    }
+                    Self::collect_own_referenced_names_inner(body, names);
+                }
+                Stmt::Try { body, handlers, handlers_star, orelse, finalbody } => {
+                    Self::collect_own_referenced_names_inner(body, names);
+                    for h in handlers {
+                        if let Some(t) = &h.typ {
+                            Self::collect_names_expr(t, names);
+                        }
+                        Self::collect_own_referenced_names_inner(&h.body, names);
+                    }
+                    for h in handlers_star {
+                        if let Some(t) = &h.typ {
+                            Self::collect_names_expr(t, names);
+                        }
+                        Self::collect_own_referenced_names_inner(&h.body, names);
+                    }
+                    Self::collect_own_referenced_names_inner(orelse, names);
+                    Self::collect_own_referenced_names_inner(finalbody, names);
+                }
                 Stmt::Raise { exc, cause } => {
                     if let Some(e) = exc {
-                        Self::collect_names_expr(e, &mut names);
+                        Self::collect_names_expr(e, names);
                     }
                     if let Some(c) = cause {
-                        Self::collect_names_expr(c, &mut names);
+                        Self::collect_names_expr(c, names);
                     }
                 }
                 Stmt::Assert { test, msg } => {
-                    Self::collect_names_expr(test, &mut names);
+                    Self::collect_names_expr(test, names);
                     if let Some(m) = msg {
-                        Self::collect_names_expr(m, &mut names);
+                        Self::collect_names_expr(m, names);
                     }
                 }
-                Stmt::With { items, .. } => {
-                    for item in items {
-                        Self::collect_names_expr(&item.context_expr, &mut names);
+                Stmt::Match { subject, cases } => {
+                    Self::collect_names_expr(subject, names);
+                    for case in cases {
+                        if let Some(guard) = &case.guard {
+                            Self::collect_names_expr(guard, names);
+                        }
+                        Self::collect_own_referenced_names_inner(&case.body, names);
                     }
                 }
-                Stmt::Match { subject, .. } => {
-                    Self::collect_names_expr(subject, &mut names);
+                Stmt::Delete(targets) => {
+                    for t in targets {
+                        Self::collect_names_expr(t, names);
+                    }
                 }
+                Stmt::TypeAlias { value, .. } => Self::collect_names_expr(value, names),
                 Stmt::FunctionDef { .. } | Stmt::ClassDef { .. } => {}
-                _ => {}
+                Stmt::Import(_) | Stmt::ImportFrom { .. } | Stmt::Global(_) | Stmt::Nonlocal(_) => {}
             }
         }
-        names
     }
 
     /// Pre-analyze a function body to determine cell variables and free variables.
@@ -595,8 +579,18 @@ impl Compiler {
             &effective_nonlocal,
         );
 
-        // All names from outer scope = own_refs (not local) + nested_refs
-        let mut all_outer_refs = nested_refs.clone();
+        // All names from outer scope = own_refs (not local) + nested_refs.
+        // nested_refs may now include names needed by something nested two
+        // or more levels down (relayed transitively through intervening
+        // scopes) — only keep those that are either satisfiable by our own
+        // locals (cellvar candidates, handled below) or genuinely available
+        // from further out; anything else is a plain global/builtin and
+        // must NOT be dragged in here.
+        let mut all_outer_refs: HashSet<String> = nested_refs
+            .iter()
+            .filter(|n| local_names.contains(*n) || enclosing_names.map_or(true, |en| en.contains(*n)))
+            .cloned()
+            .collect();
         for name in &own_refs {
             if !local_names.contains(name)
                 && !effective_global.contains(name)
@@ -664,8 +658,8 @@ impl Compiler {
     fn collect_nested_refs_inner(
         stmts: &[Stmt],
         local_names: &HashSet<String>,
-        _global_names: &HashSet<String>,
-        _nonlocal_names: &HashSet<String>,
+        global_names: &HashSet<String>,
+        nonlocal_names: &HashSet<String>,
         refs: &mut HashSet<String>,
     ) {
         for stmt in stmts {
@@ -682,12 +676,46 @@ impl Compiler {
                     for n in &inner_globals {
                         inner_local.remove(n);
                     }
-                    let all_inner_names = Self::collect_names_in_stmts(body);
-                    for name in &all_inner_names {
-                        if !inner_local.contains(name) && !inner_globals.contains(name) && local_names.contains(name) {
+                    // Names this nested function references directly that
+                    // aren't its own locals — it needs these from an
+                    // enclosing scope (either us, or further out still).
+                    let own_refs = Self::collect_own_referenced_names(body);
+                    for name in &own_refs {
+                        if !inner_local.contains(name) && !inner_globals.contains(name) {
                             refs.insert(name.clone());
                         }
                     }
+                    // Recurse: anything referenced by a function/class
+                    // nested even deeper that isn't satisfied by THIS
+                    // function's own locals also needs to come from further
+                    // out than this function, i.e. from us or beyond.
+                    let mut deeper = HashSet::new();
+                    Self::collect_nested_refs_inner(
+                        body,
+                        &inner_local,
+                        &inner_globals,
+                        &inner_nonlocals,
+                        &mut deeper,
+                    );
+                    for name in deeper {
+                        if !inner_local.contains(&name) {
+                            refs.insert(name);
+                        }
+                    }
+                }
+                // Class bodies are transparent for closure purposes: a method
+                // defined inside a class inside a function can still close
+                // over the function's locals (Python skips class scopes when
+                // resolving enclosing references), so keep looking inside
+                // using the same local_names as our caller.
+                Stmt::ClassDef { body, .. } => {
+                    Self::collect_nested_refs_inner(
+                        body,
+                        local_names,
+                        global_names,
+                        nonlocal_names,
+                        refs,
+                    );
                 }
                 _ => {}
             }
@@ -755,20 +783,34 @@ impl Compiler {
                 }
             }
             Stmt::Return(value) => {
-                if self.scope == ScopeType::Module {
-                    if let Some(expr) = value {
-                        self.compile_expr(expr)?;
-                    } else {
-                        let const_idx = self.get_const_index(ConstValue::None) as u32;
-                        self.emit(Opcode::LOAD_CONST, const_idx);
-                    }
+                if let Some(expr) = value {
+                    self.compile_expr(expr)?;
                 } else {
-                    if let Some(expr) = value {
-                        self.compile_expr(expr)?;
-                    } else {
-                        let const_idx = self.get_const_index(ConstValue::None) as u32;
-                        self.emit(Opcode::LOAD_CONST, const_idx);
+                    let const_idx = self.get_const_index(ConstValue::None) as u32;
+                    self.emit(Opcode::LOAD_CONST, const_idx);
+                }
+                // Returning from inside `with cm(): return x` must still run
+                // cm.__exit__ — CPython inlines this at compile time rather
+                // than having the VM unwind pending with/finally blocks on
+                // early return (this VM's RETURN_VALUE doesn't do that
+                // either). At this point the stack is [..., cm_N, ..., cm_1,
+                // retval] (outermost with-block's manager deepest); for each
+                // one, innermost first: swap the manager above retval, dup
+                // it, call __exit__(None,None,None), and discard both the
+                // call result and the manager, leaving retval on top again.
+                for is_async in self.with_stack.clone().iter().rev() {
+                    self.emit(Opcode::SWAP, 1);
+                    self.emit(Opcode::DUP_TOP, 0);
+                    let exit_name = if *is_async { "__aexit__" } else { "__exit__" };
+                    let exit_name_idx = self.get_name_index(exit_name) as u32;
+                    self.emit(Opcode::LOAD_ATTR, exit_name_idx);
+                    let const_none = self.get_const_index(ConstValue::None) as u32;
+                    for _ in 0..3 {
+                        self.emit(Opcode::LOAD_CONST, const_none);
                     }
+                    self.emit(Opcode::CALL, 3);
+                    self.emit(Opcode::POP_TOP, 0);
+                    self.emit(Opcode::POP_TOP, 0);
                 }
                 self.emit(Opcode::RETURN_VALUE, 0);
             }
@@ -847,7 +889,12 @@ impl Compiler {
                             Operator::MatMult => 12,
                         };
                         self.emit(Opcode::BINARY_OP, bin_op);
-                        self.emit(Opcode::SWAP, 1);
+                        // Stack here is already [obj, sum] (obj pushed once,
+                        // duplicated for LOAD_ATTR, sum computed on top) —
+                        // exactly what STORE_ATTR expects. No SWAP needed;
+                        // unlike plain `x.attr = value` assignment (see
+                        // compile_assign_target), which pushes obj AFTER the
+                        // value and so must swap.
                         self.emit(Opcode::STORE_ATTR, attr_idx);
                     }
                     _ => {
@@ -962,8 +1009,11 @@ impl Compiler {
                     self.emit(Opcode::CALL, 1);
                     // Result stays on stack
                 }
-                let name_idx = self.get_name_index(name) as u32;
-                self.emit(Opcode::STORE_NAME, name_idx);
+                // Scope-aware storage (STORE_NAME/STORE_FAST/STORE_DEREF) —
+                // see the matching fix on Stmt::ClassDef above for why
+                // unconditional STORE_NAME breaks nested-function closures
+                // over a helper function defined in the enclosing scope.
+                self.compile_assign_target(&Expr::Name(name.clone()))?;
             }
             Stmt::ClassDef {
                 name,
@@ -1018,16 +1068,19 @@ impl Compiler {
                     let doc_attr_idx = self.get_name_index("__doc__") as u32;
                     self.emit(Opcode::STORE_ATTR, doc_attr_idx);
                 }
-                let name_idx = self.get_name_index(name) as u32;
-                if !decorator_list.is_empty() {
-                }
                 for decorator in decorator_list {
                     self.compile_expr(&decorator)?;
                     self.emit(Opcode::SWAP, 1);
                     self.emit(Opcode::CALL, 1);
                     // Decorated class stays on stack
                 }
-                self.emit(Opcode::STORE_NAME, name_idx);
+                // Use the same scope-aware storage logic as a regular
+                // assignment (STORE_NAME/STORE_FAST/STORE_DEREF as
+                // appropriate) — a class defined inside a function and
+                // referenced by a nested closure needs STORE_DEREF into a
+                // cell, exactly like any other name a closure captures.
+                // Unconditional STORE_NAME here previously broke that case.
+                self.compile_assign_target(&Expr::Name(name.clone()))?;
             }
             Stmt::Import(names) => {
                 for alias in names {
@@ -1394,7 +1447,13 @@ impl Compiler {
                     let finally_label = self.new_label();
                     let end_label = self.new_label();
                     self.emit_jump(Opcode::SETUP_FINALLY, finally_label);
-                    self.compile_stmts(body)?;
+                    // Tracked so a `return` compiled inside body knows to
+                    // inline an __exit__ call for this with-block first —
+                    // see with_stack's doc comment.
+                    self.with_stack.push(*is_async);
+                    let with_result = self.compile_stmts(body);
+                    self.with_stack.pop();
+                    with_result?;
                     self.emit(Opcode::POP_BLOCK, 0);
                     // Manager is still on the stack from SETUP_WITH
                     self.emit(Opcode::DUP_TOP, 0);
@@ -1410,8 +1469,17 @@ impl Compiler {
                     self.emit_jump(Opcode::JUMP, end_label);
                     self.fix_label(finally_label);
                     self.emit(Opcode::PUSH_EXC_INFO, 0);
-                    // Manager is on the stack from SETUP_WITH — duplicate it for WITH_EXIT
-                    self.emit(Opcode::DUP_TOP, 0);
+                    // Stack here is [manager, exception] — handle_exception()
+                    // truncated to the depth right after SETUP_WITH (which
+                    // left just the manager) and then pushed the exception
+                    // object on top. WITH_EXIT wants the opposite order
+                    // ([exception, manager], manager on top so it can pop
+                    // it) — this used to DUP_TOP here, which duplicates
+                    // whatever's actually on top (the exception, not the
+                    // manager), so WITH_EXIT would pop a copy of the
+                    // exception and treat IT as the context manager. Swap
+                    // the two into the order WITH_EXIT actually expects.
+                    self.emit(Opcode::SWAP, 1);
                     self.emit(Opcode::WITH_EXIT, 0);
                     self.emit(Opcode::POP_TOP, 0);
                     self.emit(Opcode::RERAISE, 0);
@@ -1916,15 +1984,19 @@ impl Compiler {
         let old_labels = std::mem::replace(&mut self.labels, Vec::new());
         let old_label_stack = std::mem::replace(&mut self.label_stack, Vec::new());
         let old_loop_stack = std::mem::replace(&mut self.loop_stack, Vec::new());
+        let old_with_stack = std::mem::replace(&mut self.with_stack, Vec::new());
         let old_current_line = self.current_line;
         self.current_line = 1;
 
         self.enter_scope(ScopeType::Function);
-        
+        self.varnames_stack.push(Self::enclosing_snapshot(&old_code));
 
-        // Pre-analyze the function to determine cell vars and free vars
-        // Pass enclosing function's varnames so module globals aren't treated as free vars
-        let enclosing_varnames: std::collections::HashSet<String> = old_code.varnames.iter().cloned().collect();
+        // Pre-analyze the function to determine cell vars and free vars.
+        // Use the nearest REAL enclosing function's varnames (skipping over
+        // any intervening class-body scopes) so module globals aren't
+        // treated as free vars, while methods nested inside a class body
+        // can still see past it to the function that encloses the class.
+        let enclosing_varnames = self.compute_enclosing_names();
         let (cell_vars, free_vars) =
             Self::analyze_function(args, body, &self.global_names, &self.nonlocal_names, Some(&enclosing_varnames));
         self.code.cellvars = cell_vars;
@@ -2023,7 +2095,18 @@ impl Compiler {
         self.labels = old_labels;
         self.label_stack = old_label_stack;
         self.loop_stack = old_loop_stack;
+        self.with_stack = old_with_stack;
         self.current_line = old_current_line;
+        self.varnames_stack.pop();
+        // Leave the function's scope now, BEFORE compiling default-value
+        // expressions below — defaults are evaluated once in the enclosing
+        // scope at def-time (matching Python semantics), and if a default is
+        // itself a lambda (`def f(x=lambda: 1)`), compiling it recursively
+        // calls compile_function again. Leaving this until the end (after
+        // defaults) left self.scope/scope_stack one level "too deep" for
+        // that window relative to varnames_stack (already popped above),
+        // corrupting compute_enclosing_names for the nested lambda.
+        self.leave_scope();
 
         // Emit LOAD_CLOSURE for each free var of the inner function
         let mut nfree = 0usize;
@@ -2081,7 +2164,6 @@ impl Compiler {
             self.emit(Opcode::STORE_ATTR, doc_attr_idx);
         }
 
-        self.leave_scope();
         Ok(())
     }
 
@@ -2100,28 +2182,34 @@ impl Compiler {
         };
 
         self.enter_scope(ScopeType::ClassBody);
-        
 
         let old_code = std::mem::replace(&mut self.code, CodeObject::new(name.clone()));
-        
+        self.varnames_stack.push(Self::enclosing_snapshot(&old_code));
 
         let old_labels = std::mem::replace(&mut self.labels, Vec::new());
         let old_label_stack = std::mem::replace(&mut self.label_stack, Vec::new());
         let old_loop_stack = std::mem::replace(&mut self.loop_stack, Vec::new());
+        let old_with_stack = std::mem::replace(&mut self.with_stack, Vec::new());
         let old_current_line = self.current_line;
         self.current_line = 1;
 
         self.code.arg_count = 0;
 
-        // Check self fields RIGHT BEFORE calling compile_stmts
-        
+        // Class bodies are skipped when Python resolves enclosing scope, but
+        // methods defined here can still close over the enclosing function's
+        // locals — so this class body's code object needs those relayed
+        // through as free variables, exactly like a nested function would.
+        let enclosing_varnames = self.compute_enclosing_names();
+        let (_ignored_cellvars, free_vars) = Self::analyze_function(
+            &[],
+            body,
+            &self.global_names,
+            &self.nonlocal_names,
+            Some(&enclosing_varnames),
+        );
+        self.code.freevars = free_vars;
 
         self.compile_stmts(body)?;
-
-        // Check self fields RIGHT AFTER calling compile_stmts
-        
-
-        let _const_none = self.get_const_index(ConstValue::None) as u32;
 
         let const_none = self.get_const_index(ConstValue::None) as u32;
         self.emit(Opcode::LOAD_CONST, const_none);
@@ -2131,15 +2219,47 @@ impl Compiler {
         self.code.name = name.clone();
         self.code.first_lineno = 1;
 
+        let inner_free_vars = self.code.freevars.clone();
+
         let func_code = std::mem::replace(&mut self.code, old_code);
         self.labels = old_labels;
         self.label_stack = old_label_stack;
         self.loop_stack = old_loop_stack;
+        self.with_stack = old_with_stack;
         self.current_line = old_current_line;
+        self.varnames_stack.pop();
+
+        // Relay any free variables this class body's methods need, using the
+        // same mechanism as an ordinary nested function.
+        let mut nfree = 0usize;
+        for fv_name in &inner_free_vars {
+            let found = self.code.cellvars.iter().any(|n| n == fv_name)
+                || self.code.freevars.iter().any(|n| n == fv_name)
+                || self.get_var_index(fv_name).is_some();
+            if found {
+                if self.get_var_index(fv_name).is_some() && !self.code.cellvars.contains(fv_name) {
+                    self.code.cellvars.push(fv_name.clone());
+                    if self.get_var_index(fv_name).is_none() {
+                        self.add_varname(fv_name);
+                    }
+                }
+                if let Some(idx) = self.code.cellvars.iter().position(|n| n == fv_name) {
+                    self.emit(Opcode::LOAD_CLOSURE, idx as u32);
+                } else if let Some(idx) = self.code.freevars.iter().position(|n| n == fv_name) {
+                    let idx = self.code.cellvars.len() + idx;
+                    self.emit(Opcode::LOAD_CLOSURE, idx as u32);
+                }
+                nfree += 1;
+            }
+        }
+        if nfree > 0 {
+            self.emit(Opcode::BUILD_TUPLE, nfree as u32);
+        }
 
         let code_const_idx = self.get_const_index(ConstValue::Code(Box::new(func_code))) as u32;
         self.emit(Opcode::LOAD_CONST, code_const_idx);
-        self.emit(Opcode::MAKE_FUNCTION, 0);
+        let make_func_arg: u32 = if nfree > 0 { 1 << 8 } else { 0 };
+        self.emit(Opcode::MAKE_FUNCTION, make_func_arg);
 
         self.leave_scope();
         Ok(())
@@ -2308,6 +2428,42 @@ impl Compiler {
                 } else {
                     self.compile_expr(func)?;
                 }
+                // f(*args) / f(x, *args) / f(**kwargs): a starred positional
+                // or bare-** keyword must be unpacked at call time, not
+                // passed through as a single tuple/dict value — the plain
+                // CALL opcode below has no way to express "this many of my
+                // arguments came from unpacking", so use CALL_FUNCTION_EX
+                // instead, matching CPython's own split between the two.
+                let has_star_args = args.iter().any(|a| matches!(a, Expr::Starred(_)));
+                let has_star_kwargs = keywords.iter().any(|kw| kw.arg.is_none());
+                if has_star_args || has_star_kwargs {
+                    self.emit(Opcode::BUILD_LIST, 0);
+                    for arg in args {
+                        if let Expr::Starred(inner) = arg {
+                            self.compile_expr(inner)?;
+                            self.emit(Opcode::LIST_EXTEND, 0);
+                        } else {
+                            self.compile_expr(arg)?;
+                            self.emit(Opcode::LIST_APPEND, 0);
+                        }
+                    }
+                    self.emit(Opcode::LIST_TO_TUPLE, 0);
+                    self.emit(Opcode::BUILD_MAP, 0);
+                    for kw in keywords {
+                        if let Some(name) = &kw.arg {
+                            let name_idx = self.get_const_index(ConstValue::String(name.clone())) as u32;
+                            self.emit(Opcode::LOAD_CONST, name_idx);
+                            self.compile_expr(&kw.value)?;
+                            self.emit(Opcode::MAP_ADD, 0);
+                        } else {
+                            self.compile_expr(&kw.value)?;
+                            self.emit(Opcode::DICT_MERGE, 0);
+                        }
+                    }
+                    self.emit(Opcode::CALL_FUNCTION_EX, 0);
+                    return Ok(());
+                }
+
                 let npos = args.len() + extra_pos;
                 let nkw = keywords.len();
 
@@ -2378,10 +2534,27 @@ impl Compiler {
                 }
             }
             Expr::Tuple(elts) => {
-                for elt in elts {
-                    self.compile_expr(elt)?;
+                if elts.iter().any(|e| matches!(e, Expr::Starred(_))) {
+                    // Star unpacking present — build incrementally as a list
+                    // (LIST_APPEND/LIST_EXTEND handle Starred correctly),
+                    // then convert to a tuple.
+                    self.emit(Opcode::BUILD_LIST, 0);
+                    for elt in elts {
+                        if let Expr::Starred(inner) = elt {
+                            self.compile_expr(inner)?;
+                            self.emit(Opcode::LIST_EXTEND, 0);
+                        } else {
+                            self.compile_expr(elt)?;
+                            self.emit(Opcode::LIST_APPEND, 0);
+                        }
+                    }
+                    self.emit(Opcode::LIST_TO_TUPLE, 0);
+                } else {
+                    for elt in elts {
+                        self.compile_expr(elt)?;
+                    }
+                    self.emit(Opcode::BUILD_TUPLE, elts.len() as u32);
                 }
-                self.emit(Opcode::BUILD_TUPLE, elts.len() as u32);
             }
             Expr::Dict { keys, values } => {
                 self.emit(Opcode::BUILD_MAP, 0);
