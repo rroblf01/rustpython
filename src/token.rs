@@ -262,7 +262,7 @@ impl Lexer {
         Token::Number(s)
     }
 
-    fn read_bytes(&mut self, quote: char) -> Token {
+    fn read_bytes(&mut self, quote: char, raw: bool) -> Token {
         let mut bytes = Vec::new();
         let triple = self.peek() == Some(quote)
             && self.peek_ahead(1) == Some(quote);
@@ -273,7 +273,7 @@ impl Lexer {
             loop {
                 match self.advance() {
                     None => break,
-                    Some(c) if c == '\\' => {
+                    Some(c) if c == '\\' && !raw => {
                         let next = self.advance();
                         match next {
                             Some('n') => bytes.push(b'\n'),
@@ -294,6 +294,17 @@ impl Lexer {
                                 bytes.push(c as u8);
                             }
                             None => bytes.push(b'\\'),
+                        }
+                    }
+                    Some(c) if c == '\\' && raw => {
+                        // See the matching fix/comment in read_string: a
+                        // backslash in a raw bytes literal still escapes
+                        // exactly the next char for tokenizing purposes, and
+                        // that char must be consumed here so a following
+                        // quote isn't misread as the terminator.
+                        bytes.push(c as u8);
+                        if let Some(next) = self.advance() {
+                            bytes.push(next as u8);
                         }
                     }
                     Some(c) if c == quote => {
@@ -313,7 +324,7 @@ impl Lexer {
             loop {
                 match self.advance() {
                     None => break,
-                    Some(c) if c == '\\' => {
+                    Some(c) if c == '\\' && !raw => {
                         let next = self.advance();
                         match next {
                             Some('n') => bytes.push(b'\n'),
@@ -334,6 +345,12 @@ impl Lexer {
                                 bytes.push(c as u8);
                             }
                             None => bytes.push(b'\\'),
+                        }
+                    }
+                    Some(c) if c == '\\' && raw => {
+                        bytes.push(c as u8);
+                        if let Some(next) = self.advance() {
+                            bytes.push(next as u8);
                         }
                     }
                     Some(c) if c == quote => break,
@@ -396,6 +413,16 @@ impl Lexer {
                             None => s.push('\\'),
                         }
                     }
+                    Some(c) if c == '\\' && raw => {
+                        // See the matching fix/comment below in the
+                        // non-triple branch: a backslash in a raw string
+                        // always escapes exactly the next char for
+                        // tokenizing purposes, which must be consumed here.
+                        s.push(c);
+                        if let Some(next) = self.advance() {
+                            s.push(next);
+                        }
+                    }
                     Some(c) if c == quote => {
                         if self.peek() == Some(quote) && self.peek_ahead(1) == Some(quote) {
                             self.advance();
@@ -452,13 +479,21 @@ impl Lexer {
                         }
                     }
                     Some(c) if c == '\\' && raw => {
-                        // In raw strings, \" is two content chars (backslash + quote)
-                        if self.peek() == Some(quote) {
-                            s.push('\\');
-                            s.push(quote);
-                            self.advance();
-                        } else {
-                            s.push('\\');
+                        // A backslash in a raw string always escapes exactly
+                        // the next character for tokenizing purposes (so
+                        // e.g. \" doesn't end the string), while keeping
+                        // both characters literally in the content. The
+                        // escaped character MUST be consumed here — a
+                        // peek-only check (only swallowing the following
+                        // char when it happens to be the quote) misparses
+                        // `\\"` : the first backslash would leave the
+                        // second backslash to be examined fresh next
+                        // iteration, which would then wrongly swallow the
+                        // real closing quote as content instead of
+                        // terminating the string.
+                        s.push(c);
+                        if let Some(next) = self.advance() {
+                            s.push(next);
                         }
                     }
                     Some(c) if c == '{' && fstring => {
@@ -618,20 +653,28 @@ impl Lexer {
                     while self.peek().map_or(false, Self::is_identifier_continue) {
                         name.push(self.advance().unwrap());
                     }
-                    // Check for f-prefixed strings (f"..." or f'...')
-                    if (name == "f" || name == "F") && (self.peek() == Some('"') || self.peek() == Some('\'')) {
+                    // Check for string prefixes: f/F, r/R, b/B, u/U, and the
+                    // combined raw variants rf/fr/rb/br (any case) — e.g.
+                    // `rf"^www\.|..."` for a raw f-string regex pattern.
+                    // Single-char prefixes were previously the only ones
+                    // recognized; a combined prefix like "rf" is a valid
+                    // identifier-continue sequence, so without this check it
+                    // silently fell through to being tokenized as a plain
+                    // (undefined) name.
+                    let lower_name = name.to_ascii_lowercase();
+                    let is_string_prefix = matches!(lower_name.as_str(), "f" | "r" | "b" | "u" | "fr" | "rf" | "br" | "rb");
+                    if is_string_prefix && (self.peek() == Some('"') || self.peek() == Some('\'')) {
                         let quote = self.advance().unwrap();
-                        return self.tokenize_fstring(quote);
-                    }
-                    // Check for raw strings (r"..." or r'...')
-                    if (name == "r" || name == "R") && (self.peek() == Some('"') || self.peek() == Some('\'')) {
-                        let quote = self.advance().unwrap();
-                        return self.read_string(quote, true, false);
-                    }
-                    // Check for bytes literals (b"..." or b'...')
-                    if (name == "b" || name == "B") && (self.peek() == Some('"') || self.peek() == Some('\'')) {
-                        let quote = self.advance().unwrap();
-                        return self.read_bytes(quote);
+                        let raw = lower_name.contains('r');
+                        let is_fstring = lower_name.contains('f');
+                        let is_bytes = lower_name.contains('b');
+                        if is_fstring {
+                            return self.tokenize_fstring(quote, raw);
+                        } else if is_bytes {
+                            return self.read_bytes(quote, raw);
+                        } else {
+                            return self.read_string(quote, raw, false);
+                        }
                     }
                     return match name.as_str() {
                         "False" => Token::False,
@@ -841,7 +884,7 @@ impl Lexer {
         }
     }
 
-    fn tokenize_fstring(&mut self, quote: char) -> Token {
+    fn tokenize_fstring(&mut self, quote: char, raw: bool) -> Token {
         // Read the entire f-string, splitting into literal and expression parts
         // Each part: (literal_text, expr_text, format_spec_text, conversion)
         let mut parts: Vec<(String, String, String, u8)> = Vec::new();
@@ -849,6 +892,19 @@ impl Lexer {
         loop {
             match self.advance() {
                 None => break,
+                Some(c) if c == '\\' && raw => {
+                    // Raw f-string (rf"...") — a backslash still escapes
+                    // exactly the next character for tokenizing purposes
+                    // (so \" doesn't end the string), while both chars stay
+                    // literal in the content; the escaped char must be
+                    // consumed here (see the matching fix/comment in
+                    // read_string) or a following quote gets misread as
+                    // the terminator.
+                    literal.push(c);
+                    if let Some(next) = self.advance() {
+                        literal.push(next);
+                    }
+                }
                 Some(c) if c == '\\' => {
                     let next = self.advance();
                     literal.push(match next {

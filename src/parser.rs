@@ -470,8 +470,17 @@ impl Parser {
     /// Track parenthesis depth so commas inside parenthesized sub-expressions
     /// (e.g., `for (a, b) in ...`) don't confuse tuple element separators.
     /// Also works for comprehension `for` clauses.
+    fn parse_for_target_elt(&mut self) -> Result<Expr, String> {
+        // `for head, *tail in ...:` — a starred sub-target collects the rest
+        // of the iterable's items into a list, same as in assignment targets.
+        if self.eat(&Token::Star) {
+            return Ok(Expr::Starred(Box::new(self.parse_bitwise_or()?)));
+        }
+        self.parse_bitwise_or()
+    }
+
     fn parse_for_target(&mut self) -> Result<Expr, String> {
-        let mut target = self.parse_bitwise_or()?;
+        let mut target = self.parse_for_target_elt()?;
         if self.at(&Token::Comma) {
             let mut elts = vec![target];
             let mut paren_depth = 0usize;
@@ -490,7 +499,7 @@ impl Parser {
                         paren_depth -= 1;
                     }
                 }
-                elts.push(self.parse_bitwise_or()?);
+                elts.push(self.parse_for_target_elt()?);
             }
             target = Expr::Tuple(elts);
         }
@@ -1751,7 +1760,12 @@ impl Parser {
                         let mut elts = vec![first];
                         loop {
                             if self.at(&Token::RightParen) { break; }
-                            elts.push(self.parse_expr()?);
+                            if self.at(&Token::Star) {
+                                self.next();
+                                elts.push(Expr::Starred(Box::new(self.parse_expr()?)));
+                            } else {
+                                elts.push(self.parse_expr()?);
+                            }
                             if !self.eat(&Token::Comma) { break; }
                         }
                         self.expect(&Token::RightParen)?;
