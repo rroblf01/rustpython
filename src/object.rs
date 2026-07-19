@@ -176,19 +176,33 @@ impl PyObjectRef {
         }
     }
 
-    pub fn repr(&self) -> String { self.borrow().repr() }
+    pub fn repr(&self) -> String {
+        // Check for __repr__ on Instance types (user-defined objects) —
+        // self.borrow().repr() can't invoke a bound method (no PyObjectRef
+        // handle from &PyObject), so it must be handled here instead.
+        let repr_func = {
+            let obj = self.borrow();
+            match &*obj {
+                PyObject::Instance { typ, .. } => lookup_dunder_via_mro(typ, "__repr__"),
+                _ => None,
+            }
+        };
+        if let Some(f) = repr_func {
+            if let Ok(result) = call_bound_method(f, self.clone(), vec![]) {
+                return result.str();
+            }
+        }
+        if let Some(native) = native_backing_of(self) {
+            return native.repr();
+        }
+        self.borrow().repr()
+    }
     pub fn str(&self) -> String {
         // Check for __str__ on Instance types (user-defined objects)
         let str_func = {
             let obj = self.borrow();
             match &*obj {
-                PyObject::Instance { typ, .. } => {
-                    let typ_ref = typ.borrow();
-                    match &*typ_ref {
-                        PyObject::Type { dict: type_dict, .. } => type_dict.get_str("__str__").cloned(),
-                        _ => None,
-                    }
-                }
+                PyObject::Instance { typ, .. } => lookup_dunder_via_mro(typ, "__str__").or_else(|| lookup_dunder_via_mro(typ, "__repr__")),
                 _ => None,
             }
         };
@@ -196,6 +210,9 @@ impl PyObjectRef {
             if let Ok(result) = call_bound_method(f, self.clone(), vec![]) {
                 return result.str();
             }
+        }
+        if let Some(native) = native_backing_of(self) {
+            return native.str();
         }
         self.borrow().str()
     }
@@ -206,8 +223,30 @@ impl PyObjectRef {
             PyObjectRef::SmallFloat(f) => *f != 0.0,
             PyObjectRef::SmallStr(s) => !s.as_str().is_empty(),
             PyObjectRef::None => false,
-            PyObjectRef::Mut(rc) => rc.borrow().truthy(),
-            PyObjectRef::Imm(rc) => rc.borrow().truthy(),
+            PyObjectRef::Mut(_) | PyObjectRef::Imm(_) => {
+                // Handle Instance specially so a __bool__ method sees the
+                // real `self` (with its actual instance dict), not a blank
+                // stand-in — PyObject::truthy() only has `&PyObject`, with
+                // no way to reconstruct the original PyObjectRef/Rc identity.
+                let typ_opt = if let PyObject::Instance { typ, .. } = &*self.borrow() {
+                    Some(typ.clone())
+                } else {
+                    None
+                };
+                if let Some(typ) = typ_opt {
+                    if let Some(f) = lookup_dunder_via_mro(&typ, "__bool__") {
+                        if let Ok(result) = call_bound_method(f, self.clone(), vec![]) {
+                            return result.truthy();
+                        }
+                    }
+                    if let Some(native) = native_backing_of(self) {
+                        return native.truthy();
+                    }
+                    true
+                } else {
+                    self.borrow().truthy()
+                }
+            }
         }
     }
     pub fn hash(&self) -> PyResult<usize> {
@@ -230,8 +269,39 @@ impl PyObjectRef {
                 Ok(h)
             }
             PyObjectRef::None => Ok(0),
-            PyObjectRef::Mut(rc) => rc.borrow().hash(),
-            PyObjectRef::Imm(rc) => rc.borrow().hash(),
+            PyObjectRef::Mut(_) | PyObjectRef::Imm(_) => {
+                // For an Instance, __hash__ (including object's own default,
+                // pointer-identity-based implementation) must be called
+                // with the REAL self — PyObject::Instance::hash() below has
+                // no access to the original Rc and reconstructs a throwaway
+                // clone instead, giving a fresh (and different) address on
+                // every single call. Route through here first, passing
+                // `self.clone()` (a genuine Rc clone, same identity) so the
+                // default hash is actually stable across calls — otherwise
+                // no plain object can ever be used correctly as a dict/set
+                // key or inside a tuple used as one.
+                let typ = match &*self.borrow() {
+                    PyObject::Instance { typ, .. } => Some(typ.clone()),
+                    _ => None,
+                };
+                if let Some(typ) = typ {
+                    if let Some(f) = lookup_dunder_via_mro(&typ, "__hash__") {
+                        let result = call_bound_method(f, self.clone(), vec![])?;
+                        let n = result.borrow();
+                        return if let PyObject::Int(i) = &*n {
+                            let bytes = i.to_signed_bytes_le();
+                            let mut h: usize = 0;
+                            for (j, &b) in bytes.iter().enumerate() {
+                                h ^= (b as usize) << ((j % std::mem::size_of::<usize>()) * 8);
+                            }
+                            Ok(h)
+                        } else {
+                            Err(PyError::type_error("__hash__ should return an integer"))
+                        };
+                    }
+                }
+                self.borrow().hash()
+            }
         }
     }
     pub fn equals(&self, other: &PyObjectRef) -> PyResult<bool> {
@@ -346,32 +416,57 @@ impl PyError {
             PyError::ZeroDivisionError(m) => m.clone(),
             PyError::RuntimeError(m) => m.clone(),
             PyError::SystemExit(c) => format!("SystemExit({})", c),
-            PyError::Exception(m, _) => m.clone(),
+            PyError::Exception(m, exc) => {
+                // `m` is often just a dispatch tag (e.g. "re-raise" for a
+                // reraised with/finally exception) rather than the real
+                // message — the actual args live on the wrapped exception
+                // object itself.
+                if let PyObject::Exception { args, .. } = &*exc.borrow() {
+                    match args.len() {
+                        0 => String::new(),
+                        1 => args[0].str(),
+                        _ => args.iter().map(|a| a.str()).collect::<Vec<_>>().join(", "),
+                    }
+                } else {
+                    m.clone()
+                }
+            }
             PyError::StopIteration => "".to_string(),
             PyError::OsError(m) => m.clone(),
             PyError::ImportError(m) => m.clone(),
+        }
+    }
+
+    /// The exception's real type name for display — for `PyError::Exception`
+    /// this must come from the wrapped PyObject::Exception's own `typ`
+    /// field, not the outer variant's dispatch tag (which is often a
+    /// generic placeholder like "re-raise", not the actual exception type).
+    pub fn type_name_for_display(&self) -> String {
+        match self {
+            PyError::Exception(_, exc) => match &*exc.borrow() {
+                PyObject::Exception { typ, .. } => typ.clone(),
+                PyObject::ExceptionGroup { typ, .. } => typ.clone(),
+                _ => "Exception".to_string(),
+            },
+            PyError::TypeError(_) => "TypeError".to_string(),
+            PyError::ValueError(_) => "ValueError".to_string(),
+            PyError::NameError(_) => "NameError".to_string(),
+            PyError::AttributeError(_) => "AttributeError".to_string(),
+            PyError::IndexError(_) => "IndexError".to_string(),
+            PyError::KeyError(_) => "KeyError".to_string(),
+            PyError::ZeroDivisionError(_) => "ZeroDivisionError".to_string(),
+            PyError::RuntimeError(_) => "RuntimeError".to_string(),
+            PyError::SystemExit(_) => "SystemExit".to_string(),
+            PyError::StopIteration => "StopIteration".to_string(),
+            PyError::OsError(_) => "OSError".to_string(),
+            PyError::ImportError(_) => "ImportError".to_string(),
         }
     }
 }
 
 impl fmt::Display for PyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let name = match self {
-            PyError::TypeError(_) => "TypeError",
-            PyError::ValueError(_) => "ValueError",
-            PyError::NameError(_) => "NameError",
-            PyError::AttributeError(_) => "AttributeError",
-            PyError::IndexError(_) => "IndexError",
-            PyError::KeyError(_) => "KeyError",
-            PyError::ZeroDivisionError(_) => "ZeroDivisionError",
-            PyError::RuntimeError(_) => "RuntimeError",
-            PyError::SystemExit(_) => "SystemExit",
-            PyError::Exception(_, _) => "Exception",
-            PyError::StopIteration => "StopIteration",
-            PyError::OsError(_) => "OSError",
-            PyError::ImportError(_) => "ImportError",
-        };
-        write!(f, "{}: {}", name, self.message())
+        write!(f, "{}: {}", self.type_name_for_display(), self.message())
     }
 }
 
@@ -898,15 +993,14 @@ impl PyObject {
             PyObject::RangeIter { current, stop, step } => *step > 0 && *current < *stop || *step < 0 && *current > *stop,
             PyObject::EnumerateIter { items, pos, .. } => *pos < items.len(),
             PyObject::Instance { typ, .. } => {
-                // Check for __bool__ method
-                // If no __bool__, objects are truthy by default
-                let f = {
-                    let typ_ref = typ.borrow();
-                    match &*typ_ref {
-                        PyObject::Type { dict: type_dict, .. } => type_dict.get_str("__bool__").cloned(),
-                        _ => None,
-                    }
-                };
+                // Check for __bool__ method (walking the MRO so inherited
+                // __bool__ is found, not just one defined on the leaf type).
+                // If no __bool__, objects are truthy by default.
+                // NOTE: this can't pass the real `self` PyObjectRef through —
+                // `truthy()` only has `&PyObject`, not the Rc-wrapped handle —
+                // so a __bool__ that reads instance attributes (self.foo)
+                // will see an empty dict here. Pre-existing limitation.
+                let f = lookup_dunder_via_mro(typ, "__bool__");
                 if let Some(f) = f {
                     if let Ok(result) = call_bound_method(f, PyObjectRef::new(PyObject::Instance { typ: typ.clone(), dict: HashMap::new() }), vec![]) {
                         return result.truthy();
@@ -975,14 +1069,8 @@ impl PyObject {
                 Ok(h)
             }
             PyObject::Instance { typ, dict } => {
-                // Check for __hash__ method
-                let f = {
-                    let typ_ref = typ.borrow();
-                    match &*typ_ref {
-                        PyObject::Type { dict: type_dict, .. } => type_dict.get_str("__hash__").cloned(),
-                        _ => None,
-                    }
-                };
+                // Check for __hash__ method (walking the MRO)
+                let f = lookup_dunder_via_mro(typ, "__hash__");
                 if let Some(f) = f {
                     let result = call_bound_method(f, PyObjectRef::new(PyObject::Instance { typ: typ.clone(), dict: dict.clone() }), vec![])?;
                     let n = result.borrow();
@@ -996,6 +1084,8 @@ impl PyObject {
                     } else {
                         Err(PyError::type_error("__hash__ should return an integer"))
                     }
+                } else if let Some(native) = dict.get(NATIVE_BACKING_KEY) {
+                    native.hash()
                 } else {
                     Err(PyError::type_error(format!("unhashable type: '{}'", self.type_name())))
                 }
@@ -1016,13 +1106,59 @@ impl PyObject {
                 h = h.wrapping_mul(1000003).wrapping_add(*flags as usize);
                 Ok(h)
             }
+            // Functions, types, modules, etc. are hashable by identity in
+            // real Python (there's no reasonable structural hash for them,
+            // but there's no reason they should be unhashable either — code
+            // that registers callbacks in a set/dict, e.g. Django's check
+            // registry, relies on this). `self` here is `&PyObject` reached
+            // via a `Ref` guard borrowed from the object's own Rc, so its
+            // address is stable across calls as long as callers don't
+            // reconstruct a throwaway clone first (unlike the Instance case
+            // above, which needed its own fix for exactly that reason).
+            PyObject::Function { .. } | PyObject::BuiltinFunction { .. } | PyObject::BuiltinMethod { .. }
+            | PyObject::Type { .. } | PyObject::Module { .. } | PyObject::BoundMethod { .. } => {
+                Ok(self as *const PyObject as usize)
+            }
             PyObject::Closure(_) => Err(PyError::type_error(format!("unhashable type: '{}'", self.type_name()))),
             _ => Err(PyError::type_error(format!("unhashable type: '{}'", self.type_name()))),
         }
     }
 
-    pub fn equals(&self, other: &PyObjectRef) -> PyResult<bool> {
-        let other = other.borrow();
+    pub fn equals(&self, other_ref: &PyObjectRef) -> PyResult<bool> {
+        // This structural-equality function is what PyDict/PySet actually
+        // use to disambiguate a hash bucket — unlike py_compare's `==`
+        // operator dispatch, it never checked a custom class's __eq__ at
+        // all, so ANY hashable user-defined class (not just list/dict/str
+        // native-backed ones) silently failed as a dict/set key: two keys
+        // that compared equal via `==` and hashed the same would still
+        // fail to be found by that key, because dict lookup calls this
+        // function directly, bypassing dunder dispatch entirely.
+        if let PyObject::Instance { typ, .. } = self {
+            if let Some(f) = lookup_dunder_via_mro(typ, "__eq__") {
+                let self_ref = PyObjectRef::new(self.clone());
+                let result = call_bound_method(f, self_ref, vec![other_ref.clone()])?;
+                return Ok(result.truthy());
+            }
+        }
+        // Instances that transparently subclass list/dict/str (and don't
+        // override __eq__ themselves) compare via their native backing,
+        // matching CPython's list/dict/str __eq__ (structural, regardless
+        // of subclass identity).
+        if let PyObject::Instance { dict, .. } = self {
+            if let Some(native) = dict.get(NATIVE_BACKING_KEY) {
+                return native.equals(other_ref);
+            }
+        }
+        let other_native = if let PyObject::Instance { dict, .. } = &*other_ref.borrow() {
+            dict.get(NATIVE_BACKING_KEY).cloned()
+        } else {
+            None
+        };
+        if let Some(native) = other_native {
+            let self_ref = PyObjectRef::new(self.clone());
+            return self_ref.equals(&native);
+        }
+        let other = other_ref.borrow();
         if std::mem::discriminant(self) != std::mem::discriminant(&*other) {
             return Ok(false);
         }
@@ -1089,6 +1225,16 @@ impl PyObject {
             }
             (PyObject::Array(a), PyObject::Array(b)) => a.typecode == b.typecode && a.data == b.data,
             (PyObject::CompiledRegex { pattern: a, flags: af, .. }, PyObject::CompiledRegex { pattern: b, flags: bf, .. }) => a == b && af == bf,
+            // Reference-identity types (matching the identity-based hash
+            // above): equal iff it's really the same underlying object.
+            (PyObject::Function { .. }, PyObject::Function { .. })
+            | (PyObject::BuiltinFunction { .. }, PyObject::BuiltinFunction { .. })
+            | (PyObject::BuiltinMethod { .. }, PyObject::BuiltinMethod { .. })
+            | (PyObject::Type { .. }, PyObject::Type { .. })
+            | (PyObject::Module { .. }, PyObject::Module { .. })
+            | (PyObject::BoundMethod { .. }, PyObject::BoundMethod { .. }) => {
+                std::ptr::eq(self as *const PyObject, &*other as *const PyObject)
+            }
             _ => false,
         };
         Ok(result)
@@ -1267,6 +1413,21 @@ fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String, String> {
 
     while let Some(ch) = chars.next() {
         if ch == '%' {
+            // Parse an optional mapping key: %(name)s pulls "name" out of a
+            // dict argument instead of consuming positionally.
+            let mut mapping_key: Option<String> = None;
+            if chars.clone().next() == Some('(') {
+                chars.next(); // consume '('
+                let mut key = String::new();
+                loop {
+                    match chars.next() {
+                        Some(')') => break,
+                        Some(c) => key.push(c),
+                        None => return Err("incomplete format key".to_string()),
+                    }
+                }
+                mapping_key = Some(key);
+            }
             // Parse optional width specifier (e.g., %03o, %02d, %3s, %4d)
             let mut width: Option<usize> = None;
             // Check for flags (only '0' flag supported)
@@ -1295,12 +1456,21 @@ fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String, String> {
                 None => return Err("incomplete format: trailing %".to_string()),
                 Some('%') => result.push('%'),
                 Some(conv @ 's') | Some(conv @ 'r') | Some(conv @ 'f') | Some(conv @ 'd') | Some(conv @ 'i')
-                | Some(conv @ 'o') | Some(conv @ 'x') | Some(conv @ 'X') => {
-                    let raw = get_arg();
+                | Some(conv @ 'o') | Some(conv @ 'x') | Some(conv @ 'X') | Some(conv @ 'c') => {
+                    let raw = if let Some(ref key) = mapping_key {
+                        let obj = arg.borrow();
+                        match &*obj {
+                            PyObject::Dict(d) => d.get(&py_str(key)).ok().flatten()
+                                .ok_or_else(|| format!("'{}'", key))?,
+                            _ => return Err("format requires a mapping".to_string()),
+                        }
+                    } else {
+                        get_arg()
+                    };
 
                     let formatted = match conv {
                         's' => raw.str(),
-                        'r' => format!("'{}'", raw.str()),
+                        'r' => raw.repr(),
                         'f' => raw.str(),
                         'd' | 'i' => {
                             if let Some(i) = raw.as_i64() {
@@ -1328,6 +1498,13 @@ fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String, String> {
                                 format!("{:X}", i)
                             } else {
                                 "0".to_string()
+                            }
+                        }
+                        'c' => {
+                            if let Some(i) = raw.as_i64() {
+                                char::from_u32(i as u32).map(|c| c.to_string()).unwrap_or_default()
+                            } else {
+                                raw.str().chars().next().map(|c| c.to_string()).unwrap_or_default()
                             }
                         }
                         _ => unreachable!(),
@@ -1382,13 +1559,7 @@ pub fn try_dunder_binop(a: &PyObjectRef, b: &PyObjectRef, method: &str) -> PyRes
     let f = {
         let a_borrowed = a.borrow();
         match &*a_borrowed {
-            PyObject::Instance { typ, .. } => {
-                let typ_ref = typ.borrow();
-                match &*typ_ref {
-                    PyObject::Type { dict: type_dict, .. } => type_dict.get(method).cloned(),
-                    _ => None,
-                }
-            }
+            PyObject::Instance { typ, .. } => lookup_dunder_via_mro(typ, method),
             _ => {
                 // Try dunder method directly on the object (for builtin types like str, list, etc.)
                 a_borrowed.get_attribute(method).ok()
@@ -1397,10 +1568,23 @@ pub fn try_dunder_binop(a: &PyObjectRef, b: &PyObjectRef, method: &str) -> PyRes
     };
     if let Some(f) = f {
         let result = call_bound_method(f, a.clone(), vec![b.clone()])?;
-        Ok(Some(result))
-    } else {
-        Ok(None)
+        return Ok(Some(result));
     }
+    // Not overridden anywhere in the mro: for a class that transparently
+    // subclasses list/str (`class Foo(list): ...`), +/* on it should behave
+    // like the same operation on the real native backing (dict supports
+    // neither, so it's simply not in this list).
+    if let Some(native) = native_backing_of(a) {
+        let result = match method {
+            "__add__" => Some(py_add(&native, b)),
+            "__mul__" => Some(py_mul(&native, b)),
+            _ => None,
+        };
+        if let Some(result) = result {
+            return result.map(Some);
+        }
+    }
+    Ok(None)
 }
 
 pub fn py_add(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
@@ -1781,12 +1965,23 @@ pub fn py_compare(a: &PyObjectRef, b: &PyObjectRef, op: u32) -> PyResult<PyObjec
             _ => return Ok(py_bool(false)),
         }));
     }
-    // Check for __eq__/__ne__ on Instance types
-    if op == 2 || op == 5 {
+    // Check for __eq__/__ne__/__lt__/__le__/__gt__/__ge__ on Instance types —
+    // without this, no user-defined class's comparison operators work at
+    // all (only equality was ever wired up here; ordering silently fell
+    // through to the builtin Compare impl, which doesn't know Instance).
+    let method_name = match op {
+        0 => Some("__lt__"),
+        1 => Some("__le__"),
+        2 => Some("__eq__"),
+        3 => Some("__ge__"),
+        4 => Some("__gt__"),
+        5 => Some("__ne__"),
+        _ => None,
+    };
+    if let Some(method_name) = method_name {
         let is_a_instance = matches!(&*a.borrow(), PyObject::Instance { .. });
         let is_b_instance = matches!(&*b.borrow(), PyObject::Instance { .. });
         if is_a_instance || is_b_instance {
-            let method_name = if op == 2 { "__eq__" } else { "__ne__" };
             if let Some(result) = try_dunder_comparison(a, b, method_name)? {
                 return Ok(py_bool(result));
             }
@@ -1965,30 +2160,16 @@ pub fn contains_op(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<bool> {
     let f = {
         let container = a.borrow();
         match &*container {
-            PyObject::Instance { typ, .. } => {
-                let typ_ref = typ.borrow();
-                match &*typ_ref {
-                    PyObject::Type { dict: type_dict, mro, .. } => {
-                        type_dict.get_str("__contains__").cloned().or_else(|| {
-                            for base in mro.iter() {
-                                if let PyObject::Type { dict: base_dict, .. } = &*base.borrow() {
-                                    if let Some(val) = base_dict.get_str("__contains__") {
-                                        return Some(val.clone());
-                                    }
-                                }
-                            }
-                            None
-                        })
-                    }
-                    _ => None,
-                }
-            }
+            PyObject::Instance { typ, .. } => lookup_dunder_via_mro(typ, "__contains__"),
             _ => None,
         }
     };
     if let Some(f) = f {
         let result = call_bound_method(f, a.clone(), vec![b.clone()])?;
         return Ok(result.truthy());
+    }
+    if let Some(native) = native_backing_of(a) {
+        return contains_op(&native, b);
     }
     let container = a.borrow();
     match &*container {
@@ -2063,19 +2244,16 @@ pub fn builtin_len(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         PyObject::Bytes(b) => Ok(py_int(b.len())),
         PyObject::ByteArray(b) => Ok(py_int(b.len())),
         PyObject::Array(arr) => Ok(py_int(arr.data.len())),
-        PyObject::Instance { typ, .. } => {
-            let f = {
-                let typ_ref = typ.borrow();
-                match &*typ_ref {
-                    PyObject::Type { dict: type_dict, .. } => type_dict.get_str("__len__").cloned(),
-                    _ => None,
-                }
-            };
+        PyObject::Instance { typ, dict } => {
+            let f = lookup_dunder_via_mro(typ, "__len__");
             if let Some(f) = f {
                 let result = call_bound_method(f, args[0].clone(), vec![])?;
                 let n = result.borrow();
                 if let PyObject::Int(i) = &*n { return Ok(py_int(i.clone())) }
                 return Err(PyError::type_error("__len__() should return an int"))
+            }
+            if let Some(native) = dict.get(NATIVE_BACKING_KEY) {
+                return builtin_len(&[native.clone()]);
             }
             Err(PyError::type_error(format!("object of type '{}' has no len()", obj.type_name())))
         }
@@ -2332,6 +2510,15 @@ pub fn builtin_float(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             let f: f64 = s.trim().parse().map_err(|_| PyError::value_error(format!("could not convert string to float: '{}'", s)))?;
             Ok(py_float(f))
         }
+        PyObject::Instance { typ, .. } => {
+            match lookup_dunder_via_mro(typ, "__float__") {
+                Some(f) => {
+                    drop(obj);
+                    call_bound_method(f, args[0].clone(), vec![])
+                }
+                None => Err(PyError::type_error(format!("float() argument must be a string or number, not '{}'", get_type_name_for_instance(typ)))),
+            }
+        }
         _ => Err(PyError::type_error(format!("float() argument must be a string or number, not '{}'", obj.type_name()))),
     }
 }
@@ -2342,25 +2529,7 @@ pub fn builtin_str(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         let f = {
             let obj_borrowed = args[0].borrow();
             if let PyObject::Instance { typ, .. } = &*obj_borrowed {
-                let typ_ref = typ.borrow();
-                if let PyObject::Type { dict: type_dict, mro, .. } = &*typ_ref {
-                    // Check own dict first
-                    let own = type_dict.get_str("__str__").cloned();
-                    if let Some(f) = own { Some(f) }
-                    else {
-                        // Walk MRO for inherited __str__
-                        let mut found = None;
-                        for base_type in mro {
-                            if let PyObject::Type { dict: base_dict, .. } = &*base_type.borrow() {
-                                if let Some(f) = base_dict.get_str("__str__") {
-                                    found = Some(f.clone());
-                                    break;
-                                }
-                            }
-                        }
-                        found
-                    }
-                } else { None }
+                lookup_dunder_via_mro(typ, "__str__")
             } else { None }
         };
         if let Some(f) = f {
@@ -2377,13 +2546,7 @@ pub fn builtin_repr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let f = {
         let obj_borrowed = args[0].borrow();
         match &*obj_borrowed {
-            PyObject::Instance { typ, .. } => {
-                let typ_ref = typ.borrow();
-                match &*typ_ref {
-                    PyObject::Type { dict: type_dict, .. } => type_dict.get_str("__repr__").cloned(),
-                    _ => None,
-                }
-            }
+            PyObject::Instance { typ, .. } => lookup_dunder_via_mro(typ, "__repr__"),
             _ => None,
         }
     };
@@ -2448,8 +2611,45 @@ pub fn builtin_tuple(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
 }
 
-pub fn builtin_dict(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    Ok(py_dict())
+pub fn builtin_dict(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() {
+        return Ok(py_dict());
+    }
+    let mut d = PyDict::new();
+    let arg = args[0].borrow();
+    match &*arg {
+        PyObject::Dict(other) => {
+            for (k, v) in other.items() {
+                d.set(k, v)?;
+            }
+        }
+        _ => {
+            drop(arg);
+            // An iterable of (key, value) pairs
+            let it = builtin_iter(&[args[0].clone()])?;
+            loop {
+                match builtin_next(&[it.clone()]) {
+                    Ok(pair) => {
+                        let pair_b = pair.borrow();
+                        let items: Vec<PyObjectRef> = match &*pair_b {
+                            PyObject::Tuple(v) | PyObject::List(v) => v.clone(),
+                            _ => return Err(PyError::type_error("cannot convert dictionary update sequence element to a sequence")),
+                        };
+                        if items.len() != 2 {
+                            return Err(PyError::value_error(format!(
+                                "dictionary update sequence element has length {}; 2 is required", items.len()
+                            )));
+                        }
+                        drop(pair_b);
+                        d.set(items[0].clone(), items[1].clone())?;
+                    }
+                    Err(PyError::StopIteration) => break,
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+    }
+    Ok(PyObjectRef::new(PyObject::Dict(d)))
 }
 
 pub fn builtin_set(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
@@ -2795,6 +2995,17 @@ pub fn builtin_hash(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             Ok(py_int(hash as i64))
         }
         PyObject::None => Ok(py_int(123456789)),
+        PyObject::Instance { .. } => {
+            // Delegate to PyObjectRef::hash(), which (unlike reconstructing
+            // a throwaway Instance clone here) calls __hash__ with the real
+            // self — a fresh clone has a different address on every call,
+            // making the default identity-based object.__hash__() (and
+            // hence this instance's hash) different every time it's asked,
+            // which breaks it as a dict/set key or inside a tuple used as
+            // one.
+            drop(obj);
+            Ok(py_int(args[0].hash()? as i64))
+        }
         _ => {
             // For objects without a hash, use the pointer as hash
             let ptr = &*obj as *const PyObject as usize;
@@ -2925,6 +3136,15 @@ pub fn builtin_abs(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     match &*obj {
         PyObject::Int(i) => Ok(py_int(i.clone().abs())),
         PyObject::Float(f) => Ok(py_float(f.abs())),
+        PyObject::Instance { typ, .. } => {
+            match lookup_dunder_via_mro(typ, "__abs__") {
+                Some(f) => {
+                    drop(obj);
+                    call_bound_method(f, args[0].clone(), vec![])
+                }
+                None => Err(PyError::type_error(format!("bad operand type for abs(): '{}'", get_type_name_for_instance(typ)))),
+            }
+        }
         _ => Err(PyError::type_error(format!("bad operand type for abs(): '{}'", obj.type_name()))),
     }
 }
@@ -2970,13 +3190,7 @@ pub fn builtin_delattr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let f = {
         let obj_borrowed = args[0].borrow();
         match &*obj_borrowed {
-            PyObject::Instance { typ, .. } => {
-                let typ_ref = typ.borrow();
-                match &*typ_ref {
-                    PyObject::Type { dict: type_dict, .. } => type_dict.get_str("__delattr__").cloned(),
-                    _ => None,
-                }
-            }
+            PyObject::Instance { typ, .. } => lookup_dunder_via_mro(typ, "__delattr__"),
             _ => None,
         }
     };
@@ -3199,15 +3413,17 @@ pub fn builtin_sorted(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             } else {
                 b.clone()
             };
-            let ordering = match a_val.borrow().gt(&b_val) {
-                Ok(true) => std::cmp::Ordering::Greater,
-                Ok(false) => match a_val.borrow().lt(&b_val) {
-                    Ok(true) => std::cmp::Ordering::Less,
+            // Route through py_compare (not the raw Compare trait methods)
+            // so user-defined classes' __lt__/__gt__ are consulted — the
+            // trait impl alone has no notion of Instance dunder dispatch.
+            match py_compare(&a_val, &b_val, 0) {
+                Ok(result) if result.truthy() => std::cmp::Ordering::Less,
+                Ok(_) => match py_compare(&b_val, &a_val, 0) {
+                    Ok(result) if result.truthy() => std::cmp::Ordering::Greater,
                     _ => std::cmp::Ordering::Equal,
                 },
                 Err(_) => std::cmp::Ordering::Equal,
-            };
-            ordering
+            }
         });
     }
     Ok(py_list(v))
@@ -3243,13 +3459,7 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let f = {
         let obj = args[0].borrow();
         match &*obj {
-            PyObject::Instance { typ, .. } => {
-                let typ_ref = typ.borrow();
-                match &*typ_ref {
-                    PyObject::Type { dict: type_dict, .. } => type_dict.get_str("__iter__").cloned(),
-                    _ => None,
-                }
-            }
+            PyObject::Instance { typ, .. } => lookup_dunder_via_mro(typ, "__iter__"),
             PyObject::Generator { .. } => {
                 // Generators are their own iterator (return self)
                 return Ok(args[0].clone());
@@ -3259,6 +3469,9 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     };
     if let Some(f) = f {
         return call_bound_method(f, args[0].clone(), vec![]);
+    }
+    if let Some(native) = native_backing_of(&args[0]) {
+        return builtin_iter(&[native]);
     }
     let obj = args[0].borrow();
     match &*obj {
@@ -3272,6 +3485,9 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         PyObject::List(v) => {
             Ok(PyObjectRef::new(PyObject::ListIter { list: v.clone(), index: 0 }))
         }
+        PyObject::Dict(d) => {
+            Ok(PyObjectRef::new(PyObject::ListIter { list: d.keys(), index: 0 }))
+        }
         _ => Ok(args[0].clone()),
     }
 }
@@ -3284,13 +3500,7 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let f = {
         let obj = args[0].borrow();
         match &*obj {
-            PyObject::Instance { typ, .. } => {
-                let typ_ref = typ.borrow();
-                match &*typ_ref {
-                    PyObject::Type { dict: type_dict, .. } => type_dict.get_str("__next__").cloned(),
-                    _ => None,
-                }
-            }
+            PyObject::Instance { typ, .. } => lookup_dunder_via_mro(typ, "__next__"),
             PyObject::Generator { .. } => {
                 drop(obj);
                 let next_func = args[0].borrow().get_attribute("__next__")?;
@@ -3447,8 +3657,10 @@ pub fn builtin_sum(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 }
 
 fn compare_gt(a: &PyObjectRef, b: &PyObjectRef) -> std::cmp::Ordering {
-    match a.borrow().gt(b) {
-        Ok(true) => std::cmp::Ordering::Greater,
+    // Route through py_compare so user-defined classes' __gt__/__lt__ are
+    // consulted (the raw Compare trait has no notion of Instance dispatch).
+    match py_compare(a, b, 4) {
+        Ok(result) if result.truthy() => std::cmp::Ordering::Greater,
         _ => std::cmp::Ordering::Less,
     }
 }
@@ -3549,7 +3761,18 @@ pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             Ok(py_bool(false))
         }
         (PyObject::Instance { typ, .. }, _) => {
-            let class_name = class.str();
+            let class_name = match &*class {
+                PyObject::BuiltinFunction { name, .. } => name.clone(),
+                PyObject::Str(s) => s.to_string(),
+                _ => class.str(),
+            };
+            // `class Foo(list): ...` — Foo transparently subclasses a
+            // native builtin, so isinstance(foo, list) must also be true.
+            if let Some(native_kind) = native_base_of_type(typ) {
+                if native_kind == class_name {
+                    return Ok(py_bool(true));
+                }
+            }
             Ok(py_bool(typ.borrow().type_name() == class_name || class_name == "object"))
         }
         _ => {
@@ -3643,17 +3866,11 @@ pub fn builtin_callable(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         // Instances may be callable if they have __call__
         PyObject::Instance { .. }
     );
-    // For instances, check if the type has __call__
+    // For instances, check if the type (or a base, via MRO) has __call__
     if !is_callable {
         Ok(py_bool(false))
     } else if let PyObject::Instance { typ, .. } = &*obj {
-        let typ_ref = typ.borrow();
-        let has_call = if let PyObject::Type { dict, .. } = &*typ_ref {
-            dict.contains_key("__call__")
-        } else {
-            false
-        };
-        Ok(py_bool(has_call))
+        Ok(py_bool(lookup_dunder_via_mro(typ, "__call__").is_some()))
     } else {
         Ok(py_bool(true))
     }
@@ -4122,12 +4339,12 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
             builtin_call(&bf, &all_args)
         }
         4 => {
-            if let PyObject::Type { dict: type_dict, .. } = &*f.borrow() {
+            if matches!(&*f.borrow(), PyObject::Type { .. }) {
                 let instance = PyObjectRef::new(PyObject::Instance {
                     typ: f.clone(),
                     dict: std::collections::HashMap::new(),
                 });
-                if let Some(init) = type_dict.get_str("__init__").cloned() {
+                if let Some(init) = lookup_dunder_via_mro(&f, "__init__") {
                     call_bound_method(init, instance.clone(), a)?;
                 }
                 Ok(instance)
@@ -4274,6 +4491,141 @@ fn extract_slots(slots_val: &PyObjectRef, result: &mut Vec<String>) {
 
 /// Get the effective __slots__ for a type, checking the entire MRO.
 /// Returns None if no __slots__ is defined anywhere in the hierarchy.
+/// Look up a dunder method (e.g. `__len__`) on a type, walking its MRO —
+/// unlike a direct `type_dict.get_str(name)` poke, this finds methods
+/// defined on a base class, not just the instance's own leaf type.
+pub(crate) fn lookup_dunder_via_mro(typ: &PyObjectRef, name: &str) -> Option<PyObjectRef> {
+    let typ_ref = typ.borrow();
+    if let PyObject::Type { dict: type_dict, mro, .. } = &*typ_ref {
+        // Every class implicitly inherits `object`'s generic
+        // __repr__/__eq__/__hash__/etc. Those must not preempt a class
+        // with a native base (`class Foo(str): ...`) from getting the real
+        // str/list/dict behavior for these — in CPython that behavior
+        // comes from str/list/dict's own dunders sitting ahead of object
+        // in the real mro; here, since the native base isn't literally a
+        // PyObject::Type in mro, skip object's default instead, so the
+        // native-backing fallback each of these call sites adds after a
+        // None result gets a chance to run.
+        let native_marker = type_dict.contains_key_str(NATIVE_BASE_MARKER);
+        let skip_object_default = native_marker && matches!(name, "__repr__" | "__str__" | "__eq__" | "__ne__" | "__hash__");
+        if mro.is_empty() {
+            return type_dict.get_str(name).cloned();
+        }
+        for base in mro.iter() {
+            if let PyObject::Type { name: base_name, dict: base_dict, .. } = &*base.borrow() {
+                if skip_object_default && base_name == "object" {
+                    continue;
+                }
+                if let Some(v) = base_dict.get_str(name) {
+                    return Some(v.clone());
+                }
+            }
+        }
+        None
+    } else {
+        None
+    }
+}
+
+// ---- Native-base subclassing (`class Foo(list): ...`, `class Foo(dict): ...`, `class Foo(str): ...`) ----
+//
+// list/dict/str are PyObject::BuiltinFunction constructors, not real
+// PyObject::Type classes — they have no bases/mro/dict of their own. Rather
+// than adding a struct field to PyObject::Type/Instance (both are
+// constructed/destructured in 200+ places across this codebase, making a
+// shape change enormously invasive), the "this class transparently wraps a
+// native list/dict/str" fact is recorded as a plain entry in the class's
+// own (already-mutable) dict, and each instance's native payload is a real,
+// independently addressable PyObjectRef stored under a reserved key in the
+// instance's own (already-mutable) attribute dict. Because that payload is
+// a genuine PyObject::List/Dict/Str, all of list/dict/str's existing method
+// implementations work on it completely unchanged — they just need to be
+// reached via delegation when a subclass doesn't override them.
+
+pub(crate) const NATIVE_BASE_MARKER: &str = "__native_base__";
+pub(crate) const NATIVE_BACKING_KEY: &str = "__native__";
+
+pub(crate) fn is_recognized_native_base_name(name: &str) -> bool {
+    matches!(name, "list" | "dict" | "str")
+}
+
+/// Name of the builtin type (list/dict/str) a class transparently
+/// subclasses, if any — checked on the class's own dict only (the marker is
+/// propagated down into every subclass's own dict at class-creation time,
+/// so this does not need to walk mro/bases itself).
+pub(crate) fn native_base_of_type(typ: &PyObjectRef) -> Option<String> {
+    if let PyObject::Type { dict, .. } = &*typ.borrow() {
+        dict.get_str(NATIVE_BASE_MARKER).map(|v| v.str())
+    } else {
+        None
+    }
+}
+
+/// The native backing value (a real, independent PyObject::List/Dict/Str)
+/// for an instance of a native-subclassing class, if any.
+pub(crate) fn native_backing_of(obj: &PyObjectRef) -> Option<PyObjectRef> {
+    if let PyObject::Instance { dict, .. } = &*obj.borrow() {
+        dict.get(NATIVE_BACKING_KEY).cloned()
+    } else {
+        None
+    }
+}
+
+pub(crate) fn make_native_backing(kind: &str) -> PyObjectRef {
+    match kind {
+        "list" => py_list(vec![]),
+        "dict" => py_dict(),
+        "str" => py_str(""),
+        _ => py_none(),
+    }
+}
+
+/// Mimics list(iterable)/dict(...)/str(x) construction for a class that
+/// transparently subclasses a native type and doesn't override __init__.
+/// Returns the populated native backing (callers replace the instance's
+/// NATIVE_BACKING_KEY entry with it, rather than mutating in place, since
+/// the existing value's representation — e.g. an inline SmallStr — may not
+/// even be back-referenceable via borrow_mut()).
+pub(crate) fn synthesize_native_init(kind: &str, args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    match kind {
+        "list" => {
+            if let Some(iterable) = args.first() {
+                Ok(py_list(collect_iterable(iterable)?))
+            } else {
+                Ok(py_list(vec![]))
+            }
+        }
+        "dict" => {
+            if args.is_empty() {
+                Ok(py_dict())
+            } else {
+                builtin_dict(args)
+            }
+        }
+        "str" => {
+            if let Some(v) = args.first() {
+                Ok(py_str(&v.str()))
+            } else {
+                Ok(py_str(""))
+            }
+        }
+        _ => Ok(py_none()),
+    }
+}
+
+fn collect_iterable(iterable: &PyObjectRef) -> PyResult<Vec<PyObjectRef>> {
+    let iter_obj = builtin_iter(&[iterable.clone()])?;
+    let mut items = Vec::new();
+    loop {
+        match builtin_next(&[iter_obj.clone()]) {
+            Ok(v) => items.push(v),
+            Err(PyError::StopIteration) => break,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(items)
+}
+
 fn get_instance_slots(typ: &PyObjectRef) -> Option<Vec<String>> {
     let typ_ref = typ.borrow();
     if let PyObject::Type { dict: type_dict, mro, .. } = &*typ_ref {
@@ -4341,9 +4693,12 @@ impl ObjectAccess for PyObject {
             }
             PyObject::Type { dict, mro, bases, name: type_name } => {
                 if name == "__dict__" {
-                    // Return type's dict as a PyDict
+                    // Return type's dict as a PyDict — NATIVE_BASE_MARKER is
+                    // an internal bookkeeping entry (see native_base_of_type)
+                    // and must not leak into user-visible introspection.
                     let mut pd = PyDict::new();
                     for (k, v) in dict.iter() {
+                        if k == NATIVE_BASE_MARKER { continue; }
                         let _ = pd.set(py_str(k), v.clone());
                     }
                     return Ok(PyObjectRef::new(PyObject::Dict(pd)));
@@ -4359,6 +4714,23 @@ impl ObjectAccess for PyObject {
                 }
                 if name == "__qualname__" {
                     return Ok(py_str(type_name));
+                }
+                if name == "mro" && !dict.contains_key_str("mro") {
+                    // NOTE: self_obj here is a placeholder — LOAD_ATTR's fast
+                    // path always rebinds it to the actual accessed object
+                    // (`Foo`, for `Foo.mro`) before calling, so the real mro
+                    // must be read back out of args[0] at call time.
+                    return Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "mro".to_string(),
+                        func: |args| {
+                            if let PyObject::Type { mro, .. } = &*args[0].borrow() {
+                                Ok(py_list(mro.clone()))
+                            } else {
+                                Err(PyError::type_error("mro() requires a type object"))
+                            }
+                        },
+                        self_obj: py_none(),
+                    }));
                 }
                 // Check own dict first
                 if let Some(val) = dict.get_str(&name).cloned() {
@@ -4409,9 +4781,13 @@ impl ObjectAccess for PyObject {
             }
             PyObject::Instance { dict, typ } => {
                 if name == "__dict__" {
-                    // Return a copy of the instance's HashMap as a PyDict (no live view from here)
+                    // Return a copy of the instance's HashMap as a PyDict (no
+                    // live view from here) — NATIVE_BACKING_KEY is internal
+                    // bookkeeping (see native_backing_of) and must not leak
+                    // into user-visible introspection.
                     let mut pd = PyDict::new();
                     for (k, v) in dict.iter() {
+                        if k == NATIVE_BACKING_KEY { continue; }
                         let _ = pd.set(py_str(k), v.clone());
                     }
                     return Ok(PyObjectRef::new(PyObject::Dict(pd)));
@@ -4450,6 +4826,30 @@ impl ObjectAccess for PyObject {
                                     if let Some(val) = base_dict.get_str(&name) {
                                         return Some(val.clone());
                                     }
+                                }
+                            }
+                            // Not overridden anywhere in the mro: for a class
+                            // that transparently subclasses list/dict/str
+                            // (`class Foo(list): ...`), delegate to the real
+                            // native value's own attribute resolution. Its
+                            // get_attribute returns a placeholder self_obj
+                            // (the real binding normally happens wherever
+                            // LOAD_ATTR was invoked, rebinding to whatever it
+                            // was accessed on) — here that must be rebound to
+                            // the native backing itself, not this instance,
+                            // or mutations would target the placeholder. This
+                            // must run BEFORE the generic dict-like fallback
+                            // below, which would otherwise misinterpret the
+                            // native backing's own dict entry as plain
+                            // instance-attribute data.
+                            if let Some(native) = dict.get(NATIVE_BACKING_KEY) {
+                                if let Ok(val) = native.borrow().get_attribute(name) {
+                                    let rebound = if let PyObject::BuiltinMethod { name: n, func, .. } = &*val.borrow() {
+                                        PyObjectRef::imm(PyObject::BuiltinMethod { name: n.clone(), func: *func, self_obj: native.clone() })
+                                    } else {
+                                        val.clone()
+                                    };
+                                    return Some(rebound);
                                 }
                             }
                             // Fallback: provide common dict methods for dict-like instances
@@ -4634,13 +5034,19 @@ impl ObjectAccess for PyObject {
                         name: "sort".to_string(),
                         func: |args| {
                             if let PyObject::List(list) = &mut *args[0].borrow_mut() {
+                                // Route through py_compare so user-defined
+                                // classes' __lt__/__gt__ are consulted —
+                                // this used to only compare ints/floats
+                                // correctly and fall back to comparing
+                                // str() reprs for everything else.
                                 list.sort_by(|a, b| {
-                                    let a_int = a.borrow();
-                                    let b_int = b.borrow();
-                                    match (&*a_int, &*b_int) {
-                                        (PyObject::Int(ai), PyObject::Int(bi)) => ai.cmp(bi),
-                                        (PyObject::Float(af), PyObject::Float(bf)) => af.partial_cmp(bf).unwrap_or(std::cmp::Ordering::Equal),
-                                        _ => a.str().cmp(&b.str()),
+                                    match py_compare(a, b, 0) {
+                                        Ok(result) if result.truthy() => std::cmp::Ordering::Less,
+                                        Ok(_) => match py_compare(b, a, 0) {
+                                            Ok(result) if result.truthy() => std::cmp::Ordering::Greater,
+                                            _ => std::cmp::Ordering::Equal,
+                                        },
+                                        Err(_) => std::cmp::Ordering::Equal,
                                     }
                                 });
                                 Ok(py_none())
@@ -5336,14 +5742,70 @@ impl ObjectAccess for PyObject {
                     "update" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "update".to_string(),
                         func: |args| {
-                            if args.len() < 2 { return Err(PyError::type_error("update() takes at least 1 argument")); }
-                            let other = args[1].borrow();
-                            if let PyObject::Dict(d) = &mut *args[0].borrow_mut() {
-                                if let PyObject::Dict(other_dict) = &*other {
-                                    for (k, v) in other_dict.items() { d.set(k, v)?; }
-                                    Ok(py_none())
-                                } else { Err(PyError::type_error("update() argument must be a dict")) }
-                            } else { Err(PyError::runtime_error("update on non-dict")) }
+                            if args.is_empty() { return Err(PyError::type_error("update() takes at least 1 argument")); }
+                            let self_obj = args[0].clone();
+                            // Matches CPython's real dict.update(): accepts another
+                            // dict, any mapping-protocol object (has .keys()), or an
+                            // iterable of (key, value) pairs. A trailing kwargs dict
+                            // (from `d.update(x, k=v)`) is just another entry here.
+                            for other in &args[1..] {
+                                let is_dict = matches!(&*other.borrow(), PyObject::Dict(_));
+                                if is_dict {
+                                    let items = if let PyObject::Dict(other_dict) = &*other.borrow() { other_dict.items() } else { unreachable!() };
+                                    if let PyObject::Dict(d) = &mut *self_obj.borrow_mut() {
+                                        for (k, v) in items { d.set(k, v)?; }
+                                    }
+                                    continue;
+                                }
+                                // A native-backed dict subclass (Counter, defaultdict,
+                                // or any `class Foo(dict): ...`) — read straight off
+                                // the native backing rather than resolving `keys`.
+                                if let Some(native) = native_backing_of(other) {
+                                    if let PyObject::Dict(other_dict) = &*native.borrow() {
+                                        let items = other_dict.items();
+                                        if let PyObject::Dict(d) = &mut *self_obj.borrow_mut() {
+                                            for (k, v) in items { d.set(k, v)?; }
+                                        }
+                                        continue;
+                                    }
+                                }
+                                let keys_fn = match &*other.borrow() {
+                                    PyObject::Instance { typ, .. } => lookup_dunder_via_mro(typ, "keys"),
+                                    _ => None,
+                                };
+                                if let Some(keys_fn) = keys_fn {
+                                    let keys_obj = call_bound_method(keys_fn, other.clone(), vec![])?;
+                                    let it = builtin_iter(&[keys_obj])?;
+                                    loop {
+                                        match builtin_next(&[it.clone()]) {
+                                            Ok(k) => {
+                                                let v = py_getitem(other, &k)?;
+                                                if let PyObject::Dict(d) = &mut *self_obj.borrow_mut() { d.set(k, v)?; }
+                                            }
+                                            Err(PyError::StopIteration) => break,
+                                            Err(e) => return Err(e),
+                                        }
+                                    }
+                                } else {
+                                    let it = builtin_iter(&[other.clone()])?;
+                                    loop {
+                                        match builtin_next(&[it.clone()]) {
+                                            Ok(pair) => {
+                                                let (k, v) = match &*pair.borrow() {
+                                                    PyObject::Tuple(items) | PyObject::List(items) if items.len() == 2 => {
+                                                        (items[0].clone(), items[1].clone())
+                                                    }
+                                                    _ => return Err(PyError::type_error("cannot convert update sequence element to a sequence")),
+                                                };
+                                                if let PyObject::Dict(d) = &mut *self_obj.borrow_mut() { d.set(k, v)?; }
+                                            }
+                                            Err(PyError::StopIteration) => break,
+                                            Err(e) => return Err(e),
+                                        }
+                                    }
+                                }
+                            }
+                            Ok(py_none())
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -6745,6 +7207,83 @@ impl ObjectAccess for PyObject {
                         }
                     }
                 }
+                // Not found via any Type in the mro: for a class that
+                // transparently subclasses list/dict/str, `super().append(x)`
+                // etc. must still reach the native backing (list/dict/str
+                // themselves aren't PyObject::Type, so they're invisible to
+                // the mro walk above).
+                if name == "__init__" {
+                    if let Some(kind) = native_base_of_type(&{
+                        if let PyObject::Instance { typ, .. } = &*obj.borrow() { typ.clone() } else { return Err(PyError::attribute_error("'super' object has no attribute '__init__'".to_string())); }
+                    }) {
+                        let target = obj.clone();
+                        return Ok(PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                            let native = synthesize_native_init(&kind, args)?;
+                            if let PyObject::Instance { dict, .. } = &mut *target.borrow_mut() {
+                                dict.insert(NATIVE_BACKING_KEY.to_string(), native);
+                            }
+                            Ok(py_none())
+                        }))));
+                    }
+                }
+                // Same story for the operator-level dunders — list/dict
+                // don't expose __setitem__/__getitem__/etc. as a plain
+                // get_attribute entry either (subscripting/len/iteration go
+                // through their own opcode-level dispatch functions
+                // instead), so synthesize a callable that invokes those
+                // functions directly against the real native backing.
+                if let Some(native) = native_backing_of(obj) {
+                    let target = native.clone();
+                    match name {
+                        "__setitem__" => {
+                            return Ok(PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                                if args.len() < 2 { return Err(PyError::type_error("__setitem__() takes exactly 2 arguments")); }
+                                py_setitem(&target, &args[0], args[1].clone())?;
+                                Ok(py_none())
+                            }))));
+                        }
+                        "__getitem__" => {
+                            return Ok(PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                                if args.is_empty() { return Err(PyError::type_error("__getitem__() takes exactly 1 argument")); }
+                                py_getitem(&target, &args[0])
+                            }))));
+                        }
+                        "__delitem__" => {
+                            return Ok(PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                                if args.is_empty() { return Err(PyError::type_error("__delitem__() takes exactly 1 argument")); }
+                                py_delitem(&target, &args[0])?;
+                                Ok(py_none())
+                            }))));
+                        }
+                        "__contains__" => {
+                            return Ok(PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                                if args.is_empty() { return Err(PyError::type_error("__contains__() takes exactly 1 argument")); }
+                                Ok(py_bool(contains_op(&target, &args[0])?))
+                            }))));
+                        }
+                        "__len__" => {
+                            return Ok(PyObjectRef::new(PyObject::Closure(Rc::new(move |_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                                builtin_len(&[target.clone()])
+                            }))));
+                        }
+                        "__iter__" => {
+                            return Ok(PyObjectRef::new(PyObject::Closure(Rc::new(move |_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                                builtin_iter(&[target.clone()])
+                            }))));
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some(native) = native_backing_of(obj) {
+                    if let Ok(val) = native.borrow().get_attribute(&name) {
+                        let rebound = if let PyObject::BuiltinMethod { name: n, func, .. } = &*val.borrow() {
+                            PyObjectRef::imm(PyObject::BuiltinMethod { name: n.clone(), func: *func, self_obj: native.clone() })
+                        } else {
+                            val.clone()
+                        };
+                        return Ok(rebound);
+                    }
+                }
                 Err(PyError::attribute_error(
                     format!("'super' object has no attribute '{}'", name)
                 ))
@@ -6846,6 +7385,30 @@ impl ObjectAccess for PyObject {
                         },
                         self_obj: py_none(),
                     }));
+                }
+                // Built-in types (int, str, list, dict, ...) are represented
+                // as a plain callable BuiltinFunction here, not a real class
+                // object with its own bases/mro — so `int.mro()`-style
+                // introspection (used e.g. by Django's lazy() for wrapping
+                // arbitrary result types) has nothing real to walk. Returning
+                // just [self] is not a correct ancestor chain (misses
+                // `object`, and any real base for exception types etc.), but
+                // it lets that code iterate something instead of crashing.
+                if name == "mro" {
+                    return Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "mro".to_string(),
+                        func: |args| Ok(py_list(vec![args[0].clone()])),
+                        self_obj: py_none(),
+                    }));
+                }
+                if name == "__name__" {
+                    return Ok(py_str(bf_name));
+                }
+                if name == "__mro__" || name == "__bases__" {
+                    return Ok(PyObjectRef::new(PyObject::Tuple(vec![])));
+                }
+                if name == "__dict__" {
+                    return Ok(PyObjectRef::new(PyObject::Dict(PyDict::new())));
                 }
                 Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", self.type_name(), name)))
             }
@@ -6975,13 +7538,7 @@ pub fn to_index(obj: &PyObjectRef) -> PyResult<BigInt> {
         let f = {
             let o = obj.borrow();
             match &*o {
-                PyObject::Instance { typ, .. } => {
-                    let typ_ref = typ.borrow();
-                    match &*typ_ref {
-                        PyObject::Type { dict: type_dict, .. } => type_dict.get_str("__index__").cloned(),
-                        _ => None,
-                    }
-                }
+                PyObject::Instance { typ, .. } => lookup_dunder_via_mro(typ, "__index__"),
                 _ => None,
             }
         };
@@ -7032,23 +7589,7 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                                     }
                                 }
                             }
-                            // Fallback: use builtin_dict_getitem for dict-derived instances
                             None
-                        }).or_else(|| {
-                            // Check if any base is the builtin 'dict' function
-                            let is_dict_subclass = mro.iter().skip(1).any(|base| {
-                                let b = base.borrow();
-                                matches!(&*b, PyObject::BuiltinFunction { name, .. } if name == "dict")
-                                    || b.type_name() == "dict"
-                            });
-                            if is_dict_subclass {
-                                Some(PyObjectRef::new(PyObject::BuiltinFunction {
-                                    name: "__getitem__".to_string(),
-                                    func: builtin_dict_getitem,
-                                }))
-                            } else {
-                                None
-                            }
                         })
                     }
                     _ => None,
@@ -7059,6 +7600,26 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
     };
     if let Some(f) = f {
         return call_bound_method(f, obj.clone(), vec![index.clone()]);
+    }
+    // Not overridden anywhere in the mro: for a class that transparently
+    // subclasses list/dict/str (`class Foo(list): ...`), delegate straight
+    // to the native backing's own subscripting. For a dict subclass, a
+    // missing key must still go through the class's own `__missing__`
+    // (e.g. `collections.Counter`) before raising KeyError.
+    if let Some(native) = native_backing_of(obj) {
+        return match py_getitem(&native, index) {
+            Err(PyError::KeyError(_)) => {
+                let missing_fn = match &*obj.borrow() {
+                    PyObject::Instance { typ, .. } => lookup_dunder_via_mro(typ, "__missing__"),
+                    _ => None,
+                };
+                match missing_fn {
+                    Some(f) => call_bound_method(f, obj.clone(), vec![index.clone()]),
+                    None => Err(PyError::key_error(index.str())),
+                }
+            }
+            other => other,
+        };
     }
     let o = obj.borrow();
     match &*o {
@@ -7321,30 +7882,21 @@ pub fn py_setitem(obj: &PyObjectRef, index: &PyObjectRef, value: PyObjectRef) ->
     let f = {
         let o = obj.borrow();
         match &*o {
-            PyObject::Instance { typ, .. } => {
-                let typ_ref = typ.borrow();
-                match &*typ_ref {
-                    PyObject::Type { dict: type_dict, mro, .. } => {
-                        type_dict.get_str("__setitem__").cloned().or_else(|| {
-                            for base in mro.iter().skip(1) {
-                                if let PyObject::Type { dict: base_dict, .. } = &*base.borrow() {
-                                    if let Some(val) = base_dict.get_str("__setitem__") {
-                                        return Some(val.clone());
-                                    }
-                                }
-                            }
-                            None
-                        })
-                    }
-                    _ => None,
-                }
-            }
+            PyObject::Instance { typ, .. } => lookup_dunder_via_mro(typ, "__setitem__"),
             _ => None,
         }
     };
     if let Some(f) = f {
         call_bound_method(f, obj.clone(), vec![index.clone(), value])?;
         return Ok(());
+    }
+    // Not overridden anywhere in the mro: for a class that transparently
+    // subclasses list/dict/str (`class Foo(list): ...`), delegate straight
+    // to the native backing's own item assignment. Must run before the
+    // generic Instance fallback below, which would otherwise swallow this
+    // into the instance's attribute dict under a stringified key instead.
+    if let Some(native) = native_backing_of(obj) {
+        return py_setitem(&native, index, value);
     }
     // Default Instance __setitem__: store key/value in the instance dict (HashMap)
     {
@@ -7359,21 +7911,87 @@ pub fn py_setitem(obj: &PyObjectRef, index: &PyObjectRef, value: PyObjectRef) ->
             }
         }
     }
+    // Slice assignment on a list: collect the replacement items BEFORE taking
+    // a mutable borrow below — `value` may alias `obj` (e.g. `lst[:] = lst`),
+    // which would otherwise double-borrow when we iterate it.
+    let is_list_slice = matches!(&*obj.borrow(), PyObject::List(_)) && matches!(&*index.borrow(), PyObject::Slice { .. });
+    if is_list_slice {
+        let new_items: Vec<PyObjectRef> = {
+            let it = builtin_iter(&[value.clone()])?;
+            let mut v = Vec::new();
+            loop {
+                match builtin_next(&[it.clone()]) {
+                    Ok(x) => v.push(x),
+                    Err(PyError::StopIteration) => break,
+                    Err(e) => return Err(e),
+                }
+            }
+            v
+        };
+        let idx = index.borrow();
+        let (start, stop, step) = match &*idx {
+            PyObject::Slice { start, stop, step } => (start.clone(), stop.clone(), step.clone()),
+            _ => unreachable!(),
+        };
+        drop(idx);
+        let mut o = obj.borrow_mut();
+        let items = match &mut *o {
+            PyObject::List(items) => items,
+            _ => unreachable!(),
+        };
+        let len = items.len() as isize;
+        let s = start.borrow();
+        let e = stop.borrow();
+        let st = step.borrow();
+        let step_val = if let PyObject::Int(i) = &*st { i.to_isize().unwrap_or(1) } else { 1 };
+        if step_val == 1 {
+            let start_val = (if let PyObject::Int(i) = &*s { i.to_isize().unwrap_or(0) } else { 0 }).clamp(0, len);
+            let stop_val = (if let PyObject::Int(i) = &*e { i.to_isize().unwrap_or(len) } else { len }).clamp(start_val, len);
+            items.splice(start_val as usize..stop_val as usize, new_items);
+            return Ok(());
+        } else {
+            // Extended slice: replacement length must match slice length exactly
+            let mut indices = Vec::new();
+            if step_val > 0 {
+                let start_val = if let PyObject::Int(i) = &*s { i.to_isize().unwrap_or(0) } else { 0 };
+                let stop_val = if let PyObject::Int(i) = &*e { i.to_isize().unwrap_or(len) } else { len };
+                let mut i = start_val;
+                while i < stop_val && i < len { indices.push(i as usize); i += step_val; }
+            } else {
+                let start_val = if let PyObject::Int(i) = &*s { i.to_isize().unwrap_or(len - 1) } else { len - 1 };
+                let stop_val = if let PyObject::Int(i) = &*e { i.to_isize().unwrap_or(-1) } else { -1 };
+                let mut i = start_val;
+                while i > stop_val && i >= 0 { indices.push(i as usize); i += step_val; }
+            }
+            if indices.len() != new_items.len() {
+                return Err(PyError::value_error(format!(
+                    "attempt to assign sequence of size {} to extended slice of size {}",
+                    new_items.len(), indices.len()
+                )));
+            }
+            for (idx, val) in indices.into_iter().zip(new_items) {
+                items[idx] = val;
+            }
+            return Ok(());
+        }
+    }
+
     let mut o = obj.borrow_mut();
     match &mut *o {
         PyObject::List(items) => {
             let idx = index.borrow();
-            if let PyObject::Int(i) = &*idx {
-                let i = i.to_isize().ok_or_else(|| PyError::index_error("list index out of range"))?;
-                let len = items.len() as isize;
-                let i = if i < 0 { len + i } else { i };
-                if i < 0 || i >= len {
-                    return Err(PyError::index_error("list assignment index out of range"));
+            match &*idx {
+                PyObject::Int(i) => {
+                    let i = i.to_isize().ok_or_else(|| PyError::index_error("list index out of range"))?;
+                    let len = items.len() as isize;
+                    let i = if i < 0 { len + i } else { i };
+                    if i < 0 || i >= len {
+                        return Err(PyError::index_error("list assignment index out of range"));
+                    }
+                    items[i as usize] = value;
+                    Ok(())
                 }
-                items[i as usize] = value;
-                Ok(())
-            } else {
-                Err(PyError::type_error("list indices must be integers"))
+                _ => Err(PyError::type_error("list indices must be integers or slices")),
             }
         }
         PyObject::Dict(d) => {
@@ -7388,19 +8006,16 @@ pub fn py_delitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<()> {
     let f = {
         let o = obj.borrow();
         match &*o {
-            PyObject::Instance { typ, .. } => {
-                let typ_ref = typ.borrow();
-                match &*typ_ref {
-                    PyObject::Type { dict: type_dict, .. } => type_dict.get_str("__delitem__").cloned(),
-                    _ => None,
-                }
-            }
+            PyObject::Instance { typ, .. } => lookup_dunder_via_mro(typ, "__delitem__"),
             _ => None,
         }
     };
     if let Some(f) = f {
         call_bound_method(f, obj.clone(), vec![index.clone()])?;
         return Ok(());
+    }
+    if let Some(native) = native_backing_of(obj) {
+        return py_delitem(&native, index);
     }
     let mut o = obj.borrow_mut();
     match &mut *o {
@@ -7469,6 +8084,16 @@ make_exception_func!(builtin_make_exception_modulenotfounderror, "ModuleNotFound
 make_exception_func!(builtin_make_exception_stopasynciteration, "StopAsyncIteration");
 make_exception_func!(builtin_make_exception_eoferror, "EOFError");
 make_exception_func!(builtin_make_exception_syntaxerror, "SyntaxError");
+make_exception_func!(builtin_make_exception_cycleerror, "CycleError");
+make_exception_func!(builtin_make_exception_decimalexception, "DecimalException");
+make_exception_func!(builtin_make_exception_invalidoperation, "InvalidOperation");
+make_exception_func!(builtin_make_exception_decimaldivisionbyzero, "DivisionByZero");
+make_exception_func!(builtin_make_exception_inexact, "Inexact");
+make_exception_func!(builtin_make_exception_rounded, "Rounded");
+make_exception_func!(builtin_make_exception_clamped, "Clamped");
+make_exception_func!(builtin_make_exception_decimaloverflow, "Overflow");
+make_exception_func!(builtin_make_exception_decimalunderflow, "Underflow");
+make_exception_func!(builtin_make_exception_floatoperation, "FloatOperation");
 make_exception_func!(builtin_make_exception_connectionerror, "ConnectionError");
 make_exception_func!(builtin_make_exception_brokenpipeerror, "BrokenPipeError");
 make_exception_func!(builtin_make_exception_connectionrefusederror, "ConnectionRefusedError");
@@ -7479,6 +8104,29 @@ make_exception_func!(builtin_make_exception_timeouterror, "TimeoutError");
 make_exception_func!(builtin_make_exception_unicodedecodeerror, "UnicodeDecodeError");
 make_exception_func!(builtin_make_exception_unicodeencodeerror, "UnicodeEncodeError");
 make_exception_func!(builtin_make_exception_systemerror, "SystemError");
+make_exception_func!(builtin_make_exception_warning, "Warning");
+make_exception_func!(builtin_make_exception_userwarning, "UserWarning");
+make_exception_func!(builtin_make_exception_deprecationwarning, "DeprecationWarning");
+make_exception_func!(builtin_make_exception_pendingdeprecationwarning, "PendingDeprecationWarning");
+make_exception_func!(builtin_make_exception_syntaxwarning, "SyntaxWarning");
+make_exception_func!(builtin_make_exception_runtimewarning, "RuntimeWarning");
+make_exception_func!(builtin_make_exception_futurewarning, "FutureWarning");
+make_exception_func!(builtin_make_exception_importwarning, "ImportWarning");
+make_exception_func!(builtin_make_exception_unicodewarning, "UnicodeWarning");
+make_exception_func!(builtin_make_exception_byteswarning, "BytesWarning");
+make_exception_func!(builtin_make_exception_resourcewarning, "ResourceWarning");
+make_exception_func!(builtin_make_exception_referenceerror, "ReferenceError");
+make_exception_func!(builtin_make_exception_buffererror, "BufferError");
+make_exception_func!(builtin_make_exception_memoryerror, "MemoryError");
+make_exception_func!(builtin_make_exception_notadirectoryerror, "NotADirectoryError");
+make_exception_func!(builtin_make_exception_isadirectoryerror, "IsADirectoryError");
+make_exception_func!(builtin_make_exception_fileexistserror, "FileExistsError");
+make_exception_func!(builtin_make_exception_connectionabortederror, "ConnectionAbortedError");
+make_exception_func!(builtin_make_exception_connectionreseterror, "ConnectionResetError");
+make_exception_func!(builtin_make_exception_processlookuperror, "ProcessLookupError");
+make_exception_func!(builtin_make_exception_unicodetranslateerror, "UnicodeTranslateError");
+make_exception_func!(builtin_make_exception_indentationerror, "IndentationError");
+make_exception_func!(builtin_make_exception_taberror, "TabError");
 
 // ExceptionGroup and BaseExceptionGroup factory functions (PEP 654)
 pub fn builtin_make_exception_exceptiongroup(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
@@ -7964,22 +8612,6 @@ pub fn logging_error(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     };
     eprintln!("ERROR:{}:{}", logger_name, msg);
     Ok(py_none())
-}
-
-/// Bit-by-bit CRC32 computation for gzip compress.
-pub fn gzip_crc32(data: &[u8]) -> u32 {
-    let mut crc = !0u32;
-    for &byte in data {
-        crc ^= byte as u32;
-        for _ in 0..8 {
-            if crc & 1 != 0 {
-                crc = 0xedb88320 ^ (crc >> 1);
-            } else {
-                crc >>= 1;
-            }
-        }
-    }
-    !crc
 }
 
 // ---- pathlib module ----
