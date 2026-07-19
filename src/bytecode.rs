@@ -131,6 +131,12 @@ pub enum Opcode {
     // Custom opcodes for dict operations
     DICT_MERGE = 202, // Pop TOS (source dict) and merge into dict at TOS1
 
+    // Pop TOS (a list) and push a tuple with the same elements — used to
+    // build a tuple literal containing starred unpacking, e.g. (*a, *b),
+    // which is built incrementally as a list (LIST_APPEND/LIST_EXTEND)
+    // and then converted, matching CPython's own LIST_TO_TUPLE.
+    LIST_TO_TUPLE = 203,
+
     // ExceptionGroup splitting for except* (PEP 654)
     // Like CHECK_EXC_MATCH but for except*: pops type + exc_dup + exc_orig,
     // splits ExceptionGroup into matched/unmatched subgroups, pushes
