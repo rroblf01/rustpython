@@ -8,6 +8,8 @@ use crate::bytecode::*;
 use crate::interner::{self, InternedMap};
 use crate::modules::*;
 use crate::object::*;
+use crate::parser::Parser;
+use crate::compiler::Compiler;
 #[cfg(feature = "jit")]
 use crate::jit::JitCompiler;
 
@@ -235,6 +237,9 @@ impl VirtualMachine {
 
           let datetime_dict = create_datetime_dict();
           modules.insert("datetime".to_string(), create_module("datetime", datetime_dict));
+
+          let zoneinfo_dict = create_zoneinfo_dict();
+          modules.insert("zoneinfo".to_string(), create_module("zoneinfo", zoneinfo_dict));
 
           let socket_dict = create_socket_dict();
           modules.insert("socket".to_string(), create_module("socket", socket_dict));
@@ -785,7 +790,49 @@ impl VirtualMachine {
                exc_traceback: None,
            };
          vm.populate_type_registry();
+         vm.install_source_defined_stdlib("collections", crate::modules::COLLECTIONS_USER_TYPES_SOURCE, &["UserList", "UserDict", "UserString", "Counter", "defaultdict"]);
+         vm.install_source_defined_stdlib("contextlib", crate::modules::CONTEXTLIB_SOURCE, &["ContextDecorator"]);
+         vm.install_source_defined_stdlib("functools", crate::modules::FUNCTOOLS_EXTRA_SOURCE, &["lru_cache", "cache"]);
          vm
+    }
+
+    /// Some stdlib classes are far easier (and more correct) to express as
+    /// real Python source — the same way CPython's own stdlib does it — than
+    /// as hand-written Rust closures (e.g. anything relying on composition
+    /// over a `self.data` attribute, decorators, or `with`). This compiles
+    /// and runs that source against this already-constructed VM (never a
+    /// nested one — building a VM calls this same constructor, which would
+    /// recurse infinitely), extracts the requested names, merges them into
+    /// the given already-registered native module's dict, and then removes
+    /// them from `self.globals` again — `run()` executes against the VM's
+    /// real globals (shared with whatever user script runs next), so
+    /// without this cleanup step every such name would leak into every
+    /// script's top-level namespace with no import required.
+    fn install_source_defined_stdlib(&mut self, module_name: &str, source: &str, names: &[&str]) {
+        let mut parser = Parser::new(source);
+        let program = match parser.parse_program() {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let mut compiler = Compiler::new();
+        let code = match compiler.compile(&program, &format!("<{}>", module_name)) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        if self.run(code).is_err() {
+            return;
+        }
+        let extracted: Vec<(String, PyObjectRef)> = {
+            let mut globals = self.globals.borrow_mut();
+            names.iter().filter_map(|name| globals.remove(*name).map(|v| (name.to_string(), v))).collect()
+        };
+        if let Some(module) = self.modules.get(module_name) {
+            if let PyObject::Module { dict, .. } = &mut *module.borrow_mut() {
+                for (name, obj) in extracted {
+                    dict.insert(name, obj);
+                }
+            }
+        }
     }
 
     fn acquire_frame(
@@ -891,28 +938,36 @@ impl VirtualMachine {
         // Handle dotted names: e.g. "certifi.core" or "django.utils.version"
         // Walk through each segment, importing missing packages as we go
         if let Some(_dot_pos) = name.find('.') {
-            eprintln!("DEBUG import_module_from_file: dotted name='{}'", name);
             let parts: Vec<&str> = name.split('.').collect();
             let mut current_name = parts[0].to_string();
             let mut parent_path: Option<String> = None;
 
+            // A multi-part dotted import (e.g. `import django.template.engine`)
+            // must initialize each ancestor package in order first, matching
+            // real Python's import semantics. Without this, when `django`
+            // isn't already cached, the code below falls through to a
+            // direct full-path file lookup ("django/template/engine.py")
+            // that finds the leaf file directly, silently skipping every
+            // intermediate package's __init__.py — including module-level
+            // side effects (signal registration, singletons like
+            // `engines = EngineHandler()`) that code loaded later
+            // transitively depends on already having run.
+            if !self.modules.contains_key(&current_name) {
+                let _ = self.import_module_from_file(&current_name);
+            }
             // Check if we already have the top-level module
             if !self.modules.contains_key(&current_name) {
-                eprintln!("DEBUG import dotted: top-level '{}' NOT in modules", current_name);
                 if cfg!(feature = "profile") { eprintln!("DEBUG import: top-level '{}' NOT in modules", current_name); }
                 // Not in modules — fall through to regular file search below
             } else {
-                eprintln!("DEBUG import dotted: top-level '{}' IS in modules", current_name);
                 // Walk the chain: for each part after the first, resolve the child
                 let mut all_resolved = true;
                 for i in 1..parts.len() {
                     let child = parts[i];
                     let full_name = format!("{}.{}", current_name, child);
-                    eprintln!("DEBUG import dotted: iter i={} child='{}' full='{}'", i, child, full_name);
 
                     // If already in modules, skip to next
                     if self.modules.contains_key(&full_name) {
-                        eprintln!("DEBUG import dotted: '{}' already in modules, skip", full_name);
                         current_name = full_name;
                         parent_path = None;
                         continue;
@@ -920,7 +975,6 @@ impl VirtualMachine {
 
                     // Get the parent's __path__
                     if parent_path.is_none() {
-                        eprintln!("DEBUG import dotted: getting __path__ from '{}'", current_name);
                         if let Some(parent_mod) = self.modules.get(&current_name) {
                             let borrowed = parent_mod.borrow();
                             if let PyObject::Module { dict, .. } = &*borrowed {
@@ -1268,6 +1322,19 @@ impl VirtualMachine {
             format!("{}", e)
         })?;
         let globals_copy = module_globals.borrow().clone();
+        // If a placeholder module was already registered under this name
+        // (e.g. by import_module_from_file, to support circular imports),
+        // populate it in place rather than returning a brand new object —
+        // any reference a circular importer already grabbed a clone of
+        // must see the final contents too, not just IMPORT_FROM's own
+        // live-frame fallback (which only covers names accessed while
+        // still mid-execution).
+        if let Some(existing) = self.modules.get(name).cloned() {
+            if let PyObject::Module { dict, .. } = &mut *existing.borrow_mut() {
+                dict.extend(globals_copy);
+            }
+            return Ok(existing);
+        }
         Ok(create_module(name, globals_copy))
     }
 
@@ -2185,7 +2252,21 @@ impl VirtualMachine {
 
             Opcode::UNARY_NEGATIVE => {
                 let val = self.frames[fi].pop()?;
-                let result = py_sub(&py_int(0), &val)?;
+                // Custom classes with __neg__ (e.g. Decimal) need it invoked
+                // directly — implementing this as `0 - val` only works if
+                // int.__sub__ knows how to handle an arbitrary Instance
+                // operand via reflection, which try_dunder_binop doesn't do
+                // (it only ever checks the left operand's own dunder).
+                let neg_method = if let PyObject::Instance { typ, .. } = &*val.borrow() {
+                    crate::object::lookup_dunder_via_mro(typ, "__neg__")
+                } else {
+                    None
+                };
+                let result = if let Some(f) = neg_method {
+                    call_bound_method(f, val.clone(), vec![])?
+                } else {
+                    py_sub(&py_int(0), &val)?
+                };
                 self.frames[fi].push(result);
             }
 
@@ -2262,6 +2343,24 @@ impl VirtualMachine {
                 // Check for user-class instance (needs __iter__ protocol)
                 let is_instance = val.borrow().type_name() == "instance";
                 if is_instance {
+                    // A class transparently subclassing list/dict/str
+                    // (`class Foo(list): ...`) with no __iter__ override
+                    // should iterate its real native backing directly —
+                    // list/dict don't define "__iter__" as a plain
+                    // get_attribute entry (iteration normally goes through
+                    // this same opcode's native match instead), so routing
+                    // it through get_attribute below would silently miss and
+                    // fall into the unrelated dict-like-instance fallback.
+                    let has_override = if let PyObject::Instance { typ, .. } = &*val.borrow() {
+                        crate::object::lookup_dunder_via_mro(typ, "__iter__").is_some()
+                    } else { false };
+                    if !has_override {
+                        if let Some(native) = crate::object::native_backing_of(&val) {
+                            let iterator = crate::object::builtin_iter(&[native])?;
+                            self.frames[fi].push(iterator);
+                            return Ok(None);
+                        }
+                    }
                     use crate::object::ObjectAccess;
                     let raw_method = val.borrow().get_attribute("__iter__")
                         .map_err(|_| PyError::type_error(format!("'{}' object is not iterable", val.borrow().type_name())))?;
@@ -2271,25 +2370,14 @@ impl VirtualMachine {
                         self_obj: val_clone,
                     });
                     let iterator = self.call_function(iter_method, vec![], vec![])?;
-                    // Eagerly consume via BoundMethod wrapping (binds self properly)
+                    // Eagerly consume via builtin_next(), which — unlike a raw
+                    // get_attribute("__next__") — correctly handles both a
+                    // user Instance with its own __next__ AND a native iterator
+                    // (e.g. ListIter) that __iter__ delegated to, such as
+                    // `def __iter__(self): return iter(self.data)`.
                     let mut items: Vec<PyObjectRef> = Vec::new();
                     loop {
-                        let next_result = {
-                            let next_attr = iterator.borrow().get_attribute("__next__");
-                            match next_attr {
-                                Ok(f) => {
-                                    // Need to wrap as BoundMethod for self-binding
-                                    let obj_clone = iterator.clone();
-                                    let bound = PyObjectRef::imm(PyObject::BoundMethod {
-                                        func: f.clone(),
-                                        self_obj: obj_clone,
-                                    });
-                                    self.call_function(bound, vec![], vec![])
-                                }
-                                Err(_) => break,
-                            }
-                        };
-                        match next_result {
+                        match crate::object::builtin_next(&[iterator.clone()]) {
                             Ok(val) => items.push(val),
                             Err(PyError::StopIteration) => break,
                             Err(e) => return Err(e),
@@ -2451,13 +2539,17 @@ impl VirtualMachine {
                                 return Ok(None);
                             }
                             if name == "__dict__" {
-                                // Return a live Dict view backed by the instance's HashMap
+                                // Return a live Dict view backed by the instance's HashMap.
+                                // NATIVE_BACKING_KEY is internal bookkeeping
+                                // (see native_backing_of) and must not leak
+                                // into user-visible introspection.
                                 let mut pd = crate::object::PyDict {
                                     buckets: std::collections::HashMap::new(),
                                     size: 0,
                                     instance_ref: None,
                                 };
                                 for (k, v) in dict.iter() {
+                                    if k == crate::object::NATIVE_BACKING_KEY { continue; }
                                     let key = py_str(k);
                                     let h = key.hash().unwrap_or(0);
                                     pd.buckets.entry(h).or_default().push((key, v.clone()));
@@ -2571,6 +2663,27 @@ impl VirtualMachine {
                                 } else {
                                     None
                                 }
+                            });
+                            // Not overridden anywhere in the mro: for a class
+                            // that transparently subclasses list/dict/str
+                            // (`class Foo(list): ...`), delegate to the real
+                            // native value's own attribute resolution, rebound
+                            // to the native backing (not this instance) since
+                            // that's the object whose state actually mutates.
+                            // Must run BEFORE the generic dict-like fallback
+                            // below, which would otherwise misinterpret the
+                            // native backing's own dict entry as plain
+                            // instance-attribute data.
+                            let attr = attr.or_else(|| {
+                                let native = dict.get(crate::object::NATIVE_BACKING_KEY)?;
+                                let val = native.borrow().get_attribute(&name).ok()?;
+                                let rebound = match &*val.borrow() {
+                                    PyObject::BuiltinMethod { name: n, func, .. } => {
+                                        Some(PyObjectRef::imm(PyObject::BuiltinMethod { name: n.clone(), func: *func, self_obj: native.clone() }))
+                                    }
+                                    _ => None,
+                                };
+                                Some(rebound.unwrap_or(val))
                             });
                             // Fallback for dict methods on dict-derived instances
                             let attr = attr.or_else(|| {
@@ -2742,6 +2855,12 @@ impl VirtualMachine {
                 py_setitem(&obj, &index, val)?;
             }
 
+            Opcode::DELETE_SUBSCR => {
+                let index = self.frames[fi].pop()?;
+                let obj = self.frames[fi].pop()?;
+                py_delitem(&obj, &index)?;
+            }
+
             Opcode::DELETE_ATTR => {
                 let name_idx = arg as usize;
                 let name = self.frames[fi].code.names.get(name_idx).ok_or_else(|| {
@@ -2861,6 +2980,15 @@ impl VirtualMachine {
                 } else {
                     return Err(PyError::runtime_error("DICT_MERGE on non-dict"));
                 }
+            }
+
+            Opcode::LIST_TO_TUPLE => {
+                let list = self.frames[fi].pop()?;
+                let items = match &*list.borrow() {
+                    PyObject::List(v) => v.clone(),
+                    _ => return Err(PyError::runtime_error("LIST_TO_TUPLE on non-list")),
+                };
+                self.frames[fi].push(PyObjectRef::imm(PyObject::Tuple(items)));
             }
 
             Opcode::UNPACK_SEQUENCE => {
@@ -3008,16 +3136,14 @@ impl VirtualMachine {
             Opcode::CHECK_EXC_MATCH => {
                 let expected = self.frames[fi].pop()?;
                 let exc = self.frames[fi].pop()?;
-                let expected_name = match &*expected.borrow() {
-                    PyObject::Str(s) => s.to_string(),
-                    PyObject::Type { name, .. } => name.clone(),
-                    PyObject::BuiltinFunction { name, .. } => name.clone(),
-                    _ => return Err(PyError::type_error("exceptions must derive from BaseException")),
+                let typ_name = match &*exc.borrow() {
+                    PyObject::Exception { typ, .. } => Some(typ.clone()),
+                    PyObject::ExceptionGroup { typ, .. } => Some(typ.clone()),
+                    _ => None,
                 };
-                let matched = match &*exc.borrow() {
-                    PyObject::Exception { typ, .. } => is_exception_subclass(typ, &expected_name),
-                    PyObject::ExceptionGroup { typ, .. } => is_exception_subclass(typ, &expected_name),
-                    _ => false,
+                let matched = match typ_name {
+                    Some(t) => exc_type_matches(&expected, &t)?,
+                    None => false,
                 };
                 self.frames[fi].push(py_bool(matched));
             }
@@ -3030,12 +3156,6 @@ impl VirtualMachine {
                 let expected = self.frames[fi].pop()?;
                 let exc_dup = self.frames[fi].pop()?;
                 let exc_orig = self.frames[fi].pop()?;
-                let expected_name = match &*expected.borrow() {
-                    PyObject::Str(s) => s.to_string(),
-                    PyObject::Type { name, .. } => name.clone(),
-                    PyObject::BuiltinFunction { name, .. } => name.clone(),
-                    _ => return Err(PyError::type_error("exceptions must derive from BaseException")),
-                };
 
                 // Read the type info from exc_dup while we still hold the borrow
                 let is_eg = match &*exc_dup.borrow() {
@@ -3059,7 +3179,7 @@ impl VirtualMachine {
                                 PyObject::ExceptionGroup { typ, .. } => typ.clone(),
                                 _ => String::new(),
                             };
-                            if is_exception_subclass(&child_name, &expected_name) {
+                            if exc_type_matches(&expected, &child_name)? {
                                 matched.push(child.clone());
                             } else {
                                 unmatched.push(child.clone());
@@ -3098,9 +3218,13 @@ impl VirtualMachine {
                     }
                 } else {
                     // Not an ExceptionGroup — normal match check
-                    let matched = match &*exc_dup.borrow() {
-                        PyObject::Exception { typ, .. } => is_exception_subclass(typ, &expected_name),
-                        _ => false,
+                    let typ_name = match &*exc_dup.borrow() {
+                        PyObject::Exception { typ, .. } => Some(typ.clone()),
+                        _ => None,
+                    };
+                    let matched = match typ_name {
+                        Some(t) => exc_type_matches(&expected, &t)?,
+                        None => false,
                     };
                     if matched {
                         let empty_group = PyObjectRef::new(PyObject::ExceptionGroup {
@@ -3260,7 +3384,6 @@ impl VirtualMachine {
                                 let p = p.borrow();
                                 if let PyObject::Str(s) = &*p { Some(s.to_string()) } else { None }
                             });
-                        let pkg_debug = pkg.clone();
                         let resolved_name = match pkg {
                             Some(p) if !p.is_empty() => {
                                 if name.is_empty() { p } else { format!("{}.{}", p, name) }
@@ -3279,10 +3402,8 @@ impl VirtualMachine {
                                 } else { name.clone() }
                             }
                         };
-                        eprintln!("DEBUG IMPORT_NAME: name='{}', level={}, __package__={:?}, resolved='{}'", name, level, pkg_debug, resolved_name);
                         resolved_name
                     } else {
-                        eprintln!("DEBUG IMPORT_NAME: name='{}', level={}, resolved='{}' (absolute)", name, level, name);
                         name.clone()
                     }
                 };
@@ -3361,7 +3482,6 @@ impl VirtualMachine {
                 let name = self.frames[fi].code.names.get(name_idx).ok_or_else(|| {
                     PyError::runtime_error("name index out of range")
                 })?.clone();
-                eprintln!("DEBUG IMPORT_FROM: name='{}'", name);
                 let module = self.frames[fi].peek(0)?;
                 // Handle 'from module import *' — when the imported name is '*',
                 // iterate over the module's dict and store all names in current scope
@@ -3404,17 +3524,35 @@ impl VirtualMachine {
                         _ => return Err(PyError::runtime_error("IMPORT_FROM on non-module")),
                     }
                 };
+                // Get module name for submodule import (clone to avoid borrow conflicts)
+                let module_name = {
+                    let obj = module.borrow();
+                    match &*obj {
+                        PyObject::Module { name: mn, .. } => mn.clone(),
+                        _ => return Err(PyError::runtime_error("IMPORT_FROM on non-module")),
+                    }
+                };
+                // Circular-import fallback: if this module is STILL mid-execution
+                // further down the call stack (e.g. its __init__.py does
+                // `import package.submodule` as its last statement, and that
+                // submodule does `from . import name_defined_earlier`), the
+                // module object's own dict is only populated once the whole
+                // body finishes — it's a snapshot copy, not a live view of the
+                // executing frame's globals. Check ancestor frames' actual
+                // live globals for the name before giving up.
+                let found = found.or_else(|| {
+                    self.frames.iter().find_map(|f| {
+                        let g = f.globals.borrow();
+                        if g.get("__name__").map(|n| n.str()).as_deref() == Some(module_name.as_str()) {
+                            g.get(&name).cloned()
+                        } else {
+                            None
+                        }
+                    })
+                });
                 if let Some(val) = found {
                     self.frames[fi].push(val);
                 } else {
-                    // Get module name for submodule import (clone to avoid borrow conflicts)
-                    let module_name = {
-                        let obj = module.borrow();
-                        match &*obj {
-                            PyObject::Module { name: mn, .. } => mn.clone(),
-                            _ => return Err(PyError::runtime_error("IMPORT_FROM on non-module")),
-                        }
-                    };
                     // Try importing as sub-module (for dotted names like os.path)
                     let submodule_name = format!("{}.{}", module_name, name);
                     if submodule_name.contains('.') {
@@ -3722,6 +3860,26 @@ impl VirtualMachine {
                 self.frames[fi].ip = arg as usize;
             }
 
+            Opcode::CALL_FUNCTION_EX => {
+                // f(*args, **kwargs) — the compiler already built a real
+                // tuple (unpacking any starred arguments via LIST_EXTEND)
+                // and a real dict (merging any bare **expr via DICT_MERGE),
+                // so this just needs to unpack those into a normal call.
+                let kwargs_dict = self.frames[fi].pop()?;
+                let args_tuple = self.frames[fi].pop()?;
+                let callable = self.frames[fi].pop()?;
+                let args_vec = match &*args_tuple.borrow() {
+                    PyObject::Tuple(v) | PyObject::List(v) => v.clone(),
+                    _ => return Err(PyError::type_error("argument after * must be an iterable")),
+                };
+                let keywords_vec: Vec<(String, PyObjectRef)> = match &*kwargs_dict.borrow() {
+                    PyObject::Dict(d) => d.items().into_iter().map(|(k, v)| (k.str(), v)).collect(),
+                    _ => Vec::new(),
+                };
+                let result = self.call_function(callable, args_vec, keywords_vec)?;
+                self.frames[fi].push(result);
+            }
+
             _ => return Err(PyError::runtime_error(format!("unimplemented opcode: {:?}", op))),
         }
         Ok(None)
@@ -3896,8 +4054,19 @@ impl VirtualMachine {
                 }
                 new_frame.insert_local(&kwarg_name, kw_dict);
             } else {
-                // No **kwargs, just set keyword args directly
+                // No **kwargs: keyword args must still bind to the matching
+                // named parameter's FAST local slot (LOAD_FAST reads
+                // fast_locals, not the insert_local name dict — missing this
+                // meant `f(1, somekw=True)` left `somekw` as None in
+                // fast_locals, raising "referenced before assignment" the
+                // moment the function body read it), matching the
+                // **kwargs branch above.
                 for (key, value) in &keywords {
+                    if let Some(idx) = new_frame.code.varnames.iter().position(|n| n == key) {
+                        if idx < new_frame.fast_locals.len() {
+                            new_frame.fast_locals[idx] = Some(value.clone());
+                        }
+                    }
                     new_frame.insert_local(&key, value.clone());
                 }
             }
@@ -3911,13 +4080,30 @@ impl VirtualMachine {
         }
 
         if let PyObject::Type { dict, mro, .. } = &*callable.borrow() {
+            let native_kind = dict.get_str(crate::object::NATIVE_BASE_MARKER).map(|v| v.str());
+            let mut instance_dict = HashMap::new();
+            if let Some(kind) = &native_kind {
+                instance_dict.insert(crate::object::NATIVE_BACKING_KEY.to_string(), crate::object::make_native_backing(kind));
+            }
             let instance = PyObjectRef::new(PyObject::Instance {
                 typ: callable.clone(),
-                dict: HashMap::new(),
+                dict: instance_dict,
             });
             let init_func = dict.get("__init__").cloned().or_else(|| {
                 for base in mro.iter().skip(1) {
-                    if let PyObject::Type { dict: base_dict, .. } = &*base.borrow() {
+                    if let PyObject::Type { name: base_name, dict: base_dict, .. } = &*base.borrow() {
+                        // Every class implicitly inherits from `object`,
+                        // whose own __init__ is a universal no-op. For a
+                        // class that also has a native base (e.g.
+                        // `class SafeString(str, SafeData): ...`), that
+                        // no-op would otherwise always be found first and
+                        // preempt real native construction — skip it here
+                        // so synthesize_native_init below gets a chance
+                        // unless something more specific actually overrides
+                        // __init__.
+                        if native_kind.is_some() && base_name == "object" {
+                            continue;
+                        }
                         if let Some(val) = base_dict.get_str("__init__") {
                             return Some(val.clone());
                         }
@@ -3925,50 +4111,30 @@ impl VirtualMachine {
                 }
                 None
             });
-            if let Some(init_func) = init_func {
-                let init_borrowed = init_func.borrow();
-                match &*init_borrowed {
-                    PyObject::BuiltinFunction { func, .. } => {
-                        let func = *func;
-                        let mut init_args = vec![instance.clone()];
-                        init_args.extend(args);
-                        func(&init_args)?;
+            if init_func.is_none() {
+                // No Python- or Rust-defined __init__ anywhere in the mro:
+                // for a native-subclassing class (`class Foo(list): pass`),
+                // that means the constructor call itself must behave like
+                // list(iterable)/dict(...)/str(x).
+                if let Some(kind) = &native_kind {
+                    let native = crate::object::synthesize_native_init(kind, &args)?;
+                    if let PyObject::Instance { dict, .. } = &mut *instance.borrow_mut() {
+                        dict.insert(crate::object::NATIVE_BACKING_KEY.to_string(), native);
                     }
-                    PyObject::Function { code, globals: func_globals, .. } => {
-                        let code = code.clone();
-                        let func_globals = func_globals.clone();
-                        drop(init_borrowed);
-                        let mut new_frame = Frame::new(Rc::new(code), func_globals, Rc::clone(&self.builtins), None);
-                        // Set self at index 0
-                        if !new_frame.code.varnames.is_empty() {
-                            new_frame.fast_locals[0] = Some(instance.clone());
-                            new_frame.insert_local(&new_frame.code.varnames[0].clone(), instance.clone());
-                        }
-                        let varnames = new_frame.code.varnames.clone();
-                        for (i, arg_name) in varnames.iter().enumerate().skip(1) {
-                            if i - 1 < args.len() {
-                                new_frame.fast_locals[i] = Some(args[i - 1].clone());
-                                new_frame.insert_local(arg_name, args[i - 1].clone());
-                            } else {
-                                new_frame.fast_locals[i] = Some(py_none());
-                                new_frame.insert_local(arg_name, py_none());
-                            }
-                        }
-                        self.frames.push(new_frame);
-                        self.execute()?;
-                        if let Some(frame) = self.frames.pop() {
-                            self.release_frame(frame);
-                        }
-                    }
-                    PyObject::Closure(func) => {
-                        let func_clone = func.clone();
-                        drop(init_borrowed);
-                        let mut init_args = vec![instance.clone()];
-                        init_args.extend(args.to_vec());
-                        func_clone(&init_args)?;
-                    }
-                    _ => {}
                 }
+            }
+            if let Some(init_func) = init_func {
+                // Delegate to the real call_function instead of a hand-rolled
+                // frame setup per callable kind — the latter (kept here for
+                // a long time) never handled *args/**kwargs/default values at
+                // all, silently binding missing parameters to None instead of
+                // their real defaults and dropping every keyword argument
+                // passed to the constructor. call_function already gets all
+                // of that right for every callable variant (BuiltinFunction,
+                // Function, Closure, ...).
+                let mut init_args = vec![instance.clone()];
+                init_args.extend(args);
+                self.call_function(init_func, init_args, keywords)?;
             }
             return Ok(instance);
         }
@@ -3999,9 +4165,11 @@ impl VirtualMachine {
             };
 
             match &*func.borrow() {
-                PyObject::Function { code, .. } => {
+                PyObject::Function { code, closure, .. } => {
                     let code = code.clone();
-                    let new_frame = self.acquire_frame(Rc::new(code), namespace.clone(), Rc::clone(&self.builtins), caller_module_globals);
+                    let closure = closure.clone();
+                    let mut new_frame = self.acquire_frame(Rc::new(code), namespace.clone(), Rc::clone(&self.builtins), caller_module_globals);
+                    new_frame.closure = closure;
                     self.frames.push(new_frame);
                     self.execute()?;
                     if let Some(frame) = self.frames.pop() {
@@ -4071,6 +4239,23 @@ impl VirtualMachine {
                 return Ok(mc_result);
             }
 
+            let mut namespace_dict = namespace_dict;
+            // Detect `class Foo(list): ...` / `(dict)` / `(str)` — either a
+            // direct native base, or inherited transitively through a base
+            // that already carries the marker (propagated down so every
+            // subclass's own dict has it, without needing to walk mro/bases
+            // again at instantiation or dispatch time).
+            for base in &bases_vec {
+                let native_name = match &*base.borrow() {
+                    PyObject::BuiltinFunction { name, .. } if crate::object::is_recognized_native_base_name(name) => Some(name.clone()),
+                    _ => crate::object::native_base_of_type(base),
+                };
+                if let Some(native_name) = native_name {
+                    namespace_dict.insert(crate::object::NATIVE_BASE_MARKER.to_string(), py_str(&native_name));
+                    break;
+                }
+            }
+
             let class = PyObjectRef::new(PyObject::Type {
                 name: name_str,
                 dict: namespace_dict.clone(),
@@ -4125,19 +4310,22 @@ impl VirtualMachine {
             return c(&args);
         }
 
-        if let PyObject::Instance { typ, .. } = &*callable.borrow() {
-            let f = {
-                let typ_ref = typ.borrow();
-                match &*typ_ref {
-                    PyObject::Type { dict: type_dict, .. } => type_dict.get_str("__call__").cloned(),
-                    _ => None,
-                }
-            };
-            if let Some(f) = f {
-                let mut call_args = vec![callable.clone()];
-                call_args.extend(args.iter().cloned());
-                return self.call_function(f, call_args, vec![]);
+        let call_dunder = {
+            let borrowed = callable.borrow();
+            if let PyObject::Instance { typ, .. } = &*borrowed {
+                crate::object::lookup_dunder_via_mro(typ, "__call__")
+            } else {
+                None
             }
+        };
+        if let Some(f) = call_dunder {
+            // `callable` must not still be borrowed here — if `__call__`'s
+            // own body mutates `self` (e.g. `self.hits += 1`, common for a
+            // caching wrapper), STORE_ATTR's borrow_mut() on the very same
+            // object would otherwise panic with a RefCell conflict.
+            let mut call_args = vec![callable.clone()];
+            call_args.extend(args.iter().cloned());
+            return self.call_function(f, call_args, keywords);
         }
 
         Err(PyError::type_error(format!("'{}' object is not callable", type_name)))
@@ -4304,6 +4492,26 @@ impl VirtualMachine {
 /// string-based type system used by this RustPython implementation.
 /// Each exception type maps to its parent; walking up the chain determines
 /// subclass relationships. Unknown types default to children of Exception.
+/// Resolves an `except` clause's type expression against a raised
+/// exception's type name — handling the common `except (A, B):` tuple form
+/// (matches if ANY member matches), not just a single bare type/name.
+fn exc_type_matches(expected: &PyObjectRef, exc_type_name: &str) -> PyResult<bool> {
+    match &*expected.borrow() {
+        PyObject::Str(s) => Ok(is_exception_subclass(exc_type_name, s)),
+        PyObject::Type { name, .. } => Ok(is_exception_subclass(exc_type_name, name)),
+        PyObject::BuiltinFunction { name, .. } => Ok(is_exception_subclass(exc_type_name, name)),
+        PyObject::Tuple(items) | PyObject::List(items) => {
+            for item in items {
+                if exc_type_matches(item, exc_type_name)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        _ => Err(PyError::type_error("catching classes that do not inherit from BaseException is not allowed")),
+    }
+}
+
 fn is_exception_subclass(child_type: &str, parent_type: &str) -> bool {
     if child_type == parent_type {
         return true;
@@ -4317,6 +4525,10 @@ fn is_exception_subclass(child_type: &str, parent_type: &str) -> bool {
         // Sub-hierarchy parents (intermediate nodes in the tree)
         "ArithmeticError" | "LookupError" | "ImportError" | "RuntimeError" |
         "Warning" | "OSError" | "ValueError" => Some("Exception"),
+        "CycleError" => Some("ValueError"),
+        "DecimalException" => Some("ArithmeticError"),
+        "InvalidOperation" | "DivisionByZero" | "Inexact" | "Rounded" |
+        "Clamped" | "Overflow" | "Underflow" | "FloatOperation" => Some("DecimalException"),
         // ExceptionGroup inherits from Exception
         "ExceptionGroup" => Some("Exception"),
         // Sub-hierarchy children — must come before leaves to not be shadowed
