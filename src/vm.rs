@@ -55,6 +55,18 @@ pub struct Frame {
     /// function frames, where nothing currently depends on order and
     /// tracking it would be pure overhead.
     pub name_order: Option<Rc<RefCell<Vec<String>>>>,
+    /// The PyObject::Module this frame is the top-level execution of, if any.
+    /// A module's own `dict` is otherwise only synced from `globals` once
+    /// the whole body finishes executing (see `exec_module_source`) — so
+    /// any attribute access on the module object *while it's still
+    /// mid-execution* (e.g. a circular import reading a name defined
+    /// earlier in the same file) would see a stale/empty dict. Real
+    /// CPython avoids this because `module.__dict__` IS the executing
+    /// frame's globals, not a separate copy. Mirroring every STORE_NAME
+    /// into this live module's dict (see STORE_NAME/DELETE_NAME) gives the
+    /// same effect generally, for every module, not just via IMPORT_FROM's
+    /// narrower ancestor-frame fallback.
+    pub live_module: Option<PyObjectRef>,
 }
 
 #[derive(Clone)]
@@ -89,6 +101,7 @@ impl Frame {
             registers: Vec::new(),
             module_globals,
             name_order: None,
+            live_module: None,
         }
     }
 
@@ -223,7 +236,12 @@ impl VirtualMachine {
          if let PyObject::Module { dict, .. } = &mut *os_mod.borrow_mut() {
              dict.insert("path".to_string(), os_path_mod.clone());
          }
-         modules.insert("os.path".to_string(), os_path_mod);
+         modules.insert("os.path".to_string(), os_path_mod.clone());
+         // posixpath is the real module behind os.path on POSIX (CPython's
+         // own os.py does `sys.modules['os.path'] = posixpath`) — code that
+         // imports it directly (`import posixpath`, common in stdlib-ish
+         // path-handling helpers) expects the same functions os.path has.
+         modules.insert("posixpath".to_string(), os_path_mod);
 
          let pathlib_dict = create_pathlib_dict();
          modules.insert("pathlib".to_string(), create_module("pathlib", pathlib_dict));
@@ -895,6 +913,7 @@ impl VirtualMachine {
             frame.global_cache.clear();
             frame.registers.clear();
             frame.name_order = None;
+            frame.live_module = None;
             frame
         } else {
             Frame::new(code, globals, builtins, module_globals)
@@ -924,8 +943,18 @@ impl VirtualMachine {
     }
 
     pub fn exec_code(&mut self, code: CodeObject, globals: Option<Rc<RefCell<HashMap<String, PyObjectRef>>>>) -> PyResult<PyObjectRef> {
+        self.exec_code_with_module(code, globals, None)
+    }
+
+    /// Like `exec_code`, but when `live_module` is Some, every STORE_NAME/
+    /// DELETE_NAME during this execution also mirrors into that module's
+    /// own `dict` immediately — not just once execution finishes (see
+    /// `Frame::live_module`'s doc comment for why this matters for
+    /// circular imports).
+    pub fn exec_code_with_module(&mut self, code: CodeObject, globals: Option<Rc<RefCell<HashMap<String, PyObjectRef>>>>, live_module: Option<PyObjectRef>) -> PyResult<PyObjectRef> {
         let g = globals.unwrap_or_else(|| self.globals.clone());
-        let frame = self.acquire_frame(Rc::new(code), g, Rc::clone(&self.builtins), None);
+        let mut frame = self.acquire_frame(Rc::new(code), g, Rc::clone(&self.builtins), None);
+        frame.live_module = live_module;
         self.frames.push(frame);
         let result = self.execute();
         if let Some(frame) = self.frames.pop() {
@@ -1391,6 +1420,23 @@ impl VirtualMachine {
                 }
             }
         }
+        // If the caller already registered a placeholder module object under
+        // this name (the normal case — see import_module_from_file_inner),
+        // mirror every STORE_NAME into its dict live, as execution happens,
+        // instead of only after the whole body finishes (see
+        // `Frame::live_module`'s doc comment). This is what lets a
+        // circular import elsewhere see names this module already defined
+        // even while it's still mid-execution — matching real CPython,
+        // where `module.__dict__` IS the executing frame's globals, not a
+        // separate snapshot.
+        let live_module = self.modules.get(name).cloned();
+        if let Some(lm) = &live_module {
+            if let PyObject::Module { dict, .. } = &mut *lm.borrow_mut() {
+                for (k, v) in module_globals.borrow().iter() {
+                    dict.insert(k.clone(), v.clone());
+                }
+            }
+        }
         // Preserve the real exception (type + object) raised by the module
         // body as-is — this used to be flattened into a formatted String via
         // `.map_err(|e| format!("{}", e))`, which meant a module raising e.g.
@@ -1399,7 +1445,13 @@ impl VirtualMachine {
         // instead of the actual TypeError, so `except TypeError` (or
         // anything other than a blanket `except ImportError`/`except
         // Exception`) around an import could never catch it.
-        self.exec_code(code, Some(Rc::clone(&module_globals)))?;
+        if std::env::var("RPY_DEBUG_IMPORT").is_ok() {
+            eprintln!("MODULE_EXEC_START: {}", name);
+        }
+        self.exec_code_with_module(code, Some(Rc::clone(&module_globals)), live_module)?;
+        if std::env::var("RPY_DEBUG_IMPORT").is_ok() {
+            eprintln!("MODULE_EXEC_DONE: {}", name);
+        }
         let globals_copy = module_globals.borrow().clone();
         // If a placeholder module was already registered under this name
         // (e.g. by import_module_from_file, to support circular imports),
@@ -1696,6 +1748,11 @@ impl VirtualMachine {
                         order.push(name.clone());
                     }
                 }
+                if let Some(live_module) = self.frames[fi].live_module.clone() {
+                    if let PyObject::Module { dict, .. } = &mut *live_module.borrow_mut() {
+                        dict.insert(name.clone(), val.clone());
+                    }
+                }
                 self.frames[fi].globals.borrow_mut().insert(name, val);
             }
 
@@ -1859,6 +1916,11 @@ impl VirtualMachine {
             Opcode::DELETE_NAME => {
                 let name_idx = arg as usize;
                 let name = self.frames[fi].code.names[name_idx].clone();
+                if let Some(live_module) = self.frames[fi].live_module.clone() {
+                    if let PyObject::Module { dict, .. } = &mut *live_module.borrow_mut() {
+                        dict.remove(&name);
+                    }
+                }
                 self.frames[fi].globals.borrow_mut().remove(&name);
             }
 
@@ -3847,7 +3909,19 @@ impl VirtualMachine {
                             .filter_map(|name| dict.get_str(&name).map(|val| (name.clone(), val.clone())))
                             .collect();
                         drop(module_borrowed);
+                        let live_module = self.frames[fi].live_module.clone();
                         for (import_name, val) in &imports {
+                            if let Some(order) = self.frames[fi].name_order.clone() {
+                                let mut order = order.borrow_mut();
+                                if !order.contains(import_name) {
+                                    order.push(import_name.clone());
+                                }
+                            }
+                            if let Some(lm) = &live_module {
+                                if let PyObject::Module { dict, .. } = &mut *lm.borrow_mut() {
+                                    dict.insert(import_name.clone(), val.clone());
+                                }
+                            }
                             self.frames[fi].globals.borrow_mut().insert(import_name.clone(), val.clone());
                         }
                         // Push placeholder module result (the loop above already pushed values)
@@ -3880,6 +3954,7 @@ impl VirtualMachine {
                 // body finishes — it's a snapshot copy, not a live view of the
                 // executing frame's globals. Check ancestor frames' actual
                 // live globals for the name before giving up.
+                let found_direct = found.is_some();
                 let found = found.or_else(|| {
                     self.frames.iter().find_map(|f| {
                         let g = f.globals.borrow();
@@ -3890,11 +3965,17 @@ impl VirtualMachine {
                         }
                     })
                 });
+                if std::env::var("RPY_DEBUG_IMPORT").is_ok() {
+                    eprintln!("IMPORT_FROM: name={} module={} found_direct={} found_after_ancestor={}", name, module_name, found_direct, found.is_some());
+                }
                 if let Some(val) = found {
                     self.frames[fi].push(val);
                 } else {
                     // Try importing as sub-module (for dotted names like os.path)
                     let submodule_name = format!("{}.{}", module_name, name);
+                    if std::env::var("RPY_DEBUG_IMPORT").is_ok() {
+                        eprintln!("IMPORT_FROM fallback: submodule_name={} already_cached={}", submodule_name, self.modules.contains_key(&submodule_name));
+                    }
                     if submodule_name.contains('.') {
                         match self.import_module_from_file(&submodule_name) {
                             Ok(submod) => {
