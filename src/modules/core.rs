@@ -67,6 +67,24 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     builtins.insert("True".to_string(), py_bool(true));
     builtins.insert("False".to_string(), py_bool(false));
     builtins.insert("Ellipsis".to_string(), PyObjectRef::imm(PyObject::Str(compact_str::CompactString::from("..."))));
+    // NotImplemented: the singleton rich-comparison/binary-op dunders return
+    // to signal "try the other operand's reflected method instead" — needed
+    // by any `__eq__`/`__lt__`/etc. that follows the standard pattern of
+    // `if not isinstance(other, X): return NotImplemented`.
+    {
+        let mut nie_dict = HashMap::new();
+        nie_dict.insert("__repr__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__repr__".to_string(),
+            func: |_args| Ok(py_str("NotImplemented")),
+        }));
+        nie_dict.insert("__bool__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__bool__".to_string(),
+            func: |_args| Ok(py_bool(true)),
+        }));
+        let nie_type = PyObjectRef::new(PyObject::Type { name: "NotImplementedType".to_string(), dict: nie_dict, bases: vec![], mro: vec![] });
+        let not_implemented = PyObjectRef::imm(PyObject::Instance { typ: nie_type, dict: HashMap::new() });
+        builtins.insert("NotImplemented".to_string(), not_implemented);
+    }
 
     macro_rules! add_func {
         ($name:expr, $func:expr) => {
@@ -290,14 +308,20 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
             Ok(py_str(&format!("<{} object at 0x{}>", type_name, ptr_hex)))
         },
     }));
-    // __eq__(self, other): identity comparison
+    // __eq__(self, other): identity comparison. This previously compared
+    // type NAMES instead of identity — i.e. any two *distinct* instances of
+    // the same plain class (no custom __eq__ override) compared equal to
+    // each other, which is wrong (real Python's default `object.__eq__` is
+    // `self is other`) and surfaced very visibly once enum members relied
+    // on it: `Color.RED == Color.GREEN` was `True` since both are just
+    // "instances of Color".
     object_dict.insert("__eq__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
         name: "__eq__".to_string(),
         func: |args| {
             if args.len() < 2 {
                 return Err(PyError::type_error("__eq__ requires 2 arguments"));
             }
-            Ok(py_bool(args[0].borrow().type_name() == args[1].borrow().type_name()))
+            Ok(py_bool(args[0].is(&args[1])))
         },
     }));
     // __ne__(self, other): inverse of __eq__
@@ -307,7 +331,7 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
             if args.len() < 2 {
                 return Err(PyError::type_error("__ne__ requires 2 arguments"));
             }
-            Ok(py_bool(args[0].borrow().type_name() != args[1].borrow().type_name()))
+            Ok(py_bool(!args[0].is(&args[1])))
         },
     }));
     // __hash__(self): hash based on pointer

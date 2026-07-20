@@ -46,6 +46,15 @@ pub struct Frame {
     /// Used by class bodies to resolve LOAD_NAME against module-level names
     /// and by MAKE_FUNCTION to set __module__ on created functions.
     pub module_globals: Option<Rc<RefCell<HashMap<String, PyObjectRef>>>>,
+    /// First-insertion order of names STORE_NAME'd into this frame's
+    /// `globals` — only populated for class-body frames (set up by
+    /// `__build_class__`), since that's the one case where order is
+    /// user-visible (class namespaces, and anything a metaclass inspects,
+    /// e.g. enum member definition order). `globals` itself is a plain
+    /// HashMap with no ordering guarantee; `None` for ordinary module/
+    /// function frames, where nothing currently depends on order and
+    /// tracking it would be pure overhead.
+    pub name_order: Option<Rc<RefCell<Vec<String>>>>,
 }
 
 #[derive(Clone)]
@@ -79,6 +88,7 @@ impl Frame {
             global_cache: vec![None; instr_count],
             registers: Vec::new(),
             module_globals,
+            name_order: None,
         }
     }
 
@@ -1587,6 +1597,12 @@ impl VirtualMachine {
                     PyError::runtime_error("name index out of range")
                 })?.clone();
                 let val = self.frames[fi].pop()?;
+                if let Some(order) = self.frames[fi].name_order.clone() {
+                    let mut order = order.borrow_mut();
+                    if !order.contains(&name) {
+                        order.push(name.clone());
+                    }
+                }
                 self.frames[fi].globals.borrow_mut().insert(name, val);
             }
 

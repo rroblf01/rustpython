@@ -316,6 +316,26 @@ impl PyObjectRef {
         if let (PyObjectRef::SmallStr(a), PyObjectRef::SmallStr(b)) = (self, other) {
             return Ok(a.as_str() == b.as_str());
         }
+        // Custom __eq__ dispatch needs THIS PyObjectRef's own identity (a
+        // real Rc clone) passed as `self` — PyObject::equals below (called
+        // via `.borrow()`) only has `&PyObject`, with no way to recover the
+        // Rc it lives in, so it used to reconstruct a throwaway
+        // `PyObjectRef::new(self.clone())` just to have something to pass
+        // as `self`. That throwaway has a *different* identity than the
+        // real object, so e.g. `object`'s default (identity-based) __eq__
+        // always returned false — even for `x == x` on the very same
+        // instance (surfaced by enum member comparisons: `Color.RED ==
+        // Color.RED` came out False). Doing the mro lookup and call here,
+        // with the real `self`, fixes that at the root.
+        let typ = if let PyObject::Instance { typ, .. } = &*self.borrow() { Some(typ.clone()) } else { None };
+        if let Some(typ) = typ {
+            if let Some(f) = lookup_dunder_via_mro(&typ, "__eq__") {
+                let result = call_bound_method(f, self.clone(), vec![other.clone()])?;
+                if !is_not_implemented(&result) {
+                    return Ok(result.truthy());
+                }
+            }
+        }
         self.borrow().equals(other)
     }
     pub fn get_type_name(&self) -> String { self.borrow().type_name() }
@@ -538,13 +558,23 @@ pub struct PyDict {
     pub buckets: std::collections::HashMap<usize, Vec<(PyObjectRef, PyObjectRef)>>,
     pub size: usize,
     pub instance_ref: Option<PyObjectRef>,
+    /// Keys in first-insertion order — real Python dicts have preserved
+    /// insertion order since 3.7 (iteration, `**kwargs`, `vars()`,
+    /// `json.dumps`, dataclass field order, and — the case that surfaced
+    /// this gap — a class's namespace dict handed to a metaclass's
+    /// `__new__`, where member/attribute definition order is meaningful).
+    /// `buckets` alone can't provide this: it's keyed by hash bucket, whose
+    /// iteration order is Rust HashMap's arbitrary order, not insertion
+    /// order. Re-assigning an existing key does not move it, matching
+    /// Python. Removal drops the key from here too.
+    pub order: Vec<PyObjectRef>,
 }
 
 impl PyDict {
-    pub fn new() -> Self { PyDict { buckets: std::collections::HashMap::new(), size: 0, instance_ref: None } }
+    pub fn new() -> Self { PyDict { buckets: std::collections::HashMap::new(), size: 0, instance_ref: None, order: Vec::new() } }
     pub fn is_empty(&self) -> bool { self.size == 0 }
     pub fn len(&self) -> usize { self.size }
-    pub fn clear(&mut self) { self.buckets.clear(); self.size = 0; }
+    pub fn clear(&mut self) { self.buckets.clear(); self.size = 0; self.order.clear(); }
     fn bucket(&self, key: &PyObjectRef) -> PyResult<Option<&Vec<(PyObjectRef, PyObjectRef)>>> {
         let h = key.hash()?; Ok(self.buckets.get(&h))
     }
@@ -562,7 +592,7 @@ impl PyDict {
         let bucket = self.buckets.entry(h).or_default();
         match Self::find(bucket, &key) {
             Some(i) => bucket[i].1 = value.clone(),
-            None => { bucket.push((key.clone(), value.clone())); self.size += 1; }
+            None => { bucket.push((key.clone(), value.clone())); self.size += 1; self.order.push(key.clone()); }
         }
         // Propagate to Instance dict if this is a __dict__ view
         if let Some(ref inst_ref) = self.instance_ref {
@@ -576,16 +606,21 @@ impl PyDict {
         let h = key.hash()?;
         let bucket = self.buckets.get_mut(&h).ok_or_else(|| PyError::key_error(key.str()))?;
         let pos = Self::find(bucket, key).ok_or_else(|| PyError::key_error(key.str()))?;
-        self.size -= 1; Ok(bucket.swap_remove(pos).1)
+        self.size -= 1;
+        let removed = bucket.swap_remove(pos).1;
+        if let Some(op) = self.order.iter().position(|k| k.equals(key).unwrap_or(false)) {
+            self.order.remove(op);
+        }
+        Ok(removed)
     }
     pub fn keys(&self) -> Vec<PyObjectRef> {
-        self.buckets.values().flat_map(|b| b.iter().map(|(k, _)| k.clone())).collect()
+        self.order.clone()
     }
     pub fn values(&self) -> Vec<PyObjectRef> {
-        self.buckets.values().flat_map(|b| b.iter().map(|(_, v)| v.clone())).collect()
+        self.order.iter().filter_map(|k| self.get(k).ok().flatten()).collect()
     }
     pub fn items(&self) -> Vec<(PyObjectRef, PyObjectRef)> {
-        self.buckets.values().flat_map(|b| b.clone()).collect()
+        self.order.iter().filter_map(|k| self.get(k).ok().flatten().map(|v| (k.clone(), v))).collect()
     }
     /// Get a value by object identity (pointer comparison), used for memo cache.
     pub fn get_by_identity(&self, key: &PyObjectRef) -> Option<PyObjectRef> {
@@ -1137,7 +1172,9 @@ impl PyObject {
             if let Some(f) = lookup_dunder_via_mro(typ, "__eq__") {
                 let self_ref = PyObjectRef::new(self.clone());
                 let result = call_bound_method(f, self_ref, vec![other_ref.clone()])?;
-                return Ok(result.truthy());
+                if !is_not_implemented(&result) {
+                    return Ok(result.truthy());
+                }
             }
         }
         // Instances that transparently subclass list/dict/str (and don't
@@ -1568,7 +1605,9 @@ pub fn try_dunder_binop(a: &PyObjectRef, b: &PyObjectRef, method: &str) -> PyRes
     };
     if let Some(f) = f {
         let result = call_bound_method(f, a.clone(), vec![b.clone()])?;
-        return Ok(Some(result));
+        if !is_not_implemented(&result) {
+            return Ok(Some(result));
+        }
     }
     // Not overridden anywhere in the mro: for a class that transparently
     // subclasses list/str (`class Foo(list): ...`), +/* on it should behave
@@ -1990,7 +2029,7 @@ pub fn py_compare(a: &PyObjectRef, b: &PyObjectRef, op: u32) -> PyResult<PyObjec
     let result = match op {
         0 => a.borrow().lt(b)?,
         1 => a.borrow().le(b)?,
-        2 => a.borrow().equals(b)?,
+        2 => a.equals(b)?,
         3 => a.borrow().ge(b)?,
         4 => a.borrow().gt(b)?,
         5 => a.borrow().ne(b)?,
@@ -2003,36 +2042,82 @@ pub fn py_compare(a: &PyObjectRef, b: &PyObjectRef, op: u32) -> PyResult<PyObjec
     Ok(py_bool(result))
 }
 
+/// True iff `v` is the `NotImplemented` singleton — a comparison dunder
+/// returning it means "I don't know how to compare with this type, try the
+/// other operand's reflected method instead" (or fall back to the default
+/// behavior if neither side can). Without this check, any class following
+/// the standard `if not isinstance(other, X): return NotImplemented`
+/// idiom got NotImplemented's own truthiness (true) used as the comparison
+/// result directly, e.g. making `foo == unrelated_object` always True.
+fn is_not_implemented(v: &PyObjectRef) -> bool {
+    matches!(&*v.borrow(), PyObject::Instance { typ, .. }
+        if matches!(&*typ.borrow(), PyObject::Type { name, .. } if name == "NotImplementedType"))
+}
+
+/// True iff `e` signals iterator exhaustion — either the plain
+/// `PyError::StopIteration` (raised internally by builtin iterators, or by
+/// `raise StopIteration` with no message) or a wrapped `PyError::Exception`
+/// whose type is "StopIteration" (how a generator's own `__next__`/`send`
+/// driver — see the Generator match arm's get_attribute impl — signals
+/// normal return/exhaustion, and how `raise StopIteration("msg")` comes out
+/// of RAISE_VARARGS). Any direct caller of a generator's or custom
+/// iterator's `__next__` (bypassing `builtin_next`, which already does this
+/// normalization) must check both forms — checking only the bare variant
+/// left FOR_ITER unable to recognize a real generator's exhaustion at all,
+/// so `for x in some_generator(): ...` never terminated cleanly.
+pub fn is_stop_iteration_error(e: &PyError) -> bool {
+    match e {
+        PyError::StopIteration => true,
+        // Two distinct shapes reach here under the same enum variant:
+        // (1) the generator __next__/send driver's ad hoc
+        //     `PyError::Exception("StopIteration".into(), return_value)` —
+        //     the second field is the generator's raw return value, not a
+        //     real exception object, so only the message string identifies
+        //     it; (2) a genuinely `raise StopIteration("msg")`'d exception,
+        //     where the message is user text but the second field IS a
+        //     real `PyObject::Exception { typ: "StopIteration", .. }`.
+        PyError::Exception(msg, exc) => {
+            msg == "StopIteration"
+                || matches!(&*exc.borrow(), PyObject::Exception { typ, .. } if typ == "StopIteration")
+        }
+        _ => false,
+    }
+}
+
 fn try_dunder_comparison(a: &PyObjectRef, b: &PyObjectRef, method: &str) -> PyResult<Option<bool>> {
     // Try a.__eq__(b) first
     let f_a = try_get_method(a, method);
     if let Some(f) = f_a {
         let result = call_bound_method(f, a.clone(), vec![b.clone()])?;
-        return Ok(Some(result.truthy()));
+        if !is_not_implemented(&result) {
+            return Ok(Some(result.truthy()));
+        }
     }
-    // Try b.__eq__(a) if different type
+    // Try b.__eq__(a) if different type, or if a's method punted
     if a.get_type_name() != b.get_type_name() {
         let f_b = try_get_method(b, method);
         if let Some(f) = f_b {
             let result = call_bound_method(f, b.clone(), vec![a.clone()])?;
-            return Ok(Some(result.truthy()));
+            if !is_not_implemented(&result) {
+                return Ok(Some(result.truthy()));
+            }
         }
     }
     Ok(None)
 }
 
 fn try_get_method(obj: &PyObjectRef, name: &str) -> Option<PyObjectRef> {
-    let obj_borrowed = obj.borrow();
-    match &*obj_borrowed {
-        PyObject::Instance { typ, .. } => {
-            let typ_ref = typ.borrow();
-            match &*typ_ref {
-                PyObject::Type { dict: type_dict, .. } => type_dict.get_str(&name).cloned(),
-                _ => None,
-            }
-        }
-        _ => None,
-    }
+    let typ = if let PyObject::Instance { typ, .. } = &*obj.borrow() { Some(typ.clone()) } else { None };
+    // Walk the full mro (not just the instance's own exact type's dict) —
+    // this is what comparison dunders (__eq__/__lt__/etc.) need to find one
+    // *inherited* from a base rather than redefined on the exact class, e.g.
+    // any plain class relying on `object`'s default (identity-based)
+    // __eq__: without this, `try_get_method` came back None for it, so
+    // comparisons fell through this function's caller entirely and hit a
+    // different, separately-broken direct-identity-reconstruction path
+    // instead (see PyObjectRef::equals's doc comment) — surfaced by two
+    // enum members with equal `is()` identity still comparing `==` False.
+    typ.and_then(|t| lookup_dunder_via_mro(&t, name))
 }
 
 pub trait Compare {
