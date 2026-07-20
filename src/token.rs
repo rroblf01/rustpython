@@ -282,6 +282,24 @@ impl Lexer {
                             Some('\\') => bytes.push(b'\\'),
                             Some('\'') => bytes.push(b'\''),
                             Some('"') => bytes.push(b'"'),
+                            // See the matching fix in read_string above for
+                            // why this needs to consume up to 2 more octal
+                            // digits, not just recognize a bare `\0`.
+                            Some(d) if ('0'..='7').contains(&d) => {
+                                let mut value = d.to_digit(8).unwrap();
+                                let mut digits = 1;
+                                while digits < 3 {
+                                    match self.peek() {
+                                        Some(nc) if ('0'..='7').contains(&nc) => {
+                                            value = value * 8 + nc.to_digit(8).unwrap();
+                                            self.advance();
+                                            digits += 1;
+                                        }
+                                        _ => break,
+                                    }
+                                }
+                                bytes.push(value as u8);
+                            }
                             Some('x') => {
                                 let h1 = self.advance().unwrap_or('0');
                                 let h2 = self.advance().unwrap_or('0');
@@ -333,6 +351,24 @@ impl Lexer {
                             Some('\\') => bytes.push(b'\\'),
                             Some('\'') => bytes.push(b'\''),
                             Some('"') => bytes.push(b'"'),
+                            // See the matching fix in read_string above for
+                            // why this needs to consume up to 2 more octal
+                            // digits, not just recognize a bare `\0`.
+                            Some(d) if ('0'..='7').contains(&d) => {
+                                let mut value = d.to_digit(8).unwrap();
+                                let mut digits = 1;
+                                while digits < 3 {
+                                    match self.peek() {
+                                        Some(nc) if ('0'..='7').contains(&nc) => {
+                                            value = value * 8 + nc.to_digit(8).unwrap();
+                                            self.advance();
+                                            digits += 1;
+                                        }
+                                        _ => break,
+                                    }
+                                }
+                                bytes.push(value as u8);
+                            }
                             Some('x') => {
                                 let h1 = self.advance().unwrap_or('0');
                                 let h2 = self.advance().unwrap_or('0');
@@ -384,7 +420,31 @@ impl Lexer {
                             Some('\\') => s.push('\\'),
                             Some('\'') => s.push('\''),
                             Some('"') => s.push('"'),
-                            Some('0') => s.push('\0'),
+                            // Python string literals accept `\ooo` — 1 to 3
+                            // octal digits, the first being the one already
+                            // consumed here — as a byte/char escape (e.g.
+                            // real code, CPython's own `email._policybase`:
+                            // `"[\041-\071\073-\176]+$"`). Previously only a
+                            // bare `\0` (no further digits) was handled,
+                            // pushing NUL and leaving any following digits
+                            // as literal characters — so `\041` produced
+                            // `'\x00' + '4' + '1'` (3 chars) instead of the
+                            // correct single `'!'` (0o41 = 33).
+                            Some(d) if ('0'..='7').contains(&d) => {
+                                let mut value = d.to_digit(8).unwrap();
+                                let mut digits = 1;
+                                while digits < 3 {
+                                    match self.peek() {
+                                        Some(nc) if ('0'..='7').contains(&nc) => {
+                                            value = value * 8 + nc.to_digit(8).unwrap();
+                                            self.advance();
+                                            digits += 1;
+                                        }
+                                        _ => break,
+                                    }
+                                }
+                                s.push((value as u8) as char);
+                            }
                             Some('a') => s.push('\x07'),
                             Some('b') => s.push('\x08'),
                             Some('f') => s.push('\x0c'),
@@ -449,7 +509,31 @@ impl Lexer {
                             Some('\\') => s.push('\\'),
                             Some('\'') => s.push('\''),
                             Some('"') => s.push('"'),
-                            Some('0') => s.push('\0'),
+                            // Python string literals accept `\ooo` — 1 to 3
+                            // octal digits, the first being the one already
+                            // consumed here — as a byte/char escape (e.g.
+                            // real code, CPython's own `email._policybase`:
+                            // `"[\041-\071\073-\176]+$"`). Previously only a
+                            // bare `\0` (no further digits) was handled,
+                            // pushing NUL and leaving any following digits
+                            // as literal characters — so `\041` produced
+                            // `'\x00' + '4' + '1'` (3 chars) instead of the
+                            // correct single `'!'` (0o41 = 33).
+                            Some(d) if ('0'..='7').contains(&d) => {
+                                let mut value = d.to_digit(8).unwrap();
+                                let mut digits = 1;
+                                while digits < 3 {
+                                    match self.peek() {
+                                        Some(nc) if ('0'..='7').contains(&nc) => {
+                                            value = value * 8 + nc.to_digit(8).unwrap();
+                                            self.advance();
+                                            digits += 1;
+                                        }
+                                        _ => break,
+                                    }
+                                }
+                                s.push((value as u8) as char);
+                            }
                             Some('a') => s.push('\x07'),
                             Some('b') => s.push('\x08'),
                             Some('f') => s.push('\x0c'),
