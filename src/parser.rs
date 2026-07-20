@@ -994,6 +994,12 @@ impl Parser {
 
     fn parse_args(&mut self) -> Result<Vec<Arg>, String> {
         let mut args = Vec::new();
+        // Set once a `*args` or bare `*,` separator is seen — every regular
+        // param after that point is keyword-only. A bare `*,` introduces no
+        // Arg of its own, so this flag is the only record that it happened;
+        // without it, `def f(a, *, b, c):`'s b/c were indistinguishable from
+        // plain positional params anywhere later in the compiler.
+        let mut seen_star = false;
         if !self.at(&Token::RightParen) {
             loop {
                 // Allow trailing comma: if we see ')' after a comma, stop
@@ -1004,11 +1010,12 @@ impl Parser {
                     let annotation = if self.eat(&Token::Colon) {
                         Some(Box::new(self.parse_expr()?))
                     } else { None };
-                    args.push(Arg { arg: name, annotation, is_vararg: false, is_kwarg: true, is_posonlyarg: false, default: None });
+                    args.push(Arg { arg: name, annotation, is_vararg: false, is_kwarg: true, is_posonlyarg: false, is_kwonly: false, default: None });
                     if !self.eat(&Token::Comma) { break; }
                 } else if self.eat(&Token::Star) {
                     if self.at(&Token::RightParen) || self.at(&Token::Comma) {
                         // bare * means keyword-only args follow
+                        seen_star = true;
                         self.eat(&Token::Comma); // consume trailing comma if present
                         continue;
                     }
@@ -1016,7 +1023,8 @@ impl Parser {
                     let annotation = if self.eat(&Token::Colon) {
                         Some(Box::new(self.parse_expr()?))
                     } else { None };
-                    args.push(Arg { arg: name, annotation, is_vararg: true, is_kwarg: false, is_posonlyarg: false, default: None });
+                    args.push(Arg { arg: name, annotation, is_vararg: true, is_kwarg: false, is_posonlyarg: false, is_kwonly: false, default: None });
+                    seen_star = true;
                     if !self.eat(&Token::Comma) { break; }
                 } else if self.eat(&Token::Slash) {
                     // Positional-only parameter separator '/' — marks end of positional-only params.
@@ -1039,7 +1047,8 @@ impl Parser {
                     }
                     continue;
                 } else {
-                    let arg = self.parse_arg()?;
+                    let mut arg = self.parse_arg()?;
+                    arg.is_kwonly = seen_star;
                     args.push(arg);
                     if !self.eat(&Token::Comma) { break; }
                 }
@@ -1060,7 +1069,7 @@ impl Parser {
         } else {
             None
         };
-        Ok(Arg { arg, annotation, is_vararg: false, is_kwarg: false, is_posonlyarg: false, default })
+        Ok(Arg { arg, annotation, is_vararg: false, is_kwarg: false, is_posonlyarg: false, is_kwonly: false, default })
     }
 
     fn parse_block(&mut self) -> Result<Vec<Stmt>, String> {
@@ -2033,20 +2042,28 @@ impl Parser {
 
     fn parse_lambda_args(&mut self) -> Result<Vec<Arg>, String> {
         let mut args = Vec::new();
+        let mut seen_star = false;
         loop {
             if self.at(&Token::Colon) { break; }
             if self.eat(&Token::Star) {
                 if self.at(&Token::Colon) || self.at(&Token::Comma) {
+                    seen_star = true;
                     continue;
                 }
                 let name = self.expect_name()?;
-                args.push(Arg { arg: name, annotation: None, is_vararg: true, is_kwarg: false, is_posonlyarg: false, default: None });
+                args.push(Arg { arg: name, annotation: None, is_vararg: true, is_kwarg: false, is_posonlyarg: false, is_kwonly: false, default: None });
+                seen_star = true;
             } else if self.eat(&Token::DoubleStar) {
                 let name = self.expect_name()?;
-                args.push(Arg { arg: name, annotation: None, is_vararg: false, is_kwarg: true, is_posonlyarg: false, default: None });
+                args.push(Arg { arg: name, annotation: None, is_vararg: false, is_kwarg: true, is_posonlyarg: false, is_kwonly: false, default: None });
             } else {
                 let name = self.expect_name()?;
-                args.push(Arg { arg: name, annotation: None, is_vararg: false, is_kwarg: false, is_posonlyarg: false, default: None });
+                let default = if self.eat(&Token::Equal) {
+                    Some(Box::new(self.parse_expr()?))
+                } else {
+                    None
+                };
+                args.push(Arg { arg: name, annotation: None, is_vararg: false, is_kwarg: false, is_posonlyarg: false, is_kwonly: seen_star, default });
             }
             if !self.eat(&Token::Comma) { break; }
         }

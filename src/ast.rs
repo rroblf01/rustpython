@@ -108,6 +108,12 @@ pub struct Arg {
     pub is_vararg: bool,
     pub is_kwarg: bool,
     pub is_posonlyarg: bool,
+    /// True for params after `*args` or a bare `*` separator (keyword-only).
+    /// A bare `*,` introduces no Arg entry of its own (see parse_args), so
+    /// this is the only trace that such a marker preceded this param —
+    /// without it, keyword-only params with no named `*args` sibling were
+    /// entirely indistinguishable from regular positional ones.
+    pub is_kwonly: bool,
     pub default: Option<Box<Expr>>,
 }
 

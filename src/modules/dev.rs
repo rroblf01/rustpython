@@ -597,8 +597,12 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
         if let PyObject::Function { code, defaults, .. } = &*b {
             let arg_count = code.arg_count.min(code.varnames.len());
             let positional_args: Vec<PyObjectRef> = code.varnames[..arg_count].iter().map(|n| py_str(n)).collect();
+            // varnames layout is: positional args, then *args (if any), then
+            // kwonly args, then **kwargs (if any) — the vararg slot must be
+            // skipped when locating where kwonly names start.
+            let kwonly_start = arg_count + if code.vararg_name.is_some() { 1 } else { 0 };
             let kwonlyargs: Vec<PyObjectRef> = if code.kwonlyarg_count > 0 {
-                code.varnames.get(arg_count..arg_count + code.kwonlyarg_count)
+                code.varnames.get(kwonly_start..kwonly_start + code.kwonlyarg_count)
                     .map(|s| s.iter().map(|n| py_str(n)).collect())
                     .unwrap_or_default()
             } else {
@@ -606,14 +610,38 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
             };
             let varargs = code.vararg_name.as_ref().map(|n| py_str(n)).unwrap_or_else(py_none);
             let varkw = code.kwarg_name.as_ref().map(|n| py_str(n)).unwrap_or_else(py_none);
-            let defaults_val = if defaults.is_empty() { py_none() } else { py_tuple(defaults.clone()) };
+            // `defaults` holds positional defaults then kwonly ones appended
+            // after (see MAKE_FUNCTION/CodeObject::kwonly_defaults_mask) —
+            // code.num_defaults is the positional-only count.
+            let num_defaults = code.num_defaults;
+            let defaults_val = if num_defaults == 0 { py_none() } else { py_tuple(defaults[..num_defaults].to_vec()) };
+            let kwonlydefaults = py_dict();
+            if code.kwonlyarg_count > 0 {
+                let mut kwdefault_idx = num_defaults;
+                if let PyObject::Dict(d) = &mut *kwonlydefaults.borrow_mut() {
+                    for (k, has_default) in code.kwonly_defaults_mask.iter().enumerate() {
+                        if !*has_default { continue; }
+                        if let Some(pname) = code.varnames.get(kwonly_start + k) {
+                            if let Some(v) = defaults.get(kwdefault_idx) {
+                                d.set(py_str(pname), v.clone())?;
+                            }
+                        }
+                        kwdefault_idx += 1;
+                    }
+                }
+            }
+            let kwonlydefaults = if kwonlyargs.is_empty() || matches!(&*kwonlydefaults.borrow(), PyObject::Dict(d) if d.is_empty()) {
+                py_none()
+            } else {
+                kwonlydefaults
+            };
             Ok(py_tuple(vec![
                 py_list(positional_args),
                 varargs,
                 varkw,
                 defaults_val,
                 py_list(kwonlyargs),
-                py_none(),
+                kwonlydefaults,
                 py_dict(),
             ]))
         } else {
@@ -663,7 +691,13 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
             };
             let mut params = PyDict::new();
             let arg_count = code.arg_count.min(code.varnames.len());
-            let num_defaults = defaults.len();
+            // `defaults` holds positional defaults THEN keyword-only ones
+            // appended after (see MAKE_FUNCTION/CodeObject::kwonly_defaults_mask)
+            // — code.num_defaults is the count of just the positional ones;
+            // defaults.len() also counts the kwonly tail, which would shift
+            // every positional default computed from it by however many
+            // kwonly defaults exist.
+            let num_defaults = code.num_defaults;
             let first_default_idx = arg_count.saturating_sub(num_defaults);
             for i in 0..arg_count {
                 let pname = code.varnames[i].clone();
@@ -680,9 +714,18 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
             // skipped when locating where kwonly names start.
             let kwonly_start = arg_count + if code.vararg_name.is_some() { 1 } else { 0 };
             if code.kwonlyarg_count > 0 {
+                let mut kwdefault_idx = num_defaults;
                 if let Some(kwonly) = code.varnames.get(kwonly_start..kwonly_start + code.kwonlyarg_count) {
-                    for pname in kwonly {
-                        let p = make_param(pname, 3, py_none(), &param_type); // KEYWORD_ONLY
+                    for (k, pname) in kwonly.iter().enumerate() {
+                        let has_default = code.kwonly_defaults_mask.get(k).copied().unwrap_or(false);
+                        let default = if has_default {
+                            let v = defaults.get(kwdefault_idx).cloned().unwrap_or_else(py_none);
+                            kwdefault_idx += 1;
+                            v
+                        } else {
+                            py_none()
+                        };
+                        let p = make_param(pname, 3, default, &param_type); // KEYWORD_ONLY
                         params.set(py_str(pname), p)?;
                     }
                 }

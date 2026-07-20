@@ -1194,12 +1194,12 @@ impl VirtualMachine {
         vec![]
     }
 
-    fn exec_module_source(&mut self, source: &str, path: &str, name: &str) -> Result<PyObjectRef, String> {
+    fn exec_module_source(&mut self, source: &str, path: &str, name: &str) -> PyResult<PyObjectRef> {
         // ── .pyc cache support ─────────────────────────────────────────
         // Try to load a previously-compiled .pyc file. If valid (matching
         // magic + version + source timestamp), skip parsing and compilation.
         const PYC_MAGIC: u32 = 0x52535079; // "RSPy"
-        const PYC_VERSION: u16 = 1;
+        const PYC_VERSION: u16 = 2; // bumped: CodeObject gained kwonly_defaults_mask
 
         let py_path = std::path::Path::new(path);
         let source_mtime = std::fs::metadata(path)
@@ -2072,11 +2072,23 @@ impl VirtualMachine {
             Opcode::MAKE_FUNCTION => {
                 let has_closure = (arg & 0x100) != 0;
                 let n_defaults = (arg & 0xFF) as usize;
+                let n_kwdefaults = ((arg >> 9) & 0xFF) as usize;
+                // Stack (bottom to top): [closure?, CODE, pos_defaults...,
+                // kwonly_defaults...] — kwonly defaults were pushed last, so
+                // pop them first. Appended after positional defaults in the
+                // final `defaults` vec (see CodeObject::kwonly_defaults_mask
+                // for how call-binding tells the two apart).
+                let mut kwdefaults = Vec::new();
+                for _ in 0..n_kwdefaults {
+                    kwdefaults.push(self.frames[fi].pop()?);
+                }
+                kwdefaults.reverse();
                 let mut defaults = Vec::new();
                 for _ in 0..n_defaults {
                     defaults.push(self.frames[fi].pop()?);
                 }
                 defaults.reverse();
+                defaults.extend(kwdefaults);
                 let code_obj = self.frames[fi].pop()?;
                 let code = match &*code_obj.borrow() {
                     PyObject::Code(c) => c.as_ref().clone(),

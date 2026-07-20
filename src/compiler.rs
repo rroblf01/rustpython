@@ -2014,18 +2014,39 @@ impl Compiler {
             }
         }
 
-        // Separate regular args, vararg, kwarg
+        // Separate regular (positional-or-keyword) args from vararg/kwarg/
+        // keyword-only ones. Keyword-only params (arg.is_kwonly — set by the
+        // parser for anything after `*args` or a bare `*,` separator) must
+        // NOT be folded into num_positional/defaults_count: they don't count
+        // toward arg_count, and their defaults aren't positional defaults
+        // (kwonly defaults can appear in any order — `def f(*, a=1, b)` — so
+        // each slot's presence is tracked individually in
+        // kwonly_defaults_mask rather than via a simple trailing count).
         let mut num_positional = 0;
         let mut defaults_count = 0;
+        let mut kwonly_count = 0;
+        let mut kwonly_defaults_mask = Vec::new();
+        let mut arg_count_finalized = false;
         for arg in args {
             if arg.is_vararg {
                 self.code.vararg_name = Some(arg.arg.clone());
-                self.code.arg_count = num_positional;
+                if !arg_count_finalized {
+                    self.code.arg_count = num_positional;
+                    arg_count_finalized = true;
+                }
                 continue;
             }
             if arg.is_kwarg {
                 self.code.kwarg_name = Some(arg.arg.clone());
-                self.code.arg_count = num_positional;
+                continue;
+            }
+            if arg.is_kwonly {
+                if !arg_count_finalized {
+                    self.code.arg_count = num_positional;
+                    arg_count_finalized = true;
+                }
+                kwonly_count += 1;
+                kwonly_defaults_mask.push(arg.default.is_some());
                 continue;
             }
             if arg.default.is_some() {
@@ -2033,15 +2054,17 @@ impl Compiler {
             }
             num_positional += 1;
         }
+        if !arg_count_finalized {
+            self.code.arg_count = num_positional;
+        }
         // Defaults are at the end of positional args, count them
         self.code.num_defaults = defaults_count;
+        self.code.kwonlyarg_count = kwonly_count;
+        self.code.kwonly_defaults_mask = kwonly_defaults_mask;
 
         // Add all args to varnames (including vararg/kwarg at the end)
         for arg in args {
             self.add_varname(&arg.arg);
-        }
-        if self.code.arg_count == 0 && self.code.vararg_name.is_none() && self.code.kwarg_name.is_none() {
-            self.code.arg_count = args.len();
         }
 
         // Add cell vars to varnames too (so they get fast_locals slots)
@@ -2134,19 +2157,35 @@ impl Compiler {
             self.emit(Opcode::BUILD_TUPLE, nfree as u32);
         }
 
+        let kwonly_defaults_count = args.iter().filter(|a| a.is_kwonly && a.default.is_some()).count();
         let mut make_func_arg = defaults_count as u32;
         if nfree > 0 {
             make_func_arg |= 1 << 8;
         }
+        // Bits 9-16: count of keyword-only defaults (see MAKE_FUNCTION —
+        // popped after the positional defaults, appended to
+        // PyObject::Function.defaults right after them).
+        make_func_arg |= (kwonly_defaults_count as u32) << 9;
         let code_const_idx = self.get_const_index(ConstValue::Code(Box::new(func_code))) as u32;
         self.emit(Opcode::LOAD_CONST, code_const_idx);
 
-        // Push defaults onto stack (in normal order, they'll be reversed in MAKE_FUNCTION)
+        // Push defaults onto stack (in normal order, they'll be reversed in
+        // MAKE_FUNCTION) — positional first, then keyword-only (only those
+        // that actually have one; kwonly defaults may be sparse, e.g.
+        // `def f(*, a=1, b)`, unlike positional defaults which are always a
+        // trailing run).
         if defaults_count > 0 {
             for arg in args
                 .iter()
-                .filter(|a| !a.is_vararg && !a.is_kwarg && a.default.is_some())
+                .filter(|a| !a.is_vararg && !a.is_kwarg && !a.is_kwonly && a.default.is_some())
             {
+                if let Some(default) = &arg.default {
+                    self.compile_expr(default)?;
+                }
+            }
+        }
+        if kwonly_defaults_count > 0 {
+            for arg in args.iter().filter(|a| a.is_kwonly && a.default.is_some()) {
                 if let Some(default) = &arg.default {
                     self.compile_expr(default)?;
                 }

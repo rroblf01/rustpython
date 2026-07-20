@@ -285,6 +285,14 @@ pub struct CodeObject {
     pub vararg_name: Option<String>,
     pub kwarg_name: Option<String>,
     pub num_defaults: usize,
+    /// Per keyword-only parameter (in order, length == kwonlyarg_count),
+    /// whether it has a default value. Keyword-only defaults can't use the
+    /// "trailing N have defaults" trick positional defaults use (kwonly
+    /// params may have defaults in any order, e.g. `def f(*, a=1, b, c=2)`),
+    /// so each slot is tracked individually. Values live in
+    /// PyObject::Function.defaults right after the `num_defaults` positional
+    /// ones, in the same left-to-right order as the `true` entries here.
+    pub kwonly_defaults_mask: Vec<bool>,
 }
 
 impl CodeObject {
@@ -306,6 +314,7 @@ impl CodeObject {
             vararg_name: None,
             kwarg_name: None,
             num_defaults: 0,
+            kwonly_defaults_mask: Vec::new(),
         }
     }
 
@@ -384,6 +393,11 @@ impl CodeObject {
 
         write_u32(&mut buf, self.num_defaults as u32);
 
+        write_u32(&mut buf, self.kwonly_defaults_mask.len() as u32);
+        for &b in &self.kwonly_defaults_mask {
+            write_u8(&mut buf, if b { 1 } else { 0 });
+        }
+
         buf
     }
 
@@ -447,6 +461,12 @@ impl CodeObject {
 
         let num_defaults = read_u32(data, &mut pos)? as usize;
 
+        let kwonly_mask_count = read_u32(data, &mut pos)? as usize;
+        let mut kwonly_defaults_mask = Vec::with_capacity(kwonly_mask_count);
+        for _ in 0..kwonly_mask_count {
+            kwonly_defaults_mask.push(read_u8(data, &mut pos)? != 0);
+        }
+
         Ok(CodeObject {
             name,
             arg_count,
@@ -464,6 +484,7 @@ impl CodeObject {
             vararg_name,
             kwarg_name,
             num_defaults,
+            kwonly_defaults_mask,
         })
     }
 }
