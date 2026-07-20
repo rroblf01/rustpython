@@ -1564,7 +1564,7 @@ impl VirtualMachine {
                     if matches!(&e, PyError::SystemExit(_)) {
                         return Err(e);
                     }
-                    if !self.handle_exception(&e) {
+                    if !self.handle_exception(&e, frame_floor) {
                         return Err(e);
                     }
                 }
@@ -2597,7 +2597,16 @@ impl VirtualMachine {
                             Ok(val) => {
                                 self.frames[fi].push(val);
                             }
-                            Err(e) if matches!(&e, PyError::StopIteration) => {
+                            // A generator's __next__/send driver signals
+                            // normal exhaustion via an ad hoc
+                            // `PyError::Exception("StopIteration", return_value)`
+                            // (see its get_attribute arm), not the plain
+                            // `PyError::StopIteration` variant — checking
+                            // only the latter here meant `for x in
+                            // some_generator(): ...` never terminated
+                            // cleanly and instead leaked as an uncaught
+                            // exception once the generator was exhausted.
+                            Err(e) if crate::object::is_stop_iteration_error(&e) => {
                                 self.frames[fi].ip = arg as usize;
                             }
                             Err(e) => return Err(e),
@@ -2615,6 +2624,32 @@ impl VirtualMachine {
                             if *step > 0 { *current >= *stop } else { *current <= *stop }
                         }
                         PyObject::EnumerateIter { items, pos, .. } => *pos >= items.len(),
+                        // ZipIterator/MapIterator/FilterIterator don't fit
+                        // this branch's exhausted-check-then-advance shape
+                        // (advancing several sub-iterators, e.g. zip's, in
+                        // lockstep isn't a simple index/length compare) —
+                        // `builtin_next` already implements all of that
+                        // correctly (it's what list()/sum()/etc. already go
+                        // through), so drop straight into it here instead
+                        // of duplicating that logic. Previously these three
+                        // fell to the `_` arm below and raised "for_iter on
+                        // non-iterable" — i.e. `for x in zip(a, b):` (or
+                        // map/filter) used directly as a for-loop target,
+                        // as opposed to being wrapped in `list(...)` first,
+                        // has never worked.
+                        PyObject::ZipIterator { .. } | PyObject::MapIterator { .. } | PyObject::FilterIterator { .. } => {
+                            drop(obj);
+                            match crate::object::builtin_next(&[iter_val.clone()]) {
+                                Ok(val) => {
+                                    self.frames[fi].push(val);
+                                }
+                                Err(e) if crate::object::is_stop_iteration_error(&e) => {
+                                    self.frames[fi].ip = arg as usize;
+                                }
+                                Err(e) => return Err(e),
+                            }
+                            return Ok(None);
+                        }
                         _ => {
                             // Not a built-in iterator — check for __next__ protocol
                             if obj.type_name() == "instance" {
@@ -2700,13 +2735,15 @@ impl VirtualMachine {
                                     buckets: std::collections::HashMap::new(),
                                     size: 0,
                                     instance_ref: None,
+                                    order: Vec::new(),
                                 };
                                 for (k, v) in dict.iter() {
                                     if k == crate::object::NATIVE_BACKING_KEY { continue; }
                                     let key = py_str(k);
                                     let h = key.hash().unwrap_or(0);
-                                    pd.buckets.entry(h).or_default().push((key, v.clone()));
+                                    pd.buckets.entry(h).or_default().push((key.clone(), v.clone()));
                                     pd.size += 1;
+                                    pd.order.push(key);
                                 }
                                 drop(obj_borrowed);
                                 pd.instance_ref = Some(obj.clone());
@@ -3077,7 +3114,34 @@ impl VirtualMachine {
                 let val = self.frames[fi].pop()?;
                 let index = self.frames[fi].pop()?;
                 let obj = self.frames[fi].pop()?;
-                py_setitem(&obj, &index, val)?;
+                // If `obj` is an Instance with a Python-defined __setitem__,
+                // call it via `self.call_function` (the real, already-live
+                // VM) rather than falling into the free `py_setitem`
+                // function's own Instance-dispatch, which calls it via
+                // `call_bound_method` — a separate, pre-existing, documented
+                // limitation that spins up a brand-new disposable
+                // `VirtualMachine::new()` for the call. That's merely
+                // wasteful for most code, but genuinely catastrophic for
+                // any dict-subclass with a custom `__setitem__` used during
+                // this VM's own construction (e.g. enum's `_EnumDict`,
+                // whose `EnumType.__new__` does `namespace[key] = ...`) —
+                // the disposable VM's construction re-runs the same
+                // stdlib bootstrap, hits the same assignment again, and
+                // recurses without end (confirmed via gdb backtrace).
+                // Falls back to the free function for everything else
+                // (native list/dict/tuple assignment, or an Instance with
+                // no override delegating to its native backing), which
+                // needs no VM access at all.
+                let setitem_fn = if let PyObject::Instance { typ, .. } = &*obj.borrow() {
+                    crate::object::lookup_dunder_via_mro(typ, "__setitem__")
+                } else {
+                    None
+                };
+                if let Some(f) = setitem_fn {
+                    self.call_function(f, vec![obj.clone(), index, val], vec![])?;
+                } else {
+                    py_setitem(&obj, &index, val)?;
+                }
             }
 
             Opcode::DELETE_SUBSCR => {
@@ -5131,7 +5195,7 @@ impl VirtualMachine {
                     self.frames.last_mut().unwrap().push(val);
                     Ok(None)
                 }
-                Err(e) if matches!(&e, PyError::StopIteration) => {
+                Err(e) if crate::object::is_stop_iteration_error(&e) => {
                     self.frames.last_mut().unwrap().ip = jump_offset as usize;
                     Ok(None)
                 }

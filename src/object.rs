@@ -3650,8 +3650,8 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 };
                 let result = f(&[args[0].clone()]);
                 // Convert raise StopIteration into PyError::StopIteration for next() protocol
-                if let Err(PyError::Exception(ref typ, _)) = result {
-                    if typ == "StopIteration" {
+                if let Err(ref e) = result {
+                    if is_stop_iteration_error(e) {
                         return Err(PyError::StopIteration);
                     }
                 }
@@ -3889,6 +3889,35 @@ pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         return Ok(py_bool(false));
     }
     match (&*obj, &*class) {
+        (PyObject::Type { .. }, PyObject::Type { name: class_name, .. }) => {
+            // isinstance(SomeClass, X): every class is an instance of its
+            // metaclass (a custom one if it was built via `metaclass=`,
+            // otherwise plain `type` — e.g. `isinstance(Foo, type)` is
+            // True for any ordinary class `Foo`). Walk the metaclass's own
+            // mro for `X`, exactly like the Instance case above walks the
+            // *class's* mro for ordinary instance checks. Deliberately
+            // avoids fetching the canonical `type`/`object` singletons via
+            // `with_vm_mut` for the no-custom-metaclass fallback below —
+            // `isinstance()` runs deep inside live call chains constantly,
+            // and grabbing a second aliasing `&mut VirtualMachine` there
+            // reliably segfaulted in testing; a plain name comparison
+            // (matching how BuiltinFunction-represented native bases are
+            // already recognized elsewhere in this function) avoids it.
+            if let Some(mt) = metatype_of(&args[0]) {
+                if mt.is(&args[1]) {
+                    return Ok(py_bool(true));
+                }
+                if let PyObject::Type { mro, .. } = &*mt.borrow() {
+                    for c in mro {
+                        if c.is(&args[1]) {
+                            return Ok(py_bool(true));
+                        }
+                    }
+                }
+                return Ok(py_bool(false));
+            }
+            Ok(py_bool(class_name == "type" || class_name == "object"))
+        }
         (PyObject::Instance { typ, .. }, PyObject::Type { mro, .. }) => {
             let typ_name = typ.borrow().type_name();
             for c in mro {
@@ -4221,7 +4250,7 @@ pub fn builtin_import(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                             }
                         }
                     }
-                    Err(e) => return Err(PyError::ImportError(format!("__import__ error: {}", e))),
+                    Err(e) => return Err(e),
                 }
             }
 
@@ -4242,7 +4271,7 @@ pub fn builtin_import(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     }
                     Ok(module)
                 }
-                Err(e) => Err(PyError::ImportError(format!("__import__ error: {}", e))),
+                Err(e) => Err(e),
             };
         }
 
@@ -4272,7 +4301,7 @@ pub fn builtin_import(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 }
                 Ok(module)
             }
-            Err(e) => Err(PyError::ImportError(format!("__import__ error: {}", e))),
+            Err(e) => Err(e),
         }
     });
 
@@ -4386,7 +4415,58 @@ pub fn builtin_zip(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
         return Err(PyError::type_error("zip() requires at least 1 argument"));
     }
-    let iters: Vec<PyObjectRef> = args.iter().map(|a| builtin_iter(&[a.clone()])).collect::<PyResult<Vec<_>>>()?;
+    // Keyword args (only `strict` is defined for zip()) arrive packed into a
+    // trailing dict, per the calling convention call_function uses for all
+    // BuiltinFunction calls. Without stripping it here, `zip(a, b,
+    // strict=True)` treated the kwargs dict itself as one more iterable to
+    // zip — iterating a dict yields its keys, so it silently zipped in the
+    // literal string "strict" as a bogus extra column instead of enforcing
+    // equal lengths.
+    let (iterables, strict) = {
+        let last = args.last().unwrap();
+        let last_borrowed = last.borrow();
+        if let PyObject::Dict(kwargs) = &*last_borrowed {
+            let strict = kwargs.get(&py_str("strict")).ok().flatten().map(|v| v.truthy()).unwrap_or(false);
+            (&args[..args.len() - 1], strict)
+        } else {
+            (args, false)
+        }
+    };
+    if iterables.is_empty() {
+        return Ok(PyObjectRef::new(PyObject::ZipIterator { iterators: vec![] }));
+    }
+    let iters: Vec<PyObjectRef> = iterables.iter().map(|a| builtin_iter(&[a.clone()])).collect::<PyResult<Vec<_>>>()?;
+    if strict {
+        // Eagerly materialize and check equal lengths — the lazy
+        // ZipIterator has no way to distinguish "ran out because lengths
+        // differ" from "ran out because we're done" once iteration starts,
+        // so `strict` must be enforced up front.
+        let mut rows: Vec<PyObjectRef> = Vec::new();
+        loop {
+            let mut row = Vec::with_capacity(iters.len());
+            let mut stopped_indices = Vec::new();
+            for (idx, it) in iters.iter().enumerate() {
+                match builtin_next(&[it.clone()]) {
+                    Ok(v) => row.push(v),
+                    Err(e) if is_stop_iteration_error(&e) => stopped_indices.push(idx),
+                    Err(e) => return Err(e),
+                }
+            }
+            if !stopped_indices.is_empty() {
+                if stopped_indices.len() != iters.len() {
+                    let shorter_at = stopped_indices[0];
+                    let longer_at = (0..iters.len()).find(|i| !stopped_indices.contains(i)).unwrap();
+                    return Err(PyError::value_error(format!(
+                        "zip() argument {} is shorter than argument {}",
+                        shorter_at + 1, longer_at + 1,
+                    )));
+                }
+                break;
+            }
+            rows.push(py_tuple(row));
+        }
+        return Ok(PyObjectRef::new(PyObject::ListIter { list: rows, index: 0 }));
+    }
     Ok(PyObjectRef::new(PyObject::ZipIterator { iterators: iters }))
 }
 
@@ -6343,6 +6423,55 @@ impl ObjectAccess for PyObject {
                     ))),
                 }
             }
+            PyObject::BoundMethod { func, self_obj } => {
+                match name {
+                    "__func__" => Ok(func.clone()),
+                    "__self__" => Ok(self_obj.clone()),
+                    // A real Python bound method proxies any attribute not
+                    // found on the method object itself through to the
+                    // underlying function (`__func__`) — this is how e.g.
+                    // `SomeClass.some_classmethod.cache_clear()` reaches the
+                    // functools.cache wrapper underneath the classmethod
+                    // descriptor. Without this fallback, BoundMethod had no
+                    // get_attribute arm at all and every such access raised
+                    // "'method' object has no attribute ...".
+                    //
+                    // `func.get_attribute` alone (the ObjectAccess impl) does
+                    // raw, unbound retrieval — it doesn't replicate LOAD_ATTR's
+                    // self-binding for the result. Redo that binding here so
+                    // e.g. `.cache_clear` comes back as a real bound call
+                    // (self = func, the underlying cache-wrapper instance),
+                    // not a plain unbound Function that would immediately hit
+                    // "local variable 'self' referenced before assignment".
+                    _ => {
+                        let raw = func.borrow().get_attribute(name).map_err(|_| PyError::attribute_error(format!(
+                            "'method' object has no attribute '{}'", name
+                        )))?;
+                        let is_instance_self = matches!(&*func.borrow(), PyObject::Instance { .. });
+                        let raw_kind = {
+                            let b = raw.borrow();
+                            match &*b {
+                                PyObject::Function { .. } if is_instance_self => 1,
+                                PyObject::BuiltinFunction { .. } => 2,
+                                PyObject::BuiltinMethod { .. } => 3,
+                                _ => 0,
+                            }
+                        };
+                        match raw_kind {
+                            1 => Ok(PyObjectRef::imm(PyObject::BoundMethod { func: raw, self_obj: func.clone() })),
+                            2 => {
+                                let (n, f) = if let PyObject::BuiltinFunction { name: n, func: f } = &*raw.borrow() { (n.clone(), *f) } else { unreachable!() };
+                                Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: n, func: f, self_obj: func.clone() }))
+                            }
+                            3 => {
+                                let (n, f) = if let PyObject::BuiltinMethod { name: n, func: f, .. } = &*raw.borrow() { (n.clone(), *f) } else { unreachable!() };
+                                Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: n, func: f, self_obj: func.clone() }))
+                            }
+                            _ => Ok(raw),
+                        }
+                    }
+                }
+            }
             PyObject::Generator { frame: _gen_frame } => {
                 match name {
                     "__next__" | "send" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
@@ -7332,9 +7461,21 @@ impl ObjectAccess for PyObject {
                 }
             }
             PyObject::Super { cls, obj } => {
-                // super(cls, obj).attr: walk MRO of obj's type, starting after cls
+                // super(cls, obj).attr: walk MRO of obj's type, starting after cls.
+                // When `obj` is itself a class/type — the "classmethod-style"
+                // form real Python uses for metaclass methods, e.g. inside a
+                // metaclass's `def __new__(metacls, name, bases, ns):`, where
+                // bare `super()` binds obj=metacls — the relevant mro is
+                // `obj`'s own (e.g. a metaclass's own mro), not some further
+                // "type of obj" (which would just be `type`/whatever built
+                // it, an unrelated chain). Without this, `super().__new__(...)`
+                // inside a metaclass's `__new__` couldn't resolve `__new__`
+                // at all (AttributeError), since `obj` isn't a plain Instance
+                // and has no meaningful `__class__` for this purpose either.
                 let obj_type = if let PyObject::Instance { typ, .. } = &*obj.borrow() {
                     Some(typ.clone())
+                } else if matches!(&*obj.borrow(), PyObject::Type { .. }) {
+                    Some(obj.clone())
                 } else {
                     obj.borrow().get_attribute("__class__").ok()
                 };
@@ -7355,6 +7496,32 @@ impl ObjectAccess for PyObject {
                                     if let Some(val) = dict.get_str(&name) {
                                         let val_borrowed = val.borrow();
                                         match &*val_borrowed {
+                                            // `__new__` is *always* implicitly
+                                            // a staticmethod in real Python —
+                                            // never auto-bound — regardless of
+                                            // whether it's explicitly wrapped
+                                            // in `staticmethod(...)`. Only the
+                                            // explicit-wrapper case was
+                                            // unwrapped below; a plain `def
+                                            // __new__(mcs, ...):` (which is
+                                            // how virtually every real
+                                            // metaclass, including Django's,
+                                            // writes it — nobody bothers with
+                                            // `@staticmethod` there) still hit
+                                            // the auto-bind arm just below,
+                                            // producing a BoundMethod that
+                                            // prepended `obj` as an EXTRA,
+                                            // duplicate leading argument on
+                                            // top of the one already passed
+                                            // explicitly (`super().__new__(mcs,
+                                            // name, bases, attrs)` always
+                                            // passes `mcs` itself) — shifting
+                                            // every subsequent positional arg
+                                            // by one.
+                                            PyObject::Function { .. } | PyObject::BuiltinFunction { .. } if name == "__new__" => {
+                                                found = Some(val.clone());
+                                                break;
+                                            }
                                             PyObject::Function { .. } | PyObject::BuiltinFunction { .. } => {
                                                 found = Some(PyObjectRef::new(PyObject::BoundMethod {
                                                     func: val.clone(),
@@ -7364,6 +7531,16 @@ impl ObjectAccess for PyObject {
                                             }
                                             PyObject::Property { getter: Some(g), .. } => {
                                                 found = Some(builtin_call(g, &[obj.clone()]).unwrap_or_else(|_| val.clone()));
+                                                break;
+                                            }
+                                            // Staticmethods (explicit, or
+                                            // implicit like `__new__`) are
+                                            // never bound to `obj` — unwrap
+                                            // directly, matching how plain
+                                            // class-attribute access already
+                                            // treats StaticMethod.
+                                            PyObject::StaticMethod { func } => {
+                                                found = Some(func.clone());
                                                 break;
                                             }
                                             _ => {
@@ -8712,8 +8889,7 @@ pub fn deepcopy_one(obj: &PyObjectRef, memo: &PyObjectRef) -> Result<PyObjectRef
     Ok(result)
 }
 
-use std::sync::atomic::{AtomicI64, Ordering};
-pub static ENUM_AUTO_COUNTER: AtomicI64 = AtomicI64::new(1);
+use std::sync::atomic::Ordering;
 
 // ---- logging module ----
 // basicConfig(level) stores level; getLogger(name) returns dict-like with .info/.debug/.warning/.error methods.
@@ -9851,7 +10027,18 @@ pub fn builtin_dict_setitem(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let value = if args.len() >= 4 { args[3].clone() } else if args.len() >= 3 { args[2].clone() } else {
         return Err(PyError::type_error("dict.__setitem__() requires at least 2 arguments"));
     };
-    // Directly insert into the Instance's dict, bypassing py_setitem (which would recurse)
+    // A real dict subclass instance (e.g. `class _EnumDict(dict): ...`,
+    // used to give enum.EnumType.__prepare__'s namespace object a place to
+    // track member-definition order) has its actual dict *contents* in its
+    // native backing, not its own attribute storage — `dict.__setitem__`
+    // must write there so a later `classdict[key]` subscript read (which
+    // goes through the native backing via py_getitem) actually sees it.
+    // Only fall back to treating the instance's own attribute dict as "the
+    // dict" when there's no native backing at all.
+    if let Some(native) = native_backing_of(instance) {
+        py_setitem(&native, &py_str(&key), value)?;
+        return Ok(py_none());
+    }
     let mut obj = instance.borrow_mut();
     if let PyObject::Instance { dict, .. } = &mut *obj {
         dict.insert(key, value);
@@ -9882,6 +10069,11 @@ pub fn builtin_dict_getitem(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         .and_then(|missing| crate::object::call_function(&missing, vec![instance.clone(), key_ref.clone()]).ok());
     if let Some(val) = missing_result {
         return Ok(val);
+    }
+    // See builtin_dict_setitem's matching comment: a real dict subclass's
+    // actual contents live in its native backing, not its attribute dict.
+    if let Some(native) = native_backing_of(instance) {
+        return py_getitem(&native, key_ref);
     }
     // Directly read from the Instance's dict, bypassing py_getitem (which would recurse)
     let obj = instance.borrow();
