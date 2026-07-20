@@ -3127,6 +3127,15 @@ impl VirtualMachine {
                 })?.clone();
                 let val = self.frames[fi].pop()?;
                 let obj = self.frames[fi].pop()?;
+                if std::env::var("RPY_DEBUG_ATTR").is_ok() {
+                    let kind = match &*obj.borrow() {
+                        PyObject::Type { name: n, .. } => format!("Type({})", n),
+                        PyObject::Module { name: n, .. } => format!("Module({})", n),
+                        PyObject::Instance { .. } => "Instance".to_string(),
+                        other => format!("{:?}", std::mem::discriminant(other)),
+                    };
+                    eprintln!("STORE_ATTR: name={} obj_kind={}", name, kind);
+                }
 
                 // Check for __setattr__ on Instance types first
                 {

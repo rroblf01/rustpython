@@ -3446,7 +3446,10 @@ pub fn call_bound_method(func: PyObjectRef, self_obj: PyObjectRef, args: Vec<PyO
             all_args.extend(args);
             func(&all_args)
         }
-        PyObject::Function { code, globals: g, defaults, .. } => {
+        PyObject::Function { code, globals: g, defaults, name: fname, .. } => {
+            if std::env::var("RPY_DEBUG_IMPORT").is_ok() {
+                eprintln!("CALL_BOUND_METHOD (disposable VM): fname={} code_name={} filename={}", fname, code.name, code.filename);
+            }
             let mut frame = super::vm::Frame::new(std::rc::Rc::new(code.clone()), g.clone(), std::rc::Rc::new(create_builtins()), None);
             let code = code.clone();
             let defaults = defaults.clone();
@@ -4499,7 +4502,10 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
             } else { unreachable!() }
         }
         2 => {
-            if let PyObject::Function { code, globals: g, defaults, .. } = &*f.borrow() {
+            if let PyObject::Function { code, globals: g, defaults, name: fname, .. } = &*f.borrow() {
+                if std::env::var("RPY_DEBUG_IMPORT").is_ok() {
+                    eprintln!("BUILTIN_CALL (disposable VM): fname={} code_name={} filename={}", fname, code.name, code.filename);
+                }
                 let code = code.clone();
                 let g = g.clone();
                 let defaults = defaults.clone();
@@ -6444,9 +6450,20 @@ impl ObjectAccess for PyObject {
                     // not a plain unbound Function that would immediately hit
                     // "local variable 'self' referenced before assignment".
                     _ => {
-                        let raw = func.borrow().get_attribute(name).map_err(|_| PyError::attribute_error(format!(
+                        let raw = func.borrow().get_attribute(name).map_err(|_| {
+                            if std::env::var("RPY_DEBUG_ATTR").is_ok() {
+                                let (fn_name, fn_file) = if let PyObject::Function { code, name: n, .. } = &*func.borrow() {
+                                    (n.clone(), code.filename.clone())
+                                } else { ("?".to_string(), "?".to_string()) };
+                                let self_kind = match &*self_obj.borrow() {
+                                    PyObject::Type { name, .. } => format!("Type({})", name),
+                                    other => format!("{}", other.type_name()),
+                                };
+                                eprintln!("BOUNDMETHOD_ATTR_FAIL: name={} func_kind={:?} fn_name={} fn_file={} self_kind={}", name, func.borrow().type_name(), fn_name, fn_file, self_kind);
+                            }
+                            PyError::attribute_error(format!(
                             "'method' object has no attribute '{}'", name
-                        )))?;
+                        ))})?;
                         let is_instance_self = matches!(&*func.borrow(), PyObject::Instance { .. });
                         let raw_kind = {
                             let b = raw.borrow();
