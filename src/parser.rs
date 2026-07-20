@@ -367,6 +367,17 @@ impl Parser {
         match &mut stmt {
             Stmt::FunctionDef { decorator_list: d, .. }
             | Stmt::ClassDef { decorator_list: d, .. } => {
+                // `self.parse_stmt()` above, on seeing another leading `@`,
+                // recurses back into `parse_decorated` for the rest of the
+                // stack — so `d` may already hold decorators collected by
+                // that inner call (written closer to the `def`/`class`).
+                // This level's `decorator_list` was written *before* those
+                // (further from the def), so it must come first to keep
+                // the final list in top-to-bottom source order — replacing
+                // `d` outright (the previous behavior) silently discarded
+                // every decorator but this outermost one whenever two or
+                // more were stacked.
+                decorator_list.extend(std::mem::take(d));
                 *d = decorator_list;
             }
             _ => return Err("Decorator on non-function/class".to_string()),

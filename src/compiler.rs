@@ -1003,14 +1003,25 @@ impl Compiler {
                 returns: _,
                 is_async,
             } => {
-                for decorator in decorator_list {
-                    self.compile_expr(decorator)?;
-                }
-
                 self.compile_function(name.clone(), args, body, *is_async)?;
 
-                for decorator in decorator_list {
-                    self.compile_expr(&decorator)?;
+                // Decorators apply bottom-up (closest to `def` first): `@a
+                // @b def f` means `f = a(b(f))`, so `decorator_list` (given
+                // in source/top-to-bottom order, `[a, b]`) must be walked in
+                // reverse. This used to iterate forward — applying `a`
+                // before `b` — which silently reordered any stacked
+                // decorators where order is observable (e.g. `@classmethod
+                // @functools.cache def f(cls): ...`, a common real-world
+                // pattern, ended up building `cache(classmethod(f))`
+                // instead of `classmethod(cache(f))`, wrapping a
+                // `ClassMethod` object inside the cache instead of the
+                // other way around). It also used to redundantly
+                // pre-evaluate every decorator expression in a separate,
+                // unrelated first pass whose pushed values were never
+                // consumed — pure leftover stack garbage on every
+                // decorated def, removed here along with the reordering.
+                for decorator in decorator_list.iter().rev() {
+                    self.compile_expr(decorator)?;
                     self.emit(Opcode::SWAP, 1);
                     self.emit(Opcode::CALL, 1);
                     // Result stays on stack
@@ -1074,7 +1085,9 @@ impl Compiler {
                     let doc_attr_idx = self.get_name_index("__doc__") as u32;
                     self.emit(Opcode::STORE_ATTR, doc_attr_idx);
                 }
-                for decorator in decorator_list {
+                // Same bottom-up order as function decorators above (`@a @b
+                // class C` means `C = a(b(C))`).
+                for decorator in decorator_list.iter().rev() {
                     self.compile_expr(&decorator)?;
                     self.emit(Opcode::SWAP, 1);
                     self.emit(Opcode::CALL, 1);
@@ -1854,8 +1867,15 @@ impl Compiler {
                             // Fall through to POP_TOP subject, body, JUMP end_label
                         }
                         Pattern::MatchClass { cls, patterns, kwd_attrs, kwd_patterns } => {
-                            // MatchClass: check isinstance(subject, cls) then check attributes
-                            // Check isinstance
+                            // MatchClass: check isinstance(subject, cls) then check attributes.
+                            // isinstance(subject, cls) consumes its `subject` argument off the
+                            // stack (CALL pops callable + args) — without this DUP_TOP first,
+                            // the subject that the rest of this case (sub-pattern DUP_TOPs, the
+                            // final "pop subject" after the case body) assumes is still there
+                            // is simply gone, corrupting the stack (underflow) for any `case
+                            // ClassName():` pattern. The Or-pattern MatchClass arm above
+                            // already does this DUP_TOP; this arm had been missing it.
+                            self.emit(Opcode::DUP_TOP, 0);
                             let isinstance_idx = self.get_name_index("isinstance") as u32;
                             self.emit(Opcode::LOAD_GLOBAL, isinstance_idx);
                             self.emit(Opcode::SWAP, 1); // subject on top
