@@ -116,6 +116,44 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
         Ok(py_str(&b64_encode(&bytes)))
     });
 
+    // encodebytes/decodebytes: the legacy MIME-oriented form base64.b64encode
+    // is built on top of in real CPython — same alphabet, but wraps output
+    // every 76 characters (57 input bytes) with a trailing newline, and
+    // operates on bytes in/out rather than str. Needed directly by
+    // `email/encoders.py` (`from base64 import encodebytes`), a completely
+    // ordinary use of the real stdlib `base64` module, not anything
+    // email-specific about the encoding itself.
+    b64_func!("encodebytes", |args| {
+        if args.len() != 1 { return Err(PyError::type_error("encodebytes() takes exactly one argument")); }
+        let data = args[0].borrow();
+        let bytes = match &*data {
+            PyObject::Bytes(b) => b.clone(),
+            PyObject::ByteArray(b) => b.clone(),
+            _ => return Err(PyError::type_error("encodebytes() argument must be bytes")),
+        };
+        let mut out = String::new();
+        for chunk in bytes.chunks(57) {
+            out.push_str(&b64_encode(chunk));
+            out.push('\n');
+        }
+        Ok(PyObjectRef::imm(PyObject::Bytes(out.into_bytes())))
+    });
+
+    b64_func!("decodebytes", |args| {
+        if args.len() != 1 { return Err(PyError::type_error("decodebytes() takes exactly one argument")); }
+        let data = args[0].borrow();
+        let bytes = match &*data {
+            PyObject::Bytes(b) => b.clone(),
+            PyObject::ByteArray(b) => b.clone(),
+            _ => return Err(PyError::type_error("decodebytes() argument must be bytes")),
+        };
+        let s: String = bytes.iter().filter(|b| !b.is_ascii_whitespace()).map(|b| *b as char).collect();
+        match b64_decode(&s) {
+            Ok(bytes) => Ok(PyObjectRef::imm(PyObject::Bytes(bytes))),
+            Err(e) => Err(PyError::value_error(e)),
+        }
+    });
+
     b64_func!("b64decode", |args| {
         if args.len() != 1 { return Err(PyError::type_error("b64decode() takes exactly one argument")); }
         let data = args[0].borrow();
