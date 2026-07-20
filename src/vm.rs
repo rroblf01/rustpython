@@ -3162,6 +3162,27 @@ impl VirtualMachine {
                     } else { None }
                 };
                 if let Some(descriptor) = descriptor_clone {
+                    // Property is special-cased directly (matching how LOAD_ATTR's
+                    // getter path already calls `self.call_function` on the real
+                    // getter function directly, not through a wrapper) instead of
+                    // going through the generic `get_attribute("__set__")` below.
+                    // That generic path returns a `BuiltinMethod` whose closure
+                    // body calls the free `call_bound_method` function internally
+                    // (a plain `fn(&[PyObjectRef])` has no `&mut VirtualMachine`
+                    // to call through) — which spins up a disposable VM with an
+                    // empty module registry. A property setter that does a lazy
+                    // `import` internally (a real, common Django pattern used
+                    // specifically to sidestep circular imports) would then
+                    // re-import everything from scratch in that disposable VM
+                    // instead of seeing what's already loaded.
+                    let property_setter = {
+                        let d = descriptor.borrow();
+                        if let PyObject::Property { setter: Some(s), .. } = &*d { Some(s.clone()) } else { None }
+                    };
+                    if let Some(setter_fn) = property_setter {
+                        self.call_function(setter_fn, vec![obj.clone(), val.clone()], vec![])?;
+                        return Ok(None);
+                    }
                     let setter_method = {
                         descriptor.borrow().get_attribute("__set__").ok()
                     };
@@ -4639,16 +4660,8 @@ impl VirtualMachine {
             }
         }
 
-        if let PyObject::Type { dict, mro, .. } = &*callable.borrow() {
+        let type_construct_info = if let PyObject::Type { dict, mro, .. } = &*callable.borrow() {
             let native_kind = dict.get_str(crate::object::NATIVE_BASE_MARKER).map(|v| v.str());
-            let mut instance_dict = HashMap::new();
-            if let Some(kind) = &native_kind {
-                instance_dict.insert(crate::object::NATIVE_BACKING_KEY.to_string(), crate::object::make_native_backing(kind));
-            }
-            let instance = PyObjectRef::new(PyObject::Instance {
-                typ: callable.clone(),
-                dict: instance_dict,
-            });
             let init_func = dict.get("__init__").cloned().or_else(|| {
                 for base in mro.iter().skip(1) {
                     if let PyObject::Type { name: base_name, dict: base_dict, .. } = &*base.borrow() {
@@ -4670,6 +4683,27 @@ impl VirtualMachine {
                     }
                 }
                 None
+            });
+            Some((native_kind, init_func))
+        } else {
+            None
+        };
+        // The `callable.borrow()` above must be dropped (it already is, by
+        // this point — the `if let` scrutinee's temporary ends with the
+        // `if let` expression) before calling `__init__` below: `__init__`'s
+        // body commonly references its own class by name (e.g. a
+        // class-level counter like `Field.creation_counter += 1`, a
+        // widespread real-world pattern, not specific to any one
+        // library) — a STORE_ATTR on `callable` while this function still
+        // held it borrowed here was a genuine double-borrow panic.
+        if let Some((native_kind, init_func)) = type_construct_info {
+            let mut instance_dict = HashMap::new();
+            if let Some(kind) = &native_kind {
+                instance_dict.insert(crate::object::NATIVE_BACKING_KEY.to_string(), crate::object::make_native_backing(kind));
+            }
+            let instance = PyObjectRef::new(PyObject::Instance {
+                typ: callable.clone(),
+                dict: instance_dict,
             });
             if init_func.is_none() {
                 // No Python- or Rust-defined __init__ anywhere in the mro:
@@ -5340,6 +5374,8 @@ fn is_exception_subclass(child_type: &str, parent_type: &str) -> bool {
         "DecimalException" => Some("ArithmeticError"),
         "InvalidOperation" | "DivisionByZero" | "Inexact" | "Rounded" |
         "Clamped" | "Overflow" | "Underflow" | "FloatOperation" => Some("DecimalException"),
+        "PickleError" => Some("Exception"),
+        "PicklingError" | "UnpicklingError" => Some("PickleError"),
         // ExceptionGroup inherits from Exception
         "ExceptionGroup" => Some("Exception"),
         // Sub-hierarchy children — must come before leaves to not be shadowed

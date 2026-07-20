@@ -8425,6 +8425,9 @@ make_exception_func!(builtin_make_exception_stopiteration, "StopIteration");
 make_exception_func!(builtin_make_exception_assertionerror, "AssertionError");
 make_exception_func!(builtin_make_exception_oserror, "OSError");
 make_exception_func!(builtin_make_exception_importerror, "ImportError");
+make_exception_func!(builtin_make_exception_pickleerror, "PickleError");
+make_exception_func!(builtin_make_exception_picklingerror, "PicklingError");
+make_exception_func!(builtin_make_exception_unpicklingerror, "UnpicklingError");
 // Additional exception types for full CPython hierarchy
 make_exception_func!(builtin_make_exception_lookuperror, "LookupError");
 make_exception_func!(builtin_make_exception_arithmeticerror, "ArithmeticError");

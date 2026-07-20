@@ -2067,6 +2067,10 @@ pub fn create_pickle_dict() -> HashMap<String, PyObjectRef> {
     d.insert("HIGHEST_PROTOCOL".to_string(), py_int(5));
     d.insert("DEFAULT_PROTOCOL".to_string(), py_int(4));
 
+    d.insert("PickleError".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "PickleError".to_string(), func: crate::object::builtin_make_exception_pickleerror }));
+    d.insert("PicklingError".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "PicklingError".to_string(), func: crate::object::builtin_make_exception_picklingerror }));
+    d.insert("UnpicklingError".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "UnpicklingError".to_string(), func: crate::object::builtin_make_exception_unpicklingerror }));
+
     pickle_func!("dumps", |args| {
         if args.is_empty() {
             return Err(PyError::type_error("dumps() missing required argument"));
