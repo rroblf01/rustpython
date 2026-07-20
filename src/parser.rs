@@ -664,9 +664,21 @@ impl Parser {
     }
 
     fn parse_match_cases(&mut self) -> Result<Vec<MatchCase>, String> {
+        // Grammar: 'match' subject ':' NEWLINE INDENT case_block+ DEDENT —
+        // there are TWO nested indentation levels here: this outer one
+        // (wrapping the whole set of `case` clauses) and, separately, each
+        // case's own body (opened/closed by parse_block() below, which
+        // already consumes exactly its own one closing Dedent). Previously
+        // this loop ate Indent/Dedent tokens unconditionally while looking
+        // for the next `case`, which — once the last case's body ended —
+        // also swallowed the Dedent(s) belonging to whatever *encloses* the
+        // match statement (the function/module body), silently truncating
+        // everything after it from the parse tree.
         let mut cases = Vec::new();
+        self.eat(&Token::Newline);
+        let had_indent = self.eat(&Token::Indent);
         loop {
-            while self.eat(&Token::Newline) || self.eat(&Token::Indent) || self.eat(&Token::Dedent) {}
+            while self.eat(&Token::Newline) {}
             if !matches!(&self.current, Token::Name(n) if n == "case") {
                 break;
             }
@@ -680,6 +692,11 @@ impl Parser {
             self.expect(&Token::Colon)?;
             let body = self.parse_block()?;
             cases.push(MatchCase { pattern, guard, body });
+        }
+        if had_indent {
+            // Exactly one Dedent, matching the Indent consumed above — any
+            // further dedents belong to the enclosing scope.
+            self.eat(&Token::Dedent);
         }
         Ok(cases)
     }
@@ -1539,7 +1556,13 @@ impl Parser {
             return Ok(Expr::Tuple(elts));
         }
         if self.eat(&Token::Colon) {
-            let upper = if !self.at(&Token::RightBracket) && !self.at(&Token::Comma) {
+            // The upper bound is empty not just when the slice ends
+            // (`]`) or another subscript element follows (`,`), but also
+            // when the step colon immediately follows (`lower::step`,
+            // e.g. `a[1::2]`) — without checking for Colon here too, this
+            // tried to parse an expression starting at that second `:`
+            // and failed with "Expected expression, got Colon".
+            let upper = if !self.at(&Token::RightBracket) && !self.at(&Token::Comma) && !self.at(&Token::Colon) {
                 Some(Box::new(self.parse_expr()?))
             } else {
                 None
@@ -1851,6 +1874,12 @@ impl Parser {
                         keys.push(None);
                         values.push(expr);
                         is_dict = true;
+                    } else if self.eat(&Token::Star) {
+                        // Set unpacking: {*a, *b} — a starred element can
+                        // only appear in a set display, never a dict (no
+                        // `k: v` check needed, unlike the plain-key branch).
+                        let expr = self.parse_expr()?;
+                        values.push(Expr::Starred(Box::new(expr)));
                     } else {
                         let key = self.parse_expr()?;
                         if self.eat(&Token::Colon) {
@@ -1923,6 +1952,9 @@ impl Parser {
                             keys.push(None);
                             values.push(expr);
                             is_dict = true;
+                        } else if self.eat(&Token::Star) {
+                            let expr = self.parse_expr()?;
+                            values.push(Expr::Starred(Box::new(expr)));
                         } else {
                             let k = self.parse_expr()?;
                             if self.eat(&Token::Colon) {

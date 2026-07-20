@@ -26,6 +26,11 @@ pub struct Compiler {
     // past intervening class-body scopes to find the nearest real enclosing
     // function scope for closure-variable resolution.
     varnames_stack: Vec<Vec<String>>,
+    // Parallel to scope_stack's ClassBody entries: the name of the class
+    // currently being defined. Used to resolve bare `super()` (PEP 3135) —
+    // see the Expr::Call bare-super compilation for why this must be the
+    // class the method is textually defined in, not type(self).
+    class_name_stack: Vec<String>,
     current_line: usize,
 }
 
@@ -61,6 +66,7 @@ impl Compiler {
             nonlocal_names: HashSet::new(),
             scope_stack: Vec::new(),
             varnames_stack: Vec::new(),
+            class_name_stack: Vec::new(),
             current_line: 1,
         }
     }
@@ -1779,6 +1785,60 @@ impl Compiler {
                                         self.emit_jump(Opcode::JUMP, or_matched);
                                         self.fix_label(try_next);
                                     }
+                                    Pattern::MatchClass { cls, patterns, kwd_attrs, kwd_patterns } => {
+                                        // Same isinstance-then-subpattern check as the
+                                        // plain (non-Or) MatchClass arm below, but a
+                                        // failure falls through to the next alternative
+                                        // (try_next) instead of the next case.
+                                        self.emit(Opcode::DUP_TOP, 0);
+                                        let try_next = self.new_label();
+                                        let isinstance_idx = self.get_name_index("isinstance") as u32;
+                                        self.emit(Opcode::LOAD_GLOBAL, isinstance_idx);
+                                        self.emit(Opcode::SWAP, 1);
+                                        self.compile_expr(cls)?;
+                                        self.emit(Opcode::CALL, 2);
+                                        self.emit_jump(Opcode::POP_JUMP_IF_FALSE, try_next);
+                                        for sub in patterns {
+                                            self.emit(Opcode::DUP_TOP, 0);
+                                            match sub {
+                                                Pattern::MatchValue(val) => {
+                                                    self.compile_expr(val)?;
+                                                    self.emit(Opcode::COMPARE_OP, 2);
+                                                    self.emit_jump(Opcode::POP_JUMP_IF_FALSE, try_next);
+                                                }
+                                                Pattern::MatchAs { name: Some(n), .. } => {
+                                                    let idx = self.add_varname(n) as u32;
+                                                    self.emit(Opcode::STORE_FAST, idx);
+                                                }
+                                                Pattern::MatchAs { name: None, .. } => {
+                                                    self.emit(Opcode::POP_TOP, 0);
+                                                }
+                                                _ => { self.emit(Opcode::POP_TOP, 0); }
+                                            }
+                                        }
+                                        for (kwd_attr, kwd_pat) in kwd_attrs.iter().zip(kwd_patterns.iter()) {
+                                            self.emit(Opcode::DUP_TOP, 0);
+                                            let attr_idx = self.get_name_index(kwd_attr) as u32;
+                                            self.emit(Opcode::LOAD_ATTR, attr_idx);
+                                            match kwd_pat {
+                                                Pattern::MatchValue(val) => {
+                                                    self.compile_expr(val)?;
+                                                    self.emit(Opcode::COMPARE_OP, 2);
+                                                    self.emit_jump(Opcode::POP_JUMP_IF_FALSE, try_next);
+                                                }
+                                                Pattern::MatchAs { name: Some(n), .. } => {
+                                                    let idx = self.add_varname(n) as u32;
+                                                    self.emit(Opcode::STORE_FAST, idx);
+                                                }
+                                                Pattern::MatchAs { name: None, .. } => {
+                                                    self.emit(Opcode::POP_TOP, 0);
+                                                }
+                                                _ => { self.emit(Opcode::POP_TOP, 0); }
+                                            }
+                                        }
+                                        self.emit_jump(Opcode::JUMP, or_matched);
+                                        self.fix_label(try_next);
+                                    }
                                     _ => return Err("MatchOr subpattern type not supported".to_string()),
                                 }
                             }
@@ -2221,6 +2281,7 @@ impl Compiler {
         };
 
         self.enter_scope(ScopeType::ClassBody);
+        self.class_name_stack.push(name.clone());
 
         let old_code = std::mem::replace(&mut self.code, CodeObject::new(name.clone()));
         self.varnames_stack.push(Self::enclosing_snapshot(&old_code));
@@ -2301,6 +2362,7 @@ impl Compiler {
         self.emit(Opcode::MAKE_FUNCTION, make_func_arg);
 
         self.leave_scope();
+        self.class_name_stack.pop();
         Ok(())
     }
 
@@ -2447,20 +2509,42 @@ impl Compiler {
                     false
                 };
                 if is_bare_super {
-                    // PEP 3135: inject type(self) and self for super()
+                    // PEP 3135: super() without args resolves against
+                    // __class__ (the class this method is textually defined
+                    // in) and self — NOT type(self) (the instance's runtime
+                    // type), which this used to inject instead. That broke
+                    // any 3+-level hierarchy where a method is called on a
+                    // subclass instance that doesn't override it: e.g.
+                    // Widget -> Input -> HiddenInput, HiddenInput() calling
+                    // inherited Input.__init__'s `super().__init__()`. With
+                    // cls=type(self)=HiddenInput, "the class after
+                    // HiddenInput in HiddenInput's own MRO" is Input —
+                    // Input.__init__ again — infinite self-recursion (stack
+                    // overflow) instead of reaching Widget.__init__. Since
+                    // the class object doesn't exist yet at compile time
+                    // (methods compile before the class is built), look it
+                    // up by name instead — correct as long as the class is
+                    // still bound to its defining name by the time any
+                    // instance method actually runs, true for essentially
+                    // all real code (`class Foo: ...` always binds "Foo").
                     if self.scope == ScopeType::Function && !self.code.varnames.is_empty() {
-                        // Load 'super' first (callable goes at bottom of stack)
-                        self.compile_expr(func)?;
-                        // Load type builtin
-                        let type_name_idx = self.get_name_index("type") as u32;
-                        self.emit(Opcode::LOAD_GLOBAL, type_name_idx);
-                        // Load self (first arg)
-                        self.emit(Opcode::LOAD_FAST, 0);
-                        // Call type(self)
-                        self.emit(Opcode::CALL, 1);
-                        // Load self (first arg) again
-                        self.emit(Opcode::LOAD_FAST, 0);
-                        extra_pos = 2;
+                        if let Some(class_name) = self.class_name_stack.last().cloned() {
+                            self.compile_expr(func)?;
+                            let class_name_idx = self.get_name_index(&class_name) as u32;
+                            self.emit(Opcode::LOAD_GLOBAL, class_name_idx);
+                            self.emit(Opcode::LOAD_FAST, 0);
+                            extra_pos = 2;
+                        } else {
+                            // Bare super() outside a class body is invalid
+                            // Python anyway; keep the old best-effort behavior.
+                            self.compile_expr(func)?;
+                            let type_name_idx = self.get_name_index("type") as u32;
+                            self.emit(Opcode::LOAD_GLOBAL, type_name_idx);
+                            self.emit(Opcode::LOAD_FAST, 0);
+                            self.emit(Opcode::CALL, 1);
+                            self.emit(Opcode::LOAD_FAST, 0);
+                            extra_pos = 2;
+                        }
                     } else {
                         self.compile_expr(func)?;
                     }
@@ -2622,10 +2706,25 @@ impl Compiler {
                 }
             }
             Expr::Set(elts) => {
-                for elt in elts {
-                    self.compile_expr(elt)?;
+                if elts.iter().any(|e| matches!(e, Expr::Starred(_))) {
+                    // Star unpacking present (`{*a, *b}`) — build incrementally,
+                    // mirroring the Tuple case above.
+                    self.emit(Opcode::BUILD_SET, 0);
+                    for elt in elts {
+                        if let Expr::Starred(inner) = elt {
+                            self.compile_expr(inner)?;
+                            self.emit(Opcode::SET_UPDATE, 0);
+                        } else {
+                            self.compile_expr(elt)?;
+                            self.emit(Opcode::SET_ADD, 0);
+                        }
+                    }
+                } else {
+                    for elt in elts {
+                        self.compile_expr(elt)?;
+                    }
+                    self.emit(Opcode::BUILD_SET, elts.len() as u32);
                 }
-                self.emit(Opcode::BUILD_SET, elts.len() as u32);
             }
             Expr::ListComp { elt, generators } => {
                 self.compile_comprehension(elt, generators, false)?;
@@ -2800,12 +2899,23 @@ impl Compiler {
 
             self.compile_assign_target(&gen.target)?;
 
+            // A failed `if` clause must skip straight to fetching this
+            // generator's next item — NOT fall through to `elt`/APPEND
+            // regardless, which is what this previously did: it jumped
+            // over a single NOP placed immediately before `fix_label`, so
+            // both the true and false branches landed on the exact same
+            // next instruction and the condition had no effect at all
+            // (`[x for x in seq if cond]` included every element,
+            // condition ignored). POP_JUMP_IF_FALSE takes an *absolute*
+            // instruction position (see its VM handler), and this
+            // generator's own start_label was already `mark_label`ed
+            // above, so its position is already known here — no
+            // forward-label/fix_label bookkeeping needed, same as how
+            // `emit_backward_jump` below reuses an already-marked position.
+            let continue_pos = self.label_positions[*start_labels.last().unwrap()] as u32;
             for if_expr in &gen.ifs {
-                let skip_label = self.new_label();
                 self.compile_expr(if_expr)?;
-                self.emit_jump(Opcode::POP_JUMP_IF_FALSE, skip_label);
-                self.emit(Opcode::NOP, 0);
-                self.fix_label(skip_label);
+                self.emit(Opcode::POP_JUMP_IF_FALSE, continue_pos);
             }
         }
 
@@ -2865,12 +2975,13 @@ impl Compiler {
 
             self.compile_assign_target(&gen.target)?;
 
+            // See the matching fix in compile_comprehension for why this
+            // can't use the forward-label/NOP pattern (it made the filter
+            // condition a no-op — every item passed regardless).
+            let continue_pos = self.label_positions[*start_labels.last().unwrap()] as u32;
             for if_expr in &gen.ifs {
-                let skip_label = self.new_label();
                 self.compile_expr(if_expr)?;
-                self.emit_jump(Opcode::POP_JUMP_IF_FALSE, skip_label);
-                self.emit(Opcode::NOP, 0);
-                self.fix_label(skip_label);
+                self.emit(Opcode::POP_JUMP_IF_FALSE, continue_pos);
             }
         }
 
