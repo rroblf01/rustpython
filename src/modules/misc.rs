@@ -42,8 +42,115 @@ fn escape_loose_braces(pattern: &str) -> String {
     result
 }
 
+/// Two related Python-`re`-vs-Rust-`regex` character-class gaps in one
+/// pass, both hit by real code (CPython's own `email.utils.specialsre`,
+/// `r'[][\\()<>@,:;".]'`):
+///
+/// 1. A `]` right after the opening `[` (or `[^`) of a class is a literal
+///    `]`, not the closing bracket — Rust's `regex` crate actually *does*
+///    already support this one natively (confirmed: `[]]`/`[]x]` compile
+///    fine as-is) — no translation needed for this part by itself.
+/// 2. A bare `[` appearing *inside* an already-open class (a plain literal
+///    character there in Python/POSIX/PCRE — classes don't nest) is
+///    mistaken by Rust's `regex` crate for the start of a *nested* class
+///    it doesn't support, failing with "unclosed character class" the
+///    moment the class also contains an unescaped `]` later (confirmed:
+///    `[]x]` alone is fine, but `[][x]` and `[][\\()<>@,:;".]` both fail;
+///    `[]\[]`, with the inner `[` pre-escaped, works). This is the part
+///    that actually needs translating — every bare `[` found while already
+///    inside a class gets escaped to `\[`.
+///
+/// Both are handled by the same single-pass `in_class` scan below (the
+/// leading-`]` case doesn't need output changes, just correct state
+/// tracking so the following bare-`[` fix doesn't misfire on it). The same
+/// pass also translates octal character escapes (`\NNN`) to `\x{...}` when
+/// inside a class — see the comment at that branch for why it's scoped to
+/// in-class only.
+fn escape_leading_bracket_in_class(pattern: &str) -> String {
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut result = String::with_capacity(pattern.len());
+    let mut i = 0;
+    let mut in_class = false;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\\' && i + 1 < chars.len() {
+            // Python's `re` accepts `\NNN` (1-3 octal digits) as an octal
+            // character escape (real code: CPython's own `email.header`,
+            // `r'[\041-\176]+:$'`, an ASCII-printable-range class). Rust's
+            // `regex` crate has no octal-escape syntax and reads a
+            // backslash-digit sequence as a *backreference* attempt
+            // instead — which it doesn't support at all — rejecting it
+            // outright. Only translate this inside a character class,
+            // where a backreference could never be valid syntax in any
+            // regex flavor anyway (so there's no ambiguity to worry about,
+            // unlike outside a class where `\1` etc. legitimately mean
+            // "backreference to group 1" in real patterns elsewhere).
+            if in_class && chars[i + 1].is_digit(8) {
+                let mut j = i + 1;
+                let mut value: u32 = 0;
+                let mut digits = 0;
+                while j < chars.len() && digits < 3 && chars[j].is_digit(8) {
+                    value = value * 8 + chars[j].to_digit(8).unwrap();
+                    j += 1;
+                    digits += 1;
+                }
+                result.push_str(&format!("\\x{{{:x}}}", value));
+                i = j;
+                continue;
+            }
+            result.push(c);
+            result.push(chars[i + 1]);
+            i += 2;
+            continue;
+        }
+        if !in_class && c == '[' {
+            result.push(c);
+            i += 1;
+            in_class = true;
+            if i < chars.len() && chars[i] == '^' {
+                result.push('^');
+                i += 1;
+            }
+            // A `]` right here (the very first character of the class,
+            // after an optional `^`) is a literal `]`, not the closing
+            // bracket — Rust's `regex` crate needs it spelled `\]` to
+            // agree; every subsequent `[`/`]` until the *real* close is
+            // handled by the `in_class` tracking below instead of this
+            // one-shot check, so a second literal `[` right after (like
+            // `r'[][...]'`, `]` then `[` both literal) is never mistaken
+            // for the start of a nested class.
+            if i < chars.len() && chars[i] == ']' {
+                result.push('\\');
+                result.push(']');
+                i += 1;
+            }
+            continue;
+        }
+        if in_class && c == ']' {
+            in_class = false;
+            result.push(c);
+            i += 1;
+            continue;
+        }
+        if in_class && c == '[' {
+            // A bare `[` here is just a literal character in Python/POSIX
+            // (classes don't nest) — Rust's `regex` crate reads it as
+            // attempting a nested class instead, so escape it.
+            result.push('\\');
+            result.push('[');
+            i += 1;
+            continue;
+        }
+        result.push(c);
+        i += 1;
+    }
+    result
+}
+
 fn compile_python_regex(pattern: &str) -> Result<regex::Regex, regex::Error> {
-    regex::Regex::new(&escape_loose_braces(pattern))
+    let pattern = escape_loose_braces(pattern);
+    let pattern = escape_leading_bracket_in_class(&pattern);
+    regex::Regex::new(&pattern)
 }
 
 /// Build a re.Match object with group(), groups(), start(), end(), span() methods.
