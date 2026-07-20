@@ -566,48 +566,17 @@ impl VirtualMachine {
           // Native doctest module (stub with TestResults and testmod)
           modules.insert("doctest".to_string(), create_module("doctest", create_doctest_dict()));
 
-          // Native email module (stub with EmailMessage)
-          let email_mod = create_module("email", create_email_dict());
-          modules.insert("email".to_string(), email_mod.clone());
-
-          // Native email.mime.text submodule (MIMEText stub)
-          let email_mime_text_mod = create_module("email.mime.text", create_email_mime_text_dict());
-          // Create email.mime intermediate submodule and wire it under email
-          let email_mime_mod = create_module("email.mime", HashMap::new());
-          {
-              let mut email_mut = email_mod.borrow_mut();
-              if let PyObject::Module { dict: email_dict, .. } = &mut *email_mut {
-                  email_dict.insert("mime".to_string(), email_mime_mod.clone());
-              }
-          }
-          {
-              let mut mime_mut = email_mime_mod.borrow_mut();
-              if let PyObject::Module { dict: mime_dict, .. } = &mut *mime_mut {
-                  mime_dict.insert("text".to_string(), email_mime_text_mod.clone());
-              }
-          }
-          modules.insert("email.mime".to_string(), email_mime_mod);
-          modules.insert("email.mime.text".to_string(), email_mime_text_mod);
-
-          // Native email.utils submodule (formatdate, etc.)
-          let email_utils_mod = create_module("email.utils", create_email_utils_dict());
-          {
-              let mut email_mut = email_mod.borrow_mut();
-              if let PyObject::Module { dict: email_dict, .. } = &mut *email_mut {
-                  email_dict.insert("utils".to_string(), email_utils_mod.clone());
-              }
-          }
-          modules.insert("email.utils".to_string(), email_utils_mod);
-
-          // Native email.header submodule (Header class)
-          let email_header_mod = create_module("email.header", create_email_header_dict());
-          {
-              let mut email_mut = email_mod.borrow_mut();
-              if let PyObject::Module { dict: email_dict, .. } = &mut *email_mut {
-                  email_dict.insert("header".to_string(), email_header_mod.clone());
-              }
-          }
-          modules.insert("email.header".to_string(), email_header_mod);
+          // `email` used to be a thin native stub (EmailMessage/MIMEText/
+          // header/utils only, no real Message class, no submodule files —
+          // couldn't satisfy `import email.message`/`email.mime.multipart`/
+          // etc. at all). Real CPython's own `email` package is pure
+          // Python and self-contained; a full copy now lives at
+          // `Lib/email/` (plus `Lib/quopri.py`, one of its few deps) and is
+          // resolved through the normal file-based import path instead —
+          // no native registration needed anymore. `create_email_dict`/
+          // `create_email_mime_text_dict`/`create_email_header_dict`/
+          // `create_email_utils_dict` (modules/misc.rs) are now dead code,
+          // kept only in case `Lib/email/` needs to be reverted.
 
           // Native configparser module
           modules.insert("configparser".to_string(), create_module("configparser", create_configparser_dict()));
@@ -2584,6 +2553,14 @@ impl VirtualMachine {
                     PyObject::Set(s) => {
                         self.frames[fi].push(PyObjectRef::new(PyObject::ListIter { list: s.to_vec(), index: 0 }));
                     }
+                    PyObject::Bytes(b) => {
+                        let items: Vec<PyObjectRef> = b.iter().map(|byte| py_int(*byte as i64)).collect();
+                        self.frames[fi].push(PyObjectRef::new(PyObject::ListIter { list: items, index: 0 }));
+                    }
+                    PyObject::ByteArray(b) => {
+                        let items: Vec<PyObjectRef> = b.iter().map(|byte| py_int(*byte as i64)).collect();
+                        self.frames[fi].push(PyObjectRef::new(PyObject::ListIter { list: items, index: 0 }));
+                    }
                     PyObject::Generator { .. } => {
                         drop(obj);
                         self.frames[fi].push(val);
@@ -2980,9 +2957,16 @@ impl VirtualMachine {
                                             drop(typ_ref);
                                             drop(obj_borrowed);
                                             self.call_function(getattr_method, vec![obj.clone(), py_str(&name)], vec![])
+                                        } else if name == "__doc__" {
+                                            // Every real object has __doc__ (defaults to
+                                            // None) — see the matching fallback in
+                                            // object.rs's ObjectAccess::get_attribute.
+                                            Ok(py_none())
                                         } else {
                                             Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", obj_borrowed.type_name(), name)))
                                         }
+                                    } else if name == "__doc__" {
+                                        Ok(py_none())
                                     } else {
                                         Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", obj_borrowed.type_name(), name)))
                                     }
@@ -3049,6 +3033,10 @@ impl VirtualMachine {
                                             }
                                             None => {
                                                 drop(obj_borrowed);
+                                                if name == "__doc__" {
+                                                    self.frames[fi].push(py_none());
+                                                    return Ok(None);
+                                                }
                                                 return Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", obj_type_name_for_err, name)));
                                             }
                                         }
