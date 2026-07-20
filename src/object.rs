@@ -1593,6 +1593,7 @@ pub fn py_not(val: &PyObjectRef) -> PyObjectRef {
 // ---- Binary Operations ----
 
 pub fn try_dunder_binop(a: &PyObjectRef, b: &PyObjectRef, method: &str) -> PyResult<Option<PyObjectRef>> {
+    let is_native = !matches!(&*a.borrow(), PyObject::Instance { .. });
     let f = {
         let a_borrowed = a.borrow();
         match &*a_borrowed {
@@ -1604,7 +1605,31 @@ pub fn try_dunder_binop(a: &PyObjectRef, b: &PyObjectRef, method: &str) -> PyRes
         }
     };
     if let Some(f) = f {
-        let result = call_bound_method(f, a.clone(), vec![b.clone()])?;
+        // A native type's `get_attribute(method)` (the branch above, as
+        // opposed to `lookup_dunder_via_mro` for a real `Instance`) hands
+        // back a `BuiltinMethod` whose own `self_obj` is a meaningless
+        // placeholder (`PyObject::None` — it was never bound to anything,
+        // since native types aren't accessed through the usual
+        // attribute-then-call binding path). `call_bound_method` always
+        // prepends *both* that placeholder *and* the `a` we pass it as
+        // its own separate `self_obj` parameter — so for this case it
+        // silently shifts every argument by one (`args = [None, a, b]`
+        // instead of `[a, b]`), which the callee then reads as "self=None,
+        // other=a", not "self=a, other=b". Confirmed via `dict.__or__`
+        // (`{} | dict(...)`, real PEP 584 syntax) failing with a
+        // nonsensical "__or__ on non-dict" even though both operands were
+        // genuine dicts. Call the underlying function directly with the
+        // real `[a, b]` for this native-type case instead.
+        let native_func = if is_native {
+            if let PyObject::BuiltinMethod { func, .. } = &*f.borrow() { Some(*func) } else { None }
+        } else {
+            None
+        };
+        let result = if let Some(func) = native_func {
+            func(&[a.clone(), b.clone()])?
+        } else {
+            call_bound_method(f, a.clone(), vec![b.clone()])?
+        };
         if !is_not_implemented(&result) {
             return Ok(Some(result));
         }
@@ -2786,35 +2811,26 @@ pub fn builtin_dict(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 }
 
 pub fn builtin_set(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.is_empty() { Ok(py_set()) }
-    else {
-        let obj = args[0].borrow();
-        match &*obj {
-            PyObject::List(v) => Ok(PyObjectRef::new(PyObject::Set(PySet::from_vec(v.clone())?))),
-            PyObject::Tuple(v) => Ok(PyObjectRef::new(PyObject::Set(PySet::from_vec(v.clone())?))),
-            PyObject::Range { start, stop, step } => {
-                let mut elts = Vec::new();
-                let mut i = *start;
-                if *step > 0 {
-                    while i < *stop { elts.push(py_int(i)); i += step; }
-                } else {
-                    while i > *stop { elts.push(py_int(i)); i += step; }
-                }
-                Ok(PyObjectRef::new(PyObject::Set(PySet::from_vec(elts)?)))
-            }
-            PyObject::Str(s) => {
-                let elts: Vec<PyObjectRef> = s.chars().map(|c| py_int(c as i64)).collect();
-                Ok(PyObjectRef::new(PyObject::Set(PySet::from_vec(elts)?)))
-            }
-            PyObject::Bytes(b) => {
-                let elts: Vec<PyObjectRef> = b.iter().map(|&c| py_int(c as i64)).collect();
-                Ok(PyObjectRef::new(PyObject::Set(PySet::from_vec(elts)?)))
-            }
-            PyObject::Set(s) => Ok(PyObjectRef::new(PyObject::Set(s.clone()))),
-            PyObject::FrozenSet(s) => Ok(PyObjectRef::new(PyObject::Set(s.clone()))),
-            _ => Err(PyError::type_error(format!("cannot convert '{}' to set", obj.type_name()))),
+    if args.is_empty() { return Ok(py_set()); }
+    // `set(x)` accepts any iterable in real Python — dicts (yielding keys),
+    // generators, custom `__iter__` objects, etc., not just the handful of
+    // native container shapes this used to special-case (which also had
+    // its own bug: `set("abc")` produced a set of *codepoint ints* instead
+    // of single-character strings, since the Str arm bypassed the normal
+    // per-character string wrapping every other string-iteration path
+    // uses). Materializing through the real iterator protocol fixes both
+    // at once and matches the same general fix already applied to
+    // `str.join`.
+    let iterator = crate::object::builtin_iter(&[args[0].clone()])?;
+    let mut elts: Vec<PyObjectRef> = Vec::new();
+    loop {
+        match crate::object::builtin_next(&[iterator.clone()]) {
+            Ok(v) => elts.push(v),
+            Err(PyError::StopIteration) => break,
+            Err(e) => return Err(e),
         }
     }
+    Ok(PyObjectRef::new(PyObject::Set(PySet::from_vec(elts)?)))
 }
 
 pub fn builtin_bytes(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
@@ -3618,6 +3634,8 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     match &*obj {
         PyObject::Tuple(v) => Ok(py_list(v.clone())),
         PyObject::Str(s) => Ok(py_list(s.chars().map(|c| py_str(&c.to_string())).collect())),
+        PyObject::Bytes(b) => Ok(PyObjectRef::new(PyObject::ListIter { list: b.iter().map(|byte| py_int(*byte as i64)).collect(), index: 0 })),
+        PyObject::ByteArray(b) => Ok(PyObjectRef::new(PyObject::ListIter { list: b.iter().map(|byte| py_int(*byte as i64)).collect(), index: 0 })),
         PyObject::Set(s) => Ok(py_list(s.to_vec())),
         PyObject::FrozenSet(s) => Ok(py_list(s.to_vec())),
         PyObject::Range { start, stop, step } => {
@@ -4921,8 +4939,19 @@ pub trait ObjectAccess {
     fn del_attribute(&mut self, name: &str) -> PyResult<()>;
 }
 
-impl ObjectAccess for PyObject {
-    fn get_attribute(&self, name: &str) -> PyResult<PyObjectRef> {
+impl PyObject {
+    /// Every real Python object has `__doc__` (defaulting to `None` if not
+    /// otherwise set — `bool`/`int`/etc. all inherit it from `object`).
+    /// The per-variant match below (a few thousand lines, one arm per
+    /// builtin type, each with its own "no such attribute" catch-all) has
+    /// no single place to add a universal fallback without touching every
+    /// arm — so it stays untouched as `get_attribute_impl`, and the real
+    /// `get_attribute` (the trait method below) just catches this one
+    /// specific case on error instead. Real code doing generic attribute
+    /// introspection over arbitrary values (e.g. something in the stdlib
+    /// `email`/`dataclasses` machinery checking `.__doc__` while walking a
+    /// structure that isn't guaranteed to be a function/class) hit this.
+    fn get_attribute_impl(&self, name: &str) -> PyResult<PyObjectRef> {
         match self {
             PyObject::Module { dict, name: mod_name } => {
                 if name == "__dict__" {
@@ -5670,8 +5699,63 @@ impl ObjectAccess for PyObject {
                         name: "split".to_string(),
                         func: |args| {
                             let s = args[0].str();
-                            let sep = if args.len() > 1 { Some(args[1].str()) } else { None };
-                            let parts: Vec<PyObjectRef> = if let Some(sep) = sep { s.split(&sep).map(|p| py_str(p)).collect() } else { s.split_whitespace().map(|p| py_str(p)).collect() };
+                            let sep = if args.len() > 1 && !matches!(&*args[1].borrow(), PyObject::None) { Some(args[1].str()) } else { None };
+                            let maxsplit = if args.len() > 2 { args[2].as_i64().unwrap_or(-1) } else { -1 };
+                            let parts: Vec<PyObjectRef> = match (sep, maxsplit) {
+                                (Some(sep), n) if n >= 0 => s.splitn(n as usize + 1, &sep).map(py_str).collect(),
+                                (Some(sep), _) => s.split(&sep).map(py_str).collect(),
+                                (None, n) if n >= 0 => {
+                                    let mut parts: Vec<&str> = Vec::new();
+                                    let mut rest = s.as_str();
+                                    while parts.len() < n as usize {
+                                        let trimmed = rest.trim_start();
+                                        if trimmed.is_empty() { rest = trimmed; break; }
+                                        match trimmed.find(char::is_whitespace) {
+                                            Some(idx) => { parts.push(&trimmed[..idx]); rest = &trimmed[idx..]; }
+                                            None => { rest = trimmed; break; }
+                                        }
+                                    }
+                                    let tail = rest.trim();
+                                    if !tail.is_empty() { parts.push(tail); }
+                                    parts.into_iter().map(py_str).collect()
+                                }
+                                (None, _) => s.split_whitespace().map(py_str).collect(),
+                            };
+                            Ok(py_list(parts))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "rsplit" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "rsplit".to_string(),
+                        func: |args| {
+                            let s = args[0].str();
+                            let sep = if args.len() > 1 && !matches!(&*args[1].borrow(), PyObject::None) { Some(args[1].str()) } else { None };
+                            let maxsplit = if args.len() > 2 { args[2].as_i64().unwrap_or(-1) } else { -1 };
+                            let parts: Vec<PyObjectRef> = match (sep, maxsplit) {
+                                (Some(sep), n) if n >= 0 => {
+                                    let mut parts: Vec<&str> = s.rsplitn(n as usize + 1, &sep).collect();
+                                    parts.reverse();
+                                    parts.into_iter().map(py_str).collect()
+                                }
+                                (Some(sep), _) => s.split(&sep).map(py_str).collect(),
+                                (None, n) if n >= 0 => {
+                                    let mut parts: Vec<&str> = Vec::new();
+                                    let mut rest = s.as_str();
+                                    while parts.len() < n as usize {
+                                        let trimmed = rest.trim_end();
+                                        if trimmed.is_empty() { rest = trimmed; break; }
+                                        match trimmed.rfind(char::is_whitespace) {
+                                            Some(idx) => { parts.push(&trimmed[idx+1..]); rest = &trimmed[..idx]; }
+                                            None => { parts.push(trimmed); rest = ""; break; }
+                                        }
+                                    }
+                                    let head = rest.trim();
+                                    if !head.is_empty() { parts.push(head); }
+                                    parts.reverse();
+                                    parts.into_iter().map(py_str).collect()
+                                }
+                                (None, _) => s.split_whitespace().map(py_str).collect(),
+                            };
                             Ok(py_list(parts))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
@@ -5681,8 +5765,21 @@ impl ObjectAccess for PyObject {
                         func: |args| {
                             if args.len() < 2 { return Err(PyError::type_error("join() takes exactly one argument")); }
                             let sep = args[0].str();
-                            let items = args[1].borrow();
-                            let parts: Vec<String> = if let PyObject::List(v) = &*items { v.iter().map(|x| x.str()).collect() } else { return Err(PyError::type_error("join() argument must be a list")) };
+                            // Real `str.join` accepts any iterable, not just a
+                            // list (tuples/generators/dict_keys/etc. are all
+                            // common in real code, e.g. `''.join(chunk for
+                            // chunk in parts)`), so materialize through the
+                            // normal iterator protocol instead of only
+                            // recognizing a literal `PyObject::List`.
+                            let iterator = crate::object::builtin_iter(&[args[1].clone()])?;
+                            let mut parts: Vec<String> = Vec::new();
+                            loop {
+                                match crate::object::builtin_next(&[iterator.clone()]) {
+                                    Ok(v) => parts.push(v.str()),
+                                    Err(PyError::StopIteration) => break,
+                                    Err(e) => return Err(e),
+                                }
+                            }
                             Ok(py_str(&parts.join(&sep)))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
@@ -7822,6 +7919,15 @@ impl ObjectAccess for PyObject {
                 }
             }
             _ => Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", self.type_name(), name))),
+        }
+    }
+}
+
+impl ObjectAccess for PyObject {
+    fn get_attribute(&self, name: &str) -> PyResult<PyObjectRef> {
+        match self.get_attribute_impl(name) {
+            Err(_) if name == "__doc__" => Ok(py_none()),
+            other => other,
         }
     }
 
