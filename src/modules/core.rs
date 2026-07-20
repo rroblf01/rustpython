@@ -98,7 +98,8 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     add_func!("print", builtin_print);
     add_func!("len", builtin_len);
     add_func!("range", builtin_range);
-    add_func!("type", builtin_type_of);
+    // "type" is registered further down as a real, subclassable Type object
+    // once `object_type` exists — see the comment there.
     add_func!("int", builtin_int);
     add_func!("float", builtin_float);
     add_func!("str", builtin_str);
@@ -345,7 +346,17 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
             Ok(py_int(ptr as i64))
         },
     }));
-    // __new__(cls): creates a new instance of cls
+    // __new__(cls, *extra): creates a new instance of cls. When cls
+    // transparently subclasses a native type (list/dict/str/int — see
+    // NATIVE_BASE_MARKER), the native backing must be populated here too,
+    // using any extra positional args exactly like CPython's int.__new__
+    // (cls, value)/str.__new__(cls, value) would — otherwise a bare
+    // `object.__new__(cls)` on such a class produced an instance with NO
+    // native backing at all (broken: every native-delegated operation on
+    // it would fail). This is also the enum module's own construction
+    // path for value-carrying members (`object.__new__(cls, value)` used
+    // instead of `cls(value)`, since `cls(...)` is overridden by
+    // EnumType.__call__ to mean value lookup, not construction).
     object_dict.insert("__new__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
         name: "__new__".to_string(),
         func: |args| {
@@ -353,9 +364,19 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
                 return Err(PyError::type_error("__new__ requires at least 1 argument (cls)"));
             }
             let cls = args[0].clone();
+            let native_kind = if let PyObject::Type { dict, .. } = &*cls.borrow() {
+                dict.get_str(crate::object::NATIVE_BASE_MARKER).map(|v| v.str())
+            } else {
+                None
+            };
+            let mut instance_dict = HashMap::new();
+            if let Some(kind) = &native_kind {
+                let native = crate::object::synthesize_native_init(kind, &args[1..])?;
+                instance_dict.insert(crate::object::NATIVE_BACKING_KEY.to_string(), native);
+            }
             Ok(PyObjectRef::new(PyObject::Instance {
                 typ: cls,
-                dict: HashMap::new(),
+                dict: instance_dict,
             }))
         },
     }));
@@ -410,11 +431,45 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
         *mro = vec![object_type.clone()];
     }
     // Register in builtins both as a type (for __build_class__) and as a callable (for object())
-    builtins.insert("object".to_string(), object_type);
+    builtins.insert("object".to_string(), object_type.clone());
     // Also keep the function for direct use
     builtins.insert("_object_func".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
         name: "object".to_string(),
         func: builtin_object,
+    }));
+
+    // `type` — a real, subclassable Type object (not just the `type(x)`
+    // introspection/`type(name,bases,ns)` construction BuiltinFunction that
+    // used to be the sole binding for this name), so `class MyMeta(type):
+    // ...` works as a genuine metaclass with real MRO-based method
+    // resolution (needed for e.g. enum's EnumType). `type.__new__` is what
+    // a custom metaclass's `super().__new__(metacls, name, bases, ns,
+    // **kwds)` bottoms out on. `type(x)` / `type(name, bases, ns)` calling
+    // `type` itself still needs its own dual-arity behavior — that's kept
+    // in `builtin_type_of` (object.rs) and special-cased at the top of
+    // `call_function` (vm.rs) by identity against this exact object,
+    // before the generic "call a Type to instantiate it" path would
+    // otherwise try to build a plain Instance instead.
+    let mut type_dict = HashMap::new();
+    type_dict.insert("__new__".to_string(), PyObjectRef::new(PyObject::StaticMethod {
+        func: PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__new__".to_string(),
+            func: crate::object::type_new_builtin,
+        }),
+    }));
+    let type_type = PyObjectRef::new(PyObject::Type {
+        name: "type".to_string(),
+        dict: type_dict,
+        bases: vec![object_type.clone()],
+        mro: vec![],
+    });
+    if let PyObject::Type { mro, .. } = &mut *type_type.borrow_mut() {
+        *mro = vec![type_type.clone(), object_type];
+    }
+    builtins.insert("type".to_string(), type_type);
+    builtins.insert("_type_func".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "type".to_string(),
+        func: builtin_type_of,
     }));
 
     builtins

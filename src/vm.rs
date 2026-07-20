@@ -297,6 +297,9 @@ impl VirtualMachine {
           // Native locale module
           modules.insert("locale".to_string(), create_module("locale", create_locale_dict()));
 
+          // gettext module (mostly Python source — see install_source_defined_stdlib below)
+          modules.insert("gettext".to_string(), create_module("gettext", create_gettext_dict()));
+
           // Native ssl module (CPython C extension replacement for urllib3 compatibility)
           modules.insert("ssl".to_string(), create_module("ssl", create_ssl_dict()));
 
@@ -335,8 +338,14 @@ impl VirtualMachine {
           // Native heapq module for heap queue operations
           modules.insert("heapq".to_string(), create_module("heapq", create_heapq_dict()));
 
-          // Native enum module
-          modules.insert("enum".to_string(), create_module("enum", create_enum_dict()));
+          // enum module — real Enum/IntEnum/StrEnum/EnumType semantics
+          // (metaclass, real members, auto/unique) are far easier and more
+          // correct expressed as real Python source (see enum_extra.py)
+          // than as hand-written Rust closures; install_source_defined_stdlib
+          // (called below, once builtins/type registry exist) fills this
+          // module's dict in. The empty dict here is just a placeholder
+          // registration so that call finds an existing module to populate.
+          modules.insert("enum".to_string(), create_module("enum", HashMap::new()));
 
           // Native glob module
           modules.insert("glob".to_string(), create_module("glob", create_glob_dict()));
@@ -803,6 +812,15 @@ impl VirtualMachine {
          vm.install_source_defined_stdlib("collections", crate::modules::COLLECTIONS_USER_TYPES_SOURCE, &["UserList", "UserDict", "UserString", "Counter", "defaultdict"]);
          vm.install_source_defined_stdlib("contextlib", crate::modules::CONTEXTLIB_SOURCE, &["ContextDecorator"]);
          vm.install_source_defined_stdlib("functools", crate::modules::FUNCTOOLS_EXTRA_SOURCE, &["lru_cache", "cache"]);
+         vm.install_source_defined_stdlib("enum", crate::modules::ENUM_SOURCE, &[
+             "auto", "nonmember", "member", "property", "EnumType", "EnumMeta",
+             "Enum", "IntEnum", "StrEnum", "unique",
+         ]);
+         vm.install_source_defined_stdlib("gettext", crate::modules::GETTEXT_SOURCE, &[
+             "NullTranslations", "GNUTranslations", "find", "translation", "install",
+             "textdomain", "bindtextdomain", "gettext", "ngettext", "pgettext", "npgettext",
+             "dgettext", "dngettext",
+         ]);
          vm
     }
 
@@ -810,14 +828,18 @@ impl VirtualMachine {
     /// real Python source — the same way CPython's own stdlib does it — than
     /// as hand-written Rust closures (e.g. anything relying on composition
     /// over a `self.data` attribute, decorators, or `with`). This compiles
-    /// and runs that source against this already-constructed VM (never a
-    /// nested one — building a VM calls this same constructor, which would
-    /// recurse infinitely), extracts the requested names, merges them into
-    /// the given already-registered native module's dict, and then removes
-    /// them from `self.globals` again — `run()` executes against the VM's
-    /// real globals (shared with whatever user script runs next), so
-    /// without this cleanup step every such name would leak into every
-    /// script's top-level namespace with no import required.
+    /// and runs that source against its own dedicated, isolated globals
+    /// dict (never `self.globals` — the VM's real, shared top-level
+    /// namespace) and merges the requested names into the given
+    /// already-registered native module's dict. Using a dedicated dict
+    /// (rather than running against `self.globals` and stripping the
+    /// requested names back out afterward, which this used to do) matters
+    /// for correctness, not just tidiness: any exported function/class
+    /// whose body references ANOTHER exported name (e.g. gettext's
+    /// `translation()` referencing `GNUTranslations`) keeps working
+    /// correctly forever, since the dict its closure captured is never
+    /// mutated again — stripping names out from underneath it broke exactly
+    /// this pattern.
     fn install_source_defined_stdlib(&mut self, module_name: &str, source: &str, names: &[&str]) {
         let mut parser = Parser::new(source);
         let program = match parser.parse_program() {
@@ -829,12 +851,13 @@ impl VirtualMachine {
             Ok(c) => c,
             Err(_) => return,
         };
-        if self.run(code).is_err() {
+        let dedicated_globals = Rc::new(RefCell::new(HashMap::new()));
+        if self.exec_code(code, Some(Rc::clone(&dedicated_globals))).is_err() {
             return;
         }
         let extracted: Vec<(String, PyObjectRef)> = {
-            let mut globals = self.globals.borrow_mut();
-            names.iter().filter_map(|name| globals.remove(*name).map(|v| (name.to_string(), v))).collect()
+            let globals = dedicated_globals.borrow();
+            names.iter().filter_map(|name| globals.get(*name).cloned().map(|v| (name.to_string(), v))).collect()
         };
         if let Some(module) = self.modules.get(module_name) {
             if let PyObject::Module { dict, .. } = &mut *module.borrow_mut() {
@@ -871,6 +894,7 @@ impl VirtualMachine {
             frame.attr_cache.clear();
             frame.global_cache.clear();
             frame.registers.clear();
+            frame.name_order = None;
             frame
         } else {
             Frame::new(code, globals, builtins, module_globals)
@@ -2443,6 +2467,44 @@ impl VirtualMachine {
                         drop(obj);
                         self.frames[fi].push(val);
                     }
+                    // Iterators are their own iterator (matching CPython's
+                    // `__iter__` returning self) — `for x in iter(y):` or
+                    // `for x in itertools.tee(y)[0]:` must work the same as
+                    // iterating the original iterable directly.
+                    PyObject::ListIter { .. } | PyObject::RangeIter { .. }
+                    | PyObject::MapIterator { .. } | PyObject::FilterIterator { .. }
+                    | PyObject::ZipIterator { .. } => {
+                        drop(obj);
+                        self.frames[fi].push(val);
+                    }
+                    // A class object itself can be iterable via its
+                    // metaclass's `__iter__` (e.g. `for member in
+                    // SomeEnum:` — `SomeEnum` is a `PyObject::Type`, and
+                    // `__iter__` lives on its metaclass, not on `SomeEnum`
+                    // own dict/mro, which is why this needs metatype_of
+                    // rather than the ordinary Type attribute lookup above).
+                    PyObject::Type { .. } => {
+                        let iter_fn = crate::object::metatype_of(&val).and_then(|mt| {
+                            if let PyObject::Type { mro, .. } = &*mt.borrow() {
+                                for base in mro.iter() {
+                                    if let PyObject::Type { dict, .. } = &*base.borrow() {
+                                        if let Some(v) = dict.get_str("__iter__") {
+                                            return Some(v.clone());
+                                        }
+                                    }
+                                }
+                            }
+                            None
+                        });
+                        drop(obj);
+                        match iter_fn {
+                            Some(f) => {
+                                let iterator = self.call_function(f, vec![val.clone()], vec![])?;
+                                self.frames[fi].push(iterator);
+                            }
+                            None => return Err(PyError::type_error(format!("'{}' object is not iterable", val.get_type_name()))),
+                        }
+                    }
                     _ => return Err(PyError::type_error(format!("'{}' object is not iterable", obj.type_name()))),
                 }
                 }
@@ -2770,10 +2832,82 @@ impl VirtualMachine {
                                     self_obj: obj.clone(),
                                 }))
                             } else {
-                                let attr = obj_borrowed.get_attribute(&name).or_else(|_| {
-                                    Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", obj_borrowed.type_name(), name)))
-                                })?;
+                                let is_type_obj = matches!(&*obj_borrowed, PyObject::Type { .. });
+                                let direct = obj_borrowed.get_attribute(&name);
+                                let obj_type_name_for_err = obj_borrowed.type_name();
+                                let attr = match direct {
+                                    Ok(v) => v,
+                                    Err(_) => {
+                                        // Metaclass attribute fallback: a
+                                        // class-level attribute not found on
+                                        // the class's own dict/mro may still
+                                        // exist on its *metaclass* (e.g. a
+                                        // `@property` defined on a custom
+                                        // metaclass like Django's
+                                        // `ChoicesType.choices` — meant to be
+                                        // read as `SomeChoicesClass.choices`,
+                                        // with the class itself as the
+                                        // property's "self"). Ordinary
+                                        // classes have no METATYPE_KEY set,
+                                        // so this is a no-op for them.
+                                        let metatype_hit = if is_type_obj {
+                                            crate::object::metatype_of(&obj).and_then(|mt| {
+                                                if let PyObject::Type { mro, .. } = &*mt.borrow() {
+                                                    for base in mro.iter() {
+                                                        if let PyObject::Type { dict, .. } = &*base.borrow() {
+                                                            if let Some(val) = dict.get_str(&name) {
+                                                                return Some(val.clone());
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                None
+                                            })
+                                        } else {
+                                            None
+                                        };
+                                        match metatype_hit {
+                                            Some(val) => {
+                                                let is_property = matches!(&*val.borrow(), PyObject::Property { getter: Some(_), .. });
+                                                if is_property {
+                                                    let getter = if let PyObject::Property { getter: Some(g), .. } = &*val.borrow() { g.clone() } else { unreachable!() };
+                                                    drop(obj_borrowed);
+                                                    let result = self.call_function(getter, vec![obj.clone()], vec![])?;
+                                                    self.frames[fi].push(result);
+                                                    return Ok(None);
+                                                }
+                                                val
+                                            }
+                                            None => {
+                                                drop(obj_borrowed);
+                                                return Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", obj_type_name_for_err, name)));
+                                            }
+                                        }
+                                    }
+                                };
                                 drop(obj_borrowed);
+                                // Generic descriptor protocol for class-level
+                                // attribute access (`Foo.attr`, `obj` here is
+                                // the type itself): a plain user-defined
+                                // descriptor class (any Instance whose type
+                                // defines __get__ — e.g. Django's
+                                // class_or_instance_method) must have __get__
+                                // invoked with instance=None, matching the
+                                // generic __get__ handling already done for
+                                // instance-level access above. Builtin
+                                // Property/StaticMethod/ClassMethod/Function
+                                // descriptors are already special-cased below
+                                // and are never PyObject::Instance, so this
+                                // can't double-invoke them.
+                                if is_type_obj {
+                                    if matches!(&*attr.borrow(), PyObject::Instance { .. }) {
+                                        if let Ok(get_fn) = attr.borrow().get_attribute("__get__") {
+                                            let result = self.call_function(get_fn, vec![attr.clone(), py_none(), obj.clone()], vec![])?;
+                                            self.frames[fi].push(result);
+                                            return Ok(None);
+                                        }
+                                    }
+                                }
                                 // Resolve classmethod descriptor for type attribute access
                                 {
                                     let ab = attr.borrow();
@@ -2974,6 +3108,33 @@ impl VirtualMachine {
                     v.add(val)?;
                 } else {
                     return Err(PyError::runtime_error("SET_ADD on non-set"));
+                }
+            }
+
+            Opcode::SET_UPDATE => {
+                // Backs `{*a, *b}` set-unpacking display syntax. Unlike
+                // LIST_EXTEND (which only accepts list/tuple), CPython's
+                // SET_UPDATE accepts any iterable, so pull items through
+                // the same builtin_iter/builtin_next protocol chain() uses
+                // rather than requiring a concrete List/Tuple/Set.
+                let val = self.frames[fi].pop()?;
+                let mut items = Vec::new();
+                let it = crate::object::builtin_iter(&[val])?;
+                loop {
+                    match crate::object::builtin_next(&[it.clone()]) {
+                        Ok(v) => items.push(v),
+                        Err(e) if crate::object::is_stop_iteration_error(&e) => break,
+                        Err(e) => return Err(e),
+                    }
+                }
+                let set = self.frames[fi].peek(arg as usize)?;
+                let mut obj = set.borrow_mut();
+                if let PyObject::Set(v) = &mut *obj {
+                    for item in items {
+                        v.add(item)?;
+                    }
+                } else {
+                    return Err(PyError::runtime_error("SET_UPDATE on non-set"));
                 }
             }
 
@@ -3916,6 +4077,35 @@ impl VirtualMachine {
     pub(crate) fn call_function(&mut self, callable: PyObjectRef, args: Vec<PyObjectRef>, keywords: Vec<(String, PyObjectRef)>) -> PyResult<PyObjectRef> {
         let type_name = callable.borrow().type_name();
         if cfg!(feature = "profile") { eprintln!("DEBUG call_function: type={} name={:?}", type_name, callable.repr()); }
+        if std::env::var("RPY_DEBUG_CALL").is_ok() {
+            eprintln!("CALL_FUNCTION: type={} repr={}", type_name, callable.repr());
+        }
+
+        // `type.__new__` needs live `&mut self` access (to build the class
+        // via `default_build_class`, which itself calls back into
+        // `self.call_function` for __set_name__/__init_subclass__) — a
+        // plain BuiltinFunction can't capture that, and routing it through
+        // `with_vm_mut`'s thread-local VM_PTR here would hand back a
+        // *second*, aliasing `&mut VirtualMachine` while this exact call
+        // chain already holds one (we're inside `&mut self` right now),
+        // which is undefined behavior and reliably segfaulted in testing.
+        // Special-case it here instead, exactly like `__build_class__`
+        // and bare `type` are special-cased above/below, so it goes
+        // through the real, single, already-live `self`.
+        {
+            let is_type_new = matches!(&*callable.borrow(), PyObject::BuiltinFunction { func, .. } if std::ptr::fn_addr_eq(*func, crate::object::type_new_builtin as crate::object::BuiltinFunc));
+            if is_type_new {
+                let mut all_args = args;
+                if !keywords.is_empty() {
+                    let mut dict = crate::object::PyDict::new();
+                    for (k, v) in &keywords {
+                        let _ = dict.set(crate::object::py_str(k), v.clone());
+                    }
+                    all_args.push(PyObjectRef::new(PyObject::Dict(dict)));
+                }
+                return self.type_new_impl(&all_args);
+            }
+        }
 
         if let PyObject::BuiltinFunction { func, .. } = &*callable.borrow() {
             let func = *func;
@@ -4099,12 +4289,102 @@ impl VirtualMachine {
                 }
             }
 
+            // Apply defaults for still-unbound keyword-only params (CPython's
+            // __kwdefaults__ equivalent) — must run after explicit keyword
+            // binding above, since only truly-unbound kwonly slots should
+            // get their default. Defaults for kwonly params live in
+            // `defaults` right after the positional ones (see
+            // CodeObject::kwonly_defaults_mask / MAKE_FUNCTION).
+            if code.kwonlyarg_count > 0 {
+                let kwonly_start = code.arg_count + if code.vararg_name.is_some() { 1 } else { 0 };
+                let mut kwdefault_idx = code.num_defaults;
+                for (k, &has_default) in code.kwonly_defaults_mask.iter().enumerate() {
+                    if !has_default { continue; }
+                    let default_val = defaults.get(kwdefault_idx).cloned();
+                    kwdefault_idx += 1;
+                    let idx = kwonly_start + k;
+                    if idx < new_frame.fast_locals.len() && new_frame.fast_locals[idx].is_none() {
+                        if let Some(val) = default_val {
+                            let name_clone = new_frame.code.varnames[idx].clone();
+                            new_frame.insert_local(&name_clone, val.clone());
+                            new_frame.fast_locals[idx] = Some(val);
+                        }
+                    }
+                }
+            }
+
             self.frames.push(new_frame);
             let result = self.execute();
             if let Some(frame) = self.frames.pop() {
                 self.release_frame(frame);
             }
             return result;
+        }
+
+        // `type` itself is special: calling it means `type(x)` (introspect)
+        // or `type(name, bases, ns)` (metaclass-style construction), NOT
+        // "instantiate the class named type" — must be checked by identity
+        // before the generic Type-calling convention below, which would
+        // otherwise build a plain Instance (wrong: `type(x)` must return a
+        // real class/type object, not an instance of `type`).
+        if self.builtins.get("type").map(|t| t.is(&callable)).unwrap_or(false) {
+            if !keywords.is_empty() {
+                return Err(PyError::type_error("type() takes no keyword arguments"));
+            }
+            if args.len() == 1 {
+                // type(obj) -> obj's real type. For a plain instance/value
+                // this is its class (unchanged from before); for a class
+                // object itself, it's that class's *metaclass* — plain
+                // `type` unless something built it with a custom one (see
+                // METATYPE_KEY) — never the class itself, which is what
+                // the old, metaclass-unaware fallback incorrectly returned.
+                let is_type_obj = matches!(&*args[0].borrow(), PyObject::Type { .. });
+                if is_type_obj {
+                    let mt = crate::object::metatype_of(&args[0]);
+                    return Ok(mt.unwrap_or_else(|| callable.clone()));
+                }
+                return crate::object::builtin_type_of(&args);
+            }
+            if args.len() == 3 {
+                // type(name, bases, ns) -> dynamic class creation. Uses
+                // `self` directly (not `builtin_type_of`'s own 3-arg path,
+                // which goes through `with_vm_mut` — safe when called with
+                // no VM already active, but we're already inside one here
+                // and a second aliasing `&mut VirtualMachine` from within
+                // this same call chain reliably segfaulted in testing).
+                let bases_vec = match &*args[1].borrow() {
+                    PyObject::Tuple(t) => t.clone(),
+                    PyObject::None => vec![],
+                    _ => vec![args[1].clone()],
+                };
+                let namespace_dict = crate::object::dict_arg_to_hashmap(&args[2], "type() third argument must be a dict")?;
+                return self.default_build_class(args[0].str(), bases_vec, namespace_dict, vec![], None);
+            }
+            return crate::object::builtin_type_of(&args);
+        }
+
+        // A class built by a custom metaclass that itself defines
+        // `__call__` (e.g. enum's `EnumType.__call__`, used for `Color(2)`
+        // value-lookup instead of construction) must dispatch through that
+        // `__call__` — real Python semantics: `SomeClass(...)` really means
+        // `type(SomeClass).__call__(SomeClass, ...)`, and only the
+        // *default* `type.__call__` behaves like "construct + __init__",
+        // which is what the generic Type-calling convention below
+        // hardwires. Checked by identity-of-behavior (does the metatype
+        // have its OWN `__call__`, distinct from `object`'s absence of
+        // one) rather than unconditionally, so plain classes with no
+        // custom metaclass are completely unaffected.
+        {
+            let mt = crate::object::metatype_of(&callable);
+            if let Some(mt) = mt {
+                if let Some(call_fn) = crate::object::lookup_dunder_via_mro(&mt, "__call__") {
+                    let unwrapped = if let PyObject::StaticMethod { func } = &*call_fn.borrow() { Some(func.clone()) } else { None };
+                    let call_fn = unwrapped.unwrap_or(call_fn);
+                    let mut call_args = vec![callable.clone()];
+                    call_args.extend(args);
+                    return self.call_function(call_fn, call_args, keywords);
+                }
+            }
         }
 
         if let PyObject::Type { dict, mro, .. } = &*callable.borrow() {
@@ -4180,37 +4460,17 @@ impl VirtualMachine {
                 _ => return Err(PyError::type_error("class name must be a string")),
             };
 
-            let namespace = Rc::new(RefCell::new(HashMap::new()));
-
-            // Capture the calling frame's module_globals (or globals as fallback)
-            // so that LOAD_NAME inside the class body can resolve module-level names.
-            let caller_module_globals = if self.frames.len() >= 1 {
-                let caller_frame = &self.frames[self.frames.len() - 1];
-                caller_frame.module_globals.clone()
-                    .or_else(|| Some(caller_frame.globals.clone()))
-            } else {
-                None
-            };
-
-            match &*func.borrow() {
-                PyObject::Function { code, closure, .. } => {
-                    let code = code.clone();
-                    let closure = closure.clone();
-                    let mut new_frame = self.acquire_frame(Rc::new(code), namespace.clone(), Rc::clone(&self.builtins), caller_module_globals);
-                    new_frame.closure = closure;
-                    self.frames.push(new_frame);
-                    self.execute()?;
-                    if let Some(frame) = self.frames.pop() {
-                        self.release_frame(frame);
-                    }
-                }
-                _ => return Err(PyError::type_error("class body must be a function")),
-            }
-
-            let namespace_dict = namespace.borrow().clone();
-
-            // Extract metaclass from keyword arguments (if any)
-            let metaclass = keywords.iter()
+            // Bases and any explicit `metaclass=` are already fully
+            // evaluated by the time __build_class__ is called (the
+            // compiler evaluates func/name/*bases/**kwds before emitting
+            // the CALL — see Stmt::ClassDef's compilation) — so the
+            // effective metaclass can and must be determined BEFORE the
+            // class body executes, not after: a metaclass's `__prepare__`
+            // (e.g. enum's `_EnumDict`-returning one, needed for Django's
+            // `ChoicesType` to see a real `_member_names` list) has to
+            // exist as the body's own namespace target from the very
+            // start, not spliced in afterward.
+            let explicit_metaclass = keywords.iter()
                 .find(|(k, _)| k == "metaclass")
                 .map(|(_, v)| v.clone());
 
@@ -4248,90 +4508,160 @@ impl VirtualMachine {
                 bases_vec
             };
 
-            // If a metaclass was specified, delegate class creation to it
-            if let Some(mc) = metaclass {
-                // Build a PyDict from the namespace HashMap for the metaclass call
-                let namespace_py_dict = {
-                    let mut pd = PyDict::new();
-                    for (k, v) in &namespace_dict {
-                        pd.set(py_str(k), v.clone())?;
-                    }
-                    PyObjectRef::new(PyObject::Dict(pd))
-                };
-                let bases_tuple = PyObjectRef::imm(PyObject::Tuple(bases_vec));
-                let mc_result = self.call_function(
-                    mc,
-                    vec![name.clone(), bases_tuple, namespace_py_dict],
-                    vec![],
-                )?;
-                return Ok(mc_result);
-            }
-
-            let mut namespace_dict = namespace_dict;
-            // Detect `class Foo(list): ...` / `(dict)` / `(str)` — either a
-            // direct native base, or inherited transitively through a base
-            // that already carries the marker (propagated down so every
-            // subclass's own dict has it, without needing to walk mro/bases
-            // again at instantiation or dispatch time).
-            for base in &bases_vec {
-                let native_name = match &*base.borrow() {
-                    PyObject::BuiltinFunction { name, .. } if crate::object::is_recognized_native_base_name(name) => Some(name.clone()),
-                    _ => crate::object::native_base_of_type(base),
-                };
-                if let Some(native_name) = native_name {
-                    namespace_dict.insert(crate::object::NATIVE_BASE_MARKER.to_string(), py_str(&native_name));
-                    break;
-                }
-            }
-
-            let class = PyObjectRef::new(PyObject::Type {
-                name: name_str,
-                dict: namespace_dict.clone(),
-                bases: bases_vec.clone(),
-                mro: vec![],
-            });
-
-            let mut mro = vec![class.clone()];
-            // C3 linearization for proper method resolution
-            let linearization = c3_linearize(&bases_vec)?;
-            mro.extend(linearization);
-            if let PyObject::Type { mro: mro_field, .. } = &mut *class.borrow_mut() {
-                *mro_field = mro;
-            }
-
-            // __set_name__ protocol: for each descriptor in the class dict that has __set_name__, call it
-            for (attr_name, value) in namespace_dict.iter() {
-                // Get __set_name__ from the TYPE (not the instance) to avoid double-binding
-                let typ = match &*value.borrow() {
-                    PyObject::Instance { typ, .. } => Some(typ.clone()),
-                    _ => None,
-                };
-                let has_set_name = if let Some(t) = &typ {
-                    t.borrow().get_attribute("__set_name__").is_ok()
-                } else {
-                    false
-                };
-                if has_set_name {
-                    if let Some(t) = typ {
-                        let set_name_method = t.borrow().get_attribute("__set_name__").unwrap();
-                        // Call with explicit self=value, then owner=class, name=attr_name
-                        let _ = self.call_function(set_name_method, vec![value.clone(), class.clone(), py_str(attr_name)], vec![]);
-                    }
-                }
-            }
-
-            // __init_subclass__ protocol: call on each base class with non-metaclass kwargs
+            // __init_subclass__ (and any custom metaclass __new__/__init__)
+            // only ever see the non-`metaclass` keywords.
             let init_subclass_kwargs: Vec<(String, PyObjectRef)> = keywords.iter()
                 .filter(|(k, _)| k != "metaclass")
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
-            for base in &bases_vec {
-                if let Ok(init_subclass) = base.borrow().get_attribute("__init_subclass__") {
-                    let _ = self.call_function(init_subclass, vec![class.clone()], init_subclass_kwargs.clone());
+
+            // Metaclass inheritance: without an explicit `metaclass=`, a
+            // subclass of a class built by a custom metaclass must still be
+            // built by that SAME metaclass (e.g. `class IntegerChoices(Choices,
+            // IntEnum)` has no `metaclass=` of its own but must still use
+            // `ChoicesType`, inherited from `Choices`) — matching CPython's
+            // `_calculate_meta`. Real conflict resolution across multiple
+            // unrelated custom metaclasses among the bases is out of scope
+            // here (rare in practice); the first one found wins.
+            let inherited_metaclass = bases_vec.iter().find_map(crate::object::metatype_of);
+            let effective_metaclass = explicit_metaclass.or(inherited_metaclass);
+
+            // If the effective metaclass defines `__prepare__`, call it now
+            // (before the class body runs) to get the namespace object the
+            // body's names should end up copied into. `__prepare__` is a
+            // classmethod by convention — bind `mc` as its first arg
+            // manually (mirroring StaticMethod/ClassMethod unwrapping used
+            // elsewhere for `__new__`), since `lookup_dunder_via_mro`
+            // itself does no descriptor binding.
+            let prepared_namespace: Option<PyObjectRef> = if let Some(mc) = &effective_metaclass {
+                crate::object::lookup_dunder_via_mro(mc, "__prepare__").and_then(|prep_fn| {
+                    let unwrapped = match &*prep_fn.borrow() {
+                        PyObject::ClassMethod { func } => func.clone(),
+                        PyObject::StaticMethod { func } => func.clone(),
+                        _ => prep_fn.clone(),
+                    };
+                    let is_classmethod = matches!(&*prep_fn.borrow(), PyObject::ClassMethod { .. });
+                    let call_args = if is_classmethod {
+                        vec![mc.clone(), name.clone(), bases.clone()]
+                    } else {
+                        vec![name.clone(), bases.clone()]
+                    };
+                    self.call_function(unwrapped, call_args, vec![]).ok()
+                })
+            } else {
+                None
+            };
+
+            let namespace = Rc::new(RefCell::new(HashMap::new()));
+            let name_order = Rc::new(RefCell::new(Vec::new()));
+
+            // Capture the calling frame's module_globals (or globals as fallback)
+            // so that LOAD_NAME inside the class body can resolve module-level names.
+            let caller_module_globals = if self.frames.len() >= 1 {
+                let caller_frame = &self.frames[self.frames.len() - 1];
+                caller_frame.module_globals.clone()
+                    .or_else(|| Some(caller_frame.globals.clone()))
+            } else {
+                None
+            };
+
+            match &*func.borrow() {
+                PyObject::Function { code, closure, .. } => {
+                    let code = code.clone();
+                    let closure = closure.clone();
+                    let mut new_frame = self.acquire_frame(Rc::new(code), namespace.clone(), Rc::clone(&self.builtins), caller_module_globals);
+                    new_frame.closure = closure;
+                    new_frame.name_order = Some(name_order.clone());
+                    self.frames.push(new_frame);
+                    // Must pop this frame unconditionally, including on
+                    // error — `self.execute()?` used to return early on a
+                    // class body raising mid-execution (e.g. a metaclass's
+                    // `__init_subclass__`/descriptor processing failing),
+                    // skipping the pop below and leaking the frame. Once
+                    // leaked, `self.frames` never returns to the depth
+                    // `handle_exception`'s `frame_floor` invariant assumes
+                    // (exactly one frame per still-live `execute()` call),
+                    // so a *later*, unrelated caught exception elsewhere
+                    // finds the stack in a corrupted shape and blows up
+                    // with "stack underflow (peek)" — confirmed via a
+                    // frame_floor/frames.len() trace showing frames.len()
+                    // staying flat across a frame_floor transition where it
+                    // should have dropped by one.
+                    let result = self.execute();
+                    if let Some(frame) = self.frames.pop() {
+                        self.release_frame(frame);
+                    }
+                    result?;
+                }
+                _ => return Err(PyError::type_error("class body must be a function")),
+            }
+
+            let namespace_dict = namespace.borrow().clone();
+            let order = name_order.borrow().clone();
+
+            // If `__prepare__` produced a namespace object, replay the body's
+            // assignments into it in definition order via real `[key] =
+            // value` subscript-assignment — this is what actually invokes
+            // e.g. `_EnumDict.__setitem__` for each name, letting it build
+            // up its own tracking (like `_member_names`) exactly as if the
+            // class body had written directly into it. Doing this as a
+            // replay *after* the body runs (rather than making STORE_NAME
+            // itself dict-object-aware) keeps class body execution
+            // unchanged for the overwhelming common case (no `__prepare__`)
+            // at the cost of not supporting code that reads its own
+            // not-yet-assigned names back out mid-body through the custom
+            // namespace's own __getitem__ — not needed here.
+            //
+            // Deliberately does NOT use the free `py_setitem` function here
+            // (unlike STORE_SUBSCR) — that dispatches a found `__setitem__`
+            // via `call_bound_method`, which (a separate, pre-existing,
+            // documented limitation) spins up a brand-new disposable
+            // `VirtualMachine::new()` for the call. Since this code runs
+            // during `install_source_defined_stdlib`'s enum bootstrap
+            // (i.e. *during* a VM's own construction), that disposable VM's
+            // construction re-runs the exact same enum bootstrap, which
+            // hits this exact same replay again — genuine infinite
+            // recursion (confirmed via gdb backtrace showing repeated
+            // VirtualMachine::new() frames), not just wasted work. `self`
+            // is already the one real, live VM here, so call its own
+            // `call_function` directly instead.
+            if let Some(prepared) = &prepared_namespace {
+                let setitem_fn = if let PyObject::Instance { typ, .. } = &*prepared.borrow() {
+                    crate::object::lookup_dunder_via_mro(typ, "__setitem__")
+                } else {
+                    None
+                };
+                if std::env::var("RPY_DEBUG_METACLASS").is_ok() {
+                    eprintln!("prepare-replay: name={} order={:?} has_setitem={}", name_str, order, setitem_fn.is_some());
+                }
+                for k in &order {
+                    if let Some(v) = namespace_dict.get(k) {
+                        if std::env::var("RPY_DEBUG_METACLASS").is_ok() {
+                            eprintln!("  replaying key={} value={}", k, v.repr());
+                        }
+                        if let Some(f) = &setitem_fn {
+                            self.call_function(f.clone(), vec![prepared.clone(), py_str(k), v.clone()], vec![])?;
+                        } else if let Some(native) = crate::object::native_backing_of(prepared) {
+                            if let PyObject::Dict(pd) = &mut *native.borrow_mut() {
+                                pd.set(py_str(k), v.clone())?;
+                            }
+                        }
+                    }
+                }
+                if std::env::var("RPY_DEBUG_METACLASS").is_ok() {
+                    if let Some(native) = crate::object::native_backing_of(prepared) {
+                        if let PyObject::Dict(pd) = &*native.borrow() {
+                            eprintln!("  final native dict keys: {:?}", pd.keys().iter().map(|k| k.str()).collect::<Vec<_>>());
+                        }
+                    }
                 }
             }
 
-            return Ok(class);
+            if let Some(mc) = effective_metaclass {
+                return self.build_class_with_metaclass(name_str, name.clone(), bases_vec, namespace_dict, order, mc, init_subclass_kwargs, prepared_namespace);
+            }
+
+            return self.default_build_class(name_str, bases_vec, namespace_dict, init_subclass_kwargs, None);
         }
 
         if let PyObject::Closure(c) = &*callable.borrow() {
@@ -4491,6 +4821,204 @@ fn c3_linearize(bases: &[PyObjectRef]) -> PyResult<Vec<PyObjectRef>> {
 }
 
 impl VirtualMachine {
+    /// Real implementation behind `type.__new__(metacls, name, bases,
+    /// namespace, **kwds)`, called directly from `call_function` (see the
+    /// special-case there) with genuine `&mut self` access — mirrors
+    /// `crate::object::type_new_builtin`'s argument parsing exactly, but
+    /// without needing `with_vm_mut`'s thread-local re-entrant VM lookup.
+    fn type_new_impl(&mut self, args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+        if args.len() < 4 {
+            return Err(PyError::type_error("type.__new__() takes at least 4 arguments (metacls, name, bases, namespace)"));
+        }
+        if std::env::var("RPY_DEBUG_METACLASS").is_ok() {
+            eprintln!("type_new_impl: args={:?}", args.iter().map(|a| format!("{}:{}", a.get_type_name(), a.repr())).collect::<Vec<_>>());
+        }
+        let metacls = args[0].clone();
+        let name_str = args[1].str();
+        let bases_vec = match &*args[2].borrow() {
+            PyObject::Tuple(t) => t.clone(),
+            PyObject::None => vec![],
+            _ => vec![args[2].clone()],
+        };
+        let namespace_dict = crate::object::dict_arg_to_hashmap(&args[3], "type.__new__(): namespace must be a dict")?;
+        let kwargs: Vec<(String, PyObjectRef)> = match args.get(4) {
+            Some(d) => match &*d.borrow() {
+                PyObject::Dict(d) => d.items().into_iter().map(|(k, v)| (k.str(), v)).collect(),
+                _ => vec![],
+            },
+            None => vec![],
+        };
+        let is_bare_type = self.builtins.get("type").map(|t| t.is(&metacls)).unwrap_or(false);
+        let metatype = if is_bare_type { None } else { Some(metacls) };
+        self.default_build_class(name_str, bases_vec, namespace_dict, kwargs, metatype)
+    }
+
+    /// The plain (no custom metaclass) class-construction routine — this is
+    /// the Rust equivalent of CPython's `type.__new__`: build the
+    /// `PyObject::Type`, run C3 MRO linearization, apply `__set_name__` and
+    /// `__init_subclass__`. Used directly for ordinary classes, and also
+    /// exposed to Python code as `type.__new__` (see `type_new_builtin`
+    /// below) so a custom metaclass's `__new__` can call
+    /// `super().__new__(metacls, name, bases, namespace, **kwds)` and get
+    /// this same construction — tagged with `metatype` so the result
+    /// correctly reports which (customized) metaclass built it.
+    pub(crate) fn default_build_class(
+        &mut self,
+        name_str: String,
+        bases_vec: Vec<PyObjectRef>,
+        mut namespace_dict: HashMap<String, PyObjectRef>,
+        init_subclass_kwargs: Vec<(String, PyObjectRef)>,
+        metatype: Option<PyObjectRef>,
+    ) -> PyResult<PyObjectRef> {
+        // Detect `class Foo(list): ...` / `(dict)` / `(str)` / `(int)` —
+        // either a direct native base, or inherited transitively through a
+        // base that already carries the marker (propagated down so every
+        // subclass's own dict has it, without needing to walk mro/bases
+        // again at instantiation or dispatch time).
+        for base in &bases_vec {
+            let native_name = match &*base.borrow() {
+                PyObject::BuiltinFunction { name, .. } if crate::object::is_recognized_native_base_name(name) => Some(name.clone()),
+                _ => crate::object::native_base_of_type(base),
+            };
+            if let Some(native_name) = native_name {
+                namespace_dict.insert(crate::object::NATIVE_BASE_MARKER.to_string(), py_str(&native_name));
+                break;
+            }
+        }
+
+        if let Some(mt) = &metatype {
+            namespace_dict.insert(crate::object::METATYPE_KEY.to_string(), mt.clone());
+        }
+
+        let class = PyObjectRef::new(PyObject::Type {
+            name: name_str,
+            dict: namespace_dict.clone(),
+            bases: bases_vec.clone(),
+            mro: vec![],
+        });
+
+        let mut mro = vec![class.clone()];
+        // C3 linearization for proper method resolution
+        let linearization = c3_linearize(&bases_vec)?;
+        mro.extend(linearization);
+        if let PyObject::Type { mro: mro_field, .. } = &mut *class.borrow_mut() {
+            *mro_field = mro;
+        }
+
+        // __set_name__ protocol: for each descriptor in the class dict that has __set_name__, call it
+        for (attr_name, value) in namespace_dict.iter() {
+            // Get __set_name__ from the TYPE (not the instance) to avoid double-binding
+            let typ = match &*value.borrow() {
+                PyObject::Instance { typ, .. } => Some(typ.clone()),
+                _ => None,
+            };
+            let has_set_name = if let Some(t) = &typ {
+                t.borrow().get_attribute("__set_name__").is_ok()
+            } else {
+                false
+            };
+            if has_set_name {
+                if let Some(t) = typ {
+                    let set_name_method = t.borrow().get_attribute("__set_name__").unwrap();
+                    // Call with explicit self=value, then owner=class, name=attr_name
+                    let _ = self.call_function(set_name_method, vec![value.clone(), class.clone(), py_str(attr_name)], vec![]);
+                }
+            }
+        }
+
+        // __init_subclass__ protocol: call on each base class with non-metaclass kwargs
+        for base in &bases_vec {
+            if let Ok(init_subclass) = base.borrow().get_attribute("__init_subclass__") {
+                let _ = self.call_function(init_subclass, vec![class.clone()], init_subclass_kwargs.clone());
+            }
+        }
+
+        Ok(class)
+    }
+
+    /// Build a class via a custom metaclass (explicit `metaclass=` or one
+    /// inherited from a base) — the general path real metaclasses (a
+    /// user-defined class subclassing `type`, e.g. an enum's `EnumType`)
+    /// need: look up `__new__` on the metaclass's own MRO and call it with
+    /// the real CPython `__new__(metacls, name, bases, namespace, **kwds)`
+    /// convention, falling back to the plain `default_build_class` (tagged
+    /// with this metaclass) if the metaclass doesn't override `__new__`
+    /// anywhere short of plain `type`. Also calls `__init__` on the
+    /// metaclass afterward, if defined, mirroring normal instantiation.
+    fn build_class_with_metaclass(
+        &mut self,
+        name_str: String,
+        name_obj: PyObjectRef,
+        bases_vec: Vec<PyObjectRef>,
+        namespace_dict: HashMap<String, PyObjectRef>,
+        order: Vec<String>,
+        metaclass: PyObjectRef,
+        init_subclass_kwargs: Vec<(String, PyObjectRef)>,
+        prepared_namespace: Option<PyObjectRef>,
+    ) -> PyResult<PyObjectRef> {
+        // Ordered PyDict — class/metaclass namespace order is user-visible
+        // (e.g. an enum's member definition order) and plain HashMap
+        // iteration doesn't preserve it, so lay `order` down first. If the
+        // metaclass's own `__prepare__` already produced a (now-populated)
+        // namespace object — e.g. enum's `_EnumDict`, which tracked member
+        // names via its own `__setitem__` as each entry was replayed into
+        // it — use that object itself instead of building a fresh plain
+        // dict, so extra attributes/state it accumulated (like
+        // `_member_names`) survive into what the metaclass's `__new__`
+        // receives.
+        let namespace_py_dict = if let Some(prepared) = prepared_namespace {
+            prepared
+        } else {
+            let mut pd = PyDict::new();
+            for k in &order {
+                if let Some(v) = namespace_dict.get(k) {
+                    pd.set(py_str(k), v.clone())?;
+                }
+            }
+            for (k, v) in &namespace_dict {
+                if !order.contains(k) {
+                    pd.set(py_str(k), v.clone())?;
+                }
+            }
+            PyObjectRef::new(PyObject::Dict(pd))
+        };
+        let bases_tuple = PyObjectRef::imm(PyObject::Tuple(bases_vec.clone()));
+
+        // `__new__` may be wrapped in StaticMethod (as `type.__new__` is,
+        // and as a user metaclass's own `__new__` implicitly is too, since
+        // `__new__` is always an implicit staticmethod in real Python) —
+        // unwrap before calling, same as Type's own get_attribute does for
+        // plain class-attribute access.
+        let new_fn = crate::object::lookup_dunder_via_mro(&metaclass, "__new__").map(|v| {
+            let unwrapped = if let PyObject::StaticMethod { func } = &*v.borrow() { Some(func.clone()) } else { None };
+            unwrapped.unwrap_or(v)
+        });
+
+        let cls = if let Some(new_fn) = new_fn {
+            if std::env::var("RPY_DEBUG_METACLASS").is_ok() {
+                eprintln!("build_class_with_metaclass: name={} metaclass={} new_fn={}", name_str, metaclass.repr(), new_fn.repr());
+            }
+            self.call_function(
+                new_fn,
+                vec![metaclass.clone(), name_obj.clone(), bases_tuple.clone(), namespace_py_dict.clone()],
+                init_subclass_kwargs.clone(),
+            )?
+        } else {
+            // No __new__ anywhere in the metaclass's own mro (shouldn't
+            // normally happen once `type` is registered with one) — fall
+            // back to plain construction, still tagged with this metaclass.
+            self.default_build_class(name_str, bases_vec, namespace_dict, init_subclass_kwargs.clone(), Some(metaclass.clone()))?
+        };
+
+        if let Some(init_fn) = crate::object::lookup_dunder_via_mro(&metaclass, "__init__") {
+            let unwrapped = if let PyObject::StaticMethod { func } = &*init_fn.borrow() { Some(func.clone()) } else { None };
+            let init_fn = unwrapped.unwrap_or(init_fn);
+            let _ = self.call_function(init_fn, vec![cls.clone(), name_obj, bases_tuple, namespace_py_dict], init_subclass_kwargs);
+        }
+
+        Ok(cls)
+    }
+
     /// Call __next__ on a user-class iterator. Used by FOR_ITER for Instance types.
     fn for_iter_next(&mut self, iter_val: PyObjectRef, jump_offset: u32) -> PyResult<Option<PyObjectRef>> {
         use crate::object::ObjectAccess;

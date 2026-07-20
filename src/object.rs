@@ -2246,6 +2246,12 @@ pub fn contains_op(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<bool> {
         let container = a.borrow();
         match &*container {
             PyObject::Instance { typ, .. } => lookup_dunder_via_mro(typ, "__contains__"),
+            // `x in SomeClass` — a class object's metaclass may define
+            // `__contains__` directly (e.g. enum's EnumType); otherwise
+            // fall through below to the generic iterate-and-compare path,
+            // which already works for any class whose metatype provides
+            // `__iter__` (see builtin_iter's PyObject::Type arm).
+            PyObject::Type { .. } => metatype_of(a).and_then(|mt| lookup_dunder_via_mro(&mt, "__contains__")),
             _ => None,
         }
     };
@@ -2255,6 +2261,16 @@ pub fn contains_op(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<bool> {
     }
     if let Some(native) = native_backing_of(a) {
         return contains_op(&native, b);
+    }
+    if matches!(&*a.borrow(), PyObject::Type { .. }) {
+        let it = builtin_iter(&[a.clone()])?;
+        loop {
+            match builtin_next(&[it.clone()]) {
+                Ok(item) => { if item.equals(b)? { return Ok(true); } }
+                Err(e) if is_stop_iteration_error(&e) => return Ok(false),
+                Err(e) => return Err(e),
+            }
+        }
     }
     let container = a.borrow();
     match &*container {
@@ -2342,6 +2358,19 @@ pub fn builtin_len(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             }
             Err(PyError::type_error(format!("object of type '{}' has no len()", obj.type_name())))
         }
+        // A class object itself, via its metaclass's `__len__` (e.g.
+        // `len(SomeEnum)` — see the matching GET_ITER/builtin_iter handling
+        // for why this needs metatype_of rather than ordinary lookup).
+        PyObject::Type { .. } => {
+            let f = metatype_of(&args[0]).and_then(|mt| lookup_dunder_via_mro(&mt, "__len__"));
+            if let Some(f) = f {
+                let result = call_bound_method(f, args[0].clone(), vec![])?;
+                let n = result.borrow();
+                if let PyObject::Int(i) = &*n { return Ok(py_int(i.clone())) }
+                return Err(PyError::type_error("__len__() should return an int"));
+            }
+            Err(PyError::type_error(format!("object of type '{}' has no len()", obj.type_name())))
+        }
         _ => Err(PyError::type_error(format!("object of type '{}' has no len()", obj.type_name()))),
     }
 }
@@ -2404,65 +2433,77 @@ pub fn builtin_type_of(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             }
         }
     } else if args.len() == 3 {
-        // type(name, bases, dict) -> create a new class (metaclass usage)
-        let name_str = args[0].str();
-        let bases_vec = if let PyObject::Tuple(t) = &*args[1].borrow() {
-            t.clone()
-        } else if matches!(&*args[1].borrow(), PyObject::None) {
-            vec![]
-        } else {
-            vec![args[1].clone()]
-        };
-        let namespace_dict = {
-            let b = args[2].borrow();
-            match &*b {
-                PyObject::Dict(d) => {
-                    let mut h = HashMap::new();
-                    for (k, v) in d.items() {
-                        h.insert(k.str(), v);
-                    }
-                    h
-                }
-                _ => return Err(PyError::type_error("type() third argument must be a dict")),
-            }
-        };
-        // Look up the 'object' type from builtins to use as default base
-        // Since we're in object.rs we can't easily access builtins, so we
-        // create the class without implicit object base if no bases given
-        let class = PyObjectRef::new(PyObject::Type {
-            name: name_str,
-            dict: namespace_dict,
-            bases: bases_vec.clone(),
-            mro: vec![],
-        });
-        // Simple MRO: class itself + each base's linearization
-        let mut mro = vec![class.clone()];
-        for base in &bases_vec {
-            let base_mro = match &*base.borrow() {
-                PyObject::Type { mro: b_mro, .. } if !b_mro.is_empty() => b_mro.clone(),
-                _ => vec![base.clone()],
-            };
-            for item in base_mro {
-                if !mro.iter().any(|m| m.is(&item)) {
-                    mro.push(item);
-                }
-            }
-        }
-        if let PyObject::Type { mro: mro_field, .. } = &mut *class.borrow_mut() {
-            *mro_field = mro;
-        }
-        Ok(class)
+        // type(name, bases, dict) -> create a new class (metaclass usage).
+        // Delegates to the VM's default_build_class so a dynamically
+        // created class gets exactly the same treatment as one from a
+        // `class Foo(...):` statement (native-base propagation, real C3
+        // MRO, __set_name__, __init_subclass__) instead of the separate,
+        // less complete hand-rolled logic this used to have.
+        let bases_vec = to_bases_vec(&args[1]);
+        let namespace_dict = dict_arg_to_hashmap(&args[2], "type() third argument must be a dict")?;
+        with_vm_mut(|vm| vm.default_build_class(args[0].str(), bases_vec, namespace_dict, vec![], None))?
     } else {
         Err(PyError::type_error("type() takes exactly one or three arguments"))
     }
 }
 
-pub fn builtin_int(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.len() > 0 {
-        let t = args[0].borrow().type_name().to_string();
-        if t == "instance" {
-        }
+fn to_bases_vec(bases: &PyObjectRef) -> Vec<PyObjectRef> {
+    if let PyObject::Tuple(t) = &*bases.borrow() {
+        t.clone()
+    } else if matches!(&*bases.borrow(), PyObject::None) {
+        vec![]
+    } else {
+        vec![bases.clone()]
     }
+}
+
+/// A class-namespace argument (`type.__new__`'s 4th positional arg, or
+/// `type(name, bases, ns)`'s 3rd) is usually a plain dict, but when a
+/// metaclass has a `__prepare__` returning a real dict-subclass instance
+/// (e.g. enum's `_EnumDict`, used to track member-definition order via an
+/// overridden `__setitem__` — see `EnumType.__prepare__`), it arrives here
+/// as a `PyObject::Instance` whose actual dict contents live in its native
+/// backing, not a bare `PyObject::Dict`. Check both.
+pub(crate) fn dict_arg_to_hashmap(namespace: &PyObjectRef, err_msg: &str) -> PyResult<HashMap<String, PyObjectRef>> {
+    if let Some(native) = native_backing_of(namespace) {
+        return dict_arg_to_hashmap(&native, err_msg);
+    }
+    match &*namespace.borrow() {
+        PyObject::Dict(d) => Ok(d.items().into_iter().map(|(k, v)| (k.str(), v)).collect()),
+        _ => Err(PyError::type_error(err_msg)),
+    }
+}
+
+/// `type.__new__(metacls, name, bases, namespace, **kwds)` — the real,
+/// CPython-shaped 4-argument metaclass `__new__` convention (distinct from
+/// `builtin_type_of`'s `type(x)`/`type(name, bases, ns)` conventions above,
+/// which have no `metacls` parameter — kept as two separate functions so
+/// the two calling shapes are never ambiguous). Reached when a user
+/// metaclass's own `__new__` calls `super().__new__(metacls, name, bases,
+/// namespace, **kwds)` and the super-mro walk bottoms out at plain `type`
+/// (see `type`'s registration in `create_builtins`).
+pub fn type_new_builtin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if std::env::var("RPY_DEBUG_METACLASS").is_ok() {
+        eprintln!("type_new_builtin: args.len()={} args={:?}", args.len(), args.iter().map(|a| a.repr()).collect::<Vec<_>>());
+    }
+    if args.len() < 4 {
+        return Err(PyError::type_error("type.__new__() takes at least 4 arguments (metacls, name, bases, namespace)"));
+    }
+    let metacls = args[0].clone();
+    let name_str = args[1].str();
+    let bases_vec = to_bases_vec(&args[2]);
+    let namespace_dict = dict_arg_to_hashmap(&args[3], "type.__new__(): namespace must be a dict")?;
+    let kwargs: Vec<(String, PyObjectRef)> = args.get(4)
+        .map(|d| dict_arg_to_hashmap(d, "").unwrap_or_default().into_iter().collect())
+        .unwrap_or_default();
+    let metatype = with_vm_mut(|vm| {
+        let is_bare_type = vm.builtins.get("type").map(|t| t.is(&metacls)).unwrap_or(false);
+        if is_bare_type { None } else { Some(metacls.clone()) }
+    })?;
+    with_vm_mut(|vm| vm.default_build_class(name_str, bases_vec, namespace_dict, kwargs, metatype))?
+}
+
+pub fn builtin_int(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() { return Ok(py_int(0)); }
     let obj = args[0].borrow();
     match &*obj {
@@ -2526,6 +2567,13 @@ pub fn builtin_int(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         PyObject::Bool(b) => Ok(py_int(if *b { 1 } else { 0 })),
         PyObject::Instance { dict: _, typ: _ } => {
             drop(obj);
+            // A class transparently subclassing `int` (e.g. IntEnum
+            // members) with no `__int__` override converts via its native
+            // backing directly — real Python's `int(x)` for an int
+            // subclass instance just IS that underlying int value.
+            if let Some(native) = native_backing_of(&args[0]) {
+                return builtin_int(&[native]);
+            }
             // Try calling __int__ method on the instance
             let args0 = &args[0];
             if let Ok(int_method) = args0.borrow().get_attribute("__int__") {
@@ -3549,6 +3597,11 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 // Generators are their own iterator (return self)
                 return Ok(args[0].clone());
             }
+            // A class object itself, iterable via its metaclass's
+            // `__iter__` (e.g. `iter(SomeEnum)` / `list(SomeEnum)`) — see
+            // the matching GET_ITER opcode handling in vm.rs for why this
+            // needs metatype_of rather than ordinary attribute lookup.
+            PyObject::Type { .. } => metatype_of(&args[0]).and_then(|mt| lookup_dunder_via_mro(&mt, "__iter__")),
             _ => None,
         }
     };
@@ -4629,9 +4682,33 @@ pub(crate) fn lookup_dunder_via_mro(typ: &PyObjectRef, name: &str) -> Option<PyO
 
 pub(crate) const NATIVE_BASE_MARKER: &str = "__native_base__";
 pub(crate) const NATIVE_BACKING_KEY: &str = "__native__";
+/// Internal bookkeeping key (not user-visible in `__dict__`/introspection,
+/// same treatment as NATIVE_BASE_MARKER) recording the *metaclass* used to
+/// build a class object, when it's something other than the plain builtin
+/// `type` — e.g. a class built via `class Choices(Enum, metaclass=ChoicesType)`
+/// carries `metatype = ChoicesType` here. Our object model has no separate
+/// "type of this type" field on `PyObject::Type` (classes ARE
+/// `PyObject::Type` regardless of what constructed them), so this dict entry
+/// is how `type(cls)`, metaclass-level attribute fallback, and metaclass
+/// *inheritance* (a subclass with no explicit `metaclass=` must still use its
+/// base's custom metaclass) all recover "which metaclass built this".
+pub(crate) const METATYPE_KEY: &str = "__metatype__";
+
+/// The metaclass that built `typ`, if it's something other than plain
+/// `type` — checked on the class's own dict only, exactly like
+/// `native_base_of_type` (this key is not propagated to subclasses; each
+/// subclass gets its own METATYPE_KEY set at its own construction time by
+/// `__build_class__`'s metaclass-inheritance resolution).
+pub(crate) fn metatype_of(typ: &PyObjectRef) -> Option<PyObjectRef> {
+    if let PyObject::Type { dict, .. } = &*typ.borrow() {
+        dict.get(METATYPE_KEY).cloned()
+    } else {
+        None
+    }
+}
 
 pub(crate) fn is_recognized_native_base_name(name: &str) -> bool {
-    matches!(name, "list" | "dict" | "str")
+    matches!(name, "list" | "dict" | "str" | "int")
 }
 
 /// Name of the builtin type (list/dict/str) a class transparently
@@ -4661,6 +4738,7 @@ pub(crate) fn make_native_backing(kind: &str) -> PyObjectRef {
         "list" => py_list(vec![]),
         "dict" => py_dict(),
         "str" => py_str(""),
+        "int" => py_int(0),
         _ => py_none(),
     }
 }
@@ -4694,6 +4772,7 @@ pub(crate) fn synthesize_native_init(kind: &str, args: &[PyObjectRef]) -> PyResu
                 Ok(py_str(""))
             }
         }
+        "int" => builtin_int(args),
         _ => Ok(py_none()),
     }
 }
@@ -4772,9 +4851,18 @@ impl ObjectAccess for PyObject {
                 if name == "__name__" {
                     return Ok(py_str(mod_name));
                 }
-                dict.get_str(&name).cloned().ok_or_else(|| PyError::attribute_error(format!(
-                    "'module' object has no attribute '{}'", name
-                )))
+                dict.get_str(&name).cloned().ok_or_else(|| {
+                    if std::env::var("RPY_DEBUG_ATTR").is_ok() {
+                        eprintln!("MODULE_ATTR_FAIL: module={} attr={} keys={:?}", mod_name, name, {
+                            let mut ks: Vec<&String> = dict.keys().collect();
+                            ks.sort();
+                            ks
+                        });
+                    }
+                    PyError::attribute_error(format!(
+                        "'module' object has no attribute '{}'", name
+                    ))
+                })
             }
             PyObject::Type { dict, mro, bases, name: type_name } => {
                 if name == "__dict__" {
@@ -4783,7 +4871,7 @@ impl ObjectAccess for PyObject {
                     // and must not leak into user-visible introspection.
                     let mut pd = PyDict::new();
                     for (k, v) in dict.iter() {
-                        if k == NATIVE_BASE_MARKER { continue; }
+                        if k == NATIVE_BASE_MARKER || k == METATYPE_KEY { continue; }
                         let _ = pd.set(py_str(k), v.clone());
                     }
                     return Ok(PyObjectRef::new(PyObject::Dict(pd)));
@@ -7650,16 +7738,25 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
         let o = obj.borrow();
         match &*o {
             PyObject::Type { dict: type_dict, mro, .. } => {
-                // PEP 560: cls[args] checks for __class_getitem__ on the type and its MRO
-                type_dict.get_str("__class_getitem__").cloned().or_else(|| {
-                    for base in mro.iter().skip(1) {
-                        if let PyObject::Type { dict: base_dict, .. } = &*base.borrow() {
-                            if let Some(val) = base_dict.get_str("__class_getitem__") {
-                                return Some(val.clone());
+                // Real Python checks the metaclass's `__getitem__` first
+                // (subscripting a class object is, at bottom, calling
+                // `type(cls).__getitem__(cls, key)`) — e.g. enum's
+                // `EnumType.__getitem__` for `Color['RED']` name lookup.
+                // `__class_getitem__` (PEP 560, `list[int]`-style generic
+                // aliasing) is the fallback for classes with no such
+                // metaclass method.
+                let metatype_getitem = metatype_of(obj).and_then(|mt| lookup_dunder_via_mro(&mt, "__getitem__"));
+                metatype_getitem.or_else(|| {
+                    type_dict.get_str("__class_getitem__").cloned().or_else(|| {
+                        for base in mro.iter().skip(1) {
+                            if let PyObject::Type { dict: base_dict, .. } = &*base.borrow() {
+                                if let Some(val) = base_dict.get_str("__class_getitem__") {
+                                    return Some(val.clone());
+                                }
                             }
                         }
-                    }
-                    None
+                        None
+                    })
                 })
             }
             PyObject::Instance { typ, .. } => {

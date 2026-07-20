@@ -1202,42 +1202,10 @@ pub fn create_heapq_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
-pub fn create_enum_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! enum_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
-    enum_func!("auto", |args| {
-        let _ = args;
-        let val = ENUM_AUTO_COUNTER.fetch_add(1, Ordering::SeqCst);
-        Ok(py_int(val))
-    });
-
-    enum_func!("Enum", |args| {
-        if args.is_empty() { return Err(PyError::type_error("Enum() requires at least 1 argument")); }
-        // Enum is a callable that returns an int.
-        // If called with (name, value), return value; if called with just value, return it.
-        if args.len() >= 2 {
-            Ok(args[1].clone())
-        } else {
-            Ok(args[0].clone())
-        }
-    });
-
-    enum_func!("IntEnum", |args| {
-        if args.is_empty() { return Err(PyError::type_error("IntEnum() requires at least 1 argument")); }
-        if args.len() >= 2 {
-            Ok(args[1].clone())
-        } else {
-            Ok(args[0].clone())
-        }
-    });
-
-    d
-}
+// Real Enum/IntEnum/StrEnum/EnumType/auto/unique semantics are implemented
+// as real Python source instead — see ENUM_SOURCE (below) and
+// VirtualMachine::install_source_defined_stdlib.
+pub const ENUM_SOURCE: &str = include_str!("enum_extra.py");
 
 // Build a UUID instance from a 32-hex-char string (no dashes).
 fn make_uuid(hex32: String) -> PyObjectRef {
@@ -2871,6 +2839,16 @@ pub fn create_locale_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
+/// `gettext` is entirely defined as Python source — see
+/// VirtualMachine::install_source_defined_stdlib and gettext_extra.py. This
+/// just provides the empty module dict it gets merged into.
+pub fn create_gettext_dict() -> HashMap<String, PyObjectRef> {
+    HashMap::new()
+}
+
+/// gettext module source — see VirtualMachine::install_source_defined_stdlib.
+pub const GETTEXT_SOURCE: &str = include_str!("gettext_extra.py");
+
 pub fn create_colorsys_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! cs_func {
@@ -4061,7 +4039,6 @@ use std::rc::Rc;
 use std::cell::RefCell;
 use num_traits::ToPrimitive;
 use num_bigint::BigInt;
-use std::sync::atomic::Ordering;
 
 // ---------------------------------------------------------------------------
 // numbers module — Number ABCs as py_str stubs
