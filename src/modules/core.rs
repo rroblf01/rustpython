@@ -1137,7 +1137,7 @@ pub fn create_importlib_dict() -> HashMap<String, PyObjectRef> {
     }
 
     /// Helper: import a dotted module chain, ensuring parents are loaded first
-    fn import_dotted(vm: &mut crate::vm::VirtualMachine, name: &str) -> Result<PyObjectRef, String> {
+    fn import_dotted(vm: &mut crate::vm::VirtualMachine, name: &str) -> PyResult<PyObjectRef> {
         // If it's already loaded, return it
         if let Some(module) = vm.modules.get(name) {
             return Ok(module.clone());
@@ -1168,7 +1168,7 @@ pub fn create_importlib_dict() -> HashMap<String, PyObjectRef> {
             if let Some(module) = vm.modules.get(name) {
                 return Ok(module.clone());
             }
-            return Err(format!("No module named '{}'", name));
+            return Err(PyError::ImportError(format!("No module named '{}'", name)));
         }
         // Simple name
         let module = vm.import_module_from_file(name)?;
@@ -1202,10 +1202,7 @@ pub fn create_importlib_dict() -> HashMap<String, PyObjectRef> {
             if let Some(module) = vm.modules.get(&resolved) {
                 return Ok(module.clone());
             }
-            match import_dotted(vm, &resolved) {
-                Ok(module) => Ok(module),
-                Err(e) => Err(PyError::ImportError(format!("import_module error: {}", e))),
-            }
+            import_dotted(vm, &resolved)
         })?
     });
 

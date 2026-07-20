@@ -960,7 +960,29 @@ impl VirtualMachine {
         }
     }
 
-    pub fn import_module_from_file(&mut self, name: &str) -> Result<PyObjectRef, String> {
+    pub fn import_module_from_file(&mut self, name: &str) -> PyResult<PyObjectRef> {
+        // Guard against genuine infinite import recursion with a clean
+        // error (showing the exact chain) instead of a raw stack overflow —
+        // kept permanently (env-gated print is always-on; the depth check
+        // itself is cheap) rather than added back by hand each time.
+        thread_local! {
+            static IMPORT_CHAIN: RefCell<Vec<String>> = RefCell::new(Vec::new());
+        }
+        let depth = IMPORT_CHAIN.with(|c| c.borrow().len());
+        if depth > 150 {
+            let chain = IMPORT_CHAIN.with(|c| c.borrow().join(" -> "));
+            return Err(PyError::ImportError(format!("import recursion too deep, likely a genuine cycle: {} -> {}", chain, name)));
+        }
+        IMPORT_CHAIN.with(|c| c.borrow_mut().push(name.to_string()));
+        if std::env::var("RPY_DEBUG_IMPORT").is_ok() {
+            eprintln!("{}IMPORT_FILE: {}", "  ".repeat(depth), name);
+        }
+        let result = self.import_module_from_file_inner(name);
+        IMPORT_CHAIN.with(|c| { c.borrow_mut().pop(); });
+        result
+    }
+
+    fn import_module_from_file_inner(&mut self, name: &str) -> PyResult<PyObjectRef> {
         if cfg!(feature = "profile") {
             if let Ok(status) = std::fs::read_to_string(format!("/proc/{}/status", std::process::id())) {
                 if let Some(_rss_line) = status.lines().find(|l| l.starts_with("VmRSS:")) {
@@ -1031,11 +1053,13 @@ impl VirtualMachine {
                     // Try to find the child as a file/subpackage in parent's __path__
                     if let Some(ref base) = parent_path {
                         let base_trimmed = base.trim_end_matches('/');
+                        let mut found_child = false;
                         for candidate in &[
                             format!("{}/{}.py", base_trimmed, child),
                             format!("{}/{}/__init__.py", base_trimmed, child),
                         ] {
                             if let Ok(source) = std::fs::read_to_string(candidate) {
+                                found_child = true;
                                 let is_pkg = candidate.ends_with("__init__.py");
                                 let empty_dict = if is_pkg {
                                     if let Some(pkg_dir) = std::path::Path::new(candidate).parent() {
@@ -1078,7 +1102,7 @@ impl VirtualMachine {
                                     let child_name = full_name[dot_pos+1..].to_string();
                                     if let Some(parent_mod) = self.modules.get(&parent_name).cloned() {
                                         if let PyObject::Module { dict, .. } = &mut *parent_mod.borrow_mut() {
-                                            dict.insert(child_name, module.clone());
+                                            dict.insert(child_name.clone(), module.clone());
                                         }
                                     }
                                 }
@@ -1086,6 +1110,21 @@ impl VirtualMachine {
                                 parent_path = None;
                                 break;
                             }
+                        }
+                        if !found_child {
+                            // Neither `child.py` nor `child/__init__.py` exists
+                            // under the parent's __path__ — this dotted
+                            // component isn't a submodule (could be a plain
+                            // attribute of the parent, e.g. `from pkg import
+                            // some_function`, or genuinely missing). Previously
+                            // falling through here silently left `current_name`
+                            // pointing at the last-resolved ANCESTOR package,
+                            // and `all_resolved` stayed true, so the caller
+                            // returned that ancestor module mislabeled as the
+                            // full dotted name — e.g. `import pkg.missing`
+                            // would silently succeed, yielding `pkg` itself.
+                            all_resolved = false;
+                            break;
                         }
                     } else {
                         all_resolved = false;
@@ -1210,7 +1249,7 @@ impl VirtualMachine {
                 }
             }
         }
-        Err(format!("No module named '{}'", name))
+        Err(PyError::ImportError(format!("No module named '{}'", name)))
     }
 
     fn get_sys_path(&self) -> Vec<String> {
@@ -1279,12 +1318,12 @@ impl VirtualMachine {
             None => {
                 let mut parser = crate::parser::Parser::new(source);
                 let program = parser.parse_program()
-                    .map_err(|e| format!("Parse error in '{}': {}", name, e))?;
+                    .map_err(|e| PyError::RuntimeError(format!("Parse error in '{}': {}", name, e)))?;
                 drop(parser);  // Free parser memory (AST is now in `program`)
 
                 let mut compiler = crate::compiler::Compiler::new();
                 let compiled = compiler.compile(&program, path)
-                    .map_err(|e| format!("Compile error: {}", e))?;
+                    .map_err(|e| PyError::RuntimeError(format!("Compile error: {}", e)))?;
                 drop(compiler);  // Free compiler internal tables
                 drop(program);   // Free AST — CodeObject is now self-contained
 
@@ -1352,9 +1391,15 @@ impl VirtualMachine {
                 }
             }
         }
-        self.exec_code(code, Some(Rc::clone(&module_globals))).map_err(|e| {
-            format!("{}", e)
-        })?;
+        // Preserve the real exception (type + object) raised by the module
+        // body as-is — this used to be flattened into a formatted String via
+        // `.map_err(|e| format!("{}", e))`, which meant a module raising e.g.
+        // TypeError during import surfaced to the importer as a generic
+        // ImportError with the TypeError's message glued into the text
+        // instead of the actual TypeError, so `except TypeError` (or
+        // anything other than a blanket `except ImportError`/`except
+        // Exception`) around an import could never catch it.
+        self.exec_code(code, Some(Rc::clone(&module_globals)))?;
         let globals_copy = module_globals.borrow().clone();
         // If a placeholder module was already registered under this name
         // (e.g. by import_module_from_file, to support circular imports),
@@ -1482,7 +1527,25 @@ impl VirtualMachine {
                 *p.borrow_mut() = Some(self as *mut VirtualMachine);
             }
         });
-        let result = self.execute_inner();
+        // Every call site that pushes a frame onto `self.frames` immediately
+        // calls `execute()` and pops exactly that one frame once it returns
+        // (see exec_code, call_function's Function arm, __build_class__,
+        // generator/coroutine drivers) — so for the entire lifetime of this
+        // `execute_inner` invocation, `self.frames[frame_floor]` is *this*
+        // call's own frame, and any frames below it belong to an outer,
+        // currently-suspended `execute()` call further down the Rust stack.
+        // Bounding exception handling to `frame_floor` matters: without it,
+        // an uncaught exception from a nested call (a Python function call,
+        // a module body during import, ...) would find and "handle" itself
+        // using an outer/caller frame's try/except — while that outer frame
+        // was not actually the one executing, and the intervening frame(s)
+        // were never popped/unwound. Instead, nested calls must propagate an
+        // unhandled exception as a plain Err all the way back to their own
+        // call site (which pops its own frame), letting the *caller's own*
+        // execute_inner loop (now correctly with its own frame on top) find
+        // the enclosing handler itself.
+        let frame_floor = self.frames.len() - 1;
+        let result = self.execute_inner(frame_floor);
         // Store exception info for sys.exc_info()
         if let Err(ref e) = result {
             self.exc_type = Some(py_str(&e.type_name()));
@@ -1491,7 +1554,7 @@ impl VirtualMachine {
         result
     }
 
-    fn execute_inner(&mut self) -> PyResult<PyObjectRef> {
+    fn execute_inner(&mut self, frame_floor: usize) -> PyResult<PyObjectRef> {
         loop {
             let result = self.execute_instruction();
             match result {
@@ -3573,6 +3636,21 @@ impl VirtualMachine {
                                 let p = p.borrow();
                                 if let PyObject::Str(s) = &*p { Some(s.to_string()) } else { None }
                             });
+                        // level=1 (`from . import x`) resolves relative to
+                        // __package__ itself; each additional dot
+                        // (level=2 → `from .. import x`, etc.) goes up one
+                        // more enclosing package, stripping one more
+                        // trailing component. This was previously ignored
+                        // entirely — `from .. import x` resolved identically
+                        // to `from . import x`, silently importing from the
+                        // wrong (child, not parent) package whenever a
+                        // module used a multi-dot relative import.
+                        let pkg = pkg.map(|p| {
+                            let mut segs: Vec<&str> = p.split('.').collect();
+                            let strip = level.saturating_sub(1);
+                            if strip >= segs.len() { segs.clear(); } else { segs.truncate(segs.len() - strip); }
+                            segs.join(".")
+                        });
                         let resolved_name = match pkg {
                             Some(p) if !p.is_empty() => {
                                 if name.is_empty() { p } else { format!("{}.{}", p, name) }
@@ -3661,7 +3739,7 @@ impl VirtualMachine {
                                 }
                             }
                         }
-                        Err(msg) => return Err(PyError::ImportError(msg)),
+                        Err(e) => return Err(e),
                     }
                 }
             }
@@ -3753,8 +3831,28 @@ impl VirtualMachine {
                                 }
                                 self.frames[fi].push(submod);
                             }
-                            Err(_) => {
-                                return Err(PyError::ImportError(format!("cannot import name '{}' from '{}'", name, module_name)));
+                            Err(e) => {
+                                // RPY_DEBUG_IMPORT=1 prints the real underlying
+                                // error before it potentially gets flattened
+                                // into the generic message below (kept
+                                // permanently per user request, 2026-07-19).
+                                if std::env::var("RPY_DEBUG_IMPORT").is_ok() {
+                                    eprintln!("IMPORT_FROM_FAIL: name={} module={} err={}", name, module_name, e);
+                                }
+                                // Only "the submodule doesn't exist" collapses
+                                // to CPython's generic "cannot import name"
+                                // message here. Any other error (e.g. the
+                                // submodule's own body raising a real
+                                // exception) must propagate as that real
+                                // exception — previously this branch always
+                                // discarded it in favor of the generic
+                                // ImportError, so a genuine bug inside an
+                                // imported submodule was indistinguishable
+                                // from the name simply not existing.
+                                if matches!(e, PyError::ImportError(_)) {
+                                    return Err(PyError::ImportError(format!("cannot import name '{}' from '{}'", name, module_name)));
+                                }
+                                return Err(e);
                             }
                         }
                     } else {
@@ -4689,9 +4787,12 @@ impl VirtualMachine {
         Err(PyError::type_error(format!("'{}' object is not callable", type_name)))
     }
 
-    fn handle_exception(&mut self, error: &PyError) -> bool {
-        // Search all frames for exception handlers
-        for frame in self.frames.iter_mut().rev() {
+    fn handle_exception(&mut self, error: &PyError, frame_floor: usize) -> bool {
+        // Only this execute_inner invocation's own frame may handle the
+        // exception here — frames below `frame_floor` belong to an outer,
+        // suspended execute() call and must never be touched from inside a
+        // nested one (see the comment on `execute()` for why).
+        for frame in self.frames[frame_floor..].iter_mut().rev() {
             while let Some(handler) = frame.exception_handlers.pop() {
                 // For any handler (Except or Finally), restore stack and transfer control
                 frame.stack.truncate(handler.stack_depth);

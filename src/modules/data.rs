@@ -502,21 +502,60 @@ pub fn create_itertools_dict() -> HashMap<String, PyObjectRef> {
         };
     }
 
-    it_func!("chain", |args| {
-        let mut items = Vec::new();
-        for arg in args {
-            if let Ok(it) = builtin_iter(&[arg.clone()]) {
+    // chain is represented as a callable Instance (not a bare
+    // BuiltinFunction) so it can also expose `chain.from_iterable(...)` —
+    // BuiltinFunction has no attribute storage at all (set_attribute has no
+    // arm for it), so a plain function couldn't hold a from_iterable
+    // sibling method the way real itertools.chain does.
+    {
+        let mut chain_type_dict = HashMap::new();
+        chain_type_dict.insert("__call__".to_string(), PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(|args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+            // vm.call_function's `__call__` dispatch always prepends self
+            // (matching a real Python `__call__(self, *args)` method) before
+            // calling whatever `__call__` resolves to — unlike attribute
+            // access via LOAD_ATTR, which does NOT auto-bind a bare Closure.
+            // args[0] here is the chain instance itself; skip it.
+            let mut items = Vec::new();
+            for arg in args.iter().skip(1) {
+                if let Ok(it) = builtin_iter(&[arg.clone()]) {
+                    loop {
+                        match builtin_next(&[it.clone()]) {
+                            Ok(v) => items.push(v),
+                            Err(PyError::StopIteration) => break,
+                            Err(e) => return Err(e),
+                        }
+                    }
+                }
+            }
+            Ok(py_list(items))
+        }))));
+        chain_type_dict.insert("from_iterable".to_string(), PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(|args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+            if args.is_empty() { return Err(PyError::type_error("from_iterable() missing argument")); }
+            let mut items = Vec::new();
+            if let Ok(outer_it) = builtin_iter(&[args[0].clone()]) {
                 loop {
-                    match builtin_next(&[it.clone()]) {
-                        Ok(v) => items.push(v),
+                    match builtin_next(&[outer_it.clone()]) {
+                        Ok(inner) => {
+                            if let Ok(inner_it) = builtin_iter(&[inner]) {
+                                loop {
+                                    match builtin_next(&[inner_it.clone()]) {
+                                        Ok(v) => items.push(v),
+                                        Err(PyError::StopIteration) => break,
+                                        Err(e) => return Err(e),
+                                    }
+                                }
+                            }
+                        }
                         Err(PyError::StopIteration) => break,
                         Err(e) => return Err(e),
                     }
                 }
             }
-        }
-        Ok(py_list(items))
-    });
+            Ok(py_list(items))
+        }))));
+        let chain_type = PyObjectRef::new(PyObject::Type { name: "chain".to_string(), dict: chain_type_dict, bases: vec![], mro: vec![] });
+        d.insert("chain".to_string(), PyObjectRef::new(PyObject::Instance { typ: chain_type, dict: HashMap::new() }));
+    }
 
     it_func!("count", |args| {
         let start = if args.len() > 0 {
@@ -589,6 +628,94 @@ pub fn create_itertools_dict() -> HashMap<String, PyObjectRef> {
             }
             Ok(py_list(items))
         }
+    });
+
+    it_func!("islice", |args| {
+        if args.is_empty() { return Err(PyError::type_error("islice() missing arguments")); }
+        let mut items = Vec::new();
+        if let Ok(it) = builtin_iter(&[args[0].clone()]) {
+            loop {
+                match builtin_next(&[it.clone()]) {
+                    Ok(v) => items.push(v),
+                    Err(PyError::StopIteration) => break,
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        let n = items.len() as i64;
+        let (start, stop, step) = match args.len() {
+            1 => return Err(PyError::type_error("islice() missing stop argument")),
+            2 => (0i64, args[1].as_i64().unwrap_or(n), 1i64),
+            _ => {
+                let start = args[1].as_i64().unwrap_or(0);
+                let stop = args[2].as_i64().unwrap_or(n);
+                let step = if args.len() > 3 { args[3].as_i64().unwrap_or(1) } else { 1 };
+                (start, stop, step)
+            }
+        };
+        let stop = stop.min(n).max(0);
+        let start = start.max(0);
+        let step = step.max(1);
+        let mut result = Vec::new();
+        let mut i = start;
+        while i < stop {
+            result.push(items[i as usize].clone());
+            i += step;
+        }
+        Ok(py_list(result))
+    });
+
+    it_func!("tee", |args| {
+        if args.is_empty() { return Err(PyError::type_error("tee() missing argument")); }
+        let n = if args.len() > 1 { args[1].as_i64().unwrap_or(2) as usize } else { 2 };
+        let mut items = Vec::new();
+        if let Ok(it) = builtin_iter(&[args[0].clone()]) {
+            loop {
+                match builtin_next(&[it.clone()]) {
+                    Ok(v) => items.push(v),
+                    Err(PyError::StopIteration) => break,
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        let mut tees = Vec::with_capacity(n);
+        for _ in 0..n {
+            let it = builtin_iter(&[py_list(items.clone())])?;
+            tees.push(it);
+        }
+        Ok(py_tuple(tees))
+    });
+
+    it_func!("zip_longest", |args| {
+        let mut fillvalue = py_none();
+        let mut iterables = args;
+        if let Some(last) = iterables.last() {
+            if let PyObject::Dict(d) = &*last.borrow() {
+                if let Ok(Some(v)) = d.get(&py_str("fillvalue")) { fillvalue = v; }
+                iterables = &iterables[..iterables.len() - 1];
+            }
+        }
+        let mut lists: Vec<Vec<PyObjectRef>> = Vec::new();
+        for arg in iterables {
+            let mut items = Vec::new();
+            if let Ok(it) = builtin_iter(&[arg.clone()]) {
+                loop {
+                    match builtin_next(&[it.clone()]) {
+                        Ok(v) => items.push(v),
+                        Err(PyError::StopIteration) => break,
+                        Err(e) => return Err(e),
+                    }
+                }
+            }
+            lists.push(items);
+        }
+        let max_len = lists.iter().map(|l| l.len()).max().unwrap_or(0);
+        let mut result = Vec::with_capacity(max_len);
+        for i in 0..max_len {
+            let row: Vec<PyObjectRef> = lists.iter().map(|l| l.get(i).cloned().unwrap_or_else(|| fillvalue.clone())).collect();
+            result.push(py_tuple(row));
+        }
+        Ok(py_list(result))
     });
 
     it_func!("accumulate", |args| {
