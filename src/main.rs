@@ -247,6 +247,11 @@ fn main() {
                     }
                 };
 
+                if std::env::var("RPY_DEBUG_DIS").is_ok() {
+                    for (i, instr) in code_obj.instructions.iter().enumerate() {
+                        eprintln!("{:4} {:?} {}", i, instr.op, instr.arg);
+                    }
+                }
                 let mut vm = VirtualMachine::new_with_args(sys_argv);
                 match vm.run(code_obj) {
                     Ok(_val) => {}

@@ -1564,8 +1564,14 @@ impl VirtualMachine {
                     if matches!(&e, PyError::SystemExit(_)) {
                         return Err(e);
                     }
+                    if std::env::var("RPY_DEBUG_EXC").is_ok() {
+                        eprintln!("handle_exception: frame_floor={} frames.len()={} err={}", frame_floor, self.frames.len(), e);
+                    }
                     if !self.handle_exception(&e, frame_floor) {
                         return Err(e);
+                    }
+                    if std::env::var("RPY_DEBUG_EXC").is_ok() {
+                        eprintln!("  handled: frames.len()={} top_stack_len={}", self.frames.len(), self.frames.last().map(|f| f.stack.len()).unwrap_or(0));
                     }
                 }
             }
@@ -3738,6 +3744,9 @@ impl VirtualMachine {
                         name.clone()
                     }
                 };
+                if std::env::var("RPY_DEBUG_IMPORT").is_ok() {
+                    eprintln!("IMPORT_NAME: resolved={} cached={}", resolved, self.modules.contains_key(&resolved));
+                }
                 if let Some(module) = self.modules.get(&resolved) {
                     // For 'import a.b.c' where fromlist is empty (regular import, not 'from a.b import X'),
                     // push the top-level module so STORE_NAME stores the package, not the submodule
