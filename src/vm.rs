@@ -839,6 +839,7 @@ impl VirtualMachine {
              "textdomain", "bindtextdomain", "gettext", "ngettext", "pgettext", "npgettext",
              "dgettext", "dngettext",
          ]);
+         vm.install_source_defined_stdlib("json", crate::modules::JSON_EXTRA_SOURCE, &["JSONEncoder", "dumps"]);
          vm
     }
 

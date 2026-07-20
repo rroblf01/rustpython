@@ -8716,8 +8716,7 @@ pub fn json_encode_full(val: &PyObjectRef, indent: Option<usize>, sort_keys: boo
                 if parts.is_empty() {
                     Ok(py_str("[]"))
                 } else {
-                    parts.push(format!("\n{}", close_pad));
-                    Ok(py_str(&format!("[{}]", parts.join(","))))
+                    Ok(py_str(&format!("[{}\n{}]", parts.join(","), close_pad)))
                 }
             } else {
                 let mut parts = Vec::with_capacity(items.len());
@@ -8758,7 +8757,7 @@ pub fn json_encode_full(val: &PyObjectRef, indent: Option<usize>, sort_keys: boo
                 if items.is_empty() {
                     Ok(py_str("{}"))
                 } else {
-                    Ok(py_str(&format!("{{{},{}\n{}}}", items.join(","), "", close_pad)))
+                    Ok(py_str(&format!("{{{}\n{}}}", items.join(","), close_pad)))
                 }
             } else {
                 let items: Vec<String> = pairs.iter().map(|(_, v)| v.clone()).collect();

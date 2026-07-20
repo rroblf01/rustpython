@@ -29,6 +29,11 @@ pub fn create_json_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
+// Real `json.JSONEncoder` (subclassable, `default()` override point) is
+// implemented as real Python source instead — see json_extra.py and
+// VirtualMachine::install_source_defined_stdlib.
+pub const JSON_EXTRA_SOURCE: &str = include_str!("json_extra.py");
+
 pub fn create_collections_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! coll_func {
