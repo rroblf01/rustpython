@@ -37,6 +37,18 @@ pub struct Compiler {
 struct LoopInfo {
     start_label: usize,
     end_label: usize,
+    // `for`/`async for` loops keep their iterator object sitting on the
+    // stack for the loop's whole duration (FOR_ITER peeks it each pass;
+    // END_FOR pops it once on natural exhaustion, right before
+    // `end_label`). A `break` jumps straight to `end_label`, skipping that
+    // END_FOR — so without popping it here too, every `break` inside any
+    // `for` loop permanently leaked one stack slot into the enclosing
+    // frame, corrupting everything after it (confirmed: a `break` in a
+    // `for` loop nested inside another `for`/`while` loop silently
+    // desynced the outer loop's own iteration, either skipping values or
+    // looping forever). `while` loops push nothing extra, so this stays
+    // `false` there and `break` needs no compensating pop.
+    is_for: bool,
 }
 
 struct ScopeInfo {
@@ -723,6 +735,57 @@ impl Compiler {
                         refs,
                     );
                 }
+                // Control-flow statements are NOT their own scope — a nested
+                // `def`/`class` inside an `if`/`while`/`for`/`try`/`with`
+                // body is exactly as much a "nested function of the
+                // enclosing function" as one written directly at its top
+                // level (real code: `if iscoroutinefunction(func): async
+                // def wrapper(...): ... else: def wrapper(...): ...`, a
+                // completely ordinary sync/async-dispatching decorator
+                // pattern). Previously these fell to the catch-all no-op
+                // below, so a closure captured *only* by a conditionally-
+                // defined nested function was never added to the enclosing
+                // function's `cell_vars` during this upfront static pass —
+                // it only got added later, lazily, while actually compiling
+                // that nested function's closure-building code (see
+                // compile_function's "Emit LOAD_CLOSURE" step) — by which
+                // point any *other* free-variable reference already
+                // compiled earlier in the enclosing function's own body
+                // (e.g. the `if` condition itself) had already emitted a
+                // `LOAD_DEREF` index computed against the *old, smaller*
+                // `cellvars` list, silently going stale once `cellvars`
+                // grew. (Cellvars sort before freevars in the combined
+                // LOAD_DEREF index space, so any resulting off-by-one loads
+                // the wrong variable outright — confirmed via a minimal
+                // repro where an `if <closed-over free var>:` branch always
+                // took the same path regardless of the free var's real
+                // value, because index 0 pointed at a *cell* var instead.)
+                Stmt::If { body, orelse, .. } => {
+                    Self::collect_nested_refs_inner(body, local_names, global_names, nonlocal_names, refs);
+                    Self::collect_nested_refs_inner(orelse, local_names, global_names, nonlocal_names, refs);
+                }
+                Stmt::While { body, orelse, .. } => {
+                    Self::collect_nested_refs_inner(body, local_names, global_names, nonlocal_names, refs);
+                    Self::collect_nested_refs_inner(orelse, local_names, global_names, nonlocal_names, refs);
+                }
+                Stmt::For { body, orelse, .. } => {
+                    Self::collect_nested_refs_inner(body, local_names, global_names, nonlocal_names, refs);
+                    Self::collect_nested_refs_inner(orelse, local_names, global_names, nonlocal_names, refs);
+                }
+                Stmt::With { body, .. } => {
+                    Self::collect_nested_refs_inner(body, local_names, global_names, nonlocal_names, refs);
+                }
+                Stmt::Try { body, handlers, handlers_star, orelse, finalbody } => {
+                    Self::collect_nested_refs_inner(body, local_names, global_names, nonlocal_names, refs);
+                    for h in handlers {
+                        Self::collect_nested_refs_inner(&h.body, local_names, global_names, nonlocal_names, refs);
+                    }
+                    for h in handlers_star {
+                        Self::collect_nested_refs_inner(&h.body, local_names, global_names, nonlocal_names, refs);
+                    }
+                    Self::collect_nested_refs_inner(orelse, local_names, global_names, nonlocal_names, refs);
+                    Self::collect_nested_refs_inner(finalbody, local_names, global_names, nonlocal_names, refs);
+                }
                 _ => {}
             }
         }
@@ -776,7 +839,14 @@ impl Compiler {
             Stmt::Pass => {}
             Stmt::Break => {
                 if let Some(loop_info) = self.loop_stack.last() {
-                    self.emit_jump(Opcode::JUMP, loop_info.end_label);
+                    let end_label = loop_info.end_label;
+                    if loop_info.is_for {
+                        // Matches END_FOR's cleanup on the natural-exhaustion
+                        // path, which this jump otherwise bypasses entirely —
+                        // see LoopInfo::is_for's doc comment for why.
+                        self.emit(Opcode::POP_TOP, 0);
+                    }
+                    self.emit_jump(Opcode::JUMP, end_label);
                 } else {
                     return Err("'break' outside loop".to_string());
                 }
@@ -949,6 +1019,7 @@ impl Compiler {
                 self.loop_stack.push(LoopInfo {
                     start_label,
                     end_label,
+                    is_for: false,
                 });
                 self.compile_expr(test)?;
                 self.emit_jump(Opcode::POP_JUMP_IF_FALSE, else_label);
@@ -981,6 +1052,7 @@ impl Compiler {
                 self.loop_stack.push(LoopInfo {
                     start_label,
                     end_label,
+                    is_for: true,
                 });
                 self.mark_label(start_label);
                 self.emit_jump(if *is_async { Opcode::FOR_ITER } else { Opcode::FOR_ITER }, else_label);
@@ -2036,6 +2108,9 @@ impl Compiler {
         body: &[Stmt],
         is_async: bool,
     ) -> Result<(), String> {
+        if std::env::var("RPY_DEBUG_COMPILE").is_ok() {
+            eprintln!("compile_function: name={} is_async={}", name, is_async);
+        }
         // Extract docstring from first statement if present
         let docstring = body.first().and_then(|s| {
             if let Stmt::Expr(expr) = s {
@@ -2163,6 +2238,9 @@ impl Compiler {
 
         // Check if function contains yield or is async (generator/coroutine)
         let has_yield = contains_yield_in_stmts(body) || is_async;
+        if std::env::var("RPY_DEBUG_COMPILE").is_ok() {
+            eprintln!("  -> {} has_yield={}", name, has_yield);
+        }
         if has_yield {
             self.emit(Opcode::RETURN_GENERATOR, 0);
         }
@@ -2186,6 +2264,12 @@ impl Compiler {
         // Remember inner function's free vars for closure building
         let inner_free_vars = self.code.freevars.clone();
         let inner_cell_vars = self.code.cellvars.clone();
+        if std::env::var("RPY_DEBUG_COMPILE").is_ok() && std::env::var("RPY_DEBUG_COMPILE_NAME").map(|n| n == name).unwrap_or(false) {
+            eprintln!("  == {} instructions (cellvars={:?} freevars={:?} varnames={:?}) ==", name, inner_cell_vars, inner_free_vars, self.code.varnames);
+            for (i, instr) in self.code.instructions.iter().enumerate() {
+                eprintln!("    [{}] {:?} arg={}", i, instr.op, instr.arg);
+            }
+        }
 
         self.code.nlocals = self.code.varnames.len();
         self.code.name = name.clone();
@@ -2405,7 +2489,9 @@ impl Compiler {
                 self.emit(Opcode::LOAD_CONST, idx);
             }
             Expr::Name(name) => {
-                
+                if std::env::var("RPY_DEBUG_COMPILE_NAME_RESOLVE").ok().as_deref() == Some(name.as_str()) {
+                    eprintln!("NAME_RESOLVE: name={} scope={:?} in_global_names={} freevars={:?} cellvars={:?}", name, self.scope, self.global_names.contains(name), self.code.freevars, self.code.cellvars);
+                }
                 if self.scope == ScopeType::Module
                     || self.scope == ScopeType::ClassBody
                     || self.global_names.contains(name)
@@ -3066,9 +3152,22 @@ fn contains_yield_in_stmts(stmts: &[Stmt]) -> bool {
                 || contains_yield_in_stmts(orelse)
                 || contains_yield_in_stmts(finalbody)
         }
-        Stmt::FunctionDef { body, .. } | Stmt::ClassDef { body, .. } => {
-            contains_yield_in_stmts(body)
-        }
+        // A nested `def`/`async def`/`class` starts its own independent
+        // scope — whether *it* contains `yield`/`await` has no bearing on
+        // whether the *enclosing* function is a generator/coroutine. This
+        // used to recurse into the nested body, so e.g. a plain nested
+        // helper `def decorator(func): ... async def wrapper(...): return
+        // await func(...) ... return wrapper` (real code:
+        // `django.utils.deprecation.deprecate_posargs`, an ordinary
+        // sync/async-dispatching decorator factory, no yield/await
+        // anywhere in its own body) made every *enclosing* function
+        // wrongly compiled as a generator too — calling it returned a bare
+        // generator object instead of ever running its body, since nothing
+        // actually executes until the generator is iterated. Confirmed
+        // minimal repro: a function returning a nested function containing
+        // only a conditionally-defined `async def` sibling came back as
+        // `<generator object>` instead of the callable it should return.
+        Stmt::FunctionDef { .. } | Stmt::ClassDef { .. } => false,
         _ => false,
     })
 }
