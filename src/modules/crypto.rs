@@ -22,6 +22,19 @@ pub fn create_hashlib_dict() -> HashMap<String, PyObjectRef> {
         Ok(PyObjectRef::imm(PyObject::Bytes(hash.to_vec())))
     });
 
+    hl_func!("sha1", |args| {
+        if args.len() != 1 { return Err(PyError::type_error("sha1() takes exactly one argument")); }
+        let data = args[0].borrow();
+        let bytes = match &*data {
+            PyObject::Bytes(b) => b.clone(),
+            PyObject::Str(s) => s.as_bytes().to_vec(),
+            _ => return Err(PyError::type_error("sha1() argument must be bytes or str")),
+        };
+        use sha1::Digest;
+        let hash = sha1::Sha1::digest(&bytes);
+        Ok(PyObjectRef::imm(PyObject::Bytes(hash.to_vec())))
+    });
+
     hl_func!("md5", |args| {
         if args.len() != 1 { return Err(PyError::type_error("md5() takes exactly one argument")); }
         let data = args[0].borrow();
