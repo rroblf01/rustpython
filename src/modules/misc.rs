@@ -2347,6 +2347,92 @@ pub fn create_logging_dict() -> HashMap<String, PyObjectRef> {
         mro.push(handler_class.clone());
     }
     d.insert("Handler".to_string(), handler_class.clone());
+
+    // Filter base class — real code (Django's RequireDebugFalse/True,
+    // `logging.config`) subclasses this and overrides `filter(record)`;
+    // the base itself just needs a constructor and a default `filter`
+    // that lets everything through (matching real `logging.Filter` with
+    // no `name=` restriction applied).
+    let filter_class = PyObjectRef::new(PyObject::Type {
+        name: "Filter".to_string(),
+        dict: HashMap::from([
+            ("__init__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__init__".to_string(),
+                func: |args| {
+                    let name = if args.len() > 1 { args[1].str() } else { String::new() };
+                    let _ = args[0].borrow_mut().set_attribute("name", py_str(&name));
+                    Ok(py_none())
+                },
+            })),
+            ("filter".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "filter".to_string(),
+                func: |_| Ok(py_bool(true)),
+            })),
+        ]),
+        bases: vec![],
+        mro: vec![],
+    });
+    if let PyObject::Type { ref mut mro, .. } = &mut *filter_class.borrow_mut() {
+        mro.push(filter_class.clone());
+    }
+    d.insert("Filter".to_string(), filter_class);
+
+    // Formatter base class — real code (Django's `AdminEmailHandler` etc.,
+    // `logging.config` dictConfig) constructs `Formatter(fmt=...)` and
+    // calls `.format(record)`. A minimal but real implementation: supports
+    // the common `%(levelname)s`/`%(message)s`/`%(name)s`/`%(asctime)s`-
+    // style attributes actually present on a LogRecord, falling back to
+    // `record.getMessage()` if no format string was given.
+    let formatter_class = PyObjectRef::new(PyObject::Type {
+        name: "Formatter".to_string(),
+        dict: HashMap::from([
+            ("__init__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__init__".to_string(),
+                func: |args| {
+                    let fmt = if args.len() > 1 && !matches!(&*args[1].borrow(), PyObject::None) {
+                        Some(args[1].str())
+                    } else {
+                        None
+                    };
+                    let _ = args[0].borrow_mut().set_attribute("_fmt", fmt.map_or_else(py_none, |f| py_str(&f)));
+                    Ok(py_none())
+                },
+            })),
+            ("format".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "format".to_string(),
+                func: |args| {
+                    if args.len() < 2 { return Err(PyError::type_error("format() missing record argument")); }
+                    let fmt_attr = args[0].borrow().get_attribute("_fmt").ok();
+                    let record = &args[1];
+                    let get_msg = record.borrow().get_attribute("getMessage").ok();
+                    let message = if let Some(f) = get_msg {
+                        crate::object::call_bound_method(f, record.clone(), vec![]).map(|v| v.str()).unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
+                    let text = match fmt_attr {
+                        Some(f) if !matches!(&*f.borrow(), PyObject::None) => {
+                            let mut s = f.str();
+                            let levelname = record.borrow().get_attribute("levelname").map(|v| v.str()).unwrap_or_default();
+                            let name = record.borrow().get_attribute("name").map(|v| v.str()).unwrap_or_default();
+                            s = s.replace("%(levelname)s", &levelname);
+                            s = s.replace("%(name)s", &name);
+                            s = s.replace("%(message)s", &message);
+                            s
+                        }
+                        _ => message,
+                    };
+                    Ok(py_str(&text))
+                },
+            })),
+        ]),
+        bases: vec![],
+        mro: vec![],
+    });
+    if let PyObject::Type { ref mut mro, .. } = &mut *formatter_class.borrow_mut() {
+        mro.push(formatter_class.clone());
+    }
+    d.insert("Formatter".to_string(), formatter_class);
     d.insert("NullHandler".to_string(), PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(move |_| {
             Ok(PyObjectRef::new(PyObject::Instance {
                 typ: handler_class.clone(),

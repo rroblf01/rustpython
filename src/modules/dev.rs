@@ -569,23 +569,7 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
         Ok(if let Some(name) = module_name { py_str(&name) } else { py_none() })
     });
 
-    inspect_func!("getmembers", |args| {
-        if args.len() < 1 { return Err(PyError::type_error("getmembers() requires 1 argument")); }
-        let obj = args[0].borrow();
-        let dict = match &*obj {
-            PyObject::Function { ref dict, .. } => Some(dict),
-            PyObject::Type { ref dict, .. } => Some(dict),
-            PyObject::Module { ref dict, .. } => Some(dict),
-            PyObject::Instance { ref dict, .. } => Some(dict),
-            _ => None,
-        };
-        let members: Vec<PyObjectRef> = if let Some(d) = dict {
-            let mut items: Vec<(String, PyObjectRef)> = d.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-            items.sort_by(|a, b| a.0.cmp(&b.0));
-            items.into_iter().map(|(k, v)| py_tuple(vec![py_str(&k), v])).collect()
-        } else { Vec::new() };
-        Ok(py_list(members))
-    });
+    inspect_func!("getmembers", getmembers_builtin);
 
     inspect_func!("getfullargspec", |args| {
         if args.is_empty() { return Err(PyError::type_error("getfullargspec() requires 1 argument")); }
@@ -759,6 +743,56 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
     d.insert("Signature".to_string(), PyObjectRef::new(PyObject::Type { name: "Signature".to_string(), dict: HashMap::new(), bases: vec![], mro: vec![] }));
 
     d
+}
+
+fn getmembers_dict_of(obj: &PyObjectRef) -> Vec<(String, PyObjectRef)> {
+    let b = obj.borrow();
+    let dict = match &*b {
+        PyObject::Function { ref dict, .. } => Some(dict),
+        PyObject::Type { ref dict, .. } => Some(dict),
+        PyObject::Module { ref dict, .. } => Some(dict),
+        PyObject::Instance { ref dict, .. } => Some(dict),
+        _ => None,
+    };
+    let mut items: Vec<(String, PyObjectRef)> = dict
+        .map(|d| d.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        .unwrap_or_default();
+    items.sort_by(|a, b| a.0.cmp(&b.0));
+    items
+}
+
+/// `inspect.getmembers(object, predicate=None)`, given genuine `&mut
+/// VirtualMachine` access to actually call `predicate` on each candidate —
+/// called directly from `vm.rs`'s `call_function` special-case (see
+/// `is_getmembers`) for the same reason `find_spec`/`getattr`/`import_module`
+/// are special-cased there: this is reached from deep inside real Django
+/// app-loading code (`inspect.getmembers(mod, inspect.isclass)`), where
+/// `with_vm_mut`'s reentrancy hazard applies.
+pub(crate) fn getmembers_with_vm(vm: &mut crate::vm::VirtualMachine, obj: &PyObjectRef, predicate: Option<&PyObjectRef>) -> PyResult<PyObjectRef> {
+    let items = getmembers_dict_of(obj);
+    let mut members = Vec::new();
+    for (k, v) in items {
+        let keep = match predicate {
+            Some(p) => vm.call_function(p.clone(), vec![v.clone()], vec![])?.truthy(),
+            None => true,
+        };
+        if keep {
+            members.push(py_tuple(vec![py_str(&k), v]));
+        }
+    }
+    Ok(py_list(members))
+}
+
+/// `getmembers`'s standalone entry point (predicate not called through the
+/// real VM) — used only if reached outside `vm.rs`'s special-cased dispatch.
+/// Note: this fallback can't safely invoke a Python-level predicate (that's
+/// exactly the reentrancy hazard `getmembers_with_vm` exists to avoid), so it
+/// silently ignores `predicate` and returns everything, matching this
+/// function's pre-existing (if incomplete) behavior for that fallback path.
+pub(crate) fn getmembers_builtin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() { return Err(PyError::type_error("getmembers() requires 1 argument")); }
+    let items = getmembers_dict_of(&args[0]);
+    Ok(py_list(items.into_iter().map(|(k, v)| py_tuple(vec![py_str(&k), v])).collect()))
 }
 
 // ─── profile module ────────────────────────────────────────────────────────

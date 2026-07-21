@@ -1098,15 +1098,6 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
     d
 }
 
-/// Native importlib stub module providing import_module().
-pub fn create_importlib_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! importlib_func {
-        ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
-        };
-    }
-
     /// Helper: resolve a module name with relative import support
     fn resolve_name(name: &str, package: Option<&str>) -> Result<String, PyError> {
         if !name.starts_with('.') {
@@ -1183,8 +1174,16 @@ pub fn create_importlib_dict() -> HashMap<String, PyObjectRef> {
         Ok(module)
     }
 
-    // import_module(name, package=None) -> module
-    importlib_func!("import_module", |args| {
+    /// `importlib.import_module(name, package=None)`. A genuine, named,
+    /// top-level function (not an inline closure like this module's other
+    /// builtins) specifically so `vm.rs`'s `call_function` can recognize it
+    /// by function-pointer identity and special-case it — matching
+    /// `type.__new__`/`getattr` above. `with_vm_mut` below is only a
+    /// fallback for the (currently believed unreachable, since every real
+    /// call goes through a normal `CALL`/`CALL_KW` opcode) case of being
+    /// invoked some other way; the aliasing hazard it otherwise risks
+    /// (see `with_vm_mut`'s own doc comment) is why the special case exists.
+    pub(crate) fn import_module_builtin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         if args.is_empty() {
             return Err(PyError::type_error("import_module() missing required argument 'name'"));
         }
@@ -1204,8 +1203,23 @@ pub fn create_importlib_dict() -> HashMap<String, PyObjectRef> {
             }
             import_dotted(vm, &resolved)
         })?
-    });
+    }
 
+    /// Shared by both `call_function`'s special case (the normal path) and
+    /// the plain-`BuiltinFunction` fallback: resolves relative imports and
+    /// returns the already-loaded module or imports it fresh via `vm`.
+    pub(crate) fn import_module_with_vm(vm: &mut crate::vm::VirtualMachine, name: &str, package: Option<&str>) -> PyResult<PyObjectRef> {
+        let resolved = resolve_name(name, package)?;
+        if let Some(module) = vm.modules.get(&resolved) {
+            return Ok(module.clone());
+        }
+        import_dotted(vm, &resolved)
+    }
+
+/// Native importlib stub module providing import_module().
+pub fn create_importlib_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    d.insert("import_module".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "import_module".to_string(), func: import_module_builtin }));
     // __version__ — indicates importlib metadata
     d.insert("__version__".to_string(), py_str("1.0.0"));
     d
@@ -1221,100 +1235,114 @@ pub fn create_importlib_util_dict() -> HashMap<String, PyObjectRef> {
     }
 
     // find_spec(name, package=None) -> ModuleSpec or None
-    util_func!("find_spec", |args| {
-        if args.is_empty() {
-            return Err(PyError::type_error("find_spec() missing required argument 'name'"));
-        }
-        let name = args[0].str();
-        let package = if args.len() >= 2 {
-            let pkg = args[1].str();
-            if pkg.is_empty() { None } else { Some(pkg) }
-        } else { None };
+    util_func!("find_spec", find_spec_builtin);
 
-        // Resolve the full module name (handle relative imports)
-        let resolved_name = if let Some(ref pkg) = package {
-            if name.starts_with('.') {
-                let level = name.chars().take_while(|&c| c == '.').count();
-                let rel_part = &name[level..];
-                let pkg_parts: Vec<&str> = pkg.split('.').collect();
-                if level > pkg_parts.len() {
-                    return Ok(py_none());
-                }
-                let base = &pkg_parts[..pkg_parts.len() - level];
-                if base.is_empty() {
-                    rel_part.to_string()
-                } else if rel_part.is_empty() {
-                    base.join(".")
-                } else {
-                    format!("{}.{}", base.join("."), rel_part)
-                }
-            } else if !name.contains('.') {
-                format!("{}.{}", pkg, name)
-            } else {
-                name.to_string()
+    d
+}
+
+/// The real body of `importlib.util.find_spec`, given genuine `&mut
+/// VirtualMachine` access — called directly from `vm.rs`'s `call_function`
+/// special-case (see the `is_find_spec` check there) instead of through
+/// `find_spec_builtin`'s `with_vm_mut` fallback below, since this function is
+/// always reached from deep inside an active VM call chain in practice
+/// (Django's app-loading machinery calls it while `apps.populate()` is
+/// running), and `with_vm_mut` there reborrows the *same* `VirtualMachine`
+/// mutably while an outer `&mut self` is already live on the Rust call stack
+/// — a real, confirmed aliasing UB (`hashbrown`'s `HashMap::contains_key`
+/// segfaulting on a corrupted table, non-deterministically, since the bug is
+/// UB and not always "caught"), not merely a style concern.
+pub(crate) fn find_spec_with_vm(vm: &mut crate::vm::VirtualMachine, name: &str, package: Option<&str>) -> PyResult<PyObjectRef> {
+    // Resolve the full module name (handle relative imports)
+    let resolved_name = if let Some(pkg) = package {
+        if name.starts_with('.') {
+            let level = name.chars().take_while(|&c| c == '.').count();
+            let rel_part = &name[level..];
+            let pkg_parts: Vec<&str> = pkg.split('.').collect();
+            if level > pkg_parts.len() {
+                return Ok(py_none());
             }
+            let base = &pkg_parts[..pkg_parts.len() - level];
+            if base.is_empty() {
+                rel_part.to_string()
+            } else if rel_part.is_empty() {
+                base.join(".")
+            } else {
+                format!("{}.{}", base.join("."), rel_part)
+            }
+        } else if !name.contains('.') {
+            format!("{}.{}", pkg, name)
         } else {
             name.to_string()
-        };
-
-        // Get VM and check if already loaded
-        let resolved_name2 = resolved_name.clone();
-        if with_vm_mut(|vm| Ok(vm.modules.contains_key(&resolved_name2)))?? {
-            return Ok(create_module("ModuleSpec", HashMap::from([
-                ("name".to_string(), py_str(&resolved_name)),
-                ("origin".to_string(), py_str("built-in")),
-            ])));
         }
+    } else {
+        name.to_string()
+    };
 
-        // Get sys.path manually to search for the module file
-        let search_paths: Vec<String> = with_vm_mut(|vm| -> PyResult<Vec<String>> {
-            let mut paths = Vec::new();
-            if let Some(sys_mod) = vm.modules.get("sys") {
-                if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
-                    if let Some(path_list) = dict.get("path") {
-                        if let PyObject::List(items) = &*path_list.borrow() {
-                            for item in items {
-                                if let PyObject::Str(s) = &*item.borrow() {
-                                    paths.push(s.to_string());
-                                }
-                            }
+    if vm.modules.contains_key(&resolved_name) {
+        return Ok(create_module("ModuleSpec", HashMap::from([
+            ("name".to_string(), py_str(&resolved_name)),
+            ("origin".to_string(), py_str("built-in")),
+        ])));
+    }
+
+    // Get sys.path manually to search for the module file
+    let mut search_paths: Vec<String> = Vec::new();
+    if let Some(sys_mod) = vm.modules.get("sys") {
+        if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
+            if let Some(path_list) = dict.get("path") {
+                if let PyObject::List(items) = &*path_list.borrow() {
+                    for item in items {
+                        if let PyObject::Str(s) = &*item.borrow() {
+                            search_paths.push(s.to_string());
                         }
                     }
                 }
             }
-            Ok(paths)
-        })??;
-
-        // For dotted names, we need to find the file for the top-level
-        let top_name = if resolved_name.contains('.') {
-            resolved_name.split('.').next().unwrap().to_string()
-        } else {
-            resolved_name.clone()
-        };
-
-        // Search the filesystem for the module
-        for base in &search_paths {
-            let base_trimmed = base.trim_end_matches('/');
-            let py_path = format!("{}/{}.py", base_trimmed, top_name);
-            if std::path::Path::new(&py_path).exists() {
-                return Ok(create_module("ModuleSpec", HashMap::from([
-                    ("name".to_string(), py_str(&resolved_name)),
-                    ("origin".to_string(), py_str(&py_path)),
-                ])));
-            }
-            let init_path = format!("{}/{}/__init__.py", base_trimmed, top_name);
-            if std::path::Path::new(&init_path).exists() {
-                return Ok(create_module("ModuleSpec", HashMap::from([
-                    ("name".to_string(), py_str(&resolved_name)),
-                    ("origin".to_string(), py_str(&init_path)),
-                ])));
-            }
         }
+    }
 
-        Ok(py_none())
-    });
+    // For dotted names, we need to find the file for the top-level
+    let top_name = if resolved_name.contains('.') {
+        resolved_name.split('.').next().unwrap().to_string()
+    } else {
+        resolved_name.clone()
+    };
 
-    d
+    // Search the filesystem for the module
+    for base in &search_paths {
+        let base_trimmed = base.trim_end_matches('/');
+        let py_path = format!("{}/{}.py", base_trimmed, top_name);
+        if std::path::Path::new(&py_path).exists() {
+            return Ok(create_module("ModuleSpec", HashMap::from([
+                ("name".to_string(), py_str(&resolved_name)),
+                ("origin".to_string(), py_str(&py_path)),
+            ])));
+        }
+        let init_path = format!("{}/{}/__init__.py", base_trimmed, top_name);
+        if std::path::Path::new(&init_path).exists() {
+            return Ok(create_module("ModuleSpec", HashMap::from([
+                ("name".to_string(), py_str(&resolved_name)),
+                ("origin".to_string(), py_str(&init_path)),
+            ])));
+        }
+    }
+
+    Ok(py_none())
+}
+
+/// `find_spec`'s standalone entry point (used when it's not reached through
+/// `vm.rs`'s special-cased dispatch) — falls back to `with_vm_mut`, matching
+/// `import_module_builtin`'s role for `importlib.import_module`.
+pub(crate) fn find_spec_builtin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() {
+        return Err(PyError::type_error("find_spec() missing required argument 'name'"));
+    }
+    let name = args[0].str();
+    let package = if args.len() >= 2 {
+        let pkg = args[1].str();
+        if pkg.is_empty() { None } else { Some(pkg) }
+    } else { None };
+    Ok(with_vm_mut(|vm| find_spec_with_vm(vm, &name, package.as_deref()))??)
 }
 
 /// Native importlib.resources stub module.
