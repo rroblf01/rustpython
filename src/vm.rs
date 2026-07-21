@@ -1009,7 +1009,10 @@ impl VirtualMachine {
         }
         IMPORT_CHAIN.with(|c| c.borrow_mut().push(name.to_string()));
         if std::env::var("RPY_DEBUG_IMPORT").is_ok() {
-            eprintln!("{}IMPORT_FILE: {}", "  ".repeat(depth), name);
+            eprintln!("{}IMPORT_FILE: {} (self.modules.len()={}, sys.path={:?})", "  ".repeat(depth), name, self.modules.len(),
+                self.modules.get("sys").and_then(|m| if let PyObject::Module { dict, .. } = &*m.borrow() {
+                    dict.get("path").map(|p| p.str())
+                } else { None }));
         }
         let result = self.import_module_from_file_inner(name);
         IMPORT_CHAIN.with(|c| { c.borrow_mut().pop(); });
@@ -2827,12 +2830,24 @@ impl VirtualMachine {
                             Ok(attr)
                         }
                         PyObject::Instance { dict, typ } => {
-                            // Inline attribute cache: skip full lookup if cached with matching type tag
+                            // Inline attribute cache: skip full lookup if cached
+                            // with matching type tag — only valid when this
+                            // instance's OWN dict doesn't also define `name`,
+                            // since the cache only ever stores type/mro-level
+                            // hits (methods, class attributes); an instance
+                            // that shadows the class attribute with its own
+                            // instance-level value of the same name must still
+                            // win over a stale cache entry from some OTHER
+                            // instance of the same type that didn't have that
+                            // override (see the caching-site comment below for
+                            // the matching write-side half of this fix).
                             let type_tag = typ.get_id() as u64;
-                            let cached = self.frames[fi].attr_cache.get(name_idx)
-                                .and_then(|entry| entry.as_ref())
-                                .filter(|(tag, _)| *tag == type_tag)
-                                .map(|(_, val)| val.clone());
+                            let cached = if dict.contains_key(&name) { None } else {
+                                self.frames[fi].attr_cache.get(name_idx)
+                                    .and_then(|entry| entry.as_ref())
+                                    .filter(|(tag, _)| *tag == type_tag)
+                                    .map(|(_, val)| val.clone())
+                            };
                             if let Some(cached_val) = cached {
                                 self.frames[fi].push(cached_val);
                                 return Ok(None);
@@ -3034,28 +3049,51 @@ impl VirtualMachine {
                             });
                             match attr {
                                 Some(val) => {
-                                    // Cache attribute for future accesses
-                                    if name_idx < self.frames[fi].attr_cache.len() {
+                                    // Cache attribute for future accesses — but
+                                    // ONLY when it was found on the TYPE's own
+                                    // dict/mro (a method or class attribute,
+                                    // identical for every instance of this
+                                    // type), never when it came from the
+                                    // INSTANCE's own dict. A plain instance
+                                    // attribute (`self.v`) varies per-instance,
+                                    // but this cache is keyed only by
+                                    // `(name_idx, type_tag)` — with no
+                                    // per-instance component at all — so
+                                    // caching an instance-dict hit here meant
+                                    // ANY second instance of the same type
+                                    // accessed via the same attribute name
+                                    // within the same frame (e.g. `self.v` vs
+                                    // `other.v` inside `__lt__(self, other)`)
+                                    // silently got back the FIRST instance's
+                                    // value instead of its own — a severe,
+                                    // general correctness bug, not merely a
+                                    // missed-cache-hit inefficiency. Confirmed
+                                    // via a minimal repro: `other.v` returning
+                                    // `self.v`'s value inside a two-argument
+                                    // comparison method.
+                                    if !dict.contains_key(&name) && name_idx < self.frames[fi].attr_cache.len() {
                                         self.frames[fi].attr_cache[name_idx] = Some((type_tag, val.clone()));
                                     }
                                     Ok(val)
                                 }
                                 None => {
-                                    // Check for __getattr__ method on type before erroring
-                                    let typ_ref = typ.borrow();
-                                    if let PyObject::Type { dict: type_dict, .. } = &*typ_ref {
-                                        if let Some(getattr_method) = type_dict.get_str("__getattr__").cloned() {
-                                            drop(typ_ref);
-                                            self.call_function(getattr_method, vec![obj.clone(), py_str(&name)], vec![])
-                                        } else if name == "__doc__" {
-                                            // Every real object has __doc__ (defaults to
-                                            // None) — see the matching fallback in
-                                            // object.rs's ObjectAccess::get_attribute.
-                                            Ok(py_none())
-                                        } else {
-                                            Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", crate::object::get_type_name_for_instance(typ), name)))
-                                        }
+                                    // Check for __getattr__ before erroring —
+                                    // via the full mro, not just typ's own
+                                    // dict: `__getattr__` is very commonly
+                                    // defined on a BASE class (e.g. Django's
+                                    // `LazyObject.__getattr__ =
+                                    // new_method_proxy(getattr)`, inherited
+                                    // by `SimpleLazyObject`) rather than
+                                    // redeclared on every subclass, and the
+                                    // instance's own exact class rarely
+                                    // defines it directly.
+                                    let getattr_method = crate::object::lookup_dunder_via_mro(typ, "__getattr__");
+                                    if let Some(getattr_method) = getattr_method {
+                                        self.call_function(getattr_method, vec![obj.clone(), py_str(&name)], vec![])
                                     } else if name == "__doc__" {
+                                        // Every real object has __doc__ (defaults to
+                                        // None) — see the matching fallback in
+                                        // object.rs's ObjectAccess::get_attribute.
                                         Ok(py_none())
                                     } else {
                                         Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", crate::object::get_type_name_for_instance(typ), name)))
@@ -4524,7 +4562,27 @@ impl VirtualMachine {
                 let attr_name = args[1].str();
                 let direct = obj.borrow().get_attribute(&attr_name);
                 match direct {
-                    Ok(v) => return Ok(v),
+                    Ok(v) => {
+                        // object.rs's plain get_attribute (used for the
+                        // "direct" success path here) doesn't auto-bind a
+                        // plain Function found on an Instance into a
+                        // BoundMethod — only the LOAD_ATTR opcode's own,
+                        // separate logic does that. Without this,
+                        // `getattr(instance, name)` for a real method
+                        // returns it UNBOUND while `instance.name` (real
+                        // attribute syntax) correctly binds it — an
+                        // inconsistency that silently drops `self` the
+                        // moment calling code relies on `getattr()` instead
+                        // of dot access (a common proxy-object idiom, e.g.
+                        // `new_method_proxy`-style `__getattr__` forwarding
+                        // via `getattr(self._wrapped, name)`).
+                        let is_instance_obj = matches!(&*obj.borrow(), PyObject::Instance { .. });
+                        let is_function = matches!(&*v.borrow(), PyObject::Function { .. });
+                        if is_instance_obj && is_function {
+                            return Ok(PyObjectRef::imm(PyObject::BoundMethod { func: v, self_obj: obj.clone() }));
+                        }
+                        return Ok(v);
+                    }
                     Err(direct_err) => {
                         let getattr_fn = if let PyObject::Instance { typ, .. } = &*obj.borrow() {
                             crate::object::lookup_dunder_via_mro(typ, "__getattr__")
