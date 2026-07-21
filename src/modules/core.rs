@@ -2178,6 +2178,27 @@ pub fn create_os_path_dict() -> HashMap<String, PyObjectRef> {
         Ok(py_str(&path))
     });
 
+    // commonprefix(list) — longest literal (character-wise, not
+    // path-component-aware) string prefix shared by every path in `list`.
+    // Was missing entirely — needed by the real `unittest.util` module
+    // (`from os.path import commonprefix`, used for diffing assertion
+    // messages), which is itself needed by any real `unittest`-based test
+    // suite (Django's own test framework included).
+    path_func!("commonprefix", |args| {
+        if args.is_empty() { return Err(PyError::type_error("commonprefix() takes at least 1 argument")); }
+        let paths: Vec<String> = crate::object::collect_iterable(&args[0])?
+            .iter().map(|p| p.str()).collect();
+        if paths.is_empty() { return Ok(py_str("")); }
+        let first = &paths[0];
+        let mut prefix_len = first.chars().count();
+        for p in &paths[1..] {
+            let common = first.chars().zip(p.chars()).take_while(|(a, b)| a == b).count();
+            prefix_len = prefix_len.min(common);
+        }
+        let prefix: String = first.chars().take(prefix_len).collect();
+        Ok(py_str(&prefix))
+    });
+
     d
 }
 

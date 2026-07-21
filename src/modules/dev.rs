@@ -126,29 +126,70 @@ pub fn create_dataclasses_dict() -> HashMap<String, PyObjectRef> {
         };
     }
 
-    // dataclass(cls) — decorator that marks cls with _dataclass_ attr
-    dc_func!("dataclass", |args| {
-        if args.is_empty() {
-            return Err(PyError::type_error("dataclass() missing required argument (cls)"));
+    // dataclass(cls) — decorator that marks cls with _dataclass_ attr.
+    // NOTE: still just a marker, not real dataclass semantics — a genuine
+    // @dataclass should synthesize __init__/__repr__/__eq__/__hash__ from
+    // the class's own annotated fields (respecting field()'s
+    // default/default_factory/kw_only/etc.), which this does not do at all.
+    // That's a separately-tracked, larger gap; this function only fixes the
+    // narrower, previously-crashing case of the PARAMETERIZED decorator
+    // form (`@dataclass(frozen=True)`, real code — e.g. CPython's own
+    // `_colorize.py` theme classes): called with kwargs only (no `cls`
+    // positional argument, since our calling convention packs kwargs as a
+    // trailing dict arg), this used to just return that kwargs dict itself,
+    // which the decorator machinery then tried to CALL as if it were the
+    // real decorator — "'dict' object is not callable". Detect that shape
+    // and return a real closure instead.
+    fn is_class_or_instance(v: &PyObjectRef) -> bool {
+        matches!(&*v.borrow(), PyObject::Type { .. } | PyObject::Instance { .. })
+    }
+    fn mark_dataclass(cls: &PyObjectRef) -> PyResult<PyObjectRef> {
+        let mut borrowed = cls.borrow_mut();
+        if let PyObject::Instance { ref mut dict, .. } = &mut *borrowed {
+            dict.insert("_dataclass_".to_string(), py_bool(true));
         }
-        let cls = &args[0];
-        {
-            let mut borrowed = cls.borrow_mut();
-            if let PyObject::Instance { ref mut dict, .. } = &mut *borrowed {
-                dict.insert("_dataclass_".to_string(), py_bool(true));
-            }
-            // Also handle Type objects
-            if let PyObject::Type { ref mut dict, .. } = &mut *borrowed {
-                dict.insert("_dataclass_".to_string(), py_bool(true));
-            }
+        if let PyObject::Type { ref mut dict, .. } = &mut *borrowed {
+            dict.insert("_dataclass_".to_string(), py_bool(true));
         }
+        drop(borrowed);
         Ok(cls.clone())
+    }
+    dc_func!("dataclass", |args| {
+        if args.is_empty() || !is_class_or_instance(&args[0]) {
+            // Parameterized form: @dataclass(frozen=True, ...) — return a
+            // decorator closure that applies the same (still-stub) marking
+            // once the real class is passed to it.
+            return Ok(PyObjectRef::imm(PyObject::Closure(std::rc::Rc::new(|inner_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                if inner_args.is_empty() {
+                    return Err(PyError::type_error("dataclass() decorator missing required argument (cls)"));
+                }
+                mark_dataclass(&inner_args[0])
+            }))));
+        }
+        mark_dataclass(&args[0])
     });
 
     // field() — returns empty dict as a field descriptor
     dc_func!("field", |_| {
         Ok(py_dict())
     });
+
+    // Field — the class dataclasses.field()/introspection would normally
+    // return/expose (real attrs: name, type, default, default_factory,
+    // repr, hash, init, compare, metadata, kw_only). This bare marker class
+    // exists mainly so `from dataclasses import Field` succeeds at all
+    // (needed transitively by real CPython stdlib source we vendor
+    // verbatim, e.g. `_colorize.py`'s own type annotations) — actual
+    // dataclass field generation is still a stub (see the `dataclass()`
+    // function above: real @dataclass should synthesize __init__/__repr__/
+    // __eq__ from annotated fields; this only tags the class, a known,
+    // separately-tracked gap, not something this placeholder fixes.
+    d.insert("Field".to_string(), PyObjectRef::new(PyObject::Type {
+        name: "Field".to_string(),
+        dict: HashMap::new(),
+        bases: vec![],
+        mro: vec![],
+    }));
 
     // asdict(obj) — shallow dict copy
     dc_func!("asdict", |args| {

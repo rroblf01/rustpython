@@ -119,6 +119,20 @@ pub fn create_fnmatch_dict() -> HashMap<String, PyObjectRef> {
         let pattern = args[1].str();
         Ok(py_bool(fnmatch_match(&name, &pattern)))
     });
+    // fnmatchcase(name, pattern) — always case-sensitive (unlike `fnmatch`,
+    // which normalizes case on case-insensitive filesystems via
+    // os.path.normcase). Our `fnmatch_match` never does that normalization
+    // to begin with, so this is simply the same matcher under its other
+    // real name — was missing entirely (`from fnmatch import fnmatchcase`,
+    // real code in CPython's own `unittest.util`).
+    fnmatch_func!("fnmatchcase", |args| {
+        if args.len() < 2 {
+            return Err(PyError::type_error("fnmatchcase() takes exactly 2 arguments"));
+        }
+        let name = args[0].str();
+        let pattern = args[1].str();
+        Ok(py_bool(fnmatch_match(&name, &pattern)))
+    });
     d
 }
 

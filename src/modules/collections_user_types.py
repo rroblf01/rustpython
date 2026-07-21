@@ -454,3 +454,132 @@ class UserString:
 
     def endswith(self, suffix):
         return self.data.endswith(suffix)
+
+
+class ChainMap:
+    """A ChainMap groups multiple dicts (or other mappings) together
+    to create a single, updateable view.
+
+    The underlying mappings are stored in a list. Lookups search the
+    underlying mappings successively until a key is found; writes, updates,
+    and deletions only operate on the first mapping.
+
+    Standalone (doesn't subclass `_collections_abc.MutableMapping`, unlike
+    real CPython) since this interpreter's `abc`/mixin machinery is still a
+    stub — every dict-like method real ChainMap gets for free from that
+    mixin is implemented directly here instead.
+    """
+
+    def __init__(self, *maps):
+        self.maps = list(maps) or [{}]
+
+    def __missing__(self, key):
+        raise KeyError(key)
+
+    def __getitem__(self, key):
+        for mapping in self.maps:
+            try:
+                return mapping[key]
+            except KeyError:
+                pass
+        return self.__missing__(key)
+
+    def get(self, key, default=None):
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def __len__(self):
+        return len(set().union(*self.maps))
+
+    def __iter__(self):
+        d = {}
+        for mapping in reversed(self.maps):
+            d.update(dict.fromkeys(mapping))
+        return iter(d)
+
+    def __contains__(self, key):
+        return any(key in m for m in self.maps)
+
+    def __bool__(self):
+        return any(self.maps)
+
+    def __repr__(self):
+        maps_repr = ", ".join(repr(m) for m in self.maps)
+        return f"{self.__class__.__name__}({maps_repr})"
+
+    @classmethod
+    def fromkeys(cls, iterable, *args):
+        return cls(dict.fromkeys(iterable, *args))
+
+    def copy(self):
+        return self.__class__(self.maps[0].copy(), *self.maps[1:])
+
+    __copy__ = copy
+
+    def new_child(self, m=None, **kwargs):
+        if m is None:
+            m = kwargs
+        elif kwargs:
+            m.update(kwargs)
+        return self.__class__(m, *self.maps)
+
+    @property
+    def parents(self):
+        return self.__class__(*self.maps[1:])
+
+    def __setitem__(self, key, value):
+        self.maps[0][key] = value
+
+    def __delitem__(self, key):
+        try:
+            del self.maps[0][key]
+        except KeyError:
+            raise KeyError(f'Key not found in the first mapping: {key!r}')
+
+    def popitem(self):
+        try:
+            return self.maps[0].popitem()
+        except KeyError:
+            raise KeyError('No keys found in the first mapping.')
+
+    def pop(self, key, *args):
+        try:
+            return self.maps[0].pop(key, *args)
+        except KeyError:
+            raise KeyError(f'Key not found in the first mapping: {key!r}')
+
+    def clear(self):
+        self.maps[0].clear()
+
+    def keys(self):
+        return list(self.__iter__())
+
+    def values(self):
+        return [self[k] for k in self]
+
+    def items(self):
+        return [(k, self[k]) for k in self]
+
+    def __eq__(self, other):
+        if isinstance(other, ChainMap):
+            return dict(self) == dict(other)
+        return NotImplemented
+
+    def update(self, *args, **kwargs):
+        if args:
+            other = args[0]
+            if hasattr(other, "keys"):
+                for k in other.keys():
+                    self.maps[0][k] = other[k]
+            else:
+                for k, v in other:
+                    self.maps[0][k] = v
+        for k, v in kwargs.items():
+            self.maps[0][k] = v
+
+    def setdefault(self, key, default=None):
+        if key not in self:
+            self.maps[0][key] = default
+        return self[key]
