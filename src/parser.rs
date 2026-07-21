@@ -70,6 +70,37 @@ impl Parser {
         }
     }
 
+    /// Disambiguates `with (` starting a PEP 617 parenthesized multi-item
+    /// group (`with (cm1, cm2 as x):`, letting the items span multiple
+    /// lines with trailing commas — real code, e.g. CPython's own test
+    /// suite: `with (support.foo(), support.Bar() as sw):`) from `(` simply
+    /// being the start of a single context-expression that happens to be
+    /// parenthesized (`with (a + b).open():`, `with (some_cm):`). Called
+    /// with the current token already `(`: scans ahead (non-destructively,
+    /// cloned lexer — same technique as `looks_like_match_stmt`) for a
+    /// top-level `,` or `as` before the matching `)`. Either one only makes
+    /// sense inside a with-items group (a bare tuple/grouped-expr can't
+    /// contain `as`, and `with (a, b):`'s comma is overwhelmingly intended
+    /// as two context managers under the 3.10+ syntax, not the legacy
+    /// tuple-as-one-CM reading) — so finding either is decisive. Finding
+    /// neither means the parens belong to the expression itself, and must
+    /// be left for `parse_expr` to consume normally.
+    fn looks_like_parenthesized_with_items(&mut self) -> bool {
+        let mut lexer = self.lexer.clone();
+        let mut depth: i32 = 0;
+        loop {
+            let tok = lexer.next_token();
+            match tok {
+                Token::LeftParen | Token::LeftBracket | Token::LeftBrace => depth += 1,
+                Token::RightParen if depth == 0 => return false,
+                Token::RightParen | Token::RightBracket | Token::RightBrace => depth -= 1,
+                Token::Newline | Token::EndOfFile => return false,
+                Token::Comma | Token::As if depth == 0 => return true,
+                _ => {}
+            }
+        }
+    }
+
     fn at(&self, tok: &Token) -> bool {
         self.current == *tok
     }
@@ -201,7 +232,15 @@ impl Parser {
         if matches!(&self.current, Token::Name(n) if n == "match") && self.looks_like_match_stmt() {
             return self.parse_match();
         }
-        if matches!(&self.current, Token::Name(n) if n == "type") {
+        // `type` soft keyword: a real type-alias statement (`type Alias =
+        // int`, `type Alias[T] = list[T]`) always has a NAME immediately
+        // after `type` — nothing else starts that way, so a single-token
+        // lookahead disambiguates it from `type` used as a plain identifier
+        // (`type: str = ...` — an annotated assignment to a variable named
+        // "type", real code in CPython's own `_colorize.py`; `type(x)`;
+        // `type = 5`; `type.attr`). Previously unconditional, so EVERY use
+        // of "type" as an ordinary name at statement-start misparsed.
+        if matches!(&self.current, Token::Name(n) if n == "type") && matches!(self.peek(), Token::Name(_)) {
             return self.parse_type_alias();
         }
         if self.at(&Token::Class) {
@@ -589,6 +628,13 @@ impl Parser {
 
     fn parse_with(&mut self, is_async: bool) -> Result<Stmt, String> {
         self.expect(&Token::With)?;
+        // PEP 617 parenthesized with-items (`with (cm1, cm2 as x):`) — see
+        // `looks_like_parenthesized_with_items` for the disambiguation from
+        // `(` merely starting a normal (possibly parenthesized) expression.
+        let parenthesized = self.at(&Token::LeftParen) && self.looks_like_parenthesized_with_items();
+        if parenthesized {
+            self.next(); // consume the opening '('
+        }
         let mut items = Vec::new();
         loop {
             let context_expr = self.parse_expr()?;
@@ -602,6 +648,10 @@ impl Parser {
                 optional_vars,
             });
             if !self.eat(&Token::Comma) { break; }
+            if parenthesized && self.at(&Token::RightParen) { break; } // trailing comma
+        }
+        if parenthesized {
+            self.expect(&Token::RightParen)?;
         }
         self.expect(&Token::Colon)?;
         let body = self.parse_block()?;
@@ -776,6 +826,24 @@ impl Parser {
             let name = self.expect_name()?;
             if self.at(&Token::LeftParen) {
                 return self.parse_class_pattern(name);
+            }
+            // A dotted name (`case Format.STRING:`, `case some.deep.CONST:`)
+            // is a "value pattern" — matched by equality against the
+            // referenced value — NOT a capture pattern, per real Python's
+            // match-statement grammar (only a bare, undotted name captures).
+            // Without this check every qualified-constant case clause
+            // (extremely common — enum members, module-level constants)
+            // was silently treated as an always-matching capture binding
+            // instead of an equality check. Real code: CPython 3.14's own
+            // `annotationlib.py`, `case Format.STRING:` inside a real
+            // stdlib function.
+            if self.at(&Token::Dot) {
+                let mut expr = Expr::Name(name);
+                while self.eat(&Token::Dot) {
+                    let attr = self.expect_name()?;
+                    expr = Expr::Attribute { value: Box::new(expr), attr };
+                }
+                return Ok(Pattern::MatchValue(Box::new(expr)));
             }
             if name == "_" {
                 return Ok(Pattern::MatchAs { pattern: None, name: None });
@@ -2116,7 +2184,14 @@ impl Parser {
             if self.at(&Token::Colon) { break; }
             if self.eat(&Token::Star) {
                 if self.at(&Token::Colon) || self.at(&Token::Comma) {
+                    // Bare `*` keyword-only separator (`lambda *, kw=None:
+                    // ...`) — must still consume the following comma (or
+                    // stop at `:`) the same way every other arm does at the
+                    // loop's end; the previous bare `continue` skipped that
+                    // entirely, leaving the comma unconsumed and making the
+                    // next iteration immediately fail expecting a NAME.
                     seen_star = true;
+                    if !self.eat(&Token::Comma) { break; }
                     continue;
                 }
                 let name = self.expect_name()?;

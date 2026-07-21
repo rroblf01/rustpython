@@ -236,7 +236,11 @@ impl Lexer {
             }
         }
 
-        let mut is_float = false;
+        // A leading dot (`.995`, called with first=='.' from the main
+        // dispatch loop below) is already a float — without this, the loop's
+        // own `c == '.' && !is_float` check would still be false→false and
+        // (wrongly) accept a second dot as if this weren't already one.
+        let mut is_float = first == '.';
         while let Some(c) = self.peek() {
             if c.is_ascii_digit() || c == '_' {
                 s.push(self.advance().unwrap());
@@ -887,6 +891,14 @@ impl Lexer {
                     if self.peek() == Some('.') && self.peek_ahead(1) == Some('.') {
                         self.advance(); self.advance();
                         return Token::Ellipsis;
+                    } else if self.peek().map_or(false, |c| c.is_ascii_digit()) {
+                        // A float literal with no leading digit (`.995`,
+                        // `.5e10`) — real, standard Python syntax (real code:
+                        // CPython's own test suite uses `.995 * digits`),
+                        // previously not recognized at all since this
+                        // dispatch only ever produced a bare Dot/Ellipsis
+                        // token regardless of what followed.
+                        return self.read_number('.');
                     } else {
                         return Token::Dot;
                     }
