@@ -147,15 +147,67 @@ fn escape_leading_bracket_in_class(pattern: &str) -> String {
     result
 }
 
-fn compile_python_regex(pattern: &str) -> Result<regex::Regex, regex::Error> {
+/// Python's `re.sub`/`Pattern.sub` replacement strings reference capture
+/// groups as `\1`, `\g<1>`, `\g<name>` — the `regex`/`fancy_regex` crates'
+/// `Replacer` impl for `&str` instead uses Perl/sed-style `$1`/`${1}`/`${name}`
+/// and treats a literal `$` specially. Translate before calling
+/// `replace_all`/`replace`, or every `\N`-backreference replacement (an
+/// extremely common idiom — e.g. Django's own `camel_case_to_spaces`:
+/// `re_camel_case.sub(r" \1", value)`) silently emits the backreference
+/// syntax itself instead of the captured text.
+pub(crate) fn translate_python_replacement(repl: &str) -> String {
+    let chars: Vec<char> = repl.chars().collect();
+    let mut out = String::with_capacity(repl.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '$' {
+            out.push_str("$$");
+            i += 1;
+        } else if c == '\\' && i + 1 < chars.len() {
+            let next = chars[i + 1];
+            if next.is_ascii_digit() {
+                let mut j = i + 1;
+                while j < chars.len() && chars[j].is_ascii_digit() {
+                    j += 1;
+                }
+                out.push_str("${");
+                out.extend(&chars[i + 1..j]);
+                out.push('}');
+                i = j;
+            } else if next == 'g' && chars.get(i + 2) == Some(&'<') {
+                let mut j = i + 3;
+                while j < chars.len() && chars[j] != '>' {
+                    j += 1;
+                }
+                out.push_str("${");
+                out.extend(&chars[i + 3..j]);
+                out.push('}');
+                i = if j < chars.len() { j + 1 } else { j };
+            } else if next == '\\' {
+                out.push('\\');
+                i += 2;
+            } else {
+                out.push(next);
+                i += 2;
+            }
+        } else {
+            out.push(c);
+            i += 1;
+        }
+    }
+    out
+}
+
+fn compile_python_regex(pattern: &str) -> Result<fancy_regex::Regex, fancy_regex::Error> {
     let pattern = escape_loose_braces(pattern);
     let pattern = escape_leading_bracket_in_class(&pattern);
-    regex::Regex::new(&pattern)
+    fancy_regex::Regex::new(&pattern)
 }
 
 /// Build a re.Match object with group(), groups(), start(), end(), span() methods.
 /// Returns None if the regex didn't match.
-fn make_match_object(re_match: Option<regex::Match<'_>>, _num_groups: usize) -> PyObjectRef {
+fn make_match_object(re_match: Option<fancy_regex::Match<'_>>, _num_groups: usize) -> PyObjectRef {
     match re_match {
         Some(m) => {
             let start_pos = m.start();
@@ -278,7 +330,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         let string = args[1].str();
         match compile_python_regex(&pattern) {
             Ok(re) => {
-                let matched = re.find(&string);
+                let matched = re.find(&string).unwrap_or(None);
                 Ok(make_match_object(matched, 0))
             }
             Err(e) => Err(PyError::ValueError(format!("invalid regex: {}", e))),
@@ -293,7 +345,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         let string = args[1].str();
         match compile_python_regex(&pattern) {
             Ok(re) => {
-                let matched = re.find_at(&string, 0);
+                let matched = re.find(&string).unwrap_or(None);
                 // Only succeed if match starts at position 0
                 let result = match matched {
                     Some(m) if m.start() == 0 => Some(m),
@@ -313,7 +365,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         let string = args[1].str();
         match compile_python_regex(&pattern) {
             Ok(re) => {
-                let result = re.find(&string)
+                let result = re.find(&string).unwrap_or(None)
                     .filter(|m| m.start() == 0 && m.end() == string.len());
                 Ok(make_match_object(result, 0))
             }
@@ -330,6 +382,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         match compile_python_regex(&pattern) {
             Ok(re) => {
                 let results: Vec<PyObjectRef> = re.find_iter(&string)
+                    .filter_map(|r| r.ok())
                     .map(|m| py_str(m.as_str()))
                     .collect();
                 Ok(py_list(results))
@@ -347,7 +400,8 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         let string = args[2].str();
         match compile_python_regex(&pattern) {
             Ok(re) => {
-                let result = re.replace_all(&string, repl.as_str());
+                let translated = translate_python_replacement(&repl);
+                let result = re.replace_all(&string, translated.as_str());
                 Ok(py_str(&result))
             }
             Err(e) => Err(PyError::ValueError(format!("invalid regex: {}", e))),
@@ -364,9 +418,9 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         match compile_python_regex(&pattern) {
             Ok(re) => {
                 let parts: Vec<PyObjectRef> = if limit > 0 {
-                    re.splitn(&string, limit).map(|s| py_str(s)).collect()
+                    re.splitn(&string, limit).filter_map(|r| r.ok()).map(|s| py_str(s)).collect()
                 } else {
-                    re.split(&string).map(|s| py_str(s)).collect()
+                    re.split(&string).filter_map(|r| r.ok()).map(|s| py_str(s)).collect()
                 };
                 Ok(py_list(parts))
             }
@@ -402,6 +456,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         match compile_python_regex(&pattern) {
             Ok(re) => {
                 let matches: Vec<PyObjectRef> = re.find_iter(&string)
+                    .filter_map(|r| r.ok())
                     .map(|m| make_match_object(Some(m), 0))
                     .collect();
                 // Return a list that can be iterated over
@@ -1018,6 +1073,17 @@ pub fn create_struct_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
+/// `bisect`/`heapq` need ordering comparisons that consult a user-defined
+/// class's own `__lt__` (real code: bisect-inserting/heap-ordering custom
+/// objects, e.g. Django's `(creation_counter, field)` tuples during model
+/// construction) — `PyObjectRef::lt()`/`Compare::lt` is a raw, native-types
+/// only comparison with no dunder dispatch at all (`Instance` isn't handled,
+/// always `TypeError`). `py_compare` is the general, dunder-aware version
+/// already used by `sorted()`/`list.sort()` — route through it instead.
+fn py_lt(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<bool> {
+    Ok(py_compare(a, b, 0)?.truthy())
+}
+
 pub fn create_bisect_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! bisect_func {
@@ -1037,7 +1103,7 @@ pub fn create_bisect_dict() -> HashMap<String, PyObjectRef> {
         let mut hi = if args.len() > 3 { args[3].as_i64().ok_or_else(|| PyError::type_error("hi must be an integer"))? as usize } else { items.len() };
         while lo < hi {
             let mid = (lo + hi) / 2;
-            if items[mid].borrow().lt(x)? { lo = mid + 1; } else { hi = mid; }
+            if py_lt(&items[mid], x)? { lo = mid + 1; } else { hi = mid; }
         }
         Ok(py_int(lo as i64))
     });
@@ -1054,7 +1120,7 @@ pub fn create_bisect_dict() -> HashMap<String, PyObjectRef> {
         let mut hi = if args.len() > 3 { args[3].as_i64().ok_or_else(|| PyError::type_error("hi must be an integer"))? as usize } else { items.len() };
         while lo < hi {
             let mid = (lo + hi) / 2;
-            if x.borrow().lt(&items[mid])? { hi = mid; } else { lo = mid + 1; }
+            if py_lt(x, &items[mid])? { hi = mid; } else { lo = mid + 1; }
         }
         Ok(py_int(lo as i64))
     });
@@ -1071,7 +1137,7 @@ pub fn create_bisect_dict() -> HashMap<String, PyObjectRef> {
         let mut hi = if args.len() > 3 { args[3].as_i64().ok_or_else(|| PyError::type_error("hi must be an integer"))? as usize } else { items.len() };
         while lo < hi {
             let mid = (lo + hi) / 2;
-            if x.borrow().lt(&items[mid])? { hi = mid; } else { lo = mid + 1; }
+            if py_lt(x, &items[mid])? { hi = mid; } else { lo = mid + 1; }
         }
         Ok(py_int(lo as i64))
     });
@@ -1087,7 +1153,7 @@ pub fn create_bisect_dict() -> HashMap<String, PyObjectRef> {
         let mut hi = if args.len() > 3 { args[3].as_i64().ok_or_else(|| PyError::type_error("hi must be an integer"))? as usize } else { items.len() };
         while lo < hi {
             let mid = (lo + hi) / 2;
-            if items[mid].borrow().lt(x)? { lo = mid + 1; } else { hi = mid; }
+            if py_lt(&items[mid], x)? { lo = mid + 1; } else { hi = mid; }
         }
         if let PyObject::List(list) = &mut *args[0].borrow_mut() { list.insert(lo, x.clone()); Ok(py_none()) }
         else { Err(PyError::type_error("insort_left() argument must be a list")) }
@@ -1104,10 +1170,28 @@ pub fn create_bisect_dict() -> HashMap<String, PyObjectRef> {
         let mut hi = if args.len() > 3 { args[3].as_i64().ok_or_else(|| PyError::type_error("hi must be an integer"))? as usize } else { items.len() };
         while lo < hi {
             let mid = (lo + hi) / 2;
-            if x.borrow().lt(&items[mid])? { hi = mid; } else { lo = mid + 1; }
+            if py_lt(x, &items[mid])? { hi = mid; } else { lo = mid + 1; }
         }
         if let PyObject::List(list) = &mut *args[0].borrow_mut() { list.insert(lo, x.clone()); Ok(py_none()) }
         else { Err(PyError::type_error("insort_right() argument must be a list")) }
+    });
+
+    // insort = insort_right (CPython convention)
+    bisect_func!("insort", |args| {
+        if args.len() < 2 { return Err(PyError::type_error("insort() requires at least 2 arguments (list, item)")); }
+        let items = {
+            let a = args[0].borrow();
+            match &*a { PyObject::List(v) => v.clone(), _ => return Err(PyError::type_error("insort() argument must be a list")) }
+        };
+        let x = &args[1];
+        let mut lo = if args.len() > 2 { args[2].as_i64().ok_or_else(|| PyError::type_error("lo must be an integer"))? as usize } else { 0 };
+        let mut hi = if args.len() > 3 { args[3].as_i64().ok_or_else(|| PyError::type_error("hi must be an integer"))? as usize } else { items.len() };
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if py_lt(x, &items[mid])? { hi = mid; } else { lo = mid + 1; }
+        }
+        if let PyObject::List(list) = &mut *args[0].borrow_mut() { list.insert(lo, x.clone()); Ok(py_none()) }
+        else { Err(PyError::type_error("insort() argument must be a list")) }
     });
 
     d
@@ -1126,7 +1210,7 @@ pub fn create_heapq_dict() -> HashMap<String, PyObjectRef> {
         let mut pos = pos;
         while pos > start {
             let parent = (pos - 1) / 2;
-            if heap[pos].borrow().lt(&heap[parent]).unwrap_or(false) {
+            if py_lt(&heap[pos], &heap[parent]).unwrap_or(false) {
                 heap.swap(pos, parent);
                 pos = parent;
             } else {
@@ -1144,10 +1228,10 @@ pub fn create_heapq_dict() -> HashMap<String, PyObjectRef> {
             let left = 2 * pos + 1;
             let right = 2 * pos + 2;
             let mut smallest = pos;
-            if left < end && heap[left].borrow().lt(&heap[smallest]).unwrap_or(false) {
+            if left < end && py_lt(&heap[left], &heap[smallest]).unwrap_or(false) {
                 smallest = left;
             }
-            if right < end && heap[right].borrow().lt(&heap[smallest]).unwrap_or(false) {
+            if right < end && py_lt(&heap[right], &heap[smallest]).unwrap_or(false) {
                 smallest = right;
             }
             if smallest == pos { break; }
@@ -1236,7 +1320,7 @@ pub fn create_heapq_dict() -> HashMap<String, PyObjectRef> {
         // Use a min-heap of size n to track largest n elements
         if items.len() <= n {
             // Sort descending
-            items.sort_by(|a, b| b.borrow().lt(a).unwrap_or(false).cmp(&true).reverse());
+            items.sort_by(|a, b| py_lt(b, a).unwrap_or(false).cmp(&true).reverse());
             return Ok(py_list(items));
         }
         // Build a min-heap of the first n elements
@@ -1247,7 +1331,7 @@ pub fn create_heapq_dict() -> HashMap<String, PyObjectRef> {
             }
         }
         for item in items {
-            if item.borrow().lt(&heap[0]).unwrap_or(false) {
+            if py_lt(&item, &heap[0]).unwrap_or(false) {
                 // item < smallest in heap, skip
             } else {
                 heap[0] = item;
@@ -1255,7 +1339,7 @@ pub fn create_heapq_dict() -> HashMap<String, PyObjectRef> {
             }
         }
         // Sort descending
-        heap.sort_by(|a, b| b.borrow().lt(a).unwrap_or(false).cmp(&true).reverse());
+        heap.sort_by(|a, b| py_lt(b, a).unwrap_or(false).cmp(&true).reverse());
         Ok(py_list(heap))
     });
 
@@ -1263,7 +1347,7 @@ pub fn create_heapq_dict() -> HashMap<String, PyObjectRef> {
         let (n, mut items) = _extract_items(args)?;
         if n == 0 { return Ok(py_list(Vec::new())); }
         if items.len() <= n {
-            items.sort_by(|a, b| a.borrow().lt(b).unwrap_or(false).cmp(&true));
+            items.sort_by(|a, b| py_lt(a, b).unwrap_or(false).cmp(&true));
             return Ok(py_list(items));
         }
         // Use a max-heap (negation) of size n to track smallest n elements
@@ -1276,14 +1360,14 @@ pub fn create_heapq_dict() -> HashMap<String, PyObjectRef> {
             }
         }
         for item in items {
-            if heap[0].borrow().lt(&item).unwrap_or(false) {
+            if py_lt(&heap[0], &item).unwrap_or(false) {
                 // item < heap[0], skip
             } else {
                 heap[0] = item;
                 _siftup_max(&mut heap, 0);
             }
         }
-        heap.sort_by(|a, b| a.borrow().lt(b).unwrap_or(false).cmp(&true));
+        heap.sort_by(|a, b| py_lt(a, b).unwrap_or(false).cmp(&true));
         Ok(py_list(heap))
     });
 
@@ -1294,10 +1378,10 @@ pub fn create_heapq_dict() -> HashMap<String, PyObjectRef> {
             let left = 2 * pos + 1;
             let right = 2 * pos + 2;
             let mut largest = pos;
-            if left < end && heap[largest].borrow().lt(&heap[left]).unwrap_or(false) {
+            if left < end && py_lt(&heap[largest], &heap[left]).unwrap_or(false) {
                 largest = left;
             }
-            if right < end && heap[largest].borrow().lt(&heap[right]).unwrap_or(false) {
+            if right < end && py_lt(&heap[largest], &heap[right]).unwrap_or(false) {
                 largest = right;
             }
             if largest == pos { break; }
