@@ -460,14 +460,45 @@ impl PyError {
                 // reraised with/finally exception) rather than the real
                 // message — the actual args live on the wrapped exception
                 // object itself.
-                if let PyObject::Exception { args, .. } = &*exc.borrow() {
-                    match args.len() {
-                        0 => String::new(),
-                        1 => args[0].str(),
-                        _ => args.iter().map(|a| a.str()).collect::<Vec<_>>().join(", "),
+                match &*exc.borrow() {
+                    PyObject::Exception { args, .. } => {
+                        match args.len() {
+                            0 => String::new(),
+                            1 => args[0].str(),
+                            _ => args.iter().map(|a| a.str()).collect::<Vec<_>>().join(", "),
+                        }
                     }
-                } else {
-                    m.clone()
+                    // A user-defined exception class (`class Foo(Exception):
+                    // ...`, raised/reraised — e.g. Django's real
+                    // `ImproperlyConfigured`) is a plain `PyObject::Instance`,
+                    // not our internal `PyObject::Exception` representation —
+                    // without this arm every such exception displayed as the
+                    // generic dispatch tag ("Exception: re-raise") instead of
+                    // its real class name and message, the moment it passed
+                    // through a `with`/`finally` (RERAISE) or `except: raise`
+                    // (bare reraise) — both extremely common. `args` here
+                    // mirrors what `Exception.__init__` conventionally
+                    // stores (`self.args = args`), read directly rather than
+                    // calling `__str__` (no VM access from this plain method).
+                    PyObject::Instance { dict, .. } => {
+                        match dict.get("args") {
+                            Some(args_obj) => {
+                                let is_tuple = matches!(&*args_obj.borrow(), PyObject::Tuple(_));
+                                if is_tuple {
+                                    let items = if let PyObject::Tuple(items) = &*args_obj.borrow() { items.clone() } else { unreachable!() };
+                                    match items.len() {
+                                        0 => String::new(),
+                                        1 => items[0].str(),
+                                        _ => items.iter().map(|a| a.str()).collect::<Vec<_>>().join(", "),
+                                    }
+                                } else {
+                                    args_obj.str()
+                                }
+                            }
+                            None => String::new(),
+                        }
+                    }
+                    _ => m.clone(),
                 }
             }
             PyError::StopIteration => "".to_string(),
@@ -485,6 +516,9 @@ impl PyError {
             PyError::Exception(_, exc) => match &*exc.borrow() {
                 PyObject::Exception { typ, .. } => typ.clone(),
                 PyObject::ExceptionGroup { typ, .. } => typ.clone(),
+                // User-defined exception class instance (`class Foo(Exception)`)
+                // — see the matching arm in `message()` for why this matters.
+                PyObject::Instance { typ, .. } => get_type_name_for_instance(typ),
                 _ => "Exception".to_string(),
             },
             PyError::TypeError(_) => "TypeError".to_string(),
@@ -4927,6 +4961,43 @@ pub(crate) fn native_base_of_type(typ: &PyObjectRef) -> Option<String> {
     }
 }
 
+/// Name of the closest built-in exception constructor (`Exception`,
+/// `ValueError`, ...) a class's ancestry reaches, if any — walked directly
+/// (not via a propagated marker like `native_base_of_type`, since built-in
+/// exception "classes" are `PyObject::BuiltinFunction`s, not
+/// `PyObject::Type`s, so they never appear in `mro` at all — only each real
+/// ancestor `Type`'s own direct `bases` field can reference one). Used to
+/// detect `class MyError(Exception): pass`-style user exception subclasses
+/// (at any depth: `class MoreSpecific(MyError): pass` too) that don't
+/// override `__init__`, which still need `self.args` populated exactly like
+/// calling `Exception(*args)` directly would (see the call site in
+/// `vm.rs`'s Type-instantiation logic).
+pub(crate) fn find_exception_base_name(typ: &PyObjectRef) -> Option<String> {
+    let (bases, mro): (Vec<PyObjectRef>, Vec<PyObjectRef>) = {
+        if let PyObject::Type { bases, mro, .. } = &*typ.borrow() {
+            (bases.clone(), mro.clone())
+        } else {
+            return None;
+        }
+    };
+    let mut base_lists: Vec<Vec<PyObjectRef>> = vec![bases];
+    for m in &mro {
+        if let PyObject::Type { bases: b, .. } = &*m.borrow() {
+            base_lists.push(b.clone());
+        }
+    }
+    for base_list in base_lists {
+        for b in base_list {
+            if let PyObject::BuiltinFunction { name, .. } = &*b.borrow() {
+                if crate::vm::is_exception_subclass(name, "BaseException") {
+                    return Some(name.clone());
+                }
+            }
+        }
+    }
+    None
+}
+
 /// The native backing value (a real, independent PyObject::List/Dict/Str)
 /// for an instance of a native-subclassing class, if any.
 pub(crate) fn native_backing_of(obj: &PyObjectRef) -> Option<PyObjectRef> {
@@ -4981,7 +5052,7 @@ pub(crate) fn synthesize_native_init(kind: &str, args: &[PyObjectRef]) -> PyResu
     }
 }
 
-fn collect_iterable(iterable: &PyObjectRef) -> PyResult<Vec<PyObjectRef>> {
+pub(crate) fn collect_iterable(iterable: &PyObjectRef) -> PyResult<Vec<PyObjectRef>> {
     let iter_obj = builtin_iter(&[iterable.clone()])?;
     let mut items = Vec::new();
     loop {
@@ -8050,6 +8121,29 @@ impl PyObject {
                     return Ok(PyObjectRef::imm(PyObject::BuiltinFunction {
                         name: "from_bytes".to_string(),
                         func: builtin_int_from_bytes,
+                    }));
+                }
+                if bf_name == "dict" && name == "fromkeys" {
+                    // dict.fromkeys(iterable, value=None) — a real classmethod
+                    // in CPython, called both as `dict.fromkeys(...)` and via
+                    // `cls.fromkeys(...)` inside a dict-subclass's own
+                    // methods (real code: `collections.ChainMap.__iter__`
+                    // does `dict.fromkeys(mapping)`). Missing entirely before
+                    // — `dict` has no attribute dict of its own to answer
+                    // this from, being a plain BuiltinFunction constructor
+                    // rather than a real Type.
+                    return Ok(PyObjectRef::imm(PyObject::BuiltinFunction {
+                        name: "fromkeys".to_string(),
+                        func: |args| {
+                            if args.is_empty() { return Err(PyError::type_error("fromkeys() takes at least 1 argument")); }
+                            let keys = crate::object::collect_iterable(&args[0])?;
+                            let value = args.get(1).cloned().unwrap_or_else(py_none);
+                            let mut d = PyDict::new();
+                            for k in keys {
+                                d.set(k, value.clone())?;
+                            }
+                            Ok(PyObjectRef::new(PyObject::Dict(d)))
+                        },
                     }));
                 }
                 if bf_name == "dict" && (name == "__setitem__" || name == "__getitem__") {
