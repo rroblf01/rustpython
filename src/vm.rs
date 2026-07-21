@@ -223,7 +223,20 @@ impl VirtualMachine {
          modules.insert("math".to_string(), create_module("math", create_math_dict()));
          modules.insert("_codecs".to_string(), create_module("_codecs", create_codecs_dict()));
 
-         let sys_dict = create_sys_dict(argv);
+         let mut sys_dict = create_sys_dict(argv);
+         // sys.path is shared (Rc-cloned) across every VirtualMachine
+         // instance in this process/thread, real or disposable — see the
+         // populate-defaults block below for why. `sys.modules` is
+         // deliberately NOT shared this way: it's populated per-VM below
+         // from that VM's own already-built `modules` map, which is the
+         // correct, VM-local behavior for module caching.
+         thread_local! {
+             static SHARED_SYS_PATH: RefCell<Option<PyObjectRef>> = RefCell::new(None);
+         }
+         let reused_shared_path = SHARED_SYS_PATH.with(|c| c.borrow().clone());
+         if let Some(shared_path) = reused_shared_path.clone() {
+             sys_dict.insert("path".to_string(), shared_path);
+         }
          modules.insert("sys".to_string(), create_module("sys", sys_dict.clone()));
           builtins.extend(sys_dict.clone());
 
@@ -563,8 +576,14 @@ impl VirtualMachine {
           }
           modules.insert("html.parser".to_string(), html_parser_mod);
 
-          // Native unittest module (stub with TestCase)
-          modules.insert("unittest".to_string(), create_module("unittest", create_unittest_dict()));
+          // Native unittest module — DISABLED: was a complete no-op stub
+          // (every assertX method silently did nothing, `main()` never
+          // discovered or ran a single test) — replaced with the real
+          // CPython pure-Python `unittest` package (Lib/unittest/). Real
+          // CPython/Django test suites are unittest-based; silently
+          // no-op'ing every assertion is actively dangerous for a project
+          // whose goal is being a genuine CPython replacement.
+          // modules.insert("unittest".to_string(), create_module("unittest", create_unittest_dict()));
 
           // Native doctest module (stub with TestResults and testmod)
           modules.insert("doctest".to_string(), create_module("doctest", create_doctest_dict()));
@@ -686,7 +705,22 @@ impl VirtualMachine {
           #[cfg(feature = "sqlite3")]
           modules.insert("sqlite3".to_string(), create_module("sqlite3", create_sqlite3_dict()));
 
-          // Populate sys.path with default search paths
+          // Populate sys.path with default search paths — ONLY the first
+          // time this process/thread creates a VM. Every subsequent
+          // VirtualMachine::new() (crucially including the many *disposable*
+          // ones `call_bound_method` spins up per nested Python-level call —
+          // a separate, documented architectural gap) reuses the exact same
+          // list object via `reused_shared_path` above instead of rebuilding
+          // it from scratch. This fixes a real correctness bug (a disposable
+          // VM's sys.path previously reverted to just these hardcoded
+          // defaults, invisible to whatever `sys.path.insert(...)` the
+          // running script had done against the real VM — breaking any
+          // nested call that needed to import a real site-packages module,
+          // confirmed via Django's `django.db.utils.load_backend`) and a
+          // real performance win (this block does venv detection + `.pth`
+          // file filesystem I/O, previously repeated on every one of 2000+
+          // disposable VMs in one observed Django import).
+        if reused_shared_path.is_none() {
         if let PyObject::List(path_list) = &mut *sys_dict.get("path").unwrap().borrow_mut() {
             path_list.push(py_str("."));
             path_list.push(py_str(&find_lib_dir()));
@@ -776,6 +810,13 @@ impl VirtualMachine {
                 }
             }
         }
+        }
+        // First VM in this process/thread: publish the freshly-populated
+        // path list so every subsequent VirtualMachine::new() reuses it.
+        if reused_shared_path.is_none() {
+            let path_list = sys_dict.get("path").unwrap().clone();
+            SHARED_SYS_PATH.with(|c| *c.borrow_mut() = Some(path_list));
+        }
          // Populate sys.modules with already-loaded modules
          if let PyObject::Dict(mod_dict) = &mut *sys_dict.get("modules").unwrap().borrow_mut() {
              for (name, module) in &modules {
@@ -799,7 +840,7 @@ impl VirtualMachine {
                exc_traceback: None,
            };
          vm.populate_type_registry();
-         vm.install_source_defined_stdlib("collections", crate::modules::COLLECTIONS_USER_TYPES_SOURCE, &["UserList", "UserDict", "UserString", "Counter", "defaultdict"]);
+         vm.install_source_defined_stdlib("collections", crate::modules::COLLECTIONS_USER_TYPES_SOURCE, &["UserList", "UserDict", "UserString", "Counter", "defaultdict", "ChainMap"]);
          // contextlib no longer native — real Lib/contextlib.py already defines ContextDecorator
          vm.install_source_defined_stdlib("functools", crate::modules::FUNCTOOLS_EXTRA_SOURCE, &["lru_cache", "cache"]);
          vm.install_source_defined_stdlib("enum", crate::modules::ENUM_SOURCE, &[
@@ -835,19 +876,38 @@ impl VirtualMachine {
         // Every `VirtualMachine::new()` — including the many *disposable*
         // ones spun up for nested Python-level calls from Rust builtin code
         // (a separate, documented architectural gap — see
-        // `call_bound_method`'s doc comments) — re-parses and re-compiles
-        // this same, never-changing Python source from scratch. That's cheap
-        // in isolation but catastrophic under real workloads: a single
-        // Django import chain observed here triggers 2000+ disposable VMs,
-        // each re-parsing/re-compiling every one of these stdlib source
-        // files, dominating a 56-SECOND import of `django.db.models`. Fixed
-        // by caching the compiled `CodeObject` per module_name (source text
-        // is `&'static str` from `include_str!`, so identity-by-name is
-        // exact) — parsing/compiling still happens exactly once per process,
-        // every subsequent VM only clones the already-built instruction/const
-        // data, which is far cheaper than re-lexing+re-parsing+re-compiling.
+        // `call_bound_method`'s doc comments) — used to re-parse, re-compile,
+        // AND re-EXECUTE this same, never-changing Python source from
+        // scratch. That's cheap in isolation but catastrophic under real
+        // workloads: a single Django import chain observed here triggers
+        // 2000+ disposable VMs, each redoing all of this, dominating a
+        // 56-SECOND import of `django.db.models`. First fixed the
+        // parse+compile half by caching the compiled `CodeObject` (cut it to
+        // ~28s) — this caches the EXECUTION RESULT too: the extracted
+        // `(name, PyObjectRef)` pairs (e.g. `collections.Counter`,
+        // `enum.Enum` — real Type objects with their own dict of methods)
+        // are stored once and simply Rc-cloned into every subsequent VM's
+        // module dict instead of re-running ~800 lines of bytecode (class
+        // bodies, method definitions, docstrings) per VM. This is safe
+        // because these are conceptually process-global stdlib singletons —
+        // exactly how CPython's own module system treats them (one `Counter`
+        // class shared by every importer) — sharing the actual objects
+        // across VM instances doesn't change any observable behavior for
+        // user code (isinstance/identity/method dispatch all still work,
+        // since it's genuinely the same objects everywhere).
         thread_local! {
             static COMPILED_STDLIB_CACHE: std::cell::RefCell<HashMap<String, Rc<CodeObject>>> = std::cell::RefCell::new(HashMap::new());
+            static EXECUTED_STDLIB_CACHE: std::cell::RefCell<HashMap<String, Rc<Vec<(String, PyObjectRef)>>>> = std::cell::RefCell::new(HashMap::new());
+        }
+        if let Some(cached_extracted) = EXECUTED_STDLIB_CACHE.with(|c| c.borrow().get(module_name).cloned()) {
+            if let Some(module) = self.modules.get(module_name) {
+                if let PyObject::Module { dict, .. } = &mut *module.borrow_mut() {
+                    for (name, obj) in cached_extracted.iter() {
+                        dict.insert(name.clone(), obj.clone());
+                    }
+                }
+            }
+            return;
         }
         let cached = COMPILED_STDLIB_CACHE.with(|c| c.borrow().get(module_name).cloned());
         let code = match cached {
@@ -882,6 +942,7 @@ impl VirtualMachine {
             let globals = dedicated_globals.borrow();
             names.iter().filter_map(|name| globals.get(*name).cloned().map(|v| (name.to_string(), v))).collect()
         };
+        EXECUTED_STDLIB_CACHE.with(|c| c.borrow_mut().insert(module_name.to_string(), Rc::new(extracted.clone())));
         if let Some(module) = self.modules.get(module_name) {
             if let PyObject::Module { dict, .. } = &mut *module.borrow_mut() {
                 for (name, obj) in extracted {
@@ -3548,20 +3609,40 @@ impl VirtualMachine {
             Opcode::UNPACK_SEQUENCE => {
                 let count = arg as usize;
                 let seq = self.frames[fi].pop()?;
-                let items = {
+                let list_items = {
                     let obj = seq.borrow();
                     match &*obj {
-                        PyObject::List(v) | PyObject::Tuple(v) => {
-                            if v.len() != count {
-                                return Err(PyError::value_error(format!(
-                                    "cannot unpack {} items into {} values", v.len(), count
-                                )));
-                            }
-                            v.clone()
-                        }
-                        _ => return Err(PyError::type_error("cannot unpack non-iterable")),
+                        PyObject::List(v) | PyObject::Tuple(v) => Some(v.clone()),
+                        _ => None,
                     }
                 };
+                // Any other iterable (generator, custom __iter__, set, dict
+                // view, str, ...) — real Python's unpacking assignment
+                // accepts anything iterable, not just list/tuple literally.
+                // Confirmed missing via Django's real `for k, v in
+                // some_dict.items():`-adjacent unpacking during
+                // `django.setup()`.
+                let items = match list_items {
+                    Some(v) => v,
+                    None => {
+                        let iterator = crate::object::builtin_iter(&[seq.clone()])
+                            .map_err(|_| PyError::type_error(format!("cannot unpack non-iterable '{}' object", seq.borrow().type_name())))?;
+                        let mut v = Vec::new();
+                        loop {
+                            match crate::object::builtin_next(&[iterator.clone()]) {
+                                Ok(val) => v.push(val),
+                                Err(e) if crate::object::is_stop_iteration_error(&e) => break,
+                                Err(e) => return Err(e),
+                            }
+                        }
+                        v
+                    }
+                };
+                if items.len() != count {
+                    return Err(PyError::value_error(format!(
+                        "cannot unpack {} items into {} values", items.len(), count
+                    )));
+                }
                 for item in items.into_iter().rev() {
                     self.frames[fi].push(item);
                 }
@@ -3572,20 +3653,37 @@ impl VirtualMachine {
                 let after = (arg & 0xFF) as usize;
                 let total = before + after + 1; // +1 for the starred item
                 let seq = self.frames[fi].pop()?;
-                let items = {
+                let list_items = {
                     let obj = seq.borrow();
                     match &*obj {
-                        PyObject::List(v) | PyObject::Tuple(v) => {
-                            if v.len() < total {
-                                return Err(PyError::value_error(format!(
-                                    "cannot unpack {} items into {} values", v.len(), total
-                                )));
-                            }
-                            v.clone()
-                        }
-                        _ => return Err(PyError::type_error("cannot unpack non-iterable")),
+                        PyObject::List(v) | PyObject::Tuple(v) => Some(v.clone()),
+                        _ => None,
                     }
                 };
+                // Same generalization as UNPACK_SEQUENCE above: fall back to
+                // the real iterator protocol for anything that isn't
+                // literally a list/tuple.
+                let items = match list_items {
+                    Some(v) => v,
+                    None => {
+                        let iterator = crate::object::builtin_iter(&[seq.clone()])
+                            .map_err(|_| PyError::type_error(format!("cannot unpack non-iterable '{}' object", seq.borrow().type_name())))?;
+                        let mut v = Vec::new();
+                        loop {
+                            match crate::object::builtin_next(&[iterator.clone()]) {
+                                Ok(val) => v.push(val),
+                                Err(e) if crate::object::is_stop_iteration_error(&e) => break,
+                                Err(e) => return Err(e),
+                            }
+                        }
+                        v
+                    }
+                };
+                if items.len() < total {
+                    return Err(PyError::value_error(format!(
+                        "cannot unpack {} items into {} values", items.len(), total
+                    )));
+                }
                 let n = items.len();
                 // Push order (bottom of stack = first to be stored):
                 //   before items, star list, after items
@@ -3814,6 +3912,9 @@ impl VirtualMachine {
                     _ => false,
                 };
                 if !is_empty_eg {
+                    if std::env::var("RPY_DEBUG_RERAISE").is_ok() {
+                        eprintln!("RERAISE: kind={:?} repr={}", std::mem::discriminant(&*reraise_exc.borrow()), reraise_exc.borrow().repr());
+                    }
                     return Err(PyError::Exception("re-raise".to_string(), reraise_exc));
                 }
                 // Empty group — all exceptions handled, silently continue
@@ -4995,6 +5096,24 @@ impl VirtualMachine {
                     let native = crate::object::synthesize_native_init(kind, &args)?;
                     if let PyObject::Instance { dict, .. } = &mut *instance.borrow_mut() {
                         dict.insert(crate::object::NATIVE_BACKING_KEY.to_string(), native);
+                    }
+                } else if crate::object::find_exception_base_name(&callable).is_some() {
+                    // `class MyError(Exception): pass` (no explicit
+                    // __init__) — real Python's `BaseException.__init__`
+                    // always stores `self.args = args`, which is what
+                    // `str(exc)`/`repr(exc)` and every uncaught-exception
+                    // traceback print. Exception builtins (Exception,
+                    // ValueError, ...) are `BuiltinFunction`s, not
+                    // `PyObject::Type`s, so they never appear in `mro` and
+                    // were completely invisible to this constructor logic —
+                    // ANY user-defined exception subclass (an extremely
+                    // common, foundational pattern) silently got no `args`
+                    // at all, surfacing as "MyError: " (empty message) or
+                    // "Exception: re-raise" (the internal dispatch tag)
+                    // instead of the real message whenever it passed through
+                    // a `with`/`finally` or propagated uncaught.
+                    if let PyObject::Instance { dict, .. } = &mut *instance.borrow_mut() {
+                        dict.insert("args".to_string(), py_tuple(args.clone()));
                     }
                 }
             }
