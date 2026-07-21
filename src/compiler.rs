@@ -1621,6 +1621,27 @@ impl Compiler {
                 self.emit(Opcode::POP_TOP, 0);
             }
             Stmt::With { items, body, is_async } => {
+                // `with a, b, c: BODY` is exactly equivalent to nested
+                // single-item withs (`with a:\n with b:\n  with c:\n
+                // BODY`) — CPython desugars it the same way. Previously this
+                // only ever compiled `SETUP_WITH` for every item up front
+                // and then fell to a bare `self.compile_stmts(body)` with
+                // ZERO cleanup for anything but the single-item case — a
+                // multi-manager `with` never called `__exit__` at all, not
+                // even on the ordinary non-exceptional path (confirmed via
+                // a minimal repro: no "exit"-side effect ever ran). Fixed by
+                // actually desugaring into nested single-item `Stmt::With`
+                // nodes and recursing, so every level reuses the one
+                // correct, already-verified single-item try/finally
+                // machinery below instead of a second, never-implemented
+                // multi-item path.
+                if items.len() > 1 {
+                    let mut rest = items.clone();
+                    let first = rest.remove(0);
+                    let inner = Stmt::With { items: rest, body: body.clone(), is_async: *is_async };
+                    self.compile_stmt(&Stmt::With { items: vec![first], body: vec![inner], is_async: *is_async })?;
+                    return Ok(());
+                }
                 for (_i, item) in items.iter().enumerate() {
                     self.compile_expr(&item.context_expr)?;
                     if *is_async {
