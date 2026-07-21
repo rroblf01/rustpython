@@ -165,6 +165,25 @@ impl PyObjectRef {
         }
     }
 
+    /// True iff this value is a REAL float (`SmallFloat` or boxed
+    /// `PyObject::Float`) — as opposed to merely being convertible to one via
+    /// `as_f64()`, which any `Int`/`BigInt` also satisfies (lossily, via
+    /// `to_f64()`, which never fails — it just loses precision or saturates
+    /// to infinity for astronomically large magnitudes). `py_add`/`py_sub`/
+    /// `py_mul`'s fast paths need this distinction: their float fast-path is
+    /// only correct when at least one *actual* operand is a float — using
+    /// `as_f64().is_some()` alone made `(2**100) * (2**100)` silently
+    /// produce a `float` (with precision already lost) instead of the
+    /// correct exact bigint, since a big `Int` converts "successfully" to
+    /// f64 just like a real float would.
+    pub fn is_float_typed(&self) -> bool {
+        match self {
+            PyObjectRef::SmallFloat(_) => true,
+            PyObjectRef::Imm(_) | PyObjectRef::Mut(_) => matches!(&*self.borrow(), PyObject::Float(_)),
+            _ => false,
+        }
+    }
+
     pub fn is(&self, other: &PyObjectRef) -> bool {
         match (self, other) {
             (PyObjectRef::SmallInt(a), PyObjectRef::SmallInt(b)) => a == b,
@@ -785,7 +804,12 @@ pub enum PyObject {
     },
     Array(PyArray),
     CompiledRegex {
-        regex: regex::Regex,
+        // fancy_regex (not the plain `regex` crate) — needed for
+        // lookahead/lookbehind, which real Python `re` patterns use
+        // routinely (Django's own camelCase-to-verbose-name conversion:
+        // `(?<=[a-z])[A-Z]`) and the `regex` crate fundamentally can't
+        // support (a deliberate linear-time-matching guarantee, not a bug).
+        regex: fancy_regex::Regex,
         pattern: String,
         flags: i32,
     },
@@ -1679,8 +1703,10 @@ pub fn py_add(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
         return Ok(py_int(ai + bi));
     }
-    if let (Some(af), Some(bf)) = (a.as_f64(), b.as_f64()) {
-        return Ok(py_float(af + bf));
+    if a.is_float_typed() || b.is_float_typed() {
+        if let (Some(af), Some(bf)) = (a.as_f64(), b.as_f64()) {
+            return Ok(py_float(af + bf));
+        }
     }
     if let Some(r) = try_dunder_binop(a, b, "__add__")? { return Ok(r); }
     let a_obj = a.borrow();
@@ -1715,8 +1741,10 @@ pub fn py_sub(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
         return Ok(py_int(ai - bi));
     }
-    if let (Some(af), Some(bf)) = (a.as_f64(), b.as_f64()) {
-        return Ok(py_float(af - bf));
+    if a.is_float_typed() || b.is_float_typed() {
+        if let (Some(af), Some(bf)) = (a.as_f64(), b.as_f64()) {
+            return Ok(py_float(af - bf));
+        }
     }
     if let Some(r) = try_dunder_binop(a, b, "__sub__")? { return Ok(r); }
     let a_obj = a.borrow();
@@ -1736,8 +1764,10 @@ pub fn py_mul(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
         return Ok(py_int(ai * bi));
     }
-    if let (Some(af), Some(bf)) = (a.as_f64(), b.as_f64()) {
-        return Ok(py_float(af * bf));
+    if a.is_float_typed() || b.is_float_typed() {
+        if let (Some(af), Some(bf)) = (a.as_f64(), b.as_f64()) {
+            return Ok(py_float(af * bf));
+        }
     }
     if let Some(r) = try_dunder_binop(a, b, "__mul__")? { return Ok(r); }
     let a_obj = a.borrow();
@@ -2196,14 +2226,26 @@ impl Compare for PyObject {
                 Ok(true)
             }
             (PyObject::Tuple(a), PyObject::Tuple(b)) => {
+                // Route element comparison through py_compare — a raw
+                // `.lt()` has no Instance/dunder dispatch, so a tuple whose
+                // elements are user-defined objects with `__lt__` (a very
+                // common ordering idiom: `(sort_key, obj)` tuples) always
+                // raised TypeError instead of consulting it.
                 for (x, y) in a.iter().zip(b.iter()) {
-                    if !x.equals(y)? { return x.borrow().lt(y); }
+                    if !x.equals(y)? { return Ok(py_compare(x, y, 0)?.truthy()); }
                 }
                 Ok(a.len() < b.len())
             }
             (PyObject::None, PyObject::None) => Ok(false),
-            _ => Err(PyError::type_error(format!("'<' not supported between instances of '{}' and '{}'",
-                self.type_name(), other.type_name()))),
+            _ => {
+                if std::env::var("RPY_DEBUG_LT").is_ok() {
+                    let self_cls = if let PyObject::Instance { typ, .. } = self { get_type_name_for_instance(typ) } else { self.type_name() };
+                    let other_cls = if let PyObject::Instance { typ, .. } = &*other { get_type_name_for_instance(typ) } else { other.type_name() };
+                    eprintln!("LT_FAIL: self_cls={} other_cls={}", self_cls, other_cls);
+                }
+                Err(PyError::type_error(format!("'<' not supported between instances of '{}' and '{}'",
+                    self.type_name(), other.type_name())))
+            }
         }
     }
 
@@ -2223,7 +2265,7 @@ impl Compare for PyObject {
             }
             (PyObject::Tuple(a), PyObject::Tuple(b)) => {
                 for (x, y) in a.iter().zip(b.iter()) {
-                    if !x.equals(y)? { return x.borrow().lt(y); }
+                    if !x.equals(y)? { return Ok(py_compare(x, y, 0)?.truthy()); }
                 }
                 Ok(a.len() <= b.len())
             }
@@ -2248,7 +2290,7 @@ impl Compare for PyObject {
             }
             (PyObject::Tuple(a), PyObject::Tuple(b)) => {
                 for (x, y) in a.iter().zip(b.iter()) {
-                    if !x.equals(y)? { return x.borrow().gt(y); }
+                    if !x.equals(y)? { return Ok(py_compare(x, y, 4)?.truthy()); }
                 }
                 Ok(a.len() > b.len())
             }
@@ -2273,7 +2315,7 @@ impl Compare for PyObject {
             }
             (PyObject::Tuple(a), PyObject::Tuple(b)) => {
                 for (x, y) in a.iter().zip(b.iter()) {
-                    if !x.equals(y)? { return x.borrow().gt(y); }
+                    if !x.equals(y)? { return Ok(py_compare(x, y, 4)?.truthy()); }
                 }
                 Ok(a.len() >= b.len())
             }
@@ -3503,6 +3545,9 @@ pub fn call_bound_method(func: PyObjectRef, self_obj: PyObjectRef, args: Vec<PyO
             if std::env::var("RPY_DEBUG_IMPORT").is_ok() {
                 eprintln!("CALL_BOUND_METHOD (disposable VM): fname={} code_name={} filename={}", fname, code.name, code.filename);
             }
+            if std::env::var("RPY_DEBUG_CBM").is_ok() {
+                eprintln!("call_bound_method: fname={} varnames={:?} args.len()={} arg_count={}", fname, code.varnames, args.len(), code.arg_count);
+            }
             let mut frame = super::vm::Frame::new(std::rc::Rc::new(code.clone()), g.clone(), std::rc::Rc::new(create_builtins()), None);
             let code = code.clone();
             let defaults = defaults.clone();
@@ -3546,6 +3591,9 @@ pub fn call_bound_method(func: PyObjectRef, self_obj: PyObjectRef, args: Vec<PyO
                         }
                     }
                 }
+            }
+            if std::env::var("RPY_DEBUG_CBM").is_ok() {
+                eprintln!("call_bound_method: fast_locals after setup = {:?}", frame.fast_locals.iter().map(|v| v.as_ref().map(|x| x.repr())).collect::<Vec<_>>());
             }
             let mut vm = super::vm::VirtualMachine::new();
             vm.frames.push(frame);
@@ -3976,11 +4024,25 @@ pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             }
             Ok(py_bool(class_name == "type" || class_name == "object"))
         }
-        (PyObject::Instance { typ, .. }, PyObject::Type { mro, .. }) => {
-            let typ_name = typ.borrow().type_name();
-            for c in mro {
-                if c.borrow().type_name() == typ_name {
-                    return Ok(py_bool(true));
+        (PyObject::Instance { typ, .. }, PyObject::Type { .. }) => {
+            // isinstance(obj, Cls): Cls must appear in obj's OWN type's mro
+            // — this used to walk `Cls`'s mro checking for `obj`'s exact
+            // class name instead (backwards: comparing the wrong object's
+            // ancestry, and by name instead of identity), so
+            // `isinstance(subclass_instance, ParentClass)` was always False
+            // unless the instance's class name happened to literally match
+            // one of Cls's own ancestors' names. Confirmed via a minimal,
+            // Django-free repro: `isinstance(CharField(), Field)` (a plain
+            // one-level subclass check) returning False — this broke every
+            // `isinstance(other, Field)`-style guard in real code (Django's
+            // `Field.__lt__`/`__eq__`, used by `@total_ordering` and
+            // `bisect`-based field ordering during model construction).
+            let typ_ref = typ.borrow();
+            if let PyObject::Type { mro, .. } = &*typ_ref {
+                for c in mro {
+                    if c.is(&args[1]) {
+                        return Ok(py_bool(true));
+                    }
                 }
             }
             Ok(py_bool(false))
@@ -7646,7 +7708,7 @@ impl PyObject {
                             return Err(PyError::type_error("match() takes at least 1 argument"));
                         }
                         let string = args[0].str();
-                        match re.find_at(&string, 0) {
+                        match re.find(&string).unwrap_or(None) {
                             Some(m) if m.start() == 0 => {
                                 Ok(PyObjectRef::new(PyObject::Tuple(vec![
                                     py_int(m.start() as i64),
@@ -7662,7 +7724,7 @@ impl PyObject {
                             return Err(PyError::type_error("search() takes at least 1 argument"));
                         }
                         let string = args[0].str();
-                        match re.find(&string) {
+                        match re.find(&string).unwrap_or(None) {
                             Some(m) => {
                                 Ok(PyObjectRef::new(PyObject::Tuple(vec![
                                     py_int(m.start() as i64),
@@ -7679,6 +7741,7 @@ impl PyObject {
                         }
                         let string = args[0].str();
                         let results: Vec<PyObjectRef> = re.find_iter(&string)
+                            .filter_map(|r| r.ok())
                             .map(|m| py_str(m.as_str()))
                             .collect();
                         Ok(py_list(results))
@@ -7689,7 +7752,8 @@ impl PyObject {
                         }
                         let repl = args[0].str();
                         let string = args[1].str();
-                        let result = re.replace_all(&string, repl.as_str());
+                        let translated = crate::modules::translate_python_replacement(&repl);
+                        let result = re.replace_all(&string, translated.as_str());
                         Ok(py_str(&result))
                     })))),
                     "split" => Ok(PyObjectRef::imm(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
@@ -7699,9 +7763,9 @@ impl PyObject {
                         let string = args[0].str();
                         let limit = if args.len() > 1 { args[1].as_i64().unwrap_or(0) as usize } else { 0 };
                         let parts: Vec<PyObjectRef> = if limit > 0 {
-                            re.splitn(&string, limit).map(|s| py_str(s)).collect()
+                            re.splitn(&string, limit).filter_map(|r| r.ok()).map(|s| py_str(s)).collect()
                         } else {
-                            re.split(&string).map(|s| py_str(s)).collect()
+                            re.split(&string).filter_map(|r| r.ok()).map(|s| py_str(s)).collect()
                         };
                         Ok(py_list(parts))
                     })))),
@@ -7710,7 +7774,7 @@ impl PyObject {
                             return Err(PyError::type_error("fullmatch() takes at least 1 argument"));
                         }
                         let string = args[0].str();
-                        match re.find(&string) {
+                        match re.find(&string).unwrap_or(None) {
                             Some(m) if m.start() == 0 && m.end() == string.len() => {
                                 Ok(PyObjectRef::new(PyObject::Tuple(vec![
                                     py_int(m.start() as i64),
