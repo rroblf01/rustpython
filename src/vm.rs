@@ -204,6 +204,9 @@ fn find_lib_dir() -> String {
 
 impl VirtualMachine {
     pub fn new() -> Self {
+        if std::env::var("RPY_DEBUG_VM_NEW").is_ok() {
+            eprintln!("VM_NEW");
+        }
         Self::new_with_args(std::env::args().collect())
     }
 
@@ -428,8 +431,8 @@ impl VirtualMachine {
           // Native statistics module
           modules.insert("statistics".to_string(), create_module("statistics", create_statistics_dict()));
 
-          // Native contextlib module
-          modules.insert("contextlib".to_string(), create_module("contextlib", create_contextlib_dict()));
+          // Native contextlib module — DISABLED: real Lib/contextlib.py is used instead
+          // modules.insert("contextlib".to_string(), create_module("contextlib", create_contextlib_dict()));
 
           // Native decimal module
           modules.insert("decimal".to_string(), create_module("decimal", create_decimal_dict()));
@@ -797,7 +800,7 @@ impl VirtualMachine {
            };
          vm.populate_type_registry();
          vm.install_source_defined_stdlib("collections", crate::modules::COLLECTIONS_USER_TYPES_SOURCE, &["UserList", "UserDict", "UserString", "Counter", "defaultdict"]);
-         vm.install_source_defined_stdlib("contextlib", crate::modules::CONTEXTLIB_SOURCE, &["ContextDecorator"]);
+         // contextlib no longer native — real Lib/contextlib.py already defines ContextDecorator
          vm.install_source_defined_stdlib("functools", crate::modules::FUNCTOOLS_EXTRA_SOURCE, &["lru_cache", "cache"]);
          vm.install_source_defined_stdlib("enum", crate::modules::ENUM_SOURCE, &[
              "auto", "nonmember", "member", "property", "EnumType", "EnumMeta",
@@ -829,17 +832,49 @@ impl VirtualMachine {
     /// mutated again — stripping names out from underneath it broke exactly
     /// this pattern.
     fn install_source_defined_stdlib(&mut self, module_name: &str, source: &str, names: &[&str]) {
-        let mut parser = Parser::new(source);
-        let program = match parser.parse_program() {
-            Ok(p) => p,
-            Err(_) => return,
+        // Every `VirtualMachine::new()` — including the many *disposable*
+        // ones spun up for nested Python-level calls from Rust builtin code
+        // (a separate, documented architectural gap — see
+        // `call_bound_method`'s doc comments) — re-parses and re-compiles
+        // this same, never-changing Python source from scratch. That's cheap
+        // in isolation but catastrophic under real workloads: a single
+        // Django import chain observed here triggers 2000+ disposable VMs,
+        // each re-parsing/re-compiling every one of these stdlib source
+        // files, dominating a 56-SECOND import of `django.db.models`. Fixed
+        // by caching the compiled `CodeObject` per module_name (source text
+        // is `&'static str` from `include_str!`, so identity-by-name is
+        // exact) — parsing/compiling still happens exactly once per process,
+        // every subsequent VM only clones the already-built instruction/const
+        // data, which is far cheaper than re-lexing+re-parsing+re-compiling.
+        thread_local! {
+            static COMPILED_STDLIB_CACHE: std::cell::RefCell<HashMap<String, Rc<CodeObject>>> = std::cell::RefCell::new(HashMap::new());
+        }
+        let cached = COMPILED_STDLIB_CACHE.with(|c| c.borrow().get(module_name).cloned());
+        let code = match cached {
+            Some(rc) => (*rc).clone(),
+            None => {
+                let mut parser = Parser::new(source);
+                let program = match parser.parse_program() {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
+                let mut compiler = Compiler::new();
+                let code = match compiler.compile(&program, &format!("<{}>", module_name)) {
+                    Ok(c) => c,
+                    Err(_) => return,
+                };
+                COMPILED_STDLIB_CACHE.with(|c| c.borrow_mut().insert(module_name.to_string(), Rc::new(code.clone())));
+                code
+            }
         };
-        let mut compiler = Compiler::new();
-        let code = match compiler.compile(&program, &format!("<{}>", module_name)) {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-        let dedicated_globals = Rc::new(RefCell::new(HashMap::new()));
+        // Real modules always have __name__ in their globals — class bodies
+        // compiled inside this source (e.g. collections.Counter, a real
+        // `class Counter(dict): ...`) now implicitly do `__module__ =
+        // __name__` as their first statement (see compile_class_body), which
+        // would otherwise NameError here since this dict starts empty.
+        let dedicated_globals = Rc::new(RefCell::new(HashMap::from([
+            ("__name__".to_string(), py_str(module_name)),
+        ])));
         if self.exec_code(code, Some(Rc::clone(&dedicated_globals))).is_err() {
             return;
         }
@@ -1576,6 +1611,28 @@ impl VirtualMachine {
         result
     }
 
+    /// Injects `err` at the current suspension point of the single frame
+    /// already pushed onto `self.frames` (used by generator/coroutine
+    /// `.throw()`), then resumes normal execution. Mirrors `execute()`'s
+    /// frame_floor bookkeeping but starts by searching for a handler for
+    /// `err` instead of running the next instruction — this is what lets a
+    /// `try/finally` wrapping the suspended `yield` actually see the thrown
+    /// exception and run its cleanup, exactly as CPython's generator throw
+    /// does. Returns Err(err) unchanged if the generator's own code has no
+    /// handler for it (caller propagates it to whoever called .throw()).
+    pub(crate) fn throw_into_frame(&mut self, err: PyError) -> PyResult<PyObjectRef> {
+        let frame_floor = self.frames.len() - 1;
+        if !self.handle_exception(&err, frame_floor) {
+            return Err(err);
+        }
+        let result = self.execute_inner(frame_floor);
+        if let Err(ref e) = result {
+            self.exc_type = Some(py_str(&e.type_name()));
+            self.exc_value = Some(py_str(&format!("{}", e)));
+        }
+        result
+    }
+
     fn execute_inner(&mut self, frame_floor: usize) -> PyResult<PyObjectRef> {
         loop {
             let result = self.execute_instruction();
@@ -1734,8 +1791,16 @@ impl VirtualMachine {
                 };
                 match val {
                     Some(v) => self.frames[fi].push(v),
-                    None => return Err(PyError::name_error(format!("local variable '{}' referenced before assignment", 
-                        self.frames[fi].code.varnames.get(var_idx).map_or("?", |s| &**s)))),
+                    None => {
+                        if std::env::var("RPY_DEBUG_NAMEERROR").is_ok() {
+                            eprintln!("LOAD_FAST unbound: func={} file={} line={:?} varnames={:?}",
+                                self.frames[fi].code.name, self.frames[fi].code.filename,
+                                self.frames[fi].code.instructions.get(self.frames[fi].ip.saturating_sub(1)).and_then(|i| i.line_no),
+                                self.frames[fi].code.varnames);
+                        }
+                        return Err(PyError::name_error(format!("local variable '{}' referenced before assignment",
+                            self.frames[fi].code.varnames.get(var_idx).map_or("?", |s| &**s))));
+                    }
                 }
             }
 
@@ -2802,6 +2867,24 @@ impl VirtualMachine {
                                 self.frames[fi].push(cls);
                                 return Ok(None);
                             }
+                            // Clone dict/typ into owned values and drop the
+                            // borrow of `obj` ITSELF now — the descriptor
+                            // dispatch below may call into arbitrary Python
+                            // code (a `@property` getter, `cached_property`'s
+                            // `__get__`, etc.), and such code very commonly
+                            // writes back into `instance.__dict__` (that's
+                            // literally what `cached_property.__get__` does,
+                            // to cache its computed value for next time) —
+                            // if `obj`'s own borrow were still held here, that
+                            // nested write's borrow_mut() on the SAME RefCell
+                            // panics the moment such a getter touches the
+                            // instance it was called on (confirmed via a
+                            // genuine, general, Django-free repro).
+                            let dict: HashMap<String, PyObjectRef> = dict.clone();
+                            let typ: PyObjectRef = typ.clone();
+                            drop(obj_borrowed);
+                            let dict = &dict;
+                            let typ = &typ;
                             let attr = dict.get_str(&name).cloned().or_else(|| {
                                 let typ_ref = typ.borrow();
                                 if let PyObject::Type { dict: type_dict, mro, .. } = &*typ_ref {
@@ -2888,7 +2971,15 @@ impl VirtualMachine {
                                                 if let Some(cls) = cls {
                                                     if let Ok(__get__) = val.borrow().get_attribute("__get__") {
                                                         let descriptor_args = vec![val.clone(), obj.clone(), cls];
-                                                        return Some(self.call_function(__get__, descriptor_args, vec![]).unwrap_or_else(|_| val.clone()));
+                                                        match self.call_function(__get__, descriptor_args, vec![]) {
+                                                            Ok(v) => return Some(v),
+                                                            Err(e) => {
+                                                                if std::env::var("RPY_DEBUG_DESCRIPTOR").is_ok() {
+                                                                    eprintln!("DESCRIPTOR __get__ FAILED for {:?}: {}", name, e);
+                                                                }
+                                                                return Some(val.clone());
+                                                            }
+                                                        }
                                                     }
                                                 }
                                                 return Some(val.clone());
@@ -2955,7 +3046,6 @@ impl VirtualMachine {
                                     if let PyObject::Type { dict: type_dict, .. } = &*typ_ref {
                                         if let Some(getattr_method) = type_dict.get_str("__getattr__").cloned() {
                                             drop(typ_ref);
-                                            drop(obj_borrowed);
                                             self.call_function(getattr_method, vec![obj.clone(), py_str(&name)], vec![])
                                         } else if name == "__doc__" {
                                             // Every real object has __doc__ (defaults to
@@ -2963,12 +3053,12 @@ impl VirtualMachine {
                                             // object.rs's ObjectAccess::get_attribute.
                                             Ok(py_none())
                                         } else {
-                                            Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", obj_borrowed.type_name(), name)))
+                                            Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", crate::object::get_type_name_for_instance(typ), name)))
                                         }
                                     } else if name == "__doc__" {
                                         Ok(py_none())
                                     } else {
-                                        Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", obj_borrowed.type_name(), name)))
+                                        Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", crate::object::get_type_name_for_instance(typ), name)))
                                     }
                                 }
                             }
@@ -3027,6 +3117,29 @@ impl VirtualMachine {
                                                     drop(obj_borrowed);
                                                     let result = self.call_function(getter, vec![obj.clone()], vec![])?;
                                                     self.frames[fi].push(result);
+                                                    return Ok(None);
+                                                }
+                                                // `obj` (a class) is being accessed as an
+                                                // INSTANCE of its own metaclass here (that's
+                                                // what "found on the metatype, not on obj's
+                                                // own dict/mro" means) — an ordinary method
+                                                // found this way must auto-bind `self=obj`,
+                                                // exactly like any instance accessing a
+                                                // regular method, or its first real
+                                                // parameter (e.g. Django's metaclass method
+                                                // `add_to_class(cls, name, value)`, called as
+                                                // `new_class.add_to_class(name, value)`) never
+                                                // gets bound and every later positional arg
+                                                // silently shifts left by one. This is
+                                                // distinct from ordinary `SomeClass.method`
+                                                // access (the `is_function => Ok(attr)` case
+                                                // below), which correctly stays unbound.
+                                                if matches!(&*val.borrow(), PyObject::Function { .. }) {
+                                                    drop(obj_borrowed);
+                                                    self.frames[fi].push(PyObjectRef::imm(PyObject::BoundMethod {
+                                                        func: val,
+                                                        self_obj: obj.clone(),
+                                                    }));
                                                     return Ok(None);
                                                 }
                                                 val
@@ -4145,16 +4258,22 @@ impl VirtualMachine {
 
             Opcode::WITH_EXIT => {
                 // Stack: [..., exception_obj, manager]
-                // Call manager.__exit__(exc_type, exc_val, traceback)
+                // Call manager.__exit__(exc_type, exc_val, traceback) — exc_type
+                // and exc_val must be the real class object and exception
+                // instance (not a bare type-name string / the first ctor arg),
+                // since __exit__ implementations commonly do isinstance(value,
+                // ...), re-raise `value`, or read value.args/__traceback__.
                 let mgr = self.frames[fi].pop()?;
-                let (typ_str, val) = {
+                let (typ_obj, val) = {
                     let exc = self.frames[fi].peek(0)?;
                     let exc_borrowed = exc.borrow();
                     match &*exc_borrowed {
-                        PyObject::Exception { typ, args, .. } => {
-                            (py_str(typ), args.first().cloned().unwrap_or_else(|| py_none()))
+                        PyObject::Exception { typ, .. } => {
+                            let typ_obj = self.frames[fi].builtins.get(typ).cloned()
+                                .unwrap_or_else(|| py_str(typ));
+                            (typ_obj, exc.clone())
                         }
-                        _ => (py_str("Exception"), py_none()),
+                        _ => (py_none(), py_none()),
                     }
                 };
                 let exit_method = mgr.borrow().get_attribute("__exit__")
@@ -4164,7 +4283,7 @@ impl VirtualMachine {
                     func: exit_method,
                     self_obj: mgr,
                 });
-                let result = self.call_function(bound, vec![typ_str, val, py_none()], vec![])?;
+                let result = self.call_function(bound, vec![typ_obj, val, py_none()], vec![])?;
                 self.frames[fi].push(result);
             }
 
@@ -4375,6 +4494,112 @@ impl VirtualMachine {
                     all_args.push(PyObjectRef::new(PyObject::Dict(dict)));
                 }
                 return self.type_new_impl(&all_args);
+            }
+        }
+
+        // `getattr(obj, name[, default])` on a plain `Instance` needs to
+        // fall back to the type's `__getattr__` (mro-walked) when the raw
+        // lookup fails — the same fallback `LOAD_ATTR`'s own opcode
+        // handler already does, but `object::builtin_getattr` (a plain
+        // `fn(&[PyObjectRef])`, no VM access) can't call a found
+        // `__getattr__` itself. Special-cased here (matching `type.__new__`
+        // just above) so it happens through the one real, live `self`
+        // instead of `with_vm_mut`/`call_bound_method`'s disposable-VM
+        // path — a `__getattr__` doing a lazy import (a real, common
+        // pattern to dodge circular imports, same as elsewhere this
+        // session) would otherwise silently re-import everything from
+        // scratch in an empty module registry. Confirmed general, not
+        // Django-specific: any two-level `__getattr__` proxy chain where
+        // the outer level's own `__getattr__` calls the builtin
+        // `getattr(self._wrapped, name)` (real code: Django's
+        // `LazySettings`/`UserSettingsHolder`) hit this — `django.conf.
+        // settings.LOGGING_CONFIG` (and every other setting not
+        // explicitly passed to `settings.configure()`) failed with a
+        // nonsensical "instance has no attribute" instead of falling
+        // through to the wrapped default-settings module.
+        {
+            let is_getattr = matches!(&*callable.borrow(), PyObject::BuiltinFunction { func, .. } if std::ptr::fn_addr_eq(*func, crate::object::builtin_getattr as crate::object::BuiltinFunc));
+            if is_getattr && (args.len() == 2 || args.len() == 3) {
+                let obj = args[0].clone();
+                let attr_name = args[1].str();
+                let direct = obj.borrow().get_attribute(&attr_name);
+                match direct {
+                    Ok(v) => return Ok(v),
+                    Err(direct_err) => {
+                        let getattr_fn = if let PyObject::Instance { typ, .. } = &*obj.borrow() {
+                            crate::object::lookup_dunder_via_mro(typ, "__getattr__")
+                        } else {
+                            None
+                        };
+                        if let Some(f) = getattr_fn {
+                            match self.call_function(f, vec![obj.clone(), crate::object::py_str(&attr_name)], vec![]) {
+                                Ok(v) => return Ok(v),
+                                Err(_) if args.len() == 3 => return Ok(args[2].clone()),
+                                Err(e) => return Err(e),
+                            }
+                        }
+                        if args.len() == 3 {
+                            return Ok(args[2].clone());
+                        }
+                        return Err(direct_err);
+                    }
+                }
+            }
+        }
+
+        // `importlib.import_module(name, package=None)` — same reasoning
+        // as `getattr` just above: its own implementation normally reaches
+        // the VM only via `with_vm_mut`, a second aliasing `&mut self`
+        // while this exact call chain already holds one. Real code calls
+        // this constantly (Django's own `django.utils.module_loading.
+        // import_string` — used to resolve `LOGGING_CONFIG =
+        // "logging.config.dictConfig"` and similar dotted-path settings —
+        // goes through `importlib.import_module` for the module half of
+        // the path), so route it through the live `self` directly instead.
+        {
+            let is_import_module = matches!(&*callable.borrow(), PyObject::BuiltinFunction { func, .. } if std::ptr::fn_addr_eq(*func, crate::modules::import_module_builtin as crate::object::BuiltinFunc));
+            if is_import_module && !args.is_empty() {
+                let name = args[0].str();
+                let package = if args.len() >= 2 {
+                    let pkg = args[1].str();
+                    if pkg.is_empty() { None } else { Some(pkg) }
+                } else { None };
+                return crate::modules::import_module_with_vm(self, &name, package.as_deref());
+            }
+        }
+
+        // `importlib.util.find_spec` (`find_spec_builtin`) internally used
+        // `with_vm_mut` to read `vm.modules`/`sys.path` — reached constantly
+        // from deep inside an active VM call chain in practice (e.g. Django's
+        // app registry calls it while `apps.populate()` is running), which
+        // reborrows the *same* live VirtualMachine `with_vm_mut` already has
+        // a `&mut self` for elsewhere on the Rust call stack: real aliasing
+        // UB, confirmed via a non-deterministic segfault/corrupted-HashMap
+        // crash (not just theoretical). Route it through the real, live
+        // `&mut self` directly instead, same pattern as getattr/import_module
+        // above.
+        {
+            let is_find_spec = matches!(&*callable.borrow(), PyObject::BuiltinFunction { func, .. } if std::ptr::fn_addr_eq(*func, crate::modules::find_spec_builtin as crate::object::BuiltinFunc));
+            if is_find_spec && !args.is_empty() {
+                let name = args[0].str();
+                let package = if args.len() >= 2 {
+                    let pkg = args[1].str();
+                    if pkg.is_empty() { None } else { Some(pkg) }
+                } else { None };
+                return crate::modules::find_spec_with_vm(self, &name, package.as_deref());
+            }
+        }
+
+        // `inspect.getmembers(obj, predicate)` needs to actually CALL
+        // `predicate` on each candidate member — same reentrancy hazard as
+        // find_spec above (reached from deep inside Django's app-loading:
+        // `inspect.getmembers(mod, inspect.isclass)`), so route it through
+        // the real, live `&mut self` directly instead of a disposable VM.
+        {
+            let is_getmembers = matches!(&*callable.borrow(), PyObject::BuiltinFunction { func, .. } if std::ptr::fn_addr_eq(*func, crate::modules::getmembers_builtin as crate::object::BuiltinFunc));
+            if is_getmembers && !args.is_empty() {
+                let predicate = args.get(1).cloned();
+                return crate::modules::getmembers_with_vm(self, &args[0], predicate.as_ref());
             }
         }
 
@@ -4973,6 +5198,14 @@ impl VirtualMachine {
         Err(PyError::type_error(format!("'{}' object is not callable", type_name)))
     }
 
+    fn synth_exception(typ: &str, error: &PyError) -> PyObjectRef {
+        PyObjectRef::imm(PyObject::Exception {
+            typ: typ.to_string(),
+            args: vec![py_str(&error.message())],
+            cause: None,
+        })
+    }
+
     fn handle_exception(&mut self, error: &PyError, frame_floor: usize) -> bool {
         // Only this execute_inner invocation's own frame may handle the
         // exception here — frames below `frame_floor` belong to an outer,
@@ -4983,38 +5216,26 @@ impl VirtualMachine {
                 // For any handler (Except or Finally), restore stack and transfer control
                 frame.stack.truncate(handler.stack_depth);
                 frame.ip = handler.instr_addr;
-                let exc_obj = {
-                    let (typ, cause, _is_group) = match error {
-                        PyError::TypeError(_) => ("TypeError".to_string(), None, false),
-                        PyError::ValueError(_) => ("ValueError".to_string(), None, false),
-                        PyError::NameError(_) => ("NameError".to_string(), None, false),
-                        PyError::AttributeError(_) => ("AttributeError".to_string(), None, false),
-                        PyError::IndexError(_) => ("IndexError".to_string(), None, false),
-                        PyError::KeyError(_) => ("KeyError".to_string(), None, false),
-                        PyError::ZeroDivisionError(_) => ("ZeroDivisionError".to_string(), None, false),
-                        PyError::RuntimeError(_) => ("RuntimeError".to_string(), None, false),
-                        PyError::StopIteration => ("StopIteration".to_string(), None, false),
-                        PyError::ImportError(_) => ("ImportError".to_string(), None, false),
-                        PyError::Exception(_, exc) => {
-                            let exc_borrow = exc.borrow();
-                            match &*exc_borrow {
-                                PyObject::Exception { typ, cause, .. } => (typ.clone(), cause.clone(), false),
-                                PyObject::ExceptionGroup { .. } => {
-                                    // Preserve ExceptionGroup: push it directly
-                                    drop(exc_borrow);
-                                    frame.push(exc.clone());
-                                    return true;
-                                }
-                                _ => ("Exception".to_string(), None, false),
-                            }
-                        }
-                        _ => ("Exception".to_string(), None, false),
-                    };
-                    PyObjectRef::imm(PyObject::Exception {
-                        typ,
-                        args: vec![py_str(&error.message())],
-                        cause,
-                    })
+                let exc_obj = match error {
+                    // Reuse the original PyObjectRef exactly as raised —
+                    // preserves object identity (needed for `except E as e:
+                    // ... raise` to compare `e` against the handler-bound
+                    // exception, and for CPython's own `exc is value` idiom
+                    // as used by contextlib's generator-based context
+                    // managers), plus its real args/__cause__/extra attrs,
+                    // instead of rebuilding a throwaway single-message copy.
+                    PyError::Exception(_, exc) => exc.clone(),
+                    PyError::TypeError(_) => Self::synth_exception("TypeError", error),
+                    PyError::ValueError(_) => Self::synth_exception("ValueError", error),
+                    PyError::NameError(_) => Self::synth_exception("NameError", error),
+                    PyError::AttributeError(_) => Self::synth_exception("AttributeError", error),
+                    PyError::IndexError(_) => Self::synth_exception("IndexError", error),
+                    PyError::KeyError(_) => Self::synth_exception("KeyError", error),
+                    PyError::ZeroDivisionError(_) => Self::synth_exception("ZeroDivisionError", error),
+                    PyError::RuntimeError(_) => Self::synth_exception("RuntimeError", error),
+                    PyError::StopIteration => Self::synth_exception("StopIteration", error),
+                    PyError::ImportError(_) => Self::synth_exception("ImportError", error),
+                    _ => Self::synth_exception("Exception", error),
                 };
                 frame.push(exc_obj);
                 // For Finally handlers, we always execute them.
@@ -5191,6 +5412,7 @@ impl VirtualMachine {
         if let PyObject::Type { mro: mro_field, .. } = &mut *class.borrow_mut() {
             *mro_field = mro;
         }
+        crate::object::register_class(&class);
 
         // __set_name__ protocol: for each descriptor in the class dict that has __set_name__, call it
         for (attr_name, value) in namespace_dict.iter() {
@@ -5355,7 +5577,7 @@ fn exc_type_matches(expected: &PyObjectRef, exc_type_name: &str) -> PyResult<boo
     }
 }
 
-fn is_exception_subclass(child_type: &str, parent_type: &str) -> bool {
+pub(crate) fn is_exception_subclass(child_type: &str, parent_type: &str) -> bool {
     if child_type == parent_type {
         return true;
     }

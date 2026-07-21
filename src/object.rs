@@ -1338,6 +1338,43 @@ thread_local! {
     static SMALL_INT_CACHE: std::cell::RefCell<Vec<Option<PyObjectRef>>> = std::cell::RefCell::new(vec![None; 263]);
 }
 
+thread_local! {
+    // Every user-defined class ever built (registered from
+    // `VirtualMachine::default_build_class`), kept alive for the process's
+    // lifetime — backs `type.__subclasses__()`. Real CPython tracks this via
+    // a weak-ref list on each class, updated as subclasses are created/GC'd;
+    // we don't have weak refs on this object model and classes are rarely
+    // freed in practice for typical scripts, so a plain append-only registry
+    // is a reasonable trade-off (leaks class objects, matching the process
+    // lifetimes this interpreter actually runs for).
+    static CLASS_REGISTRY: std::cell::RefCell<Vec<PyObjectRef>> = std::cell::RefCell::new(Vec::new());
+}
+
+pub(crate) fn register_class(cls: &PyObjectRef) {
+    CLASS_REGISTRY.with(|r| r.borrow_mut().push(cls.clone()));
+}
+
+/// Direct (non-transitive) subclasses of `cls`, in registration order —
+/// backs `type.__subclasses__()`.
+pub(crate) fn direct_subclasses_of(cls: &PyObjectRef) -> Vec<PyObjectRef> {
+    if std::env::var("RPY_DEBUG_SUBCLASSES").is_ok() {
+        CLASS_REGISTRY.with(|r| eprintln!("SUBCLASSES_CALL registry_len={}", r.borrow().len()));
+    }
+    CLASS_REGISTRY.with(|r| {
+        r.borrow()
+            .iter()
+            .filter(|candidate| {
+                if let PyObject::Type { bases, .. } = &*candidate.borrow() {
+                    bases.iter().any(|b| b.is(cls))
+                } else {
+                    false
+                }
+            })
+            .cloned()
+            .collect()
+    })
+}
+
 pub fn py_int(i: impl Into<BigInt>) -> PyObjectRef {
     let big = i.into();
     if let Some(n) = big.to_i64() {
@@ -1593,7 +1630,6 @@ pub fn py_not(val: &PyObjectRef) -> PyObjectRef {
 // ---- Binary Operations ----
 
 pub fn try_dunder_binop(a: &PyObjectRef, b: &PyObjectRef, method: &str) -> PyResult<Option<PyObjectRef>> {
-    let is_native = !matches!(&*a.borrow(), PyObject::Instance { .. });
     let f = {
         let a_borrowed = a.borrow();
         match &*a_borrowed {
@@ -1605,31 +1641,19 @@ pub fn try_dunder_binop(a: &PyObjectRef, b: &PyObjectRef, method: &str) -> PyRes
         }
     };
     if let Some(f) = f {
-        // A native type's `get_attribute(method)` (the branch above, as
-        // opposed to `lookup_dunder_via_mro` for a real `Instance`) hands
-        // back a `BuiltinMethod` whose own `self_obj` is a meaningless
-        // placeholder (`PyObject::None` — it was never bound to anything,
-        // since native types aren't accessed through the usual
-        // attribute-then-call binding path). `call_bound_method` always
-        // prepends *both* that placeholder *and* the `a` we pass it as
-        // its own separate `self_obj` parameter — so for this case it
-        // silently shifts every argument by one (`args = [None, a, b]`
-        // instead of `[a, b]`), which the callee then reads as "self=None,
-        // other=a", not "self=a, other=b". Confirmed via `dict.__or__`
-        // (`{} | dict(...)`, real PEP 584 syntax) failing with a
-        // nonsensical "__or__ on non-dict" even though both operands were
-        // genuine dicts. Call the underlying function directly with the
-        // real `[a, b]` for this native-type case instead.
-        let native_func = if is_native {
-            if let PyObject::BuiltinMethod { func, .. } = &*f.borrow() { Some(*func) } else { None }
-        } else {
-            None
-        };
-        let result = if let Some(func) = native_func {
-            func(&[a.clone(), b.clone()])?
-        } else {
-            call_bound_method(f, a.clone(), vec![b.clone()])?
-        };
+        // `call_bound_method`'s `BuiltinMethod` arm always prepends *both*
+        // the method's own (placeholder, for a native type's dunder — see
+        // `get_attribute`) `self_obj` *and* the `a` we pass here as a
+        // second, separate `self_obj` parameter — so every native-type
+        // dunder reached this way is written expecting 3 args: `[None,
+        // self, other]`, not `[self, other]` (confirmed against `__mod__`,
+        // `__contains__`, etc., which all read `args[1]`/`args[2]`
+        // accordingly). `dict.__or__` was the one written inconsistently
+        // with a 2-arg `[self, other]` assumption instead — fixed there
+        // (not here) to match the established convention, since this
+        // calling shape is what every *other* native dunder already
+        // depends on.
+        let result = call_bound_method(f, a.clone(), vec![b.clone()])?;
         if !is_not_implemented(&result) {
             return Ok(Some(result));
         }
@@ -3326,6 +3350,19 @@ pub fn builtin_setattr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         return Err(PyError::type_error("setattr() takes exactly 3 arguments"));
     }
     let attr_name = args[1].str();
+    // The inline `PyObjectRef` variants (SmallInt/SmallBool/SmallFloat/
+    // SmallStr/None) have no backing `RefCell` at all — `borrow_mut()`
+    // panics for them by design (there's nothing to mutate). Real Python
+    // just raises a normal `AttributeError` for `setattr(5, 'x', 1)`;
+    // check for this case first instead of letting it crash the process.
+    if matches!(args[0],
+        PyObjectRef::SmallInt(_) | PyObjectRef::SmallBool(_) | PyObjectRef::SmallFloat(_)
+        | PyObjectRef::SmallStr(_) | PyObjectRef::None
+    ) {
+        return Err(PyError::attribute_error(format!(
+            "'{}' object has no attribute '{}'", args[0].borrow().type_name(), attr_name
+        )));
+    }
     args[0].borrow_mut().set_attribute(&attr_name, args[2].clone())?;
     Ok(py_none())
 }
@@ -3971,27 +4008,10 @@ pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 PyObject::Type { name, .. } => name.clone(),
                 _ => class.str(),
             };
-            // Exception hierarchy: check if class is an ancestor of obj_type
-            let obj_ancestors: &[&str] = match &obj_type[..] {
-                "BaseException" => &["BaseException"],
-                "Exception" => &["Exception", "BaseException"],
-                "TypeError" => &["TypeError", "Exception", "BaseException"],
-                "ValueError" => &["ValueError", "Exception", "BaseException"],
-                "ZeroDivisionError" => &["ZeroDivisionError", "ArithmeticError", "Exception", "BaseException"],
-                "NameError" => &["NameError", "Exception", "BaseException"],
-                "AttributeError" => &["AttributeError", "Exception", "BaseException"],
-                "IndexError" => &["IndexError", "LookupError", "Exception", "BaseException"],
-                "KeyError" => &["KeyError", "LookupError", "Exception", "BaseException"],
-                "RuntimeError" => &["RuntimeError", "Exception", "BaseException"],
-                "StopIteration" => &["StopIteration", "Exception", "BaseException"],
-                "ImportError" => &["ImportError", "Exception", "BaseException"],
-                "OSError" => &["OSError", "Exception", "BaseException"],
-                "LookupError" => &["LookupError", "Exception", "BaseException"],
-                "ArithmeticError" => &["ArithmeticError", "Exception", "BaseException"],
-                _ => &[&obj_type],
-            };
-            let is_match = obj_ancestors.contains(&class_name.as_str());
-            Ok(py_bool(obj_type == class_name || is_match))
+            // Exception hierarchy: shared with issubclass() and `except`'s
+            // own CHECK_EXC_MATCH so all three agree on ancestry instead of
+            // drifting apart via separately maintained tables.
+            Ok(py_bool(crate::vm::is_exception_subclass(&obj_type, &class_name)))
         }
     }
 }
@@ -4166,7 +4186,25 @@ pub fn builtin_issubclass(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             }
             Ok(py_bool(false))
         }
-        _ => Err(PyError::type_error("issubclass() arg 1 must be a class")),
+        // Built-in exception "classes" (e.g. KeyError, ValueError) are
+        // represented as BuiltinFunction constructors rather than Type
+        // objects — resolve ancestry by name via the same table `except`
+        // and isinstance() use, instead of only accepting real Type values.
+        (PyObject::BuiltinFunction { name: cls_name, .. }, _) => {
+            let base_name = match &*base {
+                PyObject::BuiltinFunction { name, .. } => name.clone(),
+                PyObject::Str(s) => s.to_string(),
+                PyObject::Type { name, .. } => name.clone(),
+                _ => base.str(),
+            };
+            Ok(py_bool(crate::vm::is_exception_subclass(cls_name, &base_name)))
+        }
+        _ => {
+            if std::env::var("RPY_DEBUG_ISSUBCLASS").is_ok() {
+                eprintln!("issubclass() FAIL: arg0={:?} arg1={:?}", cls.type_name(), base.type_name());
+            }
+            Err(PyError::type_error("issubclass() arg 1 must be a class"))
+        }
     }
 }
 
@@ -4922,7 +4960,7 @@ fn get_instance_slots(typ: &PyObjectRef) -> Option<Vec<String>> {
 }
 
 /// Get the class name for an Instance's type, used for error messages.
-fn get_type_name_for_instance(typ: &PyObjectRef) -> String {
+pub(crate) fn get_type_name_for_instance(typ: &PyObjectRef) -> String {
     let typ_ref = typ.borrow();
     if let PyObject::Type { name, .. } = &*typ_ref {
         name.clone()
@@ -5002,6 +5040,18 @@ impl PyObject {
                 }
                 if name == "__qualname__" {
                     return Ok(py_str(type_name));
+                }
+                if name == "__subclasses__" && !dict.contains_key_str("__subclasses__") {
+                    // NOTE: self_obj here is a placeholder — LOAD_ATTR's fast
+                    // path always rebinds it to the actual accessed object
+                    // (`Foo`, for `Foo.__subclasses__`) before calling, so the
+                    // real class must be read back out of args[0] at call time
+                    // (matching the `mro` method right below).
+                    return Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__subclasses__".to_string(),
+                        func: |args| Ok(py_list(direct_subclasses_of(&args[0]))),
+                        self_obj: py_none(),
+                    }));
                 }
                 if name == "mro" && !dict.contains_key_str("mro") {
                     // NOTE: self_obj here is a placeholder — LOAD_ATTR's fast
@@ -6242,10 +6292,26 @@ impl PyObject {
                     "__or__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "__or__".to_string(),
                         func: |args| {
-                            if args.len() < 2 { return Err(PyError::type_error("__or__() takes exactly one argument")); }
-                            let other = args[1].borrow();
+                            // Reachable two ways with two different argument
+                            // shapes: a normal bound call (`d.__or__(x)`,
+                            // rebound to `[self, other]` by the usual
+                            // attribute-access path) and `py_bit_or`'s
+                            // `try_dunder_binop` (`{} | d2`), which — like
+                            // every other native dunder called that way —
+                            // goes through `call_bound_method`'s
+                            // placeholder-prepending `BuiltinMethod` arm,
+                            // delivering `[None, self, other]` instead. This
+                            // used to only handle the 2-arg shape, so `dict |
+                            // dict` (real PEP 584 syntax) misread the
+                            // placeholder as `self`, failing with a
+                            // nonsensical "non-dict" error despite both
+                            // operands being genuine dicts.
+                            let (self_idx, other_idx) = if args.len() >= 3 { (1, 2) } else if args.len() == 2 { (0, 1) } else {
+                                return Err(PyError::type_error("__or__() takes exactly one argument"));
+                            };
+                            let other = args[other_idx].borrow();
                             if let PyObject::Dict(other_dict) = &*other {
-                                let d = args[0].borrow();
+                                let d = args[self_idx].borrow();
                                 if let PyObject::Dict(dict) = &*d {
                                     let mut new_dict = PyDict::new();
                                     for (k, v) in dict.items() { new_dict.set(k, v)?; }
@@ -6617,11 +6683,12 @@ impl PyObject {
                                         }
                                         Err(e) => {
                                             *frame_opt = None;
-                                            if matches!(&e, crate::object::PyError::StopIteration) {
-                                                return Err(e);
-                                            }
-                                            // Wrapping other exceptions as StopIteration with value
-                                            Err(crate::object::PyError::Exception("StopIteration".to_string(), crate::object::py_none()))
+                                            // Any exception the generator body itself
+                                            // raised (unhandled by its own try/except)
+                                            // must propagate to the caller as-is — only
+                                            // a genuine StopIteration (exhaustion) is
+                                            // this protocol's own signal.
+                                            Err(e)
                                         }
                                     }
                                 } else {
@@ -6636,8 +6703,50 @@ impl PyObject {
                     "throw" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "throw".to_string(),
                         func: |args| {
-                            if args.len() < 2 { return Err(PyError::type_error("throw() needs at least 1 argument")); }
-                            Err(PyError::runtime_error("generator throw not implemented"))
+                            if args.len() < 2 { return Err(PyError::type_error("throw() missing required argument 'value'")); }
+                            let gen = args[0].borrow();
+                            if let PyObject::Generator { frame } = &*gen {
+                                let mut frame_opt = frame.borrow_mut();
+                                if let Some(f) = frame_opt.as_mut() {
+                                    let mut vm = super::vm::VirtualMachine::new();
+                                    let raw = args[1].clone();
+                                    let is_callable = !matches!(&*raw.borrow(),
+                                        PyObject::Exception { .. } | PyObject::ExceptionGroup { .. } | PyObject::Instance { .. }
+                                    );
+                                    let exc_obj = if is_callable {
+                                        vm.call_function(raw.clone(), vec![], vec![])
+                                            .map_err(|_| PyError::type_error("exceptions must be classes or instances deriving from BaseException"))?
+                                    } else {
+                                        raw
+                                    };
+                                    let typ = match &*exc_obj.borrow() {
+                                        PyObject::Exception { typ, .. } => typ.clone(),
+                                        _ => "Exception".to_string(),
+                                    };
+                                    let err = PyError::Exception(typ, exc_obj);
+                                    vm.frames.push(f.clone());
+                                    match vm.throw_into_frame(err) {
+                                        Ok(val) => {
+                                            let modified = vm.frames.pop().unwrap();
+                                            if modified.ip > 0 && matches!(&modified.code.instructions[modified.ip - 1].op, crate::bytecode::Opcode::YIELD_VALUE) {
+                                                *f = modified;
+                                                Ok(val)
+                                            } else {
+                                                *frame_opt = None;
+                                                Err(crate::object::PyError::Exception("StopIteration".to_string(), val))
+                                            }
+                                        }
+                                        Err(e) => {
+                                            *frame_opt = None;
+                                            Err(e)
+                                        }
+                                    }
+                                } else {
+                                    Err(PyError::StopIteration)
+                                }
+                            } else {
+                                Err(PyError::runtime_error("throw() on non-generator"))
+                            }
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -6696,11 +6805,10 @@ impl PyObject {
                                         }
                                         Err(e) => {
                                             *frame_opt = None;
-                                            if matches!(&e, crate::object::PyError::StopIteration) {
-                                                return Err(e);
-                                            }
-                                            // Wrap other exceptions as StopIteration with value
-                                            Err(crate::object::PyError::Exception("StopIteration".to_string(), crate::object::py_none()))
+                                            // Propagate the coroutine's own unhandled
+                                            // exception as-is; only genuine exhaustion
+                                            // is signaled as StopIteration.
+                                            Err(e)
                                         }
                                     }
                                 } else {
@@ -6715,8 +6823,50 @@ impl PyObject {
                     "throw" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "throw".to_string(),
                         func: |args| {
-                            if args.len() < 2 { return Err(PyError::type_error("throw() needs at least 1 argument")); }
-                            Err(PyError::runtime_error("coroutine throw not implemented"))
+                            if args.len() < 2 { return Err(PyError::type_error("throw() missing required argument 'value'")); }
+                            let gen = args[0].borrow();
+                            if let PyObject::Coroutine { frame } = &*gen {
+                                let mut frame_opt = frame.borrow_mut();
+                                if let Some(f) = frame_opt.as_mut() {
+                                    let mut vm = super::vm::VirtualMachine::new();
+                                    let raw = args[1].clone();
+                                    let is_callable = !matches!(&*raw.borrow(),
+                                        PyObject::Exception { .. } | PyObject::ExceptionGroup { .. } | PyObject::Instance { .. }
+                                    );
+                                    let exc_obj = if is_callable {
+                                        vm.call_function(raw.clone(), vec![], vec![])
+                                            .map_err(|_| PyError::type_error("exceptions must be classes or instances deriving from BaseException"))?
+                                    } else {
+                                        raw
+                                    };
+                                    let typ = match &*exc_obj.borrow() {
+                                        PyObject::Exception { typ, .. } => typ.clone(),
+                                        _ => "Exception".to_string(),
+                                    };
+                                    let err = PyError::Exception(typ, exc_obj);
+                                    vm.frames.push(f.clone());
+                                    match vm.throw_into_frame(err) {
+                                        Ok(val) => {
+                                            let modified = vm.frames.pop().unwrap();
+                                            if modified.ip > 0 && matches!(&modified.code.instructions[modified.ip - 1].op, crate::bytecode::Opcode::YIELD_VALUE) {
+                                                *f = modified;
+                                                Ok(val)
+                                            } else {
+                                                *frame_opt = None;
+                                                Err(crate::object::PyError::Exception("StopIteration".to_string(), val))
+                                            }
+                                        }
+                                        Err(e) => {
+                                            *frame_opt = None;
+                                            Err(e)
+                                        }
+                                    }
+                                } else {
+                                    Err(PyError::StopIteration)
+                                }
+                            } else {
+                                Err(PyError::runtime_error("throw() on non-coroutine"))
+                            }
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -7965,6 +8115,19 @@ impl ObjectAccess for PyObject {
                     _ => None,
                 };
                 Err(PyError::attribute_error(format!("cannot set attribute '{}' on '{}'", name, self.type_name())))
+            }
+            PyObject::Exception { cause, .. } if name == "__cause__" => {
+                *cause = Some(value);
+                Ok(())
+            }
+            PyObject::Exception { .. } | PyObject::ExceptionGroup { .. } => {
+                // No backing dict on these variants for __traceback__,
+                // __context__, __suppress_context__, __notes__, or custom
+                // attributes — but `except E as e: e.__traceback__ = tb` (and
+                // similar) is an extremely common idiom (contextlib,
+                // unittest, ...) that must not hard-crash just because we
+                // don't track those fields anywhere.
+                Ok(())
             }
             _ => Err(PyError::attribute_error(format!("cannot set attribute '{}' on '{}'", name, self.type_name()))),
         }
