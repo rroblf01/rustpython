@@ -237,7 +237,33 @@ impl Compiler {
             Expr::Name(n) => {
                 names.insert(n.clone());
             }
-            Expr::Constant(_) | Expr::FString(_) | Expr::JoinedStr(_) => {}
+            Expr::Constant(_) => {}
+            // An f-string's embedded `{expr}`/`{expr:{format_spec}}` parts
+            // are real expressions that can reference any name in scope —
+            // including a closure variable from an enclosing function
+            // (real code: `f"{func_name}() takes at most {max_positional_args}
+            // ..."` inside a nested function, `django.utils.deprecation`).
+            // Treating the whole f-string as opaque (the previous `=> {}`
+            // no-op) made such names invisible to this scan, so the
+            // upfront cell/free-variable analysis never learned the
+            // enclosing function needed to expose them as cells — the same
+            // class of bug as the control-flow-recursion fix above, just
+            // triggered by a different AST shape.
+            Expr::FString(parts) => {
+                for part in parts {
+                    if let FStringPart::Expr { expr, format_spec, .. } = part {
+                        Self::collect_names_expr(expr, names);
+                        if let Some(fs) = format_spec {
+                            Self::collect_names_expr(fs, names);
+                        }
+                    }
+                }
+            }
+            Expr::JoinedStr(exprs) => {
+                for e in exprs {
+                    Self::collect_names_expr(e, names);
+                }
+            }
             Expr::BinOp { left, right, .. } => {
                 Self::collect_names_expr(left, names);
                 Self::collect_names_expr(right, names);
@@ -303,15 +329,52 @@ impl Compiler {
                 Self::collect_names_expr(e, names)
             }
             Expr::Yield(None) => {}
+            // A comprehension/genexpr's `for target in ...` binds `target`
+            // within its own scope — it is not a reference to anything
+            // from the enclosing function, and must not be reported as
+            // one. The previous code fed `gen.target` straight into the
+            // same `names` set as everything else, so e.g. `any(... for
+            // name in xs)` made "name" look like a free reference the
+            // enclosing function needed to supply — which, once something
+            // elsewhere also legitimately needed "name" relayed as a
+            // closure (a `for name in ...` genexpr inside a *different*
+            // nested function), caused the enclosing function's cellvars
+            // list to gain an extra, unsorted, incrementally-added entry
+            // for "name" *after* other cellvar-relative LOAD_DEREF indices
+            // had already been emitted assuming a smaller list — silently
+            // shifting them to the wrong variable (confirmed via
+            // `django.utils.deprecation.deprecate_posargs`, whose `any(...
+            // for name in remappable_names)` and a *separate* nested
+            // function's own `for name in ...` genexpr collided exactly
+            // this way). Only the first generator's `iter` is genuinely
+            // evaluated in the enclosing scope (real Python semantics — it
+            // becomes the genexpr's own initial argument); `elt`, every
+            // other `iter`, and all `ifs` run inside the comprehension's
+            // scope, where every generator's `target` is already bound, so
+            // names matching one of those don't propagate outward either.
             Expr::ListComp { elt, generators }
             | Expr::SetComp { elt, generators }
             | Expr::GeneratorExp { elt, generators } => {
-                Self::collect_names_expr(elt, names);
+                let mut bound = HashSet::new();
                 for gen in generators {
-                    Self::collect_names_expr(&gen.target, names);
-                    Self::collect_names_expr(&gen.iter, names);
+                    Self::collect_names_expr(&gen.target, &mut bound);
+                }
+                if let Some(first) = generators.first() {
+                    Self::collect_names_expr(&first.iter, names);
+                }
+                let mut inner = HashSet::new();
+                Self::collect_names_expr(elt, &mut inner);
+                for (i, gen) in generators.iter().enumerate() {
+                    if i > 0 {
+                        Self::collect_names_expr(&gen.iter, &mut inner);
+                    }
                     for if_cond in &gen.ifs {
-                        Self::collect_names_expr(if_cond, names);
+                        Self::collect_names_expr(if_cond, &mut inner);
+                    }
+                }
+                for n in inner {
+                    if !bound.contains(&n) {
+                        names.insert(n);
                     }
                 }
             }
@@ -320,13 +383,27 @@ impl Compiler {
                 value,
                 generators,
             } => {
-                Self::collect_names_expr(key, names);
-                Self::collect_names_expr(value, names);
+                let mut bound = HashSet::new();
                 for gen in generators {
-                    Self::collect_names_expr(&gen.target, names);
-                    Self::collect_names_expr(&gen.iter, names);
+                    Self::collect_names_expr(&gen.target, &mut bound);
+                }
+                if let Some(first) = generators.first() {
+                    Self::collect_names_expr(&first.iter, names);
+                }
+                let mut inner = HashSet::new();
+                Self::collect_names_expr(key, &mut inner);
+                Self::collect_names_expr(value, &mut inner);
+                for (i, gen) in generators.iter().enumerate() {
+                    if i > 0 {
+                        Self::collect_names_expr(&gen.iter, &mut inner);
+                    }
                     for if_cond in &gen.ifs {
-                        Self::collect_names_expr(if_cond, names);
+                        Self::collect_names_expr(if_cond, &mut inner);
+                    }
+                }
+                for n in inner {
+                    if !bound.contains(&n) {
+                        names.insert(n);
                     }
                 }
             }
@@ -618,12 +695,36 @@ impl Compiler {
             }
         }
 
-        // cell_vars = local_names ∩ (names from nested functions that reference our locals)
+        // cell_vars = names a nested function needs that we must expose as
+        // a cell — either because it's genuinely one of our own locals
+        // (the original `local_names ∩ nested_refs` case), OR because it's
+        // itself a free variable we only received from *our* enclosing
+        // scope but a function nested inside *us* also needs it relayed
+        // through (real code: `deprecate_posargs(deprecation_warning,
+        // remappable_names, /)`'s nested `decorator` receives both as free
+        // variables from `deprecate_posargs`, but `decorator`'s own nested
+        // `remap_deprecated_args`/genexpr also reference them — so
+        // `decorator` must re-expose them as cells, not just read them as
+        // plain free variables). Missing this second case previously meant
+        // such a name was only ever a free variable here, with no matching
+        // cell — the nested function's own free-variable *index* (computed
+        // against `cellvars.len() + position`, see `Expr::Name`'s LOAD_DEREF
+        // emission) then silently pointed at a different, unrelated
+        // variable once the enclosing function's real cellvars list (built
+        // incrementally as nested closures compile) didn't match what this
+        // upfront pass had promised. `all_outer_refs` (below) already holds
+        // every name available from further out that could need this
+        // treatment.
         let mut cell_vars: Vec<String> = local_names
             .intersection(&nested_refs)
             .filter(|n| !effective_global.contains(*n))
             .cloned()
             .collect();
+        for name in all_outer_refs.intersection(&nested_refs) {
+            if !local_names.contains(name) && !effective_global.contains(name) && !cell_vars.contains(name) {
+                cell_vars.push(name.clone());
+            }
+        }
         cell_vars.sort();
 
         // free_vars = all_outer_refs - local_names (excluding global)
@@ -1572,8 +1673,17 @@ impl Compiler {
                     // the two into the order WITH_EXIT actually expects.
                     self.emit(Opcode::SWAP, 1);
                     self.emit(Opcode::WITH_EXIT, 0);
-                    self.emit(Opcode::POP_TOP, 0);
+                    // Stack: [..., exception_obj, exit_result]. Per PEP 343, a
+                    // truthy return from __exit__ suppresses the exception —
+                    // this was previously ignored (always RERAISE), silently
+                    // breaking contextlib.suppress and any custom
+                    // exception-swallowing context manager.
+                    let suppress_label = self.new_label();
+                    self.emit_jump(Opcode::POP_JUMP_IF_TRUE, suppress_label);
+                    self.emit(Opcode::POP_TOP, 0); // discard exception_obj
                     self.emit(Opcode::RERAISE, 0);
+                    self.fix_label(suppress_label);
+                    self.emit(Opcode::POP_TOP, 0); // discard exception_obj — suppressed
                     self.fix_label(end_label);
                 } else {
                     self.compile_stmts(body)?;
@@ -2069,8 +2179,20 @@ impl Compiler {
                 self.emit(Opcode::STORE_ATTR, idx);
             }
             Expr::Subscript { value, slice } => {
+                // Entered with the value-to-assign already on the stack
+                // (chained assignment's COPY, or a tuple/list-unpack
+                // target's per-element value) — stack is [value, obj, slice]
+                // after pushing obj/slice below, but STORE_SUBSCR needs
+                // [obj, slice, value] (matching the single-target
+                // `Stmt::Assign` case above, which pushes obj/slice BEFORE
+                // the value for exactly this reason). Reorder with two
+                // SWAPs instead of restructuring the value-already-pushed
+                // calling convention every caller of compile_assign_target
+                // relies on.
                 self.compile_expr(value)?;
                 self.compile_expr(slice)?;
+                self.emit(Opcode::SWAP, 1);
+                self.emit(Opcode::SWAP, 2);
                 self.emit(Opcode::STORE_SUBSCR, 0);
             }
             Expr::Starred(inner) => {
@@ -2308,10 +2430,22 @@ impl Compiler {
                         self.add_varname(fv_name);
                     }
                 }
-                if let Some(idx) = self.code.cellvars.iter().position(|n| n == fv_name) {
-                    self.emit(Opcode::LOAD_CLOSURE, idx as u32);
-                } else if let Some(idx) = self.code.freevars.iter().position(|n| n == fv_name) {
+                // A name relayed from further out that we (as the
+                // intervening scope) also expose as one of our *own*
+                // cellvars purely so a nested function can see it (see
+                // `analyze_function`'s cell_vars doc comment) is present in
+                // BOTH lists here — but only the freevar slot actually
+                // holds the real, already-populated cell (received via our
+                // own closure); the cellvar slot is a fresh, empty one
+                // `MAKE_CELL` created at our own scope's start, never
+                // written to, since we only ever *read* the relayed value
+                // via the freevar path ourselves. Check freevars first so
+                // relaying threads the same real cell through, instead of
+                // handing a nested function an uninitialized one.
+                if let Some(idx) = self.code.freevars.iter().position(|n| n == fv_name) {
                     let idx = self.code.cellvars.len() + idx;
+                    self.emit(Opcode::LOAD_CLOSURE, idx as u32);
+                } else if let Some(idx) = self.code.cellvars.iter().position(|n| n == fv_name) {
                     self.emit(Opcode::LOAD_CLOSURE, idx as u32);
                 }
                 nfree += 1;
@@ -2413,6 +2547,26 @@ impl Compiler {
         );
         self.code.freevars = free_vars;
 
+        // Real Python implicitly seeds __module__ = <enclosing module's
+        // __name__> and __qualname__ = <class name> as the first two
+        // statements of every class body, before any user code runs. We
+        // weren't seeding either — real metaclasses very commonly assume
+        // __module__ is always present in the namespace dict they receive
+        // (e.g. Django's `ModelBase.__new__`: `attrs.pop("__module__")`,
+        // unconditional, no default), so its absence surfaced as a raw
+        // KeyError deep inside ordinary class creation.
+        {
+            let module_name_idx = self.get_name_index("__name__") as u32;
+            self.emit(Opcode::LOAD_NAME, module_name_idx);
+            let module_attr_idx = self.get_name_index("__module__") as u32;
+            self.emit(Opcode::STORE_NAME, module_attr_idx);
+
+            let qualname_const_idx = self.get_const_index(ConstValue::String(name.clone())) as u32;
+            self.emit(Opcode::LOAD_CONST, qualname_const_idx);
+            let qualname_attr_idx = self.get_name_index("__qualname__") as u32;
+            self.emit(Opcode::STORE_NAME, qualname_attr_idx);
+        }
+
         self.compile_stmts(body)?;
 
         let const_none = self.get_const_index(ConstValue::None) as u32;
@@ -2447,10 +2601,22 @@ impl Compiler {
                         self.add_varname(fv_name);
                     }
                 }
-                if let Some(idx) = self.code.cellvars.iter().position(|n| n == fv_name) {
-                    self.emit(Opcode::LOAD_CLOSURE, idx as u32);
-                } else if let Some(idx) = self.code.freevars.iter().position(|n| n == fv_name) {
+                // A name relayed from further out that we (as the
+                // intervening scope) also expose as one of our *own*
+                // cellvars purely so a nested function can see it (see
+                // `analyze_function`'s cell_vars doc comment) is present in
+                // BOTH lists here — but only the freevar slot actually
+                // holds the real, already-populated cell (received via our
+                // own closure); the cellvar slot is a fresh, empty one
+                // `MAKE_CELL` created at our own scope's start, never
+                // written to, since we only ever *read* the relayed value
+                // via the freevar path ourselves. Check freevars first so
+                // relaying threads the same real cell through, instead of
+                // handing a nested function an uninitialized one.
+                if let Some(idx) = self.code.freevars.iter().position(|n| n == fv_name) {
                     let idx = self.code.cellvars.len() + idx;
+                    self.emit(Opcode::LOAD_CLOSURE, idx as u32);
+                } else if let Some(idx) = self.code.cellvars.iter().position(|n| n == fv_name) {
                     self.emit(Opcode::LOAD_CLOSURE, idx as u32);
                 }
                 nfree += 1;
@@ -3240,6 +3406,18 @@ fn contains_yield_in_expr(expr: &Expr) -> bool {
                         || g.ifs.iter().any(|e| contains_yield_in_expr(e))
                 })
         }
+        // An f-string's embedded expressions can contain `await` (legal in
+        // an async function: `f"{await foo()}"`) — see the matching fix in
+        // `collect_names_expr` for why treating the whole f-string as
+        // opaque is wrong in general.
+        Expr::FString(parts) => parts.iter().any(|p| match p {
+            FStringPart::Expr { expr, format_spec, .. } => {
+                contains_yield_in_expr(expr)
+                    || format_spec.as_ref().is_some_and(|fs| contains_yield_in_expr(fs))
+            }
+            FStringPart::String(_) => false,
+        }),
+        Expr::JoinedStr(exprs) => exprs.iter().any(contains_yield_in_expr),
         _ => false,
     }
 }

@@ -42,6 +42,34 @@ impl Parser {
         self.peeked.as_ref().unwrap()
     }
 
+    /// Disambiguates the `match` soft keyword from `match` used as a plain
+    /// identifier (e.g. `match, rest = x.split()` or `match = re.match(...)`).
+    /// A real match-statement's header always ends with a bare `:` immediately
+    /// before the line's NEWLINE, at bracket depth 0 — no other statement
+    /// starting with a NAME token has that shape (annotated assignment's `:`
+    /// appears right after the target, not at the end). We scan ahead with a
+    /// cloned lexer so this is non-destructive to actual parse position.
+    fn looks_like_match_stmt(&mut self) -> bool {
+        let mut tok = self.peek().clone();
+        let mut lexer = self.lexer.clone();
+        let mut depth: i32 = 0;
+        loop {
+            match tok {
+                Token::LeftParen | Token::LeftBracket | Token::LeftBrace => depth += 1,
+                Token::RightParen | Token::RightBracket | Token::RightBrace => depth -= 1,
+                Token::Newline | Token::EndOfFile => return false,
+                Token::Colon if depth == 0 => {
+                    // Must be followed directly by Newline (top-level match header)
+                    let next = lexer.next_token();
+                    return matches!(next, Token::Newline);
+                }
+                Token::Equal if depth == 0 => return false,
+                _ => {}
+            }
+            tok = lexer.next_token();
+        }
+    }
+
     fn at(&self, tok: &Token) -> bool {
         self.current == *tok
     }
@@ -170,11 +198,8 @@ impl Parser {
         if self.at(&Token::Try) {
             return self.parse_try();
         }
-        if matches!(&self.current, Token::Name(n) if n == "match") {
-            // Soft keyword: only parse as match statement if NOT followed by '=' (assignment)
-            if self.peek() != &Token::Equal {
-                return self.parse_match();
-            }
+        if matches!(&self.current, Token::Name(n) if n == "match") && self.looks_like_match_stmt() {
+            return self.parse_match();
         }
         if matches!(&self.current, Token::Name(n) if n == "type") {
             return self.parse_type_alias();
@@ -402,6 +427,7 @@ impl Parser {
                         bases.push(self.parse_expr()?);
                     }
                     if !self.eat(&Token::Comma) { break; }
+                    if self.at(&Token::RightParen) { break; }
                 }
             }
             self.expect(&Token::RightParen)?;
