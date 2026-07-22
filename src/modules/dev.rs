@@ -70,6 +70,48 @@ pub fn create_warnings_dict() -> HashMap<String, PyObjectRef> {
     // Insert the current filter state as a readable attribute
     d.insert("filters".to_string(), py_list(vec![]));
 
+    warn_func!("resetwarnings", |_| Ok(py_none()));
+    warn_func!("filterwarnings", |_| Ok(py_none()));
+
+    // catch_warnings() — a context manager real code uses to isolate/mute
+    // warning state for a block (real trigger: CPython 3.14's own
+    // `unittest/runner.py`, `with warnings.catch_warnings(): ...` around
+    // each test run). Simplified: `record=True` returns a (permanently
+    // empty, since `warn()` here just prints rather than recording)
+    // list — good enough for code that only checks "were there 0 warnings"
+    // or iterates expecting none, not for code asserting on captured
+    // messages.
+    let mut cw_dict = HashMap::new();
+    cw_dict.insert("__init__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "__init__".to_string(),
+        func: |args| {
+            if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
+                let record = args.iter().skip(1).any(|a| matches!(&*a.borrow(), PyObject::Dict(d) if d.get(&py_str("record")).ok().flatten().map(|v| v.truthy()).unwrap_or(false)));
+                dict.insert("_record".to_string(), py_bool(record));
+            }
+            Ok(py_none())
+        },
+    }));
+    cw_dict.insert("__enter__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "__enter__".to_string(),
+        func: |args| {
+            let record = if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+                dict.get("_record").map(|v| v.truthy()).unwrap_or(false)
+            } else { false };
+            if record { Ok(py_list(vec![])) } else { Ok(py_none()) }
+        },
+    }));
+    cw_dict.insert("__exit__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "__exit__".to_string(),
+        func: |_args| Ok(py_bool(false)),
+    }));
+    d.insert("catch_warnings".to_string(), PyObjectRef::new(PyObject::Type {
+        name: "catch_warnings".to_string(),
+        dict: cw_dict,
+        bases: vec![],
+        mro: vec![],
+    }));
+
     d
 }
 
@@ -551,6 +593,24 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
 
     inspect_func!("isframe", |_args| Ok(py_bool(false)));
     inspect_func!("istraceback", |_args| Ok(py_bool(false)));
+
+    // isabstract(cls) — real CPython checks `bool(getattr(cls,
+    // '__abstractmethods__', False))`, populated by ABCMeta. This
+    // interpreter's `abc.ABC`/`ABCMeta` are still a stub that never
+    // populates `__abstractmethods__` at all, so nothing can ever actually
+    // be an abstract class here yet — always False is correct for now,
+    // matching what a class with no abstract methods should report.
+    inspect_func!("isabstract", |args| {
+        if args.len() < 1 { return Err(PyError::type_error("isabstract() requires 1 argument")); }
+        let obj = args[0].borrow();
+        let has_abstract_methods = match &*obj {
+            PyObject::Type { dict, .. } => dict.get("__abstractmethods__")
+                .map(|v| v.truthy())
+                .unwrap_or(false),
+            _ => false,
+        };
+        Ok(py_bool(has_abstract_methods))
+    });
 
     inspect_func!("getdoc", |args| {
         if args.len() < 1 { return Err(PyError::type_error("getdoc() requires 1 argument")); }
