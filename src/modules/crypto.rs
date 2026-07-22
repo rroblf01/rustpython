@@ -22,6 +22,51 @@ pub fn create_hashlib_dict() -> HashMap<String, PyObjectRef> {
         Ok(PyObjectRef::imm(PyObject::Bytes(hash.to_vec())))
     });
 
+    // sha224/sha384/sha512 — same family as sha256, just missing. Added all
+    // three together since they're the same trivial one-liner pattern and
+    // real code reaches for any of them (Django's own `hashlib.sha224` via
+    // `from hashlib import sha224` — real code in `django/db/backends/
+    // sqlite3/base.py`'s `_sqlite_...` helpers` chain, plus general hashlib
+    // completeness).
+    hl_func!("sha224", |args| {
+        if args.len() != 1 { return Err(PyError::type_error("sha224() takes exactly one argument")); }
+        let data = args[0].borrow();
+        let bytes = match &*data {
+            PyObject::Bytes(b) => b.clone(),
+            PyObject::Str(s) => s.as_bytes().to_vec(),
+            _ => return Err(PyError::type_error("sha224() argument must be bytes or str")),
+        };
+        use sha2::Digest;
+        let hash = sha2::Sha224::digest(&bytes);
+        Ok(PyObjectRef::imm(PyObject::Bytes(hash.to_vec())))
+    });
+
+    hl_func!("sha384", |args| {
+        if args.len() != 1 { return Err(PyError::type_error("sha384() takes exactly one argument")); }
+        let data = args[0].borrow();
+        let bytes = match &*data {
+            PyObject::Bytes(b) => b.clone(),
+            PyObject::Str(s) => s.as_bytes().to_vec(),
+            _ => return Err(PyError::type_error("sha384() argument must be bytes or str")),
+        };
+        use sha2::Digest;
+        let hash = sha2::Sha384::digest(&bytes);
+        Ok(PyObjectRef::imm(PyObject::Bytes(hash.to_vec())))
+    });
+
+    hl_func!("sha512", |args| {
+        if args.len() != 1 { return Err(PyError::type_error("sha512() takes exactly one argument")); }
+        let data = args[0].borrow();
+        let bytes = match &*data {
+            PyObject::Bytes(b) => b.clone(),
+            PyObject::Str(s) => s.as_bytes().to_vec(),
+            _ => return Err(PyError::type_error("sha512() argument must be bytes or str")),
+        };
+        use sha2::Digest;
+        let hash = sha2::Sha512::digest(&bytes);
+        Ok(PyObjectRef::imm(PyObject::Bytes(hash.to_vec())))
+    });
+
     hl_func!("sha1", |args| {
         if args.len() != 1 { return Err(PyError::type_error("sha1() takes exactly one argument")); }
         let data = args[0].borrow();
