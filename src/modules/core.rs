@@ -983,11 +983,135 @@ pub fn create_math_dict() -> HashMap<String, PyObjectRef> {
         let v = args[0].borrow();
         match &*v { PyObject::Int(i) => Ok(py_float(i.to_f64().unwrap_or(0.0).log2())), PyObject::Float(f) => Ok(py_float(f.log2())), _ => Err(PyError::type_error("log2() argument must be a number")) }
     });
+    // ── More single-float-argument math functions ──────────────────────────
+    // `math` was missing most of its real surface (only 15 functions total
+    // before this) — real code reaches for any of these routinely (Django's
+    // own sqlite3 backend registers several as SQL functions: `asin`, real
+    // trigger for this batch). Using `as_f64()`/`py_float` directly instead
+    // of each one's own hand-written Int/Float match arms, since `as_f64()`
+    // already handles both.
+    macro_rules! math_func1 {
+        ($name:expr, $f:expr) => {
+            math_func!($name, |args| {
+                if args.len() != 1 { return Err(PyError::type_error(concat!($name, "() takes exactly one argument"))); }
+                let x = args[0].as_f64().ok_or_else(|| PyError::type_error(concat!($name, "() argument must be a number")))?;
+                Ok(py_float(($f)(x)))
+            });
+        };
+    }
+    math_func1!("asin", f64::asin);
+    math_func1!("atan", f64::atan);
+    math_func1!("sinh", f64::sinh);
+    math_func1!("cosh", f64::cosh);
+    math_func1!("tanh", f64::tanh);
+    math_func1!("asinh", f64::asinh);
+    math_func1!("acosh", f64::acosh);
+    math_func1!("atanh", f64::atanh);
+    math_func1!("degrees", f64::to_degrees);
+    math_func1!("radians", f64::to_radians);
+    math_func1!("log10", f64::log10);
+    math_func1!("log1p", f64::ln_1p);
+    math_func1!("expm1", f64::exp_m1);
+    math_func1!("trunc", f64::trunc);
+    math_func1!("cbrt", f64::cbrt);
+    math_func1!("exp2", f64::exp2);
+    math_func1!("erf", libm::erf);
+    math_func1!("erfc", libm::erfc);
+    math_func1!("gamma", libm::tgamma);
+
+    math_func!("atan2", |args| {
+        if args.len() != 2 { return Err(PyError::type_error("atan2() takes exactly two arguments")); }
+        let y = args[0].as_f64().ok_or_else(|| PyError::type_error("atan2() argument must be a number"))?;
+        let x = args[1].as_f64().ok_or_else(|| PyError::type_error("atan2() argument must be a number"))?;
+        Ok(py_float(y.atan2(x)))
+    });
+    math_func!("hypot", |args| {
+        let mut sum_sq = 0.0f64;
+        for a in args {
+            let v = a.as_f64().ok_or_else(|| PyError::type_error("hypot() arguments must be numbers"))?;
+            sum_sq += v * v;
+        }
+        Ok(py_float(sum_sq.sqrt()))
+    });
+    math_func!("copysign", |args| {
+        if args.len() != 2 { return Err(PyError::type_error("copysign() takes exactly two arguments")); }
+        let x = args[0].as_f64().ok_or_else(|| PyError::type_error("copysign() argument must be a number"))?;
+        let y = args[1].as_f64().ok_or_else(|| PyError::type_error("copysign() argument must be a number"))?;
+        Ok(py_float(x.copysign(y)))
+    });
+    math_func!("fmod", |args| {
+        if args.len() != 2 { return Err(PyError::type_error("fmod() takes exactly two arguments")); }
+        let x = args[0].as_f64().ok_or_else(|| PyError::type_error("fmod() argument must be a number"))?;
+        let y = args[1].as_f64().ok_or_else(|| PyError::type_error("fmod() argument must be a number"))?;
+        Ok(py_float(x % y))
+    });
+    math_func!("isnan", |args| {
+        if args.len() != 1 { return Err(PyError::type_error("isnan() takes exactly one argument")); }
+        let x = args[0].as_f64().ok_or_else(|| PyError::type_error("isnan() argument must be a number"))?;
+        Ok(py_bool(x.is_nan()))
+    });
+    math_func!("isinf", |args| {
+        if args.len() != 1 { return Err(PyError::type_error("isinf() takes exactly one argument")); }
+        let x = args[0].as_f64().ok_or_else(|| PyError::type_error("isinf() argument must be a number"))?;
+        Ok(py_bool(x.is_infinite()))
+    });
+    math_func!("isclose", |args| {
+        if args.len() < 2 { return Err(PyError::type_error("isclose() takes at least two arguments")); }
+        let a = args[0].as_f64().ok_or_else(|| PyError::type_error("isclose() argument must be a number"))?;
+        let b = args[1].as_f64().ok_or_else(|| PyError::type_error("isclose() argument must be a number"))?;
+        let rel_tol = 1e-9;
+        let abs_tol = 0.0;
+        Ok(py_bool((a - b).abs() <= (rel_tol * a.abs().max(b.abs())).max(abs_tol)))
+    });
+    math_func!("gcd", |args| {
+        fn gcd(a: i64, b: i64) -> i64 { if b == 0 { a.abs() } else { gcd(b, a % b) } }
+        let mut result = 0i64;
+        for a in args {
+            let v = a.as_i64().ok_or_else(|| PyError::type_error("gcd() arguments must be integers"))?;
+            result = gcd(result, v);
+        }
+        Ok(py_int(result))
+    });
+    math_func!("factorial", |args| {
+        if args.len() != 1 { return Err(PyError::type_error("factorial() takes exactly one argument")); }
+        let n = args[0].as_i64().ok_or_else(|| PyError::type_error("factorial() argument must be an integer"))?;
+        if n < 0 { return Err(PyError::value_error("factorial() not defined for negative values")); }
+        let mut result = num_bigint::BigInt::from(1i64);
+        for i in 2..=n {
+            result *= num_bigint::BigInt::from(i);
+        }
+        Ok(py_int(result))
+    });
+
     // ── Constants ─────────────────────────────────────────────────────────
     d.insert("pi".to_string(), py_float(std::f64::consts::PI));
     d.insert("e".to_string(), py_float(std::f64::consts::E));
     d.insert("tau".to_string(), py_float(std::f64::consts::TAU));
     d
+}
+
+// `sys.exc_info()` — a real top-level fn (not an inline closure in
+// `create_sys_dict`) so `vm.rs`'s `call_function` can special-case it by
+// `fn_addr_eq` pointer identity, running it through the real, live `&mut
+// VirtualMachine` instead of `with_vm_mut`. `with_vm_mut`'s `VM_PTR` is set
+// unconditionally before any bytecode executes, so calling it from HERE
+// (itself only ever reached via a live bytecode CALL) always created a
+// second, aliased `&mut VirtualMachine` on top of the one already active —
+// real, unconditional UB, confirmed via the simplest possible repro
+// (`try: raise ValueError("x") except Exception: sys.exc_info()`)
+// reliably segfaulting. The exact same class of bug as the `exec()`/
+// `eval()` fix earlier this session — `with_vm_mut` is fundamentally
+// unsafe to call from any code path already running under a live VM
+// (i.e. virtually always), not just some rare reentrant case.
+pub fn sys_exc_info_builtin(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    let result = crate::object::with_vm_mut(|vm| {
+        py_tuple(vec![
+            vm.exc_type.clone().unwrap_or(py_none()),
+            vm.exc_value.clone().unwrap_or(py_none()),
+            vm.exc_traceback.clone().unwrap_or(py_none()),
+        ])
+    });
+    Ok(result.unwrap_or_else(|_| py_tuple(vec![py_none(), py_none(), py_none()])))
 }
 
 pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
@@ -1021,6 +1145,32 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
     d.insert("version".to_string(), py_str("3.12.0 (RustPython 0.1.0)"));
     d.insert("version_info".to_string(), py_tuple(vec![py_int(3), py_int(12), py_int(0)]));
     d.insert("hexversion".to_string(), py_int(0x030c0000));
+    // sys.flags — real CPython exposes this as a structseq (tuple +
+    // attribute access). A plain Instance with these as attributes is
+    // enough for real code that reads specific flags by name (e.g.
+    // unittest's runner checking `sys.flags.dev_mode` transitively) — all
+    // false/zero, matching "no special flags" for a script run normally.
+    {
+        let mut flags_dict = HashMap::new();
+        for flag in [
+            "debug", "inspect", "interactive", "optimize", "dont_write_bytecode",
+            "no_user_site", "no_site", "ignore_environment", "verbose",
+            "bytes_warning", "quiet", "hash_randomization", "isolated",
+            "dev_mode", "utf8_mode", "safe_path", "warn_default_encoding",
+        ] {
+            flags_dict.insert(flag.to_string(), py_int(0));
+        }
+        flags_dict.insert("int_max_str_digits".to_string(), py_int(4300));
+        d.insert("flags".to_string(), PyObjectRef::new(PyObject::Instance {
+            typ: PyObjectRef::new(PyObject::Type {
+                name: "flags".to_string(),
+                dict: HashMap::new(),
+                bases: vec![],
+                mro: vec![],
+            }),
+            dict: flags_dict,
+        }));
+    }
     d.insert("stdin".to_string(), PyObjectRef::new(PyObject::File {
         file: std::rc::Rc::new(std::cell::RefCell::new(dup_std_fd(0).unwrap_or_else(|_| {
             std::fs::File::open("/dev/null").unwrap()
@@ -1084,17 +1234,12 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
     d.insert("prefix".to_string(), py_str(&prefix));
     d.insert("exec_prefix".to_string(), py_str(&exec_prefix));
     d.insert("winver".to_string(), py_str("3.12"));
-    // sys.exc_info() — returns current exception info from VM
-    sys_func!("exc_info", |_args| {
-        let result = crate::object::with_vm_mut(|vm| {
-            py_tuple(vec![
-                vm.exc_type.clone().unwrap_or(py_none()),
-                vm.exc_value.clone().unwrap_or(py_none()),
-                vm.exc_traceback.clone().unwrap_or(py_none()),
-            ])
-        });
-        Ok(result.unwrap_or_else(|_| py_tuple(vec![py_none(), py_none(), py_none()])))
-    });
+    // sys.exc_info() — returns current exception info from VM. Real logic
+    // lives in `sys_exc_info_builtin` (a real top-level fn, not inlined
+    // here) so `vm.rs`'s `call_function` can recognize and special-case it
+    // by pointer identity — see the fix there for why `with_vm_mut` alone
+    // is unsafe.
+    sys_func!("exc_info", sys_exc_info_builtin);
     d
 }
 
