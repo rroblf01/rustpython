@@ -562,6 +562,19 @@ pub fn create_threading_dict() -> HashMap<String, PyObjectRef> {
         Ok(py_int(1))
     });
 
+    // Real CPython returns a unique-per-thread integer. This interpreter
+    // only ever runs Python code on one thread at a time (see the `local()`
+    // comment above), so a stable constant is correct and sufficient — real
+    // code (e.g. asgiref's `_CVar`/`Local`) uses this purely to tag/compare
+    // "am I still on the thread that stored this", never as a real handle.
+    thr_func!("get_ident", |_| {
+        Ok(py_int(1))
+    });
+
+    thr_func!("get_native_id", |_| {
+        Ok(py_int(1))
+    });
+
     d
 }
 
@@ -5218,6 +5231,52 @@ pub fn create_argparse_dict() -> HashMap<String, PyObjectRef> {
 
 // ─── asyncio module (basic event loop) ────────────────────────────────────
 
+// `asyncio.run(coro)` — extracted out of `create_asyncio_dict`'s inline
+// closure so `vm.rs`'s `call_function` can invoke `asyncio_run_impl`
+// directly with the real, live `&mut VirtualMachine` instead of
+// `with_vm_mut`. Confirmed segfaulting via the simplest possible repro
+// (`asyncio.run(some_async_def())`, an extremely common real-world async
+// entry point) — same unconditional `with_vm_mut`-aliasing UB found
+// repeatedly elsewhere this session.
+pub(crate) fn asyncio_run_impl(vm: &mut crate::vm::VirtualMachine, coro: PyObjectRef) -> PyResult<PyObjectRef> {
+    let coro_borrowed = coro.borrow();
+    if let PyObject::Coroutine { ref frame } = &*coro_borrowed {
+        let frame_borrowed = frame.borrow();
+        if let Some(ref coro_frame) = *frame_borrowed {
+            let mut coro_frame_clone = coro_frame.clone();
+            coro_frame_clone.module_globals = None;
+            drop(frame_borrowed);
+            drop(coro_borrowed);
+            vm.frames.push(coro_frame_clone);
+            let result = vm.execute();
+            vm.frames.pop();
+            return result;
+        }
+    }
+    drop(coro_borrowed);
+    // If not a coroutine, try calling it directly
+    let coro_clone = coro.clone();
+    let send_attr = coro_clone.borrow().get_attribute("send").ok();
+    if let Some(send_method) = send_attr {
+        let result = crate::object::call_bound_method(send_method, coro.clone(), vec![crate::object::py_none()]);
+        match result {
+            Ok(val) => Ok(val),
+            Err(crate::object::PyError::StopIteration) => Ok(crate::object::py_none()),
+            Err(e) => Err(e),
+        }
+    } else {
+        crate::object::call_bound_method(coro.clone(), coro.clone(), vec![])
+    }
+}
+
+pub fn asyncio_run_builtin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() {
+        return Err(PyError::type_error("run() missing required argument (coro)"));
+    }
+    let coro = args[0].clone();
+    crate::object::with_vm_mut(|vm| asyncio_run_impl(vm, coro))?
+}
+
 pub fn create_asyncio_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! asyncio_func {
@@ -5327,36 +5386,22 @@ pub fn create_asyncio_dict() -> HashMap<String, PyObjectRef> {
     d.insert("Task".to_string(), task_type);
 
     // asyncio.run(coro): Minimal event loop
-    asyncio_func!("run", |args| {
-        let coro = args[0].clone();
-        crate::object::with_vm_mut(|vm| {
-            let coro_borrowed = coro.borrow();
-            if let crate::object::PyObject::Coroutine { ref frame } = &*coro_borrowed {
-                let frame_borrowed = frame.borrow();
-                if let Some(ref coro_frame) = *frame_borrowed {
-                    let mut coro_frame_clone = coro_frame.clone();
-                    coro_frame_clone.module_globals = None;
-                    vm.frames.push(coro_frame_clone);
-                    let result = vm.execute();
-                    vm.frames.pop();
-                    return result;
-                }
-            }
-            // If not a coroutine, try calling it directly
-            let coro_clone = coro.clone();
-            let send_attr = coro_clone.borrow().get_attribute("send").ok();
-            if let Some(send_method) = send_attr {
-                let result = crate::object::call_bound_method(send_method, coro.clone(), vec![crate::object::py_none()]);
-                match result {
-                    Ok(val) => Ok(val),
-                    Err(crate::object::PyError::StopIteration) => Ok(crate::object::py_none()),
-                    Err(e) => Err(e),
-                }
-            } else {
-                crate::object::call_bound_method(coro.clone(), coro.clone(), vec![])
-            }
-        })?
+    // get_running_loop()/get_event_loop() — this native asyncio module has
+    // no real running-loop/scheduler state to consult (no coroutine
+    // scheduler here at all — `run` above just directly executes the
+    // coroutine's frame synchronously), so the only correct answer for
+    // `get_running_loop()` in EVERY case this module can actually represent
+    // is "no loop is running". Missing this entirely (get_running_loop
+    // didn't exist under this name at all) broke the extremely common
+    // defensive idiom `try: asyncio.get_running_loop() except
+    // RuntimeError: ...` — those callers catch RuntimeError specifically,
+    // not AttributeError, so real code (e.g. Django's own internals) that
+    // uses this idiom crashed instead of falling through cleanly.
+    asyncio_func!("get_running_loop", |_args| {
+        Err(crate::object::PyError::runtime_error("no running event loop"))
     });
+
+    asyncio_func!("run", asyncio_run_builtin);
 
     // asyncio.sleep(delay) -> Future
     // Returns a Future that resolves after the delay
