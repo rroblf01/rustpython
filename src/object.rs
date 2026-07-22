@@ -1515,7 +1515,18 @@ fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String, String> {
     let mut result = String::new();
     let mut chars = fmt.chars();
 
-    // Handle tuple/list arguments: consume one element per format spec
+    // Handle tuple arguments: consume one element per format spec. Real
+    // CPython's `%` operator does this ONLY for a tuple RHS — a list (or
+    // any other single non-mapping value) is always used as-is for a
+    // single conversion, never unpacked positionally. This used to also
+    // treat `PyObject::List` the same as a tuple, so `"%r" % some_list`
+    // silently dropped every element past the first `%`-spec instead of
+    // formatting the whole list — confirmed via a general, non-Django repro
+    // (`"%r" % self._tests` inside a `__repr__`, `self._tests` a 3-element
+    // list, printing only the first element's repr instead of the whole
+    // list's) that also masked an unrelated real bug during Django/unittest
+    // bisecting (looked like a lost/dropped list element, was actually this
+    // formatting bug misrepresenting a correctly-3-element list as 1).
     let mut arg_iter: Option<Box<dyn Iterator<Item = PyObjectRef>>> = None;
     let arg0 = arg.clone();
     {
@@ -1526,15 +1537,10 @@ fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String, String> {
                 let iter = vec.into_iter();
                 arg_iter = Some(Box::new(iter));
             }
-            PyObject::List(items) => {
-                let vec = items.clone();
-                let iter = vec.into_iter();
-                arg_iter = Some(Box::new(iter));
-            }
             _ => {}
         }
     }
-    // Helper: get next arg (consume from tuple/list iterator, or always use the single arg)
+    // Helper: get next arg (consume from tuple iterator, or always use the single arg)
     let mut get_arg = || -> PyObjectRef {
         if let Some(ref mut it) = arg_iter {
             it.next().unwrap_or_else(|| py_str(""))
@@ -1583,6 +1589,27 @@ fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String, String> {
             if !width_str.is_empty() {
                 width = Some(width_str.parse::<usize>().map_err(|_| "invalid width".to_string())?);
             }
+            // Parse optional `.precision` (e.g. `%.3f`, `%6.2f`) — this was
+            // entirely unparsed before, so any precision-qualified float
+            // format (an extremely common idiom for printing durations/
+            // percentages/rounded numbers — real trigger: CPython 3.14's
+            // own `unittest/runner.py`, `"%.3fs" % elapsed`) hit the literal
+            // `.` as if it were an (unsupported) conversion character.
+            let mut precision: Option<usize> = None;
+            if chars.clone().next() == Some('.') {
+                chars.next();
+                let mut prec_str = String::new();
+                loop {
+                    let mut peek3 = chars.clone();
+                    match peek3.next() {
+                        Some(c) if c.is_ascii_digit() => { prec_str.push(c); chars.next(); }
+                        _ => break,
+                    }
+                }
+                precision = Some(if prec_str.is_empty() { 0 } else {
+                    prec_str.parse::<usize>().map_err(|_| "invalid precision".to_string())?
+                });
+            }
 
             match chars.next() {
                 None => return Err("incomplete format: trailing %".to_string()),
@@ -1603,7 +1630,10 @@ fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String, String> {
                     let formatted = match conv {
                         's' => raw.str(),
                         'r' => raw.repr(),
-                        'f' => raw.str(),
+                        'f' => {
+                            let f = raw.as_f64().unwrap_or(0.0);
+                            format!("{:.prec$}", f, prec = precision.unwrap_or(6))
+                        }
                         'd' | 'i' => {
                             if let Some(i) = raw.as_i64() {
                                 i.to_string()
@@ -2441,6 +2471,9 @@ pub fn py_contains(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
 // ---- Built-in functions ----
 
 pub fn builtin_print(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if std::env::var("RPY_DEBUG_PRINT").is_ok() {
+        eprintln!("PRINT CALLED with {} args, kinds: {:?}", args.len(), args.iter().map(|a| a.borrow().type_name().to_string()).collect::<Vec<_>>());
+    }
     let strings: Vec<String> = args.iter().map(|a| a.str()).collect();
     println!("{}", strings.join(" "));
     Ok(py_none())
@@ -2883,26 +2916,48 @@ pub fn builtin_dict(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         }
         _ => {
             drop(arg);
-            // An iterable of (key, value) pairs
-            let it = builtin_iter(&[args[0].clone()])?;
-            loop {
-                match builtin_next(&[it.clone()]) {
-                    Ok(pair) => {
-                        let pair_b = pair.borrow();
-                        let items: Vec<PyObjectRef> = match &*pair_b {
-                            PyObject::Tuple(v) | PyObject::List(v) => v.clone(),
-                            _ => return Err(PyError::type_error("cannot convert dictionary update sequence element to a sequence")),
-                        };
-                        if items.len() != 2 {
-                            return Err(PyError::value_error(format!(
-                                "dictionary update sequence element has length {}; 2 is required", items.len()
-                            )));
+            // Mapping-like objects (anything with a `.keys()` method —
+            // notably dict *subclass* instances like Counter/defaultdict/
+            // ChainMap, which are never literally PyObject::Dict) are
+            // copied key-by-key, matching real `dict(mapping)` semantics.
+            // Only objects without `.keys()` fall back to being treated
+            // as an iterable of (key, value) pairs.
+            let keys_method = args[0].borrow().get_attribute("keys").ok();
+            if let Some(keys_raw) = keys_method {
+                let keys_iterable = call_bound_method(keys_raw, args[0].clone(), vec![])?;
+                let it = builtin_iter(&[keys_iterable])?;
+                loop {
+                    match builtin_next(&[it.clone()]) {
+                        Ok(key) => {
+                            let value = py_getitem(&args[0], &key)?;
+                            d.set(key, value)?;
                         }
-                        drop(pair_b);
-                        d.set(items[0].clone(), items[1].clone())?;
+                        Err(PyError::StopIteration) => break,
+                        Err(e) => return Err(e),
                     }
-                    Err(PyError::StopIteration) => break,
-                    Err(e) => return Err(e),
+                }
+            } else {
+                // An iterable of (key, value) pairs
+                let it = builtin_iter(&[args[0].clone()])?;
+                loop {
+                    match builtin_next(&[it.clone()]) {
+                        Ok(pair) => {
+                            let pair_b = pair.borrow();
+                            let items: Vec<PyObjectRef> = match &*pair_b {
+                                PyObject::Tuple(v) | PyObject::List(v) => v.clone(),
+                                _ => return Err(PyError::type_error("cannot convert dictionary update sequence element to a sequence")),
+                            };
+                            if items.len() != 2 {
+                                return Err(PyError::value_error(format!(
+                                    "dictionary update sequence element has length {}; 2 is required", items.len()
+                                )));
+                            }
+                            drop(pair_b);
+                            d.set(items[0].clone(), items[1].clone())?;
+                        }
+                        Err(PyError::StopIteration) => break,
+                        Err(e) => return Err(e),
+                    }
                 }
             }
         }
@@ -3403,6 +3458,9 @@ pub fn builtin_hasattr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         return Err(PyError::type_error("hasattr() takes exactly 2 arguments"));
     }
     let attr_name = args[1].str();
+    if std::env::var("RPY_DEBUG_GETATTR").is_ok() {
+        eprintln!("HASATTR: obj_type={} attr={}", args[0].borrow().type_name(), attr_name);
+    }
     match args[0].borrow().get_attribute(&attr_name) {
         Ok(_) => Ok(py_bool(true)),
         Err(_) => Ok(py_bool(false)),
@@ -3575,14 +3633,43 @@ pub fn call_bound_method(func: PyObjectRef, self_obj: PyObjectRef, args: Vec<PyO
             all_args.extend(args);
             func(&all_args)
         }
-        PyObject::Function { code, globals: g, defaults, name: fname, .. } => {
+        PyObject::Function { code, globals: g, defaults, name: fname, closure, .. } => {
             if std::env::var("RPY_DEBUG_IMPORT").is_ok() {
                 eprintln!("CALL_BOUND_METHOD (disposable VM): fname={} code_name={} filename={}", fname, code.name, code.filename);
             }
             if std::env::var("RPY_DEBUG_CBM").is_ok() {
                 eprintln!("call_bound_method: fname={} varnames={:?} args.len()={} arg_count={}", fname, code.varnames, args.len(), code.arg_count);
             }
-            let mut frame = super::vm::Frame::new(std::rc::Rc::new(code.clone()), g.clone(), std::rc::Rc::new(create_builtins()), None);
+            // The disposable VM is constructed BEFORE the frame (and the
+            // frame borrows ITS `builtins` map, not a separately-built one)
+            // deliberately: `vm.rs`'s `call_function` special-cases `type(x)`
+            // (and a few other builtins) by POINTER IDENTITY against
+            // `self.builtins.get("type")` — if the frame's own `builtins` map
+            // were built via a second, independent `create_builtins()` call
+            // (as this used to do), it would contain a structurally-identical
+            // but NOT pointer-identical "type" object, so that identity check
+            // silently fails and `type(x)` falls through to being treated as
+            // an ordinary call to the `type` class (constructing a bogus
+            // instance-of-`type`) instead of returning `x`'s real type.
+            // Confirmed general via a Django-free repro: `type(self).__name__`
+            // inside a function invoked through `call_bound_method` (e.g. any
+            // user-defined `__repr__` reached via the `repr()` builtin)
+            // raised `AttributeError: 'type' object has no attribute
+            // '__name__'` — `type(self)` had silently returned a fresh
+            // `type`-instance instead of the real class object.
+            let mut vm = super::vm::VirtualMachine::new();
+            let mut frame = super::vm::Frame::new(std::rc::Rc::new(code.clone()), g.clone(), std::rc::Rc::clone(&vm.builtins), None);
+            // Without this, ANY closure-capturing function invoked via
+            // call_bound_method (repr()/str()/hash()/comparisons/other
+            // native builtins that call a user-defined dunder this way,
+            // instead of through the normal CALL opcode's own frame setup
+            // in vm.rs, which already does set this) silently lost every
+            // free variable — "variable 'x' not found" the moment the
+            // function's body referenced one. Confirmed general via a
+            // Django-free repro: a `dataclass`-generated `__repr__` closing
+            // over its own field-name list worked fine called directly
+            // (`obj.__repr__()`) but raised NameError through `repr(obj)`.
+            frame.closure = closure.clone();
             let code = code.clone();
             let defaults = defaults.clone();
             // Set self at index 0
@@ -3629,7 +3716,6 @@ pub fn call_bound_method(func: PyObjectRef, self_obj: PyObjectRef, args: Vec<PyO
             if std::env::var("RPY_DEBUG_CBM").is_ok() {
                 eprintln!("call_bound_method: fast_locals after setup = {:?}", frame.fast_locals.iter().map(|v| v.as_ref().map(|x| x.repr())).collect::<Vec<_>>());
             }
-            let mut vm = super::vm::VirtualMachine::new();
             vm.frames.push(frame);
             vm.execute()
         }
@@ -4094,6 +4180,25 @@ pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     return Ok(py_bool(true));
                 }
             }
+            // `class MyError(Exception): ...` — MyError's instances must
+            // also be `isinstance(x, Exception)` (and `AttributeError`,
+            // `BaseException`, etc, for whatever it really derives from).
+            // Builtin exception "classes" are `PyObject::BuiltinFunction`s
+            // that never appear in a custom class's own `mro` (only real
+            // `PyObject::Type` bases do), so the mro-walk arm just above
+            // can't see this relationship at all — without this, NO custom
+            // exception subclass was ever recognized as an instance of any
+            // of its real (builtin) ancestors, which also broke `except
+            // Exception:`/`except SomeBuiltinBase:` for literally any
+            // user-defined exception class (CHECK_EXC_MATCH, `vm.rs`, and
+            // `builtin_issubclass` below share this exact same gap and fix).
+            if let PyObject::BuiltinFunction { .. } = &*class {
+                if let Some(base_name) = find_exception_base_name(typ) {
+                    if crate::vm::is_exception_subclass(&base_name, &class_name) {
+                        return Ok(py_bool(true));
+                    }
+                }
+            }
             Ok(py_bool(typ.borrow().type_name() == class_name || class_name == "object"))
         }
         _ => {
@@ -4270,14 +4375,35 @@ pub fn builtin_issubclass(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             Ok(py_bool(false))
         }
         (PyObject::Type { mro: cls_mro, .. }, _) => {
-            // Non-Type second argument: compare by name
-            let base_name = base.str();
+            // Non-Type second argument: compare by name. `.str()` on a
+            // BuiltinFunction (how builtin exception "classes" like
+            // `Exception` are represented) returns its full repr
+            // (`<built-in function Exception>`), not the bare name — must
+            // extract that explicitly or every name comparison below
+            // (including the exception-ancestry fix just past the mro
+            // walk) silently never matches.
+            let base_name = match &*base {
+                PyObject::BuiltinFunction { name, .. } => name.clone(),
+                _ => base.str(),
+            };
             if base_name == "object" {
                 return Ok(py_bool(true));
             }
             for c in cls_mro {
                 if c.borrow().type_name() == base_name {
                     return Ok(py_bool(true));
+                }
+            }
+            // `issubclass(MyError, Exception)` where MyError is a real
+            // user-defined `class MyError(Exception): ...` — Exception (a
+            // `BuiltinFunction`, not a `Type`) never appears in MyError's own
+            // `mro`, so the walk above can't see this. Same gap/fix as
+            // isinstance()'s Instance/BuiltinFunction arm just above.
+            if matches!(&*base, PyObject::BuiltinFunction { .. }) {
+                if let Some(base_exc_name) = find_exception_base_name(&args[0]) {
+                    if crate::vm::is_exception_subclass(&base_exc_name, &base_name) {
+                        return Ok(py_bool(true));
+                    }
                 }
             }
             Ok(py_bool(false))
@@ -4366,6 +4492,92 @@ pub fn builtin_help(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 
 // ---- __import__ builtin ----
 
+// Extracted out of `builtin_import` so `vm.rs`'s `call_function` can invoke
+// it directly with the real, live `&mut VirtualMachine` instead of going
+// through `with_vm_mut` — `__import__()` is what every `import` STATEMENT
+// desugars to at the bytecode level in real CPython, and while this
+// interpreter's own `IMPORT_NAME` opcode handling doesn't call through this
+// function, plenty of real code (`importlib.import_module`-adjacent
+// patterns, direct `__import__("x")` calls) does invoke it explicitly —
+// confirmed segfaulting via the simplest possible repro (`__import__("os")`
+// at plain top level), the same unconditional `with_vm_mut`-aliasing UB
+// found repeatedly elsewhere this session.
+pub(crate) fn import_impl(vm: &mut super::vm::VirtualMachine, name: &str, has_dots: bool, has_fromlist: bool) -> PyResult<PyObjectRef> {
+    // With a non-empty fromlist and a dotted name, import the full module chain
+    // and return the rightmost module. CPython behavior:
+    //   __import__("certifi.core", ..., ["where"], 0)  -> imports certifi.core, returns certifi.core
+    //   __import__("certifi.core", ..., [], 0)          -> imports certifi, returns certifi
+    if has_dots && has_fromlist {
+        // First, ensure the top-level package is imported (import_module_from_file
+        // needs the parent in modules to resolve dotted names)
+        let top_name = name.split('.').next().unwrap_or(name).to_string();
+        if !vm.modules.contains_key(&top_name) {
+            match vm.import_module_from_file(&top_name) {
+                Ok(module) => {
+                    vm.modules.insert(top_name.clone(), module.clone());
+                    if let Some(sys_mod) = vm.modules.get("sys") {
+                        if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
+                            if let Some(mod_dict) = dict.get("modules") {
+                                mod_dict.borrow_mut().set_attribute(&top_name, module.clone()).ok();
+                            }
+                        }
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        // Now import the full chain - import_module_from_file handles dotted
+        // names when the parent is already in modules
+        if let Some(module) = vm.modules.get(name) {
+            return Ok(module.clone());
+        }
+        return match vm.import_module_from_file(name) {
+            Ok(module) => {
+                vm.modules.insert(name.to_string(), module.clone());
+                if let Some(sys_mod) = vm.modules.get("sys") {
+                    if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
+                        if let Some(mod_dict) = dict.get("modules") {
+                            mod_dict.borrow_mut().set_attribute(name, module.clone()).ok();
+                        }
+                    }
+                }
+                Ok(module)
+            }
+            Err(e) => Err(e),
+        };
+    }
+
+    // Without fromlist (or non-dotted name), import only the top-level package
+    let resolved_name = if has_dots {
+        name.split('.').next().unwrap_or(name).to_string()
+    } else {
+        name.to_string()
+    };
+
+    // Check if already loaded
+    if let Some(module) = vm.modules.get(&resolved_name) {
+        return Ok(module.clone());
+    }
+
+    // Try to import the module from file
+    match vm.import_module_from_file(&resolved_name) {
+        Ok(module) => {
+            vm.modules.insert(resolved_name.clone(), module.clone());
+            // Also add to sys.modules
+            if let Some(sys_mod) = vm.modules.get("sys") {
+                if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
+                    if let Some(mod_dict) = dict.get("modules") {
+                        mod_dict.borrow_mut().set_attribute(&resolved_name, module.clone()).ok();
+                    }
+                }
+            }
+            Ok(module)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 pub fn builtin_import(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
         return Err(PyError::type_error("__import__() requires at least 1 argument (module name)"));
@@ -4385,79 +4597,7 @@ pub fn builtin_import(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let has_fromlist = fromlist.as_ref().map_or(false, |fl| !fl.is_empty());
 
     let import_result = with_vm_mut(|vm| -> PyResult<PyObjectRef> {
-        // With a non-empty fromlist and a dotted name, import the full module chain
-        // and return the rightmost module. CPython behavior:
-        //   __import__("certifi.core", ..., ["where"], 0)  -> imports certifi.core, returns certifi.core
-        //   __import__("certifi.core", ..., [], 0)          -> imports certifi, returns certifi
-        if has_dots && has_fromlist {
-            // First, ensure the top-level package is imported (import_module_from_file
-            // needs the parent in modules to resolve dotted names)
-            let top_name = name.split('.').next().unwrap_or(&name).to_string();
-            if !vm.modules.contains_key(&top_name) {
-                match vm.import_module_from_file(&top_name) {
-                    Ok(module) => {
-                        vm.modules.insert(top_name.clone(), module.clone());
-                        if let Some(sys_mod) = vm.modules.get("sys") {
-                            if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
-                                if let Some(mod_dict) = dict.get("modules") {
-                                    mod_dict.borrow_mut().set_attribute(&top_name, module.clone()).ok();
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
-
-            // Now import the full chain - import_module_from_file handles dotted
-            // names when the parent is already in modules
-            if let Some(module) = vm.modules.get(&name) {
-                return Ok(module.clone());
-            }
-            return match vm.import_module_from_file(&name) {
-                Ok(module) => {
-                    vm.modules.insert(name.to_string(), module.clone());
-                    if let Some(sys_mod) = vm.modules.get("sys") {
-                        if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
-                            if let Some(mod_dict) = dict.get("modules") {
-                                mod_dict.borrow_mut().set_attribute(&name, module.clone()).ok();
-                            }
-                        }
-                    }
-                    Ok(module)
-                }
-                Err(e) => Err(e),
-            };
-        }
-
-        // Without fromlist (or non-dotted name), import only the top-level package
-        let resolved_name = if has_dots {
-            name.split('.').next().unwrap_or(&name).to_string()
-        } else {
-            name.clone()
-        };
-
-        // Check if already loaded
-        if let Some(module) = vm.modules.get(&resolved_name) {
-            return Ok(module.clone());
-        }
-
-        // Try to import the module from file
-        match vm.import_module_from_file(&resolved_name) {
-            Ok(module) => {
-                vm.modules.insert(resolved_name.clone(), module.clone());
-                // Also add to sys.modules
-                if let Some(sys_mod) = vm.modules.get("sys") {
-                    if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
-                        if let Some(mod_dict) = dict.get("modules") {
-                            mod_dict.borrow_mut().set_attribute(&resolved_name, module.clone()).ok();
-                        }
-                    }
-                }
-                Ok(module)
-            }
-            Err(e) => Err(e),
-        }
+        import_impl(vm, &name, has_dots, has_fromlist)
     });
 
     match import_result {
@@ -4654,13 +4794,14 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
             } else { unreachable!() }
         }
         2 => {
-            if let PyObject::Function { code, globals: g, defaults, name: fname, .. } = &*f.borrow() {
+            if let PyObject::Function { code, globals: g, defaults, name: fname, closure, .. } = &*f.borrow() {
                 if std::env::var("RPY_DEBUG_IMPORT").is_ok() {
                     eprintln!("BUILTIN_CALL (disposable VM): fname={} code_name={} filename={}", fname, code.name, code.filename);
                 }
                 let code = code.clone();
                 let g = g.clone();
                 let defaults = defaults.clone();
+                let closure = closure.clone();
                 let npos = a.len();
                 let named_params = if code.vararg_name.is_some() || code.kwarg_name.is_some() {
                     code.varnames.iter().position(|n| {
@@ -4669,7 +4810,22 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
                 } else {
                     code.varnames.len()
                 };
-                let mut frame = super::vm::Frame::new(std::rc::Rc::new(code.clone()), g.clone(), std::rc::Rc::new(create_builtins()), None);
+                // See the matching fix (and its full explanation) in
+                // `call_bound_method`'s own `PyObject::Function` arm just
+                // above — this is a second, independent implementation of
+                // the exact same "call a Function via a disposable VM"
+                // pattern, with the exact same two bugs: the callee frame's
+                // `closure` was never set (breaking any closure-capturing
+                // function invoked through `filter()`/`map()`/etc., e.g. a
+                // nested helper closing over an enclosing method's `self` —
+                // real trigger: CPython 3.14's own `unittest/loader.py`'s
+                // `getTestCaseNames`), and the frame's `builtins` map used
+                // to come from a second, independent `create_builtins()`
+                // call instead of the disposable VM's own, breaking
+                // pointer-identity checks like the `type(x)` special case.
+                let mut vm = super::vm::VirtualMachine::new();
+                let mut frame = super::vm::Frame::new(std::rc::Rc::new(code.clone()), g.clone(), std::rc::Rc::clone(&vm.builtins), None);
+                frame.closure = closure;
                 for i in 0..npos.min(named_params) {
                     if i < code.varnames.len() {
                         frame.fast_locals[i] = Some(a[i].clone());
@@ -4697,7 +4853,6 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
                         frame.insert_local(&kwarg_name, py_dict());
                     }
                 }
-                let mut vm = super::vm::VirtualMachine::new();
                 vm.frames.push(frame);
                 vm.execute()
             } else { unreachable!() }
@@ -5123,6 +5278,52 @@ impl PyObject {
     /// `email`/`dataclasses` machinery checking `.__doc__` while walking a
     /// structure that isn't guaranteed to be a function/class) hit this.
     fn get_attribute_impl(&self, name: &str) -> PyResult<PyObjectRef> {
+        // `.__class__` (equivalent to `type(x)`) universally, for every
+        // variant — this was entirely missing from `get_attribute_impl`
+        // (used by the `getattr()` builtin and any other generic
+        // attribute-access call site), even for a plain `class Foo: ...`
+        // instance, even though `x.__class__` (direct dot-syntax) already
+        // worked via a separate, hardcoded special case in `vm.rs`'s
+        // LOAD_ATTR opcode handler. So `getattr(x, "__class__")` — a common
+        // proxy/introspection idiom real code uses interchangeably with
+        // `type(x)` — raised `AttributeError` for literally every object,
+        // real trigger: CPython 3.14's own `unittest/case.py`
+        // (`self.__class__` reached via a code path that goes through
+        // `get_attribute_impl` rather than LOAD_ATTR). Mirrors
+        // `builtin_type_of`'s own logic (Instance → its real type;
+        // Type → itself; anything else → a freshly-built placeholder Type
+        // sharing just the name, same as `type(x)` already does for
+        // natives).
+        if name == "__class__" {
+            match self {
+                PyObject::Instance { typ, .. } => return Ok(typ.clone()),
+                // A class's own `__class__` is its metaclass — usually
+                // plain `type`. `metatype_of()` (used elsewhere for the
+                // real, `METATYPE_KEY`-tracked custom-metaclass case) needs
+                // a `PyObjectRef`, not the bare `&PyObject` available here;
+                // falling back to plain `"type"` is correct for the
+                // overwhelmingly common no-custom-metaclass case.
+                PyObject::Type { dict, .. } if dict.contains_key(METATYPE_KEY) => {
+                    return Ok(dict.get(METATYPE_KEY).unwrap().clone());
+                }
+                PyObject::Type { .. } => {
+                    return Ok(PyObjectRef::new(PyObject::Type {
+                        name: "type".to_string(),
+                        dict: HashMap::new(),
+                        bases: vec![],
+                        mro: vec![],
+                    }));
+                }
+                _ => {
+                    return Ok(PyObjectRef::new(PyObject::Type {
+                        name: self.type_name().to_string(),
+                        dict: HashMap::new(),
+                        bases: vec![],
+                        mro: vec![],
+                    }));
+                }
+            }
+        }
         match self {
             PyObject::Module { dict, name: mod_name } => {
                 if name == "__dict__" {
@@ -5334,7 +5535,7 @@ impl PyObject {
                     } else {
                         None
                     }
-                }).ok_or_else(|| PyError::attribute_error(format!("instance has no attribute '{}'", name)))
+                }).ok_or_else(|| PyError::attribute_error(format!("'{}' object has no attribute '{}'", get_type_name_for_instance(typ), name)))
             }
             PyObject::Property { getter, setter, deleter, doc, .. } => {
                 match name {
@@ -6414,6 +6615,41 @@ impl PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
+                    // `some_dict.__getitem__`/`__setitem__`/`__delitem__` as
+                    // a bound-method REFERENCE (not called directly) — real
+                    // code uses this idiom to grab a fast lookup callable
+                    // (real trigger: CPython 3.14's own `_colorize.py`,
+                    // `super().__setattr__('_name_to_value',
+                    // name_to_value.__getitem__)`), same class of gap as
+                    // `frozenset.__contains__` found earlier this session.
+                    "__getitem__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__getitem__".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("__getitem__() takes exactly one argument")); }
+                            py_getitem(&args[0], &args[1])
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__setitem__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__setitem__".to_string(),
+                        func: |args| {
+                            if args.len() < 3 { return Err(PyError::type_error("__setitem__() takes exactly 2 arguments")); }
+                            py_setitem(&args[0], &args[1], args[2].clone())?;
+                            Ok(py_none())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__delitem__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__delitem__".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("__delitem__() takes exactly one argument")); }
+                            if let PyObject::Dict(d) = &mut *args[0].borrow_mut() {
+                                d.remove(&args[1])?;
+                                Ok(py_none())
+                            } else { Err(PyError::runtime_error("__delitem__ on non-dict")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     "move_to_end" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "move_to_end".to_string(),
                         func: |args| {
@@ -7059,6 +7295,17 @@ impl PyObject {
                                 file.borrow_mut().write_all(text.as_bytes()).map_err(|e| PyError::OsError(format!("{}", e)))?;
                                 Ok(py_int(text.len() as i64))
                             } else { Err(PyError::runtime_error("write on non-file")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "flush" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "flush".to_string(),
+                        func: |args| {
+                            use std::io::Write;
+                            if let PyObject::File { file, .. } = &*args[0].borrow() {
+                                file.borrow_mut().flush().map_err(|e| PyError::OsError(format!("{}", e)))?;
+                                Ok(py_none())
+                            } else { Err(PyError::runtime_error("flush on non-file")) }
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -7880,14 +8127,40 @@ impl PyObject {
                 };
                 if let Some(obj_type) = obj_type {
                     if let PyObject::Type { mro, .. } = &*obj_type.borrow() {
-                        // Find cls in MRO, start search from the next class
+                        // Find cls in MRO, start search from the next class.
+                        // If `cls` isn't in `obj`'s MRO at all — e.g. a
+                        // zero-arg `super()`'s compiled-in `LOAD_GLOBAL
+                        // <ClassName>` (see compile_expr's PEP 3135 handling)
+                        // picked up a DIFFERENT object than the class this
+                        // method actually belongs to, because that global
+                        // name got rebound/re-imported to something else in
+                        // the meantime — `unwrap_or(0) + 1` used to silently
+                        // treat "not found" as "found at position 0", i.e.
+                        // start the search at `mro[1]`. For a method whose
+                        // own class IS in `obj`'s real MRO (the overwhelmingly
+                        // common case, just not reachable via this wrong
+                        // `cls`), `mro[1]` is often that SAME class again —
+                        // so `super().method()` calls itself again as if it
+                        // were the next-in-MRO implementation, forever.
+                        // Confirmed via a general, Django-free repro
+                        // (rebinding a class's own name inside its
+                        // `__init_subclass__` before the trailing
+                        // `super().__init_subclass__()` call reproduces
+                        // unbounded recursion). Real CPython raises
+                        // `TypeError: super(type, obj): obj must be an
+                        // instance or subtype of type` here instead — treat
+                        // it as "not found via this MRO" and fall through to
+                        // the native-backing/error handling below, which is
+                        // at least a clean, immediate failure rather than a
+                        // silent infinite loop.
                         let start_idx = mro.iter().position(|m| {
                             if let (PyObjectRef::Mut(a), PyObjectRef::Mut(b)) = (cls, m) {
                                 std::ptr::eq(a.as_ptr(), b.as_ptr())
                             } else {
                                 false
                             }
-                        }).unwrap_or(0) + 1;
+                        }).map(|p| p + 1);
+                        if let Some(start_idx) = start_idx {
                         if start_idx < mro.len() {
                             let mut found = None;
                             for base in mro.iter().skip(start_idx) {
@@ -7954,6 +8227,7 @@ impl PyObject {
                                 return Ok(found);
                             }
                         }
+                        }
                     }
                 }
                 // Not found via any Type in the mro: for a class that
@@ -7974,6 +8248,30 @@ impl PyObject {
                             Ok(py_none())
                         }))));
                     }
+                }
+                // `super().__setattr__(name, value)`/`__delattr__(name)` —
+                // the real `object.__setattr__`/`__delattr__` (a plain
+                // generic attribute set/delete) isn't exposed as a gettable
+                // attribute anywhere either (same class of gap as
+                // `__init__` just above), needed by real code that
+                // deliberately bypasses an overridden `__setattr__` this
+                // way (a frozen-dataclass-style pattern — real trigger:
+                // CPython 3.14's own `Lib/_colorize.py`'s
+                // `ThemeSection.__post_init__`).
+                if name == "__setattr__" || name == "__delattr__" {
+                    let target = obj.clone();
+                    let is_delete = name == "__delattr__";
+                    return Ok(PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                        if args.is_empty() { return Err(PyError::type_error("missing required argument: name")); }
+                        let attr_name = args[0].str();
+                        if is_delete {
+                            target.borrow_mut().del_attribute(&attr_name)?;
+                        } else {
+                            if args.len() < 2 { return Err(PyError::type_error("__setattr__() takes exactly 2 arguments")); }
+                            target.borrow_mut().set_attribute(&attr_name, args[1].clone())?;
+                        }
+                        Ok(py_none())
+                    }))));
                 }
                 // Same story for the operator-level dunders — list/dict
                 // don't expose __setitem__/__getitem__/etc. as a plain
@@ -8209,6 +8507,19 @@ impl PyObject {
                                 else { &args[1] };
                             let other_set = convert_to_set(other)?;
                             Ok(py_bool(self_set.is_subset(&other_set)))
+                        },
+                        self_obj: py_none(),
+                    })),
+                    // Needed for the extremely common `frozenset(x).__contains__`
+                    // idiom (a bound method used as a first-class predicate
+                    // value, not called directly) — real CPython's own
+                    // `Lib/keyword.py` does exactly this for `iskeyword`.
+                    "__contains__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__contains__".to_string(),
+                        func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                            if args.len() < 2 { return Err(PyError::type_error("__contains__() takes exactly one argument")); }
+                            if let PyObject::FrozenSet(set) = &*args[0].borrow() { Ok(py_bool(set.contains(&args[1])?)) }
+                            else { Err(PyError::runtime_error("__contains__ on non-frozenset")) }
                         },
                         self_obj: py_none(),
                     })),
