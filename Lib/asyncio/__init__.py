@@ -105,6 +105,17 @@ class DefaultEventLoopPolicy:
 def get_event_loop():
     return BaseEventLoop()
 
+def get_running_loop():
+    # See the matching function in asyncio/events.py for why this always
+    # raises here (no real running-loop tracking in this minimal stub) —
+    # correct for the common synchronous case, which is what actually needed
+    # this (Django's own defensive `try: asyncio.get_running_loop() except
+    # RuntimeError:` idiom, previously an unhandled AttributeError since this
+    # function didn't exist under the name real code actually calls,
+    # `asyncio.get_running_loop()` resolving through this file, not
+    # `asyncio.events`).
+    raise RuntimeError("no running event loop")
+
 def set_event_loop(loop):
     pass
 
