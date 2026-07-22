@@ -99,6 +99,13 @@ pub enum Stmt {
         type_params: Vec<Ident>,
         value: Box<Expr>,
     },
+    /// Wraps a statement with its real source line number, as recorded by
+    /// the parser. Only introduced at the point a statement is pushed into
+    /// a block's `Vec<Stmt>` (see `parse_block`/`parse_program`) — inner
+    /// AST-building code never constructs or expects to see this directly.
+    /// Consumers that walk statement lists must unwrap it (see
+    /// `Compiler::unwrap_located` in compiler.rs) to reach the real `Stmt`.
+    Located(usize, Box<Stmt>),
 }
 
 #[derive(Debug, Clone, PartialEq)]

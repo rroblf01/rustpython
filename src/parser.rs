@@ -152,7 +152,8 @@ impl Parser {
             if self.at(&Token::EndOfFile) {
                 break;
             }
-            stmts.push(self.parse_stmt()?);
+            let line = self.lexer.get_line_col().0;
+            stmts.push(Stmt::Located(line, Box::new(self.parse_stmt()?)));
         }
         Ok(Program::Module(stmts))
     }
@@ -540,6 +541,24 @@ impl Parser {
             body,
             orelse,
         })
+    }
+
+    /// Consumes a comprehension clause's leading `for` or `async for`.
+    /// Returns `Some(is_async)` if either was consumed, `None` (consuming
+    /// nothing) if neither is present — callers use this both to decide
+    /// whether another clause follows and to know its async-ness. `async`
+    /// is a hard keyword in this lexer (never a plain identifier), so
+    /// seeing it here and NOT finding `for` right after is unambiguously
+    /// invalid syntax — `expect` surfaces that as a normal parse error.
+    fn eat_comp_for(&mut self) -> Result<Option<bool>, String> {
+        if self.eat(&Token::Async) {
+            self.expect(&Token::For)?;
+            Ok(Some(true))
+        } else if self.eat(&Token::For) {
+            Ok(Some(false))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Parse a `for` target expression, handling tuple unpacking.
@@ -1199,7 +1218,8 @@ impl Parser {
         if !self.eat(&Token::Newline) {
             // Single-statement body (same line after colon)
             if !self.at(&Token::Dedent) && !self.at(&Token::EndOfFile) {
-                stmts.push(self.parse_stmt()?);
+                let line = self.lexer.get_line_col().0;
+                stmts.push(Stmt::Located(line, Box::new(self.parse_stmt()?)));
             }
             return Ok(stmts);
         }
@@ -1222,7 +1242,8 @@ impl Parser {
                 if self.at(&Token::Dedent) || self.at(&Token::EndOfFile) {
                     continue;
                 }
-                stmts.push(self.parse_stmt()?);
+                let line = self.lexer.get_line_col().0;
+                stmts.push(Stmt::Located(line, Box::new(self.parse_stmt()?)));
             }
         }
         Ok(stmts)
@@ -1556,8 +1577,8 @@ impl Parser {
                                 };
                             }
                             // Check for generator expression as sole argument: f(x for x in lst)
-                            if self.at(&Token::For) && args.is_empty() && keywords.is_empty() {
-                                self.next(); // consume 'for'
+                            if (self.at(&Token::For) || self.at(&Token::Async)) && args.is_empty() && keywords.is_empty() {
+                                let is_async = self.eat_comp_for()?.unwrap();
                                 let target = self.parse_for_target()?;
                                 self.expect(&Token::In)?;
                                 let iter = self.parse_or_expr()?;
@@ -1565,9 +1586,9 @@ impl Parser {
                                     target: Box::new(target),
                                     iter: Box::new(iter),
                                     ifs: Vec::new(),
-                                    is_async: false,
+                                    is_async,
                                 }];
-                                while self.eat(&Token::For) {
+                                while let Some(is_async) = self.eat_comp_for()? {
                                     let t = self.parse_for_target()?;
                                     self.expect(&Token::In)?;
                                     let i = self.parse_or_expr()?;
@@ -1575,7 +1596,7 @@ impl Parser {
                                         target: Box::new(t),
                                         iter: Box::new(i),
                                         ifs: Vec::new(),
-                                        is_async: false,
+                                        is_async,
                                     });
                                 }
                                 if self.eat(&Token::If) {
@@ -1863,17 +1884,17 @@ impl Parser {
                     }
                 } else {
                     let first = self.parse_expr()?;
-                    if self.eat(&Token::For) {
+                    if let Some(is_async) = self.eat_comp_for()? {
                         // Generator expression: (expr for x in iter)
                         let target = self.parse_for_target()?;
                         self.expect(&Token::In)?;
                         let iter = self.parse_or_expr()?;
-                        let mut generators = vec![Comprehension { target: Box::new(target), iter: Box::new(iter), ifs: Vec::new(), is_async: false }];
-                        while self.eat(&Token::For) {
+                        let mut generators = vec![Comprehension { target: Box::new(target), iter: Box::new(iter), ifs: Vec::new(), is_async }];
+                        while let Some(is_async) = self.eat_comp_for()? {
                             let t = self.parse_for_target()?;
                             self.expect(&Token::In)?;
                             let i = self.parse_or_expr()?;
-                            generators.push(Comprehension { target: Box::new(t), iter: Box::new(i), ifs: Vec::new(), is_async: false });
+                            generators.push(Comprehension { target: Box::new(t), iter: Box::new(i), ifs: Vec::new(), is_async });
                         }
                         if self.eat(&Token::If) {
                             if let Some(last) = generators.last_mut() {
@@ -1937,16 +1958,17 @@ impl Parser {
                     }
                 }
                 // Check for list comprehension: [expr for ...]
-                if elts.len() == 1 && self.eat(&Token::For) {
+                if elts.len() == 1 && (self.at(&Token::For) || self.at(&Token::Async)) {
+                    let is_async = self.eat_comp_for()?.unwrap();
                     let target = self.parse_for_target()?;
                     self.expect(&Token::In)?;
                     let iter = self.parse_or_expr()?;
-                    let mut generators = vec![Comprehension { target: Box::new(target), iter: Box::new(iter), ifs: Vec::new(), is_async: false }];
-                    while self.eat(&Token::For) {
+                    let mut generators = vec![Comprehension { target: Box::new(target), iter: Box::new(iter), ifs: Vec::new(), is_async }];
+                    while let Some(is_async) = self.eat_comp_for()? {
                         let t = self.parse_for_target()?;
                         self.expect(&Token::In)?;
                         let i = self.parse_or_expr()?;
-                        generators.push(Comprehension { target: Box::new(t), iter: Box::new(i), ifs: Vec::new(), is_async: false });
+                        generators.push(Comprehension { target: Box::new(t), iter: Box::new(i), ifs: Vec::new(), is_async });
                     }
                     // Optional if clauses
                     if self.eat(&Token::If) {
@@ -1990,16 +2012,16 @@ impl Parser {
                         if self.eat(&Token::Colon) {
                             let value = self.parse_expr()?;
                             // Check for dict comprehension: {k: v for ...}
-                            if self.eat(&Token::For) {
+                            if let Some(is_async) = self.eat_comp_for()? {
                                 let target = self.parse_for_target()?;
                                 self.expect(&Token::In)?;
                                 let iter = self.parse_or_expr()?;
-                                let mut generators = vec![Comprehension { target: Box::new(target), iter: Box::new(iter), ifs: Vec::new(), is_async: false }];
-                                while self.eat(&Token::For) {
+                                let mut generators = vec![Comprehension { target: Box::new(target), iter: Box::new(iter), ifs: Vec::new(), is_async }];
+                                while let Some(is_async) = self.eat_comp_for()? {
                                     let t = self.parse_for_target()?;
                                     self.expect(&Token::In)?;
                                     let i = self.parse_or_expr()?;
-                                    generators.push(Comprehension { target: Box::new(t), iter: Box::new(i), ifs: Vec::new(), is_async: false });
+                                    generators.push(Comprehension { target: Box::new(t), iter: Box::new(i), ifs: Vec::new(), is_async });
                                 }
                                 if self.eat(&Token::If) {
                                     if let Some(last) = generators.last_mut() {
@@ -2021,16 +2043,16 @@ impl Parser {
                             is_dict = true;
                         } else {
                             // Check for set comprehension: {expr for ...}
-                            if self.eat(&Token::For) {
+                            if let Some(is_async) = self.eat_comp_for()? {
                                 let target = self.parse_for_target()?;
                                 self.expect(&Token::In)?;
                                 let iter = self.parse_or_expr()?;
-                                let mut generators = vec![Comprehension { target: Box::new(target), iter: Box::new(iter), ifs: Vec::new(), is_async: false }];
-                                while self.eat(&Token::For) {
+                                let mut generators = vec![Comprehension { target: Box::new(target), iter: Box::new(iter), ifs: Vec::new(), is_async }];
+                                while let Some(is_async) = self.eat_comp_for()? {
                                     let t = self.parse_for_target()?;
                                     self.expect(&Token::In)?;
                                     let i = self.parse_or_expr()?;
-                                    generators.push(Comprehension { target: Box::new(t), iter: Box::new(i), ifs: Vec::new(), is_async: false });
+                                    generators.push(Comprehension { target: Box::new(t), iter: Box::new(i), ifs: Vec::new(), is_async });
                                 }
                                 if self.eat(&Token::If) {
                                     if let Some(last) = generators.last_mut() {

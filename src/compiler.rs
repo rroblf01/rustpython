@@ -32,6 +32,13 @@ pub struct Compiler {
     // class the method is textually defined in, not type(self).
     class_name_stack: Vec<String>,
     current_line: usize,
+    // Whether `__annotations__` has already been created (via BUILD_MAP +
+    // STORE_NAME) in the CURRENT module/class scope — reset per scope like
+    // `current_line`. Only consulted for `Stmt::AnnAssign` at Module/
+    // ClassBody scope (see there); Function scope never populates a real
+    // `__annotations__`, matching real Python (local variable annotations
+    // are evaluated for side effects only, never stored anywhere).
+    annotations_initialized: bool,
 }
 
 struct LoopInfo {
@@ -80,6 +87,7 @@ impl Compiler {
             varnames_stack: Vec::new(),
             class_name_stack: Vec::new(),
             current_line: 1,
+            annotations_initialized: false,
         }
     }
 
@@ -423,6 +431,7 @@ impl Compiler {
 
     fn collect_assigned_inner(stmts: &[Stmt], assigned: &mut HashSet<String>) {
         for stmt in stmts {
+            let stmt = Self::unwrap_located(stmt);
             match stmt {
                 Stmt::Assign { targets, .. } => {
                     for t in targets {
@@ -538,7 +547,9 @@ impl Compiler {
 
     fn collect_own_referenced_names_inner(stmts: &[Stmt], names: &mut HashSet<String>) {
         for stmt in stmts {
+            let stmt = Self::unwrap_located(stmt);
             match stmt {
+                Stmt::Located(..) => unreachable!("stmt already unwrapped via unwrap_located"),
                 Stmt::Expr(expr) => Self::collect_names_expr(expr, names),
                 Stmt::Return(Some(expr)) => Self::collect_names_expr(expr, names),
                 Stmt::Return(None) | Stmt::Pass | Stmt::Break | Stmt::Continue => {}
@@ -782,6 +793,7 @@ impl Compiler {
         refs: &mut HashSet<String>,
     ) {
         for stmt in stmts {
+            let stmt = Self::unwrap_located(stmt);
             match stmt {
                 Stmt::FunctionDef { args, body, .. } => {
                     let (inner_globals, inner_nonlocals) = Self::scan_global_nonlocal_decls(body);
@@ -896,6 +908,7 @@ impl Compiler {
         let mut globals = HashSet::new();
         let mut nonlocals = HashSet::new();
         for stmt in body {
+            let stmt = Self::unwrap_located(stmt);
             match stmt {
                 Stmt::Global(names) => {
                     for n in names {
@@ -915,11 +928,26 @@ impl Compiler {
 
     // ---- Statement compilation ----
 
+    /// Strips a `Stmt::Located` wrapper (added by the parser at each
+    /// statement pushed into a block) down to the real statement. Statements
+    /// synthesized by the compiler itself (e.g. multi-item `with` desugaring)
+    /// are never wrapped and pass through unchanged.
+    fn unwrap_located(stmt: &Stmt) -> &Stmt {
+        match stmt {
+            Stmt::Located(_, inner) => Self::unwrap_located(inner),
+            _ => stmt,
+        }
+    }
+
     fn compile_stmts(&mut self, stmts: &[Stmt]) -> Result<(), String> {
         let mut first = true;
-        for (i, stmt) in stmts.iter().enumerate() {
-            // Use 1-based line counting per statement
-            self.set_line(i + 1);
+        for stmt in stmts {
+            let stmt = if let Stmt::Located(line, inner) = stmt {
+                self.set_line(*line);
+                inner.as_ref()
+            } else {
+                stmt
+            };
             if first {
                 first = false;
                 if matches!(stmt, Stmt::Match { .. }) {
@@ -1214,7 +1242,7 @@ impl Compiler {
             } => {
                 // Extract docstring from first statement if present
                 let docstring = body.first().and_then(|s| {
-                    if let Stmt::Expr(expr) = s {
+                    if let Stmt::Expr(expr) = Self::unwrap_located(s) {
                         if let Expr::Constant(Constant::String(doc)) = expr.as_ref() {
                             Some(doc.clone())
                         } else {
@@ -1382,6 +1410,10 @@ impl Compiler {
                 self.compile_expr(value)?;
                 let name_idx = self.add_varname(name) as u32;
                 self.emit(Opcode::STORE_FAST, name_idx);
+            }
+            Stmt::Located(line, inner) => {
+                self.set_line(*line);
+                self.compile_stmt(inner)?;
             }
             Stmt::Try {
                 body,
@@ -1712,9 +1744,70 @@ impl Compiler {
             }
             Stmt::AnnAssign {
                 target,
-                annotation: _,
+                annotation,
                 value,
             } => {
+                // Module/class-body annotations populate a real
+                // `__annotations__` dict in that scope's namespace — this
+                // used to be silently discarded entirely (`annotation: _`),
+                // which broke `cls.__annotations__`/`__annotations__` for
+                // EVERY class and module, a foundational gap for any code
+                // introspecting types (dataclasses, typing.get_type_hints,
+                // NamedTuple/TypedDict-style patterns). Function-scope
+                // annotations are left as before (evaluated only via the
+                // value-assignment path below, nothing stored) — real
+                // CPython doesn't expose local variable annotations anywhere
+                // either.
+                if let Expr::Name(name) = target.as_ref() {
+                    if self.scope == ScopeType::Module || self.scope == ScopeType::ClassBody {
+                        if !self.annotations_initialized {
+                            self.emit(Opcode::BUILD_MAP, 0);
+                            let ann_idx = self.get_name_index("__annotations__") as u32;
+                            self.emit(Opcode::STORE_NAME, ann_idx);
+                            self.annotations_initialized = true;
+                        }
+                        let ann_idx = self.get_name_index("__annotations__") as u32;
+                        self.emit(Opcode::LOAD_NAME, ann_idx);
+                        let name_const = self.get_const_index(ConstValue::String(name.clone())) as u32;
+                        self.emit(Opcode::LOAD_CONST, name_const);
+                        // Evaluating the annotation eagerly (this
+                        // interpreter doesn't implement PEP 649/749's real
+                        // lazy-annotation deferral) can raise NameError for
+                        // legitimate, common real-world code: CPython 3.14's
+                        // own stdlib now routinely uses type-checking-only
+                        // names in annotations relying on the new default
+                        // lazy evaluation (e.g. `_colorize.py`'s
+                        // `__dataclass_fields__: ClassVar[...]`, where
+                        // `ClassVar` is only imported under `if False:`).
+                        // Catch NameError specifically here (nothing else)
+                        // and fall back to None — a pragmatic middle ground:
+                        // real forward-reference-style annotations don't
+                        // crash class definition, while annotations that
+                        // fail for an unrelated reason (TypeError,
+                        // ZeroDivisionError, ...) still propagate normally.
+                        let tmp = "__annotation_tmp__".to_string();
+                        let try_stmt = Stmt::Try {
+                            body: vec![Stmt::Assign {
+                                targets: vec![Expr::Name(tmp.clone())],
+                                value: Box::new((**annotation).clone()),
+                            }],
+                            handlers: vec![ExceptHandler {
+                                typ: Some(Box::new(Expr::Name("NameError".to_string()))),
+                                name: None,
+                                body: vec![Stmt::Assign {
+                                    targets: vec![Expr::Name(tmp.clone())],
+                                    value: Box::new(Expr::Constant(Constant::None)),
+                                }],
+                            }],
+                            handlers_star: vec![],
+                            orelse: vec![],
+                            finalbody: vec![],
+                        };
+                        self.compile_stmt(&try_stmt)?;
+                        self.compile_expr(&Expr::Name(tmp))?;
+                        self.emit(Opcode::STORE_SUBSCR, 0);
+                    }
+                }
                 if let Some(val) = value {
                     self.compile_expr(val)?;
                     self.compile_assign_target(target)?;
@@ -2256,7 +2349,7 @@ impl Compiler {
         }
         // Extract docstring from first statement if present
         let docstring = body.first().and_then(|s| {
-            if let Stmt::Expr(expr) = s {
+            if let Stmt::Expr(expr) = Self::unwrap_located(s) {
                 if let Expr::Constant(Constant::String(doc)) = expr.as_ref() {
                     Some(doc.clone())
                 } else {
@@ -2285,6 +2378,8 @@ impl Compiler {
         let old_with_stack = std::mem::replace(&mut self.with_stack, Vec::new());
         let old_current_line = self.current_line;
         self.current_line = 1;
+        let old_annotations_initialized = self.annotations_initialized;
+        self.annotations_initialized = false;
 
         self.enter_scope(ScopeType::Function);
         self.varnames_stack.push(Self::enclosing_snapshot(&old_code));
@@ -2427,6 +2522,7 @@ impl Compiler {
         self.loop_stack = old_loop_stack;
         self.with_stack = old_with_stack;
         self.current_line = old_current_line;
+        self.annotations_initialized = old_annotations_initialized;
         self.varnames_stack.pop();
         // Leave the function's scope now, BEFORE compiling default-value
         // expressions below — defaults are evaluated once in the enclosing
@@ -2529,7 +2625,7 @@ impl Compiler {
         
 
         // Skip docstring if first statement is a string literal
-        let body = if let Some(Stmt::Expr(expr)) = body.first() {
+        let body = if let Some(Stmt::Expr(expr)) = body.first().map(Self::unwrap_located) {
             if matches!(expr.as_ref(), Expr::Constant(Constant::String(_))) {
                 &body[1..]
             } else {
@@ -2542,7 +2638,9 @@ impl Compiler {
         self.enter_scope(ScopeType::ClassBody);
         self.class_name_stack.push(name.clone());
 
-        let old_code = std::mem::replace(&mut self.code, CodeObject::new(name.clone()));
+        let mut new_class_code = CodeObject::new(name.clone());
+        new_class_code.filename = self.code.filename.clone();
+        let old_code = std::mem::replace(&mut self.code, new_class_code);
         self.varnames_stack.push(Self::enclosing_snapshot(&old_code));
 
         let old_labels = std::mem::replace(&mut self.labels, Vec::new());
@@ -2551,6 +2649,8 @@ impl Compiler {
         let old_with_stack = std::mem::replace(&mut self.with_stack, Vec::new());
         let old_current_line = self.current_line;
         self.current_line = 1;
+        let old_annotations_initialized = self.annotations_initialized;
+        self.annotations_initialized = false;
 
         self.code.arg_count = 0;
 
@@ -2606,6 +2706,7 @@ impl Compiler {
         self.loop_stack = old_loop_stack;
         self.with_stack = old_with_stack;
         self.current_line = old_current_line;
+        self.annotations_initialized = old_annotations_initialized;
         self.varnames_stack.pop();
 
         // Relay any free variables this class body's methods need, using the
@@ -3298,7 +3399,7 @@ impl Compiler {
 }
 
 fn contains_yield_in_stmts(stmts: &[Stmt]) -> bool {
-    stmts.iter().any(|s| match s {
+    stmts.iter().any(|s| match Compiler::unwrap_located(s) {
         Stmt::Expr(expr)
         | Stmt::Return(Some(expr))
         | Stmt::Assign { value: expr, .. }
