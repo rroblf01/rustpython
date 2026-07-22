@@ -27,6 +27,20 @@ use vm::VirtualMachine;
 use object::{PyObject, ObjectAccess};
 use object::PyError;
 
+fn print_traceback(vm: &VirtualMachine, e: &PyError, fallback_file: &str) {
+    eprintln!("Traceback (most recent call last):");
+    if vm.last_traceback.is_empty() {
+        let line = vm.last_error_line.map_or("???".to_string(), |l| l.to_string());
+        let file = vm.last_error_file.clone().unwrap_or_else(|| fallback_file.to_string());
+        eprintln!("  File \"{}\", line {}", file, line);
+    } else {
+        for (file, line, name) in &vm.last_traceback {
+            eprintln!("  File \"{}\", line {}, in {}", file, line, name);
+        }
+    }
+    eprintln!("{}", e);
+}
+
 fn call_displayhook(vm: &VirtualMachine, val: &object::PyObjectRef) {
     if let Some(sys_mod) = vm.modules.get("sys") {
         if let Ok(hook) = sys_mod.borrow().get_attribute("displayhook") {
@@ -259,8 +273,7 @@ fn main() {
                         if let PyError::SystemExit(exit_code) = &e {
                             std::process::exit(*exit_code);
                         }
-                        let line = vm.last_error_line.map_or("???".to_string(), |l| l.to_string());
-                        eprintln!("Traceback (most recent call last):\n  File \"<string>\", line {}\n{}", line, e);
+                        print_traceback(&vm, &e, "<string>");
                         std::process::exit(1);
                     }
                 }
@@ -325,8 +338,7 @@ fn main() {
                         if let PyError::SystemExit(exit_code) = &e {
                             std::process::exit(*exit_code);
                         }
-                        let line = vm.last_error_line.map_or("???".to_string(), |l| l.to_string());
-                        eprintln!("Traceback (most recent call last):\n  File \"<module>\", line {}\n{}", line, e);
+                        print_traceback(&vm, &e, "<module>");
                         std::process::exit(1);
                     }
                 }
@@ -386,8 +398,7 @@ fn main() {
                         if let PyError::SystemExit(exit_code) = &e {
                             std::process::exit(*exit_code);
                         }
-                        let line = vm.last_error_line.map_or("???".to_string(), |l| l.to_string());
-                        eprintln!("Traceback (most recent call last):\n  File \"{}\", line {}\n{}", filename, line, e);
+                        print_traceback(&vm, &e, filename);
                         std::process::exit(1);
                     }
                 }
