@@ -344,7 +344,14 @@ class ForwardRef:
         return f"ForwardRef({self.__resolved_str__!r}{''.join(extra)})"
 
 
-_Template = type(t"")
+# NOTE (rustpython adaptation): the original `type(t"")` gets the real
+# PEP 750 t-string runtime type (`string.templatelib.Template`) purely to
+# use in isinstance/type checks below. This interpreter doesn't parse t-string
+# syntax at all, so no value here can ever actually be a Template instance —
+# a placeholder class that nothing can equal/isinstance-match is behaviorally
+# identical for every code path that reaches this module.
+class _Template:
+    pass
 
 
 class _Stringifier:
