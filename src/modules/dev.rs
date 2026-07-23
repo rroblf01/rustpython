@@ -472,6 +472,17 @@ pub fn create_dis_dict() -> HashMap<String, PyObjectRef> {
 
     // Also add some opcode name constants for reference
     d.insert("opname".to_string(), py_str("dis module for bytecode disassembly"));
+    // Real CPython's `dis` re-exports these opcode-classification lists
+    // from `opcode` (which describes CPython's OWN bytecode format — not
+    // this interpreter's, so there's nothing meaningful to populate them
+    // with). Empty lists here are enough for code that merely imports/
+    // constructs a `set()` from them without asserting real CPython opcode
+    // membership (real trigger: `test.support.bytecode_helper`, which our
+    // fundamentally-different bytecode format can't produce accurate
+    // results for regardless).
+    for name in ["hasarg", "hasconst", "hasname", "hasjrel", "hasjabs", "haslocal", "hascompare", "hasfree", "hasexc"] {
+        d.insert(name.to_string(), py_list(vec![]));
+    }
 
     d
 }
@@ -1559,10 +1570,21 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
     d.insert("TextIOBase".to_string(), text_cls.clone());
     d.insert("_TextIOBase".to_string(), text_cls.clone());
 
-    // StringIO — in-memory text buffer, factory with Rc<RefCell<String>> via Closures
+    // StringIO — real in-memory text buffer with actual position tracking
+    // (char-indexed, matching Python's own str model — NOT byte-indexed).
+    // The PREVIOUS implementation was a near-total stub: `read()` ignored
+    // any size argument and always returned the ENTIRE buffer regardless of
+    // position, and `seek`/`tell` were hardcoded to always return 0 — no
+    // position tracking existed at all. This made the extremely common
+    // `while True: chunk = f.read(1)\n if not chunk: break` idiom loop
+    // FOREVER (`read(1)` never shrinks, never returns `''`) — confirmed via
+    // CPython's own `shlex.py` (`shlex.split(...)` hung indefinitely on any
+    // input). Position is tracked in a `Rc<RefCell<usize>>` (char offset,
+    // not byte offset) alongside the buffer.
     let stringio_closure: Rc<dyn Fn(&[PyObjectRef]) -> PyResult<PyObjectRef>> = Rc::new(move |args: &[PyObjectRef]| {
-        let initial_value = if !args.is_empty() { args[0].str() } else { String::new() };
+        let initial_value = if !args.is_empty() && !matches!(&*args[0].borrow(), PyObject::None) { args[0].str() } else { String::new() };
         let buffer = Rc::new(RefCell::new(initial_value));
+        let pos = Rc::new(RefCell::new(0usize));
         let mut type_dict = HashMap::new();
 
         // __init__ — no-op (initial_value already consumed by factory)
@@ -1570,21 +1592,68 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
             name: "__init__".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
         }));
 
-        // read — return full buffer contents
-        let b_read = buffer.clone();
-        type_dict.insert("read".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
-            Ok(py_str(&b_read.borrow()))
+        // Optional size arg: absent, explicit None, or negative all mean
+        // "no limit" (read to end / no truncation), matching real
+        // `read(size=-1)`/`truncate(size=None)` semantics.
+        fn opt_size(args: &[PyObjectRef], idx: usize) -> Option<i64> {
+            let a = args.get(idx)?;
+            if matches!(&*a.borrow(), PyObject::None) { return None; }
+            let n = a.as_i64()?;
+            if n < 0 { None } else { Some(n) }
+        }
+
+        // read(size=-1) — from the current position, advancing it.
+        let (b, p) = (buffer.clone(), pos.clone());
+        type_dict.insert("read".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| {
+            let chars: Vec<char> = b.borrow().chars().collect();
+            let start = (*p.borrow()).min(chars.len());
+            let end = match opt_size(args, 0) {
+                Some(n) => (start + n as usize).min(chars.len()),
+                None => chars.len(),
+            };
+            *p.borrow_mut() = end;
+            Ok(py_str(&chars[start..end].iter().collect::<String>()))
         }))));
 
-        // write — append text to buffer
-        let b_write = buffer.clone();
+        // readline(size=-1) — up to and including the next '\n', or EOF.
+        let (b, p) = (buffer.clone(), pos.clone());
+        type_dict.insert("readline".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| {
+            let chars: Vec<char> = b.borrow().chars().collect();
+            let start = (*p.borrow()).min(chars.len());
+            let limit = opt_size(args, 0).map(|n| (start + n as usize).min(chars.len())).unwrap_or(chars.len());
+            let mut end = start;
+            while end < limit {
+                if chars[end] == '\n' { end += 1; break; }
+                end += 1;
+            }
+            *p.borrow_mut() = end;
+            Ok(py_str(&chars[start..end].iter().collect::<String>()))
+        }))));
+
+        // write(s) — overwrite at the current position (extending the
+        // buffer if writing past its current end), then advance position
+        // by the written length. Matches real `StringIO.write`'s
+        // "positioned write", not a plain append.
+        let (b, p) = (buffer.clone(), pos.clone());
         type_dict.insert("write".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |w_args: &[PyObjectRef]| {
             let text = if !w_args.is_empty() { w_args[0].str() } else { String::new() };
-            b_write.borrow_mut().push_str(&text);
-            Ok(py_int(text.len()))
+            let mut chars: Vec<char> = b.borrow().chars().collect();
+            let start = *p.borrow();
+            while chars.len() < start { chars.push('\0'); }
+            let new_chars: Vec<char> = text.chars().collect();
+            let end = start + new_chars.len();
+            if end > chars.len() {
+                chars.truncate(start);
+                chars.extend(new_chars.iter());
+            } else {
+                chars.splice(start..end, new_chars.iter().cloned());
+            }
+            *b.borrow_mut() = chars.into_iter().collect();
+            *p.borrow_mut() = end;
+            Ok(py_int(text.chars().count() as i64))
         }))));
 
-        // getvalue — return current buffer contents
+        // getvalue — full buffer contents regardless of current position.
         let b_get = buffer.clone();
         type_dict.insert("getvalue".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
             Ok(py_str(&b_get.borrow()))
@@ -1595,14 +1664,74 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
             Ok(py_none())
         }))));
 
-        // seek — stub
-        type_dict.insert("seek".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
-            Ok(py_int(0))
+        // seek(pos, whence=0) — 0=absolute, 1=relative, 2=from end.
+        let (b, p) = (buffer.clone(), pos.clone());
+        type_dict.insert("seek".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| {
+            let target = args.get(0).and_then(|a| a.as_i64()).unwrap_or(0);
+            let whence = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
+            let len = b.borrow().chars().count() as i64;
+            let new_pos = match whence {
+                1 => *p.borrow() as i64 + target,
+                2 => len + target,
+                _ => target,
+            };
+            let new_pos = new_pos.max(0) as usize;
+            *p.borrow_mut() = new_pos;
+            Ok(py_int(new_pos as i64))
         }))));
 
-        // tell — stub
+        // tell — current position.
+        let p_tell = pos.clone();
         type_dict.insert("tell".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
-            Ok(py_int(0))
+            Ok(py_int(*p_tell.borrow() as i64))
+        }))));
+
+        // truncate(size=None) — cut the buffer at `size` chars (current
+        // position if omitted); does NOT move the current position (matches
+        // real `io.StringIO.truncate`).
+        let (b, p) = (buffer.clone(), pos.clone());
+        type_dict.insert("truncate".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| {
+            let mut chars: Vec<char> = b.borrow().chars().collect();
+            let size = opt_size(args, 0).map(|n| n as usize).unwrap_or(*p.borrow()).min(chars.len());
+            chars.truncate(size);
+            *b.borrow_mut() = chars.into_iter().collect();
+            Ok(py_int(size as i64))
+        }))));
+
+        // readlines(hint=-1) — split remaining content into lines (each
+        // keeping its trailing '\n' except possibly the last).
+        let (b, p) = (buffer.clone(), pos.clone());
+        type_dict.insert("readlines".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
+            let chars: Vec<char> = b.borrow().chars().collect();
+            let start = (*p.borrow()).min(chars.len());
+            let rest: String = chars[start..].iter().collect();
+            *p.borrow_mut() = chars.len();
+            let mut lines = Vec::new();
+            let mut cur = String::new();
+            for c in rest.chars() {
+                cur.push(c);
+                if c == '\n' { lines.push(py_str(&cur)); cur.clear(); }
+            }
+            if !cur.is_empty() { lines.push(py_str(&cur)); }
+            Ok(py_list(lines))
+        }))));
+
+        // __iter__/__next__ — iterate remaining lines, StopIteration at EOF.
+        type_dict.insert("__iter__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__iter__".to_string(), func: |args: &[PyObjectRef]| Ok(args[0].clone()),
+        }));
+        let (b, p) = (buffer.clone(), pos.clone());
+        type_dict.insert("__next__".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
+            let chars: Vec<char> = b.borrow().chars().collect();
+            let start = (*p.borrow()).min(chars.len());
+            if start >= chars.len() { return Err(PyError::StopIteration); }
+            let mut end = start;
+            while end < chars.len() {
+                if chars[end] == '\n' { end += 1; break; }
+                end += 1;
+            }
+            *p.borrow_mut() = end;
+            Ok(py_str(&chars[start..end].iter().collect::<String>()))
         }))));
 
         Ok(PyObjectRef::new(PyObject::Instance {
