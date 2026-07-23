@@ -2902,6 +2902,9 @@ pub fn create_array_dict() -> HashMap<String, PyObjectRef> {
 
 pub fn create_thread_module_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
+    // Real CPython's max `Lock.acquire(timeout=...)` value (platform max C
+    // `long` in seconds, roughly). Needed by `test.support.lock_tests`.
+    d.insert("TIMEOUT_MAX".to_string(), py_float(4294967.0));
     macro_rules! thr_func {
         ($name:expr, $func:expr) => {
             d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
