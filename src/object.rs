@@ -5281,8 +5281,25 @@ pub(crate) fn lookup_dunder_via_mro(typ: &PyObjectRef, name: &str) -> Option<PyO
         // None result gets a chance to run.
         let native_marker = type_dict.contains_key_str(NATIVE_BASE_MARKER);
         let skip_object_default = native_marker && matches!(name, "__repr__" | "__str__" | "__eq__" | "__ne__" | "__hash__");
+        // Always check the type's OWN dict first, regardless of whether
+        // `mro` is empty. For an ordinary user-defined class this is a
+        // no-op (real mro-building always puts the class itself at
+        // `mro[0]`, so this duplicates that first check harmlessly) — but
+        // some native, hand-constructed `PyObject::Type`s (e.g. `dev.rs`'s
+        // closure-built `StringIO`) set `mro` to just their BASE classes,
+        // omitting themselves, since they're built ad hoc rather than via
+        // the real class-creation/mro-linearization machinery. Without
+        // this, such a type's OWN methods (its whole reason for existing)
+        // were invisible to any dunder lookup that goes through this
+        // function specifically (`__next__`/`__iter__`/etc. — plain
+        // attribute access via `get_attribute_impl` checks the type's own
+        // dict directly and was unaffected) — confirmed via `for line in
+        // io.StringIO(...):`, `TypeError: 'instance' is not an iterator`.
+        if let Some(v) = type_dict.get_str(name) {
+            return Some(v.clone());
+        }
         if mro.is_empty() {
-            return type_dict.get_str(name).cloned();
+            return None;
         }
         for base in mro.iter() {
             if let PyObject::Type { name: base_name, dict: base_dict, .. } = &*base.borrow() {
@@ -6174,11 +6191,45 @@ impl PyObject {
                         func: |args| {
                             if let PyObject::Bytes(bytes) = &*args[0].borrow() {
                                 let encoding = if args.len() > 1 { args[1].str() } else { "utf-8".to_string() };
+                                let errors = if args.len() > 2 { args[2].str() } else { "strict".to_string() };
                                 if encoding == "utf-8" || encoding == "utf8" {
-                                    if let Ok(s) = String::from_utf8(bytes.clone()) {
-                                        Ok(py_str(&s))
-                                    } else {
-                                        Err(PyError::value_error("invalid utf-8 sequence".to_string()))
+                                    match String::from_utf8(bytes.clone()) {
+                                        Ok(s) => Ok(py_str(&s)),
+                                        Err(e) if errors == "strict" => {
+                                            // A real `UnicodeDecodeError` (not a
+                                            // bare `ValueError`, its ancestor —
+                                            // real code commonly catches the
+                                            // specific subclass, e.g. CPython's
+                                            // own `test.support.os_helper`
+                                            // probing filesystem-encoding
+                                            // behavior via `except
+                                            // UnicodeDecodeError:`) so real
+                                            // CPython-idiomatic error handling
+                                            // around `.decode()` actually works.
+                                            let pos = e.utf8_error().valid_up_to();
+                                            Err(PyError::Exception("UnicodeDecodeError".to_string(), PyObjectRef::new(PyObject::Exception {
+                                                typ: "UnicodeDecodeError".to_string(),
+                                                args: vec![
+                                                    py_str(&encoding),
+                                                    PyObjectRef::imm(PyObject::Bytes(bytes.clone())),
+                                                    py_int(pos as i64),
+                                                    py_int(pos as i64 + 1),
+                                                    py_str("invalid start byte"),
+                                                ],
+                                                cause: None,
+                                            })))
+                                        }
+                                        Err(_) => {
+                                            // 'ignore'/'replace'/'surrogateescape'/etc:
+                                            // this interpreter's `PyObject::Str` is
+                                            // backed by a real Rust `String`
+                                            // (always valid UTF-8), so it can't
+                                            // represent lone surrogates the way
+                                            // real `surrogateescape` round-trips
+                                            // require — lossy replacement is the
+                                            // closest approximation available.
+                                            Ok(py_str(&String::from_utf8_lossy(bytes)))
+                                        }
                                     }
                                 } else {
                                     let s = String::from_utf8_lossy(bytes).to_string();
@@ -9502,6 +9553,7 @@ make_exception_func!(builtin_make_exception_blockingioerror, "BlockingIOError");
 make_exception_func!(builtin_make_exception_childprocesserror, "ChildProcessError");
 make_exception_func!(builtin_make_exception_interruptederror, "InterruptedError");
 make_exception_func!(builtin_make_exception_timeouterror, "TimeoutError");
+make_exception_func!(builtin_make_exception_unicodeerror, "UnicodeError");
 make_exception_func!(builtin_make_exception_unicodedecodeerror, "UnicodeDecodeError");
 make_exception_func!(builtin_make_exception_unicodeencodeerror, "UnicodeEncodeError");
 make_exception_func!(builtin_make_exception_systemerror, "SystemError");
