@@ -143,6 +143,29 @@ pub fn create_shutil_dict() -> HashMap<String, PyObjectRef> {
             d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
         };
     }
+    shutil_func!("get_terminal_size", |args| {
+        // Real `shutil.get_terminal_size(fallback=(80, 24))`: prefers the
+        // `COLUMNS`/`LINES` env vars, then an actual terminal query, then
+        // `fallback`. This interpreter has no terminal ioctl support, so it
+        // stops at the env-var check before `fallback` — good enough for
+        // the overwhelmingly common real-world caller (`argparse`'s
+        // `HelpFormatter`, wanting just `.columns` to wrap help text).
+        let (fallback_cols, fallback_lines) = if let Some(fb) = args.get(0) {
+            if let PyObject::Tuple(t) = &*fb.borrow() {
+                let c = t.get(0).and_then(|v| v.as_i64()).unwrap_or(80);
+                let l = t.get(1).and_then(|v| v.as_i64()).unwrap_or(24);
+                (c, l)
+            } else { (80, 24) }
+        } else { (80, 24) };
+        let columns = std::env::var("COLUMNS").ok().and_then(|s| s.parse::<i64>().ok()).unwrap_or(fallback_cols);
+        let lines = std::env::var("LINES").ok().and_then(|s| s.parse::<i64>().ok()).unwrap_or(fallback_lines);
+        let typ = PyObjectRef::new(PyObject::Type { name: "os.terminal_size".to_string(), dict: HashMap::new(), bases: vec![], mro: vec![] });
+        let mut dict = HashMap::new();
+        dict.insert("columns".to_string(), py_int(columns));
+        dict.insert("lines".to_string(), py_int(lines));
+        Ok(PyObjectRef::new(PyObject::Instance { typ, dict }))
+    });
+
     shutil_func!("copy", |args| {
         if args.len() < 2 {
             return Err(PyError::type_error("copy() requires 2 arguments (src, dst)"));

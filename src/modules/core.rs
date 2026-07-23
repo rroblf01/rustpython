@@ -1142,6 +1142,7 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
     d.insert("argv".to_string(), py_list(argv.into_iter().map(|s| py_str(&s)).collect()));
     d.insert("path".to_string(), py_list(vec![]));
     d.insert("modules".to_string(), py_dict());
+    d.insert("warnoptions".to_string(), py_list(vec![]));
     d.insert("version".to_string(), py_str("3.12.0 (RustPython 0.1.0)"));
     d.insert("version_info".to_string(), py_tuple(vec![py_int(3), py_int(12), py_int(0)]));
     d.insert("hexversion".to_string(), py_int(0x030c0000));
