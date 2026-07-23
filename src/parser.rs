@@ -1948,7 +1948,14 @@ impl Parser {
                             let expr = self.parse_expr()?;
                             elts.push(Expr::Starred(Box::new(expr)));
                         } else {
-                            elts.push(self.parse_conditional_expr()?);
+                            // `parse_expr` (not `parse_conditional_expr`) so
+                            // a walrus assignment expression is allowed as a
+                            // list-display element (`[y := f(x), x/y]`,
+                            // valid real Python grammar — `testlist_comp`
+                            // uses `namedexpr_test`, not bare `test`) —
+                            // confirmed general via CPython's own
+                            // `test_named_expressions.py`.
+                            elts.push(self.parse_expr()?);
                         }
                         if !self.eat(&Token::Comma) { break; }
                         // After eating a trailing comma, check if we're at the end
