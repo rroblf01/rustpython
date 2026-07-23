@@ -417,6 +417,15 @@ fn real_main() {
                 };
 
                 let mut vm = VirtualMachine::new_with_args(sys_argv);
+                // Real CPython sets `__file__` in the running script's own
+                // globals to its path — missing entirely here before (only
+                // regularly-imported modules got it, via `import_module_
+                // from_file`), breaking any top-level script doing
+                // `os.path.dirname(__file__)`-style relative-path lookups
+                // (real trigger: several of CPython's own `Lib/test/
+                // test_*.py` files read `__file__` directly for fixture
+                // data next to the script).
+                vm.globals.borrow_mut().insert("__file__".to_string(), object::py_str(filename));
                 match vm.run(code) {
                     Ok(_val) => {}
                     Err(e) => {
