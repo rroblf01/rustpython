@@ -988,6 +988,17 @@ pub fn create_types_dict() -> HashMap<String, PyObjectRef> {
         }
         Ok(d)
     });
+    // `@types.coroutine` — real CPython marks the generator function so its
+    // resulting generator gets coroutine-like `__await__`/`send`/`throw`
+    // behavior. This interpreter's own generator objects already expose
+    // `__await__`/`__iter__` unconditionally (see `object.rs`'s Generator
+    // attribute-access arm), so the decorator itself only needs to be a
+    // transparent passthrough — real trigger: CPython's own `test.support`,
+    // `@types.coroutine\ndef async_yield(v): return (yield v)`.
+    t_func!("coroutine", |args| {
+        if args.is_empty() { return Err(PyError::type_error("coroutine() requires an argument")); }
+        Ok(args[0].clone())
+    });
     d.insert("CodeType".to_string(), py_str("code"));
     d.insert("MappingProxyType".to_string(), py_str("mappingproxy"));
     // GenericAlias — used for generic type annotations like list[int], dict[str, int]
