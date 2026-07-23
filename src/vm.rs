@@ -208,6 +208,30 @@ fn find_lib_dir() -> String {
     "./Lib".to_string()
 }
 
+/// Finds `key`'s slot in `varnames` IF it names a real formal parameter
+/// (positional or keyword-only) — NOT just any local variable. `varnames`
+/// (CPython's `co_varnames` layout) holds positional params, then kwonly
+/// params, then `*args`/`**kwargs` names, then EVERY OTHER plain local the
+/// function body ever assigns — a naive `varnames.iter().position(...)`
+/// scan over the whole list (the bug this replaced) meant a keyword
+/// argument whose name happened to match some unrelated local variable used
+/// later in the function body (e.g. `def f(**kwargs): dest =
+/// kwargs.pop('dest', None)` called as `f(dest=...)`) got silently
+/// misrouted into that local's fast-locals slot instead of `**kwargs`,
+/// making it vanish from `kwargs` entirely.
+fn formal_param_index(varnames: &[String], arg_count: usize, kwonlyarg_count: usize, kwonly_start: usize, key: &str) -> Option<usize> {
+    if let Some(idx) = varnames.get(0..arg_count).and_then(|s| s.iter().position(|n| n == key)) {
+        return Some(idx);
+    }
+    if kwonlyarg_count > 0 {
+        let end = kwonly_start + kwonlyarg_count;
+        if let Some(rel) = varnames.get(kwonly_start..end).and_then(|s| s.iter().position(|n| n == key)) {
+            return Some(kwonly_start + rel);
+        }
+    }
+    None
+}
+
 impl VirtualMachine {
     pub fn new() -> Self {
         if std::env::var("RPY_DEBUG_VM_NEW").is_ok() {
@@ -483,8 +507,12 @@ impl VirtualMachine {
           // Native pdb module
           modules.insert("pdb".to_string(), create_module("pdb", create_pdb_dict()));
 
-          // Native traceback module
-          modules.insert("traceback".to_string(), create_module("traceback", create_traceback_dict()));
+          // traceback now loads from Lib/traceback.py — the old native stub
+          // (`create_traceback_dict`, kept as dead code) had only
+          // `format_exc`/`print_exc` as no-ops and no `TracebackException`
+          // at all, which real `unittest/result.py` needs to format a
+          // failure/error for display.
+          // modules.insert("traceback".to_string(), create_module("traceback", create_traceback_dict()));
 
           // Native warnings module
           modules.insert("warnings".to_string(), create_module("warnings", create_warnings_dict()));
@@ -627,8 +655,15 @@ impl VirtualMachine {
           // Native this module (Zen of Python)
           modules.insert("this".to_string(), create_module("this", create_this_dict()));
 
-          // Native argparse module (ArgumentParser stub)
-          modules.insert("argparse".to_string(), create_module("argparse", create_argparse_dict()));
+          // argparse now loads from Lib/argparse.py (real CPython source,
+          // vendored verbatim) instead of the old native stub — the stub's
+          // `add_argument` was a no-op and `parse_args` never populated a
+          // caller-supplied `namespace` object (2nd positional arg), which
+          // is exactly the calling convention `unittest.main()`'s own
+          // `TestProgram.parseArgs` and Django's management-command
+          // machinery both rely on. See `create_argparse_dict` (kept, now
+          // dead code) for the old implementation.
+          // modules.insert("argparse".to_string(), create_module("argparse", create_argparse_dict()));
 
           // Native _imp module (CPython C extension replacement needed by importlib._bootstrap)
           modules.insert("_imp".to_string(), create_module("_imp", create_imp_dict()));
@@ -1016,13 +1051,35 @@ impl VirtualMachine {
     }
 
     pub fn run(&mut self, code: CodeObject) -> PyResult<PyObjectRef> {
+        // Real CPython always has a `__main__` module in `sys.modules`
+        // backed by the running script's own globals — `__import__("__main__")`
+        // (which `unittest.main()` calls unconditionally via
+        // `TestProgram.__init__`'s `self.module = __import__(module)`) relies
+        // on this. Without it every `if __name__ == "__main__": unittest.main()`
+        // trailer in a real CPython test file raised `ImportError: No module
+        // named '__main__'` instead of actually running the tests. Reuse the
+        // existing `live_module` mirroring machinery (same mechanism a
+        // regular file-backed module import already uses) so STORE_NAME/
+        // DELETE_NAME at top level keep this module's `dict` in sync as the
+        // script executes, instead of only registering it once, empty then finished.
+        let main_module = self.modules.entry("__main__".to_string())
+            .or_insert_with(|| create_module("__main__", HashMap::new()))
+            .clone();
+        if let Some(sys_mod) = self.modules.get("sys") {
+            if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
+                if let Some(mod_dict) = dict.get("modules") {
+                    mod_dict.borrow_mut().set_attribute("__main__", main_module.clone()).ok();
+                }
+            }
+        }
         // JIT compilation disabled — using stable interpreter path only
-        let frame = self.acquire_frame(
+        let mut frame = self.acquire_frame(
             Rc::new(code),
             self.globals.clone(),
             Rc::clone(&self.builtins),
             None,
         );
+        frame.live_module = Some(main_module);
         self.frames.push(frame);
         let result = self.execute();
         if let Some(frame) = self.frames.pop() {
@@ -1692,8 +1749,18 @@ impl VirtualMachine {
         let result = self.execute_inner(frame_floor);
         // Store exception info for sys.exc_info()
         if let Err(ref e) = result {
-            self.exc_type = Some(py_str(&e.type_name()));
-            self.exc_value = Some(py_str(&format!("{}", e)));
+            // Must be the real exception object + its real class (what
+            // `sys.exc_info()` returns), not a bare descriptive string —
+            // this is what let `issubclass(sys.exc_info()[0], ...)` crash
+            // with "arg 1 must be a class" for ANY natively-raised error
+            // (a `TypeError`/`ValueError`/etc. raised internally by a
+            // builtin/opcode rather than a Python-level `raise` statement,
+            // which instead goes through RAISE_VARARGS's own now-fixed
+            // assignment) — exactly the same bug, just a second, separate
+            // site that produced it for a different class of raise.
+            let exc_obj = Self::error_to_exc_obj(e);
+            self.exc_type = Some(self.exception_class_of(&exc_obj));
+            self.exc_value = Some(exc_obj);
         }
         result
     }
@@ -1714,8 +1781,18 @@ impl VirtualMachine {
         }
         let result = self.execute_inner(frame_floor);
         if let Err(ref e) = result {
-            self.exc_type = Some(py_str(&e.type_name()));
-            self.exc_value = Some(py_str(&format!("{}", e)));
+            // Must be the real exception object + its real class (what
+            // `sys.exc_info()` returns), not a bare descriptive string —
+            // this is what let `issubclass(sys.exc_info()[0], ...)` crash
+            // with "arg 1 must be a class" for ANY natively-raised error
+            // (a `TypeError`/`ValueError`/etc. raised internally by a
+            // builtin/opcode rather than a Python-level `raise` statement,
+            // which instead goes through RAISE_VARARGS's own now-fixed
+            // assignment) — exactly the same bug, just a second, separate
+            // site that produced it for a different class of raise.
+            let exc_obj = Self::error_to_exc_obj(e);
+            self.exc_type = Some(self.exception_class_of(&exc_obj));
+            self.exc_value = Some(exc_obj);
         }
         result
     }
@@ -2513,9 +2590,41 @@ impl VirtualMachine {
             }
 
             Opcode::BINARY_OP => {
-                let op = arg;
+                // `arg >= 100` encodes the IN-PLACE variant of operator
+                // `arg - 100` (`x += y` etc. — `Stmt::AugAssign`'s codegen
+                // is the only emitter of this range). Try `__iadd__`/
+                // `__isub__`/etc. first (only meaningful for a
+                // `PyObject::Instance` with such a dunder defined — every
+                // native type falls through unchanged), then fall back to
+                // the exact same logic as the plain, non-augmented operator
+                // below. Previously `x += y` NEVER checked for `__iadd__`
+                // at all (AugAssign compiled to a bare `BINARY_OP` with the
+                // SAME arg as `x + y`) — `__iadd__`'s entire purpose (an
+                // object choosing to mutate itself and return `self`,
+                // instead of `__add__`'s always-build-a-new-object
+                // semantics) was silently unreachable for every user class
+                // in the interpreter's history. Confirmed general via
+                // CPython's own `test_augassign.py`.
+                let (op, in_place) = if arg >= 100 { (arg - 100, true) } else { (arg, false) };
                 let right = self.frames[fi].pop()?;
                 let left = self.frames[fi].pop()?;
+                if in_place {
+                    let idunder = match op {
+                        0 => Some("__iadd__"), 1 => Some("__isub__"), 2 => Some("__imul__"),
+                        3 => Some("__itruediv__"), 4 => Some("__ifloordiv__"), 5 => Some("__imod__"),
+                        6 => Some("__ipow__"), 7 => Some("__ilshift__"), 8 => Some("__irshift__"),
+                        9 => Some("__ior__"), 10 => Some("__ixor__"), 11 => Some("__iand__"),
+                        12 => Some("__imatmul__"), _ => None,
+                    };
+                    if let Some(name) = idunder {
+                        if matches!(&*left.borrow(), PyObject::Instance { .. }) {
+                            if let Some(r) = crate::object::try_dunder_binop(&left, &right, name)? {
+                                self.frames[fi].push(r);
+                                return Ok(None);
+                            }
+                        }
+                    }
+                }
                 let result = match op {
                     0 => py_add(&left, &right),
                     1 => py_sub(&left, &right),
@@ -3060,6 +3169,44 @@ impl VirtualMachine {
                                                     return Some(val.clone());
                                                 }
                                             }
+                                            PyObject::BuiltinFunction { name: n, func } if crate::object::is_builtin_exception_class_name(n) => {
+                                                // Do NOT auto-bind a builtin
+                                                // exception "class" (this
+                                                // codebase's representation for
+                                                // e.g. `AssertionError`) found
+                                                // as a plain class attribute
+                                                // (`failureException =
+                                                // AssertionError`) — unlike a
+                                                // genuine native METHOD (also a
+                                                // `BuiltinFunction`, e.g.
+                                                // `hmac`'s `HMAC.hexdigest`,
+                                                // which DOES rely on `self`
+                                                // being auto-prepended — see
+                                                // the `else` arm just below,
+                                                // unchanged for that case), a
+                                                // class reference is never a
+                                                // descriptor in real Python, so
+                                                // binding it here silently
+                                                // prepended `self` as an extra
+                                                // positional argument to every
+                                                // call and turned the class
+                                                // reference into a `BoundMethod`
+                                                // that `issubclass()` could no
+                                                // longer recognize as a class at
+                                                // all — confirmed via
+                                                // `unittest`'s own
+                                                // `self.failureException(msg)`
+                                                // (raising `AssertionError(self,
+                                                // msg)` instead of
+                                                // `AssertionError(msg)`) and
+                                                // `issubclass(exc_info[0],
+                                                // test.failureException)`
+                                                // (always False, misclassifying
+                                                // every real test failure as an
+                                                // error).
+                                                let _ = func;
+                                                return Some(val.clone());
+                                            }
                                             PyObject::BuiltinFunction { name: n, func } => {
                                                 return Some(PyObjectRef::imm(PyObject::BuiltinMethod {
                                                     name: n.clone(),
@@ -3339,9 +3486,35 @@ impl VirtualMachine {
                                         return Ok(None);
                                     }
                                 }
-                                let is_builtin_method = matches!(&*attr.borrow(), PyObject::BuiltinMethod { .. });
+                                // Only rebind self_obj (and cache the
+                                // func-pointer fast path keyed on it) when
+                                // the found `BuiltinMethod`'s own self_obj is
+                                // still the `PyObject::None` PLACEHOLDER —
+                                // the established convention native
+                                // container methods (File/List/Dict/Set/
+                                // frozenset's own `.append`/`.get`/etc.) use,
+                                // meaning "rebind me to whatever object I
+                                // was actually looked up on". A
+                                // BuiltinMethod that's already bound to some
+                                // OTHER real object (e.g. a MODULE-level
+                                // `iskeyword = frozenset(kwlist).__contains__`
+                                // — self_obj is that frozenset, permanently,
+                                // and `obj` here is the *module* being
+                                // accessed as `keyword.iskeyword`) must be
+                                // returned completely unchanged. Previously
+                                // this unconditionally rebuilt EVERY
+                                // BuiltinMethod found this way with
+                                // `self_obj: obj.clone()`, discarding the
+                                // real target and substituting the
+                                // currently-accessed object instead —
+                                // confirmed general via `import keyword;
+                                // keyword.iskeyword("if")` raising
+                                // `RuntimeError: __contains__ on
+                                // non-frozenset` (self_obj had silently
+                                // become the `keyword` module itself).
+                                let is_placeholder_self = matches!(&*attr.borrow(), PyObject::BuiltinMethod { self_obj, .. } if matches!(&*self_obj.borrow(), PyObject::None));
                                 let is_function = matches!(&*attr.borrow(), PyObject::Function { .. });
-                                if is_builtin_method {
+                                if is_placeholder_self {
                                     let (n, func) = {
                                         let b = attr.borrow();
                                         if let PyObject::BuiltinMethod { name: n, func, .. } = &*b {
@@ -4077,10 +4250,25 @@ impl VirtualMachine {
                                 return Err(PyError::StopIteration);
                             }
                         }
-                        // Store exc_info before returning error
-                        self.exc_type = Some(exc.clone());
+                        // Store exc_info before returning error. `exc_type`
+                        // must be the exception's real CLASS object (what
+                        // real `sys.exc_info()[0]` is, and what makes
+                        // `issubclass(exc_info()[0], SomeError)` — the
+                        // pattern `unittest`'s own `TestResult`/`_Outcome`
+                        // use to classify failures vs. errors — valid to
+                        // call at all) — NOT the exception instance itself.
+                        // This used to just be `exc.clone()` (the instance)
+                        // for BOTH `exc_type` and `exc_value`, so any code
+                        // calling `issubclass()` on it crashed with
+                        // `TypeError: issubclass() arg 1 must be a class`
+                        // the moment a real test failure/error tried to get
+                        // reported through `unittest.main()`.
+                        self.exc_type = Some(self.exception_class_of(&exc));
                         self.exc_value = Some(exc.clone());
                         self.exc_traceback = Some(py_none());
+                        if std::env::var("RPY_DEBUG_EXCINFO").is_ok() {
+                            eprintln!("RAISE set exc_type={} exc_value={}", self.exc_type.as_ref().unwrap().repr(), self.exc_value.as_ref().unwrap().repr());
+                        }
                         return Err(PyError::Exception(msg, exc));
                     }
                     2 => {
@@ -4741,6 +4929,11 @@ impl VirtualMachine {
             PyObject::Function { .. } => {
                 Some(PyObjectRef::imm(PyObject::BoundMethod { func: found.clone(), self_obj: obj.clone() }))
             }
+            PyObject::BuiltinFunction { name: n, .. } if crate::object::is_builtin_exception_class_name(n) => {
+                // Don't auto-bind a builtin exception "class" — see the
+                // matching LOAD_ATTR fix's own (much longer) comment.
+                Some(found.clone())
+            }
             PyObject::BuiltinFunction { name: n, func } => {
                 Some(PyObjectRef::imm(PyObject::BuiltinMethod { name: n.clone(), func: *func, self_obj: obj.clone() }))
             }
@@ -4957,6 +5150,9 @@ impl VirtualMachine {
         {
             let is_exc_info = matches!(&*callable.borrow(), PyObject::BuiltinFunction { func, .. } if std::ptr::fn_addr_eq(*func, crate::modules::sys_exc_info_builtin as crate::object::BuiltinFunc));
             if is_exc_info {
+                if std::env::var("RPY_DEBUG_EXCINFO").is_ok() {
+                    eprintln!("READ exc_info: type={:?} value={:?}", self.exc_type.as_ref().map(|v| v.repr()), self.exc_value.as_ref().map(|v| v.repr()));
+                }
                 return Ok(py_tuple(vec![
                     self.exc_type.clone().unwrap_or_else(py_none),
                     self.exc_value.clone().unwrap_or_else(py_none),
@@ -5203,6 +5399,14 @@ impl VirtualMachine {
                 }
                 new_args.push(crate::object::PyObjectRef::new(crate::object::PyObject::Dict(dict)));
             }
+            // `generator.throw()` needs real `&mut self` access so the
+            // resumed generator body's `sys.exc_info()` sees THIS VM's
+            // exc_type/exc_value (set moments earlier by the original
+            // `raise`) instead of a disposable VM's blank ones — see
+            // `generator_throw_with_vm`'s own doc comment.
+            if std::ptr::fn_addr_eq(func, crate::object::generator_throw_fallback as crate::object::BuiltinFunc) {
+                return crate::object::generator_throw_with_vm(self, &new_args);
+            }
             return func(&new_args);
         }
 
@@ -5320,10 +5524,11 @@ impl VirtualMachine {
             }
 
             // Handle **kwargs
+            let kwonly_start = code.arg_count + if code.vararg_name.is_some() { 1 } else { 0 };
             if let Some(kwarg_name) = &code.kwarg_name {
                 let kw_dict = py_dict();
                 for (key, value) in &keywords {
-                    if let Some(idx) = new_frame.code.varnames.iter().position(|n| n == key) {
+                    if let Some(idx) = formal_param_index(&new_frame.code.varnames, code.arg_count, code.kwonlyarg_count, kwonly_start, key) {
                         new_frame.insert_local(&key, value.clone());
                         if idx < new_frame.fast_locals.len() {
                             new_frame.fast_locals[idx] = Some(value.clone());
@@ -5349,7 +5554,7 @@ impl VirtualMachine {
                 // moment the function body read it), matching the
                 // **kwargs branch above.
                 for (key, value) in &keywords {
-                    if let Some(idx) = new_frame.code.varnames.iter().position(|n| n == key) {
+                    if let Some(idx) = formal_param_index(&new_frame.code.varnames, code.arg_count, code.kwonlyarg_count, kwonly_start, key) {
                         if idx < new_frame.fast_locals.len() {
                             new_frame.fast_locals[idx] = Some(value.clone());
                         }
@@ -5797,6 +6002,91 @@ impl VirtualMachine {
         })
     }
 
+    /// The real CLASS object behind a raised exception instance — what
+    /// `sys.exc_info()[0]` must be (see the `RAISE_VARARGS` call site that
+    /// uses this). For a `class MyError(Exception): ...` instance this is
+    /// its own `typ`; for the native `PyObject::Exception`/`ExceptionGroup`
+    /// representations (a bare string type name, not a real class object)
+    /// this looks the name up in `self.builtins` (where every builtin
+    /// exception is registered as a `BuiltinFunction`/constructor) — falling
+    /// back to a freshly-built placeholder `Type` sharing just the name if
+    /// somehow not found there, rather than ever returning the instance
+    /// itself (which is what caused `issubclass(exc_info()[0], ...)` to
+    /// raise "arg 1 must be a class").
+    fn exception_class_of(&self, exc: &PyObjectRef) -> PyObjectRef {
+        let name = match &*exc.borrow() {
+            PyObject::Instance { typ, .. } => return typ.clone(),
+            PyObject::Exception { typ, .. } => typ.clone(),
+            PyObject::ExceptionGroup { .. } => "ExceptionGroup".to_string(),
+            other => other.type_name().to_string(),
+        };
+        if let Some(builtin) = self.builtins.get(&name) {
+            return builtin.clone();
+        }
+        PyObjectRef::new(PyObject::Type {
+            name,
+            dict: HashMap::new(),
+            bases: vec![],
+            mro: vec![],
+        })
+    }
+
+    /// The real exception OBJECT a `PyError` represents — shared by
+    /// `handle_exception` (pushes it for the handler/CHECK_EXC_MATCH to see)
+    /// and `execute()`/`throw_into_frame` (need the same real object, not a
+    /// bare string, to populate `exc_value`/derive `exc_type` for
+    /// `sys.exc_info()` — see those call sites' own comments for the exact
+    /// bug this fixes).
+    fn error_to_exc_obj(error: &PyError) -> PyObjectRef {
+        match error {
+            // Reuse the original PyObjectRef exactly as raised — preserves
+            // object identity (needed for `except E as e: ... raise` to
+            // compare `e` against the handler-bound exception, and for
+            // CPython's own `exc is value` idiom as used by contextlib's
+            // generator-based context managers), plus its real
+            // args/__cause__/extra attrs, instead of rebuilding a throwaway
+            // single-message copy.
+            //
+            // EXCEPT for one ad hoc shape: a generator's own
+            // `__next__`/`send`/`throw` driver (`object.rs`'s Generator
+            // match arm) signals "generator returned instead of yielding
+            // again" as `PyError::Exception("StopIteration".into(),
+            // return_value)` — `return_value` there is the generator's raw
+            // return value (often `None`), NOT a real exception object (see
+            // `is_stop_iteration_error`'s doc comment, which already knows
+            // to check the message string for exactly this reason). Pushing
+            // that raw value as-is meant a Python-level `except
+            // StopIteration as exc:` clause could never recognize it
+            // (CHECK_EXC_MATCH has nothing exception-shaped to classify),
+            // breaking `contextlib.contextmanager`'s own `__exit__`, which
+            // relies on exactly that to detect a generator finishing in
+            // response to `.throw()`. Build a real `StopIteration` instance
+            // instead, carrying the return value as its arg (matching real
+            // CPython's `StopIteration(value)`).
+            PyError::Exception(msg, exc) if msg == "StopIteration"
+                && !matches!(&*exc.borrow(), PyObject::Exception { typ, .. } if typ == "StopIteration") =>
+            {
+                PyObjectRef::imm(PyObject::Exception {
+                    typ: "StopIteration".to_string(),
+                    args: vec![exc.clone()],
+                    cause: None,
+                })
+            }
+            PyError::Exception(_, exc) => exc.clone(),
+            PyError::TypeError(_) => Self::synth_exception("TypeError", error),
+            PyError::ValueError(_) => Self::synth_exception("ValueError", error),
+            PyError::NameError(_) => Self::synth_exception("NameError", error),
+            PyError::AttributeError(_) => Self::synth_exception("AttributeError", error),
+            PyError::IndexError(_) => Self::synth_exception("IndexError", error),
+            PyError::KeyError(_) => Self::synth_exception("KeyError", error),
+            PyError::ZeroDivisionError(_) => Self::synth_exception("ZeroDivisionError", error),
+            PyError::RuntimeError(_) => Self::synth_exception("RuntimeError", error),
+            PyError::StopIteration => Self::synth_exception("StopIteration", error),
+            PyError::ImportError(_) => Self::synth_exception("ImportError", error),
+            _ => Self::synth_exception("Exception", error),
+        }
+    }
+
     fn handle_exception(&mut self, error: &PyError, frame_floor: usize) -> bool {
         // Only this execute_inner invocation's own frame may handle the
         // exception here — frames below `frame_floor` belong to an outer,
@@ -5807,27 +6097,7 @@ impl VirtualMachine {
                 // For any handler (Except or Finally), restore stack and transfer control
                 frame.stack.truncate(handler.stack_depth);
                 frame.ip = handler.instr_addr;
-                let exc_obj = match error {
-                    // Reuse the original PyObjectRef exactly as raised —
-                    // preserves object identity (needed for `except E as e:
-                    // ... raise` to compare `e` against the handler-bound
-                    // exception, and for CPython's own `exc is value` idiom
-                    // as used by contextlib's generator-based context
-                    // managers), plus its real args/__cause__/extra attrs,
-                    // instead of rebuilding a throwaway single-message copy.
-                    PyError::Exception(_, exc) => exc.clone(),
-                    PyError::TypeError(_) => Self::synth_exception("TypeError", error),
-                    PyError::ValueError(_) => Self::synth_exception("ValueError", error),
-                    PyError::NameError(_) => Self::synth_exception("NameError", error),
-                    PyError::AttributeError(_) => Self::synth_exception("AttributeError", error),
-                    PyError::IndexError(_) => Self::synth_exception("IndexError", error),
-                    PyError::KeyError(_) => Self::synth_exception("KeyError", error),
-                    PyError::ZeroDivisionError(_) => Self::synth_exception("ZeroDivisionError", error),
-                    PyError::RuntimeError(_) => Self::synth_exception("RuntimeError", error),
-                    PyError::StopIteration => Self::synth_exception("StopIteration", error),
-                    PyError::ImportError(_) => Self::synth_exception("ImportError", error),
-                    _ => Self::synth_exception("Exception", error),
-                };
+                let exc_obj = Self::error_to_exc_obj(error);
                 frame.push(exc_obj);
                 // For Finally handlers, we always execute them.
                 // For Except handlers, we also execute them — the code at the
