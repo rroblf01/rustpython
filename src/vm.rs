@@ -180,6 +180,13 @@ pub struct VirtualMachine {
     pub exc_type: Option<PyObjectRef>,
     pub exc_value: Option<PyObjectRef>,
     pub exc_traceback: Option<PyObjectRef>,
+    /// `sys.getrecursionlimit()`/`setrecursionlimit()` — consulted by
+    /// `call_function`'s own `self.frames.len()` depth guard (see there for
+    /// why this exists at all). Real trigger: CPython's own `test.support.
+    /// infinite_recursion(N)` context manager temporarily lowers this to
+    /// make deliberately-infinite-recursion tests fail fast instead of
+    /// grinding through hundreds of real frames first.
+    pub recursion_limit: usize,
 }
 
 /// Locate the bundled `Lib/` directory relative to the running executable
@@ -456,8 +463,16 @@ impl VirtualMachine {
           // Native numbers module (Number ABC stubs)
           modules.insert("numbers".to_string(), create_module("numbers", create_numbers_dict()));
 
-          // Native ast module (literal_eval and node stubs)
-          modules.insert("ast".to_string(), create_module("ast", create_ast_dict()));
+          // `ast` now loads from Lib/ast.py — needs real (if minimal, marker-
+          // only) node classes for PEP 649 lazy-annotation stringification
+          // (`annotationlib.py`'s `_Stringifier`, needed transitively by
+          // `test.support`), which the old native stub (just `literal_eval`
+          // plus a handful of node NAMES as bare strings, no real classes at
+          // all) couldn't provide. The old stub's actual `literal_eval`
+          // logic is kept and re-exposed under a private native module name
+          // so Lib/ast.py can still delegate to it instead of reimplementing
+          // literal parsing in pure Python.
+          modules.insert("_ast_native".to_string(), create_module("_ast_native", create_ast_dict()));
 
           // Native sunau module (Sun AU audio format stubs)
           modules.insert("sunau".to_string(), create_module("sunau", create_sunau_dict()));
@@ -667,6 +682,8 @@ impl VirtualMachine {
 
           // Native _imp module (CPython C extension replacement needed by importlib._bootstrap)
           modules.insert("_imp".to_string(), create_module("_imp", create_imp_dict()));
+          // Native _opcode module (needed by test.support)
+          modules.insert("_opcode".to_string(), create_module("_opcode", create_opcode_dict()));
           // Native _warnings module (CPython C extension replacement)
           modules.insert("_warnings".to_string(), create_module("_warnings", create_warnings_c_dict()));
           // Native marshal module (CPython C extension replacement)
@@ -896,6 +913,7 @@ impl VirtualMachine {
                exc_type: None,
                exc_value: None,
                exc_traceback: None,
+               recursion_limit: 1000,
            };
          vm.populate_type_registry();
          vm.install_source_defined_stdlib("collections", crate::modules::COLLECTIONS_USER_TYPES_SOURCE, &["UserList", "UserDict", "UserString", "Counter", "defaultdict", "ChainMap"]);
@@ -1692,8 +1710,8 @@ impl VirtualMachine {
                         7 => py_lshift(&left, &right),
                         8 => py_rshift(&left, &right),
                         9 => py_bit_or(&left, &right),
-                        10 => py_bit_and(&left, &right),
-                        11 => py_bit_xor(&left, &right),
+                        10 => py_bit_xor(&left, &right),
+                        11 => py_bit_and(&left, &right),
                         13 => py_getitem(&left, &right),
                         _ => return None,
                     };
@@ -2335,8 +2353,8 @@ impl VirtualMachine {
                     7 => py_lshift(&a, &b),
                     8 => py_rshift(&a, &b),
                     9 => py_bit_or(&a, &b),
-                    10 => py_bit_and(&a, &b),
-                    11 => py_bit_xor(&a, &b),
+                    10 => py_bit_xor(&a, &b),
+                    11 => py_bit_and(&a, &b),
                     13 => py_getitem(&a, &b),
                     _ => return Err(PyError::runtime_error(format!("unknown reg binary op: {}", op))),
                 }?;
@@ -5161,6 +5179,26 @@ impl VirtualMachine {
             }
         }
 
+        // `sys.getrecursionlimit()`/`setrecursionlimit()` — read/write
+        // `self.recursion_limit` directly (same `with_vm_mut`-avoidance
+        // pattern as everything else here) instead of the fallback
+        // `with_vm_mut`-based native fns, which are otherwise unconditional
+        // UB from within a live call chain like every other case on this
+        // page.
+        {
+            let is_getrecursionlimit = matches!(&*callable.borrow(), PyObject::BuiltinFunction { func, .. } if std::ptr::fn_addr_eq(*func, crate::modules::sys_getrecursionlimit_builtin as crate::object::BuiltinFunc));
+            if is_getrecursionlimit {
+                return Ok(py_int(self.recursion_limit as i64));
+            }
+            let is_setrecursionlimit = matches!(&*callable.borrow(), PyObject::BuiltinFunction { func, .. } if std::ptr::fn_addr_eq(*func, crate::modules::sys_setrecursionlimit_builtin as crate::object::BuiltinFunc));
+            if is_setrecursionlimit {
+                let n = args.get(0).and_then(|a| a.as_i64()).ok_or_else(|| PyError::type_error("setrecursionlimit() requires an integer argument"))?;
+                if n < 1 { return Err(PyError::value_error("recursion limit must be greater or equal than 1")); }
+                self.recursion_limit = n as usize;
+                return Ok(py_none());
+            }
+        }
+
         // `globals()`/`locals()` — same `with_vm_mut`-is-unconditional-UB
         // class of bug (confirmed via a general repro: `def f(): locals()`
         // — not a segfault this time, but `vm.frames` reading back empty
@@ -5464,6 +5502,27 @@ impl VirtualMachine {
                 if let Some(result) = Self::try_exec_simple(code, &args) {
                     return result;
                 }
+            }
+            // A Python-level function call here recurses through actual
+            // Rust call frames (`call_function` -> `execute()` ->
+            // `execute_inner` -> `execute_instruction`'s `CALL` handling ->
+            // `call_function` -> ...), with no equivalent of CPython's own
+            // `sys.getrecursionlimit()` check anywhere — so unbounded
+            // Python recursion (a plain accidental bug in user code, not
+            // some contrived edge case) previously overflowed the REAL
+            // native thread stack and hard-aborted the whole process
+            // (`fatal runtime error: stack overflow`) instead of raising a
+            // catchable `RecursionError`, exactly like real CPython does.
+            // Confirmed general via the simplest possible repro (`def
+            // f(n): return f(n+1)` called once) and via CPython's own
+            // `test_isinstance.py`'s deliberate recursion-limit tests.
+            // Reads `self.recursion_limit` (default matches real CPython's
+            // `sys.getrecursionlimit()`, 1000 — see its own doc comment).
+            // Made safe by `main.rs` running everything on a dedicated,
+            // much larger-than-default stack sized with headroom to spare
+            // even at the default limit.
+            if self.frames.len() >= self.recursion_limit {
+                return Err(PyError::recursion_error("maximum recursion depth exceeded"));
             }
             let func_globals = func_globals.clone();
             let defaults = defaults.clone();
@@ -6083,6 +6142,7 @@ impl VirtualMachine {
             PyError::RuntimeError(_) => Self::synth_exception("RuntimeError", error),
             PyError::StopIteration => Self::synth_exception("StopIteration", error),
             PyError::ImportError(_) => Self::synth_exception("ImportError", error),
+            PyError::RecursionError(_) => Self::synth_exception("RecursionError", error),
             _ => Self::synth_exception("Exception", error),
         }
     }

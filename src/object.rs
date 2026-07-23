@@ -397,6 +397,7 @@ pub enum PyError {
     StopIteration,
     OsError(String),
     ImportError(String),
+    RecursionError(String),
 }
 
 impl PyError {
@@ -415,6 +416,7 @@ impl PyError {
             PyError::StopIteration => "StopIteration",
             PyError::OsError(_) => "OSError",
             PyError::ImportError(_) => "ImportError",
+            PyError::RecursionError(_) => "RecursionError",
         }
     }
     pub fn type_error(msg: impl Into<String>) -> Self {
@@ -443,6 +445,9 @@ impl PyError {
     }
     pub fn runtime_error(msg: impl Into<String>) -> Self {
         PyError::RuntimeError(msg.into())
+    }
+    pub fn recursion_error(msg: impl Into<String>) -> Self {
+        PyError::RecursionError(msg.into())
     }
     pub fn message(&self) -> String {
         match self {
@@ -504,6 +509,7 @@ impl PyError {
             PyError::StopIteration => "".to_string(),
             PyError::OsError(m) => m.clone(),
             PyError::ImportError(m) => m.clone(),
+            PyError::RecursionError(m) => m.clone(),
         }
     }
 
@@ -533,6 +539,7 @@ impl PyError {
             PyError::StopIteration => "StopIteration".to_string(),
             PyError::OsError(_) => "OSError".to_string(),
             PyError::ImportError(_) => "ImportError".to_string(),
+            PyError::RecursionError(_) => "RecursionError".to_string(),
         }
     }
 }
@@ -8612,6 +8619,19 @@ impl PyObject {
                     return Ok(PyObjectRef::imm(PyObject::BuiltinFunction {
                         name: "fromhex".to_string(),
                         func: builtin_bytes_fromhex,
+                    }));
+                }
+                if bf_name == "float" && name == "__getformat__" {
+                    // `float.__getformat__("double"/"float")` — real CPython
+                    // queries the platform's actual float representation;
+                    // this interpreter's floats are always IEEE 754 doubles
+                    // (Rust `f64`), so always answer accordingly. Real
+                    // trigger: CPython's own `test.support.requires_IEEE_754`
+                    // module-level constant, `float.__getformat__("double").
+                    // startswith("IEEE")`.
+                    return Ok(PyObjectRef::imm(PyObject::BuiltinFunction {
+                        name: "__getformat__".to_string(),
+                        func: |_args| Ok(py_str("IEEE, little-endian")),
                     }));
                 }
                 if bf_name == "int" && name == "from_bytes" {
