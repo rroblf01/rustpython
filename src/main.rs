@@ -210,7 +210,32 @@ fn print_usage() {
     println!("  --help           Print this help and exit");
 }
 
+// Real CPython lets recursive Python code go ~1000 frames deep
+// (`sys.getrecursionlimit()`'s default) before raising a catchable
+// `RecursionError`. Each Python-level call here recurses through a large
+// chain of actual Rust call frames (`call_function` -> `execute()` ->
+// `execute_inner` -> `execute_instruction`'s `CALL` handling ->
+// `call_function` -> ...) that, empirically, costs roughly 250KB of REAL
+// native stack per level — so the default OS thread stack (a few MB) only
+// has room for ~30-40 levels before a hard, uncatchable stack overflow
+// aborts the whole process, nowhere near enough for legitimately
+// deep-but-not-buggy recursion (tree/graph algorithms, recursive-descent
+// parsers, ...). Run everything on a dedicated thread with a much larger
+// stack instead, sized to comfortably clear `vm.rs`'s own
+// `RecursionError` depth check (see `call_function`'s `self.frames.len()`
+// guard) with real headroom to spare.
 fn main() {
+    let child = std::thread::Builder::new()
+        .stack_size(512 * 1024 * 1024)
+        .spawn(real_main)
+        .expect("failed to spawn main thread with enlarged stack");
+    match child.join() {
+        Ok(()) => {}
+        Err(_) => std::process::exit(1),
+    }
+}
+
+fn real_main() {
     let raw_args: Vec<String> = env::args().collect();
 
     // Strip program name
