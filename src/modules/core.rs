@@ -1114,6 +1114,18 @@ pub fn sys_exc_info_builtin(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Ok(result.unwrap_or_else(|_| py_tuple(vec![py_none(), py_none(), py_none()])))
 }
 
+pub fn sys_getrecursionlimit_builtin(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    let result = crate::object::with_vm_mut(|vm| py_int(vm.recursion_limit as i64));
+    Ok(result.unwrap_or_else(|_| py_int(1000)))
+}
+
+pub fn sys_setrecursionlimit_builtin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    let n = args.get(0).and_then(|a| a.as_i64()).ok_or_else(|| PyError::type_error("setrecursionlimit() requires an integer argument"))?;
+    if n < 1 { return Err(PyError::value_error("recursion limit must be greater or equal than 1")); }
+    let _ = crate::object::with_vm_mut(|vm| { vm.recursion_limit = n as usize; });
+    Ok(py_none())
+}
+
 pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! sys_func {
@@ -1170,6 +1182,61 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
                 mro: vec![],
             }),
             dict: flags_dict,
+        }));
+    }
+    {
+        // sys.hash_info — a real CPython structseq describing the hash
+        // algorithm's parameters. Values match this interpreter's actual
+        // hashing (a plain 64-bit `usize` computed directly, no SipHash
+        // randomization) — `width`/`hash_bits` are the two fields real
+        // code actually reads (`test.support`'s own `NHASHBITS = sys.
+        // hash_info.width`); the rest are filled in for completeness/
+        // structural parity with real CPython rather than because
+        // anything here depends on them being exact.
+        let mut hash_info_dict = HashMap::new();
+        hash_info_dict.insert("width".to_string(), py_int(64));
+        hash_info_dict.insert("modulus".to_string(), py_int((1i64 << 61) - 1));
+        hash_info_dict.insert("inf".to_string(), py_int(314159));
+        hash_info_dict.insert("nan".to_string(), py_int(0));
+        hash_info_dict.insert("imag".to_string(), py_int(1000003));
+        hash_info_dict.insert("algorithm".to_string(), py_str("fnv"));
+        hash_info_dict.insert("hash_bits".to_string(), py_int(64));
+        hash_info_dict.insert("seed_bits".to_string(), py_int(128));
+        hash_info_dict.insert("cutoff".to_string(), py_int(0));
+        d.insert("hash_info".to_string(), PyObjectRef::new(PyObject::Instance {
+            typ: PyObjectRef::new(PyObject::Type {
+                name: "hash_info".to_string(),
+                dict: HashMap::new(),
+                bases: vec![],
+                mro: vec![],
+            }),
+            dict: hash_info_dict,
+        }));
+    }
+    {
+        // sys._jit — CPython 3.13+'s experimental copy-and-patch JIT
+        // introspection object (`sys._jit.is_enabled()`/`is_active()`).
+        // Unrelated to this interpreter's own optional Cranelift `jit`
+        // Cargo feature; either way the correct answer for test purposes
+        // is "not enabled". Real trigger: `test.support`'s own
+        // `_JIT_ENABLED = sys._jit.is_enabled()`.
+        let mut jit_dict = HashMap::new();
+        jit_dict.insert("is_enabled".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "is_enabled".to_string(),
+            func: |_args| Ok(py_bool(false)),
+        }));
+        jit_dict.insert("is_active".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "is_active".to_string(),
+            func: |_args| Ok(py_bool(false)),
+        }));
+        d.insert("_jit".to_string(), PyObjectRef::new(PyObject::Instance {
+            typ: PyObjectRef::new(PyObject::Type {
+                name: "_jit".to_string(),
+                dict: HashMap::new(),
+                bases: vec![],
+                mro: vec![],
+            }),
+            dict: jit_dict,
         }));
     }
     d.insert("stdin".to_string(), PyObjectRef::new(PyObject::File {
@@ -1241,6 +1308,8 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
     // by pointer identity — see the fix there for why `with_vm_mut` alone
     // is unsafe.
     sys_func!("exc_info", sys_exc_info_builtin);
+    sys_func!("getrecursionlimit", sys_getrecursionlimit_builtin);
+    sys_func!("setrecursionlimit", sys_setrecursionlimit_builtin);
     d
 }
 
