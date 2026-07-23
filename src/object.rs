@@ -196,6 +196,30 @@ impl PyObjectRef {
     }
 
     pub fn repr(&self) -> String {
+        // Guards against a genuinely self-referential container (`d = {};
+        // d[42] = d.values(); repr(d)` — real trigger: CPython's own
+        // `test_dictviews.py`'s `test_recursive_repr`). Real CPython's
+        // `repr()` has proper cycle detection (`Py_ReprEnter`/`Py_ReprLeave`,
+        // tracking object IDENTITY to print `[...]`/`{...}` for a repeat);
+        // this is a simpler DEPTH-based approximation — good enough to turn
+        // an unconditional stack-overflow crash into a plain "..." — since
+        // `.repr()` returns a bare `String`, not a `PyResult`, so there's
+        // nowhere to propagate a real `RecursionError` from here without a
+        // much larger signature change across every call site.
+        thread_local! {
+            static REPR_DEPTH: std::cell::Cell<usize> = std::cell::Cell::new(0);
+        }
+        let depth = REPR_DEPTH.with(|c| { let d = c.get() + 1; c.set(d); d });
+        if depth > 200 {
+            REPR_DEPTH.with(|c| c.set(c.get() - 1));
+            return "...".to_string();
+        }
+        let result = self.repr_inner();
+        REPR_DEPTH.with(|c| c.set(c.get() - 1));
+        result
+    }
+
+    fn repr_inner(&self) -> String {
         // Check for __repr__ on Instance types (user-defined objects) —
         // self.borrow().repr() can't invoke a bound method (no PyObjectRef
         // handle from &PyObject), so it must be handled here instead.
@@ -4166,6 +4190,45 @@ pub fn builtin_vars(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
 }
 
+thread_local! {
+    // `isinstance()`/`issubclass()` recurse in PLAIN RUST (calling
+    // themselves directly, not through `call_function`) when the
+    // `classinfo` argument is a tuple that itself contains tuples —
+    // arbitrarily deeply, per real Python semantics (`isinstance(x, (a,
+    // (b, (c, ...))))`). `vm.rs`'s `call_function` recursion-depth guard
+    // (see its own doc comment) only covers actual Python-level function
+    // calls, not this native-Rust recursion, so a deeply/infinitely nested
+    // classinfo tuple had no depth limit at all — confirmed general via
+    // CPython's own `test_isinstance.py`'s `blowstack()` helper, which
+    // builds an ever-growing nested tuple in a `while True:` loop
+    // expecting `RecursionError` to interrupt it "eventually": without a
+    // guard here, it never does, hanging forever instead of failing fast.
+    static ISINSTANCE_RECURSION_DEPTH: std::cell::Cell<usize> = std::cell::Cell::new(0);
+}
+
+struct IsinstanceRecursionGuard;
+
+impl IsinstanceRecursionGuard {
+    fn enter() -> PyResult<Self> {
+        let depth = ISINSTANCE_RECURSION_DEPTH.with(|c| {
+            let d = c.get() + 1;
+            c.set(d);
+            d
+        });
+        if depth > 1000 {
+            ISINSTANCE_RECURSION_DEPTH.with(|c| c.set(c.get() - 1));
+            return Err(PyError::recursion_error("maximum recursion depth exceeded"));
+        }
+        Ok(IsinstanceRecursionGuard)
+    }
+}
+
+impl Drop for IsinstanceRecursionGuard {
+    fn drop(&mut self) {
+        ISINSTANCE_RECURSION_DEPTH.with(|c| c.set(c.get().saturating_sub(1)));
+    }
+}
+
 pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() != 2 {
         return Err(PyError::type_error("isinstance() takes exactly 2 arguments"));
@@ -4174,6 +4237,7 @@ pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let class = args[1].borrow();
     // Handle tuple of types: isinstance(x, (type1, type2, ...))
     if let PyObject::Tuple(types) = &*class {
+        let _guard = IsinstanceRecursionGuard::enter()?;
         for t in types {
             let check_args = vec![args[0].clone(), t.clone()];
             if builtin_isinstance(&check_args)?.truthy() {
@@ -4442,6 +4506,7 @@ pub fn builtin_issubclass(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // Handle tuple of types: issubclass(cls, (type1, type2, ...))
     let base = args[1].borrow();
     if let PyObject::Tuple(types) = &*base {
+        let _guard = IsinstanceRecursionGuard::enter()?;
         for t in types {
             let check_args = vec![args[0].clone(), t.clone()];
             if builtin_issubclass(&check_args)?.truthy() {

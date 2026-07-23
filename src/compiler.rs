@@ -1777,7 +1777,8 @@ impl Compiler {
                         self.emit(Opcode::LOAD_CONST, const_none);
                     }
                     self.emit(Opcode::CALL, 3);
-                    self.emit(Opcode::POP_TOP, 0);
+                    self.emit(Opcode::POP_TOP, 0); // discard __exit__'s return value
+                    self.emit(Opcode::POP_TOP, 0); // discard the manager itself (DUP_TOP'd above, never otherwise consumed)
                     self.emit_jump(Opcode::JUMP, end_label);
                     self.fix_label(finally_label);
                     self.emit(Opcode::PUSH_EXC_INFO, 0);
