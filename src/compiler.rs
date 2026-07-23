@@ -8,15 +8,21 @@ pub struct Compiler {
     label_positions: Vec<usize>,
     label_stack: Vec<Vec<(usize, u32)>>,
     loop_stack: Vec<LoopInfo>,
-    // Active `with`-blocks currently being compiled (within the current
-    // function scope only — reset per function like loop_stack). A `return`
-    // compiled while this is non-empty must inline __exit__/__aexit__ calls
-    // for each entry (innermost first) before the actual RETURN_VALUE:
-    // CPython itself does this at compile time rather than having the VM
-    // unwind pending with/finally blocks on early return, and this VM's
-    // RETURN_VALUE never did the latter either — so without this, a
-    // `with cm(): return x` silently skipped `__exit__` entirely.
-    with_stack: Vec<bool>, // each entry: is_async
+    // Active `with`-blocks and `try`/`finally` blocks currently being
+    // compiled (within the current function scope only — reset per function
+    // like loop_stack). A `return` compiled while this is non-empty must
+    // inline, innermost first, either the `__exit__`/`__aexit__` call (With)
+    // or a fresh copy of the `finally` body (Finally) for each entry before
+    // the actual RETURN_VALUE: CPython itself does this at compile time
+    // rather than having the VM unwind pending with/finally blocks on early
+    // return, and this VM's RETURN_VALUE never did the latter either — so
+    // without this, `with cm(): return x` silently skipped `__exit__`
+    // entirely, and (a separate, more fundamental gap found later) so did
+    // plain `try: return x finally: ...` skip its own `finally` block
+    // completely, for every single `return`-inside-`try` in the entire
+    // codebase's history — confirmed via the simplest possible repro (`def
+    // f():\n try: return "ret"\n finally: print("ran")` printing nothing).
+    pending_cleanup: Vec<PendingCleanup>,
     scope: ScopeType,
     global_names: HashSet<String>,
     nonlocal_names: HashSet<String>,
@@ -39,6 +45,12 @@ pub struct Compiler {
     // `__annotations__`, matching real Python (local variable annotations
     // are evaluated for side effects only, never stored anywhere).
     annotations_initialized: bool,
+}
+
+#[derive(Clone)]
+enum PendingCleanup {
+    With(bool), // is_async
+    Finally(Vec<Stmt>),
 }
 
 struct LoopInfo {
@@ -79,7 +91,7 @@ impl Compiler {
             label_positions: Vec::new(),
             label_stack: Vec::new(),
             loop_stack: Vec::new(),
-            with_stack: Vec::new(),
+            pending_cleanup: Vec::new(),
             scope: ScopeType::Module,
             global_names: HashSet::new(),
             nonlocal_names: HashSet::new(),
@@ -995,27 +1007,42 @@ impl Compiler {
                     self.emit(Opcode::LOAD_CONST, const_idx);
                 }
                 // Returning from inside `with cm(): return x` must still run
-                // cm.__exit__ — CPython inlines this at compile time rather
-                // than having the VM unwind pending with/finally blocks on
-                // early return (this VM's RETURN_VALUE doesn't do that
-                // either). At this point the stack is [..., cm_N, ..., cm_1,
-                // retval] (outermost with-block's manager deepest); for each
-                // one, innermost first: swap the manager above retval, dup
-                // it, call __exit__(None,None,None), and discard both the
-                // call result and the manager, leaving retval on top again.
-                for is_async in self.with_stack.clone().iter().rev() {
-                    self.emit(Opcode::SWAP, 1);
-                    self.emit(Opcode::DUP_TOP, 0);
-                    let exit_name = if *is_async { "__aexit__" } else { "__exit__" };
-                    let exit_name_idx = self.get_name_index(exit_name) as u32;
-                    self.emit(Opcode::LOAD_ATTR, exit_name_idx);
-                    let const_none = self.get_const_index(ConstValue::None) as u32;
-                    for _ in 0..3 {
-                        self.emit(Opcode::LOAD_CONST, const_none);
+                // cm.__exit__, and returning from inside `try: return x
+                // finally: ...` must still run the `finally` body — CPython
+                // inlines both at compile time rather than having the VM
+                // unwind pending with/finally blocks on early return (this
+                // VM's RETURN_VALUE doesn't do that either). Walk pending
+                // cleanup entries innermost first (the order they were
+                // pushed, reversed).
+                for entry in self.pending_cleanup.clone().iter().rev() {
+                    match entry {
+                        PendingCleanup::With(is_async) => {
+                            // At this point the stack is [..., cm_N, ...,
+                            // cm_1, retval] (outermost with-block's manager
+                            // deepest); swap the manager above retval, dup
+                            // it, call __exit__(None,None,None), and discard
+                            // both the call result and the manager, leaving
+                            // retval on top again.
+                            self.emit(Opcode::SWAP, 1);
+                            self.emit(Opcode::DUP_TOP, 0);
+                            let exit_name = if *is_async { "__aexit__" } else { "__exit__" };
+                            let exit_name_idx = self.get_name_index(exit_name) as u32;
+                            self.emit(Opcode::LOAD_ATTR, exit_name_idx);
+                            let const_none = self.get_const_index(ConstValue::None) as u32;
+                            for _ in 0..3 {
+                                self.emit(Opcode::LOAD_CONST, const_none);
+                            }
+                            self.emit(Opcode::CALL, 3);
+                            self.emit(Opcode::POP_TOP, 0);
+                            self.emit(Opcode::POP_TOP, 0);
+                        }
+                        PendingCleanup::Finally(finalbody) => {
+                            // Inline a fresh copy of the finally body right
+                            // here (retval is safely parked below on the
+                            // stack, untouched by these statements).
+                            self.compile_stmts(finalbody)?;
+                        }
                     }
-                    self.emit(Opcode::CALL, 3);
-                    self.emit(Opcode::POP_TOP, 0);
-                    self.emit(Opcode::POP_TOP, 0);
                 }
                 self.emit(Opcode::RETURN_VALUE, 0);
             }
@@ -1068,7 +1095,7 @@ impl Compiler {
                             Operator::BitAnd => 11,
                             Operator::MatMult => 12,
                         };
-                        self.emit(Opcode::BINARY_OP, bin_op);
+                        self.emit(Opcode::BINARY_OP, bin_op + 100); // +100: in-place (see BINARY_OP's own doc comment)
                         self.emit(Opcode::STORE_SUBSCR, 0);
                     }
                     Expr::Attribute { value: obj, attr } => {
@@ -1093,7 +1120,7 @@ impl Compiler {
                             Operator::BitAnd => 11,
                             Operator::MatMult => 12,
                         };
-                        self.emit(Opcode::BINARY_OP, bin_op);
+                        self.emit(Opcode::BINARY_OP, bin_op + 100); // +100: in-place (see BINARY_OP's own doc comment)
                         // Stack here is already [obj, sum] (obj pushed once,
                         // duplicated for LOAD_ATTR, sum computed on top) —
                         // exactly what STORE_ATTR expects. No SWAP needed;
@@ -1120,7 +1147,7 @@ impl Compiler {
                             Operator::BitAnd => 11,
                             Operator::MatMult => 12,
                         };
-                        self.emit(Opcode::BINARY_OP, bin_op);
+                        self.emit(Opcode::BINARY_OP, bin_op + 100); // +100: in-place (see BINARY_OP's own doc comment)
                         self.compile_assign_target(target)?;
                     }
                 }
@@ -1427,7 +1454,13 @@ impl Compiler {
                     let finally_label = self.new_label();
                     let end_label = self.new_label();
                     self.emit_jump(Opcode::SETUP_FINALLY, finally_label);
-                    self.compile_stmts(body)?;
+                    // Tracked so a `return` compiled inside `body` knows to
+                    // inline a copy of `finalbody` first — see
+                    // `pending_cleanup`'s doc comment.
+                    self.pending_cleanup.push(PendingCleanup::Finally(finalbody.clone()));
+                    let body_result = self.compile_stmts(body);
+                    self.pending_cleanup.pop();
+                    body_result?;
                     self.emit(Opcode::POP_BLOCK, 0);
                     self.compile_stmts(finalbody)?;
                     self.emit_jump(Opcode::JUMP, end_label);
@@ -1446,7 +1479,13 @@ impl Compiler {
                     self.emit_jump(Opcode::SETUP_FINALLY, cleanup);
                     let body_end = self.new_label();
                     let handler_done = self.new_label();
-                    self.compile_stmts(body)?;
+                    let after_orelse = self.new_label();
+                    // Tracked so a `return` compiled inside `body`, any
+                    // `handler.body`, or `orelse` knows to inline a copy of
+                    // `finalbody` first — see `pending_cleanup`'s doc comment.
+                    self.pending_cleanup.push(PendingCleanup::Finally(finalbody.clone()));
+                    let body_result = self.compile_stmts(body);
+                    body_result?;
                     self.emit(Opcode::POP_BLOCK, 0);
                     self.emit_jump(Opcode::JUMP, body_end);
                     self.fix_label(cleanup);
@@ -1523,10 +1562,21 @@ impl Compiler {
                     self.emit(Opcode::RERAISE, 0);
                     self.fix_label(handler_done);
                     self.emit(Opcode::POP_EXCEPT, 0);
+                    // Skip `orelse` (only the no-exception path runs it —
+                    // see the sibling try/except-without-finally branch's
+                    // comment for the exact bug this avoids) but still fall
+                    // into the shared `finalbody` cleanup below, which must
+                    // run regardless of whether an exception was handled.
+                    self.emit_jump(Opcode::JUMP, after_orelse);
                     self.fix_label(body_end);
-                    if !orelse.is_empty() {
-                        self.compile_stmts(orelse)?;
-                    }
+                    let orelse_result = if !orelse.is_empty() {
+                        self.compile_stmts(orelse)
+                    } else {
+                        Ok(())
+                    };
+                    self.pending_cleanup.pop();
+                    orelse_result?;
+                    self.fix_label(after_orelse);
                     self.emit(Opcode::POP_BLOCK, 0);
                     self.compile_stmts(finalbody)?;
                     self.emit_jump(Opcode::JUMP, end_label);
@@ -1619,6 +1669,23 @@ impl Compiler {
                     self.emit(Opcode::RERAISE, 0);
                     self.fix_label(handler_done);
                     self.emit(Opcode::POP_EXCEPT, 0);
+                    // A handled exception must NOT fall through into
+                    // `orelse` — real Python's `try/except/else` only runs
+                    // `else` when the `try` body completed with no
+                    // exception at all. Without this jump, `orelse` ran
+                    // unconditionally after ANY handler finished too (the
+                    // `Opcode::ELSE` emitted below is purely a no-op
+                    // marker, not an actual guard) — confirmed via the
+                    // simplest possible repro (`try: raise ValueError()
+                    // except ValueError: pass else: print("bug")` printing
+                    // "bug"), and the real trigger that surfaced it:
+                    // `unittest`'s own `case.py`'s `_addDuration`, whose
+                    // `except AttributeError: warn(...) else:
+                    // addDuration(...)` ran BOTH branches, hitting
+                    // `NameError: addDuration referenced before assignment`
+                    // whenever a `TestResult` legitimately had no
+                    // `addDuration` method.
+                    self.emit_jump(Opcode::JUMP, end_label);
                     self.fix_label(body_end);
                     if !orelse.is_empty() {
                         self.emit(Opcode::ELSE, 0);
@@ -1694,10 +1761,10 @@ impl Compiler {
                     self.emit_jump(Opcode::SETUP_FINALLY, finally_label);
                     // Tracked so a `return` compiled inside body knows to
                     // inline an __exit__ call for this with-block first —
-                    // see with_stack's doc comment.
-                    self.with_stack.push(*is_async);
+                    // see `pending_cleanup`'s doc comment.
+                    self.pending_cleanup.push(PendingCleanup::With(*is_async));
                     let with_result = self.compile_stmts(body);
-                    self.with_stack.pop();
+                    self.pending_cleanup.pop();
                     with_result?;
                     self.emit(Opcode::POP_BLOCK, 0);
                     // Manager is still on the stack from SETUP_WITH
@@ -2375,7 +2442,7 @@ impl Compiler {
         let old_labels = std::mem::replace(&mut self.labels, Vec::new());
         let old_label_stack = std::mem::replace(&mut self.label_stack, Vec::new());
         let old_loop_stack = std::mem::replace(&mut self.loop_stack, Vec::new());
-        let old_with_stack = std::mem::replace(&mut self.with_stack, Vec::new());
+        let old_with_stack = std::mem::replace(&mut self.pending_cleanup, Vec::new());
         let old_current_line = self.current_line;
         self.current_line = 1;
         let old_annotations_initialized = self.annotations_initialized;
@@ -2520,7 +2587,7 @@ impl Compiler {
         self.labels = old_labels;
         self.label_stack = old_label_stack;
         self.loop_stack = old_loop_stack;
-        self.with_stack = old_with_stack;
+        self.pending_cleanup = old_with_stack;
         self.current_line = old_current_line;
         self.annotations_initialized = old_annotations_initialized;
         self.varnames_stack.pop();
@@ -2646,7 +2713,7 @@ impl Compiler {
         let old_labels = std::mem::replace(&mut self.labels, Vec::new());
         let old_label_stack = std::mem::replace(&mut self.label_stack, Vec::new());
         let old_loop_stack = std::mem::replace(&mut self.loop_stack, Vec::new());
-        let old_with_stack = std::mem::replace(&mut self.with_stack, Vec::new());
+        let old_with_stack = std::mem::replace(&mut self.pending_cleanup, Vec::new());
         let old_current_line = self.current_line;
         self.current_line = 1;
         let old_annotations_initialized = self.annotations_initialized;
@@ -2704,7 +2771,7 @@ impl Compiler {
         self.labels = old_labels;
         self.label_stack = old_label_stack;
         self.loop_stack = old_loop_stack;
-        self.with_stack = old_with_stack;
+        self.pending_cleanup = old_with_stack;
         self.current_line = old_current_line;
         self.annotations_initialized = old_annotations_initialized;
         self.varnames_stack.pop();
