@@ -476,6 +476,18 @@ pub fn create_dis_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
+/// Minimal `_opcode` (the CPython C extension backing parts of `dis`).
+/// Only exposes the two constants `test.support` itself reads at import
+/// time (`ENABLE_SPECIALIZATION`/`ENABLE_SPECIALIZATION_FT`, both about
+/// CPython 3.11+'s adaptive specializing interpreter — always `False`
+/// here, correct since this interpreter has no such optimization to gate).
+pub fn create_opcode_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    d.insert("ENABLE_SPECIALIZATION".to_string(), py_bool(false));
+    d.insert("ENABLE_SPECIALIZATION_FT".to_string(), py_bool(false));
+    d
+}
+
 pub fn create_doctest_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! doctest_func {
@@ -546,6 +558,22 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
             d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
         };
     }
+
+    // A unique "no value given" marker distinct from `None` (real code uses
+    // it as a default-argument sentinel so `None` remains a legitimate
+    // explicit value) — real trigger: CPython's own `test.support`,
+    // `find_name_in_mro(cls, name, default=inspect._sentinel)`. Any
+    // distinct object identity works; a bare Instance of an empty marker
+    // Type is the simplest one available.
+    d.insert("_sentinel".to_string(), PyObjectRef::new(PyObject::Instance {
+        typ: PyObjectRef::new(PyObject::Type {
+            name: "_sentinel".to_string(),
+            dict: HashMap::new(),
+            bases: vec![],
+            mro: vec![],
+        }),
+        dict: HashMap::new(),
+    }));
 
     inspect_func!("isfunction", |args| {
         if args.len() < 1 { return Err(PyError::type_error("isfunction() requires 1 argument")); }
