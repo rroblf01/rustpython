@@ -66,6 +66,10 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     builtins.insert("None".to_string(), py_none());
     builtins.insert("True".to_string(), py_bool(true));
     builtins.insert("False".to_string(), py_bool(false));
+    // `__debug__` — always True here (no `-O` optimize-flag equivalent to
+    // turn it off), used by real code as `if __debug__: assert ...`-style
+    // guards and by the `assert` statement's own real-CPython semantics.
+    builtins.insert("__debug__".to_string(), py_bool(true));
     builtins.insert("Ellipsis".to_string(), PyObjectRef::imm(PyObject::Str(compact_str::CompactString::from("..."))));
     // NotImplemented: the singleton rich-comparison/binary-op dunders return
     // to signal "try the other operand's reflected method instead" — needed
@@ -213,6 +217,7 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     add_exc_type!("ChildProcessError", builtin_make_exception_childprocesserror);
     add_exc_type!("InterruptedError", builtin_make_exception_interruptederror);
     add_exc_type!("TimeoutError", builtin_make_exception_timeouterror);
+    add_exc_type!("UnicodeError", builtin_make_exception_unicodeerror);
     add_exc_type!("UnicodeDecodeError", builtin_make_exception_unicodedecodeerror);
     add_exc_type!("UnicodeEncodeError", builtin_make_exception_unicodeencodeerror);
     add_exc_type!("ExceptionGroup", builtin_make_exception_exceptiongroup);
@@ -1214,6 +1219,33 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
         }));
     }
     {
+        // sys.float_info — real CPython structseq describing the platform
+        // `double` (matches Rust `f64`, IEEE 754 binary64 — same values
+        // real CPython reports on any IEEE-754 platform, which is
+        // effectively all of them).
+        let mut float_info_dict = HashMap::new();
+        float_info_dict.insert("max".to_string(), py_float(f64::MAX));
+        float_info_dict.insert("max_exp".to_string(), py_int(1024));
+        float_info_dict.insert("max_10_exp".to_string(), py_int(308));
+        float_info_dict.insert("min".to_string(), py_float(f64::MIN_POSITIVE));
+        float_info_dict.insert("min_exp".to_string(), py_int(-1021));
+        float_info_dict.insert("min_10_exp".to_string(), py_int(-307));
+        float_info_dict.insert("dig".to_string(), py_int(15));
+        float_info_dict.insert("mant_dig".to_string(), py_int(53));
+        float_info_dict.insert("epsilon".to_string(), py_float(f64::EPSILON));
+        float_info_dict.insert("radix".to_string(), py_int(2));
+        float_info_dict.insert("rounds".to_string(), py_int(1));
+        d.insert("float_info".to_string(), PyObjectRef::new(PyObject::Instance {
+            typ: PyObjectRef::new(PyObject::Type {
+                name: "float_info".to_string(),
+                dict: HashMap::new(),
+                bases: vec![],
+                mro: vec![],
+            }),
+            dict: float_info_dict,
+        }));
+    }
+    {
         // sys._jit — CPython 3.13+'s experimental copy-and-patch JIT
         // introspection object (`sys._jit.is_enabled()`/`is_active()`).
         // Unrelated to this interpreter's own optional Cranelift `jit`
@@ -1307,6 +1339,9 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
     // here) so `vm.rs`'s `call_function` can recognize and special-case it
     // by pointer identity — see the fix there for why `with_vm_mut` alone
     // is unsafe.
+    sys_func!("getfilesystemencoding", |_args| Ok(py_str("utf-8")));
+    sys_func!("getfilesystemencodeerrors", |_args| Ok(py_str("surrogateescape")));
+    sys_func!("getdefaultencoding", |_args| Ok(py_str("utf-8")));
     sys_func!("exc_info", sys_exc_info_builtin);
     sys_func!("getrecursionlimit", sys_getrecursionlimit_builtin);
     sys_func!("setrecursionlimit", sys_setrecursionlimit_builtin);
@@ -1451,6 +1486,37 @@ pub fn create_importlib_util_dict() -> HashMap<String, PyObjectRef> {
 
     // find_spec(name, package=None) -> ModuleSpec or None
     util_func!("find_spec", find_spec_builtin);
+
+    // cache_from_source(path, ...)/source_from_cache(path) — real CPython's
+    // `__pycache__/name.cpython-VER.pyc` naming convention. Implemented as
+    // plain string manipulation (not tied to this interpreter's own actual
+    // bytecode-cache format) — good enough for code that just constructs/
+    // parses the conventional path shape (real trigger: `py_compile.py`,
+    // vendored verbatim, needs `cache_from_source` to pick a default output
+    // path for `py_compile.compile()`).
+    util_func!("cache_from_source", |args| {
+        if args.is_empty() { return Err(PyError::type_error("cache_from_source() missing required argument: 'path'")); }
+        let path = args[0].str();
+        let (dir, base) = match path.rfind('/') {
+            Some(i) => (path[..i].to_string(), path[i+1..].to_string()),
+            None => (String::new(), path.clone()),
+        };
+        let stem = base.strip_suffix(".py").unwrap_or(&base);
+        let cache_dir = if dir.is_empty() { "__pycache__".to_string() } else { format!("{}/__pycache__", dir) };
+        Ok(py_str(&format!("{}/{}.cpython-314.pyc", cache_dir, stem)))
+    });
+    util_func!("source_from_cache", |args| {
+        if args.is_empty() { return Err(PyError::type_error("source_from_cache() missing required argument: 'path'")); }
+        let path = args[0].str();
+        if !path.ends_with(".pyc") {
+            return Err(PyError::value_error("not a valid pyc path"));
+        }
+        let without_pycache = path.replace("/__pycache__/", "/");
+        let base = without_pycache.rsplit('/').next().unwrap_or(&without_pycache);
+        let dir = without_pycache[..without_pycache.len() - base.len()].to_string();
+        let stem = base.split(".cpython-").next().unwrap_or(base);
+        Ok(py_str(&format!("{}{}.py", dir, stem)))
+    });
 
     d
 }
@@ -1708,6 +1774,32 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
     d.insert("linesep".to_string(), py_str(if cfg!(windows) { "\r\n" } else { "\n" }));
     d.insert("defpath".to_string(), py_str(if cfg!(windows) { "." } else { ":/bin:/usr/bin" }));
     d.insert("devnull".to_string(), py_str(if cfg!(windows) { "nul" } else { "/dev/null" }));
+    os_func!("fspath", |args| {
+        if args.is_empty() { return Err(PyError::type_error("fspath() missing required argument: 'path'")); }
+        let obj = args[0].clone();
+        match &*obj.borrow() {
+            PyObject::Str(_) | PyObject::Bytes(_) => return Ok(obj.clone()),
+            _ => {}
+        }
+        if let Ok(f) = obj.borrow().get_attribute("__fspath__") {
+            return call_bound_method(f, obj.clone(), vec![]);
+        }
+        Err(PyError::type_error(format!("expected str, bytes or os.PathLike object, not {}", obj.borrow().type_name())))
+    });
+    os_func!("fsencode", |args| {
+        if args.is_empty() { return Err(PyError::type_error("fsencode() missing required argument: 'filename'")); }
+        let s = args[0].str();
+        Ok(PyObjectRef::imm(PyObject::Bytes(s.into_bytes())))
+    });
+    os_func!("fsdecode", |args| {
+        if args.is_empty() { return Err(PyError::type_error("fsdecode() missing required argument: 'filename'")); }
+        let obj = args[0].borrow();
+        match &*obj {
+            PyObject::Bytes(b) => Ok(py_str(&String::from_utf8_lossy(b))),
+            PyObject::Str(s) => Ok(py_str(s)),
+            _ => Err(PyError::type_error("expected str or bytes")),
+        }
+    });
     os_func!("listdir", |args| {
         let path = if args.len() > 0 { args[0].str() } else { ".".to_string() };
         match std::fs::read_dir(&path) {
@@ -2166,6 +2258,7 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
 /// splitext, split, getsize, getmtime, islink, expanduser, normpath, normcase
 pub fn create_os_path_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
+    d.insert("supports_unicode_filenames".to_string(), py_bool(!cfg!(windows)));
     macro_rules! path_func {
         ($name:expr, $func:expr) => {
             d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
