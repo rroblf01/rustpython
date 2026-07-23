@@ -51,7 +51,14 @@ pub fn create_socket_dict() -> HashMap<String, PyObjectRef> {
         }))
     });
 
+    // Honest: this interpreter's `socket()` only supports AF_INET (see
+    // below) — reporting `has_ipv6 = True` would make `test.support.
+    // socket_helper`'s own `_is_ipv6_enabled()` try `socket.socket(AF_INET6,
+    // ...)`, which raises `RuntimeError` (not `OSError`, the only thing it
+    // catches), crashing instead of cleanly falling back to "no IPv6".
+    d.insert("has_ipv6".to_string(), py_bool(false));
     d.insert("AF_INET".to_string(), py_int(2));
+    d.insert("AF_INET6".to_string(), py_int(10));
     d.insert("SOCK_STREAM".to_string(), py_int(1));
     d.insert("SOCK_DGRAM".to_string(), py_int(2));
     d.insert("SOL_SOCKET".to_string(), py_int(1));
@@ -178,6 +185,8 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
 
     // Constants
     d.insert("PIPE".to_string(), py_int(-1));
+    d.insert("STDOUT".to_string(), py_int(-2));
+    d.insert("DEVNULL".to_string(), py_int(-3));
 
     d
 }
@@ -392,6 +401,25 @@ fn http_response_read(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 
 pub fn create_http_client_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
+
+    // Minimal exception hierarchy — real code commonly catches
+    // `http.client.HTTPException` (or a specific subclass) around request
+    // handling. Plain marker classes (no custom `__init__`/state) are
+    // enough for `except HTTPException:`/`isinstance` purposes.
+    fn make_http_exc(name: &str, base: Option<PyObjectRef>) -> PyObjectRef {
+        let bases = base.map(|b| vec![b]).unwrap_or_default();
+        PyObjectRef::new(crate::object::PyObject::Type {
+            name: name.to_string(), dict: HashMap::new(), bases: bases.clone(), mro: bases,
+        })
+    }
+    let http_exception = make_http_exc("HTTPException", None);
+    d.insert("HTTPException".to_string(), http_exception.clone());
+    for name in ["NotConnected", "InvalidURL", "UnknownProtocol", "UnknownTransferEncoding",
+                 "UnimplementedFileMode", "IncompleteRead", "ImproperConnectionState",
+                 "CannotSendRequest", "CannotSendHeader", "ResponseNotReady",
+                 "BadStatusLine", "LineTooLong", "RemoteDisconnected"] {
+        d.insert(name.to_string(), make_http_exc(name, Some(http_exception.clone())));
+    }
 
     // HTTP status code to phrase mapping
     let responses = crate::object::py_dict();
