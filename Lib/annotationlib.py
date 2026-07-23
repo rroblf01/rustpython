@@ -1166,7 +1166,19 @@ def _get_and_call_annotate(obj, format):
     return None
 
 
-_BASE_GET_ANNOTATIONS = type.__dict__["__annotations__"].__get__
+# Real CPython: `type.__dict__["__annotations__"]` is a C-level data
+# descriptor whose `.__get__` reads a class's OWN `__annotations__` (not an
+# inherited one via mro fallback) and raises AttributeError if absent. This
+# interpreter's `type` has no such descriptor at all (`__annotations__` is
+# just a plain dict entry a class's own `__dict__` may or may not have —
+# see `Stmt::AnnAssign`'s compiler support), so reimplement the same
+# contract directly instead of patching a load-bearing CPython internal
+# this interpreter doesn't (and doesn't need to) model.
+def _BASE_GET_ANNOTATIONS(obj):
+    try:
+        return obj.__dict__["__annotations__"]
+    except KeyError:
+        raise AttributeError("__annotations__") from None
 
 
 def _get_dunder_annotations(obj):
