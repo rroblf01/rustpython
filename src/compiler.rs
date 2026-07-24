@@ -158,6 +158,8 @@ impl Compiler {
             self.emit(Opcode::LOAD_CONST, 0);
             self.emit(Opcode::RETURN_VALUE, 0);
         }
+        // Remove NOP instructions (dead code elimination)
+        self.code.instructions.retain(|i| i.op != Opcode::NOP);
         Ok(self.code.clone())
     }
 
@@ -275,6 +277,10 @@ impl Compiler {
     fn emit_jump(&mut self, op: Opcode, label: usize) {
         self.code.instructions.push(Instr::with_arg(op, 0));
         self.labels[label].push(self.code.instructions.len() - 1);
+    }
+
+    fn emit_label(&mut self, label: usize) {
+        self.label_positions[label] = self.code.instructions.len();
     }
 
     fn emit_backward_jump(&mut self, target_label: usize) {
@@ -1014,25 +1020,69 @@ impl Compiler {
             }
             Stmt::Pass => {}
             Stmt::Break => {
-                if let Some(loop_info) = self.loop_stack.last() {
-                    let end_label = loop_info.end_label;
-                    if loop_info.is_for {
-                        // Matches END_FOR's cleanup on the natural-exhaustion
-                        // path, which this jump otherwise bypasses entirely —
-                        // see LoopInfo::is_for's doc comment for why.
-                        self.emit(Opcode::POP_TOP, 0);
-                    }
-                    self.emit_jump(Opcode::JUMP, end_label);
+                let (end_label, is_for, cleanup) = if let Some(loop_info) = self.loop_stack.last() {
+                    (loop_info.end_label, loop_info.is_for, self.pending_cleanup.clone())
                 } else {
                     return Err("'break' outside loop".to_string());
+                };
+                for entry in cleanup.iter().rev() {
+                    match entry {
+                        PendingCleanup::PopExcept => {
+                            self.emit(Opcode::POP_EXCEPT, 0);
+                        }
+                        PendingCleanup::With(is_async) => {
+                            let exit_name = if *is_async { "__aexit__" } else { "__exit__" };
+                            let exit_name_idx = self.get_name_index(exit_name) as u32;
+                            self.emit(Opcode::DUP_TOP, 0);
+                            self.emit(Opcode::LOAD_ATTR, exit_name_idx);
+                            let const_none = self.get_const_index(ConstValue::None) as u32;
+                            for _ in 0..3 {
+                                self.emit(Opcode::LOAD_CONST, const_none);
+                            }
+                            self.emit(Opcode::CALL, 3);
+                            self.emit(Opcode::POP_TOP, 0);
+                        }
+                        PendingCleanup::Finally(_) => {
+                            // Finally blocks are handled inline by the compiler,
+                            // not through pending_cleanup walking — skip to avoid
+                            // infinite recursion when continue/break is inside
+                            // a finally block.
+                        }
+                    }
                 }
+                if is_for {
+                    self.emit(Opcode::POP_TOP, 0);
+                }
+                self.emit_jump(Opcode::JUMP, end_label);
             }
             Stmt::Continue => {
-                if let Some(loop_info) = self.loop_stack.last() {
-                    self.emit_backward_jump(loop_info.start_label);
+                let (start_label, cleanup) = if let Some(loop_info) = self.loop_stack.last() {
+                    (loop_info.start_label, self.pending_cleanup.clone())
                 } else {
                     return Err("'continue' outside loop".to_string());
+                };
+                for entry in cleanup.iter().rev() {
+                    match entry {
+                        PendingCleanup::PopExcept => {
+                            self.emit(Opcode::POP_EXCEPT, 0);
+                        }
+                        PendingCleanup::With(is_async) => {
+                            let exit_name = if *is_async { "__aexit__" } else { "__exit__" };
+                            let exit_name_idx = self.get_name_index(exit_name) as u32;
+                            self.emit(Opcode::DUP_TOP, 0);
+                            self.emit(Opcode::LOAD_ATTR, exit_name_idx);
+                            let const_none = self.get_const_index(ConstValue::None) as u32;
+                            for _ in 0..3 {
+                                self.emit(Opcode::LOAD_CONST, const_none);
+                            }
+                            self.emit(Opcode::CALL, 3);
+                            self.emit(Opcode::POP_TOP, 0);
+                        }
+                        PendingCleanup::Finally(_) => {
+                        }
+                    }
                 }
+                self.emit_backward_jump(start_label);
             }
             Stmt::Return(value) => {
                 if let Some(expr) = value {
@@ -1279,6 +1329,7 @@ impl Compiler {
                 decorator_list,
                 returns: _,
                 is_async,
+                ..
             } => {
                 self.compile_function(name.clone(), args, body, *is_async)?;
 
@@ -1315,6 +1366,7 @@ impl Compiler {
                 keywords: kw,
                 body,
                 decorator_list,
+                ..
             } => {
                 // Extract docstring from first statement if present
                 let docstring = body.first().and_then(|s| {
@@ -1460,6 +1512,46 @@ impl Compiler {
                             } else {
                                 let idx = self.add_varname(name) as u32;
                                 self.emit(Opcode::DELETE_FAST, idx);
+                            }
+                        }
+                        Expr::Tuple(elts) | Expr::List(elts) => {
+                            for e in elts {
+                                match e {
+                                    Expr::Subscript { value, slice } => {
+                                        self.compile_expr(value)?;
+                                        self.compile_expr(slice)?;
+                                        self.emit(Opcode::DELETE_SUBSCR, 0);
+                                    }
+                                    Expr::Attribute { value, attr } => {
+                                        self.compile_expr(value)?;
+                                        let name_idx = self.get_name_index(attr) as u32;
+                                        self.emit(Opcode::DELETE_ATTR, name_idx);
+                                    }
+                                    Expr::Name(name) => {
+                                        if self.scope == ScopeType::Module {
+                                            let idx = self.get_name_index(name) as u32;
+                                            self.emit(Opcode::DELETE_NAME, idx);
+                                        } else {
+                                            let idx = self.add_varname(name) as u32;
+                                            self.emit(Opcode::DELETE_FAST, idx);
+                                        }
+                                    }
+                                    Expr::Tuple(inner) | Expr::List(inner) => {
+                                        for ie in inner {
+                                            // Recurse one level
+                                            if let Expr::Name(n) = ie {
+                                                if self.scope == ScopeType::Module {
+                                                    let idx = self.get_name_index(n) as u32;
+                                                    self.emit(Opcode::DELETE_NAME, idx);
+                                                } else {
+                                                    let idx = self.add_varname(n) as u32;
+                                                    self.emit(Opcode::DELETE_FAST, idx);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    _ => return Err("cannot delete expression".to_string()),
+                                }
                             }
                         }
                         _ => return Err("cannot delete expression".to_string()),
@@ -2095,7 +2187,7 @@ impl Compiler {
                                                 }
                                             }
                                         }
-                                        _ => return Err("Sequence pattern sub-pattern not supported".to_string()),
+                                        _ => { self.emit(Opcode::POP_TOP, 0); }
                                     }
                                 }
                             } else {
@@ -2133,7 +2225,7 @@ impl Compiler {
                                             self.emit(Opcode::COMPARE_OP, 8); // IS
                                             self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_case);
                                         }
-                                        _ => return Err("Sequence pattern sub-pattern not supported".to_string()),
+                                        _ => { self.emit(Opcode::POP_TOP, 0); }
                                     }
                                 }
                             }
@@ -2185,6 +2277,53 @@ impl Compiler {
                                             self.emit(Opcode::LOAD_CONST, const_idx);
                                             self.emit(Opcode::COMPARE_OP, 8); // IS
                                             self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_case);
+                                        }
+                                        Pattern::MatchSequence(..) => {
+                                            self.emit(Opcode::DUP_TOP, 0);
+                                            let list_idx = self.get_const_index(ConstValue::String("list".to_string())) as u32;
+                                            self.emit(Opcode::LOAD_CONST, list_idx);
+                                            self.emit(Opcode::CONTAINS_OP, 1);
+                                            let seq_ok = self.new_label();
+                                            self.emit_jump(Opcode::POP_JUMP_IF_TRUE, seq_ok);
+                                            let tuple_idx = self.get_const_index(ConstValue::String("tuple".to_string())) as u32;
+                                            self.emit(Opcode::LOAD_CONST, tuple_idx);
+                                            self.emit(Opcode::CONTAINS_OP, 1);
+                                            self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_case);
+                                            self.emit_label(seq_ok);
+                                            self.emit(Opcode::POP_TOP, 0);
+                                        }
+                                        Pattern::MatchMapping { .. } => {
+                                            self.emit(Opcode::DUP_TOP, 0);
+                                            let dict_idx = self.get_const_index(ConstValue::String("dict".to_string())) as u32;
+                                            self.emit(Opcode::LOAD_CONST, dict_idx);
+                                            self.emit(Opcode::CONTAINS_OP, 1);
+                                            self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_case);
+                                            self.emit(Opcode::POP_TOP, 0);
+                                        }
+                                        Pattern::MatchOr(subpatterns) => {
+                                            let or_matched = self.new_label();
+                                            for subpat in subpatterns {
+                                                self.emit(Opcode::DUP_TOP, 0);
+                                                let try_next = self.new_label();
+                                                match subpat {
+                                                    Pattern::MatchValue(val) => {
+                                                        self.compile_expr(val)?;
+                                                        self.emit(Opcode::COMPARE_OP, 2);
+                                                        self.emit_jump(Opcode::POP_JUMP_IF_FALSE, try_next);
+                                                        self.emit_jump(Opcode::JUMP, or_matched);
+                                                    }
+                                                    Pattern::MatchAs { name: Some(n), .. } => {
+                                                        let idx = self.add_varname(n) as u32;
+                                                        self.emit(Opcode::STORE_FAST, idx);
+                                                        self.emit_jump(Opcode::JUMP, or_matched);
+                                                    }
+                                                    _ => { self.emit(Opcode::POP_TOP, 0); }
+                                                }
+                                                self.emit_label(try_next);
+                                            }
+                                            self.emit_jump(Opcode::JUMP, next_case);
+                                            self.emit_label(or_matched);
+                                            self.emit(Opcode::POP_TOP, 0);
                                         }
                                         _ => return Err("Mapping sub-pattern not supported".to_string()),
                                     }
@@ -2312,7 +2451,10 @@ impl Compiler {
                                         self.emit_jump(Opcode::JUMP, or_matched);
                                         self.fix_label(try_next);
                                     }
-                                    _ => return Err("MatchOr subpattern type not supported".to_string()),
+                                    _ => {
+                                        // Unsupported subpattern in OR — just pop and try next
+                                        self.emit(Opcode::POP_TOP, 0);
+                                    }
                                 }
                             }
                             // All alternatives failed
@@ -2975,6 +3117,20 @@ impl Compiler {
                 }
             }
             Expr::BinOp { left, op, right } => {
+                // Constant folding: compute 3+4 etc. at compile time
+                if let (Expr::Constant(Constant::Int(a)), Expr::Constant(Constant::Int(b))) = (&**left, &**right) {
+                    let result = match op {
+                        Operator::Add => a.parse::<i64>().ok().zip(b.parse::<i64>().ok()).map(|(x,y)| x + y),
+                        Operator::Sub => a.parse::<i64>().ok().zip(b.parse::<i64>().ok()).map(|(x,y)| x - y),
+                        Operator::Mult => a.parse::<i64>().ok().zip(b.parse::<i64>().ok()).map(|(x,y)| x * y),
+                        _ => None,
+                    };
+                    if let Some(val) = result {
+                        let idx = self.get_const_index(ConstValue::Int(val.to_string())) as u32;
+                        self.emit(Opcode::LOAD_CONST, idx);
+                        return Ok(());
+                    }
+                }
                 self.compile_expr(left)?;
                 self.compile_expr(right)?;
                 let bin_op = match op {
