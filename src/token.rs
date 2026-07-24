@@ -197,11 +197,11 @@ impl Lexer {
     }
 
     fn is_identifier_start(c: char) -> bool {
-        c.is_ascii_alphabetic() || c == '_'
+        c.is_ascii_alphabetic() || c == '_' || c.is_alphabetic()
     }
 
     fn is_identifier_continue(c: char) -> bool {
-        c.is_ascii_alphanumeric() || c == '_'
+        c.is_ascii_alphanumeric() || c == '_' || c.is_alphanumeric()
     }
 
     fn read_number(&mut self, first: char) -> Token {
@@ -751,7 +751,7 @@ impl Lexer {
                     // silently fell through to being tokenized as a plain
                     // (undefined) name.
                     let lower_name = name.to_ascii_lowercase();
-                    let is_string_prefix = matches!(lower_name.as_str(), "f" | "r" | "b" | "u" | "fr" | "rf" | "br" | "rb");
+                    let is_string_prefix = matches!(lower_name.as_str(), "f" | "r" | "b" | "u" | "t" | "fr" | "rf" | "br" | "rb");
                     if is_string_prefix && (self.peek() == Some('"') || self.peek() == Some('\'')) {
                         let quote = self.advance().unwrap();
                         let raw = lower_name.contains('r');
@@ -876,11 +876,11 @@ impl Lexer {
                     else { return Token::Name("!".to_string()) }
                 }
                 '(' => { self.paren_level += 1; return Token::LeftParen; }
-                ')' => { self.paren_level -= 1; return Token::RightParen; }
+                ')' => { if self.paren_level > 0 { self.paren_level -= 1; } return Token::RightParen; }
                 '[' => { self.paren_level += 1; return Token::LeftBracket; }
-                ']' => { self.paren_level -= 1; return Token::RightBracket; }
+                ']' => { if self.paren_level > 0 { self.paren_level -= 1; } return Token::RightBracket; }
                 '{' => { self.paren_level += 1; return Token::LeftBrace; }
-                '}' => { self.paren_level -= 1; return Token::RightBrace; }
+                '}' => { if self.paren_level > 0 { self.paren_level -= 1; } return Token::RightBrace; }
                 ',' => { return Token::Comma; },
                 ':' => {
                     if self.advance_if('=') { return Token::Walrus }
@@ -984,6 +984,11 @@ impl Lexer {
     fn tokenize_fstring(&mut self, quote: char, raw: bool) -> Token {
         // Read the entire f-string, splitting into literal and expression parts
         // Each part: (literal_text, expr_text, format_spec_text, conversion)
+        let triple = self.peek() == Some(quote) && self.peek_ahead(1) == Some(quote);
+        if triple {
+            self.advance();
+            self.advance();
+        }
         let mut parts: Vec<(String, String, String, u8)> = Vec::new();
         let mut literal = String::new();
         loop {
@@ -1030,8 +1035,25 @@ impl Lexer {
                         let mut debug: bool = false;
                         let mut state: u8 = 0; // 0=expr, 1=after_conv_marker, 2=format_spec
                         let mut bracket_depth: u32 = 0; // track ()[] nesting
+                        let mut str_char: char = '\0'; // track strings: '\'' or '"' or '\0'
                         while depth > 0 {
                             match self.advance() {
+                                Some(c) if str_char != '\0' && c == str_char => {
+                                    expr.push(c);
+                                    str_char = '\0';
+                                }
+                                Some(c) if str_char != '\0' => {
+                                    expr.push(c);
+                                    if c == '\\' {
+                                        if let Some(next) = self.advance() {
+                                            expr.push(next);
+                                        }
+                                    }
+                                }
+                                Some(c @ ('\'' | '"')) if str_char == '\0' && state == 0 => {
+                                    str_char = c;
+                                    expr.push(c);
+                                }
                                 Some('{') => {
                                     if state == 0 { depth += 1; }
                                     if depth > 1 || state > 0 { 
@@ -1040,24 +1062,52 @@ impl Lexer {
                                     }
                                 }
                                 Some('}') => {
-                                    depth -= 1;
-                                    if depth > 0 { 
-                                        if state == 2 { format_spec.push('}'); }
-                                        else { expr.push('}'); }
+                                    if state == 2 && depth > 1 {
+                                        format_spec.push('}');
+                                        depth -= 1;
+                                    } else {
+                                        depth -= 1;
+                                        if depth > 0 { 
+                                            if state == 2 { format_spec.push('}'); }
+                                            else { expr.push('}'); }
+                                        }
                                     }
                                 }
                                 Some('=') if depth == 1 && state == 0 => {
-                                    debug = true;
-                                    // Don't add '=' to expr — it's a debug marker
+                                    match self.peek() {
+                                        Some('=') => {
+                                            expr.push('=');
+                                            expr.push('=');
+                                            self.advance();
+                                        }
+                                        Some('}') | Some('!') | Some(':') => {
+                                            debug = true;
+                                        }
+                                        _ => {
+                                            expr.push('=');
+                                        }
+                                    }
                                 }
                                 Some('!') if depth == 1 && state == 0 => {
-                                    state = 1;
+                                    if self.peek() == Some('=') {
+                                        expr.push('!');
+                                        expr.push('=');
+                                        self.advance();
+                                    } else {
+                                        state = 1;
+                                    }
                                 }
                                 Some('r') if state == 1 => { conversion = 1; state = 0; }
                                 Some('s') if state == 1 => { conversion = 2; state = 0; }
                                 Some('a') if state == 1 => { conversion = 3; state = 0; }
                                 Some(':') if depth == 1 && state == 0 && bracket_depth == 0 => {
-                                    state = 2;
+                                    if self.peek() == Some('=') {
+                                        expr.push(':');
+                                        expr.push('=');
+                                        self.advance();
+                                    } else {
+                                        state = 2;
+                                    }
                                 }
                                 Some(c) => {
                                     if state == 1 {
@@ -1092,9 +1142,23 @@ impl Lexer {
                     if self.peek() == Some('}') {
                         self.advance();
                         literal.push('}');
+                    } else {
+                        // Stray } outside expression — push as literal
+                        literal.push('}');
                     }
                 }
-                Some(c) if c == quote => break,
+                Some(c) if c == quote => {
+                    if triple {
+                        if self.peek() == Some(quote) && self.peek_ahead(1) == Some(quote) {
+                            self.advance();
+                            self.advance();
+                            break;
+                        }
+                        literal.push(c);
+                    } else {
+                        break;
+                    }
+                }
                 Some(c) => literal.push(c),
             }
         }
@@ -1109,8 +1173,12 @@ impl Lexer {
     }
 
     fn tokenize_fstring_expr(&self, text: &str) -> Vec<Token> {
+        // Strip leading/trailing whitespace — expressions inside f-strings
+        // are not subject to indentation processing
+        let text = text.trim();
         // Tokenize an f-string expression text
         let mut lex = Lexer::new(text);
+        lex.at_line_start = false;
         let mut tokens = Vec::new();
         loop {
             let tok = lex.next_token();

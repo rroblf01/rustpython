@@ -167,9 +167,17 @@ impl Parser {
             if self.at(&Token::EndOfFile) {
                 break;
             }
-            let line = self.lexer.get_line_col().0;
-            stmts.push(Stmt::Located(line, Box::new(self.parse_stmt()?)));
-        }
+                let line = self.lexer.get_line_col().0;
+                stmts.push(Stmt::Located(line, Box::new(self.parse_stmt()?)));
+                // Handle semicolon-separated statements on the same line: `while i: i = 0; continue`
+                while self.eat(&Token::Semicolon) {
+                    if self.at(&Token::Dedent) || self.at(&Token::EndOfFile) {
+                        break;
+                    }
+                    let line = self.lexer.get_line_col().0;
+                    stmts.push(Stmt::Located(line, Box::new(self.parse_stmt()?)));
+                }
+            }
         Ok(Program::Module(stmts))
     }
 
@@ -293,9 +301,23 @@ impl Parser {
                 } else if self.at(&Token::Equal) {
                     // Bare comma before = means trailing comma on single-element tuple
                     break;
-                } else {
-                    elts.push(self.parse_expr()?);
-                }
+                    } else {
+                        let e = self.parse_expr()?;
+                        // Expression followed by : means it's a slice: 3:4
+                        if self.eat(&Token::Colon) {
+                            let u = if !self.at(&Token::RightBracket) && !self.at(&Token::Comma) {
+                                Some(Box::new(self.parse_expr()?))
+                            } else { None };
+                            let s = if self.eat(&Token::Colon) {
+                                if !self.at(&Token::RightBracket) && !self.at(&Token::Comma) {
+                                    Some(Box::new(self.parse_expr()?))
+                                } else { None }
+                            } else { None };
+                            elts.push(Expr::Slice { lower: Some(Box::new(e)), upper: u, step: s });
+                        } else {
+                            elts.push(e);
+                        }
+                    }
             }
             if self.at(&Token::Equal) || self.at(&Token::PlusEqual) || self.at(&Token::MinusEqual)
                 || self.at(&Token::StarEqual) || self.at(&Token::SlashEqual)
@@ -320,20 +342,46 @@ impl Parser {
     fn parse_stmt_tail(&mut self, expr: Expr) -> Result<Stmt, String> {
         if self.eat(&Token::Equal) {
             let mut targets = vec![expr];
-            let mut value = self.parse_conditional_expr()?;
-            if self.at(&Token::Comma) && !self.at(&Token::Semicolon) && !self.at(&Token::Newline) {
-                let mut elts = vec![value];
-                while self.eat(&Token::Comma) {
-                    if self.at(&Token::Newline) || self.at(&Token::Semicolon) || self.at(&Token::EndOfFile) {
-                        break;
+            // RHS may start with * for tuple unpacking: `a = *b, *c`
+            let mut value = if self.at(&Token::Star) {
+                let mut elts = Vec::new();
+                loop {
+                    if self.at(&Token::Star) {
+                        self.next();
+                        elts.push(Expr::Starred(Box::new(self.parse_expr()?)));
+                    } else {
+                        elts.push(self.parse_expr()?);
                     }
-                    elts.push(self.parse_conditional_expr()?);
+                    if !self.eat(&Token::Comma) { break; }
                 }
-                value = Expr::Tuple(elts);
-            }
+                Expr::Tuple(elts)
+            } else {
+                let mut value = self.parse_conditional_expr()?;
+                if self.at(&Token::Comma) && !self.at(&Token::Semicolon) && !self.at(&Token::Newline) {
+                    let mut elts = vec![value];
+                    while self.eat(&Token::Comma) {
+                        if self.at(&Token::Newline) || self.at(&Token::Semicolon) || self.at(&Token::EndOfFile) {
+                            break;
+                        }
+                        elts.push(self.parse_conditional_expr()?);
+                    }
+                    value = Expr::Tuple(elts);
+                }
+                value
+            };
             while self.eat(&Token::Equal) {
                 targets.push(value);
                 value = self.parse_conditional_expr()?;
+                if self.at(&Token::Comma) && !self.at(&Token::Semicolon) && !self.at(&Token::Newline) {
+                    let mut elts = vec![value];
+                    while self.eat(&Token::Comma) {
+                        if self.at(&Token::Newline) || self.at(&Token::Semicolon) || self.at(&Token::EndOfFile) {
+                            break;
+                        }
+                        elts.push(self.parse_conditional_expr()?);
+                    }
+                    value = Expr::Tuple(elts);
+                }
             }
             let _ = self.expect_newline_or_eof();
             Ok(Stmt::Assign { targets, value: Box::new(value) })
@@ -361,7 +409,18 @@ impl Parser {
                 Token::AtEqual => Operator::MatMult,
                 _ => unreachable!(),
             };
-            let value = self.parse_conditional_expr()?;
+            let mut value = self.parse_conditional_expr()?;
+            // Augmented assignment with tuple RHS: fds += r, w
+            if self.at(&Token::Comma) {
+                let mut elts = vec![value];
+                while self.eat(&Token::Comma) {
+                    if self.at(&Token::Newline) || self.at(&Token::Semicolon) || self.at(&Token::EndOfFile) {
+                        break;
+                    }
+                    elts.push(self.parse_conditional_expr()?);
+                }
+                value = Expr::Tuple(elts);
+            }
             let _ = self.expect_newline_or_eof();
             Ok(Stmt::AugAssign {
                 target: Box::new(expr),
@@ -413,6 +472,31 @@ impl Parser {
         }
         self.expect(&Token::Def)?;
         let name = self.expect_name()?;
+        let type_params = if self.eat(&Token::LeftBracket) {
+            let mut params = Vec::new();
+            loop {
+                if self.eat(&Token::Star) {
+                    params.push(format!("*{}", self.expect_name()?));
+                } else if self.eat(&Token::DoubleStar) {
+                    params.push(format!("**{}", self.expect_name()?));
+                } else {
+                    params.push(self.expect_name()?);
+                }
+                // Optional bound: [T: str]  or [T:  str]
+                if self.eat(&Token::Colon) {
+                    self.parse_expr()?; // skip bound expression
+                }
+                // Optional default: [T = int]  or [T: str = int]
+                if self.eat(&Token::Equal) {
+                    self.parse_expr()?; // skip default expression
+                }
+                if !self.eat(&Token::Comma) { break; }
+            }
+            self.expect(&Token::RightBracket)?;
+            params
+        } else {
+            Vec::new()
+        };
         self.expect(&Token::LeftParen)?;
         let args = self.parse_args()?;
         self.expect(&Token::RightParen)?;
@@ -430,6 +514,7 @@ impl Parser {
             decorator_list,
             returns,
             is_async: async_token,
+            type_params,
         })
     }
 
@@ -468,6 +553,29 @@ impl Parser {
     fn parse_class(&mut self) -> Result<Stmt, String> {
         self.expect(&Token::Class)?;
         let name = self.expect_name()?;
+        let type_params = if self.eat(&Token::LeftBracket) {
+            let mut params = Vec::new();
+            loop {
+                if self.eat(&Token::Star) {
+                    params.push(format!("*{}", self.expect_name()?));
+                } else if self.eat(&Token::DoubleStar) {
+                    params.push(format!("**{}", self.expect_name()?));
+                } else {
+                    params.push(self.expect_name()?);
+                }
+                if self.eat(&Token::Colon) {
+                    self.parse_expr()?;
+                }
+                if self.eat(&Token::Equal) {
+                    self.parse_expr()?;
+                }
+                if !self.eat(&Token::Comma) { break; }
+            }
+            self.expect(&Token::RightBracket)?;
+            params
+        } else {
+            Vec::new()
+        };
         let mut bases = Vec::new();
         let mut keywords = Vec::new();
         if self.eat(&Token::LeftParen) {
@@ -478,6 +586,17 @@ impl Parser {
                         self.expect(&Token::Equal)?;
                         let value = self.parse_expr()?;
                         keywords.push(Keyword { arg, value: Box::new(value) });
+                    } else if self.at(&Token::Underscore) && self.peek() == &Token::Equal {
+                        self.next();
+                        self.expect(&Token::Equal)?;
+                        let value = self.parse_expr()?;
+                        keywords.push(Keyword { arg: Some("_".to_string()), value: Box::new(value) });
+                    } else if self.eat(&Token::DoubleStar) {
+                        let value = self.parse_expr()?;
+                        keywords.push(Keyword { arg: None, value: Box::new(value) });
+                    } else if self.eat(&Token::Star) {
+                        let value = self.parse_expr()?;
+                        bases.push(Expr::Starred(Box::new(value)));
                     } else {
                         bases.push(self.parse_expr()?);
                     }
@@ -495,6 +614,7 @@ impl Parser {
             keywords,
             body,
             decorator_list: vec![],
+            type_params,
         })
     }
 
@@ -622,7 +742,12 @@ impl Parser {
         self.expect(&Token::In)?;
         // Parse the iterable expression — may be a comma-separated tuple without parens
         // e.g. `for x in 'a', 'b', 'c':`  (CPython accepts this syntax)
-        let first_expr = self.parse_expr()?;
+        let first_expr = if self.at(&Token::Star) {
+            self.next();
+            Expr::Starred(Box::new(self.parse_expr()?))
+        } else {
+            self.parse_expr()?
+        };
         let iter = if self.eat(&Token::Comma) {
             if self.at(&Token::Colon) || self.at(&Token::Newline) || self.at(&Token::Semicolon) {
                 // Single-item tuple with trailing comma: `for x in 'a',:`
@@ -633,7 +758,12 @@ impl Parser {
                     if self.at(&Token::Colon) || self.at(&Token::Newline) || self.at(&Token::Semicolon) || self.at(&Token::EndOfFile) {
                         break;
                     }
-                    elts.push(self.parse_expr()?);
+                    if self.at(&Token::Star) {
+                        self.next();
+                        elts.push(Expr::Starred(Box::new(self.parse_expr()?)));
+                    } else {
+                        elts.push(self.parse_expr()?);
+                    }
                     if !self.eat(&Token::Comma) { break; }
                     if self.at(&Token::Colon) || self.at(&Token::Newline) || self.at(&Token::Semicolon) {
                         break;
@@ -705,7 +835,19 @@ impl Parser {
             // Check for except* (PEP 654)
             if self.eat(&Token::Star) {
                 let typ = if !self.at(&Token::Colon) {
-                    Some(Box::new(self.parse_expr()?))
+                    let first = self.parse_expr()?;
+                    if self.at(&Token::Comma) {
+                        let mut elts = vec![first];
+                        while self.eat(&Token::Comma) {
+                            if self.at(&Token::Colon) || self.at(&Token::Newline) || self.at(&Token::Semicolon) {
+                                break;
+                            }
+                            elts.push(self.parse_expr()?);
+                        }
+                        Some(Box::new(Expr::Tuple(elts)))
+                    } else {
+                        Some(Box::new(first))
+                    }
                 } else {
                     None
                 };
@@ -723,7 +865,20 @@ impl Parser {
                 });
             } else {
                 let typ = if !self.at(&Token::Colon) {
-                    Some(Box::new(self.parse_expr()?))
+                    let first = self.parse_expr()?;
+                    // except Exc1, Exc2, ...:  (comma-separated tuple, Python 3.14+)
+                    if self.at(&Token::Comma) {
+                        let mut elts = vec![first];
+                        while self.eat(&Token::Comma) {
+                            if self.at(&Token::Colon) || self.at(&Token::Newline) || self.at(&Token::Semicolon) {
+                                break;
+                            }
+                            elts.push(self.parse_expr()?);
+                        }
+                        Some(Box::new(Expr::Tuple(elts)))
+                    } else {
+                        Some(Box::new(first))
+                    }
                 } else {
                     None
                 };
@@ -757,6 +912,24 @@ impl Parser {
         // consume the 'match' keyword token (now Name("match"))
         self.next();
         let subject = self.parse_expr()?;
+        // Match subject can be a tuple: `match x, y:`  or `match x,:`
+        let subject = if self.eat(&Token::Comma) {
+            let mut elts = vec![subject];
+            loop {
+                while self.at(&Token::Newline) { self.next(); }
+                if self.at(&Token::Colon) { break; }
+                if self.at(&Token::Star) {
+                    self.next();
+                    elts.push(Expr::Starred(Box::new(self.parse_expr()?)));
+                } else {
+                    elts.push(self.parse_expr()?);
+                }
+                if !self.eat(&Token::Comma) { break; }
+            }
+            Expr::Tuple(elts)
+        } else {
+            subject
+        };
         self.expect(&Token::Colon)?;
         let cases = self.parse_match_cases()?;
         Ok(Stmt::Match {
@@ -773,7 +946,21 @@ impl Parser {
         // Optional: [T, U, ...] type parameters (PEP 695)
         if self.eat(&Token::LeftBracket) {
             loop {
-                type_params.push(self.expect_name()?);
+                if self.eat(&Token::DoubleStar) {
+                    let name = self.expect_name()?;
+                    type_params.push(format!("**{}", name));
+                } else if self.eat(&Token::Star) {
+                    let name = self.expect_name()?;
+                    type_params.push(format!("*{}", name));
+                } else {
+                    type_params.push(self.expect_name()?);
+                }
+                if self.eat(&Token::Colon) {
+                    self.parse_expr()?; // skip bound
+                }
+                if self.eat(&Token::Equal) {
+                    self.parse_expr()?; // skip default
+                }
                 if !self.eat(&Token::Comma) { break; }
             }
             self.expect(&Token::RightBracket)?;
@@ -804,7 +991,29 @@ impl Parser {
                 break;
             }
             self.next(); // consume "case" keyword
-            let pattern = self.parse_pattern()?;
+            let mut pattern = self.parse_pattern()?;
+            // Open sequence pattern: `case 0, *x:`  (comma-separated without parens)
+            if self.eat(&Token::Comma) {
+                let mut patterns = vec![pattern];
+                loop {
+                    while self.at(&Token::Newline) { self.next(); }
+                    if self.at(&Token::Colon) || self.at(&Token::If) { break; }
+                    if self.eat(&Token::Star) {
+                        let name = if matches!(&self.current, Token::Name(_)) {
+                            Some(self.expect_name()?)
+                        } else if self.eat(&Token::Underscore) {
+                            Some("_".to_string())
+                        } else {
+                            None
+                        };
+                        patterns.push(Pattern::MatchStar { name });
+                    } else {
+                        patterns.push(self.parse_pattern()?);
+                    }
+                    if !self.eat(&Token::Comma) { break; }
+                }
+                pattern = Pattern::MatchSequence(patterns);
+            }
             let guard = if self.eat(&Token::If) {
                 Some(Box::new(self.parse_expr()?))
             } else {
@@ -856,6 +1065,16 @@ impl Parser {
             self.next();
             return Ok(Pattern::MatchAs { pattern: None, name: None });
         }
+        if self.eat(&Token::Star) {
+            let name = if matches!(&self.current, Token::Name(_)) {
+                Some(self.expect_name()?)
+            } else if self.eat(&Token::Underscore) {
+                Some("_".to_string())
+            } else {
+                None
+            };
+            return Ok(Pattern::MatchStar { name });
+        }
         if matches!(&self.current, Token::Name(_)) {
             let name = self.expect_name()?;
             if self.at(&Token::LeftParen) {
@@ -890,7 +1109,7 @@ impl Parser {
         if self.at(&Token::LeftBrace) {
             return self.parse_mapping_pattern();
         }
-        let expr = self.parse_expr()?;
+        let expr = self.parse_or_expr()?;
         Ok(Pattern::MatchValue(Box::new(expr)))
     }
 
@@ -932,9 +1151,14 @@ impl Parser {
             if open == "[" && self.at(&Token::RightBracket) {
                 break;
             }
+            if open == "(" && self.at(&Token::RightParen) {
+                break;
+            }
             if self.eat(&Token::Star) {
                 let name = if matches!(&self.current, Token::Name(_)) {
                     Some(self.expect_name()?)
+                } else if self.eat(&Token::Underscore) {
+                    Some("_".to_string())
                 } else {
                     None
                 };
@@ -975,7 +1199,12 @@ impl Parser {
     fn parse_return(&mut self) -> Result<Stmt, String> {
         self.expect(&Token::Return)?;
         let value = if !self.at(&Token::Newline) && !self.at(&Token::Semicolon) && !self.at(&Token::EndOfFile) {
-            let first = self.parse_conditional_expr()?;
+            let first = if self.at(&Token::Star) {
+                self.next();
+                Expr::Starred(Box::new(self.parse_conditional_expr()?))
+            } else {
+                self.parse_conditional_expr()?
+            };
             // return x, y → return (x, y) (tuple return)
             if self.at(&Token::Comma) {
                 let mut elts = vec![first];
@@ -983,7 +1212,12 @@ impl Parser {
                     if self.at(&Token::Newline) || self.at(&Token::Semicolon) || self.at(&Token::EndOfFile) {
                         break;
                     }
-                    elts.push(self.parse_conditional_expr()?);
+                    if self.at(&Token::Star) {
+                        self.next();
+                        elts.push(Expr::Starred(Box::new(self.parse_conditional_expr()?)));
+                    } else {
+                        elts.push(self.parse_conditional_expr()?);
+                    }
                 }
                 Some(Box::new(Expr::Tuple(elts)))
             } else {
@@ -1058,6 +1292,9 @@ impl Parser {
         self.next();
         let mut targets = vec![self.parse_expr()?];
         while self.eat(&Token::Comma) {
+            if self.at(&Token::Newline) || self.at(&Token::Semicolon) || self.at(&Token::EndOfFile) {
+                break;
+            }
             targets.push(self.parse_expr()?);
         }
         let _ = self.expect_newline_or_eof();
@@ -1177,7 +1414,12 @@ impl Parser {
                     }
                     let name = self.expect_name()?;
                     let annotation = if self.eat(&Token::Colon) {
-                        Some(Box::new(self.parse_expr()?))
+                        if self.eat(&Token::Star) {
+                            let inner = self.parse_expr()?;
+                            Some(Box::new(Expr::Starred(Box::new(inner))))
+                        } else {
+                            Some(Box::new(self.parse_expr()?))
+                        }
                     } else { None };
                     args.push(Arg { arg: name, annotation, is_vararg: true, is_kwarg: false, is_posonlyarg: false, is_kwonly: false, default: None });
                     seen_star = true;
@@ -1587,8 +1829,8 @@ impl Parser {
                             self.next();
                             let value = self.parse_expr()?;
                             keywords.push(Keyword { arg: None, value: Box::new(value) });
-                        } else if self.peek() == &Token::Equal && matches!(&self.current, Token::Name(_)) {
-                            let arg = Some(self.expect_name()?);
+                        } else if self.peek() == &Token::Equal && (matches!(&self.current, Token::Name(_)) || self.at(&Token::Underscore)) {
+                            let arg = Some(if self.eat(&Token::Underscore) { "_".to_string() } else { self.expect_name()? });
                             self.expect(&Token::Equal)?;
                             let value = self.parse_expr()?;
                             keywords.push(Keyword { arg, value: Box::new(value) });
@@ -1631,6 +1873,25 @@ impl Parser {
                                         last.ifs.push(self.parse_or_expr()?);
                                         while self.eat(&Token::If) {
                                             last.ifs.push(self.parse_or_expr()?);
+                                        }
+                                    }
+                                }
+                                while let Some(is_async) = self.eat_comp_for()? {
+                                    let t = self.parse_for_target()?;
+                                    self.expect(&Token::In)?;
+                                    let i = self.parse_or_expr()?;
+                                    generators.push(Comprehension {
+                                        target: Box::new(t),
+                                        iter: Box::new(i),
+                                        ifs: Vec::new(),
+                                        is_async,
+                                    });
+                                    if self.eat(&Token::If) {
+                                        if let Some(last) = generators.last_mut() {
+                                            last.ifs.push(self.parse_or_expr()?);
+                                            while self.eat(&Token::If) {
+                                                last.ifs.push(self.parse_or_expr()?);
+                                            }
                                         }
                                     }
                                 }
@@ -1694,16 +1955,63 @@ impl Parser {
                     None
                 };
             }
-            return Ok(Expr::Slice { lower: None, upper, step });
+            let slice = Expr::Slice { lower: None, upper, step };
+            if self.eat(&Token::Comma) {
+                let mut elts = vec![slice];
+                loop {
+                    while self.at(&Token::Newline) { self.next(); }
+                    if self.at(&Token::RightBracket) { break; }
+                    if self.at(&Token::Colon) {
+                        self.next();
+                        let u = if !self.at(&Token::RightBracket) && !self.at(&Token::Comma) && !self.at(&Token::Colon) {
+                            Some(Box::new(self.parse_expr()?))
+                        } else { None };
+                        let s = if self.eat(&Token::Colon) {
+                            if !self.at(&Token::RightBracket) && !self.at(&Token::Comma) {
+                                Some(Box::new(self.parse_expr()?))
+                            } else { None }
+                        } else { None };
+                        elts.push(Expr::Slice { lower: None, upper: u, step: s });
+                    } else {
+                        let e = self.parse_expr()?;
+                        if self.eat(&Token::Colon) {
+                            let u = if !self.at(&Token::RightBracket) && !self.at(&Token::Comma) && !self.at(&Token::Colon) {
+                                Some(Box::new(self.parse_expr()?))
+                            } else { None };
+                            let s = if self.eat(&Token::Colon) {
+                                if !self.at(&Token::RightBracket) && !self.at(&Token::Comma) {
+                                    Some(Box::new(self.parse_expr()?))
+                                } else { None }
+                            } else { None };
+                            elts.push(Expr::Slice { lower: Some(Box::new(e)), upper: u, step: s });
+                        } else {
+                            elts.push(e);
+                        }
+                    }
+                    if !self.eat(&Token::Comma) { break; }
+                }
+                return Ok(Expr::Tuple(elts));
+            }
+            return Ok(slice);
         }
-        let lower = self.parse_expr()?;
+        // Expression-first path
+        let lower = if self.eat(&Token::Star) {
+            Expr::Starred(Box::new(self.parse_expr()?))
+        } else {
+            self.parse_expr()?
+        };
         // Handle comma-separated expressions in subscript: X[a, b, c]
         if self.eat(&Token::Comma) {
             let mut elts = vec![lower];
             loop {
                 while self.at(&Token::Newline) { self.next(); }
                 if self.at(&Token::RightBracket) { break; }
-                elts.push(self.parse_expr()?);
+                if self.at(&Token::Star) {
+                    self.next();
+                    elts.push(Expr::Starred(Box::new(self.parse_expr()?)));
+                } else {
+                    elts.push(self.parse_expr()?);
+                }
                 if !self.eat(&Token::Comma) { break; }
             }
             return Ok(Expr::Tuple(elts));
@@ -1729,6 +2037,46 @@ impl Parser {
             } else {
                 None
             };
+            // After a slice, check for comma (multi-dim slice or tuple in subscript).
+            // If found, collect remaining comma-separated expressions into a tuple.
+            if self.eat(&Token::Comma) {
+                let mut elts = vec![Expr::Slice { lower: Some(Box::new(lower)), upper, step }];
+                loop {
+                    if self.at(&Token::RightBracket) { break; }
+                    // Each element may itself be a slice (a:b)
+                    if self.eat(&Token::Colon) {
+                        let u = if !self.at(&Token::RightBracket) && !self.at(&Token::Comma) && !self.at(&Token::Colon) {
+                            Some(Box::new(self.parse_expr()?))
+                        } else { None };
+                        let s = if self.eat(&Token::Colon) {
+                            if !self.at(&Token::RightBracket) && !self.at(&Token::Comma) && !self.at(&Token::Colon) {
+                                Some(Box::new(self.parse_expr()?))
+                            } else { None }
+                        } else { None };
+                        elts.push(Expr::Slice { lower: None, upper: u, step: s });
+                    } else if self.eat(&Token::Star) {
+                        elts.push(Expr::Starred(Box::new(self.parse_expr()?)));
+                    } else {
+                        let e = self.parse_expr()?;
+                        // Expression followed by : means it's a slice: 3:4
+                        if self.eat(&Token::Colon) {
+                            let u = if !self.at(&Token::RightBracket) && !self.at(&Token::Comma) {
+                                Some(Box::new(self.parse_expr()?))
+                            } else { None };
+                            let s = if self.eat(&Token::Colon) {
+                                if !self.at(&Token::RightBracket) && !self.at(&Token::Comma) {
+                                    Some(Box::new(self.parse_expr()?))
+                                } else { None }
+                            } else { None };
+                            elts.push(Expr::Slice { lower: Some(Box::new(e)), upper: u, step: s });
+                        } else {
+                            elts.push(e);
+                        }
+                    }
+                    if !self.eat(&Token::Comma) { break; }
+                }
+                return Ok(Expr::Tuple(elts));
+            }
             Ok(Expr::Slice {
                 lower: Some(Box::new(lower)),
                 upper,
@@ -1829,6 +2177,7 @@ impl Parser {
             }
 
             Token::FStringStart => {
+                self.next();
                 let mut parts = vec![self.parse_fstring()?];
                 // Implicit concatenation: adjacent f-strings and regular strings
                 loop {
@@ -1840,6 +2189,7 @@ impl Parser {
                     }
                     match &self.current {
                         Token::FStringStart => {
+                            self.next();
                             parts.push(self.parse_fstring()?);
                         }
                         Token::String(s) => {
@@ -1879,14 +2229,27 @@ impl Parser {
                         if self.at(&Token::Star) {
                             self.next();
                             elts.push(Expr::Starred(Box::new(self.parse_expr()?)));
+                    } else {
+                        let e = self.parse_expr()?;
+                        if self.eat(&Token::Colon) {
+                            let u = if !self.at(&Token::RightBracket) && !self.at(&Token::Comma) && !self.at(&Token::Colon) {
+                                Some(Box::new(self.parse_expr()?))
+                            } else { None };
+                            let s = if self.eat(&Token::Colon) {
+                                if !self.at(&Token::RightBracket) && !self.at(&Token::Comma) {
+                                    Some(Box::new(self.parse_expr()?))
+                                } else { None }
+                            } else { None };
+                            elts.push(Expr::Slice { lower: Some(Box::new(e)), upper: u, step: s });
                         } else {
-                            elts.push(self.parse_expr()?);
+                            elts.push(e);
                         }
+                    }
                         if !self.eat(&Token::Comma) { break; }
                     }
                     self.expect(&Token::RightParen)?;
                     Expr::Tuple(elts)
-                } else if self.peek() == &Token::Comma || (self.peek() == &Token::Equal && matches!(&self.current, Token::Name(_))) {
+                } else if self.peek() == &Token::Comma || (self.peek() == &Token::Equal && (matches!(&self.current, Token::Name(_)) || self.at(&Token::Underscore))) {
                     // Single-element tuple or named expression
                     let first = self.parse_expr()?;
                     if self.eat(&Token::Comma) {
@@ -1933,6 +2296,20 @@ impl Parser {
                                 last.ifs.push(self.parse_or_expr()?);
                                 while self.eat(&Token::If) {
                                     last.ifs.push(self.parse_or_expr()?);
+                                }
+                            }
+                        }
+                        while let Some(is_async) = self.eat_comp_for()? {
+                            let t = self.parse_for_target()?;
+                            self.expect(&Token::In)?;
+                            let i = self.parse_or_expr()?;
+                            generators.push(Comprehension { target: Box::new(t), iter: Box::new(i), ifs: Vec::new(), is_async });
+                            if self.eat(&Token::If) {
+                                if let Some(last) = generators.last_mut() {
+                                    last.ifs.push(self.parse_or_expr()?);
+                                    while self.eat(&Token::If) {
+                                        last.ifs.push(self.parse_or_expr()?);
+                                    }
                                 }
                             }
                         }
@@ -2009,12 +2386,25 @@ impl Parser {
                         let i = self.parse_or_expr()?;
                         generators.push(Comprehension { target: Box::new(t), iter: Box::new(i), ifs: Vec::new(), is_async });
                     }
-                    // Optional if clauses
                     if self.eat(&Token::If) {
                         if let Some(last) = generators.last_mut() {
                             last.ifs.push(self.parse_or_expr()?);
                             while self.eat(&Token::If) {
                                 last.ifs.push(self.parse_or_expr()?);
+                            }
+                        }
+                    }
+                    while let Some(is_async) = self.eat_comp_for()? {
+                        let t = self.parse_for_target()?;
+                        self.expect(&Token::In)?;
+                        let i = self.parse_or_expr()?;
+                        generators.push(Comprehension { target: Box::new(t), iter: Box::new(i), ifs: Vec::new(), is_async });
+                        if self.eat(&Token::If) {
+                            if let Some(last) = generators.last_mut() {
+                                last.ifs.push(self.parse_or_expr()?);
+                                while self.eat(&Token::If) {
+                                    last.ifs.push(self.parse_or_expr()?);
+                                }
                             }
                         }
                     }
@@ -2070,6 +2460,20 @@ impl Parser {
                                         }
                                     }
                                 }
+                                while let Some(is_async) = self.eat_comp_for()? {
+                                    let t = self.parse_for_target()?;
+                                    self.expect(&Token::In)?;
+                                    let i = self.parse_or_expr()?;
+                                    generators.push(Comprehension { target: Box::new(t), iter: Box::new(i), ifs: Vec::new(), is_async });
+                                    if self.eat(&Token::If) {
+                                        if let Some(last) = generators.last_mut() {
+                                            last.ifs.push(self.parse_or_expr()?);
+                                            while self.eat(&Token::If) {
+                                                last.ifs.push(self.parse_or_expr()?);
+                                            }
+                                        }
+                                    }
+                                }
                                 self.expect(&Token::RightBrace)?;
                                 return Ok(Expr::DictComp {
                                     key: Box::new(key),
@@ -2098,6 +2502,20 @@ impl Parser {
                                         last.ifs.push(self.parse_or_expr()?);
                                         while self.eat(&Token::If) {
                                             last.ifs.push(self.parse_or_expr()?);
+                                        }
+                                    }
+                                }
+                                while let Some(is_async) = self.eat_comp_for()? {
+                                    let t = self.parse_for_target()?;
+                                    self.expect(&Token::In)?;
+                                    let i = self.parse_or_expr()?;
+                                    generators.push(Comprehension { target: Box::new(t), iter: Box::new(i), ifs: Vec::new(), is_async });
+                                    if self.eat(&Token::If) {
+                                        if let Some(last) = generators.last_mut() {
+                                            last.ifs.push(self.parse_or_expr()?);
+                                            while self.eat(&Token::If) {
+                                                last.ifs.push(self.parse_or_expr()?);
+                                            }
                                         }
                                     }
                                 }
@@ -2162,7 +2580,16 @@ impl Parser {
 
     fn parse_fstring(&mut self) -> Result<Expr, String> {
         let mut parts = Vec::new();
+        let mut first = true;
         loop {
+            if first {
+                first = false;
+                // First token might be FStringStart (from implicit concatenation)
+                if matches!(&self.current, Token::FStringStart) {
+                    self.next();
+                    continue;
+                }
+            }
             match &self.current {
                 Token::FStringMiddle(s) => {
                     let s = s.clone();
@@ -2170,7 +2597,35 @@ impl Parser {
                     parts.push(FStringPart::String(s));
                 }
                 Token::FStringStart => {
-                    self.next();
+                    // Inner f-string from tokenize_fstring_expr — parse full expression
+                    let expr = self.parse_expr()?;
+                    let mut conversion: u8 = 0;
+                    let mut format_spec: Option<Box<Expr>> = None;
+                    if let Token::FStringConversion(c) = &self.current {
+                        conversion = *c;
+                        self.next();
+                    }
+                    if let Token::FormatSpec(spec_text) = &self.current {
+                        let spec = spec_text.clone();
+                        self.next();
+                        if spec.contains('{') {
+                            let mut nested_lex = crate::token::Lexer::new(&format!("f\"{}\"", spec));
+                            let first_tok = nested_lex.next_token();
+                            if first_tok == Token::FStringStart {
+                                let mut nested_parser = Parser::new(&format!("f\"{}\"", spec));
+                                if let Ok(Expr::FString(inner)) = nested_parser.parse_expr() {
+                                    format_spec = Some(Box::new(Expr::FString(inner)));
+                                } else {
+                                    format_spec = Some(Box::new(Expr::Constant(Constant::String(spec))));
+                                }
+                            } else {
+                                format_spec = Some(Box::new(Expr::Constant(Constant::String(spec))));
+                            }
+                        } else {
+                            format_spec = Some(Box::new(Expr::Constant(Constant::String(spec))));
+                        }
+                    }
+                    parts.push(FStringPart::Expr { expr: Box::new(expr), conversion, format_spec });
                 }
                 Token::FStringEnd => {
                     self.next();
@@ -2183,7 +2638,22 @@ impl Parser {
                     if self.at(&Token::EndOfFile) {
                         break;
                     }
-                    let expr = self.parse_expr()?;
+                    let mut expr = self.parse_expr()?;
+                    // Handle tuple expressions inside f-string: {x, y, z}
+                    if self.eat(&Token::Comma) {
+                        let mut elts = vec![expr];
+                        loop {
+                            if self.at(&Token::RightBrace) || self.at(&Token::FStringEnd)
+                                || matches!(&self.current, Token::FStringConversion(_))
+                                || matches!(&self.current, Token::FormatSpec(_))
+                            {
+                                break;
+                            }
+                            elts.push(self.parse_expr()?);
+                            if !self.eat(&Token::Comma) { break; }
+                        }
+                        expr = Expr::Tuple(elts);
+                    }
                     let mut conversion: u8 = 0;
                     let mut format_spec: Option<Box<Expr>> = None;
                     // Check for FStringConversion token
@@ -2239,10 +2709,20 @@ impl Parser {
     }
 
     fn parse_lambda_args(&mut self) -> Result<Vec<Arg>, String> {
-        let mut args = Vec::new();
+        let mut args: Vec<Arg> = Vec::new();
         let mut seen_star = false;
+        let mut seen_slash = false;
         loop {
             if self.at(&Token::Colon) { break; }
+            if self.at(&Token::Slash) && !seen_slash {
+                self.next();
+                seen_slash = true;
+                for arg in args.iter_mut() {
+                    arg.is_posonlyarg = true;
+                }
+                if !self.eat(&Token::Comma) { break; }
+                continue;
+            }
             if self.eat(&Token::Star) {
                 if self.at(&Token::Colon) || self.at(&Token::Comma) {
                     // Bare `*` keyword-only separator (`lambda *, kw=None:
@@ -2286,7 +2766,12 @@ impl Parser {
                 && !self.at(&Token::Colon) && !self.at(&Token::Comma)
                 && !self.at(&Token::Semicolon) && !self.at(&Token::EndOfFile)
             {
-                let first = self.parse_conditional_expr()?;
+                let first = if self.at(&Token::Star) {
+                    self.next();
+                    Expr::Starred(Box::new(self.parse_conditional_expr()?))
+                } else {
+                    self.parse_conditional_expr()?
+                };
                 // yield x, y → yield (x, y)  (tuple yield)
                 if self.at(&Token::Comma) {
                     let mut elts = vec![first];
@@ -2296,7 +2781,12 @@ impl Parser {
                             || self.at(&Token::RightBrace) || self.at(&Token::EndOfFile) {
                             break;
                         }
-                        elts.push(self.parse_conditional_expr()?);
+                        if self.at(&Token::Star) {
+                            self.next();
+                            elts.push(Expr::Starred(Box::new(self.parse_conditional_expr()?)));
+                        } else {
+                            elts.push(self.parse_conditional_expr()?);
+                        }
                     }
                     Some(Box::new(Expr::Tuple(elts)))
                 } else {

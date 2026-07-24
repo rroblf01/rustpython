@@ -17,6 +17,7 @@ pub enum Stmt {
         decorator_list: Vec<Expr>,
         returns: Option<Box<Expr>>,
         is_async: bool,
+        type_params: Vec<Ident>,
     },
     ClassDef {
         name: Ident,
@@ -24,6 +25,7 @@ pub enum Stmt {
         keywords: Vec<Keyword>,
         body: Vec<Stmt>,
         decorator_list: Vec<Expr>,
+        type_params: Vec<Ident>,
     },
     Return(Option<Box<Expr>>),
     Delete(Vec<Expr>),
