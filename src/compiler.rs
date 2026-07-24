@@ -1703,16 +1703,10 @@ impl Compiler {
                 self.compile_expr(test)?;
                 let ok_label = self.new_label();
                 self.emit_jump(Opcode::POP_JUMP_IF_TRUE, ok_label);
+                let mut args = 0;
                 if let Some(msg) = msg {
                     self.compile_expr(msg)?;
-                } else {
-                    let const_none = self.get_const_index(ConstValue::None) as u32;
-                    self.emit(Opcode::LOAD_CONST, const_none);
-                }
-                self.compile_expr(test)?;
-                let mut args = 1;
-                if msg.is_some() {
-                    args = 2;
+                    args = 1;
                 }
                 self.emit(Opcode::CALL, args);
                 self.emit(Opcode::RAISE_VARARGS, 1);
