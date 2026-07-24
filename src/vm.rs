@@ -3086,19 +3086,11 @@ impl VirtualMachine {
                                 // NATIVE_BACKING_KEY is internal bookkeeping
                                 // (see native_backing_of) and must not leak
                                 // into user-visible introspection.
-                                let mut pd = crate::object::PyDict {
-                                    buckets: std::collections::HashMap::new(),
-                                    size: 0,
-                                    instance_ref: None,
-                                    order: Vec::new(),
-                                };
+                                let mut pd = crate::object::PyDict::new();
                                 for (k, v) in dict.iter() {
                                     if k == crate::object::NATIVE_BACKING_KEY { continue; }
                                     let key = py_str(k);
-                                    let h = key.hash().unwrap_or(0);
-                                    pd.buckets.entry(h).or_default().push((key.clone(), v.clone()));
-                                    pd.size += 1;
-                                    pd.order.push(key);
+                                    pd.set(key, v.clone())?;
                                 }
                                 drop(obj_borrowed);
                                 pd.instance_ref = Some(obj.clone());
