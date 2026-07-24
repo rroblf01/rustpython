@@ -286,7 +286,15 @@ pub fn collect() -> usize {
     let mut scratch = Vec::new();
     for rc in &live_rcs {
         scratch.clear();
-        trace_children(&rc.borrow(), &mut scratch);
+        // Use try_borrow() to avoid panicking on objects that are currently
+        // mutably borrowed by running code. If we can't borrow, skip this
+        // object — the cycle might not be fully collected this cycle, but
+        // it will be revisited on a future GC run.
+        let borrowed = match rc.try_borrow() {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        trace_children(&borrowed, &mut scratch);
         for child in &scratch {
             if let Some(child_rc) = extract_rc(child) {
                 if let Some(&j) = index_of.get(&Rc::as_ptr(&child_rc)) {

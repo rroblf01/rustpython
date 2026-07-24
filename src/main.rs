@@ -26,6 +26,8 @@ use parser::{Parser, try_parse_as_expression};
 use compiler::Compiler;
 use vm::VirtualMachine;
 use object::{PyObject, ObjectAccess};
+
+/// Exit the process after running atexit handlers.
 use object::PyError;
 
 fn print_traceback(vm: &VirtualMachine, e: &PyError, fallback_file: &str) {
