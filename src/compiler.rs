@@ -51,6 +51,21 @@ pub struct Compiler {
 enum PendingCleanup {
     With(bool), // is_async
     Finally(Vec<Stmt>),
+    // Marks "we're compiling an `except` handler's body, whose entry point
+    // (`PUSH_EXC_INFO`) pushed the active exception onto the stack" — a
+    // `return`/`break`/`continue` from inside that body must `POP_EXCEPT`
+    // that pushed value before jumping out, exactly like the handler's own
+    // normal fall-through path already does. Without this, `return` from
+    // inside `except X: return val` (an extremely common pattern —
+    // `import_fresh_module`'s own `except ImportError: return None`) left
+    // the exception-info value permanently on the stack: harmless by
+    // itself, but any ENCLOSING `with` block's return-cleanup inlining
+    // (`PendingCleanup::With`, above) then swaps/dups/calls `__exit__` on
+    // whatever's now on top of the stack — the stray exception object,
+    // not the real context manager — surfacing as `AttributeError:
+    // 'ImportError' object has no attribute '__exit__'` several statements
+    // away from the actual bug.
+    PopExcept,
 }
 
 struct LoopInfo {
@@ -1042,6 +1057,20 @@ impl Compiler {
                             // stack, untouched by these statements).
                             self.compile_stmts(finalbody)?;
                         }
+                        PendingCleanup::PopExcept => {
+                            // Stack here is [..., exc_info, retval] — retval
+                            // (pushed first, by this Return's own codegen)
+                            // sits ON TOP of the pushed exception info.
+                            // `POP_EXCEPT` unconditionally pops whatever's
+                            // on top of the stack (it has no notion of
+                            // "the second slot down"), so popping it
+                            // directly here would discard `retval` instead
+                            // — swap the two first so `exc_info` ends up on
+                            // top for `POP_EXCEPT` to remove, leaving
+                            // `retval` on top again afterward.
+                            self.emit(Opcode::SWAP, 1);
+                            self.emit(Opcode::POP_EXCEPT, 0);
+                        }
                     }
                 }
                 self.emit(Opcode::RETURN_VALUE, 0);
@@ -1490,6 +1519,11 @@ impl Compiler {
                     self.emit_jump(Opcode::JUMP, body_end);
                     self.fix_label(cleanup);
                     self.emit(Opcode::PUSH_EXC_INFO, 0);
+                    // A `return` from inside any handler body below must
+                    // `POP_EXCEPT` this pushed exception info before
+                    // running any enclosing `with`'s cleanup — see
+                    // `PendingCleanup::PopExcept`'s doc comment.
+                    self.pending_cleanup.push(PendingCleanup::PopExcept);
                     // Compile regular except handlers
                     for handler in handlers {
                         if let Some(typ) = &handler.typ {
@@ -1499,6 +1533,25 @@ impl Compiler {
                             let next_handler = self.new_label();
                             self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_handler);
                             if let Some(name) = &handler.name {
+                                // `except E as name:` consumes the pushed
+                                // exception via this STORE — but the
+                                // handler's shared `handler_done` epilogue
+                                // (and, since this session's `PopExcept`
+                                // fix, any `return` inside this body too)
+                                // unconditionally `POP_EXCEPT`s whatever is
+                                // on top of the stack, expecting to find
+                                // the exception still there (as it is for
+                                // a nameless `except E:`). DUP first so a
+                                // copy survives the STORE for that later
+                                // pop to consume — otherwise it silently
+                                // pops whatever real value happens to sit
+                                // below (e.g. an enclosing `with`'s own
+                                // manager), corrupting it. Confirmed via
+                                // the simplest repro: `with cm(): try:
+                                // raise V() except V as e: pass` crashing
+                                // with a stack underflow inside `cm`'s own
+                                // `__exit__` several instructions later.
+                                self.emit(Opcode::DUP_TOP, 0);
                                 if self.scope == ScopeType::Module {
                                     let name_idx = self.get_name_index(name) as u32;
                                     self.emit(Opcode::STORE_NAME, name_idx);
@@ -1512,6 +1565,8 @@ impl Compiler {
                             self.fix_label(next_handler);
                         } else {
                             if let Some(name) = &handler.name {
+                                // See the identical `DUP_TOP` comment above.
+                                self.emit(Opcode::DUP_TOP, 0);
                                 if self.scope == ScopeType::Module {
                                     let name_idx = self.get_name_index(name) as u32;
                                     self.emit(Opcode::STORE_NAME, name_idx);
@@ -1559,6 +1614,7 @@ impl Compiler {
                             self.compile_stmts(&handler.body)?;
                         }
                     }
+                    self.pending_cleanup.pop(); // PopExcept
                     self.emit(Opcode::RERAISE, 0);
                     self.fix_label(handler_done);
                     self.emit(Opcode::POP_EXCEPT, 0);
@@ -1598,6 +1654,10 @@ impl Compiler {
                     self.emit_jump(Opcode::JUMP, body_end);
                     self.fix_label(cleanup);
                     self.emit(Opcode::PUSH_EXC_INFO, 0);
+                    // See the identical marker in the try/except/finally
+                    // branch above — `PendingCleanup::PopExcept`'s doc
+                    // comment explains why this is needed.
+                    self.pending_cleanup.push(PendingCleanup::PopExcept);
                     for handler in handlers {
                         if let Some(typ) = &handler.typ {
                             self.emit(Opcode::DUP_TOP, 0);
@@ -1606,6 +1666,25 @@ impl Compiler {
                             let next_handler = self.new_label();
                             self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_handler);
                             if let Some(name) = &handler.name {
+                                // `except E as name:` consumes the pushed
+                                // exception via this STORE — but the
+                                // handler's shared `handler_done` epilogue
+                                // (and, since this session's `PopExcept`
+                                // fix, any `return` inside this body too)
+                                // unconditionally `POP_EXCEPT`s whatever is
+                                // on top of the stack, expecting to find
+                                // the exception still there (as it is for
+                                // a nameless `except E:`). DUP first so a
+                                // copy survives the STORE for that later
+                                // pop to consume — otherwise it silently
+                                // pops whatever real value happens to sit
+                                // below (e.g. an enclosing `with`'s own
+                                // manager), corrupting it. Confirmed via
+                                // the simplest repro: `with cm(): try:
+                                // raise V() except V as e: pass` crashing
+                                // with a stack underflow inside `cm`'s own
+                                // `__exit__` several instructions later.
+                                self.emit(Opcode::DUP_TOP, 0);
                                 if self.scope == ScopeType::Module {
                                     let name_idx = self.get_name_index(name) as u32;
                                     self.emit(Opcode::STORE_NAME, name_idx);
@@ -1619,6 +1698,8 @@ impl Compiler {
                             self.fix_label(next_handler);
                         } else {
                             if let Some(name) = &handler.name {
+                                // See the identical `DUP_TOP` comment above.
+                                self.emit(Opcode::DUP_TOP, 0);
                                 if self.scope == ScopeType::Module {
                                     let name_idx = self.get_name_index(name) as u32;
                                     self.emit(Opcode::STORE_NAME, name_idx);
@@ -1666,6 +1747,7 @@ impl Compiler {
                             self.compile_stmts(&handler.body)?;
                         }
                     }
+                    self.pending_cleanup.pop(); // PopExcept
                     self.emit(Opcode::RERAISE, 0);
                     self.fix_label(handler_done);
                     self.emit(Opcode::POP_EXCEPT, 0);

@@ -304,16 +304,24 @@ impl PyObjectRef {
     }
     pub fn hash(&self) -> PyResult<usize> {
         match self {
-            PyObjectRef::SmallInt(n) => {
-                let mut h: usize = 0;
-                let bytes = BigInt::from(*n).to_signed_bytes_le();
-                for (j, &b) in bytes.iter().enumerate() { h ^= (b as usize) << ((j % 8) * 8); }
-                Ok(h)
-            }
+            // `hash_bigint` (also used by boxed `PyObject::Int`/whole-number
+            // `PyObject::Float`) — MUST stay identical to those so a value
+            // that happens to be inlined (small int/float) hashes the same
+            // as the same value boxed, and so `1 == 1.0` (numeric-tower
+            // equality) implies `hash(1) == hash(1.0)` even when either side
+            // is the inline representation — otherwise `{1: 'x'}[1.0]`
+            // raises `KeyError` despite `1.0 in {1: 'x'}` being True.
+            PyObjectRef::SmallInt(n) => Ok(hash_bigint(&BigInt::from(*n))),
             PyObjectRef::SmallBool(b) => Ok(if *b { 1 } else { 0 }),
             PyObjectRef::SmallFloat(f) => {
-                let bits = f.to_bits();
-                Ok(bits as usize ^ (bits >> 32) as usize)
+                if f.is_nan() {
+                    Ok(0)
+                } else if f.fract() == 0.0 && f.is_finite() && f.abs() < 1e18 {
+                    Ok(hash_bigint(&BigInt::from(*f as i64)))
+                } else {
+                    let bits = f.to_bits();
+                    Ok(bits as usize ^ (bits >> 32) as usize)
+                }
             }
             PyObjectRef::SmallStr(s) => {
                 let bytes = s.as_str().as_bytes();
@@ -751,6 +759,7 @@ pub enum PyObject {
     Bool(bool),
     Int(BigInt),
     Float(f64),
+    Complex(f64, f64),
     Str(compact_str::CompactString),
     Bytes(Vec<u8>),
     ByteArray(Vec<u8>),
@@ -921,6 +930,33 @@ pub enum SocketInner {
     Uninitialized,
 }
 
+fn format_py_float(f: f64) -> String {
+    if f.is_nan() { "nan".to_string() }
+    else if f.is_infinite() && f.is_sign_positive() { "inf".to_string() }
+    else if f.is_infinite() { "-inf".to_string() }
+    else {
+        let s = format!("{:.17}", f);
+        let s = s.trim_end_matches('0').to_string();
+        if s.ends_with('.') { format!("{}0", s) } else { s }
+    }
+}
+
+/// Like `format_py_float`, but for a `complex` literal's real/imaginary
+/// components — real CPython's `complex.__repr__` does NOT force a trailing
+/// `.0` on whole-number parts the way `float.__repr__` does (`repr(2j)` ==
+/// `'2j'`, not `'2.0j'`; `repr(complex(3,4))` == `'(3+4j)'`, not
+/// `'(3.0+4.0j)'`).
+fn format_complex_part(f: f64) -> String {
+    if f.is_nan() { "nan".to_string() }
+    else if f.is_infinite() && f.is_sign_positive() { "inf".to_string() }
+    else if f.is_infinite() { "-inf".to_string() }
+    else {
+        let s = format!("{:.17}", f);
+        let s = s.trim_end_matches('0').to_string();
+        s.strip_suffix('.').map(|s| s.to_string()).unwrap_or(s)
+    }
+}
+
 impl PyObject {
     pub fn type_name(&self) -> String {
         match self {
@@ -928,6 +964,7 @@ impl PyObject {
             PyObject::Bool(_) => "bool",
             PyObject::Int(_) => "int",
             PyObject::Float(_) => "float",
+            PyObject::Complex(..) => "complex",
             PyObject::Str(_) => "str",
             PyObject::Bytes(_) => "bytes",
             PyObject::ByteArray(_) => "bytearray",
@@ -983,14 +1020,16 @@ impl PyObject {
             PyObject::None => "None".to_string(),
             PyObject::Bool(b) => if *b { "True" } else { "False" }.to_string(),
             PyObject::Int(i) => i.to_string(),
-            PyObject::Float(f) => {
-                if f.is_nan() { "nan".to_string() }
-                else if f.is_infinite() && f.is_sign_positive() { "inf".to_string() }
-                else if f.is_infinite() { "-inf".to_string() }
-                else {
-                    let s = format!("{:.17}", f);
-                    let s = s.trim_end_matches('0').to_string();
-                    if s.ends_with('.') { format!("{}0", s) } else { s }
+            PyObject::Float(f) => format_py_float(*f),
+            PyObject::Complex(re, im) => {
+                // Real CPython: a zero real part reprs as just `<imag>j`;
+                // otherwise `(<real><sign><|imag|>j)` — matches `repr(1+2j)`
+                // == '(1+2j)', `repr(2j)` == '2j', `repr(1-2j)` == '(1-2j)'.
+                if *re == 0.0 && re.is_sign_positive() {
+                    format!("{}j", format_complex_part(*im))
+                } else {
+                    let sign = if im.is_sign_negative() { "-" } else { "+" };
+                    format!("({}{}{}j)", format_complex_part(*re), sign, format_complex_part(im.abs()))
                 }
             }
             PyObject::Str(s) => format!("'{}'", escape_string(s)),
@@ -1181,20 +1220,37 @@ impl PyObject {
         match self {
             PyObject::None => Ok(0),
             PyObject::Bool(b) => Ok(if *b { 1 } else { 0 }),
-            PyObject::Int(i) => {
-                // Simple hash: take lower bits
-                let bytes = i.to_signed_bytes_le();
-                let mut h: usize = 0;
-                for (j, &b) in bytes.iter().enumerate() {
-                    h ^= (b as usize) << ((j % (std::mem::size_of::<usize>())) * 8);
-                }
-                Ok(h)
-            }
+            PyObject::Int(i) => Ok(hash_bigint(i)),
+            // A whole-number float must hash IDENTICALLY to the equal int
+            // (`1.0 == 1` is true, per the numeric-tower equality fix above,
+            // and Python's dict/set invariant requires `a == b => hash(a) ==
+            // hash(b)` — otherwise `{1: 'x'}[1.0]` raises `KeyError` even
+            // though `1.0 in {1: 'x'}` reports the key as present via `==`).
+            // Reuses Int's own (already-established) hash function directly
+            // rather than reimplementing CPython's real mod-2**61-1 float
+            // hash algorithm — this covers the overwhelmingly common case
+            // (whole-number float dict/set keys) without changing Int's own
+            // existing hash values. Non-whole-number floats keep the prior
+            // bit-pattern hash (internally consistent, just not
+            // cross-type-matching — which only matters for fractional
+            // int/float equality, impossible for finite non-whole floats).
             PyObject::Float(f) => {
                 if f.is_nan() {
                     Ok(0)
+                } else if f.fract() == 0.0 && f.is_finite() && f.abs() < 1e18 {
+                    Ok(hash_bigint(&BigInt::from(*f as i64)))
                 } else {
                     Ok(f.to_bits() as usize)
+                }
+            }
+            PyObject::Complex(re, im) => {
+                let real_hash = PyObject::Float(*re).hash()?;
+                if *im == 0.0 {
+                    Ok(real_hash)
+                } else {
+                    let imag_hash = PyObject::Float(*im).hash()?;
+                    let combined = (real_hash as i64).wrapping_add(1000003i64.wrapping_mul(imag_hash as i64));
+                    Ok((if combined == -1 { -2 } else { combined }) as usize)
                 }
             }
             PyObject::Str(s) => {
@@ -1323,6 +1379,19 @@ impl PyObject {
             return self_ref.equals(&native);
         }
         let other = other_ref.borrow();
+        // Numeric cross-type equality — `1 == 1.0`, `1 == (1+0j)`, `True ==
+        // 1` must all be True, matching Python's numeric tower (comparison
+        // is by VALUE across int/float/bool/complex, never gated by the
+        // concrete Rust variant). Excludes Int==Int specifically so two
+        // plain ints keep comparing via exact `BigInt` equality below
+        // instead of a lossy `to_f64()` round-trip that would silently
+        // break equality for integers beyond f64's 53-bit mantissa.
+        let both_plain_ints = matches!(self, PyObject::Int(_)) && matches!(&*other, PyObject::Int(_));
+        if !both_plain_ints {
+            if let (Some(a_parts), Some(b_parts)) = (as_complex_parts(self), as_complex_parts(&*other)) {
+                return Ok(a_parts == b_parts);
+            }
+        }
         if std::mem::discriminant(self) != std::mem::discriminant(&*other) {
             return Ok(false);
         }
@@ -1765,6 +1834,35 @@ fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String, String> {
 
 // ---- Unary Operations ----
 
+/// The int hash: take lower bits (kept as originally implemented — not
+/// CPython's real mod-2**61-1 algorithm, but a stable, self-consistent hash
+/// for `PyObject::Int`). Factored out so `PyObject::Float`'s whole-number
+/// case (see `PyObject::hash`) can call the SAME function a bigint built
+/// from that float, guaranteeing `hash(1) == hash(1.0)` without changing
+/// Int's own existing hash values at all.
+fn hash_bigint(i: &BigInt) -> usize {
+    let bytes = i.to_signed_bytes_le();
+    let mut h: usize = 0;
+    for (j, &b) in bytes.iter().enumerate() {
+        h ^= (b as usize) << ((j % (std::mem::size_of::<usize>())) * 8);
+    }
+    h
+}
+
+/// Extracts (real, imaginary) from any of `complex`/`int`/`float`/`bool` —
+/// used to let complex arithmetic transparently accept a real-number operand
+/// on either side (`1 + 2j`, `2j * 3.0`, ...) without a combinatorial
+/// explosion of match arms per numeric-type pairing.
+fn as_complex_parts(obj: &PyObject) -> Option<(f64, f64)> {
+    match obj {
+        PyObject::Complex(re, im) => Some((*re, *im)),
+        PyObject::Int(n) => n.to_f64().map(|f| (f, 0.0)),
+        PyObject::Float(f) => Some((*f, 0.0)),
+        PyObject::Bool(b) => Some((if *b { 1.0 } else { 0.0 }, 0.0)),
+        _ => None,
+    }
+}
+
 pub fn py_neg(val: &PyObjectRef) -> PyResult<PyObjectRef> {
     if let Some(i) = val.as_i64() {
         return Ok(py_int(-i));
@@ -1776,6 +1874,7 @@ pub fn py_neg(val: &PyObjectRef) -> PyResult<PyObjectRef> {
     match &*obj {
         PyObject::Int(n) => Ok(py_int(-n.clone())),
         PyObject::Float(n) => Ok(py_float(-n)),
+        PyObject::Complex(re, im) => Ok(PyObjectRef::imm(PyObject::Complex(-re, -im))),
         _ => Err(PyError::type_error(format!("bad operand type for unary -: '{}'", obj.type_name()))),
     }
 }
@@ -1866,7 +1965,13 @@ pub fn py_add(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
             v.extend(b);
             Ok(PyObjectRef::imm(PyObject::Bytes(v)))
         }
-        _ => Err(PyError::type_error(format!("unsupported operand type(s) for +: '{}' and '{}'", 
+        (a, b) if matches!(a, PyObject::Complex(..)) || matches!(b, PyObject::Complex(..)) => {
+            match (as_complex_parts(a), as_complex_parts(b)) {
+                (Some((ar, ai)), Some((br, bi))) => Ok(PyObjectRef::imm(PyObject::Complex(ar + br, ai + bi))),
+                _ => Err(PyError::type_error(format!("unsupported operand type(s) for +: '{}' and '{}'", a.type_name(), b.type_name()))),
+            }
+        }
+        _ => Err(PyError::type_error(format!("unsupported operand type(s) for +: '{}' and '{}'",
             a_obj.type_name(), b_obj.type_name())))
     }
 }
@@ -1890,6 +1995,12 @@ pub fn py_sub(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
         (PyObject::Int(a), PyObject::Float(b)) => Ok(py_float(a.to_f64().unwrap() - b)),
         (PyObject::Float(a), PyObject::Int(b)) => Ok(py_float(a - b.to_f64().unwrap())),
         (PyObject::Set(a), PyObject::Set(b)) => set_difference(a, b),
+        (a, b) if matches!(a, PyObject::Complex(..)) || matches!(b, PyObject::Complex(..)) => {
+            match (as_complex_parts(a), as_complex_parts(b)) {
+                (Some((ar, ai)), Some((br, bi))) => Ok(PyObjectRef::imm(PyObject::Complex(ar - br, ai - bi))),
+                _ => Err(PyError::type_error(format!("unsupported operand type(s) for -: '{}' and '{}'", a.type_name(), b.type_name()))),
+            }
+        }
         _ => Err(PyError::type_error(format!("unsupported operand type(s) for -: '{}' and '{}'",
             a_obj.type_name(), b_obj.type_name()))),
     }
@@ -1949,6 +2060,12 @@ pub fn py_mul(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
                 Err(PyError::value_error("cannot multiply tuple by negative number"))
             }
         }
+        (a, b) if matches!(a, PyObject::Complex(..)) || matches!(b, PyObject::Complex(..)) => {
+            match (as_complex_parts(a), as_complex_parts(b)) {
+                (Some((ar, ai)), Some((br, bi))) => Ok(PyObjectRef::imm(PyObject::Complex(ar * br - ai * bi, ar * bi + ai * br))),
+                _ => Err(PyError::type_error(format!("unsupported operand type(s) for *: '{}' and '{}'", a.type_name(), b.type_name()))),
+            }
+        }
         _ => Err(PyError::type_error(format!("unsupported operand type(s) for *: '{}' and '{}'",
             a_obj.type_name(), b_obj.type_name()))),
     }
@@ -1979,6 +2096,16 @@ pub fn py_div(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
         (PyObject::Float(a), PyObject::Int(b)) => {
             if b.is_zero() { return Err(PyError::zero_division()); }
             Ok(py_float(a / b.to_f64().unwrap()))
+        }
+        (a, b) if matches!(a, PyObject::Complex(..)) || matches!(b, PyObject::Complex(..)) => {
+            match (as_complex_parts(a), as_complex_parts(b)) {
+                (Some((ar, ai)), Some((br, bi))) => {
+                    let denom = br * br + bi * bi;
+                    if denom == 0.0 { return Err(PyError::zero_division()); }
+                    Ok(PyObjectRef::imm(PyObject::Complex((ar * br + ai * bi) / denom, (ai * br - ar * bi) / denom)))
+                }
+                _ => Err(PyError::type_error(format!("unsupported operand type(s) for /: '{}' and '{}'", a.type_name(), b.type_name()))),
+            }
         }
         _ => Err(PyError::type_error(format!("unsupported operand type(s) for /: '{}' and '{}'",
             a_obj.type_name(), b_obj.type_name()))),
@@ -2895,6 +3022,90 @@ pub fn builtin_float(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
 }
 
+/// Parses a real CPython-style complex literal string (`complex("1+2j")`,
+/// `complex("-3-4j")`, `complex("2j")`, `complex("(1+2j)")`) — finds the
+/// LAST top-level `+`/`-` before the trailing `j`/`J` (skipping one right
+/// after `e`/`E`, which is an exponent sign, not the real/imag separator).
+fn parse_complex_str(s: &str) -> PyResult<(f64, f64)> {
+    let malformed = || PyError::value_error(format!("complex() arg is a malformed string"));
+    let s = s.trim();
+    let inner = s.strip_prefix('(').and_then(|s| s.strip_suffix(')')).unwrap_or(s).trim();
+    if inner.is_empty() { return Err(malformed()); }
+    if let Some(stripped) = inner.strip_suffix(['j', 'J']) {
+        let bytes = stripped.as_bytes();
+        let mut split_idx = None;
+        for i in (1..bytes.len()).rev() {
+            let c = bytes[i] as char;
+            if c == '+' || c == '-' {
+                let prev = bytes[i - 1] as char;
+                if prev != 'e' && prev != 'E' {
+                    split_idx = Some(i);
+                    break;
+                }
+            }
+        }
+        match split_idx {
+            Some(idx) => {
+                let real_str = &stripped[..idx];
+                let imag_str = &stripped[idx..];
+                let re: f64 = real_str.parse().map_err(|_| malformed())?;
+                let im: f64 = match imag_str {
+                    "+" => 1.0,
+                    "-" => -1.0,
+                    _ => imag_str.parse().map_err(|_| malformed())?,
+                };
+                Ok((re, im))
+            }
+            None => {
+                let im: f64 = match stripped {
+                    "" | "+" => 1.0,
+                    "-" => -1.0,
+                    _ => stripped.parse().map_err(|_| malformed())?,
+                };
+                Ok((0.0, im))
+            }
+        }
+    } else {
+        let re: f64 = inner.parse().map_err(|_| malformed())?;
+        Ok((re, 0.0))
+    }
+}
+
+pub fn builtin_complex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() {
+        return Ok(PyObjectRef::imm(PyObject::Complex(0.0, 0.0)));
+    }
+    let (re, im) = {
+        let obj = args[0].borrow();
+        match &*obj {
+            PyObject::Complex(re, im) => (*re, *im),
+            PyObject::Int(i) => (i.to_f64().unwrap_or(0.0), 0.0),
+            PyObject::Float(f) => (*f, 0.0),
+            PyObject::Bool(b) => (if *b { 1.0 } else { 0.0 }, 0.0),
+            PyObject::Str(s) => {
+                if args.len() > 1 {
+                    return Err(PyError::type_error("complex() can't take second arg if first is a string"));
+                }
+                parse_complex_str(s)?
+            }
+            _ => return Err(PyError::type_error(format!("complex() argument must be a string or a number, not '{}'", obj.type_name()))),
+        }
+    };
+    if args.len() > 1 {
+        let imag_extra: f64 = {
+            let obj = args[1].borrow();
+            match &*obj {
+                PyObject::Int(i) => i.to_f64().unwrap_or(0.0),
+                PyObject::Float(f) => *f,
+                PyObject::Bool(b) => if *b { 1.0 } else { 0.0 },
+                _ => return Err(PyError::type_error(format!("complex() second argument must be a number, not '{}'", obj.type_name()))),
+            }
+        };
+        return Ok(PyObjectRef::imm(PyObject::Complex(re, im + imag_extra)));
+    }
+    Ok(PyObjectRef::imm(PyObject::Complex(re, im)))
+}
+
 pub fn builtin_str(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() { Ok(py_str("")) }
     else {
@@ -3556,6 +3767,7 @@ pub fn builtin_abs(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     match &*obj {
         PyObject::Int(i) => Ok(py_int(i.clone().abs())),
         PyObject::Float(f) => Ok(py_float(f.abs())),
+        PyObject::Complex(re, im) => Ok(py_float(re.hypot(*im))),
         PyObject::Instance { typ, .. } => {
             match lookup_dunder_via_mro(typ, "__abs__") {
                 Some(f) => {
@@ -5670,10 +5882,28 @@ impl PyObject {
             }));
         }
         match self {
+            PyObject::Complex(re, im) => {
+                match name {
+                    "real" => Ok(py_float(*re)),
+                    "imag" => Ok(py_float(*im)),
+                    "conjugate" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                        name: "conjugate".to_string(),
+                        func: |args| {
+                            let obj = args[0].borrow();
+                            match &*obj {
+                                PyObject::Complex(re, im) => Ok(PyObjectRef::imm(PyObject::Complex(*re, -im))),
+                                _ => Err(PyError::type_error("conjugate() requires a complex self")),
+                            }
+                        },
+                        self_obj: PyObjectRef::imm(PyObject::Complex(*re, *im)),
+                    })),
+                    _ => Err(PyError::attribute_error(format!("'complex' object has no attribute '{}'", name))),
+                }
+            }
             PyObject::Module { dict, name: mod_name } => {
                 if name == "__dict__" {
                     // Convert module's HashMap to a PyDict
-                    
+
                     let mut pd = PyDict::new();
                     for (k, v) in dict.iter() {
                         let _ = pd.set(py_str(k), v.clone());

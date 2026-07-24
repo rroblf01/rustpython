@@ -61,6 +61,35 @@ def walk_packages(path=None, prefix="", onerror=None):
             yield from walk_packages(sub_path, info.name + ".", onerror)
 
 
+def resolve_name(name):
+    """Resolve a dotted name to an object (module, or dotted-attribute path
+    within a module) — matches real CPython's `pkgutil.resolve_name`, used
+    e.g. by `unittest.mock.patch`'s target-string resolution.
+    """
+    import importlib
+
+    if ':' in name:
+        pkg, cls = name.split(':', 1)
+    else:
+        pkg, cls = None, name
+
+    if pkg is None:
+        pkg, dot, cls = cls.rpartition('.')
+        if not dot:
+            pkg, cls = cls, None
+
+    if pkg:
+        obj = importlib.import_module(pkg)
+    else:
+        import builtins
+        obj = builtins
+
+    if cls:
+        for part in cls.split('.'):
+            obj = getattr(obj, part)
+    return obj
+
+
 def get_data(package, resource):
     import importlib
     mod = importlib.import_module(package)

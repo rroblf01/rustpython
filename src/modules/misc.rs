@@ -1660,6 +1660,20 @@ pub fn create_platform_dict() -> HashMap<String, PyObjectRef> {
     plat_func!("system", |_| {
         Ok(py_str(std::env::consts::OS))
     });
+    // Real signature: libc_ver(executable=None, lib='', version='',
+    // chunksize=16384) -> (lib, version) — detects glibc/musl via parsing
+    // the executable's dynamic-linker strings on real CPython. Honest
+    // empty-string stub (matches what real CPython itself reports for a
+    // non-Linux or otherwise-undetectable target) rather than guessing.
+    plat_func!("libc_ver", |_| {
+        Ok(py_tuple(vec![py_str(""), py_str("")]))
+    });
+    // Windows-only in real CPython (returns e.g. "ServerStandard" on
+    // Windows Server); always "" elsewhere, which is what non-Windows
+    // `platform.py` itself falls back to.
+    plat_func!("win32_edition", |_| {
+        Ok(py_str(""))
+    });
     d
 }
 

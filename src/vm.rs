@@ -1925,12 +1925,13 @@ impl VirtualMachine {
                     ConstValue::String(s) => py_str(&s),
                     ConstValue::Bytes(b) => PyObjectRef::imm(PyObject::Bytes(b)),
                     ConstValue::Complex { real, imag } => {
-                        // Create a string representation matching Python's complex repr
-                        if imag.starts_with('-') {
-                            py_str(&format!("({}{}j)", real, imag))
-                        } else {
-                            py_str(&format!("({}+{}j)", real, imag))
-                        }
+                        let re: f64 = real.parse().map_err(|_| {
+                            PyError::value_error(format!("invalid complex literal: {}", real))
+                        })?;
+                        let im: f64 = imag.parse().map_err(|_| {
+                            PyError::value_error(format!("invalid complex literal: {}", imag))
+                        })?;
+                        PyObjectRef::imm(PyObject::Complex(re, im))
                     }
                     ConstValue::Code(code) => {
                         PyObjectRef::imm(PyObject::Code(code))
@@ -2295,11 +2296,9 @@ impl VirtualMachine {
                     ConstValue::String(s) => py_str(&s),
                     ConstValue::Bytes(b) => PyObjectRef::imm(PyObject::Bytes(b)),
                     ConstValue::Complex { real, imag } => {
-                        if imag.starts_with('-') {
-                            py_str(&format!("({}{}j)", real, imag))
-                        } else {
-                            py_str(&format!("({}+{}j)", real, imag))
-                        }
+                        let re: f64 = real.parse().map_err(|_| PyError::value_error("invalid complex literal"))?;
+                        let im: f64 = imag.parse().map_err(|_| PyError::value_error("invalid complex literal"))?;
+                        PyObjectRef::imm(PyObject::Complex(re, im))
                     }
                     ConstValue::Code(code) => PyObjectRef::imm(PyObject::Code(code)),
                     ConstValue::Tuple(items) => {

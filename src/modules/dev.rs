@@ -1237,8 +1237,15 @@ pub fn create_imp_dict() -> HashMap<String, PyObjectRef> {
 
     d.insert("check_hash_based_pycs".to_string(), py_str("never"));
     d.insert("_frozen_module_names".to_string(), py_list(vec![]));
-    d.insert("_override_frozen_modules_for_tests".to_string(), py_none());
-    d.insert("_override_multi_interp_extensions_check".to_string(), py_none());
+    // Both were bare `py_none()` placeholders — not callable at all — which
+    // broke `test.support.import_helper.frozen_modules()`/
+    // `multi_interp_extensions_check()` (both real CPython context managers
+    // wrapping a call to one of these) with `TypeError: 'NoneType' object is
+    // not callable`, for any test file using `import_fresh_module`/`CleanImport`
+    // (an extremely common test-infrastructure idiom — real trigger: 10+
+    // corpus files hit this identical symptom via `import_helper`).
+    imp_func!("_override_frozen_modules_for_tests", |_| Ok(py_none()));
+    imp_func!("_override_multi_interp_extensions_check", |_| Ok(py_none()));
 
     d
 }

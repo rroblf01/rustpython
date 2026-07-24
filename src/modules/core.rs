@@ -106,6 +106,7 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     // once `object_type` exists — see the comment there.
     add_func!("int", builtin_int);
     add_func!("float", builtin_float);
+    add_func!("complex", builtin_complex);
     add_func!("str", builtin_str);
     add_func!("bool", builtin_bool);
     add_func!("list", builtin_list);
