@@ -248,7 +248,56 @@ impl PyObjectRef {
         if let Some(native) = native_backing_of(self) {
             return native.repr();
         }
-        self.borrow().repr()
+        // For container types, clone elements before calling their .repr()
+        // so the RefCell borrow on the container is released first. This
+        // prevents RefCell panics when an element's __repr__ (via Python
+        // code) tries to mutate the same container (e.g. mylist.pop()
+        // during repr(mylist)).
+        let obj = self.borrow();
+        match &*obj {
+            PyObject::List(items) => {
+                let cloned: Vec<PyObjectRef> = items.clone();
+                drop(obj);
+                let parts: Vec<String> = cloned.iter().map(|x| x.repr()).collect();
+                format!("[{}]", parts.join(", "))
+            }
+            PyObject::Tuple(items) => {
+                let cloned: Vec<PyObjectRef> = items.clone();
+                drop(obj);
+                let parts: Vec<String> = cloned.iter().map(|x| x.repr()).collect();
+                if parts.len() == 1 {
+                    format!("({},)", parts[0])
+                } else {
+                    format!("({})", parts.join(", "))
+                }
+            }
+            PyObject::Dict(d) => {
+                let items = d.items();
+                drop(obj);
+                let parts: Vec<String> = items.iter().map(|(k, v)| format!("{}: {}", k.repr(), v.repr())).collect();
+                format!("{{{}}}", parts.join(", "))
+            }
+            PyObject::Set(s) => {
+                let items = s.to_vec();
+                drop(obj);
+                if items.is_empty() {
+                    "set()".to_string()
+                } else {
+                    let parts: Vec<String> = items.iter().map(|x| x.repr()).collect();
+                    format!("{{{}}}", parts.join(", "))
+                }
+            }
+            PyObject::FrozenSet(s) => {
+                let items = s.to_vec();
+                drop(obj);
+                let parts: Vec<String> = items.iter().map(|x| x.repr()).collect();
+                format!("frozenset({{{}}})", parts.join(", "))
+            }
+            _ => {
+                drop(obj);
+                self.borrow().repr()
+            }
+        }
     }
     pub fn str(&self) -> String {
         // Check for __str__ on Instance types (user-defined objects)
@@ -395,6 +444,52 @@ impl PyObjectRef {
                 if !is_not_implemented(&result) {
                     return Ok(result.truthy());
                 }
+            }
+        }
+        // For container types, clone elements before element-wise comparison
+        // so the RefCell borrow on the container is released first. This
+        // prevents RefCell panics when an element's __eq__ mutates the same
+        // container during comparison (e.g. lst.index(lst) with custom __eq__
+        // that calls lst.clear()).
+        let self_items = match &*self.borrow() {
+            PyObject::List(items) => Some(items.clone()),
+            PyObject::Tuple(items) => Some(items.clone()),
+            _ => None,
+        };
+        if let Some(my_items) = self_items {
+            let other_items = match &*other.borrow() {
+                PyObject::List(items) => Some(items.clone()),
+                PyObject::Tuple(items) => Some(items.clone()),
+                _ => None,
+            };
+            if let Some(other_items) = other_items {
+                if my_items.len() != other_items.len() { return Ok(false); }
+                for (x, y) in my_items.iter().zip(other_items.iter()) {
+                    if !x.equals(y)? { return Ok(false); }
+                }
+                return Ok(true);
+            }
+        }
+        // Handle Dict comparison: clone items and keys to avoid RefCell conflicts
+        let self_dict = match &*self.borrow() {
+            PyObject::Dict(d) => Some(d.items()),
+            _ => None,
+        };
+        if let Some(my_items) = self_dict {
+            let other_dict = match &*other.borrow() {
+                PyObject::Dict(d) => Some(d.items()),
+                _ => None,
+            };
+            if let Some(other_items) = other_dict {
+                if my_items.len() != other_items.len() { return Ok(false); }
+                for (k, va) in my_items {
+                    let found = other_items.iter().find(|(ok, _)| ok.equals(&k).unwrap_or(false));
+                    match found {
+                        Some((_, vb)) => { if !va.equals(vb).unwrap_or(false) { return Ok(false); } }
+                        None => { return Ok(false); }
+                    }
+                }
+                return Ok(true);
             }
         }
         self.borrow().equals(other)
@@ -1948,7 +2043,10 @@ pub fn try_dunder_binop(a: &PyObjectRef, b: &PyObjectRef, method: &str) -> PyRes
 
 pub fn py_add(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
-        return Ok(py_int(ai + bi));
+        match ai.checked_add(bi) {
+            Some(result) => return Ok(py_int(result)),
+            None => { /* fall through to BigInt path */ }
+        }
     }
     if a.is_float_typed() || b.is_float_typed() {
         if let (Some(af), Some(bf)) = (a.as_f64(), b.as_f64()) {
@@ -1993,7 +2091,10 @@ pub fn py_add(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
 
 pub fn py_sub(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
-        return Ok(py_int(ai - bi));
+        match ai.checked_sub(bi) {
+            Some(result) => return Ok(py_int(result)),
+            None => { /* fall through to BigInt path */ }
+        }
     }
     if a.is_float_typed() || b.is_float_typed() {
         if let (Some(af), Some(bf)) = (a.as_f64(), b.as_f64()) {
@@ -2023,7 +2124,10 @@ pub fn py_sub(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
 
 pub fn py_mul(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
-        return Ok(py_int(ai * bi));
+        match ai.checked_mul(bi) {
+            Some(result) => return Ok(py_int(result)),
+            None => { /* fall through to BigInt path */ }
+        }
     }
     if a.is_float_typed() || b.is_float_typed() {
         if let (Some(af), Some(bf)) = (a.as_f64(), b.as_f64()) {
@@ -2810,8 +2914,9 @@ pub fn builtin_len(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             if *step > 0 && *start >= *stop { Ok(py_int(0)) }
             else if *step < 0 && *start <= *stop { Ok(py_int(0)) }
             else {
-                let len = ((*stop - *start) / *step) as i64;
-                if (*stop - *start) % *step != 0 { Ok(py_int(len.abs() + 1)) }
+                let raw_len = stop.checked_sub(*start).unwrap_or(i64::MAX);
+                let len = raw_len.checked_div(*step).unwrap_or(0) as i64;
+                if raw_len % *step != 0 { Ok(py_int(len.abs() + 1)) }
                 else { Ok(py_int(len.abs())) }
             }
         }
@@ -3629,39 +3734,14 @@ pub fn builtin_format(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         0 => Err(PyError::type_error("format() requires at least 1 argument")),
         1 => Ok(py_str(&args[0].str())),
         2 => {
-            let val = args[0].str();
             let spec = args[1].str();
             if spec.trim().is_empty() {
-                return Ok(py_str(&val));
+                return Ok(py_str(&args[0].str()));
             }
-            // Basic format: fill, align, width
-            let spec = spec.trim();
-            let s: Vec<char> = spec.chars().collect();
-            let mut idx = 0;
-            let fill_char = if idx < s.len() && !matches!(s[idx], '<' | '>' | '^' | '=') {
-                let c = s[idx]; idx += 1; c
-            } else { ' ' };
-            let align = if idx < s.len() && matches!(s[idx], '<' | '>' | '^' | '=') {
-                let c = s[idx]; idx += 1; Some(c)
-            } else { None };
-            let width_str: String = s[idx..].iter().take_while(|c| c.is_ascii_digit()).collect();
-            let width: usize = width_str.parse().unwrap_or(0);
-            if width > 0 {
-                let padding = width.saturating_sub(val.len());
-                match align {
-                    Some('<') | None => Ok(py_str(&format!("{}{}", val, fill_char.to_string().repeat(padding)))),
-                    Some('>') => Ok(py_str(&format!("{}{}", fill_char.to_string().repeat(padding), val))),
-                    Some('^') => {
-                        let left = padding / 2;
-                        let right = padding - left;
-                        Ok(py_str(&format!("{}{}{}", fill_char.to_string().repeat(left), val, fill_char.to_string().repeat(right))))
-                    }
-                    Some('=') => Ok(py_str(&val)),
-                    _ => Ok(py_str(&val)),
-                }
-            } else {
-                Ok(py_str(&val))
-            }
+            // Use the comprehensive format_with_spec from vm.rs
+            let result = super::vm::format_with_spec(&args[0], &spec)
+                .map_err(|e| PyError::value_error(format!("Format spec: {}", e)))?;
+            Ok(py_str(&result))
         }
         _ => Err(PyError::type_error("format() takes at most 2 arguments")),
     }
@@ -4336,6 +4416,14 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         return result;
     }
     // Fallback to list-based iteration
+    // Inline types (SmallInt etc.) are not iterable — return TypeError
+    // without calling borrow_mut on something that doesn't support it.
+    match args[0] {
+        PyObjectRef::SmallInt(_) | PyObjectRef::SmallBool(_) | PyObjectRef::SmallFloat(_) | PyObjectRef::SmallStr(_) | PyObjectRef::None => {
+            return Err(PyError::type_error(format!("'{}' object is not an iterator", args[0].get_type_name())));
+        }
+        _ => {}
+    }
     let mut obj = args[0].borrow_mut();
     match &mut *obj {
         PyObject::List(v) => {
@@ -4705,9 +4793,11 @@ pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 PyObject::Type { name, .. } => name.clone(),
                 _ => class.str(),
             };
-            // Exception hierarchy: shared with issubclass() and `except`'s
-            // own CHECK_EXC_MATCH so all three agree on ancestry instead of
-            // drifting apart via separately maintained tables.
+            // Direct type name match for built-in types (int, str, list, etc.)
+            if obj_type == class_name {
+                return Ok(py_bool(true));
+            }
+            // Exception hierarchy
             Ok(py_bool(crate::vm::is_exception_subclass(&obj_type, &class_name)))
         }
     }
@@ -4812,34 +4902,47 @@ pub fn builtin_reversed(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() != 1 {
         return Err(PyError::type_error("reversed() takes exactly one argument"));
     }
-    let obj = args[0].borrow();
-    match &*obj {
-        PyObject::List(v) => {
-            let mut rev = v.clone(); rev.reverse();
-            Ok(PyObjectRef::new(PyObject::ListIter { list: rev, index: 0 }))
+    // Check type with a short-lived borrow to avoid holding the RefCell
+    // borrow while iterating (which could trigger borrow_mut conflicts).
+    let kind = {
+        let obj = args[0].borrow();
+        match &*obj {
+            PyObject::List(_) => 1,
+            PyObject::Tuple(_) => 2,
+            PyObject::Str(_) => 3,
+            _ => 0,
         }
-        PyObject::Tuple(v) => {
-            let mut rev = v.clone(); rev.reverse();
-            Ok(PyObjectRef::new(PyObject::ListIter { list: rev, index: 0 }))
-        }
-        PyObject::Str(s) => {
-            let chars: Vec<PyObjectRef> = s.chars().rev().map(|c| py_str(&c.to_string())).collect();
-            Ok(PyObjectRef::new(PyObject::ListIter { list: chars, index: 0 }))
-        }
-        _ => {
-            let mut v = Vec::new();
-            let iterable = builtin_iter(&[args[0].clone()])?;
-            loop {
-                match builtin_next(&[iterable.clone()]) {
-                    Ok(val) => v.push(val),
-                    Err(PyError::StopIteration) => break,
-                    Err(e) => return Err(e),
-                }
+    };
+    if kind != 0 {
+        let obj = args[0].borrow();
+        return match &*obj {
+            PyObject::List(v) => {
+                let mut rev = v.clone(); rev.reverse();
+                Ok(PyObjectRef::new(PyObject::ListIter { list: rev, index: 0 }))
             }
-            v.reverse();
-            Ok(PyObjectRef::new(PyObject::ListIter { list: v, index: 0 }))
+            PyObject::Tuple(v) => {
+                let mut rev = v.clone(); rev.reverse();
+                Ok(PyObjectRef::new(PyObject::ListIter { list: rev, index: 0 }))
+            }
+            PyObject::Str(s) => {
+                let chars: Vec<PyObjectRef> = s.chars().rev().map(|c| py_str(&c.to_string())).collect();
+                Ok(PyObjectRef::new(PyObject::ListIter { list: chars, index: 0 }))
+            }
+            _ => unreachable!(),
+        };
+    }
+    // Unknown type: drain via iteration (no active borrow on args[0])
+    let mut v = Vec::new();
+    let iterable = builtin_iter(&[args[0].clone()])?;
+    loop {
+        match builtin_next(&[iterable.clone()]) {
+            Ok(val) => v.push(val),
+            Err(PyError::StopIteration) => break,
+            Err(e) => return Err(e),
         }
     }
+    v.reverse();
+    Ok(PyObjectRef::new(PyObject::ListIter { list: v, index: 0 }))
 }
 
 pub fn builtin_issubclass(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
@@ -6323,6 +6426,22 @@ impl PyObject {
                     // just from the attribute not existing at all.
                     "__context__" | "__traceback__" => Ok(py_none()),
                     "__suppress_context__" => Ok(py_bool(false)),
+                    "__notes__" => Ok(py_list(vec![])),
+                    "add_note" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "add_note".to_string(),
+                        func: |_args| Ok(py_none()),
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "with_traceback" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "with_traceback".to_string(),
+                        func: |args| {
+                            if args.len() < 2 {
+                                return Err(PyError::type_error("with_traceback() takes exactly one argument"));
+                            }
+                            Ok(args[0].clone())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     _ => Err(PyError::attribute_error(format!("'Exception' object has no attribute '{}'", name))),
                 }
             }
@@ -6387,9 +6506,12 @@ impl PyObject {
                         name: "remove".to_string(),
                         func: |args| {
                             if args.len() < 2 { return Err(PyError::type_error("remove() takes exactly one argument")); }
+                            let items = if let PyObject::List(list) = &*args[0].borrow() {
+                                list.clone()
+                            } else { return Err(PyError::runtime_error("remove on non-list")) };
+                            let pos = items.iter().position(|item| item.equals(&args[1]).unwrap_or(false))
+                                .ok_or_else(|| PyError::value_error(format!("{} is not in list", args[1].str())))?;
                             if let PyObject::List(list) = &mut *args[0].borrow_mut() {
-                                let pos = list.iter().position(|item| item.equals(&args[1]).unwrap_or(false))
-                                    .ok_or_else(|| PyError::value_error(format!("{} is not in list", args[1].str())))?;
                                 list.remove(pos);
                                 Ok(py_none())
                             } else { Err(PyError::runtime_error("remove on non-list")) }
@@ -6400,12 +6522,13 @@ impl PyObject {
                         name: "index".to_string(),
                         func: |args| {
                             if args.len() < 2 { return Err(PyError::type_error("index() takes at least 1 argument")); }
-                            if let PyObject::List(list) = &*args[0].borrow() {
-                                for (i, item) in list.iter().enumerate() {
-                                    if item.equals(&args[1])? { return Ok(py_int(i as i64)); }
-                                }
-                                Err(PyError::value_error(format!("{} is not in list", args[1].str())))
-                            } else { Err(PyError::runtime_error("index on non-list")) }
+                            let items = if let PyObject::List(list) = &*args[0].borrow() {
+                                list.clone()
+                            } else { return Err(PyError::runtime_error("index on non-list")) };
+                            for (i, item) in items.iter().enumerate() {
+                                if item.equals(&args[1])? { return Ok(py_int(i as i64)); }
+                            }
+                            Err(PyError::value_error(format!("{} is not in list", args[1].str())))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -6413,10 +6536,11 @@ impl PyObject {
                         name: "count".to_string(),
                         func: |args| {
                             if args.len() < 2 { return Err(PyError::type_error("count() takes at least 1 argument")); }
-                            if let PyObject::List(list) = &*args[0].borrow() {
-                                let c = list.iter().filter(|item| item.equals(&args[1]).unwrap_or(false)).count();
-                                Ok(py_int(c as i64))
-                            } else { Err(PyError::runtime_error("count on non-list")) }
+                            let items = if let PyObject::List(list) = &*args[0].borrow() {
+                                list.clone()
+                            } else { return Err(PyError::runtime_error("count on non-list")) };
+                            let c = items.iter().filter(|item| item.equals(&args[1]).unwrap_or(false)).count();
+                            Ok(py_int(c as i64))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -6489,12 +6613,13 @@ impl PyObject {
                         name: "__contains__".to_string(),
                         func: |args| {
                             if args.len() < 2 { return Err(PyError::type_error("__contains__() takes exactly one argument")); }
-                            if let PyObject::List(list) = &*args[0].borrow() {
-                                for item in list.iter() {
-                                    if item.equals(&args[1])? { return Ok(py_bool(true)); }
-                                }
-                                Ok(py_bool(false))
-                            } else { Err(PyError::runtime_error("__contains__ on non-list")) }
+                            let items = if let PyObject::List(list) = &*args[0].borrow() {
+                                list.clone()
+                            } else { return Err(PyError::runtime_error("__contains__ on non-list")) };
+                            for item in items.iter() {
+                                if item.equals(&args[1])? { return Ok(py_bool(true)); }
+                            }
+                            Ok(py_bool(false))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -6621,6 +6746,40 @@ impl PyObject {
                                     Ok(py_str(&s))
                                 }
                             } else { Err(PyError::runtime_error("decode on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "removeprefix" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "removeprefix".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("removeprefix() takes exactly 1 argument")); }
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let prefix = args[1].borrow();
+                                if let PyObject::Bytes(p) = &*prefix {
+                                    if b.starts_with(p.as_slice()) {
+                                        Ok(PyObjectRef::imm(PyObject::Bytes(b[p.len()..].to_vec())))
+                                    } else {
+                                        Ok(PyObjectRef::imm(PyObject::Bytes(b.clone())))
+                                    }
+                                } else { Err(PyError::type_error("removeprefix() argument must be bytes")) }
+                            } else { Err(PyError::runtime_error("removeprefix on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "removesuffix" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "removesuffix".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("removesuffix() takes exactly 1 argument")); }
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let suffix = args[1].borrow();
+                                if let PyObject::Bytes(s) = &*suffix {
+                                    if b.ends_with(s.as_slice()) {
+                                        Ok(PyObjectRef::imm(PyObject::Bytes(b[..b.len()-s.len()].to_vec())))
+                                    } else {
+                                        Ok(PyObjectRef::imm(PyObject::Bytes(b.clone())))
+                                    }
+                                } else { Err(PyError::type_error("removesuffix() argument must be bytes")) }
+                            } else { Err(PyError::runtime_error("removesuffix on non-bytes")) }
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -6767,6 +6926,52 @@ impl PyObject {
                             if let PyObject::ByteArray(bytes) = &*args[0].borrow() {
                                 Ok(py_int(33 + bytes.len() as i64))
                             } else { Err(PyError::runtime_error("__sizeof__ on non-bytearray")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "removeprefix" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "removeprefix".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("removeprefix() takes exactly 1 argument")); }
+                            if let PyObject::ByteArray(b) = &*args[0].borrow() {
+                                let prefix = args[1].borrow();
+                                if let PyObject::Bytes(p) = &*prefix {
+                                    if b.starts_with(p.as_slice()) {
+                                        Ok(PyObjectRef::imm(PyObject::ByteArray(b[p.len()..].to_vec())))
+                                    } else {
+                                        Ok(PyObjectRef::imm(PyObject::ByteArray(b.clone())))
+                                    }
+                                } else if let PyObject::ByteArray(p) = &*prefix {
+                                    if b.starts_with(p.as_slice()) {
+                                        Ok(PyObjectRef::imm(PyObject::ByteArray(b[p.len()..].to_vec())))
+                                    } else {
+                                        Ok(PyObjectRef::imm(PyObject::ByteArray(b.clone())))
+                                    }
+                                } else { Err(PyError::type_error("removeprefix() argument must be bytes-like")) }
+                            } else { Err(PyError::runtime_error("removeprefix on non-bytearray")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "removesuffix" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "removesuffix".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("removesuffix() takes exactly 1 argument")); }
+                            if let PyObject::ByteArray(b) = &*args[0].borrow() {
+                                let suffix = args[1].borrow();
+                                if let PyObject::Bytes(s) = &*suffix {
+                                    if b.ends_with(s.as_slice()) {
+                                        Ok(PyObjectRef::imm(PyObject::ByteArray(b[..b.len()-s.len()].to_vec())))
+                                    } else {
+                                        Ok(PyObjectRef::imm(PyObject::ByteArray(b.clone())))
+                                    }
+                                } else if let PyObject::ByteArray(s) = &*suffix {
+                                    if b.ends_with(s.as_slice()) {
+                                        Ok(PyObjectRef::imm(PyObject::ByteArray(b[..b.len()-s.len()].to_vec())))
+                                    } else {
+                                        Ok(PyObjectRef::imm(PyObject::ByteArray(b.clone())))
+                                    }
+                                } else { Err(PyError::type_error("removesuffix() argument must be bytes-like")) }
+                            } else { Err(PyError::runtime_error("removesuffix on non-bytearray")) }
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -7778,45 +7983,47 @@ impl PyObject {
                     "__next__" | "send" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: name.to_string(),
                         func: move |args| {
-                            let gen = args[0].borrow();
-                            if let PyObject::Generator { frame } = &*gen {
-                                let mut frame_opt = frame.borrow_mut();
-                                if let Some(f) = frame_opt.as_mut() {
-                                    // Push the sent value onto the stack (None for __next__, value for send())
-                                    if args.len() > 1 {
-                                        f.stack.push(args[1].clone());
-                                    } else {
-                                        f.stack.push(crate::object::py_none());
-                                    }
-                                    let mut vm = super::vm::VirtualMachine::new();
-                                    vm.frames.push(f.clone());
-                                    match vm.execute() {
-                                        Ok(val) => {
-                                            let modified = vm.frames.pop().unwrap();
-                                            if modified.ip > 0 && matches!(&modified.code.instructions[modified.ip - 1].op, crate::bytecode::Opcode::YIELD_VALUE) {
-                                                *f = modified;
-                                                Ok(val)
-                                            } else {
-                                                *frame_opt = None;
-                                                // Propagate the return value via StopIteration for SEND
-                                                Err(crate::object::PyError::Exception("StopIteration".to_string(), val))
-                                            }
-                                        }
-                                        Err(e) => {
-                                            *frame_opt = None;
-                                            // Any exception the generator body itself
-                                            // raised (unhandled by its own try/except)
-                                            // must propagate to the caller as-is — only
-                                            // a genuine StopIteration (exhaustion) is
-                                            // this protocol's own signal.
-                                            Err(e)
-                                        }
-                                    }
+                            // Use a raw pointer to the RefCell to avoid cloning it
+                            // (cloning creates an independent copy and the saved frame
+                            // state is never written back to the generator).
+                            let frame_ptr: *const std::cell::RefCell<Option<super::vm::Frame>> = {
+                                let gen = args[0].borrow();
+                                match &*gen {
+                                    PyObject::Generator { frame } => frame as *const _,
+                                    _ => std::ptr::null(),
+                                }
+                            };
+                            if frame_ptr.is_null() {
+                                return Err(PyError::runtime_error("__next__ on non-generator"));
+                            }
+                            let frame_rc = unsafe { &*frame_ptr };
+                            let mut frame_opt = frame_rc.borrow_mut();
+                            if let Some(f) = frame_opt.as_mut() {
+                                if args.len() > 1 {
+                                    f.stack.push(args[1].clone());
                                 } else {
-                                    Err(PyError::StopIteration)
+                                    f.stack.push(crate::object::py_none());
+                                }
+                                let mut vm = super::vm::VirtualMachine::new();
+                                vm.frames.push(f.clone());
+                                match vm.execute() {
+                                    Ok(val) => {
+                                        let modified = vm.frames.pop().unwrap();
+                                        if modified.ip > 0 && matches!(&modified.code.instructions[modified.ip - 1].op, crate::bytecode::Opcode::YIELD_VALUE) {
+                                            *f = modified;
+                                            Ok(val)
+                                        } else {
+                                            *frame_opt = None;
+                                            Err(crate::object::PyError::Exception("StopIteration".to_string(), val))
+                                        }
+                                    }
+                                    Err(e) => {
+                                        *frame_opt = None;
+                                        Err(e)
+                                    }
                                 }
                             } else {
-                                Err(PyError::runtime_error("__next__ on non-generator"))
+                                Err(PyError::StopIteration)
                             }
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
@@ -7968,6 +8175,92 @@ impl PyObject {
                         func: |args| Ok(args[0].clone()),
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
+                    "__await__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__await__".to_string(),
+                        func: |args| Ok(args[0].clone()),
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__anext__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__anext__".to_string(),
+                        func: |args| {
+                            if let PyObject::Coroutine { .. } = &*args[0].borrow() {
+                                let send_method = args[0].borrow().get_attribute("send")?;
+                                let (n, f) = {
+                                    let b = send_method.borrow();
+                                    if let PyObject::BuiltinMethod { name, func, .. } = &*b {
+                                        (name.clone(), *func)
+                                    } else { return Err(PyError::runtime_error("expected send method")) }
+                                };
+                                let fixed = PyObjectRef::imm(PyObject::BuiltinMethod {
+                                    name: n, func: f,
+                                    self_obj: args[0].clone(),
+                                });
+                                let mut vm = super::vm::VirtualMachine::new();
+                                vm.call_function(fixed, vec![crate::object::py_none()], vec![])
+                            } else { Err(PyError::runtime_error("__anext__ on non-coroutine")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__aiter__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__aiter__".to_string(),
+                        func: |args| Ok(args[0].clone()),
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "asend" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "asend".to_string(),
+                        func: |args| {
+                            if let PyObject::Coroutine { .. } = &*args[0].borrow() {
+                                let send_method = args[0].borrow().get_attribute("send")?;
+                                let (n, f) = {
+                                    let b = send_method.borrow();
+                                    if let PyObject::BuiltinMethod { name, func, .. } = &*b {
+                                        (name.clone(), *func)
+                                    } else { return Err(PyError::runtime_error("expected send method")) }
+                                };
+                                let fixed = PyObjectRef::imm(PyObject::BuiltinMethod {
+                                    name: n, func: f,
+                                    self_obj: args[0].clone(),
+                                });
+                                let val = if args.len() > 1 { args[1].clone() } else { crate::object::py_none() };
+                                let mut vm = super::vm::VirtualMachine::new();
+                                vm.call_function(fixed, vec![val], vec![])
+                            } else { Err(PyError::runtime_error("asend on non-coroutine")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "athrow" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "athrow".to_string(),
+                        func: |args| {
+                            if let PyObject::Coroutine { .. } = &*args[0].borrow() {
+                                let throw_method = args[0].borrow().get_attribute("throw")?;
+                                let (n, f) = {
+                                    let b = throw_method.borrow();
+                                    if let PyObject::BuiltinMethod { name, func, .. } = &*b {
+                                        (name.clone(), *func)
+                                    } else { return Err(PyError::runtime_error("expected throw method")) }
+                                };
+                                let fixed = PyObjectRef::imm(PyObject::BuiltinMethod {
+                                    name: n, func: f,
+                                    self_obj: args[0].clone(),
+                                });
+                                let exc = if args.len() > 1 { args[1].clone() } else { crate::object::py_none() };
+                                let mut vm = super::vm::VirtualMachine::new();
+                                vm.call_function(fixed, vec![exc], vec![])
+                            } else { Err(PyError::runtime_error("athrow on non-coroutine")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "aclose" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "aclose".to_string(),
+                        func: |args| {
+                            if let PyObject::Coroutine { frame } = &*args[0].borrow() {
+                                let mut frame_opt = frame.borrow_mut();
+                                *frame_opt = None;
+                                Ok(crate::object::py_none())
+                            } else { Err(PyError::runtime_error("aclose on non-coroutine")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     _ => Err(PyError::attribute_error(format!("'coroutine' object has no attribute '{}'", name))),
                 }
             }
@@ -8053,6 +8346,66 @@ impl PyObject {
                             }
                             Ok(py_none())
                         },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "seek" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "seek".to_string(),
+                        func: |args| {
+                            use std::io::SeekFrom;
+                            if args.len() < 2 { return Err(PyError::type_error("seek() requires at least 1 argument")); }
+                            if let PyObject::File { file, .. } = &*args[0].borrow() {
+                                use std::io::Seek;
+                                let offset = args[1].as_i64().unwrap_or(0);
+                                let whence = if args.len() > 2 { args[2].as_i64().unwrap_or(0) as i32 } else { 0 };
+                                let pos = file.borrow_mut().seek(match whence {
+                                    1 => SeekFrom::Current(offset),
+                                    2 => SeekFrom::End(offset),
+                                    _ => SeekFrom::Start(offset as u64),
+                                }).map_err(|e| PyError::OsError(format!("{}", e)))?;
+                                Ok(py_int(pos as i64))
+                            } else { Err(PyError::runtime_error("seek on non-file")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "tell" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "tell".to_string(),
+                        func: |args| {
+                            use std::io::Seek;
+                            if let PyObject::File { file, .. } = &*args[0].borrow() {
+                                let pos = file.borrow_mut().stream_position().map_err(|e| PyError::OsError(format!("{}", e)))?;
+                                Ok(py_int(pos as i64))
+                            } else { Err(PyError::runtime_error("tell on non-file")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "isatty" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "isatty".to_string(),
+                        func: |args| {
+                            if let PyObject::File { file, .. } = &*args[0].borrow() {
+                                let fd = {
+                                    use std::os::unix::io::AsRawFd;
+                                    file.borrow().as_raw_fd()
+                                };
+                                extern "C" { fn isatty(fd: i32) -> i32; }
+                                let is_tty = unsafe { isatty(fd) } != 0;
+                                Ok(py_bool(is_tty))
+                            } else { Err(PyError::runtime_error("isatty on non-file")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "readable" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "readable".to_string(),
+                        func: |_| Ok(py_bool(true)),
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "writable" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "writable".to_string(),
+                        func: |_| Ok(py_bool(true)),
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "seekable" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "seekable".to_string(),
+                        func: |_| Ok(py_bool(true)),
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
                     _ => Err(PyError::attribute_error(format!("'file' object has no attribute '{}'", name))),
@@ -8579,6 +8932,21 @@ impl PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
+                    "bit_count" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "bit_count".to_string(),
+                        func: |args| {
+                            if let PyObject::Int(v) = &*args[0].borrow() {
+                                let count: u32 = if *v < num_bigint::BigInt::from(0) {
+                                    let neg = -(v + 1i32);
+                                    neg.to_bytes_le().1.iter().map(|b| b.count_ones()).sum()
+                                } else {
+                                    v.to_bytes_le().1.iter().map(|b| b.count_ones()).sum()
+                                };
+                                Ok(py_int(count as i64))
+                            } else { Err(PyError::runtime_error("bit_count on non-int")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     "to_bytes" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "to_bytes".to_string(),
                         func: |args| {
@@ -8715,6 +9083,32 @@ impl PyObject {
                                 let (num, den) = float_to_ratio(f);
                                 Ok(py_tuple(vec![py_int(num), py_int(den)]))
                             } else { Err(PyError::runtime_error("as_integer_ratio on non-float")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "hex" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "hex".to_string(),
+                        func: |args| {
+                            if let PyObject::Float(v) = &*args[0].borrow() {
+                                let bits = v.to_bits();
+                                let sign = if (bits >> 63) != 0 { "-" } else { "" };
+                                let biased_exp = ((bits >> 52) & 0x7ff) as i64;
+                                let mantissa = bits & 0x000f_ffff_ffff_ffff;
+                                if biased_exp == 0x7ff {
+                                    if mantissa == 0 {
+                                        Ok(py_str(&format!("{}inf", sign)))
+                                    } else {
+                                        Ok(py_str(&format!("{}nan", sign)))
+                                    }
+                                } else if *v == 0.0 {
+                                    Ok(py_str(&format!("{}0x0.0p+0", sign)))
+                                } else {
+                                    let exp = biased_exp - 1023;
+                                    let hex_mantissa = format!("{:013x}", mantissa);
+                                    let hex_mantissa = hex_mantissa.trim_end_matches('0');
+                                    Ok(py_str(&format!("{}0x1.{}p{:+}", sign, if hex_mantissa.is_empty() { "0" } else { hex_mantissa }, exp)))
+                                }
+                            } else { Err(PyError::runtime_error("hex on non-float")) }
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -9194,6 +9588,9 @@ impl PyObject {
                 if name == "__name__" {
                     return Ok(py_str(bf_name));
                 }
+                if name == "__qualname__" {
+                    return Ok(py_str(bf_name));
+                }
                 if name == "__mro__" || name == "__bases__" {
                     return Ok(PyObjectRef::new(PyObject::Tuple(vec![])));
                 }
@@ -9255,6 +9652,23 @@ impl PyObject {
                     "co_varnames" => Ok(py_tuple(c.varnames.iter().map(|v| py_str(v)).collect())),
                     "co_flags" => Ok(py_int(c.flags as i64)),
                     _ => Err(PyError::attribute_error(format!("'code' object has no attribute '{}'", name))),
+                }
+            }
+            PyObject::Range { start, stop, step } => {
+                match name {
+                    "start" => Ok(py_int(*start)),
+                    "stop" => Ok(py_int(*stop)),
+                    "step" => Ok(py_int(*step)),
+                    _ => Err(PyError::attribute_error(format!("'range' object has no attribute '{}'", name))),
+                }
+            }
+            PyObject::RangeIter { current, stop, step } => {
+                match name {
+                    "__length_hint__" => {
+                        let remaining = if *step > 0 { stop.saturating_sub(*current).max(0) as i64 } else { current.saturating_sub(*stop).max(0) as i64 };
+                        Ok(py_int(remaining / step.abs() as i64))
+                    }
+                    _ => Err(PyError::attribute_error(format!("'range_iterator' object has no attribute '{}'", name))),
                 }
             }
             _ => Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", self.type_name(), name))),
@@ -9479,15 +9893,18 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                     if step_val > 0 {
                         let start_val = if let PyObject::Int(i) = &*s { i.to_isize().unwrap_or(0) } else { 0 };
                         let stop_val = if let PyObject::Int(i) = &*e { i.to_isize().unwrap_or(len as isize) } else { len as isize };
-                        let mut i = start_val;
-                        while i < stop_val && i < len as isize {
+                        let start_clamped = start_val.max(0).min(len as isize);
+                        let stop_clamped = stop_val.max(0).min(len as isize);
+                        let mut i = start_clamped;
+                        while i < stop_clamped && i < len as isize {
                             result.push(items[i as usize].clone());
                             i += step_val;
                         }
                     } else {
                         let start_val = if let PyObject::Int(i) = &*s { i.to_isize().unwrap_or((len as isize) - 1) } else { (len as isize) - 1 };
                         let stop_val = if let PyObject::Int(i) = &*e { i.to_isize().unwrap_or(-1) } else { -1 };
-                        let mut i = start_val;
+                        let start_clamped = start_val.min((len as isize) - 1);
+                        let mut i = start_clamped;
                         while i > stop_val && i >= 0 {
                             result.push(items[i as usize].clone());
                             i += step_val;
@@ -9520,15 +9937,18 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                     if step_val > 0 {
                         let start_val = if let PyObject::Int(i) = &*s { i.to_isize().unwrap_or(0) } else { 0 };
                         let stop_val = if let PyObject::Int(i) = &*e { i.to_isize().unwrap_or(len as isize) } else { len as isize };
-                        let mut i = start_val;
-                        while i < stop_val && i < len as isize {
+                        let start_clamped = start_val.max(0).min(len as isize);
+                        let stop_clamped = stop_val.max(0).min(len as isize);
+                        let mut i = start_clamped;
+                        while i < stop_clamped && i < len as isize {
                             result.push(items[i as usize].clone());
                             i += step_val;
                         }
                     } else {
                         let start_val = if let PyObject::Int(i) = &*s { i.to_isize().unwrap_or((len as isize) - 1) } else { (len as isize) - 1 };
                         let stop_val = if let PyObject::Int(i) = &*e { i.to_isize().unwrap_or(-1) } else { -1 };
-                        let mut i = start_val;
+                        let start_clamped = start_val.min((len as isize) - 1);
+                        let mut i = start_clamped;
                         while i > stop_val && i >= 0 {
                             result.push(items[i as usize].clone());
                             i += step_val;

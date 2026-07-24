@@ -323,7 +323,8 @@ impl VirtualMachine {
           modules.insert("zoneinfo".to_string(), create_module("zoneinfo", zoneinfo_dict));
 
           let socket_dict = create_socket_dict();
-          modules.insert("socket".to_string(), create_module("socket", socket_dict));
+          modules.insert("socket".to_string(), create_module("socket", socket_dict.clone()));
+          modules.insert("_socket".to_string(), create_module("_socket", socket_dict));
 
           let select_dict = create_select_dict();
           modules.insert("select".to_string(), create_module("select", select_dict));
@@ -335,11 +336,11 @@ impl VirtualMachine {
           modules.insert("subprocess".to_string(), create_module("subprocess", subprocess_dict));
 
           // Native pickle module (basic stub)
-          modules.insert("pickle".to_string(), create_module("pickle", create_pickle_dict()));
+          modules.insert("_pickle".to_string(), create_module("_pickle", create_pickle_dict()));
 
           // Native logging module
-          modules.insert("logging".to_string(), create_module("logging", create_logging_dict()));
-          modules.insert("logging.config".to_string(), create_module("logging.config", create_logging_config_dict()));
+          modules.insert("_logging".to_string(), create_module("_logging", create_logging_dict()));
+          modules.insert("_logging.config".to_string(), create_module("_logging.config", create_logging_config_dict()));
 
           // Native timeit module
           modules.insert("timeit".to_string(), create_module("timeit", create_timeit_dict()));
@@ -540,10 +541,10 @@ impl VirtualMachine {
           // modules.insert("typing".to_string(), create_module("typing", create_typing_dict()));
 
           // Native pickle module
-          modules.insert("pickle".to_string(), create_module("pickle", create_pickle_dict()));
+          modules.insert("_pickle".to_string(), create_module("_pickle", create_pickle_dict()));
 
           // Native logging module
-          modules.insert("logging".to_string(), create_module("logging", create_logging_dict()));
+          modules.insert("_logging".to_string(), create_module("_logging", create_logging_dict()));
 
           // Native timeit module
           modules.insert("timeit".to_string(), create_module("timeit", create_timeit_dict()));
@@ -806,6 +807,16 @@ impl VirtualMachine {
         if let PyObject::List(path_list) = &mut *sys_dict.get("path").unwrap().borrow_mut() {
             path_list.push(py_str("."));
             path_list.push(py_str(&find_lib_dir()));
+
+            // Read PYTHONPATH environment variable
+            if let Ok(pythonpath) = std::env::var("PYTHONPATH") {
+                for p in pythonpath.split(':') {
+                    let trimmed = p.trim();
+                    if !trimmed.is_empty() {
+                        path_list.push(py_str(trimmed));
+                    }
+                }
+            }
 
             // Detect virtual environment (VIRTUAL_ENV, conda, poetry, pixi, or .venv in CWD)
             let venv = std::env::var("VIRTUAL_ENV").ok()
@@ -6620,7 +6631,7 @@ pub(crate) fn is_exception_subclass(child_type: &str, parent_type: &str) -> bool
 /// and applies the formatting to the given value.
 ///
 /// See: https://docs.python.org/3/library/string.html#formatspec
-fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
+pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
     if spec_str.is_empty() {
         return Ok(val.str());
     }
