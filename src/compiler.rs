@@ -126,7 +126,27 @@ impl Compiler {
         }
         match program {
             Program::Module(stmts) => {
-                self.compile_stmts(stmts)?;
+                // A bare string-literal expression as the module's FIRST
+                // statement is its docstring, matching real CPython's
+                // module `__doc__` semantics — this was never handled at
+                // all (only function/class docstrings were), so EVERY
+                // module's `__doc__` was unconditionally `None` regardless
+                // of what the module's own source actually said. Confirmed
+                // via the simplest repro: `"""doc"""` as a module's first
+                // line still left `module.__doc__` as `None`. Compiled the
+                // same way real CPython does — a direct `STORE_NAME
+                // __doc__`, not a discarded expression statement.
+                let mut start = 0;
+                if let Some(Stmt::Expr(expr)) = stmts.first().map(Self::unwrap_located) {
+                    if let Expr::Constant(Constant::String(doc)) = expr.as_ref() {
+                        let doc_idx = self.get_const_index(ConstValue::String(doc.clone())) as u32;
+                        self.emit(Opcode::LOAD_CONST, doc_idx);
+                        let doc_name_idx = self.get_name_index("__doc__") as u32;
+                        self.emit(Opcode::STORE_NAME, doc_name_idx);
+                        start = 1;
+                    }
+                }
+                self.compile_stmts(&stmts[start..])?;
             }
             Program::Expression(expr) => {
                 self.compile_expr(expr)?;

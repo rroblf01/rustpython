@@ -748,25 +748,34 @@ pub fn create_itertools_dict() -> HashMap<String, PyObjectRef> {
     it_func!("repeat", |args| {
         if args.is_empty() { return Err(PyError::type_error("repeat() missing argument")); }
         let obj = args[0].clone();
-        let times = if args.len() > 1 {
-            args[1].as_i64().ok_or_else(|| PyError::type_error("times must be int"))? as usize
+        // `None` distinguishes "no count given" (real infinite repeat) from
+        // an explicit `times=0` (a real, valid call meaning "repeat zero
+        // times" — an empty iterator) — these used to collapse onto the
+        // same `0` sentinel, so `itertools.repeat(x, 0)` wrongly produced
+        // 1000 items instead of none.
+        let times: Option<usize> = if args.len() > 1 {
+            let n = args[1].as_i64().ok_or_else(|| PyError::type_error("times must be int"))?;
+            Some(n.max(0) as usize)
         } else {
-            0 // signal for infinite
+            None
         };
-        if times == 0 {
-            // Infinite repeat — return a list of 1000 items (enough for random.py)
-            let mut items = Vec::with_capacity(1000);
-            for _ in 0..1000 {
-                items.push(obj.clone());
-            }
-            Ok(py_list(items))
-        } else {
-            let mut items = Vec::with_capacity(times);
-            for _ in 0..times {
-                items.push(obj.clone());
-            }
-            Ok(py_list(items))
+        // Cap materialization regardless of the requested count — this
+        // itertools implementation is eager (builds a real list), not a
+        // true lazy iterator, so an astronomically large explicit count
+        // (a common real-world test pattern like `repeat(x, sys.maxsize)`
+        // combined with `islice` to only ever pull a few items, relying on
+        // real itertools' laziness to never actually materialize the rest)
+        // would otherwise try to allocate a vector sized by that count
+        // directly, crashing with a Rust allocator "capacity overflow"
+        // panic instead of a graceful Python-level result. Real trigger:
+        // CPython's own `test_itertools.py`.
+        const MAX_MATERIALIZED: usize = 100_000;
+        let n = times.unwrap_or(1000).min(MAX_MATERIALIZED);
+        let mut items = Vec::with_capacity(n);
+        for _ in 0..n {
+            items.push(obj.clone());
         }
+        Ok(py_list(items))
     });
 
     it_func!("islice", |args| {

@@ -485,6 +485,21 @@ impl PyError {
     pub fn stop_iteration() -> Self {
         PyError::StopIteration
     }
+    /// A real `SyntaxError` (typ + message, matching the established
+    /// `PyError::Exception(name, obj)` pattern used elsewhere for
+    /// dynamically-named exceptions like `UnicodeDecodeError`) — NOT
+    /// `PyError::TypeError`, which is what every parse-error site used to
+    /// raise instead (confirmed via `compile("x=", "<f>", "exec")`,
+    /// previously uncatchable by `except SyntaxError:`, an extremely
+    /// standard idiom for validating/pre-checking source code).
+    pub fn syntax_error(msg: impl Into<String>) -> Self {
+        let msg = msg.into();
+        PyError::Exception("SyntaxError".to_string(), PyObjectRef::new(PyObject::Exception {
+            typ: "SyntaxError".to_string(),
+            args: vec![py_str(&msg)],
+            cause: None,
+        }))
+    }
     pub fn runtime_error(msg: impl Into<String>) -> Self {
         PyError::RuntimeError(msg.into())
     }
@@ -2642,13 +2657,27 @@ pub fn contains_op(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<bool> {
             Ok(s.contains(&item_str))
         }
         PyObject::List(items) => {
-            for item in items {
+            // Clone the item list out of the borrow BEFORE iterating —
+            // `item.equals(b)` can run arbitrary Python (a custom
+            // `__eq__`), and holding `container`'s borrow live across that
+            // call means a pathological `__eq__` that mutates THIS SAME
+            // list (e.g. a test deliberately exercising a
+            // clears-itself-during-comparison edge case) hits `list.clear()`
+            // (or any other mutator) while this borrow is still held,
+            // panicking with "RefCell already borrowed" instead of either
+            // completing or raising a normal Python-level error. Confirmed
+            // via a real trigger in CPython's own `test_deque.py`.
+            let items = items.clone();
+            drop(container);
+            for item in &items {
                 if item.equals(b)? { return Ok(true); }
             }
             Ok(false)
         }
         PyObject::Tuple(items) => {
-            for item in items {
+            let items = items.clone();
+            drop(container);
+            for item in &items {
                 if item.equals(b)? { return Ok(true); }
             }
             Ok(false)
@@ -2678,13 +2707,91 @@ pub fn py_contains(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
 
 // ---- Built-in functions ----
 
+// Fallback only — real dispatch goes through `print_with_vm` via a
+// `fn_addr_eq` special-case in `vm.rs`'s `call_function` (see
+// `print_with_vm`'s own doc comment for why this needs the live VM).
 pub fn builtin_print(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if std::env::var("RPY_DEBUG_PRINT").is_ok() {
-        eprintln!("PRINT CALLED with {} args, kinds: {:?}", args.len(), args.iter().map(|a| a.borrow().type_name().to_string()).collect::<Vec<_>>());
+    with_vm_mut(|vm| print_with_vm(vm, args, &[]))?
+}
+
+/// The real `print()` implementation — needs a live `&mut VirtualMachine` to
+/// look up the CURRENT value of `sys.stdout` (not a cached reference) so
+/// `contextlib.redirect_stdout`/`unittest.mock.patch('sys.stdout', ...)`-style
+/// substitution actually takes effect, and to call arbitrary objects'
+/// `write`/`flush` methods (a plain `io::stdout()` `println!()`, which is
+/// what this used to be, can reach neither). Previously this also silently
+/// ignored `sep`/`end`/`file`/`flush` keyword arguments entirely — they were
+/// packed into a trailing dict (this project's established kwargs-passing
+/// convention for plain `BuiltinFunction`s) and then that dict got PRINTED
+/// AS A POSITIONAL ARGUMENT, since the old code just joined every element of
+/// `args` unconditionally. Confirmed via the simplest possible repro:
+/// `print("x", end="")` printed `x {'end': ''}` instead of `x` with no
+/// trailing newline. Given how extremely common `sep=`/`end=`/`file=` and
+/// stdout-capturing test patterns both are in real Python code, this was one
+/// of the most broadly-impactful gaps found this session.
+pub(crate) fn print_with_vm(vm: &mut super::vm::VirtualMachine, args: &[PyObjectRef], keywords: &[(String, PyObjectRef)]) -> PyResult<PyObjectRef> {
+    let mut sep = " ".to_string();
+    let mut end = "\n".to_string();
+    let mut file: Option<PyObjectRef> = None;
+    let mut flush = false;
+    for (k, v) in keywords {
+        match k.as_str() {
+            "sep" => {
+                if !matches!(&*v.borrow(), PyObject::None) { sep = v.str(); }
+            }
+            "end" => {
+                if !matches!(&*v.borrow(), PyObject::None) { end = v.str(); }
+            }
+            "file" => {
+                if !matches!(&*v.borrow(), PyObject::None) { file = Some(v.clone()); }
+            }
+            "flush" => { flush = v.truthy(); }
+            _ => {}
+        }
     }
+
     let strings: Vec<String> = args.iter().map(|a| a.str()).collect();
-    println!("{}", strings.join(" "));
+    let mut output = strings.join(&sep);
+    output.push_str(&end);
+
+    let target = match file {
+        Some(f) => f,
+        None => vm.modules.get("sys")
+            .and_then(|m| if let PyObject::Module { dict, .. } = &*m.borrow() { dict.get("stdout").cloned() } else { None })
+            .ok_or_else(|| PyError::runtime_error("lost sys.stdout"))?,
+    };
+
+    call_method_rebound(vm, &target, "write", vec![py_str(&output)])
+        .map_err(|_| PyError::attribute_error("'file' object has no attribute 'write'"))?;
+
+    if flush {
+        let _ = call_method_rebound(vm, &target, "flush", vec![]);
+    }
+
     Ok(py_none())
+}
+
+/// Calls `target.<name>(call_args...)`, rebinding a native `BuiltinMethod`'s
+/// `self_obj` to `target` directly (ONE prepended self, matching how
+/// `LOAD_ATTR` itself rebinds container methods like `File`/`List`/`Dict`'s
+/// `write`/`append`/etc. for ordinary dot-call syntax) — NOT
+/// `call_bound_method`'s convention, which prepends BOTH the method's own
+/// (placeholder) `self_obj` AND an explicit second one, meant for dunder
+/// methods that are written expecting that double-self shape. Using
+/// `call_bound_method` here initially caused `File::write`'s own `args[0]`
+/// check to see the leftover placeholder instead of the real file, raising
+/// "write on non-file" — confirmed by testing plain `f.write(x)` (which
+/// goes through `LOAD_ATTR`'s rebind-in-place logic, not `call_bound_method`)
+/// working correctly on the exact same object.
+fn call_method_rebound(vm: &mut super::vm::VirtualMachine, target: &PyObjectRef, name: &str, call_args: Vec<PyObjectRef>) -> PyResult<PyObjectRef> {
+    let method = target.borrow().get_attribute(name)?;
+    let bound = match &*method.borrow() {
+        PyObject::BuiltinMethod { func, name: mname, .. } => {
+            PyObjectRef::imm(PyObject::BuiltinMethod { name: mname.clone(), func: *func, self_obj: target.clone() })
+        }
+        _ => method.clone(),
+    };
+    vm.call_function(bound, call_args, vec![])
 }
 
 pub fn builtin_len(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
@@ -5127,11 +5234,34 @@ pub fn builtin_compile(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
     let source = args[0].str();
     let filename = args[1].str();
-    let _mode = args[2].str();
-    let mut parser = crate::parser::Parser::new(&source);
-    let program = parser.parse_program().map_err(|e| PyError::type_error(format!("SyntaxError: {}", e)))?;
+    let mode = args[2].str();
+    // The `mode` argument was previously READ but never actually consulted
+    // (`_mode`, underscore-prefixed — deliberately unused) — every call
+    // parsed as a plain statement/module body regardless of "eval"/"exec"/
+    // "single", so `compile(src, f, "eval")` produced a MODULE-shaped code
+    // object (ending in `LOAD_CONST None; RETURN_VALUE`, discarding
+    // whatever the expression computed) instead of an EXPRESSION-shaped one
+    // (`RETURN_VALUE` with the actual computed value). Confirmed via the
+    // simplest repro: `eval(compile("1+1", "<x>", "eval"))` returned `None`
+    // instead of `2`, even though `eval("1+1")` (compiling from a raw
+    // string, which goes through a SEPARATE, already-correct code path in
+    // `vm.rs`'s own `exec`/`eval` special-casing) worked fine — the bug was
+    // specifically in the `compile()` builtin, not `eval()` itself. "single"
+    // (REPL/interactive mode) is treated the same as "eval" here — this
+    // interpreter has no separate auto-print-via-displayhook mechanism for
+    // it either way, so an expression's VALUE is at least preserved instead
+    // of silently discarded, which is what actually mattered for real
+    // callers (real trigger: a `doctest`-style engine using
+    // `compile(example, "<doctest>", "eval")` to both execute an example
+    // and recover its result for auto-printing).
+    let program = if mode == "eval" || mode == "single" {
+        crate::parser::try_parse_as_expression(&source).map_err(|e| PyError::syntax_error(e))?
+    } else {
+        let mut parser = crate::parser::Parser::new(&source);
+        parser.parse_program().map_err(|e| PyError::syntax_error(e))?
+    };
     let mut compiler = crate::compiler::Compiler::new();
-    let code = compiler.compile(&program, &filename).map_err(|e| PyError::type_error(format!("compile error: {}", e)))?;
+    let code = compiler.compile(&program, &filename).map_err(|e| PyError::syntax_error(e))?;
     Ok(PyObjectRef::new(PyObject::Code(Box::new(code))))
 }
 

@@ -946,7 +946,7 @@ impl Lexer {
             // Still need to handle indent/dedent for comment-only lines
             // followed by blank lines (the # handler consumes the \n but
             // the indent check is skipped due to early return)
-            let current = *self.indent_stack.last().unwrap();
+            let current = self.indent_stack.last().copied().unwrap_or(0);
             if indent > current {
                 self.indent_stack.push(indent);
                 self.pending.push(Token::Indent);
@@ -961,7 +961,7 @@ impl Lexer {
             }
             return;
         }
-        let current = *self.indent_stack.last().unwrap();
+        let current = self.indent_stack.last().copied().unwrap_or(0);
         if indent > current {
             self.indent_stack.push(indent);
             self.pending.push(Token::Indent);

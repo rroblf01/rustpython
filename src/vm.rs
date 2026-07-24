@@ -638,8 +638,17 @@ impl VirtualMachine {
           // whose goal is being a genuine CPython replacement.
           // modules.insert("unittest".to_string(), create_module("unittest", create_unittest_dict()));
 
-          // Native doctest module (stub with TestResults and testmod)
-          modules.insert("doctest".to_string(), create_module("doctest", create_doctest_dict()));
+          // Native doctest module used to be a hollow stub (testmod/testfile
+          // always reported 0 attempted/0 failed regardless of actual
+          // docstring content; DocTestSuite/DocFileSuite didn't exist at all
+          // — real trigger: 16+ CPython test files' own `load_tests` doing
+          // `tests.addTest(doctest.DocTestSuite())`, crashing with
+          // `AttributeError: 'module' object has no attribute
+          // 'DocTestSuite'`). Replaced with a real (if simplified) Python
+          // implementation at `Lib/doctest.py`, resolved through the normal
+          // file-based import path instead — same "vendor/reimplement as a
+          // pure-Python Lib/ module" pattern as `unittest`/`email`.
+          // modules.insert("doctest".to_string(), create_module("doctest", create_doctest_dict()));
 
           // `email` used to be a thin native stub (EmailMessage/MIMEText/
           // header/utils only, no real Message class, no submodule files —
@@ -1086,7 +1095,19 @@ impl VirtualMachine {
         if let Some(sys_mod) = self.modules.get("sys") {
             if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
                 if let Some(mod_dict) = dict.get("modules") {
-                    mod_dict.borrow_mut().set_attribute("__main__", main_module.clone()).ok();
+                    // `sys.modules` is a real `dict` — `set_attribute` sets
+                    // an OBJECT ATTRIBUTE (routed to `PyObject::Dict`'s own
+                    // catch-all side-attribute-storage arm for non-Instance
+                    // builtins), not a dict KEY, so this silently failed to
+                    // make `"__main__"` actually appear via `sys.modules[...]`/
+                    // `in sys.modules` at all — only `self.modules` (this
+                    // VM's own Rust-side registry, which `import __main__`
+                    // itself consults) ever really had it. Confirmed via the
+                    // simplest repro: `import __main__` succeeds but
+                    // `"__main__" in sys.modules` is `False` right after.
+                    if let PyObject::Dict(d) = &mut *mod_dict.borrow_mut() {
+                        let _ = d.set(py_str("__main__"), main_module.clone());
+                    }
                 }
             }
         }
@@ -5190,6 +5211,19 @@ impl VirtualMachine {
             }
         }
 
+        // `print()` — needs the live VM to look up the CURRENT `sys.stdout`
+        // (not a cached reference) and to accept `sep`/`end`/`file`/`flush`
+        // keyword arguments, which the generic `BuiltinFunction` dispatch
+        // path further below would otherwise pack into a trailing dict
+        // ARGUMENT (this project's established kwargs-passing convention
+        // for plain builtins) — silently printing that dict as if it were
+        // one more thing to print, since the old implementation just joined
+        // every element of `args` unconditionally. See `print_with_vm`'s
+        // own doc comment for the full story.
+        if matches!(&*callable.borrow(), PyObject::BuiltinFunction { func, .. } if std::ptr::fn_addr_eq(*func, crate::object::builtin_print as crate::object::BuiltinFunc)) {
+            return crate::object::print_with_vm(self, &args, &keywords);
+        }
+
         // `globals()`/`locals()` — same `with_vm_mut`-is-unconditional-UB
         // class of bug (confirmed via a general repro: `def f(): locals()`
         // — not a segfault this time, but `vm.frames` reading back empty
@@ -5304,14 +5338,17 @@ impl VirtualMachine {
                         // level execution); using statement-mode for both
                         // (the pre-fix code's bug) made `eval("2+2")` return
                         // None instead of 4.
+                        // A real `SyntaxError` (not `TypeError`) — see
+                        // `PyError::syntax_error`'s own doc comment; same
+                        // fix as `builtin_compile`'s equivalent parse sites.
                         let program = if is_eval {
-                            crate::parser::try_parse_as_expression(&source).map_err(|e| PyError::type_error(format!("eval parse error: {}", e)))?
+                            crate::parser::try_parse_as_expression(&source).map_err(PyError::syntax_error)?
                         } else {
                             let mut parser = crate::parser::Parser::new(&source);
-                            parser.parse_program().map_err(|e| PyError::type_error(format!("exec parse error: {}", e)))?
+                            parser.parse_program().map_err(PyError::syntax_error)?
                         };
                         let mut compiler = crate::compiler::Compiler::new();
-                        compiler.compile(&program, &format!("<{}>", mode_name)).map_err(|e| PyError::type_error(format!("{} compile error: {}", mode_name, e)))?
+                        compiler.compile(&program, &format!("<{}>", mode_name)).map_err(PyError::syntax_error)?
                     }
                 };
                 // Merge an explicit globals dict (reads) with an explicit

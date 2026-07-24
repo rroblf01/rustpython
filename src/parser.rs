@@ -5,7 +5,21 @@ pub struct Parser {
     lexer: Lexer,
     current: Token,
     peeked: Option<Token>,
+    // Guards `parse_unary`'s self-recursion (`-`/`+`/`~` chains) against a
+    // native stack overflow on pathological input — real CPython's own PEG
+    // parser has an equivalent C-stack-depth counter and raises `MemoryError:
+    // too complex` past it, rather than crashing (its own `test_syntax.py`
+    // explicitly tests for exactly this: `compile("-" * 100000 + "4", ...)`
+    // must raise `MemoryError`, not abort the process). Without this guard,
+    // this interpreter's own recursive-descent `parse_unary` (which calls
+    // itself directly, once per leading `-`/`+`/`~`) genuinely overflowed
+    // the native stack on that same input — confirmed via the exact repro,
+    // crashing with a real OS-level "stack overflow, aborting" abort, not a
+    // catchable Rust panic or Python exception.
+    unary_depth: usize,
 }
+
+const MAX_UNARY_DEPTH: usize = 2000;
 
 macro_rules! unexpected_token {
     ($self:expr, $expected:expr) => {
@@ -27,6 +41,7 @@ impl Parser {
             lexer,
             current: first,
             peeked: None,
+            unary_depth: 0,
         }
     }
 
@@ -1501,7 +1516,15 @@ impl Parser {
     }
 
     fn parse_unary(&mut self) -> Result<Expr, String> {
-        if self.eat(&Token::Plus) {
+        let is_unary_prefix = matches!(self.current, Token::Plus | Token::Minus | Token::Tilde);
+        if is_unary_prefix {
+            self.unary_depth += 1;
+            if self.unary_depth > MAX_UNARY_DEPTH {
+                self.unary_depth -= 1;
+                return Err("MemoryError: too complex".to_string());
+            }
+        }
+        let result = if self.eat(&Token::Plus) {
             let expr = self.parse_unary()?;
             Ok(Expr::UnaryOp {
                 op: UnaryOp::UAdd,
@@ -1521,7 +1544,11 @@ impl Parser {
             })
         } else {
             self.parse_power()
+        };
+        if is_unary_prefix {
+            self.unary_depth -= 1;
         }
+        result
     }
 
     fn parse_power(&mut self) -> Result<Expr, String> {
