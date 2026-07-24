@@ -100,6 +100,12 @@ extern "C" fn jit_contains(a: *const PyObjectRef, b: *const PyObjectRef, out: *m
         std::ptr::write(out, result);
     }
 }
+extern "C" fn jit_getitem(obj: *const PyObjectRef, idx: *const PyObjectRef, out: *mut PyObjectRef) {
+    unsafe {
+        let result = crate::object::py_getitem(&*obj, &*idx).unwrap_or_else(|_| crate::object::py_none());
+        std::ptr::write(out, result);
+    }
+}
 extern "C" fn jit_get_iter(val: *const PyObjectRef, out: *mut PyObjectRef) {
     unsafe {
         use crate::object::ObjectAccess;
@@ -852,11 +858,13 @@ impl JitCompiler {
             Opcode::STORE_FAST, Opcode::DUP_TOP,
             Opcode::POP_TOP, Opcode::COMPARE_OP,
             Opcode::POP_JUMP_IF_FALSE, Opcode::JUMP_BACKWARD,
+            Opcode::JUMP_FORWARD, Opcode::JUMP,
             Opcode::LOAD_GLOBAL,
             Opcode::UNARY_NEGATIVE, Opcode::UNARY_NOT,
             Opcode::BUILD_LIST, Opcode::BUILD_TUPLE,
             Opcode::LIST_APPEND, Opcode::CONTAINS_OP,
             Opcode::CALL,
+            Opcode::PUSH_NULL,
             Opcode::LOAD_ATTR,
             Opcode::GET_ITER,
             Opcode::FOR_ITER,
@@ -873,6 +881,8 @@ impl JitCompiler {
         ];
         for instr in &code.instructions {
             if !supported.contains(&instr.op) { eprintln!("JIT: unsupported opcode {:?} in '{}'", instr.op, code.name); return None; }
+            // BINARY_OP with arg > 11 (e.g. BINARY_SUBSCR = 13) is not JIT-compilable
+            if instr.op == Opcode::BINARY_OP && instr.arg > 11 { eprintln!("JIT: unsupported BINARY_OP arg {} in '{}'", instr.arg, code.name); return None; }
         }
 
         let _consts = Self::precompute_with_names(code);
@@ -1143,6 +1153,10 @@ impl JitCompiler {
                     builder.ins().store(memflags, val[1], dst, 8);
                     builder.ins().store(memflags, zero, dst, 16);
                 }
+                Opcode::PUSH_NULL => {
+                    let zero = builder.ins().iconst(types::I64, 0);
+                    eval_stack.push([zero, zero]);
+                }
                 Opcode::DUP_TOP => {
                     let val = eval_stack.last().unwrap();
                     eval_stack.push([val[0], val[1]]);
@@ -1200,6 +1214,12 @@ impl JitCompiler {
                 }
                 Opcode::JUMP_BACKWARD => {
                     let target = i.wrapping_sub(instr.arg as usize);
+                    let target_block = block_of[&target];
+                    builder.ins().jump(target_block, &[]);
+                    terminated = true;
+                }
+                Opcode::JUMP_FORWARD | Opcode::JUMP => {
+                    let target = i + instr.arg as usize;
                     let target_block = block_of[&target];
                     builder.ins().jump(target_block, &[]);
                     terminated = true;
