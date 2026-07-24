@@ -86,13 +86,23 @@ impl PyObjectRef {
     /// Create a MUTABLE PyObjectRef (for List, Dict, Set, Instance)
     pub fn new(obj: PyObject) -> Self {
         ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
-        PyObjectRef::Mut(Rc::new(RefCell::new(obj)))
+        let trackable = crate::cycle_gc::is_trackable(&obj);
+        let rc = Rc::new(RefCell::new(obj));
+        if trackable {
+            crate::cycle_gc::track(&rc);
+        }
+        PyObjectRef::Mut(rc)
     }
 
     /// Create an IMMUTABLE PyObjectRef (for Int, Str, Float, etc.)
     pub fn imm(obj: PyObject) -> Self {
         IMM_COUNT.fetch_add(1, Ordering::Relaxed);
-        PyObjectRef::Imm(Rc::new(RefCell::new(obj)))
+        let trackable = crate::cycle_gc::is_trackable(&obj);
+        let rc = Rc::new(RefCell::new(obj));
+        if trackable {
+            crate::cycle_gc::track(&rc);
+        }
+        PyObjectRef::Imm(rc)
     }
 
     pub fn borrow(&self) -> RefOrOwned<'_> {
@@ -636,47 +646,64 @@ impl PySet {
 }
 
 // ---- PyDict: hash-based dict with arbitrary hashable keys ----
-
+//
+// Dense-array-plus-index-table design (the same shape real CPython's own
+// dict uses internally) — each key/value pair is stored EXACTLY ONCE, in
+// `entries`, in insertion order (`None` marks a removed/tombstone slot, so
+// existing indices stay valid without shifting on removal — same reason
+// CPython's own dict never shrinks its dense table on delete either).
+// `index` maps a hash to the `entries` positions that share it (a
+// collision chain) — it stores plain `usize` positions, not full key
+// clones. The PREVIOUS design (`HashMap<hash, Vec<(PyObjectRef,
+// PyObjectRef)>>` PLUS a separate `order: Vec<PyObjectRef>` for iteration
+// order) stored every key TWICE — once in its hash bucket, once again in
+// `order` — confirmed via direct benchmarking against real CPython: a
+// 500K-entry `int -> int` dict used 2.6x MORE memory here than in CPython,
+// the single largest memory gap found in that comparison. This design
+// keeps the exact same public API/behavior (insertion-order iteration,
+// re-assigning a key doesn't move it, `O(1)`-amortized get/set/remove) —
+// only the internal storage shape changed.
 #[derive(Clone)]
 pub struct PyDict {
-    pub buckets: std::collections::HashMap<usize, Vec<(PyObjectRef, PyObjectRef)>>,
-    pub size: usize,
+    entries: Vec<Option<(PyObjectRef, PyObjectRef)>>,
+    index: std::collections::HashMap<usize, Vec<usize>>,
+    size: usize,
     pub instance_ref: Option<PyObjectRef>,
-    /// Keys in first-insertion order — real Python dicts have preserved
-    /// insertion order since 3.7 (iteration, `**kwargs`, `vars()`,
-    /// `json.dumps`, dataclass field order, and — the case that surfaced
-    /// this gap — a class's namespace dict handed to a metaclass's
-    /// `__new__`, where member/attribute definition order is meaningful).
-    /// `buckets` alone can't provide this: it's keyed by hash bucket, whose
-    /// iteration order is Rust HashMap's arbitrary order, not insertion
-    /// order. Re-assigning an existing key does not move it, matching
-    /// Python. Removal drops the key from here too.
-    pub order: Vec<PyObjectRef>,
 }
 
 impl PyDict {
-    pub fn new() -> Self { PyDict { buckets: std::collections::HashMap::new(), size: 0, instance_ref: None, order: Vec::new() } }
+    pub fn new() -> Self {
+        PyDict { entries: Vec::new(), index: std::collections::HashMap::new(), size: 0, instance_ref: None }
+    }
     pub fn is_empty(&self) -> bool { self.size == 0 }
     pub fn len(&self) -> usize { self.size }
-    pub fn clear(&mut self) { self.buckets.clear(); self.size = 0; self.order.clear(); }
-    fn bucket(&self, key: &PyObjectRef) -> PyResult<Option<&Vec<(PyObjectRef, PyObjectRef)>>> {
-        let h = key.hash()?; Ok(self.buckets.get(&h))
-    }
-    fn find(bucket: &[(PyObjectRef, PyObjectRef)], key: &PyObjectRef) -> Option<usize> {
-        bucket.iter().position(|(k, _)| k.equals(key).unwrap_or(false))
+    pub fn clear(&mut self) { self.entries.clear(); self.index.clear(); self.size = 0; }
+
+    /// Position of `key` within `entries`, if present (skips tombstones).
+    fn find(&self, key: &PyObjectRef, h: usize) -> Option<usize> {
+        let chain = self.index.get(&h)?;
+        chain.iter().copied().find(|&i| {
+            matches!(&self.entries[i], Some((k, _)) if k.equals(key).unwrap_or(false))
+        })
     }
     pub fn contains(&self, key: &PyObjectRef) -> PyResult<bool> {
-        match self.bucket(key)? { Some(b) => Ok(Self::find(b, key).is_some()), None => Ok(false) }
+        let h = key.hash()?;
+        Ok(self.find(key, h).is_some())
     }
     pub fn get(&self, key: &PyObjectRef) -> PyResult<Option<PyObjectRef>> {
-        match self.bucket(key)? { Some(b) => Ok(Self::find(b, key).map(|i| b[i].1.clone())), None => Ok(None) }
+        let h = key.hash()?;
+        Ok(self.find(key, h).map(|i| self.entries[i].as_ref().unwrap().1.clone()))
     }
     pub fn set(&mut self, key: PyObjectRef, value: PyObjectRef) -> PyResult<()> {
         let h = key.hash()?;
-        let bucket = self.buckets.entry(h).or_default();
-        match Self::find(bucket, &key) {
-            Some(i) => bucket[i].1 = value.clone(),
-            None => { bucket.push((key.clone(), value.clone())); self.size += 1; self.order.push(key.clone()); }
+        match self.find(&key, h) {
+            Some(i) => self.entries[i].as_mut().unwrap().1 = value.clone(),
+            None => {
+                let idx = self.entries.len();
+                self.entries.push(Some((key.clone(), value.clone())));
+                self.index.entry(h).or_default().push(idx);
+                self.size += 1;
+            }
         }
         // Propagate to Instance dict if this is a __dict__ view
         if let Some(ref inst_ref) = self.instance_ref {
@@ -688,33 +715,30 @@ impl PyDict {
     }
     pub fn remove(&mut self, key: &PyObjectRef) -> PyResult<PyObjectRef> {
         let h = key.hash()?;
-        let bucket = self.buckets.get_mut(&h).ok_or_else(|| PyError::key_error(key.str()))?;
-        let pos = Self::find(bucket, key).ok_or_else(|| PyError::key_error(key.str()))?;
-        self.size -= 1;
-        let removed = bucket.swap_remove(pos).1;
-        if let Some(op) = self.order.iter().position(|k| k.equals(key).unwrap_or(false)) {
-            self.order.remove(op);
+        let i = self.find(key, h).ok_or_else(|| PyError::key_error(key.str()))?;
+        let removed = self.entries[i].take().unwrap().1;
+        if let Some(chain) = self.index.get_mut(&h) {
+            chain.retain(|&j| j != i);
         }
+        self.size -= 1;
         Ok(removed)
     }
     pub fn keys(&self) -> Vec<PyObjectRef> {
-        self.order.clone()
+        self.entries.iter().filter_map(|e| e.as_ref().map(|(k, _)| k.clone())).collect()
     }
     pub fn values(&self) -> Vec<PyObjectRef> {
-        self.order.iter().filter_map(|k| self.get(k).ok().flatten()).collect()
+        self.entries.iter().filter_map(|e| e.as_ref().map(|(_, v)| v.clone())).collect()
     }
     pub fn items(&self) -> Vec<(PyObjectRef, PyObjectRef)> {
-        self.order.iter().filter_map(|k| self.get(k).ok().flatten().map(|v| (k.clone(), v))).collect()
+        self.entries.iter().filter_map(|e| e.clone()).collect()
     }
     /// Get a value by object identity (pointer comparison), used for memo cache.
     pub fn get_by_identity(&self, key: &PyObjectRef) -> Option<PyObjectRef> {
         let key_ptr: *const PyObjectRef = key;
-        for entry in self.buckets.values() {
-            for (k, v) in entry {
-                let k_ptr: *const PyObjectRef = k;
-                if k_ptr == key_ptr {
-                    return Some(v.clone());
-                }
+        for (k, v) in self.entries.iter().flatten() {
+            let k_ptr: *const PyObjectRef = k;
+            if k_ptr == key_ptr {
+                return Some(v.clone());
             }
         }
         None
@@ -4695,6 +4719,7 @@ pub(crate) fn generator_throw_with_vm(vm: &mut super::vm::VirtualMachine, args: 
                     }
                 }
                 Err(e) => {
+                    vm.frames.pop();
                     *frame_opt = None;
                     Err(e)
                 }
