@@ -611,6 +611,140 @@ pub fn create_itertools_dict() -> HashMap<String, PyObjectRef> {
         Ok(py_list(result.into_iter().map(|v| py_tuple(v)).collect()))
     });
 
+    it_func!("combinations", |args| {
+        if args.is_empty() { return Err(PyError::type_error("combinations() missing argument")); }
+        let mut pool = Vec::new();
+        if let Ok(it) = builtin_iter(&[args[0].clone()]) {
+            loop {
+                match builtin_next(&[it.clone()]) {
+                    Ok(v) => pool.push(v),
+                    Err(PyError::StopIteration) => break,
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        let n = pool.len();
+        let r = if args.len() > 1 {
+            args[1].as_i64().ok_or_else(|| PyError::type_error("r must be int"))? as usize
+        } else {
+            n
+        };
+        let mut result = Vec::new();
+        if r <= n {
+            let mut indices: Vec<usize> = (0..r).collect();
+            loop {
+                result.push(py_tuple(indices.iter().map(|&i| pool[i].clone()).collect()));
+                let mut i = r;
+                loop {
+                    if i == 0 { return Ok(py_list(result)); }
+                    i -= 1;
+                    if indices[i] != i + n - r {
+                        break;
+                    }
+                    if i == 0 { return Ok(py_list(result)); }
+                }
+                indices[i] += 1;
+                for j in i + 1..r {
+                    indices[j] = indices[j - 1] + 1;
+                }
+            }
+        }
+        Ok(py_list(result))
+    });
+
+    it_func!("combinations_with_replacement", |args| {
+        if args.is_empty() { return Err(PyError::type_error("combinations_with_replacement() missing argument")); }
+        let mut pool = Vec::new();
+        if let Ok(it) = builtin_iter(&[args[0].clone()]) {
+            loop {
+                match builtin_next(&[it.clone()]) {
+                    Ok(v) => pool.push(v),
+                    Err(PyError::StopIteration) => break,
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        let n = pool.len();
+        let r = if args.len() > 1 {
+            args[1].as_i64().ok_or_else(|| PyError::type_error("r must be int"))? as usize
+        } else {
+            n
+        };
+        let mut result = Vec::new();
+        if n > 0 || r == 0 {
+            let mut indices = vec![0usize; r];
+            loop {
+                result.push(py_tuple(indices.iter().map(|&i| pool[i].clone()).collect()));
+                let mut i_opt = None;
+                for i in (0..r).rev() {
+                    if indices[i] != n - 1 {
+                        i_opt = Some(i);
+                        break;
+                    }
+                }
+                match i_opt {
+                    None => break,
+                    Some(i) => {
+                        let v = indices[i] + 1;
+                        for j in i..r {
+                            indices[j] = v;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(py_list(result))
+    });
+
+    it_func!("permutations", |args| {
+        if args.is_empty() { return Err(PyError::type_error("permutations() missing argument")); }
+        let mut pool = Vec::new();
+        if let Ok(it) = builtin_iter(&[args[0].clone()]) {
+            loop {
+                match builtin_next(&[it.clone()]) {
+                    Ok(v) => pool.push(v),
+                    Err(PyError::StopIteration) => break,
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        let n = pool.len();
+        let r = if args.len() > 1 && !matches!(&*args[1].borrow(), PyObject::None) {
+            args[1].as_i64().ok_or_else(|| PyError::type_error("r must be int"))? as usize
+        } else {
+            n
+        };
+        let mut result = Vec::new();
+        if r <= n {
+            let mut indices: Vec<usize> = (0..n).collect();
+            let mut cycles: Vec<usize> = (0..r).map(|i| n - i).collect();
+            result.push(py_tuple(indices[0..r].iter().map(|&i| pool[i].clone()).collect()));
+            'outer: loop {
+                let mut i = r;
+                loop {
+                    if i == 0 { break 'outer; }
+                    i -= 1;
+                    cycles[i] -= 1;
+                    if cycles[i] == 0 {
+                        let first = indices[i];
+                        for k in i..n - 1 {
+                            indices[k] = indices[k + 1];
+                        }
+                        indices[n - 1] = first;
+                        cycles[i] = n - i;
+                    } else {
+                        let j = n - cycles[i];
+                        indices.swap(i, j);
+                        result.push(py_tuple(indices[0..r].iter().map(|&i| pool[i].clone()).collect()));
+                        continue 'outer;
+                    }
+                    if i == 0 { break 'outer; }
+                }
+            }
+        }
+        Ok(py_list(result))
+    });
+
     it_func!("repeat", |args| {
         if args.is_empty() { return Err(PyError::type_error("repeat() missing argument")); }
         let obj = args[0].clone();
