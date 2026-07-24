@@ -863,7 +863,14 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
             sig_dict.insert("parameters".to_string(), PyObjectRef::new(PyObject::Dict(params)));
             Ok(PyObjectRef::new(PyObject::Instance { typ: sig_type, dict: sig_dict }))
         } else {
-            Err(PyError::type_error("signature() requires a Python function"))
+            // Real CPython raises ValueError here (not TypeError) — "no
+            // signature found for builtin ..." — since a builtin/native
+            // callable genuinely has no introspectable signature, as
+            // opposed to the argument not being callable at all. Matters
+            // beyond cosmetics: `unittest/mock.py`'s own module-level
+            // `inspect.signature(partial(CodeType.__init__, None))` is
+            // wrapped in `except ValueError:` specifically expecting this.
+            Err(PyError::value_error("no signature found for builtin type"))
         }
     });
     inspect_func!("currentframe", |_args| Ok(py_none()));
