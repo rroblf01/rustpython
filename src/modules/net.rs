@@ -1,7 +1,7 @@
 use crate::object::*;
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 
 pub fn create_select_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
@@ -550,15 +550,37 @@ pub fn create_http_client_dict() -> HashMap<String, PyObjectRef> {
                     }
                 };
 
-                // Connect via TcpStream
+                // Connect via TcpStream with a bounded timeout — an
+                // unreachable/firewalled host (common in sandboxed/offline
+                // environments) can otherwise leave a bare `TcpStream::connect`
+                // blocking for the OS's own connect timeout (which may be
+                // minutes, or effectively indefinite if packets are silently
+                // dropped), hanging the whole interpreter with no way for
+                // Python-level code to recover.
                 let addr = format!("{}:{}", host, port);
-                let stream = match TcpStream::connect(&addr) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        return Err(PyError::OsError(format!(
-                            "Could not connect to {}: {}",
-                            addr, e
-                        )));
+                let stream = {
+                    let mut last_err: Option<std::io::Error> = None;
+                    let mut connected = None;
+                    match addr.to_socket_addrs() {
+                        Ok(addrs) => {
+                            for sock_addr in addrs {
+                                match TcpStream::connect_timeout(&sock_addr, std::time::Duration::from_secs(10)) {
+                                    Ok(s) => { connected = Some(s); break; }
+                                    Err(e) => { last_err = Some(e); }
+                                }
+                            }
+                        }
+                        Err(e) => { last_err = Some(e); }
+                    }
+                    match connected {
+                        Some(s) => s,
+                        None => {
+                            return Err(PyError::OsError(format!(
+                                "Could not connect to {}: {}",
+                                addr,
+                                last_err.map(|e| e.to_string()).unwrap_or_else(|| "unknown error".to_string())
+                            )));
+                        }
                     }
                 };
 
