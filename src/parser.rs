@@ -1724,14 +1724,19 @@ impl Parser {
                 let s = s.clone();
                 self.next();
                 // Hex/binary/octal numbers may contain 'e'/'E'/'B'/'O' as valid digits
-                // so we must check for float exponent only in decimal/octal numbers
-                if (s.starts_with("0x") || s.starts_with("0X") || s.starts_with("0b") || s.starts_with("0B") || s.starts_with("0o") || s.starts_with("0O"))
+                // so we must check for float exponent only in decimal/octal numbers.
+                // The imaginary suffix (`2j`, `3.5J`) must be checked BEFORE the
+                // plain-int fallback below — `"2j"` contains no '.'/'e'/'E' so it
+                // used to satisfy the int-fallback condition first and never reach
+                // this arm at all, sending literal `2j` through `int_from_str`
+                // (raising "invalid integer: 2j" for every imaginary literal).
+                if s.ends_with('j') || s.ends_with('J') {
+                    let imag = s[..s.len()-1].to_string();
+                    Ok(Expr::Constant(Constant::Complex { real: "0".to_string(), imag }))
+                } else if (s.starts_with("0x") || s.starts_with("0X") || s.starts_with("0b") || s.starts_with("0B") || s.starts_with("0o") || s.starts_with("0O"))
                     || (!s.contains('.') && !s.contains('e') && !s.contains('E'))
                 {
                     Ok(Expr::Constant(Constant::int_from_str(&s)))
-                } else if s.ends_with('j') || s.ends_with('J') {
-                    let real = s[..s.len()-1].to_string();
-                    Ok(Expr::Constant(Constant::Complex { real: "0".to_string(), imag: real }))
                 } else {
                     Ok(Expr::Constant(Constant::float_from_str(&s)))
                 }
