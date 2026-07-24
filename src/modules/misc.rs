@@ -999,7 +999,21 @@ pub fn create_types_dict() -> HashMap<String, PyObjectRef> {
         if args.is_empty() { return Err(PyError::type_error("coroutine() requires an argument")); }
         Ok(args[0].clone())
     });
-    d.insert("CodeType".to_string(), py_str("code"));
+    {
+        // A real (minimal) Type, not a bare placeholder string — needed so
+        // `CodeType.__init__` resolves to something attribute-accessible
+        // (real trigger: `unittest/mock.py`'s own module-level
+        // `inspect.signature(partial(CodeType.__init__, None))`, which
+        // otherwise raises `AttributeError` — on a plain str — before ever
+        // reaching the `try/except ValueError:` guarding that line).
+        let mut code_type_dict = HashMap::new();
+        code_type_dict.insert("__init__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__init__".to_string(),
+            func: |_args| Ok(py_none()),
+        }));
+        let code_type = PyObjectRef::new(PyObject::Type { name: "code".to_string(), dict: code_type_dict, bases: vec![], mro: vec![] });
+        d.insert("CodeType".to_string(), code_type);
+    }
     d.insert("MappingProxyType".to_string(), py_str("mappingproxy"));
     // GenericAlias — used for generic type annotations like list[int], dict[str, int]
     d.insert("GenericAlias".to_string(), py_str("types.GenericAlias"));
@@ -2983,32 +2997,33 @@ pub fn create_gc_dict() -> HashMap<String, PyObjectRef> {
         };
     }
 
-    // Wire gc.collect() to the actual generational GC in gc.rs
-    #[cfg(feature = "gc")]
+    // Wire gc.collect() to the real cycle collector in cycle_gc.rs — this
+    // runs unconditionally (not feature-gated) since it operates on the
+    // actual `Rc<RefCell<PyObject>>`-based object model every build uses,
+    // unlike `gc.rs`'s separate experimental tracing heap (feature `gc`,
+    // not wired into the object model at all).
     gc_func!("collect", |_| {
-        crate::gc::GC_HEAP.with(|heap| {
-            heap.borrow_mut().collect();
-        });
-        let stats = crate::gc::GC_HEAP.with(|heap| {
-            *heap.borrow().stats()
-        });
-        Ok(py_int(stats.freed as i64))
-    });
-    #[cfg(not(feature = "gc"))]
-    gc_func!("collect", |_| {
-        Ok(py_int(0))
+        let collected = crate::cycle_gc::collect();
+        Ok(py_int(collected as i64))
     });
 
     gc_func!("enable", |_| {
+        crate::cycle_gc::set_enabled(true);
         Ok(py_none())
     });
 
     gc_func!("disable", |_| {
+        crate::cycle_gc::set_enabled(false);
         Ok(py_none())
     });
 
     gc_func!("isenabled", |_| {
-        Ok(py_bool(true))
+        Ok(py_bool(crate::cycle_gc::is_enabled()))
+    });
+
+    gc_func!("get_count", |_| {
+        let (tracked, _) = crate::cycle_gc::stats();
+        Ok(py_tuple(vec![py_int(tracked as i64), py_int(0), py_int(0)]))
     });
 
     d
