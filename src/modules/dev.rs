@@ -889,6 +889,26 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
     d.insert("Parameter".to_string(), PyObjectRef::new(PyObject::Type { name: "Parameter".to_string(), dict: param_type_dict, bases: vec![], mro: vec![] }));
     d.insert("Signature".to_string(), PyObjectRef::new(PyObject::Type { name: "Signature".to_string(), dict: HashMap::new(), bases: vec![], mro: vec![] }));
 
+    // Code object flags (CO_* constants)
+    d.insert("CO_OPTIMIZED".to_string(), py_int(0x0001));
+    d.insert("CO_NEWLOCALS".to_string(), py_int(0x0002));
+    d.insert("CO_VARARGS".to_string(), py_int(0x0004));
+    d.insert("CO_VARKEYWORDS".to_string(), py_int(0x0008));
+    d.insert("CO_NESTED".to_string(), py_int(0x0010));
+    d.insert("CO_GENERATOR".to_string(), py_int(0x0020));
+    d.insert("CO_NOFREE".to_string(), py_int(0x0040));
+    d.insert("CO_COROUTINE".to_string(), py_int(0x0080));
+    d.insert("CO_ITERABLE_COROUTINE".to_string(), py_int(0x0100));
+    d.insert("CO_ASYNC_GENERATOR".to_string(), py_int(0x0200));
+    d.insert("CO_FUTURE_DIVISION".to_string(), py_int(0x2000));
+    d.insert("CO_FUTURE_ABSOLUTE_IMPORT".to_string(), py_int(0x4000));
+    d.insert("CO_FUTURE_WITH_STATEMENT".to_string(), py_int(0x8000));
+    d.insert("CO_FUTURE_PRINT_FUNCTION".to_string(), py_int(0x10000));
+    d.insert("CO_FUTURE_UNICODE_LITERALS".to_string(), py_int(0x20000));
+    d.insert("CO_FUTURE_BARRY_AS_BDFL".to_string(), py_int(0x40000));
+    d.insert("CO_FUTURE_GENERATOR_STOP".to_string(), py_int(0x80000));
+    d.insert("CO_FUTURE_ANNOTATIONS".to_string(), py_int(0x100000));
+
     d
 }
 

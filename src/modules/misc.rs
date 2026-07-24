@@ -975,6 +975,10 @@ pub fn create_types_dict() -> HashMap<String, PyObjectRef> {
         if args.is_empty() { return Err(PyError::type_error("CoroutineType() requires an argument")); }
         Ok(args[0].clone())
     });
+    t_func!("AsyncGeneratorType", |args| {
+        if args.is_empty() { return Err(PyError::type_error("AsyncGeneratorType() requires an argument")); }
+        Ok(args[0].clone())
+    });
     t_func!("SimpleNamespace", |args| {
         let d = py_dict();
         if args.len() > 0 {
@@ -1014,6 +1018,7 @@ pub fn create_types_dict() -> HashMap<String, PyObjectRef> {
         let code_type = PyObjectRef::new(PyObject::Type { name: "code".to_string(), dict: code_type_dict, bases: vec![], mro: vec![] });
         d.insert("CodeType".to_string(), code_type);
     }
+    d.insert("CellType".to_string(), py_str("cell"));
     d.insert("MappingProxyType".to_string(), py_str("mappingproxy"));
     // GenericAlias — used for generic type annotations like list[int], dict[str, int]
     d.insert("GenericAlias".to_string(), py_str("types.GenericAlias"));
@@ -2639,7 +2644,22 @@ pub fn create_atexit_dict() -> HashMap<String, PyObjectRef> {
         },
     }));
     d.insert("__name__".to_string(), py_str("atexit"));
+    d.insert("_clear".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "_clear".to_string(),
+        func: |_| {
+            EXIT_CALLBACKS.with(|cb| cb.borrow_mut().clear());
+            Ok(py_none())
+        },
+    }));
     d
+}
+
+/// Run all registered atexit handlers, using the provided VM.
+pub fn run_atexit_handlers(vm: &mut crate::vm::VirtualMachine) {
+    let callbacks: Vec<PyObjectRef> = EXIT_CALLBACKS.with(|cb| cb.borrow().clone());
+    for cb in callbacks {
+        let _ = vm.call_function(cb, vec![], vec![]);
+    }
 }
 
 pub fn create_timeit_dict() -> HashMap<String, PyObjectRef> {

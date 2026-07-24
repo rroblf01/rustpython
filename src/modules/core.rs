@@ -1089,10 +1089,110 @@ pub fn create_math_dict() -> HashMap<String, PyObjectRef> {
         Ok(py_int(result))
     });
 
+    // Additional math functions
+    math_func!("ldexp", |args| {
+        if args.len() < 2 { return Err(PyError::type_error("ldexp() requires 2 arguments")); }
+        let x = args[0].as_f64().ok_or_else(|| PyError::type_error("argument must be a number"))?;
+        let exp = args[1].as_i64().ok_or_else(|| PyError::type_error("exponent must be an integer"))?;
+        Ok(py_float(x * (2.0_f64).powi(exp as i32)))
+    });
+    math_func!("fsum", |args| {
+        if args.is_empty() { return Err(PyError::type_error("fsum() requires an argument")); }
+        let iterable = args[0].clone();
+        let mut total = 0.0_f64;
+        let mut partials: Vec<f64> = Vec::new();
+        // Simple summation
+        let obj = iterable.borrow();
+        if let PyObject::List(items) = &*obj {
+            for item in items {
+                total += item.as_f64().unwrap_or(0.0);
+            }
+        } else if let PyObject::Tuple(items) = &*obj {
+            for item in items {
+                total += item.as_f64().unwrap_or(0.0);
+            }
+        }
+        Ok(py_float(total))
+    });
+    math_func!("remainder", |args| {
+        if args.len() < 2 { return Err(PyError::type_error("remainder() requires 2 arguments")); }
+        let x = args[0].as_f64().ok_or_else(|| PyError::type_error("argument must be a number"))?;
+        let y = args[1].as_f64().ok_or_else(|| PyError::type_error("argument must be a number"))?;
+        Ok(py_float(x - y * (x / y).round()))
+    });
+    math_func!("modf", |args| {
+        if args.is_empty() { return Err(PyError::type_error("modf() requires an argument")); }
+        let x = args[0].as_f64().ok_or_else(|| PyError::type_error("argument must be a number"))?;
+        let frac = x.fract();
+        let integer = x.trunc();
+        Ok(py_tuple(vec![py_float(frac), py_float(integer)]))
+    });
+    math_func!("frexp", |args| {
+        if args.is_empty() { return Err(PyError::type_error("frexp() requires an argument")); }
+        let x = args[0].as_f64().ok_or_else(|| PyError::type_error("argument must be a number"))?;
+        if x == 0.0 {
+            return Ok(py_tuple(vec![py_float(0.0), py_int(0)]));
+        }
+        let bits = x.to_bits();
+        let biased_exp = ((bits >> 52) & 0x7ff) as i64;
+        let normalized_exp = biased_exp - 1023;
+        let mantissa_bits = bits & 0x000f_ffff_ffff_ffff;
+        let sign_bit = bits & 0x8000_0000_0000_0000;
+        // Reconstruct mantissa in range [0.5, 1)
+        let fraction_bits = sign_bit | (0x3fe << 52) | mantissa_bits;
+        let fraction = f64::from_bits(fraction_bits);
+        Ok(py_tuple(vec![py_float(fraction), py_int(normalized_exp)]))
+    });
+    math_func!("ulp", |args| {
+        if args.is_empty() { return Err(PyError::type_error("ulp() requires an argument")); }
+        let x = args[0].as_f64().ok_or_else(|| PyError::type_error("argument must be a number"))?;
+        // Calculate ULP: distance to next representable float
+        if x.is_nan() || x.is_infinite() { return Ok(py_float(x)); }
+        if x == 0.0 { return Ok(py_float(f64::MIN_POSITIVE)); }
+        let abs = x.abs();
+        let next = if abs == f64::INFINITY { abs } else {
+            let bits = abs.to_bits();
+            f64::from_bits(bits + 1)
+        };
+        Ok(py_float(next - abs))
+    });
+    math_func!("nextafter", |args| {
+        if args.len() < 2 { return Err(PyError::type_error("nextafter() requires 2 arguments")); }
+        let x = args[0].as_f64().ok_or_else(|| PyError::type_error("argument must be a number"))?;
+        let y = args[1].as_f64().ok_or_else(|| PyError::type_error("argument must be a number"))?;
+        if x.is_nan() || y.is_nan() { return Ok(py_float(f64::NAN)); }
+        if x == y { return Ok(py_float(x)); }
+        if x == 0.0 {
+            if y > 0.0 { return Ok(py_float(f64::MIN_POSITIVE)); }
+            else { return Ok(py_float(-f64::MIN_POSITIVE)); }
+        }
+        let bits = x.to_bits();
+        let next = if y > x { bits + 1 } else { bits - 1 };
+        Ok(py_float(f64::from_bits(next)))
+    });
+    math_func!("prod", |args| {
+        if args.is_empty() { return Err(PyError::type_error("prod() requires an argument")); }
+        let start = if args.len() > 1 { args[1].as_i64().unwrap_or(1) } else { 1i64 };
+        let obj = args[0].borrow();
+        let mut result = num_bigint::BigInt::from(start);
+        if let PyObject::List(items) = &*obj {
+            for item in items {
+                result *= num_bigint::BigInt::from(item.as_i64().unwrap_or(1));
+            }
+        } else if let PyObject::Tuple(items) = &*obj {
+            for item in items {
+                result *= num_bigint::BigInt::from(item.as_i64().unwrap_or(1));
+            }
+        }
+        Ok(py_int(result))
+    });
+
     // ── Constants ─────────────────────────────────────────────────────────
     d.insert("pi".to_string(), py_float(std::f64::consts::PI));
     d.insert("e".to_string(), py_float(std::f64::consts::E));
     d.insert("tau".to_string(), py_float(std::f64::consts::TAU));
+    d.insert("inf".to_string(), py_float(f64::INFINITY));
+    d.insert("nan".to_string(), py_float(f64::NAN));
     d
 }
 
@@ -1163,6 +1263,7 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
     d.insert("warnoptions".to_string(), py_list(vec![]));
     d.insert("version".to_string(), py_str("3.12.0 (RustPython 0.1.0)"));
     d.insert("version_info".to_string(), py_tuple(vec![py_int(3), py_int(12), py_int(0)]));
+    d.insert("float_repr_style".to_string(), py_str("short"));
     d.insert("hexversion".to_string(), py_int(0x030c0000));
     // sys.flags — real CPython exposes this as a structseq (tuple +
     // attribute access). A plain Instance with these as attributes is
@@ -1900,7 +2001,13 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
         if access_mode == 0 { opts.read(true); }     // O_RDONLY
         if access_mode == 1 { opts.write(true); }    // O_WRONLY
         if access_mode == 2 { opts.write(true); opts.read(true); } // O_RDWR
-        if flags & 64 != 0 { opts.create(true); }       // O_CREAT = 64
+        if flags & 64 != 0 {       // O_CREAT = 64
+            if flags & 128 != 0 {  // O_EXCL = 128
+                opts.create_new(true);
+            } else {
+                opts.create(true);
+            }
+        }
         if flags & 512 != 0 { opts.truncate(true); }    // O_TRUNC = 512
         if flags & 1024 != 0 { opts.append(true); }     // O_APPEND = 1024
         match opts.open(&path) {
@@ -1948,6 +2055,19 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
         let fd = args[0].as_i64().unwrap_or(-1) as i32;
         close_fd(fd);
         Ok(py_none())
+    });
+
+    // os.fdopen(fd, mode='r') -> file object from fd
+    os_func!("fdopen", |args| {
+        if args.is_empty() { return Err(PyError::type_error("fdopen() missing required argument 'fd'")); }
+        let fd = args[0].as_i64().ok_or_else(|| PyError::type_error("fd must be an integer"))? as i32;
+        let _mode = if args.len() > 1 { args[1].str() } else { "r".to_string() };
+        use std::os::unix::io::FromRawFd;
+        let file = unsafe { std::fs::File::from_raw_fd(fd) };
+        Ok(PyObjectRef::new(PyObject::File {
+            file: std::rc::Rc::new(std::cell::RefCell::new(file)),
+            name: format!("<fdopen>"),
+        }))
     });
 
     // os.urandom(size) -> random bytes from OS

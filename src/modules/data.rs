@@ -889,6 +889,40 @@ pub fn create_itertools_dict() -> HashMap<String, PyObjectRef> {
         Ok(py_list(items))
     });
 
+    // filterfalse(func, iterable) — filter elements where func is False
+    it_func!("filterfalse", |args| {
+        if args.len() < 2 { return Err(PyError::type_error("filterfalse() requires 2 arguments")); }
+        let predicate = if matches!(&*args[0].borrow(), PyObject::None) { None } else { Some(args[0].clone()) };
+        let iterable = args[1].clone();
+        let mut result = Vec::new();
+        loop {
+            match builtin_next(&[iterable.clone()]) {
+                Ok(item) => {
+                    let should_keep = match &predicate {
+                        Some(f) => {
+                            let callable = PyObjectRef::imm(PyObject::BoundMethod {
+                                func: f.clone(),
+                                self_obj: py_none(),
+                            });
+                            let mut vm = crate::vm::VirtualMachine::new();
+                            match vm.call_function(callable, vec![item.clone()], vec![]) {
+                                Ok(val) => !val.truthy(),
+                                Err(_) => true,
+                            }
+                        }
+                        None => !item.truthy(),
+                    };
+                    if should_keep {
+                        result.push(item);
+                    }
+                }
+                Err(e) if crate::object::is_stop_iteration_error(&e) => break,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(py_list(result))
+    });
+
     d
 }
 
