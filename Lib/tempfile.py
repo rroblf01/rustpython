@@ -1,28 +1,28 @@
-"""Temporary file utilities.
-
-Minimal implementation sufficient for Django and common stdlib use.
-"""
+"""Temporary file utilities."""
 
 import os as _os
 import io as _io
+import atexit as _atexit
 
 __all__ = [
     "NamedTemporaryFile", "TemporaryFile", "SpooledTemporaryFile",
+    "TemporaryDirectory",
     "mkstemp", "mkdtemp", "mktemp",
     "gettempdir", "gettempprefix",
     "tempdir", "template",
 ]
 
-# ── Global state ─────────────────────────────────────────────────────────────
-
-_os.name = "posix"  # Ensure posix mode
+_os.name = "posix"
 
 tempdir = None
 template = "tmp"
 
+# Track created temp files/dirs for atexit cleanup
+_temp_files = []
+_temp_dirs = []
+
 
 def gettempdir():
-    """Return the name of the directory used for temporary files."""
     global tempdir
     if tempdir is not None:
         return tempdir
@@ -40,15 +40,10 @@ def gettempdir():
 
 
 def gettempprefix():
-    """Return the filename prefix used for temporary files."""
     return template
 
 
-# ── Random name generation ───────────────────────────────────────────────────
-
-
 def _candidate_filename(suffix="", prefix="tmp", dir=None):
-    """Generate a unique temporary filename."""
     import uuid
     if dir is None:
         dir = gettempdir()
@@ -56,70 +51,48 @@ def _candidate_filename(suffix="", prefix="tmp", dir=None):
     return name
 
 
-# ── Low-level functions ──────────────────────────────────────────────────────
-
-
 def mkstemp(suffix="", prefix="tmp", dir=None, text=False):
-    """Create a temporary file and return (fd, name).
-
-    The file is opened with O_CREAT | O_EXCL | O_RDWR.
-    """
     if dir is None:
         dir = gettempdir()
     _os.makedirs(dir, exist_ok=True)
-
     name = _candidate_filename(suffix, prefix, dir)
-    # Ensure we don't have race conditions
-    try:
-        fd = _os.open(name, _os.O_CREAT | _os.O_EXCL | _os.O_RDWR, 0o600)
-        return (fd, name)
-    except FileExistsError:
-        # Extremely rare, try once more
-        name = _candidate_filename(suffix, prefix, dir)
-        fd = _os.open(name, _os.O_CREAT | _os.O_EXCL | _os.O_RDWR, 0o600)
-        return (fd, name)
+    for _ in range(100):
+        try:
+            fd = _os.open(name, _os.O_CREAT | _os.O_EXCL | _os.O_RDWR, 0o600)
+            _temp_files.append(name)
+            return (fd, name)
+        except OSError:
+            name = _candidate_filename(suffix, prefix, dir)
+    raise OSError("mkstemp: could not create unique temporary file")
 
 
 def mkdtemp(suffix="", prefix="tmp", dir=None):
-    """Create a temporary directory and return its name."""
     if dir is None:
         dir = gettempdir()
     _os.makedirs(dir, exist_ok=True)
-
     name = _candidate_filename(suffix, prefix, dir)
-    try:
-        _os.mkdir(name, 0o700)
-        return name
-    except FileExistsError:
-        name = _candidate_filename(suffix, prefix, dir)
-        _os.mkdir(name, 0o700)
-        return name
+    for _ in range(100):
+        try:
+            _os.mkdir(name, 0o700)
+            _temp_dirs.append(name)
+            return name
+        except OSError:
+            name = _candidate_filename(suffix, prefix, dir)
+    raise OSError("mkdtemp: could not create unique temporary directory")
 
 
 def mktemp(suffix="", prefix="tmp", dir=None):
-    """Return a unique temporary filename without creating a file.
-
-    Deprecated: use mkstemp instead.
-    """
     if dir is None:
         dir = gettempdir()
     return _candidate_filename(suffix, prefix, dir)
 
 
-# ── High-level classes ───────────────────────────────────────────────────────
-
-
 class TemporaryFile:
-    """Wrapper around a temporary file.
-
-    Creates a real temp file (via mkstemp) and provides file-like access.
-    """
-
     def __init__(self, mode="w+b", buffering=-1, encoding=None,
                  newline=None, suffix="", prefix="tmp", dir=None, errors=None):
         self._mode = mode
         fd, self.name = mkstemp(suffix, prefix, dir)
-        self._file = _os.fdopen(fd, mode, buffering, encoding=encoding,
+        self._file = _os.fdopen(fd, mode, buffering=-1, encoding=encoding,
                                 newline=newline, errors=errors)
         self._close_called = False
 
@@ -144,31 +117,20 @@ class TemporaryFile:
     def __exit__(self, exc, value, tb):
         self.close()
 
-    def __del__(self):
-        self.close()
-
 
 class NamedTemporaryFile:
-    """A temporary file that will be removed when closed.
-
-    This class is deliberately NOT a file object, but provides file-like
-    access via delegation.
-    """
-
     def __init__(self, mode="w+b", buffering=-1, encoding=None,
                  newline=None, suffix="", prefix="tmp", dir=None,
                  delete=True, errors=None):
         self._delete = delete
         self._close_called = False
-
         fd, self.name = mkstemp(suffix, prefix, dir)
-        self._file = _os.fdopen(fd, mode, buffering, encoding=encoding,
+        self._file = _os.fdopen(fd, mode, buffering=-1, encoding=encoding,
                                 newline=newline, errors=errors)
 
     def __getattr__(self, attr):
-        """Delegate attribute access to the underlying file."""
         if attr in ("name", "_file", "_close_called", "_delete", "close",
-                    "__enter__", "__exit__", "__del__"):
+                    "__enter__", "__exit__"):
             raise AttributeError(attr)
         return getattr(self._file, attr)
 
@@ -191,19 +153,13 @@ class NamedTemporaryFile:
     def __exit__(self, exc, value, tb):
         self.close()
 
-    def __del__(self):
-        self.close()
-
 
 class SpooledTemporaryFile(_io.BytesIO):
-    """A temporary file that buffers in memory until it exceeds max_size."""
-
     def __init__(self, max_size=0, mode="w+b", buffering=-1, encoding=None,
                  newline=None, suffix="", prefix="tmp", dir=None, errors=None):
         self._max_size = max_size
         self._rolled = False
         self._file = _io.BytesIO()
-        # ... minimal stub
 
     def write(self, data):
         if self._rolled:
@@ -211,9 +167,38 @@ class SpooledTemporaryFile(_io.BytesIO):
         return self._file.write(data)
 
 
-# ── Cleanup / Compatibility ──────────────────────────────────────────────────
+class TemporaryDirectory:
+    def __init__(self, suffix="", prefix="tmp", dir=None):
+        self.name = mkdtemp(suffix, prefix, dir)
+
+    def cleanup(self):
+        import shutil
+        try:
+            shutil.rmtree(self.name)
+        except Exception:
+            pass
+
+    def __enter__(self):
+        return self.name
+
+    def __exit__(self, exc, value, tb):
+        self.cleanup()
 
 
 def _remove_all(*args, **kwargs):
-    """Placeholder: cleanup of stale temp files."""
-    pass
+    for path in _temp_files:
+        try:
+            _os.unlink(path)
+        except Exception:
+            pass
+    _temp_files.clear()
+    import shutil
+    for path in _temp_dirs:
+        try:
+            shutil.rmtree(path)
+        except Exception:
+            pass
+    _temp_dirs.clear()
+
+
+_atexit.register(_remove_all)
