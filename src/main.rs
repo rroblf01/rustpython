@@ -11,6 +11,7 @@ mod compiler;
 mod object;
 mod modules;
 mod vm;
+mod cycle_gc;
 #[cfg(feature = "jit")]
 mod jit;
 mod interner;
