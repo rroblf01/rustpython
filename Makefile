@@ -15,6 +15,10 @@ SHELL := /bin/bash
 RUSTPYTHON := target/debug/rustpython
 RUSTPYTHON_REL := target/release/rustpython
 RUSTPYTHON_STATIC := target/x86_64-unknown-linux-gnu/release/rustpython
+RUSTPYTHON_TEST := target/debug/rustpython-test
+RUSTPYTHON_TEST_FEATURES := jit,sqlite3
+TEST_VENV := /tmp/test-uv-rustpython/.venv
+TEST_VENV_SITE := $(TEST_VENV)/lib/python3.14/site-packages
 TESTS_DIR := tests
 UNAME := $(shell uname -s)
 
@@ -25,7 +29,7 @@ YELLOW := \033[33m
 CYAN   := \033[36m
 RESET  := \033[0m
 
-.PHONY: all build release static test test-rust test-python
+.PHONY: all build release static test test-rust test-python test-cpython
 .PHONY: lint lint-clippy lint-ruff lint-typos lint-fmt
 .PHONY: check clean run bench fmt docs install-tools
 .PHONY: help
@@ -79,14 +83,20 @@ test-rust:
 	@echo -e "$(CYAN)==> Running Rust unit tests...$(RESET)"
 	cargo test 2>&1 | tail -20
 
-test-python: $(RUSTPYTHON)
+build-test:
+	@echo -e "$(CYAN)==> Building test binary (features: $(RUSTPYTHON_TEST_FEATURES))...$(RESET)"
+	cargo build --features $(RUSTPYTHON_TEST_FEATURES) --bin rustpython
+	@cp target/debug/rustpython $(RUSTPYTHON_TEST)
+
+test-python: build-test
 	@echo -e "$(CYAN)==> Running Python tests...$(RESET)"
 	@mkdir -p /tmp/rustpython-test-logs
 	@passed=0; failed=0; \
+	export PYTHONPATH=$(TEST_VENV_SITE):$${PYTHONPATH:-}; \
 	for f in $$(ls $(TESTS_DIR)/*.py 2>/dev/null | sort); do \
 		name=$$(basename $$f); \
 		printf "  [test] %-40s" "$$name"; \
-		if output=$$(./$(RUSTPYTHON) "$$f" 2>&1); then \
+		if output=$$(./$(RUSTPYTHON_TEST) "$$f" 2>&1); then \
 			echo -e "$(GREEN)PASS$(RESET)"; \
 			passed=$$((passed + 1)); \
 		else \
@@ -99,24 +109,26 @@ test-python: $(RUSTPYTHON)
 	echo -e "$(GREEN)$$passed passed$(RESET), $(RED)$$failed failed$(RESET)"; \
 	[ $$failed -eq 0 ]
 
-test-python-verbose: $(RUSTPYTHON)
+test-python-verbose: build-test
 	@echo -e "$(CYAN)==> Running Python tests (verbose)...$(RESET)"
-	@for f in $$(ls $(TESTS_DIR)/*.py 2>/dev/null | sort); do \
+	@export PYTHONPATH=$(TEST_VENV_SITE):$${PYTHONPATH:-}; \
+	for f in $$(ls $(TESTS_DIR)/*.py 2>/dev/null | sort); do \
 		name=$$(basename $$f); \
 		echo "--- $$name ---"; \
-		./$(RUSTPYTHON) "$$f" 2>&1; \
+		./$(RUSTPYTHON_TEST) "$$f" 2>&1; \
 		echo "exit code: $$?"; \
 		echo; \
 	done
 
-# Test a specific Python test file
-test-one: $(RUSTPYTHON)
+# Test a specific Python test file (uses debug binary without sqlite3)
+test-one:
 	@if [ -z "$(FILE)" ]; then \
 		echo "Usage: make test-one FILE=tests/test_name.py"; \
 		exit 1; \
 	fi
 	@echo -e "$(CYAN)==> Running $(FILE)...$(RESET)"
-	@./$(RUSTPYTHON) "$(FILE)" 2>&1; \
+	@export PYTHONPATH=$(TEST_VENV_SITE):$${PYTHONPATH:-}; \
+	./$(RUSTPYTHON) "$(FILE)" 2>&1; \
 	echo "exit code: $$?"
 
 # Test with real site-packages (uv project)
@@ -129,6 +141,45 @@ test-uv: $(RUSTPYTHON)
 	fi
 	@cd /tmp/test-uv-rustpython && ../rustpython/target/debug/rustpython -c "import sys; sys.path.insert(0, sys.path[3]); import certifi; print('certifi:', certifi.where())" 2>&1
 	@echo -e "$(GREEN)✔  uv integration OK$(RESET)"
+
+# ── CPython test suite ─────────────────────────────
+CPYTHON_TIMEOUT := 120
+CPYTHON_PARALLEL := 12
+
+test-cpython: build-test
+	@echo -e "$(CYAN)==> Running CPython compatibility tests ($(CPYTHON_TIMEOUT)s timeout, $(CPYTHON_PARALLEL) parallel)...$(RESET)"
+	@mkdir -p /tmp/rustpython-test-logs/cpython
+	@mkdir -p /tmp/rustpython-test-logs/cpython/summary
+	@total=0; pass=0; fail=0; timeout=0; parse=0; \
+	export TEST_VENV_SITE=$(TEST_VENV_SITE); \
+	SCRIPTS=$$(ls $(TESTS_DIR)/cpython/test_*.py 2>/dev/null | sort); \
+	TOTAL=$$(echo "$$SCRIPTS" | wc -l); \
+	echo "  Total test files: $$TOTAL"; \
+	echo "  Parallelism: $(CPYTHON_PARALLEL)"; \
+	echo ""; \
+	echo "$$SCRIPTS" | xargs -P $(CPYTHON_PARALLEL) -I {} bash -c ' \
+		name=$$(basename "{}" .py); \
+		logdir=/tmp/rustpython-test-logs/cpython; \
+		result=$$(tests/cpython_runner.sh $(RUSTPYTHON_TEST) "{}" "$$logdir" $(CPYTHON_TIMEOUT) $(TEST_VENV_SITE)); \
+		echo "$$result"; \
+		echo "$$result" >> "/tmp/rustpython-test-logs/cpython/summary/$$name.txt"; \
+	'; \
+	echo ""; \
+	echo "=== RESULTS ==="; \
+	p_count=$$(grep -c "^PASS|" /tmp/rustpython-test-logs/cpython/summary/*.txt 2>/dev/null || echo 0); \
+	f_count=$$(grep -c "^FAIL|" /tmp/rustpython-test-logs/cpython/summary/*.txt 2>/dev/null || echo 0); \
+	t_count=$$(grep -c "^TIMEOUT|" /tmp/rustpython-test-logs/cpython/summary/*.txt 2>/dev/null || echo 0); \
+	p_count=$$(grep -c "^PARSE_ERROR|" /tmp/rustpython-test-logs/cpython/summary/*.txt 2>/dev/null || echo 0); \
+	echo "  PASS: $$p_count"; \
+	echo "  FAIL: $$f_count"; \
+	echo "  TIMEOUT: $$t_count"; \
+	echo "  PARSE_ERROR: $$p_count"; \
+	TOTAL=$$(ls /tmp/rustpython-test-logs/cpython/summary/*.txt 2>/dev/null | wc -l); \
+	echo "  TOTAL: $$TOTAL"; \
+	[ $$f_count -eq 0 ] || echo -e "$(YELLOW)  ⚠  $$f_count failures + $$t_count timeouts + $$p_count parse errors$(RESET)"
+
+test-cpython-quick: CPYTHON_TIMEOUT := 30
+test-cpython-quick: test-cpython
 
 # ── Check (fast) ─────────────────────────────────
 check:
