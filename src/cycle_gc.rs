@@ -202,9 +202,11 @@ fn trace_children(obj: &PyObject, out: &mut Vec<PyObjectRef>) {
             out.push(func.clone());
             out.push((**iterator).clone());
         }
-        PyObject::EnumerateIter { items, .. } | PyObject::ListIter { list: items, .. } => {
+        PyObject::ListIter { list: items, .. } => {
             out.extend(items.iter().cloned())
         }
+        PyObject::EnumerateIter { source, .. } => out.push(source.clone()),
+        PyObject::CycleIter { items, .. } => out.extend(items.iter().cloned()),
         PyObject::Slice { start, stop, step } => {
             out.push(start.clone());
             out.push(stop.clone());

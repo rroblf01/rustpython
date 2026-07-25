@@ -1150,8 +1150,29 @@ pub enum PyObject {
         list: Vec<PyObjectRef>,
         index: usize,
     },
-    EnumerateIter {
+    /// Backing for `itertools.cycle(iterable)` — genuinely INFINITE, unlike
+    /// every other `itertools` function in this file (which eagerly
+    /// materializes into a plain list/`ListIter`, per this module's own
+    /// established convention — impossible here since a cycle has no
+    /// natural end). `index` wraps via `% items.len()` on each advance;
+    /// an empty source iterable yields nothing forever (matching real
+    /// CPython: `cycle([])` is a valid, immediately-exhausted iterator,
+    /// not an error).
+    CycleIter {
         items: Vec<PyObjectRef>,
+        index: usize,
+    },
+    /// Backing for `enumerate(iterable, start=0)` — `source` is the
+    /// underlying iterator (already passed through `builtin_iter`), pulled
+    /// from lazily one item per `__next__` call. Used to hold a fully
+    /// pre-materialized `items: Vec<PyObjectRef>` instead (eagerly draining
+    /// the WHOLE input during `enumerate()`'s own construction) — hung
+    /// forever on any genuinely infinite iterable (`itertools.cycle`, a
+    /// custom infinite generator, ...), since building that list never
+    /// finished. `enumerate()` must not consume more of its argument than
+    /// the caller actually asks for, exactly like real Python.
+    EnumerateIter {
+        source: PyObjectRef,
         pos: usize,
         start: usize,
     },
@@ -1252,6 +1273,16 @@ pub enum PyObject {
     File {
         file: std::rc::Rc<std::cell::RefCell<std::fs::File>>,
         name: String,
+    },
+    /// Backing for `subprocess.Popen` — holds the spawned child process.
+    /// `child` is `None` after `.communicate()`/`.wait()` has reaped it
+    /// (via `wait_with_output`, which consumes the `Child`); `returncode`
+    /// is filled in at that point and read by subsequent `.poll()`/`.wait()`
+    /// calls without needing the (now-gone) child handle.
+    Process {
+        child: std::rc::Rc<std::cell::RefCell<Option<std::process::Child>>>,
+        returncode: std::rc::Rc<std::cell::RefCell<Option<i64>>>,
+        pid: i64,
     },
     Socket {
         inner: std::rc::Rc<std::cell::RefCell<SocketInner>>,
@@ -1402,6 +1433,8 @@ impl PyObject {
             PyObject::CompiledRegex { .. } => "re.Pattern",
             PyObject::Closure(_) => "builtin_function_or_method",
             PyObject::FutureAwaitIterator { .. } => "future_await_iterator",
+            PyObject::Process { .. } => "Popen",
+            PyObject::CycleIter { .. } => "itertools.cycle",
         }.to_string()
     }
 
@@ -1544,6 +1577,10 @@ impl PyObject {
             PyObject::FutureAwaitIterator { future, yielded } => {
                 format!("<future_await_iterator future={} yielded={}>", future.repr(), yielded)
             }
+            PyObject::Process { pid, returncode, .. } => {
+                format!("<Popen: returncode: {} args: [pid {}]>", returncode.borrow().map(|r| r.to_string()).unwrap_or_else(|| "None".to_string()), pid)
+            }
+            PyObject::CycleIter { .. } => "<itertools.cycle object>".to_string(),
         }
     }
 
@@ -1582,7 +1619,14 @@ impl PyObject {
             PyObject::FrozenSet(s) => !s.is_empty(),
             PyObject::Range { start, stop, step } => *step > 0 && *start < *stop || *step < 0 && *start > *stop,
             PyObject::RangeIter { current, stop, step } => *step > 0 && *current < *stop || *step < 0 && *current > *stop,
-            PyObject::EnumerateIter { items, pos, .. } => *pos < items.len(),
+            // Real CPython's `enumerate` object has no `__bool__`/`__len__`
+            // at all — it's always truthy regardless of remaining items
+            // (matches the default object truthiness rule). The previous
+            // `*pos < items.len()` check is no longer even expressible now
+            // that `EnumerateIter` holds a lazy `source` instead of a
+            // pre-materialized `items` list — and was arguably wrong
+            // before too, since it's not what real Python does.
+            PyObject::EnumerateIter { .. } => true,
             PyObject::Instance { typ, .. } => {
                 // Check for __bool__ method (walking the MRO so inherited
                 // __bool__ is found, not just one defined on the leaf type).
@@ -4613,17 +4657,11 @@ pub fn builtin_enumerate(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             i.to_usize().unwrap_or(0)
         } else { 0 }
     } else { 0 };
-    // Eagerly consume the iterable into a Vec, then wrap in lazy EnumerateIter
+    // Lazily wrap the source iterator — see `PyObject::EnumerateIter`'s own
+    // doc comment for why eagerly draining it here (the previous approach)
+    // was a real bug, not just a style choice.
     let iterable = builtin_iter(&[args[0].clone()])?;
-    let mut items = Vec::new();
-    loop {
-        match builtin_next(&[iterable.clone()]) {
-            Ok(val) => items.push(val),
-            Err(PyError::StopIteration) => break,
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(PyObjectRef::new(PyObject::EnumerateIter { items, pos: 0, start }))
+    Ok(PyObjectRef::new(PyObject::EnumerateIter { source: iterable, pos: 0, start }))
 }
 
 pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
@@ -4768,15 +4806,36 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 Ok(v)
             }
         }
-        PyObject::EnumerateIter { items, pos, start } => {
-            if *pos >= items.len() {
+        PyObject::CycleIter { items, index } => {
+            if items.is_empty() {
                 if args.len() >= 2 { Ok(args[1].clone()) }
                 else { Err(PyError::stop_iteration()) }
             } else {
-                let val = items[*pos].clone();
-                let idx = *start + *pos;
-                *pos += 1;
-                Ok(py_tuple(vec![py_int(idx as i64), val]))
+                let v = items[*index % items.len()].clone();
+                *index += 1;
+                Ok(v)
+            }
+        }
+        PyObject::EnumerateIter { source, pos, start } => {
+            // Genuinely lazy — pulls one item from the underlying `source`
+            // iterator per call instead of the OLD approach (a
+            // pre-materialized `items: Vec<PyObjectRef>`, built by eagerly
+            // draining the whole input up front in `builtin_enumerate`).
+            // That eager drain hung forever on any genuinely infinite
+            // iterable (`itertools.cycle(...)`, `itertools.count()` past
+            // its own internal materialization cap) — confirmed via the
+            // simplest repro, `enumerate(itertools.cycle([1,2,3]))`, which
+            // never even got to yield its first pair.
+            let idx = *start + *pos;
+            *pos += 1;
+            let source = source.clone();
+            drop(obj);
+            match builtin_next(&[source]) {
+                Ok(val) => Ok(py_tuple(vec![py_int(idx as i64), val])),
+                Err(PyError::StopIteration) => {
+                    if args.len() >= 2 { Ok(args[1].clone()) } else { Err(PyError::stop_iteration()) }
+                }
+                Err(e) => Err(e),
             }
         }
         PyObject::MapIterator { func, iterator } => {
@@ -8713,6 +8772,161 @@ impl PyObject {
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
                     _ => Err(PyError::attribute_error(format!("'coroutine' object has no attribute '{}'", name))),
+                }
+            }
+            PyObject::Process { pid, returncode, .. } => {
+                match name {
+                    "pid" => Ok(py_int(*pid)),
+                    "returncode" => Ok(returncode.borrow().map(py_int).unwrap_or_else(py_none)),
+                    "poll" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "poll".to_string(),
+                        func: |args| {
+                            if let PyObject::Process { child, returncode, .. } = &*args[0].borrow() {
+                                if let Some(rc) = *returncode.borrow() { return Ok(py_int(rc)); }
+                                let mut child_opt = child.borrow_mut();
+                                match child_opt.as_mut() {
+                                    Some(c) => match c.try_wait() {
+                                        Ok(Some(status)) => {
+                                            let rc = status.code().unwrap_or(-1) as i64;
+                                            *returncode.borrow_mut() = Some(rc);
+                                            Ok(py_int(rc))
+                                        }
+                                        Ok(None) => Ok(py_none()),
+                                        Err(e) => Err(PyError::OsError(format!("{}", e))),
+                                    },
+                                    None => Ok(py_none()),
+                                }
+                            } else { Err(PyError::runtime_error("poll on non-process")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "wait" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "wait".to_string(),
+                        func: |args| {
+                            if let PyObject::Process { child, returncode, .. } = &*args[0].borrow() {
+                                if let Some(rc) = *returncode.borrow() { return Ok(py_int(rc)); }
+                                let mut child_opt = child.borrow_mut();
+                                match child_opt.as_mut() {
+                                    Some(c) => match c.wait() {
+                                        Ok(status) => {
+                                            let rc = status.code().unwrap_or(-1) as i64;
+                                            *returncode.borrow_mut() = Some(rc);
+                                            Ok(py_int(rc))
+                                        }
+                                        Err(e) => Err(PyError::OsError(format!("{}", e))),
+                                    },
+                                    None => Ok(py_none()),
+                                }
+                            } else { Err(PyError::runtime_error("wait on non-process")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    // `communicate(input=None, timeout=None)` — writes
+                    // `input` (if given and stdin was piped) then reads
+                    // stdout/stderr to completion via `Child::
+                    // wait_with_output` (which internally spawns reader
+                    // threads for both streams concurrently, avoiding the
+                    // classic "write blocks because the child's stdout
+                    // pipe filled up while nobody's reading it yet"
+                    // deadlock). Consumes the stored `Child` — a second
+                    // `communicate()` call after the first sees `None` and
+                    // returns empty output, matching real Python's own
+                    // "communicate() should only be called once" contract
+                    // closely enough for real-world usage.
+                    "communicate" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "communicate".to_string(),
+                        func: |args| {
+                            if let PyObject::Process { child, returncode, .. } = &*args[0].borrow() {
+                                let input = args.get(1).filter(|v| !matches!(&*v.borrow(), PyObject::None));
+                                let taken = child.borrow_mut().take();
+                                match taken {
+                                    Some(mut c) => {
+                                        if let Some(inp) = input {
+                                            if let Some(mut stdin) = c.stdin.take() {
+                                                use std::io::Write;
+                                                let bytes = match &*inp.borrow() {
+                                                    PyObject::Bytes(b) => b.clone(),
+                                                    other => other.str().into_bytes(),
+                                                };
+                                                let _ = stdin.write_all(&bytes);
+                                            }
+                                        }
+                                        match c.wait_with_output() {
+                                            Ok(output) => {
+                                                *returncode.borrow_mut() = Some(output.status.code().unwrap_or(-1) as i64);
+                                                Ok(py_tuple(vec![
+                                                    PyObjectRef::imm(PyObject::Bytes(output.stdout)),
+                                                    PyObjectRef::imm(PyObject::Bytes(output.stderr)),
+                                                ]))
+                                            }
+                                            Err(e) => Err(PyError::OsError(format!("{}", e))),
+                                        }
+                                    }
+                                    None => Ok(py_tuple(vec![
+                                        PyObjectRef::imm(PyObject::Bytes(Vec::new())),
+                                        PyObjectRef::imm(PyObject::Bytes(Vec::new())),
+                                    ])),
+                                }
+                            } else { Err(PyError::runtime_error("communicate on non-process")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    // Rust's `std::process::Child` doesn't distinguish a
+                    // graceful SIGTERM from a hard SIGKILL the way real
+                    // `Popen.terminate()`/`.kill()` do (POSIX-specific) —
+                    // both map to `Child::kill()` here, good enough for the
+                    // overwhelming majority of real usage (which just wants
+                    // "make the child stop").
+                    "terminate" | "kill" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: name.to_string(),
+                        func: |args| {
+                            if let PyObject::Process { child, .. } = &*args[0].borrow() {
+                                if let Some(c) = child.borrow_mut().as_mut() {
+                                    let _ = c.kill();
+                                }
+                                Ok(py_none())
+                            } else { Err(PyError::runtime_error("terminate/kill on non-process")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "send_signal" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "send_signal".to_string(),
+                        func: |args| {
+                            // No portable "send arbitrary signal" in std;
+                            // treat any signal as a kill request (correct
+                            // for the extremely common SIGTERM/SIGKILL
+                            // case, not for exotic signal numbers).
+                            if let PyObject::Process { child, .. } = &*args[0].borrow() {
+                                if let Some(c) = child.borrow_mut().as_mut() {
+                                    let _ = c.kill();
+                                }
+                                Ok(py_none())
+                            } else { Err(PyError::runtime_error("send_signal on non-process")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__enter__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__enter__".to_string(),
+                        func: |args| Ok(args[0].clone()),
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__exit__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__exit__".to_string(),
+                        func: |args| {
+                            if let PyObject::Process { child, returncode, .. } = &*args[0].borrow() {
+                                if returncode.borrow().is_none() {
+                                    if let Some(c) = child.borrow_mut().as_mut() {
+                                        if let Ok(status) = c.wait() {
+                                            *returncode.borrow_mut() = Some(status.code().unwrap_or(-1) as i64);
+                                        }
+                                    }
+                                }
+                            }
+                            Ok(py_bool(false))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    _ => Err(PyError::attribute_error(format!("'Popen' object has no attribute '{}'", name))),
                 }
             }
             PyObject::File { file: _, .. } => {

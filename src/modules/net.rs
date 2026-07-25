@@ -188,6 +188,83 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
     d.insert("STDOUT".to_string(), py_int(-2));
     d.insert("DEVNULL".to_string(), py_int(-3));
 
+    // `subprocess.Popen` — was missing ENTIRELY (only the higher-level
+    // `run`/`check_output` convenience wrappers existed, both of which
+    // block synchronously via `Command::output()`). Real CPython's own
+    // `run`/`check_output` are themselves implemented ON TOP OF `Popen` —
+    // it's the foundational class real code reaches for whenever it needs
+    // non-blocking spawn, streaming I/O, or manual process lifecycle
+    // control (`.poll()`, `.wait()`, `.communicate()`, `.terminate()`).
+    // Spawns eagerly (matching real `Popen` semantics — construction
+    // itself starts the child process) via `Command::spawn()` (non-
+    // blocking, unlike `.output()`). `stdin`/`stdout`/`stderr` accept
+    // `subprocess.PIPE`/`DEVNULL`/`STDOUT` (int sentinels) or default to
+    // inherited (matching real Python's own `None` default).
+    sub_func!("Popen", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("Popen() missing required argument 'args'"));
+        }
+        let kwargs = args.last().and_then(|a| if let PyObject::Dict(d) = &*a.borrow() { Some(d.clone()) } else { None });
+        let get_kw = |name: &str| kwargs.as_ref().and_then(|d| d.get(&py_str(name)).ok().flatten());
+        let shell = get_kw("shell").map(|v| v.truthy()).unwrap_or(false);
+        let cmd_arg = &args[0];
+
+        let mut command = if shell {
+            let cmd_str = cmd_arg.str();
+            let mut c = std::process::Command::new("/bin/sh");
+            c.arg("-c").arg(&cmd_str);
+            c
+        } else {
+            let cmd_args: Vec<String> = match &*cmd_arg.borrow() {
+                PyObject::List(items) | PyObject::Tuple(items) => items.iter().map(|a| a.str()).collect(),
+                _ => vec![cmd_arg.str()],
+            };
+            if cmd_args.is_empty() {
+                return Err(PyError::value_error("empty command"));
+            }
+            let mut c = std::process::Command::new(&cmd_args[0]);
+            c.args(&cmd_args[1..]);
+            c
+        };
+        if let Some(cwd) = get_kw("cwd") {
+            if !matches!(&*cwd.borrow(), PyObject::None) {
+                command.current_dir(crate::object::path_arg_to_string(&cwd));
+            }
+        }
+        // Sentinel ints (matching this module's own PIPE/STDOUT/DEVNULL
+        // constants just above) map to the corresponding `Stdio` mode;
+        // anything else (including the real default, `None`) inherits the
+        // parent's stream, matching real Python's own default.
+        let stdio_for = |v: &PyObjectRef| -> std::process::Stdio {
+            match v.as_i64() {
+                Some(-1) => std::process::Stdio::piped(),
+                Some(-3) => std::process::Stdio::null(),
+                _ => std::process::Stdio::inherit(),
+            }
+        };
+        if let Some(v) = get_kw("stdin") { command.stdin(stdio_for(&v)); }
+        if let Some(v) = get_kw("stdout") { command.stdout(stdio_for(&v)); }
+        if let Some(v) = get_kw("stderr") {
+            // `STDOUT` (-2) means "merge into the same stream as stdout" —
+            // Rust's `Command` has no simple pre-spawn "same fd as stdout"
+            // API, so approximate by piping stderr separately too (still
+            // captured via `.communicate()`, just as a distinct stream
+            // rather than truly interleaved byte-for-byte with stdout).
+            match v.as_i64() {
+                Some(-2) => { command.stderr(std::process::Stdio::piped()); }
+                _ => { command.stderr(stdio_for(&v)); }
+            }
+        }
+
+        let child = command.spawn().map_err(|e| PyError::OsError(format!("{}", e)))?;
+        let pid = child.id() as i64;
+        Ok(PyObjectRef::new(PyObject::Process {
+            child: std::rc::Rc::new(std::cell::RefCell::new(Some(child))),
+            returncode: std::rc::Rc::new(std::cell::RefCell::new(None)),
+            pid,
+        }))
+    });
+
     d
 }
 

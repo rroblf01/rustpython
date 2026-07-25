@@ -3050,7 +3050,7 @@ impl VirtualMachine {
                     // iterating the original iterable directly.
                     PyObject::ListIter { .. } | PyObject::RangeIter { .. }
                     | PyObject::MapIterator { .. } | PyObject::FilterIterator { .. }
-                    | PyObject::ZipIterator { .. } => {
+                    | PyObject::ZipIterator { .. } | PyObject::CycleIter { .. } => {
                         drop(obj);
                         self.frames[fi].push(val);
                     }
@@ -3137,7 +3137,6 @@ impl VirtualMachine {
                         PyObject::RangeIter { current, stop, step } => {
                             if *step > 0 { *current >= *stop } else { *current <= *stop }
                         }
-                        PyObject::EnumerateIter { items, pos, .. } => *pos >= items.len(),
                         // ZipIterator/MapIterator/FilterIterator don't fit
                         // this branch's exhausted-check-then-advance shape
                         // (advancing several sub-iterators, e.g. zip's, in
@@ -3151,7 +3150,16 @@ impl VirtualMachine {
                         // map/filter) used directly as a for-loop target,
                         // as opposed to being wrapped in `list(...)` first,
                         // has never worked.
-                        PyObject::ZipIterator { .. } | PyObject::MapIterator { .. } | PyObject::FilterIterator { .. } => {
+                        // `CycleIter` (`itertools.cycle`) shares the same
+                        // "doesn't fit index/length exhaustion" shape —
+                        // genuinely infinite (wraps via modulo), so there's
+                        // no `len()` to compare against at all; delegate to
+                        // `builtin_next` exactly like Zip/Map/Filter above.
+                        // `EnumerateIter` moved here too — it no longer
+                        // holds a materialized `items`/`len()` to compare
+                        // against now that it's a lazy wrapper around a
+                        // `source` iterator (see its own doc comment).
+                        PyObject::ZipIterator { .. } | PyObject::MapIterator { .. } | PyObject::FilterIterator { .. } | PyObject::CycleIter { .. } | PyObject::EnumerateIter { .. } => {
                             drop(obj);
                             match crate::object::builtin_next(&[iter_val.clone()]) {
                                 Ok(val) => {
@@ -3199,12 +3207,13 @@ impl VirtualMachine {
                                 *current += *step;
                                 v
                             }
-                            PyObject::EnumerateIter { items, pos, start } => {
-                                let idx = *start + *pos;
-                                let val = items[*pos].clone();
-                                *pos += 1;
-                                py_tuple(vec![py_int(idx as i64), val])
-                            }
+                            // `EnumerateIter` no longer reaches this arm at
+                            // all — it moved to the earlier "delegate to
+                            // builtin_next, return early" bucket above
+                            // (alongside Zip/Map/Filter/Cycle) once it
+                            // became a lazy `source`-wrapper instead of a
+                            // materialized `items` list with no `len()` to
+                            // compare against.
                             _ => unreachable!()
                         }
                     };

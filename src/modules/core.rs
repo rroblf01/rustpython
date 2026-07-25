@@ -2522,6 +2522,35 @@ pub fn create_os_path_dict() -> HashMap<String, PyObjectRef> {
         }
     });
 
+    // `os.path.realpath(path)` — resolves symlinks (via `std::fs::
+    // canonicalize`) and returns an absolute path, falling back to the
+    // plain `abspath`-style resolution above if the path doesn't exist
+    // (real CPython's `realpath` doesn't require the path to exist either —
+    // it resolves as much as it can and leaves the rest as-is). Missing
+    // entirely before this — a common, general path-normalization idiom
+    // real code reaches for constantly (not just a niche function).
+    path_func!("realpath", |args| {
+        if args.is_empty() { return Err(PyError::type_error("realpath() takes at least 1 argument")); }
+        let path_str = crate::object::path_arg_to_string(&args[0]);
+        match std::fs::canonicalize(&path_str) {
+            Ok(resolved) => Ok(py_str(&resolved.to_string_lossy())),
+            Err(_) => {
+                // Path doesn't exist (or a component doesn't) — fall back
+                // to plain absolute-path resolution without requiring
+                // existence, matching real `realpath`'s graceful behavior.
+                let path = std::path::Path::new(&path_str);
+                if path.is_absolute() {
+                    Ok(py_str(&path_str))
+                } else {
+                    match std::env::current_dir() {
+                        Ok(cwd) => Ok(py_str(&cwd.join(&path_str).to_string_lossy())),
+                        Err(e) => Err(PyError::OsError(format!("{}", e))),
+                    }
+                }
+            }
+        }
+    });
+
     // --- Filesystem metadata ---
 
     path_func!("getsize", |args| {

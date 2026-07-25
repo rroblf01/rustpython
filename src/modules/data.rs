@@ -578,6 +578,29 @@ pub fn create_itertools_dict() -> HashMap<String, PyObjectRef> {
         Ok(py_list(items))
     });
 
+    // `itertools.cycle(iterable)` was missing entirely — unlike this
+    // file's other itertools functions (`count`/`repeat`/etc.), which
+    // approximate "infinite" by eagerly materializing a large-but-bounded
+    // number of items, `cycle` gets a REAL lazy iterator (`PyObject::
+    // CycleIter`, `object.rs`) since eager materialization is simply
+    // impossible for something with no natural cutoff at all — real code
+    // commonly relies on `cycle()` running genuinely forever (e.g. paired
+    // with `itertools.islice` to take just the first N, or driven by an
+    // external `break`).
+    it_func!("cycle", |args| {
+        if args.is_empty() { return Err(PyError::type_error("cycle() missing required argument")); }
+        let it = builtin_iter(&[args[0].clone()])?;
+        let mut items = Vec::new();
+        loop {
+            match builtin_next(&[it.clone()]) {
+                Ok(v) => items.push(v),
+                Err(PyError::StopIteration) => break,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(PyObjectRef::new(PyObject::CycleIter { items, index: 0 }))
+    });
+
     it_func!("product", |args| {
         if args.is_empty() {
             return Ok(py_list(vec![py_tuple(vec![])]));
@@ -778,37 +801,50 @@ pub fn create_itertools_dict() -> HashMap<String, PyObjectRef> {
         Ok(py_list(items))
     });
 
+    // `islice(iterable, [start,] stop[, step])` — its ENTIRE reason to
+    // exist in real Python is slicing a bound out of a POTENTIALLY INFINITE
+    // iterator (`itertools.count()`, `itertools.cycle()`, a hand-written
+    // infinite generator) without ever materializing it in full. The
+    // previous implementation eagerly drained the WHOLE input into a `Vec`
+    // BEFORE looking at `start`/`stop`/`step` at all — hung forever on any
+    // genuinely infinite source (confirmed via the simplest repro,
+    // `list(itertools.islice(itertools.cycle('ab'), 5))`). Fixed to pull at
+    // most `stop` items from the source lazily, stopping as soon as enough
+    // have been read — matching real `islice`'s whole purpose. A `stop`
+    // of `None` (real Python's "take everything from `start` onward," only
+    // meaningful for a source that eventually ends on its own) still drains
+    // to real exhaustion, same as before — that's correct there, not a bug.
     it_func!("islice", |args| {
         if args.is_empty() { return Err(PyError::type_error("islice() missing arguments")); }
-        let mut items = Vec::new();
-        if let Ok(it) = builtin_iter(&[args[0].clone()]) {
-            loop {
-                match builtin_next(&[it.clone()]) {
-                    Ok(v) => items.push(v),
-                    Err(PyError::StopIteration) => break,
-                    Err(e) => return Err(e),
-                }
-            }
-        }
-        let n = items.len() as i64;
         let (start, stop, step) = match args.len() {
             1 => return Err(PyError::type_error("islice() missing stop argument")),
-            2 => (0i64, args[1].as_i64().unwrap_or(n), 1i64),
+            2 => (0i64, if matches!(&*args[1].borrow(), PyObject::None) { None } else { Some(args[1].as_i64().unwrap_or(0)) }, 1i64),
             _ => {
                 let start = args[1].as_i64().unwrap_or(0);
-                let stop = args[2].as_i64().unwrap_or(n);
+                let stop = if matches!(&*args[2].borrow(), PyObject::None) { None } else { Some(args[2].as_i64().unwrap_or(0)) };
                 let step = if args.len() > 3 { args[3].as_i64().unwrap_or(1) } else { 1 };
                 (start, stop, step)
             }
         };
-        let stop = stop.min(n).max(0);
         let start = start.max(0);
         let step = step.max(1);
+        let it = builtin_iter(&[args[0].clone()])?;
         let mut result = Vec::new();
-        let mut i = start;
-        while i < stop {
-            result.push(items[i as usize].clone());
-            i += step;
+        let mut i: i64 = 0;
+        loop {
+            if let Some(stop_v) = stop {
+                if i >= stop_v { break; }
+            }
+            match builtin_next(&[it.clone()]) {
+                Ok(v) => {
+                    if i >= start && (i - start) % step == 0 {
+                        result.push(v);
+                    }
+                    i += 1;
+                }
+                Err(PyError::StopIteration) => break,
+                Err(e) => return Err(e),
+            }
         }
         Ok(py_list(result))
     });

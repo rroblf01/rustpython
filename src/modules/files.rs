@@ -111,6 +111,28 @@ pub fn create_fnmatch_dict() -> HashMap<String, PyObjectRef> {
         regex::Regex::new(&re_str).map(|re| re.is_match(name)).unwrap_or(false)
     }
 
+    // `fnmatch.translate(pattern)` returns the REGEX SOURCE STRING a glob
+    // pattern compiles to (real CPython: `(?s:REGEX)\Z`) — was missing
+    // entirely. Real code uses this to build its OWN compiled regex (e.g.
+    // combining several glob patterns into one alternation), rather than
+    // calling `fnmatch()` per name repeatedly.
+    fn fnmatch_translate_str(pattern: &str) -> String {
+        let mut re_str = String::new();
+        for ch in pattern.chars() {
+            match ch {
+                '.' => re_str.push_str("\\."),
+                '*' => re_str.push_str(".*"),
+                '?' => re_str.push('.'),
+                '(' | ')' | '[' | ']' | '{' | '}' | '+' | '^' | '$' | '|' | '\\' => {
+                    re_str.push('\\');
+                    re_str.push(ch);
+                }
+                other => re_str.push(other),
+            }
+        }
+        format!("(?s:{})\\Z", re_str)
+    }
+
     fnmatch_func!("fnmatch", |args| {
         if args.len() < 2 {
             return Err(PyError::type_error("fnmatch() takes exactly 2 arguments"));
@@ -132,6 +154,12 @@ pub fn create_fnmatch_dict() -> HashMap<String, PyObjectRef> {
         let name = args[0].str();
         let pattern = args[1].str();
         Ok(py_bool(fnmatch_match(&name, &pattern)))
+    });
+    fnmatch_func!("translate", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("translate() takes exactly 1 argument"));
+        }
+        Ok(py_str(&fnmatch_translate_str(&args[0].str())))
     });
     d
 }
