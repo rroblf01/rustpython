@@ -294,7 +294,7 @@ fn eval_const_value(const_val: ConstValue) -> PyResult<PyObjectRef> {
             PyObjectRef::imm(PyObject::Complex(re, im))
         }
         ConstValue::Code(code) => {
-            PyObjectRef::imm(PyObject::Code(code))
+            PyObjectRef::imm(PyObject::Code(Rc::from(code)))
         }
         ConstValue::Tuple(items) => {
             let objs: Vec<PyObjectRef> = items.into_iter().map(|s| py_str(&s)).collect();
@@ -2425,7 +2425,7 @@ impl VirtualMachine {
                         let im: f64 = imag.parse().map_err(|_| PyError::value_error("invalid complex literal"))?;
                         PyObjectRef::imm(PyObject::Complex(re, im))
                     }
-                    ConstValue::Code(code) => PyObjectRef::imm(PyObject::Code(code)),
+                    ConstValue::Code(code) => PyObjectRef::imm(PyObject::Code(Rc::from(code))),
                     ConstValue::Tuple(items) => {
                         let objs: Vec<PyObjectRef> = items.into_iter().map(|s| py_str(&s)).collect();
                         PyObjectRef::imm(PyObject::Tuple(objs))
@@ -2620,8 +2620,16 @@ impl VirtualMachine {
                 defaults.reverse();
                 defaults.extend(kwdefaults);
                 let code_obj = self.frames[fi].pop()?;
+                // A cheap `Rc` clone, not a deep copy of the whole
+                // `CodeObject` (instructions, consts, ...) — this used to
+                // `.clone()` the dereferenced `CodeObject` itself here,
+                // meaning a `def`/`lambda` executed fresh on every
+                // iteration of a loop deep-cloned its entire compiled body
+                // every single time, even though (with `LOAD_CONST`'s own
+                // caching) the SAME `PyObject::Code` constant was being
+                // read repeatedly.
                 let code = match &*code_obj.borrow() {
-                    PyObject::Code(c) => c.as_ref().clone(),
+                    PyObject::Code(c) => c.clone(),
                     _ => return Err(PyError::runtime_error("MAKE_FUNCTION: expected code object")),
                 };
                 let closure = if has_closure {
@@ -2660,7 +2668,7 @@ impl VirtualMachine {
                 });
                 // Set __code__ and __module__ on the function
                 if let PyObject::Function { dict, .. } = &mut *func.borrow_mut() {
-                    dict.insert("__code__".to_string(), PyObjectRef::imm(PyObject::Code(Box::new(code_obj))));
+                    dict.insert("__code__".to_string(), PyObjectRef::imm(PyObject::Code(code_obj)));
                 }
                 if let Some(ref mg) = self.frames[fi].module_globals {
                     let mg = mg.borrow();
@@ -3240,7 +3248,7 @@ impl VirtualMachine {
                             // panics the moment such a getter touches the
                             // instance it was called on (confirmed via a
                             // genuine, general, Django-free repro).
-                            let dict: HashMap<String, PyObjectRef> = dict.clone();
+                            let dict: crate::object::AttrMap = dict.clone();
                             let typ: PyObjectRef = typ.clone();
                             drop(obj_borrowed);
                             let dict = &dict;
@@ -4855,12 +4863,12 @@ impl VirtualMachine {
                 let frame = self.frames[fi].clone();
                 if is_coroutine {
                     let gen = PyObjectRef::new(PyObject::Coroutine {
-                        frame: std::cell::RefCell::new(Some(frame)),
+                        frame: std::cell::RefCell::new(Some(Box::new(frame))),
                     });
                     return Ok(Some(gen));
                 } else {
                     let gen = PyObjectRef::new(PyObject::Generator {
-                        frame: std::cell::RefCell::new(Some(frame)),
+                        frame: std::cell::RefCell::new(Some(Box::new(frame))),
                     });
                     return Ok(Some(gen));
                 }
@@ -5889,7 +5897,7 @@ impl VirtualMachine {
         // library) — a STORE_ATTR on `callable` while this function still
         // held it borrowed here was a genuine double-borrow panic.
         if let Some((native_kind, init_func)) = type_construct_info {
-            let mut instance_dict = HashMap::new();
+            let mut instance_dict = AttrMap::new();
             if let Some(kind) = &native_kind {
                 instance_dict.insert(crate::object::NATIVE_BACKING_KEY.to_string(), crate::object::make_native_backing(kind));
             }
@@ -6065,7 +6073,7 @@ impl VirtualMachine {
                 PyObject::Function { code, closure, .. } => {
                     let code = code.clone();
                     let closure = closure.clone();
-                    let mut new_frame = self.acquire_frame(Rc::new(code), namespace.clone(), Rc::clone(&self.builtins), caller_module_globals);
+                    let mut new_frame = self.acquire_frame(code, namespace.clone(), Rc::clone(&self.builtins), caller_module_globals);
                     new_frame.closure = closure;
                     new_frame.name_order = Some(name_order.clone());
                     self.frames.push(new_frame);

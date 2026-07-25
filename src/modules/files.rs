@@ -160,7 +160,7 @@ pub fn create_shutil_dict() -> HashMap<String, PyObjectRef> {
         let columns = std::env::var("COLUMNS").ok().and_then(|s| s.parse::<i64>().ok()).unwrap_or(fallback_cols);
         let lines = std::env::var("LINES").ok().and_then(|s| s.parse::<i64>().ok()).unwrap_or(fallback_lines);
         let typ = PyObjectRef::new(PyObject::Type { name: "os.terminal_size".to_string(), dict: HashMap::new(), bases: vec![], mro: vec![] });
-        let mut dict = HashMap::new();
+        let mut dict = AttrMap::new();
         dict.insert("columns".to_string(), py_int(columns));
         dict.insert("lines".to_string(), py_int(lines));
         Ok(PyObjectRef::new(PyObject::Instance { typ, dict }))
@@ -419,7 +419,7 @@ fn build_gzip_file(filename: &str, mode: &str, compresslevel: u32, mtime: Option
 
     Ok(PyObjectRef::new(PyObject::Instance {
         typ: PyObjectRef::new(PyObject::Type { name: "GzipFile".to_string(), dict: type_dict, bases: vec![], mro: vec![] }),
-        dict: HashMap::new(),
+        dict: AttrMap::new(),
     }))
 }
 
@@ -531,7 +531,7 @@ pub fn create_tarfile_dict() -> HashMap<String, PyObjectRef> {
         if args.len() < 1 { return Err(PyError::type_error("tarfile.open() takes at least 1 argument (name)")); }
         let _name = args[0].borrow().str();
         // Return an Instance with getnames() and extractall() methods
-        let mut inst_dict = HashMap::new();
+        let mut inst_dict = AttrMap::new();
         inst_dict.insert("name".to_string(), py_str(&_name));
         inst_dict.insert("getnames".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
             name: "getnames".to_string(),
@@ -731,7 +731,7 @@ pub fn create_pathlib_dict() -> HashMap<String, PyObjectRef> {
         let path_type = PATH_TYPE.with(|cell| {
             cell.borrow().clone()
         }).ok_or_else(|| PyError::runtime_error("Path type not initialized".to_string()))?;
-        let mut instance_dict = HashMap::new();
+        let mut instance_dict = AttrMap::new();
         instance_dict.insert("_path".to_string(), py_str(&result));
         Ok(PyObjectRef::new(PyObject::Instance {
             typ: path_type,
@@ -760,7 +760,7 @@ pub fn create_pathlib_dict() -> HashMap<String, PyObjectRef> {
         let path_type = PATH_TYPE.with(|cell| {
             cell.borrow().clone()
         }).ok_or_else(|| PyError::runtime_error("Path type not initialized".to_string()))?;
-        let mut instance_dict = HashMap::new();
+        let mut instance_dict = AttrMap::new();
         instance_dict.insert("_path".to_string(), py_str(&result));
         Ok(PyObjectRef::new(PyObject::Instance {
             typ: path_type,

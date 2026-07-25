@@ -384,7 +384,7 @@ pub fn create_string_dict_v2() -> HashMap<String, PyObjectRef> {
     let formatter = PyObjectRef::new(PyObject::BuiltinFunction {
         name: "Formatter".to_string(),
         func: |_args| {
-            let mut dict = HashMap::new();
+            let mut dict = AttrMap::new();
 
             dict.insert("vformat".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
                 name: "vformat".to_string(),
@@ -604,7 +604,7 @@ pub fn create_difflib_dict() -> HashMap<String, PyObjectRef> {
     let seq_matcher = PyObjectRef::new(PyObject::BuiltinFunction {
         name: "SequenceMatcher".to_string(),
         func: |_args| {
-            let mut dict = HashMap::new();
+            let mut dict = AttrMap::new();
             dict.insert("ratio".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
                 name: "ratio".to_string(),
                 func: |_| Ok(py_float(1.0)),
@@ -637,7 +637,7 @@ pub fn create_html_parser_dict() -> HashMap<String, PyObjectRef> {
     let html_parser = PyObjectRef::new(PyObject::BuiltinFunction {
         name: "HTMLParser".to_string(),
         func: |_args| {
-            let mut dict = HashMap::new();
+            let mut dict = AttrMap::new();
 
             // feed(data) — accumulates data
             dict.insert("feed".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {

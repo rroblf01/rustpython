@@ -131,7 +131,7 @@ pub fn create_abc_dict() -> HashMap<String, PyObjectRef> {
                 name: "abc".to_string(),
                 dict: HashMap::new(),
             }),
-            dict: HashMap::new(),
+            dict: AttrMap::new(),
         }))
     });
 
@@ -433,7 +433,7 @@ pub fn create_dis_dict() -> HashMap<String, PyObjectRef> {
         let obj = args[0].borrow();
         match &*obj {
             PyObject::Code(code) => Ok(code.as_ref().clone()),
-            PyObject::Function { code, .. } => Ok(code.clone()),
+            PyObject::Function { code, .. } => Ok((**code).clone()),
             _ => Err(PyError::type_error("argument must be a code object or function")),
         }
     }
@@ -509,7 +509,7 @@ pub fn create_doctest_dict() -> HashMap<String, PyObjectRef> {
 
     // TestResults constructor — returns an instance with failed=0, attempted=0
     doctest_func!("TestResults", |_args| {
-        let mut dict = HashMap::new();
+        let mut dict = AttrMap::new();
         dict.insert("failed".to_string(), py_int(0));
         dict.insert("attempted".to_string(), py_int(0));
         Ok(PyObjectRef::new(PyObject::Instance {
@@ -520,7 +520,7 @@ pub fn create_doctest_dict() -> HashMap<String, PyObjectRef> {
 
     // testmod(m=None) — runs doctests on a module, returns TestResults(failed=0, attempted=0)
     doctest_func!("testmod", |_args| {
-        let mut dict = HashMap::new();
+        let mut dict = AttrMap::new();
         dict.insert("failed".to_string(), py_int(0));
         dict.insert("attempted".to_string(), py_int(0));
         Ok(PyObjectRef::new(PyObject::Instance {
@@ -531,7 +531,7 @@ pub fn create_doctest_dict() -> HashMap<String, PyObjectRef> {
 
     // testfile(filename) — runs doctests in a file, returns TestResults(failed=0, attempted=0)
     doctest_func!("testfile", |_args| {
-        let mut dict = HashMap::new();
+        let mut dict = AttrMap::new();
         dict.insert("failed".to_string(), py_int(0));
         dict.insert("attempted".to_string(), py_int(0));
         Ok(PyObjectRef::new(PyObject::Instance {
@@ -547,7 +547,7 @@ pub fn create_doctest_dict() -> HashMap<String, PyObjectRef> {
 
     // DocTestFinder class stub
     doctest_func!("DocTestFinder", |_args| {
-        let mut dict = HashMap::new();
+        let mut dict = AttrMap::new();
         dict.insert("find".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
             name: "find".to_string(),
             func: |_| Ok(py_list(vec![])),
@@ -583,7 +583,7 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
             bases: vec![],
             mro: vec![],
         }),
-        dict: HashMap::new(),
+        dict: AttrMap::new(),
     }));
 
     inspect_func!("isfunction", |args| {
@@ -807,7 +807,7 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
             param_type_dict.insert("empty".to_string(), py_none());
             let param_type = PyObjectRef::new(PyObject::Type { name: "Parameter".to_string(), dict: param_type_dict, bases: vec![], mro: vec![] });
             let make_param = |pname: &str, kind: i64, default: PyObjectRef, param_type: &PyObjectRef| {
-                let mut inst_dict = HashMap::new();
+                let mut inst_dict = AttrMap::new();
                 inst_dict.insert("name".to_string(), py_str(pname));
                 inst_dict.insert("kind".to_string(), py_int(kind));
                 inst_dict.insert("default".to_string(), default);
@@ -859,7 +859,7 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
                 params.set(py_str(kw), p)?;
             }
             let sig_type = PyObjectRef::new(PyObject::Type { name: "Signature".to_string(), dict: HashMap::new(), bases: vec![], mro: vec![] });
-            let mut sig_dict = HashMap::new();
+            let mut sig_dict = AttrMap::new();
             sig_dict.insert("parameters".to_string(), PyObjectRef::new(PyObject::Dict(params)));
             Ok(PyObjectRef::new(PyObject::Instance { typ: sig_type, dict: sig_dict }))
         } else {
@@ -914,16 +914,13 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
 
 fn getmembers_dict_of(obj: &PyObjectRef) -> Vec<(String, PyObjectRef)> {
     let b = obj.borrow();
-    let dict = match &*b {
-        PyObject::Function { ref dict, .. } => Some(dict),
-        PyObject::Type { ref dict, .. } => Some(dict),
-        PyObject::Module { ref dict, .. } => Some(dict),
-        PyObject::Instance { ref dict, .. } => Some(dict),
-        _ => None,
+    let mut items: Vec<(String, PyObjectRef)> = match &*b {
+        PyObject::Function { dict, .. } => dict.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        PyObject::Type { dict, .. } => dict.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        PyObject::Module { dict, .. } => dict.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        PyObject::Instance { dict, .. } => dict.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        _ => Vec::new(),
     };
-    let mut items: Vec<(String, PyObjectRef)> = dict
-        .map(|d| d.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
-        .unwrap_or_default();
     items.sort_by(|a, b| a.0.cmp(&b.0));
     items
 }
@@ -1010,7 +1007,7 @@ pub fn create_profile_dict() -> HashMap<String, PyObjectRef> {
 
     // Profiler stub class
     prof_func!("Profile", |_args| {
-        let mut inst_dict = HashMap::new();
+        let mut inst_dict = AttrMap::new();
         inst_dict.insert("enable".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
             name: "enable".to_string(),
             func: |_| Ok(py_none()),
@@ -1079,7 +1076,7 @@ pub fn create_resource_dict() -> HashMap<String, PyObjectRef> {
     d.insert("RLIMIT_AS".to_string(), py_int(9));
 
     res_func!("getrusage", |_args| {
-        let mut result_dict = HashMap::new();
+        let mut result_dict = AttrMap::new();
         let zero = py_int(0);
         result_dict.insert("ru_utime".to_string(), py_float(0.0));
         result_dict.insert("ru_stime".to_string(), py_float(0.0));
@@ -1130,7 +1127,7 @@ pub fn create_trace_dict() -> HashMap<String, PyObjectRef> {
     }
 
     trace_func!("Trace", |_args| {
-        let mut inst_dict = HashMap::new();
+        let mut inst_dict = AttrMap::new();
         inst_dict.insert("run".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
             name: "run".to_string(),
             func: |args| {
@@ -1163,7 +1160,7 @@ pub fn create_trace_dict() -> HashMap<String, PyObjectRef> {
 
     // Coverage results class
     trace_func!("CoverageResults", |_args| {
-        let mut inst_dict = HashMap::new();
+        let mut inst_dict = AttrMap::new();
         inst_dict.insert("write_results".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
             name: "write_results".to_string(),
             func: |_| Ok(py_none()),
@@ -1279,7 +1276,7 @@ pub fn create_zipimport_dict() -> HashMap<String, PyObjectRef> {
     }
     zip_func!("zipimporter", |args| {
         let _path = if !args.is_empty() { args[0].str() } else { String::new() };
-        let mut inst_dict = HashMap::new();
+        let mut inst_dict = AttrMap::new();
         inst_dict.insert("find_spec".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
             name: "find_spec".to_string(), func: |_| Ok(py_none()),
         }));
@@ -1435,13 +1432,13 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
 
         Ok(PyObjectRef::new(PyObject::Instance {
             typ: PyObjectRef::new(PyObject::Type { name: "BytesIO".to_string(), dict: type_dict, bases: vec![], mro: vec![] }),
-            dict: HashMap::new(),
+            dict: AttrMap::new(),
         }))
     });
 
     // IncrementalNewlineDecoder — stub
     io_func!("IncrementalNewlineDecoder", |_args| {
-        let mut type_dict = HashMap::new();
+        let mut type_dict = AttrMap::new();
         type_dict.insert("decode".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
             name: "decode".to_string(),
             func: |m_args| {
@@ -1773,7 +1770,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
                 name: "StringIO".to_string(), dict: type_dict,
                 bases: vec![text_cls.clone()], mro: vec![text_cls.clone()],
             }),
-            dict: HashMap::new(),
+            dict: AttrMap::new(),
         }))
     });
     d.insert("StringIO".to_string(), PyObjectRef::new(PyObject::Closure(stringio_closure)));

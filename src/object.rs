@@ -13,6 +13,169 @@ impl DictMap for HashMap<String, PyObjectRef> {
     fn contains_key_str(&self, name: &str) -> bool { self.contains_key(name) }
 }
 
+/// Dense, linear-scan small map used for `PyObject::Instance.dict`.
+///
+/// Real Python instances typically hold only a handful of attributes (a
+/// class with `__init__(self, x, y)` has exactly 2). A `HashMap`'s fixed
+/// per-map overhead — an empty struct costs 48 bytes, and inserting just 2
+/// entries already forces a table allocation rounded up to capacity 3 —
+/// costs more at this scale than a flat `Vec` scan saves in lookup speed.
+/// Linear scan over a handful of short strings is also cache-friendlier
+/// than hashing + a pointer-chasing bucket lookup. Kept HashMap-API-shaped
+/// (`get`/`insert`/`remove`/`contains_key`/`keys`/`iter`/`entry`/...) so it
+/// drops into the existing call sites with minimal churn. Module/Type dicts
+/// (which can hold many entries — every class method, every module export)
+/// deliberately keep `HashMap`, where hashing actually pays for itself.
+#[derive(Debug, Clone, Default)]
+pub struct AttrMap {
+    entries: Vec<(String, PyObjectRef)>,
+}
+
+impl AttrMap {
+    pub fn new() -> Self {
+        AttrMap { entries: Vec::new() }
+    }
+
+    fn position(&self, key: &str) -> Option<usize> {
+        self.entries.iter().position(|(k, _)| k == key)
+    }
+
+    pub fn get(&self, key: &str) -> Option<&PyObjectRef> {
+        self.position(key).map(|i| &self.entries[i].1)
+    }
+
+    pub fn get_mut(&mut self, key: &str) -> Option<&mut PyObjectRef> {
+        match self.position(key) {
+            Some(i) => Some(&mut self.entries[i].1),
+            None => None,
+        }
+    }
+
+    pub fn insert(&mut self, key: String, value: PyObjectRef) -> Option<PyObjectRef> {
+        match self.position(&key) {
+            Some(i) => Some(std::mem::replace(&mut self.entries[i].1, value)),
+            None => {
+                self.entries.push((key, value));
+                None
+            }
+        }
+    }
+
+    pub fn remove(&mut self, key: &str) -> Option<PyObjectRef> {
+        self.position(key).map(|i| self.entries.remove(i).1)
+    }
+
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.position(key).is_some()
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = &String> {
+        self.entries.iter().map(|(k, _)| k)
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &PyObjectRef> {
+        self.entries.iter().map(|(_, v)| v)
+    }
+
+    pub fn values_mut(&mut self) -> impl Iterator<Item = &mut PyObjectRef> {
+        self.entries.iter_mut().map(|(_, v)| v)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &PyObjectRef)> {
+        self.entries.iter().map(|(k, v)| (k, v))
+    }
+
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&String, &mut PyObjectRef)> {
+        self.entries.iter_mut().map(|(k, v)| (&*k, v))
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear()
+    }
+
+    pub fn entry(&mut self, key: String) -> AttrEntry<'_> {
+        match self.position(&key) {
+            Some(i) => AttrEntry::Occupied(&mut self.entries[i].1),
+            None => AttrEntry::Vacant(self, key),
+        }
+    }
+}
+
+impl Extend<(String, PyObjectRef)> for AttrMap {
+    fn extend<I: IntoIterator<Item = (String, PyObjectRef)>>(&mut self, iter: I) {
+        for (k, v) in iter {
+            self.insert(k, v);
+        }
+    }
+}
+
+impl<const N: usize> From<[(String, PyObjectRef); N]> for AttrMap {
+    fn from(arr: [(String, PyObjectRef); N]) -> Self {
+        let mut m = AttrMap::new();
+        for (k, v) in arr {
+            m.insert(k, v);
+        }
+        m
+    }
+}
+
+impl FromIterator<(String, PyObjectRef)> for AttrMap {
+    fn from_iter<I: IntoIterator<Item = (String, PyObjectRef)>>(iter: I) -> Self {
+        let mut m = AttrMap::new();
+        for (k, v) in iter {
+            m.insert(k, v);
+        }
+        m
+    }
+}
+
+impl IntoIterator for AttrMap {
+    type Item = (String, PyObjectRef);
+    type IntoIter = std::vec::IntoIter<(String, PyObjectRef)>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.entries.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a AttrMap {
+    type Item = (&'a String, &'a PyObjectRef);
+    type IntoIter = Box<dyn Iterator<Item = (&'a String, &'a PyObjectRef)> + 'a>;
+    fn into_iter(self) -> Self::IntoIter {
+        Box::new(self.iter())
+    }
+}
+
+pub enum AttrEntry<'a> {
+    Occupied(&'a mut PyObjectRef),
+    Vacant(&'a mut AttrMap, String),
+}
+
+impl<'a> AttrEntry<'a> {
+    pub fn or_insert_with<F: FnOnce() -> PyObjectRef>(self, f: F) -> &'a mut PyObjectRef {
+        match self {
+            AttrEntry::Occupied(v) => v,
+            AttrEntry::Vacant(map, key) => {
+                map.entries.push((key, f()));
+                &mut map.entries.last_mut().unwrap().1
+            }
+        }
+    }
+}
+
+impl DictMap for AttrMap {
+    fn get_str(&self, name: &str) -> Option<&PyObjectRef> { self.get(name) }
+    fn insert_str(&mut self, name: &str, val: PyObjectRef) -> Option<PyObjectRef> { self.insert(name.to_string(), val) }
+    fn contains_key_str(&self, name: &str) -> bool { self.contains_key(name) }
+}
+
 use std::fmt;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicUsize;
@@ -979,9 +1142,24 @@ pub enum PyObject {
         stop: PyObjectRef,
         step: PyObjectRef,
     },
-    Code(Box<CodeObject>),
+    // `Rc` (not `Box`) so `MAKE_FUNCTION` can share the same compiled body
+    // across repeated executions of one `def`/`lambda` (e.g. one defined
+    // fresh each iteration of a loop) via a cheap pointer clone, instead of
+    // deep-cloning the whole `CodeObject` (instructions, consts, ...) every
+    // time — see `PyObject::Function.code`'s own field comment, which this
+    // directly feeds into via `LOAD_CONST`'s now-cached `PyObject::Code`
+    // constant.
+    Code(Rc<CodeObject>),
+    // `Rc<CodeObject>` (not owned `CodeObject`, which is 344 bytes) — see
+    // `PyObject::Generator`'s field comment for why embedding a large
+    // struct by value here bloats the ENTIRE enum, not just this variant.
+    // Sharing via `Rc` also means every `def`/`lambda` executed inside a
+    // loop (a fresh `MAKE_FUNCTION` call each time, same underlying code)
+    // no longer deep-clones its whole compiled body (instructions, consts,
+    // ...) on every iteration — it did before, since this field previously
+    // forced an owned copy.
     Function {
-        code: CodeObject,
+        code: Rc<CodeObject>,
         globals: Rc<RefCell<HashMap<String, PyObjectRef>>>,
         name: String,
         defaults: Vec<PyObjectRef>,
@@ -1011,7 +1189,7 @@ pub enum PyObject {
     },
     Instance {
         typ: PyObjectRef,
-        dict: HashMap<String, PyObjectRef>,
+        dict: AttrMap,
     },
     Cell {
         value: Option<PyObjectRef>,
@@ -1070,11 +1248,18 @@ pub enum PyObject {
     ClassMethod {
         func: PyObjectRef,
     },
+    // `Box<Frame>` (not a bare `Frame`) — `Frame` itself is ~536 bytes, and
+    // since Rust sizes an enum to its LARGEST variant, embedding it inline
+    // here made EVERY `PyObject` (a one-element list, an empty dict, a
+    // short string) pay for 552 bytes of heap space regardless of its own
+    // actual size. Boxing just these two variants (plus `Function.code`,
+    // see its own field comment) shrinks the whole enum down to whatever
+    // its new largest variant is instead.
     Generator {
-        frame: std::cell::RefCell<Option<super::vm::Frame>>,
+        frame: std::cell::RefCell<Option<Box<super::vm::Frame>>>,
     },
     Coroutine {
-        frame: std::cell::RefCell<Option<super::vm::Frame>>,
+        frame: std::cell::RefCell<Option<Box<super::vm::Frame>>>,
     },
     Array(PyArray),
     CompiledRegex {
@@ -1379,7 +1564,7 @@ impl PyObject {
                 // will see an empty dict here. Pre-existing limitation.
                 let f = lookup_dunder_via_mro(typ, "__bool__");
                 if let Some(f) = f {
-                    if let Ok(result) = call_bound_method(f, PyObjectRef::new(PyObject::Instance { typ: typ.clone(), dict: HashMap::new() }), vec![]) {
+                    if let Ok(result) = call_bound_method(f, PyObjectRef::new(PyObject::Instance { typ: typ.clone(), dict: AttrMap::new() }), vec![]) {
                         return result.truthy();
                     }
                 }
@@ -3823,7 +4008,7 @@ pub fn builtin_object(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     });
     Ok(PyObjectRef::new(PyObject::Instance {
         typ: object_type,
-        dict: HashMap::new(),
+        dict: AttrMap::new(),
     }))
 }
 
@@ -3937,7 +4122,12 @@ pub fn builtin_dir(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let obj = args[0].borrow();
     let mut names = Vec::new();
     match &*obj {
-        PyObject::Instance { dict, .. } | PyObject::Module { dict, .. } => {
+        PyObject::Instance { dict, .. } => {
+            for key in dict.keys() {
+                names.push(py_str(key));
+            }
+        }
+        PyObject::Module { dict, .. } => {
             for key in dict.keys() {
                 names.push(py_str(key));
             }
@@ -4239,7 +4429,7 @@ pub fn call_bound_method(func: PyObjectRef, self_obj: PyObjectRef, args: Vec<PyO
             // '__name__'` — `type(self)` had silently returned a fresh
             // `type`-instance instead of the real class object.
             let mut vm = super::vm::VirtualMachine::new();
-            let mut frame = super::vm::Frame::new(std::rc::Rc::new(code.clone()), g.clone(), std::rc::Rc::clone(&vm.builtins), None);
+            let mut frame = super::vm::Frame::new(code.clone(), g.clone(), std::rc::Rc::clone(&vm.builtins), None);
             // Without this, ANY closure-capturing function invoked via
             // call_bound_method (repr()/str()/hash()/comparisons/other
             // native builtins that call a user-defined dunder this way,
@@ -5194,12 +5384,12 @@ pub(crate) fn generator_throw_with_vm(vm: &mut super::vm::VirtualMachine, args: 
                 _ => "Exception".to_string(),
             };
             let err = PyError::Exception(typ, exc_obj);
-            vm.frames.push(f.clone());
+            vm.frames.push((**f).clone());
             match vm.throw_into_frame(err) {
                 Ok(val) => {
                     let modified = vm.frames.pop().unwrap();
                     if modified.ip > 0 && matches!(&modified.code.instructions[modified.ip - 1].op, crate::bytecode::Opcode::YIELD_VALUE) {
-                        *f = modified;
+                        *f = Box::new(modified);
                         Ok(val)
                     } else {
                         *frame_opt = None;
@@ -5373,20 +5563,18 @@ pub fn builtin_exec(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
     // Check if first arg is a code object (compile() result)
     let code = match &*args[0].borrow() {
-        PyObject::Code(c) => (*c).clone(),
-        _ => Box::new(
-            (|| -> Result<CodeObject, String> {
+        PyObject::Code(c) => (**c).clone(),
+        _ => (|| -> Result<CodeObject, String> {
                 let source = args[0].str();
                 let mut parser = crate::parser::Parser::new(&source);
                 let program = parser.parse_program()?;
                 let mut compiler = crate::compiler::Compiler::new();
                 compiler.compile(&program, "<exec>")
-            })().map_err(|e| PyError::type_error(format!("exec error: {}", e)))?
-        ),
+            })().map_err(|e| PyError::type_error(format!("exec error: {}", e)))?,
     };
-    let code2 = (*code).clone();
+    let code2 = code.clone();
     // Use current VM if available via VM_PTR so exec() shares modules, sys.path, etc.
-    match with_vm_mut(|vm| vm.run(*code)) {
+    match with_vm_mut(|vm| vm.run(code)) {
         Ok(Ok(ref _val)) => Ok(py_none()),
         Ok(Err(e)) => Err(PyError::type_error(format!("exec error: {}", e))),
         Err(_) => {
@@ -5431,7 +5619,7 @@ pub fn builtin_compile(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     };
     let mut compiler = crate::compiler::Compiler::new();
     let code = compiler.compile(&program, &filename).map_err(|e| PyError::syntax_error(e))?;
-    Ok(PyObjectRef::new(PyObject::Code(Box::new(code))))
+    Ok(PyObjectRef::new(PyObject::Code(Rc::new(code))))
 }
 
 pub fn builtin_super(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
@@ -5587,7 +5775,7 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
                 // call instead of the disposable VM's own, breaking
                 // pointer-identity checks like the `type(x)` special case.
                 let mut vm = super::vm::VirtualMachine::new();
-                let mut frame = super::vm::Frame::new(std::rc::Rc::new(code.clone()), g.clone(), std::rc::Rc::clone(&vm.builtins), None);
+                let mut frame = super::vm::Frame::new(code.clone(), g.clone(), std::rc::Rc::clone(&vm.builtins), None);
                 frame.closure = closure;
                 for i in 0..npos.min(named_params) {
                     if i < code.varnames.len() {
@@ -5651,7 +5839,7 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
             if matches!(&*f.borrow(), PyObject::Type { .. }) {
                 let instance = PyObjectRef::new(PyObject::Instance {
                     typ: f.clone(),
-                    dict: std::collections::HashMap::new(),
+                    dict: AttrMap::new(),
                 });
                 if let Some(init) = lookup_dunder_via_mro(&f, "__init__") {
                     call_bound_method(init, instance.clone(), a)?;
@@ -5662,7 +5850,7 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
         5 => {
             let instance = PyObjectRef::new(PyObject::Instance {
                 typ: f.clone(),
-                dict: std::collections::HashMap::new(),
+                dict: AttrMap::new(),
             });
             Ok(instance)
         }
@@ -8052,7 +8240,7 @@ impl PyObject {
                             // Use a raw pointer to the RefCell to avoid cloning it
                             // (cloning creates an independent copy and the saved frame
                             // state is never written back to the generator).
-                            let frame_ptr: *const std::cell::RefCell<Option<super::vm::Frame>> = {
+                            let frame_ptr: *const std::cell::RefCell<Option<Box<super::vm::Frame>>> = {
                                 let gen = args[0].borrow();
                                 match &*gen {
                                     PyObject::Generator { frame } => frame as *const _,
@@ -8071,12 +8259,12 @@ impl PyObject {
                                     f.stack.push(crate::object::py_none());
                                 }
                                 let mut vm = super::vm::VirtualMachine::new();
-                                vm.frames.push(f.clone());
+                                vm.frames.push((**f).clone());
                                 match vm.execute() {
                                     Ok(val) => {
                                         let modified = vm.frames.pop().unwrap();
                                         if modified.ip > 0 && matches!(&modified.code.instructions[modified.ip - 1].op, crate::bytecode::Opcode::YIELD_VALUE) {
-                                            *f = modified;
+                                            *f = Box::new(modified);
                                             Ok(val)
                                         } else {
                                             *frame_opt = None;
@@ -8139,12 +8327,12 @@ impl PyObject {
                                         f.stack.push(crate::object::py_none());
                                     }
                                     let mut vm = super::vm::VirtualMachine::new();
-                                    vm.frames.push(f.clone());
+                                    vm.frames.push((**f).clone());
                                     match vm.execute() {
                                         Ok(val) => {
                                             let modified = vm.frames.pop().unwrap();
                                             if modified.ip > 0 && matches!(&modified.code.instructions[modified.ip - 1].op, crate::bytecode::Opcode::YIELD_VALUE) {
-                                                *f = modified;
+                                                *f = Box::new(modified);
                                                 Ok(val)
                                             } else {
                                                 *frame_opt = None;
@@ -8193,12 +8381,12 @@ impl PyObject {
                                         _ => "Exception".to_string(),
                                     };
                                     let err = PyError::Exception(typ, exc_obj);
-                                    vm.frames.push(f.clone());
+                                    vm.frames.push((**f).clone());
                                     match vm.throw_into_frame(err) {
                                         Ok(val) => {
                                             let modified = vm.frames.pop().unwrap();
                                             if modified.ip > 0 && matches!(&modified.code.instructions[modified.ip - 1].op, crate::bytecode::Opcode::YIELD_VALUE) {
-                                                *f = modified;
+                                                *f = Box::new(modified);
                                                 Ok(val)
                                             } else {
                                                 *frame_opt = None;
@@ -11081,7 +11269,7 @@ fn zipfile_infolist(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             PyObject::List(items) => items,
             _ => return py_none(),
         };
-        let mut info_dict = HashMap::new();
+        let mut info_dict = AttrMap::new();
         if entry_list.len() >= 1 {
             info_dict.insert("filename".to_string(), entry_list[0].clone());
         }
@@ -11173,7 +11361,7 @@ pub fn zipfile_constructor(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         offset = data_start + compressed_size;
     }
 
-    let mut inst_dict = HashMap::new();
+    let mut inst_dict = AttrMap::new();
     inst_dict.insert("filename".to_string(), py_str(&filename));
     inst_dict.insert("_data".to_string(), PyObjectRef::new(PyObject::Bytes(archive)));
     inst_dict.insert("_names".to_string(), py_list(names));
@@ -11542,7 +11730,7 @@ pub fn shelf_open(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let data_dict = py_dict();
 
     // Instance dict with field and methods
-    let mut inst_dict = HashMap::new();
+    let mut inst_dict = AttrMap::new();
     inst_dict.insert("_data".to_string(), data_dict);
     inst_dict.insert("filename".to_string(), py_str(&filename));
 
@@ -11611,7 +11799,7 @@ fn create_urlopen_response(body: Vec<u8>) -> PyObjectRef {
         mro: vec![],
     });
 
-    let mut instance_dict = HashMap::new();
+    let mut instance_dict = AttrMap::new();
     instance_dict.insert("_body".to_string(), PyObjectRef::imm(PyObject::Bytes(body)));
     PyObjectRef::new(PyObject::Instance {
         typ: resp_type,
@@ -11815,7 +12003,7 @@ pub fn create_urllib_parse_dict() -> HashMap<String, PyObjectRef> {
             mro: vec![],
         });
 
-        let mut instance_dict = HashMap::new();
+        let mut instance_dict = AttrMap::new();
         instance_dict.insert("scheme".to_string(), py_str(&scheme));
         instance_dict.insert("netloc".to_string(), py_str(&netloc));
         instance_dict.insert("path".to_string(), py_str(&path));

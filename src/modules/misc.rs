@@ -299,7 +299,7 @@ fn make_match_object(re_match: Option<fancy_regex::Match<'_>>, _num_groups: usiz
                 mro: vec![],
             });
 
-            let mut instance_dict = HashMap::new();
+            let mut instance_dict = AttrMap::new();
             instance_dict.insert("_text".to_string(), py_str(&text));
             instance_dict.insert("_start".to_string(), py_int(start_pos as i64));
             instance_dict.insert("_end".to_string(), py_int(end_pos as i64));
@@ -527,7 +527,7 @@ pub fn create_threading_dict() -> HashMap<String, PyObjectRef> {
                 bases: vec![],
                 mro: vec![],
             }),
-            dict: HashMap::new(),
+            dict: AttrMap::new(),
         }))
     });
 
@@ -833,7 +833,7 @@ pub fn create_collections_abc_dict() -> HashMap<String, PyObjectRef> {
         func: |_args| {
             Ok(PyObjectRef::new(PyObject::Instance {
                 typ: py_dict(), // simplified type
-                dict: HashMap::new(),
+                dict: AttrMap::new(),
             }))
         },
     });
@@ -865,7 +865,7 @@ pub fn create_collections_abc_dict() -> HashMap<String, PyObjectRef> {
                 bases: vec![],
                 mro: vec![],
             }),
-            dict: HashMap::new(),
+            dict: AttrMap::new(),
         })
     }
 
@@ -1498,7 +1498,7 @@ fn make_uuid(hex32: String) -> PyObjectRef {
     });
     PyObjectRef::new(PyObject::Instance {
         typ,
-        dict: HashMap::from([("_hex".to_string(), py_str(&hex32))]),
+        dict: AttrMap::from([("_hex".to_string(), py_str(&hex32))]),
     })
 }
 
@@ -2427,7 +2427,7 @@ pub fn create_logging_dict() -> HashMap<String, PyObjectRef> {
         });
         let instance = PyObjectRef::new(PyObject::Instance {
             typ: logger_typ,
-            dict: HashMap::from([
+            dict: AttrMap::from([
                 ("name".to_string(), py_str(&name)),
             ]),
         });
@@ -2551,7 +2551,7 @@ pub fn create_logging_dict() -> HashMap<String, PyObjectRef> {
     d.insert("NullHandler".to_string(), PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(move |_| {
             Ok(PyObjectRef::new(PyObject::Instance {
                 typ: handler_class.clone(),
-                dict: HashMap::from([
+                dict: AttrMap::from([
                     ("emit".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
                         name: "emit".to_string(),
                         func: |_| Ok(py_none()),
@@ -3522,7 +3522,7 @@ pub fn create_wave_dict() -> HashMap<String, PyObjectRef> {
                         mro: vec![],
                     });
 
-                    let mut instance_dict = HashMap::new();
+                    let mut instance_dict = AttrMap::new();
                     instance_dict.insert("nchannels".to_string(), py_int(nchannels as i64));
                     instance_dict.insert("sampwidth".to_string(), py_int(sampwidth as i64));
                     instance_dict.insert("framerate".to_string(), py_int(framerate as i64));
@@ -3679,7 +3679,7 @@ fn email_message_constructor(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // Create instance with empty dict
     let instance = PyObjectRef::new(PyObject::Instance {
         typ: email_type,
-        dict: HashMap::new(),
+        dict: AttrMap::new(),
     });
 
     Ok(instance)
@@ -3734,7 +3734,7 @@ pub fn create_email_dict() -> HashMap<String, PyObjectRef> {
             mro: vec![],
         });
 
-        let mut instance_dict = HashMap::new();
+        let mut instance_dict = AttrMap::new();
         instance_dict.insert("_content".to_string(), py_str(&body));
         instance_dict.insert("_content_type".to_string(), py_str(&format!("text/{}", subtype)));
 
@@ -3784,7 +3784,7 @@ pub fn create_email_mime_text_dict() -> HashMap<String, PyObjectRef> {
                 mro: vec![],
             });
 
-            let mut instance_dict = HashMap::new();
+            let mut instance_dict = AttrMap::new();
             instance_dict.insert("_content".to_string(), py_str(&body));
             instance_dict.insert("_content_type".to_string(), py_str(&format!("text/{}", subtype)));
 
@@ -3812,7 +3812,7 @@ pub fn create_email_header_dict() -> HashMap<String, PyObjectRef> {
                     bases: vec![],
                     mro: vec![],
                 }),
-                dict: HashMap::from([
+                dict: AttrMap::from([
                     ("_text".to_string(), py_str(&text)),
                     ("__str__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
                         name: "__str__".to_string(),
@@ -4353,7 +4353,7 @@ pub fn create_configparser_dict() -> HashMap<String, PyObjectRef> {
                 mro: vec![],
             });
 
-            let mut instance_dict = HashMap::new();
+            let mut instance_dict = AttrMap::new();
             instance_dict.insert("_sections".to_string(), py_dict());
 
             Ok(PyObjectRef::new(PyObject::Instance {
@@ -4695,7 +4695,7 @@ pub fn create_sunau_dict() -> HashMap<String, PyObjectRef> {
             return Err(PyError::type_error("open() missing required argument: file"));
         }
         // Return a minimal Au_read object stub
-        let mut instance_dict = HashMap::new();
+        let mut instance_dict = AttrMap::new();
         instance_dict.insert("nchannels".to_string(), py_int(1));
         instance_dict.insert("sampwidth".to_string(), py_int(2));
         instance_dict.insert("framerate".to_string(), py_int(8000));
@@ -4949,7 +4949,7 @@ pub fn create_xml_etree_dict() -> HashMap<String, PyObjectRef> {
         let typ = ELEMENT_TYPE.with(|cache| {
             cache.borrow().clone().unwrap()
         });
-        let mut instance_dict = HashMap::new();
+        let mut instance_dict = AttrMap::new();
         instance_dict.insert("tag".to_string(), py_str(tag));
         instance_dict.insert("text".to_string(), py_none());
         instance_dict.insert("attrib".to_string(), py_dict());
@@ -5202,7 +5202,7 @@ pub fn create_argparse_dict() -> HashMap<String, PyObjectRef> {
             mro: vec![],
         });
 
-        let mut ns_dict = HashMap::new();
+        let mut ns_dict = AttrMap::new();
         if args.len() > 1 {
             let arg_list: Vec<String> = {
                 let borrowed = args[1].borrow();
@@ -5280,7 +5280,7 @@ pub(crate) fn asyncio_run_impl(vm: &mut crate::vm::VirtualMachine, coro: PyObjec
     if let PyObject::Coroutine { ref frame } = &*coro_borrowed {
         let frame_borrowed = frame.borrow();
         if let Some(ref coro_frame) = *frame_borrowed {
-            let mut coro_frame_clone = coro_frame.clone();
+            let mut coro_frame_clone = (**coro_frame).clone();
             coro_frame_clone.module_globals = None;
             drop(frame_borrowed);
             drop(coro_borrowed);
@@ -5447,7 +5447,7 @@ pub fn create_asyncio_dict() -> HashMap<String, PyObjectRef> {
         // Create a Future by calling builtins.dict or using construct
         let future = crate::object::PyObjectRef::new(crate::object::PyObject::Instance {
             typ: crate::object::py_none(),  // placeholder
-            dict: std::collections::HashMap::new(),
+            dict: AttrMap::new(),
         });
         // Set Future-specific attributes
         future.borrow_mut().set_attribute("_done", crate::object::py_bool(false)).ok();
@@ -5885,7 +5885,7 @@ pub fn create_contextvars_dict() -> HashMap<String, PyObjectRef> {
         });
 
         // Create a Token instance
-        let mut token_dict = HashMap::new();
+        let mut token_dict = AttrMap::new();
         token_dict.insert("_token_id".to_string(), py_int(token_id as i64));
         token_dict.insert("_var_name".to_string(), py_str(&name));
         let token = PyObjectRef::new(PyObject::Instance {

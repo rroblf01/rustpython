@@ -421,7 +421,7 @@ pub fn create_hmac_dict() -> HashMap<String, PyObjectRef> {
             },
         }));
 
-        let mut instance_dict = HashMap::new();
+        let mut instance_dict = AttrMap::new();
         instance_dict.insert("_digest".to_string(), PyObjectRef::imm(PyObject::Bytes(hash_bytes)));
         instance_dict.insert("_hexdigest".to_string(), py_str(&hash_hex));
 

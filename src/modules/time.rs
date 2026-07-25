@@ -736,7 +736,7 @@ fn build_timedelta_type() -> PyObjectRef {
 }
 
 fn make_timedelta_with_type(typ: PyObjectRef, days: i64, seconds: i64, microseconds: i64) -> PyObjectRef {
-    let mut dict = HashMap::new();
+    let mut dict = AttrMap::new();
     dict.insert("days".to_string(), py_int(days));
     dict.insert("seconds".to_string(), py_int(seconds));
     dict.insert("microseconds".to_string(), py_int(microseconds));
@@ -898,7 +898,7 @@ fn build_date_type() -> PyObjectRef {
 
 fn make_date(year: i64, month: i64, day: i64) -> PyObjectRef {
     let typ = get_date_type();
-    let mut dict = HashMap::new();
+    let mut dict = AttrMap::new();
     dict.insert("year".to_string(), py_int(year));
     dict.insert("month".to_string(), py_int(month));
     dict.insert("day".to_string(), py_int(day));
@@ -911,11 +911,11 @@ fn get_date_type() -> PyObjectRef {
     let typ = build_date_type();
     let min_inst = PyObjectRef::new(PyObject::Instance {
         typ: typ.clone(),
-        dict: HashMap::from([("year".to_string(), py_int(1)), ("month".to_string(), py_int(1)), ("day".to_string(), py_int(1))]),
+        dict: AttrMap::from([("year".to_string(), py_int(1)), ("month".to_string(), py_int(1)), ("day".to_string(), py_int(1))]),
     });
     let max_inst = PyObjectRef::new(PyObject::Instance {
         typ: typ.clone(),
-        dict: HashMap::from([("year".to_string(), py_int(9999)), ("month".to_string(), py_int(12)), ("day".to_string(), py_int(31))]),
+        dict: AttrMap::from([("year".to_string(), py_int(9999)), ("month".to_string(), py_int(12)), ("day".to_string(), py_int(31))]),
     });
     let res_inst = make_timedelta(1, 0, 0);
     if let PyObject::Type { dict, .. } = &mut *typ.borrow_mut() {
@@ -1039,7 +1039,7 @@ fn build_time_type() -> PyObjectRef {
 
 fn make_time(hour: i64, minute: i64, second: i64, microsecond: i64, tzinfo: PyObjectRef, fold: i64) -> PyObjectRef {
     let typ = get_time_type();
-    let mut dict = HashMap::new();
+    let mut dict = AttrMap::new();
     dict.insert("hour".to_string(), py_int(hour));
     dict.insert("minute".to_string(), py_int(minute));
     dict.insert("second".to_string(), py_int(second));
@@ -1423,7 +1423,7 @@ fn build_datetime_type() -> PyObjectRef {
 
 fn make_datetime(year: i64, month: i64, day: i64, hour: i64, minute: i64, second: i64, microsecond: i64, tzinfo: PyObjectRef, fold: i64) -> PyObjectRef {
     let typ = get_datetime_type();
-    let mut dict = HashMap::new();
+    let mut dict = AttrMap::new();
     dict.insert("year".to_string(), py_int(year));
     dict.insert("month".to_string(), py_int(month));
     dict.insert("day".to_string(), py_int(day));
@@ -1495,7 +1495,7 @@ fn build_timezone_type() -> PyObjectRef {
 }
 
 fn make_timezone_with_type(typ: PyObjectRef, offset_seconds: i64, name: Option<String>) -> PyObjectRef {
-    let mut dict = HashMap::new();
+    let mut dict = AttrMap::new();
     dict.insert("_offset_seconds".to_string(), py_int(offset_seconds));
     dict.insert("_name".to_string(), name.map(|n| py_str(&n)).unwrap_or_else(py_none));
     PyObjectRef::new(PyObject::Instance { typ, dict })

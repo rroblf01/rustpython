@@ -748,7 +748,7 @@ pub fn create_http_client_dict() -> HashMap<String, PyObjectRef> {
                 });
 
                 // Build HTTPResponse instance
-                let mut inst_dict = HashMap::new();
+                let mut inst_dict = AttrMap::new();
                 inst_dict.insert("status".to_string(), py_int(status_code));
                 inst_dict.insert("_body".to_string(), PyObjectRef::imm(PyObject::Bytes(body)));
 

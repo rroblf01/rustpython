@@ -57,7 +57,7 @@ pub fn create_concurrent_futures_dict() -> HashMap<String, PyObjectRef> {
             1
         };
 
-        let mut inst_dict = HashMap::new();
+        let mut inst_dict = AttrMap::new();
 
         // submit(fn, *args, **kwargs) -> returns a Future-like object
         inst_dict.insert("submit".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
@@ -71,7 +71,7 @@ pub fn create_concurrent_futures_dict() -> HashMap<String, PyObjectRef> {
                     // here we just call synchronously and return a completed future.
                 }
                 // Return a simple completed future
-                let mut fut_dict = HashMap::new();
+                let mut fut_dict = AttrMap::new();
                 fut_dict.insert("result".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
                     name: "result".to_string(),
                     func: |_| Ok(py_none()),
@@ -148,11 +148,11 @@ pub fn create_concurrent_futures_dict() -> HashMap<String, PyObjectRef> {
             1
         };
 
-        let mut inst_dict = HashMap::new();
+        let mut inst_dict = AttrMap::new();
         inst_dict.insert("submit".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
             name: "submit".to_string(),
             func: |_| {
-                let mut fut_dict = HashMap::new();
+                let mut fut_dict = AttrMap::new();
                 fut_dict.insert("result".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
                     name: "result".to_string(),
                     func: |_| Ok(py_none()),
@@ -189,7 +189,7 @@ pub fn create_concurrent_futures_dict() -> HashMap<String, PyObjectRef> {
     // ── Future (stub class) ─────────────────────────────────────────────
 
     cf_func!("Future", |_args| {
-        let mut inst_dict = HashMap::new();
+        let mut inst_dict = AttrMap::new();
         inst_dict.insert("result".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
             name: "result".to_string(),
             func: |_| Ok(py_none()),

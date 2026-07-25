@@ -132,7 +132,7 @@ pub fn create_collections_dict() -> HashMap<String, PyObjectRef> {
                     bases: vec![],
                     mro: vec![],
                 }),
-                dict: HashMap::new(),
+                dict: AttrMap::new(),
             }));
         }
         Ok(PyObjectRef::new(PyObject::Type {
@@ -334,7 +334,7 @@ pub fn create_functools_dict() -> HashMap<String, PyObjectRef> {
                 bases: vec![],
                 mro: vec![],
             }),
-            dict: HashMap::new(), // attributes like .register, .registry go here
+            dict: AttrMap::new(), // attributes like .register, .registry go here
         });
         {
             let mut py_registry = PyDict::new();
@@ -488,7 +488,7 @@ pub fn create_functools_dict() -> HashMap<String, PyObjectRef> {
                     bases: vec![],
                     mro: vec![],
                 }),
-                dict: std::collections::HashMap::new(),
+                dict: AttrMap::new(),
             });
             let _ = key_obj.borrow_mut().set_attribute("obj", obj_rc.as_ref().clone());
             Ok(key_obj)
@@ -559,7 +559,7 @@ pub fn create_itertools_dict() -> HashMap<String, PyObjectRef> {
             Ok(py_list(items))
         }))));
         let chain_type = PyObjectRef::new(PyObject::Type { name: "chain".to_string(), dict: chain_type_dict, bases: vec![], mro: vec![] });
-        d.insert("chain".to_string(), PyObjectRef::new(PyObject::Instance { typ: chain_type, dict: HashMap::new() }));
+        d.insert("chain".to_string(), PyObjectRef::new(PyObject::Instance { typ: chain_type, dict: AttrMap::new() }));
     }
 
     it_func!("count", |args| {
@@ -1259,7 +1259,7 @@ fn special_from_str(s: &str) -> DecSpecial {
 
 fn decval_to_instance(v: &DecValue) -> PyObjectRef {
     let typ = get_decimal_type();
-    let mut dict = HashMap::new();
+    let mut dict = AttrMap::new();
     dict.insert(DEC_SIGN_KEY.to_string(), py_bool(v.sign));
     dict.insert(DEC_COEFF_KEY.to_string(), py_int(v.coeff.clone()));
     dict.insert(DEC_EXP_KEY.to_string(), py_int(v.exp));
@@ -1804,7 +1804,7 @@ fn get_context_type() -> PyObjectRef {
 
 fn make_context_instance(precision: usize, rounding: &str) -> PyObjectRef {
     let typ = get_context_type();
-    let mut dict = HashMap::new();
+    let mut dict = AttrMap::new();
     dict.insert("prec".to_string(), py_int(precision as i64));
     dict.insert("rounding".to_string(), py_str(rounding));
     PyObjectRef::new(PyObject::Instance { typ, dict })
@@ -1860,7 +1860,7 @@ pub fn create_decimal_dict() -> HashMap<String, PyObjectRef> {
             func: |_args| { DECIMAL_CURRENT_CONTEXT.with(|c| { *c.borrow_mut() = (28, "ROUND_HALF_EVEN".to_string()); }); Ok(py_bool(false)) },
         }));
         let cm_typ = PyObjectRef::new(PyObject::Type { name: "_ContextManager".to_string(), dict: cm_dict, bases: vec![], mro: vec![] });
-        let mut inst_dict = HashMap::new();
+        let mut inst_dict = AttrMap::new();
         inst_dict.insert("prec".to_string(), py_int(precision as i64));
         inst_dict.insert("rounding".to_string(), py_str(&rounding));
         let _ = ctx;
@@ -2087,7 +2087,7 @@ pub fn create_calendar_dict() -> HashMap<String, PyObjectRef> {
                 bases: vec![],
                 mro: vec![],
             }),
-            dict: HashMap::new(),
+            dict: AttrMap::new(),
         }))
     });
 
@@ -2140,7 +2140,7 @@ pub fn create_calendar_dict() -> HashMap<String, PyObjectRef> {
                 bases: vec![],
                 mro: vec![],
             }),
-            dict: HashMap::new(),
+            dict: AttrMap::new(),
         }))
     });
 

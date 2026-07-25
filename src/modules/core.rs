@@ -86,7 +86,7 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
             func: |_args| Ok(py_bool(true)),
         }));
         let nie_type = PyObjectRef::new(PyObject::Type { name: "NotImplementedType".to_string(), dict: nie_dict, bases: vec![], mro: vec![] });
-        let not_implemented = PyObjectRef::imm(PyObject::Instance { typ: nie_type, dict: HashMap::new() });
+        let not_implemented = PyObjectRef::imm(PyObject::Instance { typ: nie_type, dict: AttrMap::new() });
         builtins.insert("NotImplemented".to_string(), not_implemented);
     }
 
@@ -375,7 +375,7 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
             } else {
                 None
             };
-            let mut instance_dict = HashMap::new();
+            let mut instance_dict = AttrMap::new();
             if let Some(kind) = &native_kind {
                 let native = crate::object::synthesize_native_init(kind, &args[1..])?;
                 instance_dict.insert(crate::object::NATIVE_BACKING_KEY.to_string(), native);
@@ -1271,7 +1271,7 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
     // unittest's runner checking `sys.flags.dev_mode` transitively) — all
     // false/zero, matching "no special flags" for a script run normally.
     {
-        let mut flags_dict = HashMap::new();
+        let mut flags_dict = AttrMap::new();
         for flag in [
             "debug", "inspect", "interactive", "optimize", "dont_write_bytecode",
             "no_user_site", "no_site", "ignore_environment", "verbose",
@@ -1300,7 +1300,7 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
         // hash_info.width`); the rest are filled in for completeness/
         // structural parity with real CPython rather than because
         // anything here depends on them being exact.
-        let mut hash_info_dict = HashMap::new();
+        let mut hash_info_dict = AttrMap::new();
         hash_info_dict.insert("width".to_string(), py_int(64));
         hash_info_dict.insert("modulus".to_string(), py_int((1i64 << 61) - 1));
         hash_info_dict.insert("inf".to_string(), py_int(314159));
@@ -1325,7 +1325,7 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
         // `double` (matches Rust `f64`, IEEE 754 binary64 — same values
         // real CPython reports on any IEEE-754 platform, which is
         // effectively all of them).
-        let mut float_info_dict = HashMap::new();
+        let mut float_info_dict = AttrMap::new();
         float_info_dict.insert("max".to_string(), py_float(f64::MAX));
         float_info_dict.insert("max_exp".to_string(), py_int(1024));
         float_info_dict.insert("max_10_exp".to_string(), py_int(308));
@@ -1354,7 +1354,7 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
         // Cargo feature; either way the correct answer for test purposes
         // is "not enabled". Real trigger: `test.support`'s own
         // `_JIT_ENABLED = sys._jit.is_enabled()`.
-        let mut jit_dict = HashMap::new();
+        let mut jit_dict = AttrMap::new();
         jit_dict.insert("is_enabled".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
             name: "is_enabled".to_string(),
             func: |_args| Ok(py_bool(false)),

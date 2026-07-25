@@ -239,6 +239,29 @@ fn main() {
 }
 
 fn real_main() {
+    if env::var("RPY_DEBUG_SIZES").is_ok() {
+        eprintln!("size_of PyObjectRef: {}", std::mem::size_of::<object::PyObjectRef>());
+        eprintln!("size_of PyObject: {}", std::mem::size_of::<object::PyObject>());
+        eprintln!("size_of PyDict: {}", std::mem::size_of::<object::PyDict>());
+        eprintln!("size_of vm::Frame: {}", std::mem::size_of::<vm::Frame>());
+        eprintln!("size_of bytecode::CodeObject: {}", std::mem::size_of::<bytecode::CodeObject>());
+        eprintln!("size_of bytecode::Instr: {}", std::mem::size_of::<bytecode::Instr>());
+        eprintln!("size_of String: {}", std::mem::size_of::<String>());
+        eprintln!("size_of HashMap<String,i64> empty: {}", std::mem::size_of::<std::collections::HashMap<String, i64>>());
+        {
+            let mut m: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+            m.insert("x".to_string(), 1);
+            m.insert("y".to_string(), 2);
+            eprintln!("HashMap<String,i64> with 2 entries: capacity={}", m.capacity());
+        }
+        {
+            let mut v: Vec<(String, i64)> = Vec::new();
+            v.push(("x".to_string(), 1));
+            v.push(("y".to_string(), 2));
+            eprintln!("Vec<(String,i64)> with 2 entries: capacity={}", v.capacity());
+        }
+        std::process::exit(0);
+    }
     let raw_args: Vec<String> = env::args().collect();
 
     // Strip program name
