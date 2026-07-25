@@ -4342,19 +4342,47 @@ impl VirtualMachine {
                     }
                     1 => {
                         let exc = self.frames[fi].pop()?;
-                        // If the raised value is already an exception instance, use it directly
-                        let is_callable = !matches!(&*exc.borrow(), 
-                            PyObject::Str(_) | PyObject::Exception { .. } | PyObject::ExceptionGroup { .. } | PyObject::Instance { .. }
+                        // If the raised value is already a native exception
+                        // representation, use it directly — `PyObject::Str`
+                        // deliberately NOT included here (see below): a bare
+                        // string is never a valid thing to raise in Python 3.
+                        let is_callable = !matches!(&*exc.borrow(),
+                            PyObject::Exception { .. } | PyObject::ExceptionGroup { .. } | PyObject::Instance { .. }
                         );
                         let exc = if is_callable {
                             let exc_clone = exc.clone();
                             match self.call_function(exc_clone, vec![], vec![]) {
                                 Ok(instance) => instance,
-                                Err(_) => return Err(PyError::type_error("exceptions must be str or Exception instances")),
+                                Err(_) => return Err(PyError::type_error("exceptions must derive from BaseException")),
                             }
                         } else {
                             exc
                         };
+                        // Verify the raised value genuinely derives from
+                        // BaseException. Real Python allows raising any
+                        // BaseException instance/class, but a plain
+                        // `class Foo: pass` instance (or a bare string —
+                        // caught by excluding `PyObject::Str` from
+                        // `is_callable` above, which routes it through
+                        // `call_function` on a non-callable and fails there)
+                        // must raise `TypeError`, not be silently treated as
+                        // a legitimate, uncatchable-by-`except TypeError`
+                        // exception. Real trigger: CPython's own
+                        // `test_baseexception.py::
+                        // test_raise_new_style_non_exception`/
+                        // `test_raise_string` — both `raise SomeInstance`
+                        // (no Exception ancestor) and `raise "spam"`
+                        // previously propagated the raw value uncaught by
+                        // ANY `except` clause instead of raising `TypeError`.
+                        // `PyObject::Exception`/`ExceptionGroup` are this
+                        // interpreter's own native representations, always
+                        // trusted; only a plain `PyObject::Instance` needs
+                        // its class hierarchy actually checked here.
+                        if let PyObject::Instance { typ, .. } = &*exc.borrow() {
+                            if crate::object::find_exception_base_name(typ).is_none() {
+                                return Err(PyError::type_error("exceptions must derive from BaseException"));
+                            }
+                        }
                         let msg = match &*exc.borrow() {
                             PyObject::Str(s) => s.to_string(),
                             PyObject::Exception { args, .. } => {
@@ -5389,15 +5417,26 @@ impl VirtualMachine {
             let is_import = matches!(&*callable.borrow(), PyObject::BuiltinFunction { func, .. } if std::ptr::fn_addr_eq(*func, crate::object::builtin_import as crate::object::BuiltinFunc));
             if is_import && !args.is_empty() {
                 let name = args[0].str();
-                let fromlist = if args.len() > 3 {
-                    match &*args[3].borrow() {
+                // `fromlist` is overwhelmingly passed as a KEYWORD argument
+                // in real code (`__import__(name, fromlist=[...])` — real
+                // trigger: CPython's own `dbm/__init__.py`), which under
+                // this project's calling convention arrives as a trailing
+                // packed kwargs dict, not a 4th positional argument — see
+                // `object::builtin_import`'s matching doc comment for the
+                // full story (checking only `args[3]` silently always
+                // returned the top-level package instead of the requested
+                // submodule, an infinite-recursion trap for callers that
+                // then call `.open`/etc. on what they assumed was the
+                // specific submodule).
+                let kwargs_fromlist = keywords.iter().find(|(k, _)| k == "fromlist").map(|(_, v)| v.clone());
+                let fromlist_arg = kwargs_fromlist.or_else(|| args.get(3).cloned());
+                let fromlist = fromlist_arg.and_then(|fl| {
+                    match &*fl.borrow() {
                         PyObject::List(items) => Some(items.clone()),
                         PyObject::Tuple(items) => Some(items.iter().cloned().collect::<Vec<_>>()),
                         _ => None,
                     }
-                } else {
-                    None
-                };
+                });
                 let has_dots = name.contains('.');
                 let has_fromlist = fromlist.as_ref().map_or(false, |fl: &Vec<PyObjectRef>| !fl.is_empty());
                 return crate::object::import_impl(self, &name, has_dots, has_fromlist);
@@ -6283,6 +6322,18 @@ impl VirtualMachine {
             PyError::StopIteration => Self::synth_exception("StopIteration", error),
             PyError::ImportError(_) => Self::synth_exception("ImportError", error),
             PyError::RecursionError(_) => Self::synth_exception("RecursionError", error),
+            // `PyError::OsError` (raised by essentially every file/OS
+            // operation — `os.stat`/`open()`/`read()`/`write()`/etc. — for
+            // any underlying `std::io::Error`) previously fell through to
+            // the generic `_` catch-all below, synthesizing a bare
+            // `Exception` instead of a real, catchable `OSError`. Broke the
+            // extremely common `try: os.stat(path) except OSError:`
+            // existence-check idiom (used throughout the real stdlib
+            // itself — real trigger: vendoring `dbm/__init__.py`'s own
+            // `whichdb()`, `except OSError:` around a missing-file
+            // `os.stat()` call) and any other OS-error-handling code
+            // anywhere in the ecosystem.
+            PyError::OsError(_) => Self::synth_exception("OSError", error),
             _ => Self::synth_exception("Exception", error),
         }
     }

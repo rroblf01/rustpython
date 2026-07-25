@@ -329,7 +329,21 @@ pub fn collect() -> usize {
     }
     while let Some(rc) = stack.pop() {
         scratch.clear();
-        trace_children(&rc.borrow(), &mut scratch);
+        // Use try_borrow() (not borrow()), matching the trial-deletion loop
+        // above — a collection can trigger while some in-progress operation
+        // (a `set.add()`/`dict.__setitem__()` call in the middle of
+        // computing a key's hash, an iterator mid-advance, ...) already
+        // holds a real borrow on an object this BFS also happens to reach
+        // (real trigger: CPython's own `test_set.py`/`test_iter.py`,
+        // wherever the 20,000-allocation auto-collect threshold happened to
+        // land mid-operation). Skipping an unborrowable object here just
+        // means whatever it uniquely reaches isn't marked live THIS pass —
+        // safe, since anything genuinely still needed has its own live
+        // external referrer keeping its own refcount up, and a future GC
+        // pass gets another chance once the borrow is released.
+        if let Ok(borrowed) = rc.try_borrow() {
+            trace_children(&borrowed, &mut scratch);
+        }
         for child in scratch.drain(..) {
             if let Some(child_rc) = extract_rc(&child) {
                 let ptr = Rc::as_ptr(&child_rc);

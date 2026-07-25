@@ -1921,7 +1921,7 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
     });
     os_func!("remove", |args| {
         if args.is_empty() { return Err(PyError::type_error("remove() takes at least 1 argument")); }
-        let path = args[0].str();
+        let path = crate::object::path_arg_to_string(&args[0]);
         std::fs::remove_file(&path).map_err(|e| PyError::OsError(format!("{}", e)))?;
         Ok(py_none())
     });
@@ -1929,14 +1929,14 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
     // os.unlink = os.remove (POSIX alias)
     os_func!("unlink", |args| {
         if args.is_empty() { return Err(PyError::type_error("unlink() takes at least 1 argument")); }
-        let path = args[0].str();
+        let path = crate::object::path_arg_to_string(&args[0]);
         std::fs::remove_file(&path).map_err(|e| PyError::OsError(format!("{}", e)))?;
         Ok(py_none())
     });
 
     os_func!("rename", |args| {
         if args.len() < 2 { return Err(PyError::type_error("rename() takes 2 arguments")); }
-        match std::fs::rename(&args[0].str(), &args[1].str()) {
+        match std::fs::rename(&crate::object::path_arg_to_string(&args[0]), &crate::object::path_arg_to_string(&args[1])) {
             Ok(()) => Ok(py_none()),
             Err(e) => Err(PyError::OsError(format!("{}", e))),
         }
@@ -2181,7 +2181,7 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
     // --- os.stat(path) ---
     os_func!("stat", |args| {
         if args.is_empty() { return Err(PyError::type_error("stat() takes at least 1 argument")); }
-        match std::fs::metadata(&args[0].str()) {
+        match std::fs::metadata(&crate::object::path_arg_to_string(&args[0])) {
             Ok(meta) => Ok(create_module("stat_result", stat_to_dict(&meta))),
             Err(e) => Err(PyError::OsError(format!("{}", e))),
         }
@@ -2190,7 +2190,7 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
     // --- os.lstat(path) ---
     os_func!("lstat", |args| {
         if args.is_empty() { return Err(PyError::type_error("lstat() takes at least 1 argument")); }
-        match std::fs::symlink_metadata(&args[0].str()) {
+        match std::fs::symlink_metadata(&crate::object::path_arg_to_string(&args[0])) {
             Ok(meta) => Ok(create_module("stat_result", stat_to_dict(&meta))),
             Err(e) => Err(PyError::OsError(format!("{}", e))),
         }
@@ -2218,7 +2218,7 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
     // --- os.chmod(path, mode) ---
     os_func!("chmod", |args| {
         if args.len() < 2 { return Err(PyError::type_error("chmod() takes at least 2 arguments")); }
-        let path = args[0].str();
+        let path = crate::object::path_arg_to_string(&args[0]);
         let mode = args[1].as_i64().unwrap_or(0) as u32;
         use std::os::unix::fs::PermissionsExt;
         match std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)) {

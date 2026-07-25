@@ -1004,10 +1004,33 @@ impl PyDict {
     }
     pub fn get(&self, key: &PyObjectRef) -> PyResult<Option<PyObjectRef>> {
         let h = key.hash()?;
-        Ok(self.find(key, h).map(|i| self.entries[i].as_ref().unwrap().1.clone()))
+        Ok(self.get_with_hash(key, h))
+    }
+    /// Same as `get`, but takes an already-computed hash — lets a caller
+    /// compute `key.hash()` (which may run arbitrary Python via a custom
+    /// `__hash__` and can legally re-enter and mutate this very dict, see
+    /// `set_with_hash`'s doc comment) BEFORE taking any borrow that would
+    /// alias with that reentrant call.
+    pub fn get_with_hash(&self, key: &PyObjectRef, h: usize) -> Option<PyObjectRef> {
+        self.find(key, h).map(|i| self.entries[i].as_ref().unwrap().1.clone())
     }
     pub fn set(&mut self, key: PyObjectRef, value: PyObjectRef) -> PyResult<()> {
         let h = key.hash()?;
+        self.set_with_hash(key, value, h)
+    }
+    /// Same as `set`, but takes an already-computed hash. Callers that reach
+    /// this through an Rc<RefCell<PyObject>>'s own `borrow_mut()` (e.g.
+    /// `py_setitem`'s `PyObject::Dict` arm, backing `d[k] = v`) MUST compute
+    /// `key.hash()` themselves before taking that borrow, not rely on this
+    /// method to do it internally — a key with a Python-level `__hash__`
+    /// override can run arbitrary code, including code that mutates THIS
+    /// SAME dict (real CPython test: gh-97591, `d[K()] = V()` where
+    /// `K.__hash__` does `d.clear()`) — computing the hash while `obj`'s own
+    /// mutable borrow is still held would re-enter `borrow_mut()` on the
+    /// identical `RefCell` and panic ("already borrowed"), unlike CPython's
+    /// refcounted object model, which has no equivalent static aliasing
+    /// restriction.
+    pub fn set_with_hash(&mut self, key: PyObjectRef, value: PyObjectRef, h: usize) -> PyResult<()> {
         match self.find(&key, h) {
             Some(i) => self.entries[i].as_mut().unwrap().1 = value.clone(),
             None => {
@@ -1027,6 +1050,12 @@ impl PyDict {
     }
     pub fn remove(&mut self, key: &PyObjectRef) -> PyResult<PyObjectRef> {
         let h = key.hash()?;
+        self.remove_with_hash(key, h)
+    }
+    /// Same as `remove`, but takes an already-computed hash — see
+    /// `set_with_hash`'s doc comment for why a caller holding `obj`'s own
+    /// mutable borrow must compute the hash before taking it.
+    pub fn remove_with_hash(&mut self, key: &PyObjectRef, h: usize) -> PyResult<PyObjectRef> {
         let i = self.find(key, h).ok_or_else(|| PyError::key_error(key.str()))?;
         let removed = self.entries[i].take().unwrap().1;
         if let Some(chain) = self.index.get_mut(&h) {
@@ -2428,6 +2457,24 @@ pub fn py_mul(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
                 Ok(py_tuple(result))
             } else {
                 Err(PyError::value_error("cannot multiply tuple by negative number"))
+            }
+        }
+        // `bytes`/`bytearray` repetition (`b'\0' * n`) — real, common idiom
+        // for zero-padding/pre-sizing a buffer (real trigger: CPython's own
+        // `dbm/dumb.py`, `f.write(b'\0'*(npos-pos))`) — was missing
+        // entirely despite `str`/`list`/`tuple` all already supporting `*`.
+        (PyObject::Bytes(v), PyObject::Int(n)) | (PyObject::Int(n), PyObject::Bytes(v)) => {
+            if let Some(n) = n.to_usize() {
+                Ok(PyObjectRef::imm(PyObject::Bytes(v.repeat(n))))
+            } else {
+                Err(PyError::value_error("cannot multiply bytes by negative number"))
+            }
+        }
+        (PyObject::ByteArray(v), PyObject::Int(n)) | (PyObject::Int(n), PyObject::ByteArray(v)) => {
+            if let Some(n) = n.to_usize() {
+                Ok(PyObjectRef::new(PyObject::ByteArray(v.repeat(n))))
+            } else {
+                Err(PyError::value_error("cannot multiply bytearray by negative number"))
             }
         }
         (a, b) if matches!(a, PyObject::Complex(..)) || matches!(b, PyObject::Complex(..)) => {
@@ -5059,15 +5106,42 @@ pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
 }
 
+/// Real `open()`/`os.*` path arguments accept `str`, `bytes`, or any
+/// `os.PathLike` — but `PyObjectRef::str()` on a `PyObject::Bytes` value
+/// deliberately returns Python's own `repr()`-style `"b'...'"` form (matching
+/// real CPython's `str(b"x")` semantics — NOT a bug on its own), which is
+/// exactly the WRONG thing to feed to a filesystem call. Real trigger:
+/// CPython's own `dbm/dumb.py` (via `os.fsencode`), which builds its
+/// `.dat`/`.dir`/`.bak` filenames as `bytes` and passes them straight to
+/// `io.open()` — `open(b"/tmp/x.dat", "w")` tried to open a file literally
+/// named `b'/tmp/x.dat'` (quotes, `b` prefix and all), which obviously
+/// doesn't exist, raising a confusing `OSError` instead of writing to the
+/// intended path.
+pub(crate) fn path_arg_to_string(obj: &PyObjectRef) -> String {
+    if let PyObject::Bytes(b) = &*obj.borrow() {
+        String::from_utf8_lossy(b).into_owned()
+    } else {
+        obj.str()
+    }
+}
+
 pub fn builtin_open(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
         return Err(PyError::type_error("open() missing required argument 'file'"));
     }
-    let filename = args[0].str();
+    let filename = path_arg_to_string(&args[0]);
     let mode = if args.len() > 1 { args[1].str() } else { "r".to_string() };
+    // A trailing `+` ("r+"/"w+"/"a+", real CPython's "and updating" suffix)
+    // means the file is opened for BOTH reading and writing — was
+    // completely ignored here, so "rb+" (read-write, don't truncate, don't
+    // create — the exact mode `dbm/dumb.py` uses to append new values to
+    // its own data file) only ever opened for reading, and a subsequent
+    // `f.write(...)` failed with a raw OS-level "Bad file descriptor"
+    // instead of writing.
+    let has_plus = mode.contains('+');
     let file = std::fs::File::options()
-        .read(mode.contains('r'))
-        .write(mode.contains('w') || mode.contains('a'))
+        .read(mode.contains('r') || has_plus)
+        .write(mode.contains('w') || mode.contains('a') || has_plus)
         .append(mode.contains('a'))
         .create(mode.contains('w') || mode.contains('a'))
         .truncate(mode.contains('w'))
@@ -5346,6 +5420,187 @@ pub fn builtin_help(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Ok(py_none())
 }
 
+// ---- generator.__next__() / generator.send() ----
+
+/// Body of `generator.__next__()`/`generator.send(value)`.
+///
+/// DELIBERATELY uses its own disposable `VirtualMachine::new()` rather than
+/// real `&mut VirtualMachine` access, even though that costs rebuilding the
+/// entire native module registry on every single resume (measured: 1,441
+/// disposable-VM constructions for one real CPython test file,
+/// `test_coroutines.py`, contributing a real ~4.5x slowdown when the
+/// cycle-GC is enabled vs disabled — not a GC bug, just GC triggered far
+/// more often by this avoidable allocation flood). A real-`&mut self`
+/// version WAS tried and reverted after it segfaulted: `builtin_next`'s own
+/// `PyObject::Generator` arm calls this function's `BuiltinMethod.func`
+/// directly (`f(&[args[0].clone()])`), bypassing `vm.rs`'s `call_function`
+/// dispatch entirely — so the `fn_addr_eq`-special-case trick used for
+/// `generator.throw()` (which IS only ever reached through `call_function`)
+/// doesn't cover this path, and it fell through to `with_vm_mut`'s aliased
+/// raw-pointer access instead — fatal here specifically because this
+/// function, unlike `throw()`'s disposable-VM predecessor, would have
+/// pushed/popped `vm.frames` for real, corrupting the REAL, already-
+/// executing VM's own frame stack (confirmed via a native SIGSEGV inside
+/// `Vec::push`'s reallocation, gdb backtrace showed the alias). Revisit only
+/// after auditing (and fixing) EVERY direct, non-`call_function` call site
+/// that can reach a generator's `__next__`/`send` (`builtin_next` is the
+/// known one; there may be others in itertools-style eager-materialization
+/// helpers) to route through real `&mut VirtualMachine` access instead.
+pub(crate) fn generator_next_fallback(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    let frame_ptr: *const std::cell::RefCell<Option<Box<super::vm::Frame>>> = {
+        let gen = args[0].borrow();
+        match &*gen {
+            PyObject::Generator { frame } => frame as *const _,
+            _ => std::ptr::null(),
+        }
+    };
+    if frame_ptr.is_null() {
+        return Err(PyError::runtime_error("__next__ on non-generator"));
+    }
+    let frame_rc = unsafe { &*frame_ptr };
+    // A generator that (directly or via some nested callback) tries to
+    // resume ITSELF while already mid-execution previously panicked with a
+    // raw "RefCell already borrowed" instead of real CPython's own
+    // `ValueError: generator already executing` (real trigger: CPython's
+    // own `test_coroutines.py`/`test_yield_from.py`). `try_borrow_mut`
+    // turns that exact conflict into the correct, catchable exception.
+    let mut frame_opt = match frame_rc.try_borrow_mut() {
+        Ok(guard) => guard,
+        Err(_) => return Err(PyError::value_error("generator already executing")),
+    };
+    if let Some(f) = frame_opt.as_mut() {
+        if args.len() > 1 {
+            f.stack.push(args[1].clone());
+        } else {
+            f.stack.push(crate::object::py_none());
+        }
+        let mut vm = super::vm::VirtualMachine::new();
+        vm.frames.push((**f).clone());
+        match vm.execute() {
+            Ok(val) => {
+                let modified = vm.frames.pop().unwrap();
+                if modified.ip > 0 && matches!(&modified.code.instructions[modified.ip - 1].op, crate::bytecode::Opcode::YIELD_VALUE) {
+                    *f = Box::new(modified);
+                    Ok(val)
+                } else {
+                    *frame_opt = None;
+                    Err(crate::object::PyError::Exception("StopIteration".to_string(), val))
+                }
+            }
+            Err(e) => {
+                *frame_opt = None;
+                Err(e)
+            }
+        }
+    } else {
+        Err(PyError::StopIteration)
+    }
+}
+
+// ---- coroutine.send() / coroutine.throw() ----
+
+/// Body of `coroutine.send(value)` — deliberately uses a disposable VM, same
+/// rationale as `generator_next_fallback` above (kept this way for
+/// consistency/safety even though no direct, non-`call_function` bypass is
+/// currently known for coroutines specifically — `SEND`/`GET_AWAITABLE`
+/// opcodes and explicit `.send()` calls all route through `call_function`).
+pub(crate) fn coroutine_send_fallback(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    let gen = args[0].borrow();
+    if let PyObject::Coroutine { frame } = &*gen {
+        // A coroutine resuming itself re-entrantly must raise real
+        // CPython's `ValueError: coroutine already executing`, not panic
+        // on a raw RefCell conflict.
+        let mut frame_opt = match frame.try_borrow_mut() {
+            Ok(guard) => guard,
+            Err(_) => return Err(PyError::value_error("coroutine already executing")),
+        };
+        if let Some(f) = frame_opt.as_mut() {
+            if args.len() > 1 {
+                f.stack.push(args[1].clone());
+            } else {
+                f.stack.push(crate::object::py_none());
+            }
+            let mut vm = super::vm::VirtualMachine::new();
+            vm.frames.push((**f).clone());
+            match vm.execute() {
+                Ok(val) => {
+                    let modified = vm.frames.pop().unwrap();
+                    if modified.ip > 0 && matches!(&modified.code.instructions[modified.ip - 1].op, crate::bytecode::Opcode::YIELD_VALUE) {
+                        *f = Box::new(modified);
+                        Ok(val)
+                    } else {
+                        *frame_opt = None;
+                        // Propagate the return value via StopIteration for SEND
+                        Err(crate::object::PyError::Exception("StopIteration".to_string(), val))
+                    }
+                }
+                Err(e) => {
+                    *frame_opt = None;
+                    // Propagate the coroutine's own unhandled
+                    // exception as-is; only genuine exhaustion
+                    // is signaled as StopIteration.
+                    Err(e)
+                }
+            }
+        } else {
+            Err(PyError::StopIteration)
+        }
+    } else {
+        Err(PyError::runtime_error("send on non-coroutine"))
+    }
+}
+
+/// Body of `coroutine.throw(value)` — see `coroutine_send_fallback` above.
+pub(crate) fn coroutine_throw_fallback(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() < 2 { return Err(PyError::type_error("throw() missing required argument 'value'")); }
+    let gen = args[0].borrow();
+    if let PyObject::Coroutine { frame } = &*gen {
+        let mut frame_opt = match frame.try_borrow_mut() {
+            Ok(guard) => guard,
+            Err(_) => return Err(PyError::value_error("coroutine already executing")),
+        };
+        if let Some(f) = frame_opt.as_mut() {
+            let mut vm = super::vm::VirtualMachine::new();
+            let raw = args[1].clone();
+            let is_callable = !matches!(&*raw.borrow(),
+                PyObject::Exception { .. } | PyObject::ExceptionGroup { .. } | PyObject::Instance { .. }
+            );
+            let exc_obj = if is_callable {
+                vm.call_function(raw.clone(), vec![], vec![])
+                    .map_err(|_| PyError::type_error("exceptions must be classes or instances deriving from BaseException"))?
+            } else {
+                raw
+            };
+            let typ = match &*exc_obj.borrow() {
+                PyObject::Exception { typ, .. } => typ.clone(),
+                _ => "Exception".to_string(),
+            };
+            let err = PyError::Exception(typ, exc_obj);
+            vm.frames.push((**f).clone());
+            match vm.throw_into_frame(err) {
+                Ok(val) => {
+                    let modified = vm.frames.pop().unwrap();
+                    if modified.ip > 0 && matches!(&modified.code.instructions[modified.ip - 1].op, crate::bytecode::Opcode::YIELD_VALUE) {
+                        *f = Box::new(modified);
+                        Ok(val)
+                    } else {
+                        *frame_opt = None;
+                        Err(crate::object::PyError::Exception("StopIteration".to_string(), val))
+                    }
+                }
+                Err(e) => {
+                    *frame_opt = None;
+                    Err(e)
+                }
+            }
+        } else {
+            Err(PyError::StopIteration)
+        }
+    } else {
+        Err(PyError::runtime_error("throw() on non-coroutine"))
+    }
+}
+
 // ---- generator.throw() ----
 
 /// Real body of `generator.throw(value)`, given genuine `&mut
@@ -5367,7 +5622,10 @@ pub(crate) fn generator_throw_with_vm(vm: &mut super::vm::VirtualMachine, args: 
     if args.len() < 2 { return Err(PyError::type_error("throw() missing required argument 'value'")); }
     let gen = args[0].borrow();
     if let PyObject::Generator { frame } = &*gen {
-        let mut frame_opt = frame.borrow_mut();
+        let mut frame_opt = match frame.try_borrow_mut() {
+            Ok(guard) => guard,
+            Err(_) => return Err(PyError::value_error("generator already executing")),
+        };
         if let Some(f) = frame_opt.as_mut() {
             let raw = args[1].clone();
             let is_callable = !matches!(&*raw.borrow(),
@@ -5513,16 +5771,34 @@ pub fn builtin_import(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         return Err(PyError::type_error("__import__() requires at least 1 argument (module name)"));
     }
     let name = args[0].str();
-    // Handle fromlist: if provided, return the rightmost submodule
-    let fromlist = if args.len() > 3 {
-        match &*args[3].borrow() {
+    // Handle fromlist: if provided, return the rightmost submodule. Real
+    // code overwhelmingly calls `__import__(name, fromlist=[...])` with
+    // `fromlist` as a KEYWORD argument (real trigger: CPython's own
+    // `dbm/__init__.py`, `__import__(modname, fromlist=['open'])`), which
+    // under this project's own calling convention arrives as a trailing
+    // packed kwargs dict, NOT as a 4th positional argument — checking only
+    // `args[3]` (matching real CPython's positional `__import__(name,
+    // globals, locals, fromlist, level)` signature exactly) silently
+    // missed the overwhelmingly common keyword form entirely, always
+    // returning the top-level package instead of the requested submodule
+    // and causing `mod.open` to resolve back to the PACKAGE's own `open`
+    // (an infinite-recursion trap for `dbm`'s own dispatcher, which calls
+    // `mod.open(...)` expecting `mod` to be the specific submodule).
+    let kwargs_fromlist = args.last().and_then(|last| {
+        if let PyObject::Dict(d) = &*last.borrow() {
+            d.get(&py_str("fromlist")).ok().flatten()
+        } else {
+            None
+        }
+    });
+    let fromlist_arg = kwargs_fromlist.or_else(|| args.get(3).cloned());
+    let fromlist = fromlist_arg.and_then(|fl| {
+        match &*fl.borrow() {
             PyObject::List(items) => Some(items.clone()),
             PyObject::Tuple(items) => Some(items.iter().cloned().collect()),
             _ => None,
         }
-    } else {
-        None
-    };
+    });
     let has_dots = name.contains('.');
     let has_fromlist = fromlist.as_ref().map_or(false, |fl| !fl.is_empty());
 
@@ -6733,9 +7009,29 @@ impl PyObject {
                         name: "extend".to_string(),
                         func: |args| {
                             if args.len() < 2 { return Err(PyError::type_error("extend() takes exactly one argument")); }
+                            // Materialize the iterable BEFORE taking the
+                            // mutable borrow below — `args[1]` may alias
+                            // `args[0]` (`d.extend(d)`, a real CPython test
+                            // pattern, `test_deque.py`'s `test_extend`),
+                            // which would otherwise try to `.borrow()` the
+                            // same RefCell while it's already mutably
+                            // borrowed by `list.push(...)`'s own
+                            // `borrow_mut()`, panicking instead of
+                            // completing (matches real CPython's
+                            // `list.extend`, which safe-copies a
+                            // self-referential source first).
+                            let it = builtin_iter(&[args[1].clone()])?;
+                            let mut items = Vec::new();
+                            loop {
+                                match builtin_next(&[it.clone()]) {
+                                    Ok(v) => items.push(v),
+                                    Err(PyError::StopIteration) => break,
+                                    Err(e) => return Err(e),
+                                }
+                            }
                             if let PyObject::List(list) = &mut *args[0].borrow_mut() {
-                                let it = builtin_iter(&[args[1].clone()])?;
-                                loop { match builtin_next(&[it.clone()]) { Ok(v) => list.push(v), Err(PyError::StopIteration) => return Ok(py_none()), Err(e) => return Err(e) } }
+                                list.extend(items);
+                                Ok(py_none())
                             } else { Err(PyError::runtime_error("extend on non-list")) }
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
@@ -7234,6 +7530,19 @@ impl PyObject {
             }
             PyObject::Str(_s) => {
                 match name {
+                    // Gettable `__hash__` — needed so `super().__hash__()`
+                    // works for a `class K(str): def __hash__(self): ...
+                    // return super().__hash__()` override (the `super()`
+                    // proxy's own attribute resolution falls back to the
+                    // native backing's `get_attribute`, which previously had
+                    // no `__hash__` case at all here — real trigger:
+                    // CPython's own `test_baseexception.py::
+                    // test_setstate_refcount_no_crash`, gh-97591).
+                    "__hash__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__hash__".to_string(),
+                        func: |args| Ok(py_int(args[0].hash()? as i64)),
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     "format" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "format".to_string(),
                         func: |args| {
@@ -8236,50 +8545,7 @@ impl PyObject {
                 match name {
                     "__next__" | "send" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: name.to_string(),
-                        func: move |args| {
-                            // Use a raw pointer to the RefCell to avoid cloning it
-                            // (cloning creates an independent copy and the saved frame
-                            // state is never written back to the generator).
-                            let frame_ptr: *const std::cell::RefCell<Option<Box<super::vm::Frame>>> = {
-                                let gen = args[0].borrow();
-                                match &*gen {
-                                    PyObject::Generator { frame } => frame as *const _,
-                                    _ => std::ptr::null(),
-                                }
-                            };
-                            if frame_ptr.is_null() {
-                                return Err(PyError::runtime_error("__next__ on non-generator"));
-                            }
-                            let frame_rc = unsafe { &*frame_ptr };
-                            let mut frame_opt = frame_rc.borrow_mut();
-                            if let Some(f) = frame_opt.as_mut() {
-                                if args.len() > 1 {
-                                    f.stack.push(args[1].clone());
-                                } else {
-                                    f.stack.push(crate::object::py_none());
-                                }
-                                let mut vm = super::vm::VirtualMachine::new();
-                                vm.frames.push((**f).clone());
-                                match vm.execute() {
-                                    Ok(val) => {
-                                        let modified = vm.frames.pop().unwrap();
-                                        if modified.ip > 0 && matches!(&modified.code.instructions[modified.ip - 1].op, crate::bytecode::Opcode::YIELD_VALUE) {
-                                            *f = Box::new(modified);
-                                            Ok(val)
-                                        } else {
-                                            *frame_opt = None;
-                                            Err(crate::object::PyError::Exception("StopIteration".to_string(), val))
-                                        }
-                                    }
-                                    Err(e) => {
-                                        *frame_opt = None;
-                                        Err(e)
-                                    }
-                                }
-                            } else {
-                                Err(PyError::StopIteration)
-                            }
-                        },
+                        func: generator_next_fallback,
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
                     "throw" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
@@ -8292,8 +8558,9 @@ impl PyObject {
                         func: |args| {
                             let gen = args[0].borrow();
                             if let PyObject::Generator { frame } = &*gen {
-                                let mut frame_opt = frame.borrow_mut();
-                                *frame_opt = None;
+                                if let Ok(mut frame_opt) = frame.try_borrow_mut() {
+                                    *frame_opt = None;
+                                }
                             }
                             Ok(py_none())
                         },
@@ -8316,95 +8583,12 @@ impl PyObject {
                 match name {
                     "send" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "send".to_string(),
-                        func: move |args| {
-                            let gen = args[0].borrow();
-                            if let PyObject::Coroutine { frame } = &*gen {
-                                let mut frame_opt = frame.borrow_mut();
-                                if let Some(f) = frame_opt.as_mut() {
-                                    if args.len() > 1 {
-                                        f.stack.push(args[1].clone());
-                                    } else {
-                                        f.stack.push(crate::object::py_none());
-                                    }
-                                    let mut vm = super::vm::VirtualMachine::new();
-                                    vm.frames.push((**f).clone());
-                                    match vm.execute() {
-                                        Ok(val) => {
-                                            let modified = vm.frames.pop().unwrap();
-                                            if modified.ip > 0 && matches!(&modified.code.instructions[modified.ip - 1].op, crate::bytecode::Opcode::YIELD_VALUE) {
-                                                *f = Box::new(modified);
-                                                Ok(val)
-                                            } else {
-                                                *frame_opt = None;
-                                                // Propagate the return value via StopIteration for SEND
-                                                Err(crate::object::PyError::Exception("StopIteration".to_string(), val))
-                                            }
-                                        }
-                                        Err(e) => {
-                                            *frame_opt = None;
-                                            // Propagate the coroutine's own unhandled
-                                            // exception as-is; only genuine exhaustion
-                                            // is signaled as StopIteration.
-                                            Err(e)
-                                        }
-                                    }
-                                } else {
-                                    Err(PyError::StopIteration)
-                                }
-                            } else {
-                                Err(PyError::runtime_error("send on non-coroutine"))
-                            }
-                        },
+                        func: coroutine_send_fallback,
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
                     "throw" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "throw".to_string(),
-                        func: |args| {
-                            if args.len() < 2 { return Err(PyError::type_error("throw() missing required argument 'value'")); }
-                            let gen = args[0].borrow();
-                            if let PyObject::Coroutine { frame } = &*gen {
-                                let mut frame_opt = frame.borrow_mut();
-                                if let Some(f) = frame_opt.as_mut() {
-                                    let mut vm = super::vm::VirtualMachine::new();
-                                    let raw = args[1].clone();
-                                    let is_callable = !matches!(&*raw.borrow(),
-                                        PyObject::Exception { .. } | PyObject::ExceptionGroup { .. } | PyObject::Instance { .. }
-                                    );
-                                    let exc_obj = if is_callable {
-                                        vm.call_function(raw.clone(), vec![], vec![])
-                                            .map_err(|_| PyError::type_error("exceptions must be classes or instances deriving from BaseException"))?
-                                    } else {
-                                        raw
-                                    };
-                                    let typ = match &*exc_obj.borrow() {
-                                        PyObject::Exception { typ, .. } => typ.clone(),
-                                        _ => "Exception".to_string(),
-                                    };
-                                    let err = PyError::Exception(typ, exc_obj);
-                                    vm.frames.push((**f).clone());
-                                    match vm.throw_into_frame(err) {
-                                        Ok(val) => {
-                                            let modified = vm.frames.pop().unwrap();
-                                            if modified.ip > 0 && matches!(&modified.code.instructions[modified.ip - 1].op, crate::bytecode::Opcode::YIELD_VALUE) {
-                                                *f = Box::new(modified);
-                                                Ok(val)
-                                            } else {
-                                                *frame_opt = None;
-                                                Err(crate::object::PyError::Exception("StopIteration".to_string(), val))
-                                            }
-                                        }
-                                        Err(e) => {
-                                            *frame_opt = None;
-                                            Err(e)
-                                        }
-                                    }
-                                } else {
-                                    Err(PyError::StopIteration)
-                                }
-                            } else {
-                                Err(PyError::runtime_error("throw() on non-coroutine"))
-                            }
-                        },
+                        func: coroutine_throw_fallback,
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
                     "close" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
@@ -8412,8 +8596,9 @@ impl PyObject {
                         func: |args| {
                             let gen = args[0].borrow();
                             if let PyObject::Coroutine { frame } = &*gen {
-                                let mut frame_opt = frame.borrow_mut();
-                                *frame_opt = None;
+                                if let Ok(mut frame_opt) = frame.try_borrow_mut() {
+                                    *frame_opt = None;
+                                }
                             }
                             Ok(py_none())
                         },
@@ -10123,6 +10308,21 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
             other => other,
         };
     }
+    // Dict lookups: compute the key's hash BEFORE taking `obj`'s own borrow
+    // (see `PyDict::set_with_hash`'s doc comment) — a key with a custom
+    // `__hash__` can run arbitrary Python, including code that mutates this
+    // very dict, which would re-enter `borrow()`/`borrow_mut()` on the same
+    // RefCell and panic if the hash were computed while already borrowed.
+    if matches!(&*obj.borrow(), PyObject::Dict(_)) {
+        let h = index.hash()?;
+        let o = obj.borrow();
+        if let PyObject::Dict(d) = &*o {
+            return match d.get_with_hash(index, h) {
+                Some(val) => Ok(val),
+                None => Err(PyError::key_error(index.str())),
+            };
+        }
+    }
     let o = obj.borrow();
     match &*o {
         PyObject::List(items) => {
@@ -10258,12 +10458,7 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                 _ => Err(PyError::type_error("string indices must be integers or slices")),
             }
         }
-        PyObject::Dict(d) => {
-            match d.get(index)? {
-                Some(val) => Ok(val),
-                None => Err(PyError::key_error(index.str())),
-            }
-        }
+        // PyObject::Dict is handled above, before this borrow is taken.
         PyObject::Bytes(b) => {
             let idx = index.borrow();
             match &*idx {
@@ -10484,6 +10679,20 @@ pub fn py_setitem(obj: &PyObjectRef, index: &PyObjectRef, value: PyObjectRef) ->
         }
     }
 
+    // Dict assignment: compute the key's hash BEFORE taking `obj`'s own
+    // mutable borrow (see `PyDict::set_with_hash`'s doc comment) — a key
+    // with a custom `__hash__` can run arbitrary Python, including code
+    // that mutates this very dict (real CPython test: gh-97591), which
+    // would re-enter `borrow_mut()` on the same RefCell and panic if the
+    // hash were computed while already mutably borrowed.
+    if matches!(&*obj.borrow(), PyObject::Dict(_)) {
+        let h = index.hash()?;
+        let mut o = obj.borrow_mut();
+        if let PyObject::Dict(d) = &mut *o {
+            return d.set_with_hash(index.clone(), value, h);
+        }
+    }
+
     let mut o = obj.borrow_mut();
     match &mut *o {
         PyObject::List(items) => {
@@ -10502,9 +10711,7 @@ pub fn py_setitem(obj: &PyObjectRef, index: &PyObjectRef, value: PyObjectRef) ->
                 _ => Err(PyError::type_error("list indices must be integers or slices")),
             }
         }
-        PyObject::Dict(d) => {
-            d.set(index.clone(), value)
-        }
+        // PyObject::Dict is handled above, before this borrow is taken.
         _ => Err(PyError::type_error(format!("'{}' object does not support item assignment", o.type_name()))),
     }
 }
@@ -10525,6 +10732,19 @@ pub fn py_delitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<()> {
     if let Some(native) = native_backing_of(obj) {
         return py_delitem(&native, index);
     }
+    // Dict deletion: compute the key's hash BEFORE taking `obj`'s own
+    // mutable borrow — see `PyDict::set_with_hash`'s doc comment for why
+    // (a custom `__hash__` can run arbitrary Python that mutates this same
+    // dict, and computing the hash while already mutably borrowed would
+    // panic on re-entry).
+    if matches!(&*obj.borrow(), PyObject::Dict(_)) {
+        let h = index.hash()?;
+        let mut o = obj.borrow_mut();
+        if let PyObject::Dict(d) = &mut *o {
+            d.remove_with_hash(index, h)?;
+            return Ok(());
+        }
+    }
     let mut o = obj.borrow_mut();
     match &mut *o {
         PyObject::List(items) => {
@@ -10542,10 +10762,7 @@ pub fn py_delitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<()> {
                 Err(PyError::type_error("list indices must be integers"))
             }
         }
-        PyObject::Dict(d) => {
-            d.remove(index)?;
-            Ok(())
-        }
+        // PyObject::Dict is handled above, before this borrow is taken.
         _ => Err(PyError::type_error(format!("'{}' object does not support item deletion", o.type_name()))),
     }
 }

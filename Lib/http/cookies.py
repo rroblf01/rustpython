@@ -127,9 +127,6 @@ class BaseCookie(dict):
             m.set(key, str(value), str(value))
             dict.__setitem__(self, key, m)
 
-    def __getitem__(self, key):
-        return dict.__getitem__(self, key).value()
-
     def __str__(self):
         """Return the cookies as a Cookie (request) header value."""
         return "; ".join(str(m) for m in self.values())

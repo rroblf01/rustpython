@@ -912,6 +912,60 @@ pub fn create_collections_abc_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
+thread_local! {
+    static SIMPLE_NAMESPACE_TYPE: std::cell::RefCell<Option<PyObjectRef>> = std::cell::RefCell::new(None);
+}
+
+fn build_simple_namespace_type() -> PyObjectRef {
+    let mut type_dict: HashMap<String, PyObjectRef> = HashMap::new();
+    macro_rules! bf {
+        ($name:expr, $f:expr) => {
+            PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $f })
+        };
+    }
+    // Real CPython's `SimpleNamespace.__repr__` lists attributes SORTED by
+    // name (`namespace(x=1, y=2)`, regardless of assignment order) —
+    // confirmed against real Python behavior, not guessed.
+    type_dict.insert("__repr__".to_string(), bf!("__repr__", |args| {
+        if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+            let mut items: Vec<(String, PyObjectRef)> = dict.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            items.sort_by(|a, b| a.0.cmp(&b.0));
+            let body = items.iter().map(|(k, v)| format!("{}={}", k, v.repr())).collect::<Vec<_>>().join(", ");
+            Ok(py_str(&format!("namespace({})", body)))
+        } else {
+            Ok(py_str("namespace()"))
+        }
+    }));
+    // Real CPython compares two SimpleNamespaces by their `__dict__`s.
+    type_dict.insert("__eq__".to_string(), bf!("__eq__", |args| {
+        if args.len() < 2 { return Ok(py_bool(false)); }
+        let a = if let PyObject::Instance { dict, .. } = &*args[0].borrow() { Some(dict.clone()) } else { None };
+        let b = if let PyObject::Instance { dict, .. } = &*args[1].borrow() { Some(dict.clone()) } else { None };
+        match (a, b) {
+            (Some(a), Some(b)) => {
+                if a.len() != b.len() { return Ok(py_bool(false)); }
+                for (k, v) in a.iter() {
+                    match b.get(k) {
+                        Some(bv) if v.equals(bv)? => {}
+                        _ => return Ok(py_bool(false)),
+                    }
+                }
+                Ok(py_bool(true))
+            }
+            _ => Ok(py_bool(false)),
+        }
+    }));
+    PyObjectRef::new(PyObject::Type { name: "types.SimpleNamespace".to_string(), dict: type_dict, bases: vec![], mro: vec![] })
+}
+
+fn get_simple_namespace_type() -> PyObjectRef {
+    let existing = SIMPLE_NAMESPACE_TYPE.with(|c| c.borrow().clone());
+    if let Some(t) = existing { return t; }
+    let typ = build_simple_namespace_type();
+    SIMPLE_NAMESPACE_TYPE.with(|c| { *c.borrow_mut() = Some(typ.clone()); });
+    typ
+}
+
 pub fn create_types_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! t_func {
@@ -928,18 +982,59 @@ pub fn create_types_dict() -> HashMap<String, PyObjectRef> {
         if args.is_empty() { return Err(PyError::type_error("LambdaType() requires an argument")); }
         Ok(args[0].clone())
     });
-    t_func!("MethodType", |args| {
-        if args.is_empty() { return Err(PyError::type_error("MethodType() requires an argument")); }
-        Ok(args[0].clone())
-    });
+    // Unlike `FunctionType`/`LambdaType` above (pure isinstance-check
+    // helpers — real code essentially never CALLS them, since functions can
+    // only be built by `def`/`lambda`), `types.MethodType(function,
+    // instance)` genuinely IS a common real-world constructor — manually
+    // binding a plain function to an instance, without going through a
+    // class's own attribute lookup (e.g. dynamic method injection, certain
+    // metaprogramming/proxy patterns). The passthrough-`args[0].clone()`
+    // shape silently discarded the `instance` argument entirely, returning
+    // the UNBOUND function — calling the result then called the function
+    // with one fewer argument than it expects (self never supplied),
+    // corrupting positional argument binding downstream (confirmed via a
+    // repro: `types.MethodType(f, obj)(x)` raised `NameError` inside `f`
+    // for its own `x` parameter, since `x` silently filled `self`'s slot
+    // instead). Fixed to build a real `PyObject::BoundMethod`, the same
+    // representation this interpreter already uses for `obj.method`
+    // attribute access.
+    d.insert("MethodType".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "MethodType".to_string(),
+        func: |args| {
+            if args.len() < 2 { return Err(PyError::type_error("MethodType() requires 2 arguments")); }
+            Ok(PyObjectRef::new(PyObject::BoundMethod { func: args[0].clone(), self_obj: args[1].clone() }))
+        },
+    }));
     t_func!("BuiltinFunctionType", |args| {
         if args.is_empty() { return Err(PyError::type_error("BuiltinFunctionType() requires an argument")); }
         Ok(args[0].clone())
     });
-    t_func!("ModuleType", |args| {
-        if args.is_empty() { return Err(PyError::type_error("ModuleType() requires an argument")); }
-        Ok(args[0].clone())
-    });
+    // Unlike its neighbors above (`FunctionType`/`LambdaType`/`MethodType`,
+    // all pure isinstance-check helpers that only ever see an ALREADY-
+    // EXISTING instance of their kind passed back in), `types.ModuleType`
+    // is genuinely CONSTRUCTIBLE in real Python — `types.ModuleType(name)`
+    // creates a brand-new, empty module object with that name (the exact
+    // mechanism CPython's own `importlib` uses internally, and a common
+    // idiom for building "fake modules" — real trigger: CPython's own
+    // `test_call.py`). The passthrough-`args[0].clone()` shape used here
+    // used to just return the NAME STRING unchanged, silently masquerading
+    // as a module — any subsequent `.attr = value` on it then tried to
+    // `borrow_mut()` an inline `PyObjectRef::SmallStr`, panicking
+    // ("borrow_mut on non-mutable value") instead of setting a real module
+    // attribute.
+    d.insert("ModuleType".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "ModuleType".to_string(),
+        func: |args| {
+            if args.is_empty() { return Err(PyError::type_error("module.__init__() takes at least 1 argument (0 given)")); }
+            let name = args[0].str();
+            let module = crate::object::create_module(&name, HashMap::new());
+            if let PyObject::Module { dict, .. } = &mut *module.borrow_mut() {
+                dict.insert("__name__".to_string(), crate::object::py_str(&name));
+                dict.insert("__doc__".to_string(), if args.len() > 1 { args[1].clone() } else { crate::object::py_none() });
+            }
+            Ok(module)
+        },
+    }));
     t_func!("NoneType", |_| Ok(py_none()));
     t_func!("GeneratorType", |args| {
         if args.is_empty() { return Err(PyError::type_error("GeneratorType() requires an argument")); }
@@ -953,19 +1048,30 @@ pub fn create_types_dict() -> HashMap<String, PyObjectRef> {
         if args.is_empty() { return Err(PyError::type_error("AsyncGeneratorType() requires an argument")); }
         Ok(args[0].clone())
     });
-    t_func!("SimpleNamespace", |args| {
-        let d = py_dict();
-        if args.len() > 0 {
-            if let PyObject::Dict(items) = &*args[0].borrow() {
-                let mut new_dict = PyDict::new();
-                for (k, v) in items.items() {
-                    let _ = new_dict.set(k, v);
+    // Real `types.SimpleNamespace(**kwargs)` creates an object exposing
+    // each keyword as an ATTRIBUTE (`ns.x`), with a `namespace(x=1, y=2)`
+    // repr and by-value equality — NOT a plain dict (a plain `PyObject::
+    // Dict` doesn't support attribute-style access at all, so `ns.x` used
+    // to raise `AttributeError: 'dict' object has no attribute 'x'`, a
+    // real, common idiom broken outright). Kwargs arrive as a single
+    // trailing packed dict per this project's own calling convention (see
+    // e.g. `dict(mapping, key=val)`'s handling elsewhere) — real
+    // `SimpleNamespace` takes no positional arguments at all, so the ONLY
+    // arg ever present here is that trailing kwargs dict, if any.
+    d.insert("SimpleNamespace".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "SimpleNamespace".to_string(),
+        func: |args| {
+            let mut inst_dict = crate::object::AttrMap::new();
+            if let Some(last) = args.last() {
+                if let PyObject::Dict(items) = &*last.borrow() {
+                    for (k, v) in items.items() {
+                        inst_dict.insert(k.str(), v);
+                    }
                 }
-                return Ok(PyObjectRef::new(PyObject::Dict(new_dict)));
             }
-        }
-        Ok(d)
-    });
+            Ok(PyObjectRef::new(PyObject::Instance { typ: get_simple_namespace_type(), dict: inst_dict }))
+        },
+    }));
     // `@types.coroutine` — real CPython marks the generator function so its
     // resulting generator gets coroutine-like `__await__`/`send`/`throw`
     // behavior. This interpreter's own generator objects already expose
