@@ -1071,6 +1071,27 @@ impl VirtualMachine {
             frame.return_value = None;
             frame.closure.clear();
             frame.active_exception = None;
+            // NOTE: `.clear()` (not resized back to `code.instructions.len()`)
+            // leaves both caches at length 0, which makes `LOAD_ATTR`/
+            // `LOAD_GLOBAL`'s inline-cache checks (`instr_ip < cache.len()`)
+            // permanently miss for any pooled (reused) frame — i.e. nearly
+            // all real execution, since the pool holds ≤32 frames and gets
+            // reused constantly. This is INTENTIONAL, not an oversight: a
+            // real attempt to fix it (just resizing back, restoring the
+            // caching) was reverted after confirming BOTH caches have no
+            // invalidation on external mutation — `global_cache` doesn't
+            // invalidate when a DIFFERENT function reassigns the same
+            // global via `global x` mid-loop, and `attr_cache` (despite
+            // storing a `type_version_tag`, keyed by the CLASS's own
+            // identity) doesn't invalidate when a class attribute is
+            // reassigned (`SomeClass.attr = new_value`) — both return
+            // silently-stale values once actually active. See
+            // [[project_goal_cpython314]] memory for the confirmed repro of
+            // both and what a correct fix (generation-counter-based
+            // invalidation touching every globals/class-attribute mutation
+            // site) would need. Left disabled (matching this project's
+            // shipped behavior before this was investigated) since a
+            // silently-wrong answer is worse than a slow-but-correct one.
             frame.attr_cache.clear();
             frame.global_cache.clear();
             frame.registers.clear();
@@ -1871,6 +1892,19 @@ impl VirtualMachine {
                         if let Some(f) = self.frames.get(frame_floor) {
                             let idx = f.ip.saturating_sub(1).min(f.code.instructions.len().saturating_sub(1));
                             let line = f.code.instructions.get(idx).and_then(|i| i.line_no).unwrap_or(f.code.first_lineno);
+                            // Each enclosing level re-runs this same branch as
+                            // the error keeps propagating outward — only the
+                            // FIRST (innermost, deepest) occurrence should set
+                            // `last_error_line`/`file` (matching the ORIGINAL
+                            // per-instruction-update behavior, which always
+                            // reflected wherever execution last was, i.e. the
+                            // innermost frame, before the error started
+                            // unwinding). `last_traceback` is still empty only
+                            // on this first, innermost pass.
+                            if self.last_traceback.is_empty() {
+                                self.last_error_line = Some(line);
+                                self.last_error_file = Some(f.code.filename.clone());
+                            }
                             self.last_traceback.insert(0, (f.code.filename.clone(), line, f.code.name.clone()));
                         }
                         return Err(e);
@@ -1894,8 +1928,17 @@ impl VirtualMachine {
         if ip >= self.frames[fi].code.instructions.len() {
             return Err(PyError::runtime_error("execution reached end of code"));
         }
-        self.last_error_line = self.frames[fi].code.instructions[ip].line_no;
-        self.last_error_file = Some(self.frames[fi].code.filename.clone());
+        // `last_error_line`/`last_error_file` (only ever read once, in
+        // `main.rs`'s final top-level uncaught-error report) used to be
+        // updated HERE — unconditionally, on every single instruction
+        // executed, including a `.clone()` of the filename string — instead
+        // of only at the point an error actually escapes uncaught (set in
+        // `execute_inner`'s error-handling branch below, right where the
+        // equivalent `last_traceback` entry is already computed from the
+        // exact same frame/line). For a hot loop or recursive function
+        // executing millions of instructions, that was millions of
+        // pointless heap allocations doing bookkeeping nothing ever reads
+        // unless the program is about to crash.
         let op = self.frames[fi].code.instructions[ip].op;
         let arg = self.frames[fi].code.instructions[ip].arg;
         self.frames[fi].ip = ip + 1;

@@ -44,6 +44,19 @@ class Handler:
         raise NotImplementedError
 
 
+class NullHandler(Handler):
+    """A do-nothing handler, for library code that wants a default handler
+    to avoid the "No handlers could be found" warning without actually
+    logging anywhere — matches real CPython's `logging.NullHandler`.
+    """
+    def handle(self, record):
+        pass
+    def emit(self, record):
+        pass
+    def createLock(self):
+        self.lock = None
+
+
 class StreamHandler(Handler):
     def __init__(self, stream=None):
         super().__init__()

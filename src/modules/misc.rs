@@ -705,43 +705,17 @@ pub fn create_copy_dict() -> HashMap<String, PyObjectRef> {
         }
         let obj = &args[0];
         let memo = if args.len() > 1 { args[1].clone() } else { py_dict() };
-        let borrowed = obj.borrow();
-        match &*borrowed {
-            PyObject::None => Ok(py_none()),
-            PyObject::Bool(b) => Ok(py_bool(*b)),
-            PyObject::Int(_) | PyObject::Float(_) | PyObject::Str(_) | PyObject::Bytes(_) => Ok(obj.clone()),
-            PyObject::Tuple(items) => {
-                let mut new_items = Vec::with_capacity(items.len());
-                for item in items {
-                    new_items.push(deepcopy_one(item, &memo)?);
-                }
-                Ok(PyObjectRef::imm(PyObject::Tuple(new_items)))
-            }
-            PyObject::List(items) => {
-                let mut new_items = Vec::with_capacity(items.len());
-                for item in items {
-                    new_items.push(deepcopy_one(item, &memo)?);
-                }
-                Ok(py_list(new_items))
-            }
-            PyObject::Dict(dict) => {
-                let mut new_dict = PyDict::new();
-                for (k, v) in dict.items() {
-                    let new_k = deepcopy_one(&k, &memo)?;
-                    let new_v = deepcopy_one(&v, &memo)?;
-                    let _ = new_dict.set(new_k, new_v);
-                }
-                Ok(PyObjectRef::new(PyObject::Dict(new_dict)))
-            }
-            _ => {
-                // For instances, try __deepcopy__ first
-                if let Ok(dc_method) = borrowed.get_attribute("__deepcopy__") {
-                    drop(borrowed);
-                    return crate::object::call_function(&dc_method, vec![obj.clone(), memo]);
-                }
-                Ok(obj.clone())
-            }
-        }
+        // Delegate entirely to `deepcopy_one` — this used to duplicate its
+        // whole List/Tuple/Dict/`__deepcopy__` dispatch inline, with the
+        // SAME "memoize after recursing instead of before" bug fixed there
+        // (see its own doc comment): a self-referential dict/list passed
+        // DIRECTLY to `copy.deepcopy(d)` recursed forever, because this
+        // top-level call site's own copy of the logic never registered `d`
+        // in `memo` before recursing into `d`'s own self-referencing value,
+        // even after `deepcopy_one`'s NESTED recursion was fixed to do so
+        // correctly. Confirmed via CPython's own
+        // `test_copy.py::test_deepcopy_reflexive_dict`.
+        crate::object::deepcopy_one(obj, &memo)
     });
 
     // Error class

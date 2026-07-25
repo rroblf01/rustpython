@@ -415,6 +415,34 @@ impl PyObjectRef {
         }
     }
     pub fn equals(&self, other: &PyObjectRef) -> PyResult<bool> {
+        // Real CPython's own container `==` has no cycle detection either —
+        // comparing two reflexive structures (`x = {}; x['k'] = x`) recurses
+        // until ITS OWN recursion limit trips, raising a real, catchable
+        // `RecursionError` (confirmed expected behavior: CPython's own
+        // `test_copy.py::test_deepcopy_reflexive_dict` explicitly asserts
+        // `RecursionError` is raised for `y == x` on two such structures).
+        // This interpreter's `equals()` had NO depth guard at all, so the
+        // same comparison genuinely overflowed the native stack — a hard
+        // process abort, not a catchable Python exception, unlike CPython's
+        // own controlled failure. Mirrors the existing `REPR_DEPTH` guard's
+        // shape (same thread-local counter pattern) but — since `equals`
+        // already returns a `PyResult`, unlike `repr()`'s bare `String` —
+        // propagates a REAL `RecursionError` instead of silently
+        // approximating with a placeholder value.
+        thread_local! {
+            static EQUALS_DEPTH: std::cell::Cell<usize> = std::cell::Cell::new(0);
+        }
+        let depth = EQUALS_DEPTH.with(|c| { let d = c.get() + 1; c.set(d); d });
+        if depth > 500 {
+            EQUALS_DEPTH.with(|c| c.set(c.get() - 1));
+            return Err(PyError::recursion_error("maximum recursion depth exceeded in comparison"));
+        }
+        let result = self.equals_inner(other);
+        EQUALS_DEPTH.with(|c| c.set(c.get() - 1));
+        result
+    }
+
+    fn equals_inner(&self, other: &PyObjectRef) -> PyResult<bool> {
         if let (Some(ai), Some(bi)) = (self.as_i64(), other.as_i64()) {
             return Ok(ai == bi);
         }
@@ -483,9 +511,12 @@ impl PyObjectRef {
             if let Some(other_items) = other_dict {
                 if my_items.len() != other_items.len() { return Ok(false); }
                 for (k, va) in my_items {
-                    let found = other_items.iter().find(|(ok, _)| ok.equals(&k).unwrap_or(false));
+                    let mut found = None;
+                    for (ok, ov) in &other_items {
+                        if ok.equals(&k)? { found = Some(ov); break; }
+                    }
                     match found {
-                        Some((_, vb)) => { if !va.equals(vb).unwrap_or(false) { return Ok(false); } }
+                        Some(vb) => { if !va.equals(vb)? { return Ok(false); } }
                         None => { return Ok(false); }
                     }
                 }
@@ -851,15 +882,50 @@ impl PyDict {
         self.entries.iter().filter_map(|e| e.clone()).collect()
     }
     /// Get a value by object identity (pointer comparison), used for memo cache.
+    /// Get a value by object IDENTITY (same semantics as the `is` operator
+    /// — i.e. the same underlying heap object, matching CPython's own
+    /// `id()`), used for memo caches like `copy.deepcopy`'s cycle/diamond-
+    /// reference detection. Previously compared `key: &PyObjectRef`'s OWN
+    /// reference address (`*const PyObjectRef`, i.e. wherever the CALLER's
+    /// local variable/parameter happens to live on the stack) against the
+    /// address of the dict's internally-stored `PyObjectRef` value — two
+    /// completely different memory locations for what is logically "the
+    /// same object", so this NEVER matched in practice regardless of how
+    /// many times the same object was looked up. Confirmed via the
+    /// simplest repro: `copy.deepcopy` on a self-referential dict/list
+    /// recursing forever, since its cycle-detection memo lookup could
+    /// never find the very entry it had just stored. Fixed by delegating
+    /// to `PyObjectRef::is`, the established (`Rc::ptr_eq`-based) identity
+    /// comparison already used for the `is` operator itself.
     pub fn get_by_identity(&self, key: &PyObjectRef) -> Option<PyObjectRef> {
-        let key_ptr: *const PyObjectRef = key;
         for (k, v) in self.entries.iter().flatten() {
-            let k_ptr: *const PyObjectRef = k;
-            if k_ptr == key_ptr {
+            if k.is(key) {
                 return Some(v.clone());
             }
         }
         None
+    }
+
+    /// Insert/update by object IDENTITY, bypassing `.hash()`/`.equals()`
+    /// entirely — the matching counterpart to `get_by_identity`, needed for
+    /// the SAME reason: a memo cache (`copy.deepcopy`'s cycle detection)
+    /// must be able to use genuinely UNHASHABLE objects (dict, list, set —
+    /// precisely the mutable container types most likely to form a cycle)
+    /// as keys, keyed by identity rather than value. The ordinary `set()`
+    /// computes `key.hash()?` first, which returns `Err("unhashable
+    /// type")` for those types — and every call site that ignored that
+    /// Result (`let _ = memo_dict.set(...)`) silently no-op'd instead of
+    /// ever actually storing the entry, so the memo dict stayed
+    /// permanently empty and cycle detection never worked at all.
+    pub fn set_by_identity(&mut self, key: PyObjectRef, value: PyObjectRef) {
+        for entry in self.entries.iter_mut().flatten() {
+            if entry.0.is(&key) {
+                entry.1 = value;
+                return;
+            }
+        }
+        self.entries.push(Some((key, value)));
+        self.size += 1;
     }
 }
 
@@ -1519,7 +1585,7 @@ impl PyObject {
                     let mut eq = true;
                     for (k, va) in a.items() {
                         match b.get(&k) {
-                            Ok(Some(vb)) => { if !va.equals(&vb).unwrap_or(false) { eq = false; break; } }
+                            Ok(Some(vb)) => { if !va.equals(&vb)? { eq = false; break; } }
                             _ => { eq = false; break; }
                         }
                     }
@@ -10749,42 +10815,86 @@ pub fn deepcopy_one(obj: &PyObjectRef, memo: &PyObjectRef) -> Result<PyObjectRef
             return Ok(cached);
         }
     }
-    // Deep-copy based on type
-    let result = {
-        let borrowed = obj.borrow();
-        match &*borrowed {
-            PyObject::Int(_) | PyObject::Float(_) | PyObject::Str(_) | PyObject::Bool(_) | PyObject::None | PyObject::Bytes(_) => obj.clone(),
-            PyObject::List(items) => {
-                let mut new_items = Vec::new();
-                for item in items {
-                    new_items.push(deepcopy_one(item, memo)?);
-                }
-                py_list(new_items)
-            }
-            PyObject::Tuple(items) => {
-                let mut new_items = Vec::new();
-                for item in items {
-                    new_items.push(deepcopy_one(item, memo)?);
-                }
-                PyObjectRef::imm(PyObject::Tuple(new_items))
-            }
-            PyObject::Dict(dict) => {
-                let mut new_dict = PyDict::new();
-                for (k, v) in dict.items() {
-                    let new_k = deepcopy_one(&k, memo)?;
-                    let new_v = deepcopy_one(&v, memo)?;
-                    let _ = new_dict.set(new_k, new_v);
-                }
-                PyObjectRef::new(PyObject::Dict(new_dict))
-            }
-            _ => obj.clone(),
+    // Uses `set_by_identity` (bypasses `.hash()`) — NOT the ordinary
+    // `set()`, which would call `key.hash()` and get `Err("unhashable
+    // type")` for exactly the container types (dict/list/set) most likely
+    // to need cycle protection here, silently failing to store anything.
+    fn remember(memo: &PyObjectRef, orig: &PyObjectRef, copy: &PyObjectRef) {
+        if let PyObject::Dict(memo_dict) = &mut *memo.borrow_mut() {
+            memo_dict.set_by_identity(orig.clone(), copy.clone());
         }
-    };
-    // Store in memo for cycle detection
-    if let PyObject::Dict(memo_dict) = &mut *memo.borrow_mut() {
-        let _ = memo_dict.set(obj.clone(), result.clone());
     }
-    Ok(result)
+    // List/Dict are MUTABLE, so a self- or mutually-referential structure
+    // (`d = {}; d['self'] = d`) is directly constructible in real Python —
+    // deep-copying one must therefore create the new (still-empty)
+    // container and register it in `memo` BEFORE recursing into its
+    // children, so a child that refers back to the original finds the
+    // (partially-built) copy already memoized instead of recursing forever.
+    // The previous version only called `remember` AFTER fully copying all
+    // children — for a self-referential dict/list, the recursive call for
+    // the self-reference would run before its own entry ever got memoized,
+    // recursing without end and overflowing the native stack (confirmed via
+    // CPython's own `test_copy.py::test_deepcopy_reflexive_dict`).
+    match &*obj.borrow() {
+        PyObject::Int(_) | PyObject::Float(_) | PyObject::Str(_) | PyObject::Bool(_) | PyObject::None | PyObject::Bytes(_) => Ok(obj.clone()),
+        PyObject::List(_) => {
+            let new_list = py_list(Vec::new());
+            remember(memo, obj, &new_list);
+            let items = if let PyObject::List(items) = &*obj.borrow() { items.clone() } else { unreachable!() };
+            let mut new_items = Vec::with_capacity(items.len());
+            for item in &items {
+                new_items.push(deepcopy_one(item, memo)?);
+            }
+            if let PyObject::List(nl) = &mut *new_list.borrow_mut() {
+                *nl = new_items;
+            }
+            Ok(new_list)
+        }
+        PyObject::Dict(_) => {
+            let new_dict = PyObjectRef::new(PyObject::Dict(PyDict::new()));
+            remember(memo, obj, &new_dict);
+            let items = if let PyObject::Dict(d) = &*obj.borrow() { d.items() } else { unreachable!() };
+            for (k, v) in items {
+                let new_k = deepcopy_one(&k, memo)?;
+                let new_v = deepcopy_one(&v, memo)?;
+                if let PyObject::Dict(nd) = &mut *new_dict.borrow_mut() {
+                    let _ = nd.set(new_k, new_v);
+                }
+            }
+            Ok(new_dict)
+        }
+        // Tuples are immutable, so a PURE tuple-only cycle can never exist
+        // in real Python (a tuple can only reference already-fully-built
+        // objects) — no placeholder-first trick needed here, just the
+        // ordinary "build children, then memoize the final result" shape
+        // (still useful for diamond references: the same tuple appearing
+        // twice in one structure should deep-copy to the same new object).
+        PyObject::Tuple(items) => {
+            let items = items.clone();
+            let mut new_items = Vec::with_capacity(items.len());
+            for item in &items {
+                new_items.push(deepcopy_one(item, memo)?);
+            }
+            let result = PyObjectRef::imm(PyObject::Tuple(new_items));
+            remember(memo, obj, &result);
+            Ok(result)
+        }
+        _ => {
+            // Custom `__deepcopy__` takes priority (matching real Python's
+            // `copy.deepcopy` protocol) — without this, an Instance nested
+            // inside a list/dict/tuple being deep-copied always got a bare
+            // shallow `.clone()` instead of ever invoking its own
+            // `__deepcopy__`.
+            if let Ok(dc_method) = obj.borrow().get_attribute("__deepcopy__") {
+                let result = call_function(&dc_method, vec![obj.clone(), memo.clone()])?;
+                remember(memo, obj, &result);
+                return Ok(result);
+            }
+            let result = obj.clone();
+            remember(memo, obj, &result);
+            Ok(result)
+        }
+    }
 }
 
 use std::sync::atomic::Ordering;
