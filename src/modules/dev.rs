@@ -72,6 +72,19 @@ pub fn create_warnings_dict() -> HashMap<String, PyObjectRef> {
 
     warn_func!("resetwarnings", |_| Ok(py_none()));
     warn_func!("filterwarnings", |_| Ok(py_none()));
+    // Real CPython's `warnings.py` does `from _warnings import (..., _deprecated,
+    // ...)` — a native-extension-only helper `nturl2path`/other stdlib
+    // modules call directly (`warnings._deprecated("urllib.request...",
+    // remove=(3, 15))`) to emit a standard-shaped `DeprecationWarning`.
+    // Added as a thin wrapper around `warn` (this interpreter's own `warn`
+    // just prints, so the exact message shape matters less than not
+    // raising `AttributeError` on import).
+    d.insert("_DEPRECATED_MSG".to_string(), py_str("{name!r} is deprecated"));
+    warn_func!("_deprecated", |args| {
+        let name = if !args.is_empty() { args[0].str() } else { String::new() };
+        println!("DeprecationWarning: {} is deprecated", name);
+        Ok(py_none())
+    });
 
     // catch_warnings() — a context manager real code uses to isolate/mute
     // warning state for a block (real trigger: CPython 3.14's own

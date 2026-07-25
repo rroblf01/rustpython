@@ -35,6 +35,108 @@ fn epoch_to_ymd(secs: i64) -> (i64, i64, i64, i64, i64, i64, i64, i64) {
     (y, m, d, hour, minute, second, wday, yday)
 }
 
+const STRUCT_TIME_FIELDS: [&str; 9] = [
+    "tm_year", "tm_mon", "tm_mday", "tm_hour", "tm_min", "tm_sec",
+    "tm_wday", "tm_yday", "tm_isdst",
+];
+
+thread_local! {
+    static STRUCT_TIME_TYPE: std::cell::RefCell<Option<PyObjectRef>> = std::cell::RefCell::new(None);
+}
+
+fn build_struct_time_type() -> PyObjectRef {
+    let mut type_dict: HashMap<String, PyObjectRef> = HashMap::new();
+    macro_rules! bf {
+        ($name:expr, $f:expr) => {
+            PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $f })
+        };
+    }
+    // `time.struct_time` is a real CPython "structseq" — simultaneously
+    // index-accessible like a plain 9-tuple (`t[0]`) AND attribute-
+    // accessible by name (`t.tm_year`) — real code uses BOTH forms
+    // interchangeably. The previous stub was a bare passthrough
+    // (`struct_time(x) -> x`), so anything built from it was just a plain
+    // tuple with NO attribute access at all (`t.tm_year` raised
+    // `AttributeError: 'tuple' object has no attribute 'tm_year'`).
+    type_dict.insert("__getitem__".to_string(), bf!("__getitem__", |args| {
+        if args.len() < 2 { return Err(PyError::type_error("__getitem__() takes exactly one argument")); }
+        let idx = args[1].as_i64().ok_or_else(|| PyError::type_error("indices must be integers"))?;
+        if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+            let i = if idx < 0 { idx + 9 } else { idx };
+            let name = STRUCT_TIME_FIELDS.get(i as usize).ok_or_else(|| PyError::index_error("struct_time index out of range"))?;
+            Ok(dict.get(name).cloned().unwrap_or_else(py_none))
+        } else {
+            Err(PyError::runtime_error("__getitem__ on non-struct_time"))
+        }
+    }));
+    type_dict.insert("__len__".to_string(), bf!("__len__", |_args| Ok(py_int(9))));
+    type_dict.insert("__iter__".to_string(), bf!("__iter__", |args| {
+        if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+            let items: Vec<PyObjectRef> = STRUCT_TIME_FIELDS.iter().map(|f| dict.get(f).cloned().unwrap_or_else(py_none)).collect();
+            Ok(PyObjectRef::new(PyObject::ListIter { list: items, index: 0 }))
+        } else {
+            Err(PyError::runtime_error("__iter__ on non-struct_time"))
+        }
+    }));
+    type_dict.insert("__repr__".to_string(), bf!("__repr__", |args| {
+        if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+            let body = STRUCT_TIME_FIELDS.iter()
+                .map(|f| format!("{}={}", f, dict.get(f).map(|v| v.repr()).unwrap_or_else(|| "None".to_string())))
+                .collect::<Vec<_>>().join(", ");
+            Ok(py_str(&format!("time.struct_time({})", body)))
+        } else {
+            Ok(py_str("time.struct_time(...)"))
+        }
+    }));
+    PyObjectRef::new(PyObject::Type { name: "time.struct_time".to_string(), dict: type_dict, bases: vec![], mro: vec![] })
+}
+
+fn get_struct_time_type() -> PyObjectRef {
+    let existing = STRUCT_TIME_TYPE.with(|c| c.borrow().clone());
+    if let Some(t) = existing { return t; }
+    let typ = build_struct_time_type();
+    STRUCT_TIME_TYPE.with(|c| { *c.borrow_mut() = Some(typ.clone()); });
+    typ
+}
+
+#[allow(clippy::too_many_arguments)]
+fn make_struct_time(y: i64, mon: i64, mday: i64, h: i64, min: i64, s: i64, wday: i64, yday: i64, isdst: i64) -> PyObjectRef {
+    let mut dict = AttrMap::new();
+    dict.insert("tm_year".to_string(), py_int(y));
+    dict.insert("tm_mon".to_string(), py_int(mon));
+    dict.insert("tm_mday".to_string(), py_int(mday));
+    dict.insert("tm_hour".to_string(), py_int(h));
+    dict.insert("tm_min".to_string(), py_int(min));
+    dict.insert("tm_sec".to_string(), py_int(s));
+    dict.insert("tm_wday".to_string(), py_int(wday));
+    dict.insert("tm_yday".to_string(), py_int(yday + 1));
+    dict.insert("tm_isdst".to_string(), py_int(isdst));
+    PyObjectRef::new(PyObject::Instance { typ: get_struct_time_type(), dict })
+}
+
+/// Days since 0000-03-01 for a given (year, 1-indexed month, day) — inverse
+/// of `epoch_to_ymd`'s own Howard Hinnant `days_from_civil` algorithm, used
+/// to derive `tm_wday`/`tm_yday` for a caller-supplied date (`strptime`,
+/// `mktime`-adjacent code) where a real epoch-seconds value isn't
+/// necessarily available yet.
+fn civil_to_days(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
+fn weekday_yday_for(y: i64, m: i64, d: i64) -> (i64, i64) {
+    let days = civil_to_days(y, m, d);
+    let wday = ((days + 3) % 7 + 7) % 7;
+    let jan1 = civil_to_days(y, 1, 1);
+    let yday = days - jan1;
+    (wday, yday)
+}
+
 fn format_strftime(fmt: &str, y: i64, m: i64, d: i64, h: i64, min: i64, s: i64, wday: i64, yday: i64) -> String {
     let mut result = String::new();
     let mut chars = fmt.chars();
@@ -81,6 +183,113 @@ fn format_strftime(fmt: &str, y: i64, m: i64, d: i64, h: i64, min: i64, s: i64, 
         }
     }
     result
+}
+
+const FULL_MONTHS: [&str; 12] = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+const ABBR_MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const FULL_WEEKDAYS: [&str; 7] = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+const ABBR_WEEKDAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+/// A hand-written (not regex-based, unlike real CPython's own `_strptime.py`)
+/// but genuinely FUNCTIONAL `strptime` parser covering the directives real
+/// code overwhelmingly actually uses. Replaces a previous "stub" that
+/// silently ignored BOTH its `data_string` and `format` arguments entirely,
+/// always returning the CURRENT system time regardless of input — a severe,
+/// silently-wrong-answer bug (not a crash) for one of the most common
+/// date-parsing entry points in the whole standard library.
+fn parse_strptime(data: &str, fmt: &str) -> Result<(i64, i64, i64, i64, i64, i64), String> {
+    let mut year: i64 = 1900;
+    let mut month: i64 = 1;
+    let mut day: i64 = 1;
+    let mut hour: i64 = 0;
+    let mut minute: i64 = 0;
+    let mut second: i64 = 0;
+    let mut pm = false;
+    let mut hour12_seen = false;
+
+    let dbytes: Vec<char> = data.chars().collect();
+    let mut di = 0usize;
+    let mut fchars = fmt.chars().peekable();
+
+    fn skip_ws(d: &[char], i: &mut usize) {
+        while *i < d.len() && d[*i].is_whitespace() { *i += 1; }
+    }
+    fn read_digits(d: &[char], i: &mut usize, max: usize) -> Option<i64> {
+        let start = *i;
+        let mut n: usize = 0;
+        while *i < d.len() && d[*i].is_ascii_digit() && n < max {
+            *i += 1; n += 1;
+        }
+        if *i == start { return None; }
+        d[start..*i].iter().collect::<String>().parse::<i64>().ok()
+    }
+    fn match_name<'a>(d: &[char], i: &mut usize, names: &'a [&'a str]) -> Option<usize> {
+        let rest: String = d[*i..].iter().collect();
+        let rest_lower = rest.to_lowercase();
+        for (idx, name) in names.iter().enumerate() {
+            if rest_lower.starts_with(&name.to_lowercase()) {
+                *i += name.chars().count();
+                return Some(idx);
+            }
+        }
+        None
+    }
+
+    while let Some(fc) = fchars.next() {
+        if fc == '%' {
+            match fchars.next() {
+                Some('Y') => { year = read_digits(&dbytes, &mut di, 4).ok_or("bad year")?; }
+                Some('y') => {
+                    let yy = read_digits(&dbytes, &mut di, 2).ok_or("bad year")?;
+                    year = if yy <= 68 { 2000 + yy } else { 1900 + yy };
+                }
+                Some('m') => { month = read_digits(&dbytes, &mut di, 2).ok_or("bad month")?; }
+                Some('d') => { day = read_digits(&dbytes, &mut di, 2).ok_or("bad day")?; }
+                Some('H') => { hour = read_digits(&dbytes, &mut di, 2).ok_or("bad hour")?; }
+                Some('I') => { hour = read_digits(&dbytes, &mut di, 2).ok_or("bad hour")?; hour12_seen = true; }
+                Some('M') => { minute = read_digits(&dbytes, &mut di, 2).ok_or("bad minute")?; }
+                Some('S') => { second = read_digits(&dbytes, &mut di, 2).ok_or("bad second")?; }
+                Some('f') => { read_digits(&dbytes, &mut di, 6); }
+                Some('j') => { read_digits(&dbytes, &mut di, 3).ok_or("bad yday")?; }
+                Some('p') => {
+                    let rest: String = dbytes[di..].iter().collect();
+                    let upper = rest.to_uppercase();
+                    if upper.starts_with("PM") { pm = true; di += 2; }
+                    else if upper.starts_with("AM") { di += 2; }
+                }
+                Some('B') => { month = 1 + match_name(&dbytes, &mut di, &FULL_MONTHS).ok_or("bad month name")? as i64; }
+                Some('b') | Some('h') => { month = 1 + match_name(&dbytes, &mut di, &ABBR_MONTHS).ok_or("bad month name")? as i64; }
+                Some('A') => { match_name(&dbytes, &mut di, &FULL_WEEKDAYS).ok_or("bad weekday name")?; }
+                Some('a') => { match_name(&dbytes, &mut di, &ABBR_WEEKDAYS).ok_or("bad weekday name")?; }
+                Some('z') => {
+                    if di < dbytes.len() && (dbytes[di] == '+' || dbytes[di] == '-') {
+                        di += 1;
+                        read_digits(&dbytes, &mut di, 2);
+                        if di < dbytes.len() && dbytes[di] == ':' { di += 1; }
+                        read_digits(&dbytes, &mut di, 2);
+                    }
+                }
+                Some('Z') => {
+                    while di < dbytes.len() && (dbytes[di].is_alphabetic() || dbytes[di] == '+' || dbytes[di] == '-' || dbytes[di].is_ascii_digit() || dbytes[di] == ':') { di += 1; }
+                }
+                Some('%') => {
+                    if di < dbytes.len() && dbytes[di] == '%' { di += 1; } else { return Err("expected '%'".to_string()); }
+                }
+                Some(other) => return Err(format!("unsupported strptime directive %{}", other)),
+                None => return Err("trailing '%' in format".to_string()),
+            }
+        } else if fc.is_whitespace() {
+            skip_ws(&dbytes, &mut di);
+        } else {
+            if di >= dbytes.len() || dbytes[di] != fc {
+                return Err(format!("time data does not match format (expected '{}')", fc));
+            }
+            di += 1;
+        }
+    }
+    if hour12_seen && pm && hour < 12 { hour += 12; }
+    if hour12_seen && !pm && hour == 12 { hour = 0; }
+    Ok((year, month, day, hour, minute, second))
 }
 
 pub fn create_time_dict() -> HashMap<String, PyObjectRef> {
@@ -133,11 +342,7 @@ pub fn create_time_dict() -> HashMap<String, PyObjectRef> {
             SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64
         };
         let (y, m, d, h, min, s, wday, yday) = epoch_to_ymd(secs);
-        Ok(py_tuple(vec![
-            py_int(y), py_int(m), py_int(d),
-            py_int(h), py_int(min), py_int(s),
-            py_int(wday), py_int(yday), py_int(0),
-        ]))
+        Ok(make_struct_time(y, m, d, h, min, s, wday, yday, 0))
     });
 
     // localtime(secs=None) -> struct_time
@@ -146,11 +351,7 @@ pub fn create_time_dict() -> HashMap<String, PyObjectRef> {
             SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64
         };
         let (y, m, d, h, min, s, wday, yday) = epoch_to_ymd(secs);
-        Ok(py_tuple(vec![
-            py_int(y), py_int(m), py_int(d),
-            py_int(h), py_int(min), py_int(s),
-            py_int(wday), py_int(yday), py_int(0),
-        ]))
+        Ok(make_struct_time(y, m, d, h, min, s, wday, yday, 0))
     });
 
     // strftime(format, struct_time) -> string
@@ -158,20 +359,26 @@ pub fn create_time_dict() -> HashMap<String, PyObjectRef> {
         let fmt = if args.len() > 0 { args[0].str() } else { "%c".to_string() };
         let (y, m, d, h, min, s, wday, yday) = if args.len() > 1 {
             let t = &args[1];
-            if let PyObject::Tuple(items) = &*t.borrow() {
-                let y = items.get(0).and_then(|v| v.as_i64()).unwrap_or(2025);
-                let m = items.get(1).and_then(|v| v.as_i64()).unwrap_or(1);
-                let d = items.get(2).and_then(|v| v.as_i64()).unwrap_or(1);
-                let h = items.get(3).and_then(|v| v.as_i64()).unwrap_or(0);
-                let min = items.get(4).and_then(|v| v.as_i64()).unwrap_or(0);
-                let s = items.get(5).and_then(|v| v.as_i64()).unwrap_or(0);
-                let wday = items.get(6).and_then(|v| v.as_i64()).unwrap_or(0);
-                let yday = items.get(7).and_then(|v| v.as_i64()).unwrap_or(0);
-                (y, m, d, h, min, s, wday, yday)
-            } else {
-                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
-                epoch_to_ymd(now)
-            }
+            let get = |field: &str, idx: usize| -> Option<i64> {
+                match &*t.borrow() {
+                    PyObject::Instance { dict, .. } => dict.get(field).and_then(|v| v.as_i64()),
+                    PyObject::Tuple(items) => items.get(idx).and_then(|v| v.as_i64()),
+                    _ => None,
+                }
+            };
+            (
+                get("tm_year", 0).unwrap_or(2025),
+                get("tm_mon", 1).unwrap_or(1),
+                get("tm_mday", 2).unwrap_or(1),
+                get("tm_hour", 3).unwrap_or(0),
+                get("tm_min", 4).unwrap_or(0),
+                get("tm_sec", 5).unwrap_or(0),
+                get("tm_wday", 6).unwrap_or(0),
+                // `%j`/internal yday math here is 0-indexed (matching
+                // `epoch_to_ymd`'s own convention) but `tm_yday` on a real
+                // struct_time is 1-indexed — convert back.
+                get("tm_yday", 7).map(|v| v - 1).unwrap_or(0),
+            )
         } else {
             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
             epoch_to_ymd(now)
@@ -181,15 +388,11 @@ pub fn create_time_dict() -> HashMap<String, PyObjectRef> {
 
     // strptime(string, format) -> struct_time
     time_func!("strptime", |args| {
-        let _string = if args.len() > 0 { args[0].str() } else { String::new() };
-        let _fmt = if args.len() > 1 { args[1].str() } else { "%c".to_string() };
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
-        let (y, m, d, h, min, s, wday, yday) = epoch_to_ymd(now);
-        Ok(py_tuple(vec![
-            py_int(y), py_int(m), py_int(d),
-            py_int(h), py_int(min), py_int(s),
-            py_int(wday), py_int(yday), py_int(0),
-        ]))
+        let string = if args.len() > 0 { args[0].str() } else { String::new() };
+        let fmt = if args.len() > 1 { args[1].str() } else { "%a %b %d %H:%M:%S %Y".to_string() };
+        let (y, m, d, h, min, s) = parse_strptime(&string, &fmt).map_err(PyError::value_error)?;
+        let (wday, yday) = weekday_yday_for(y, m, d);
+        Ok(make_struct_time(y, m, d, h, min, s, wday, yday, -1))
     });
 
     // perf_counter() -> float (high-resolution monotonic)
@@ -206,14 +409,33 @@ pub fn create_time_dict() -> HashMap<String, PyObjectRef> {
     d.insert("timezone".to_string(), py_int(0));
     d.insert("tzname".to_string(), py_tuple(vec![py_str("UTC"), py_str("UTC")]));
 
-    // struct_time named tuple stub (use tuple)
+    // `time.struct_time(sequence)` — real CPython accepts any 9+-element
+    // sequence and builds a real structseq from it (used directly by real
+    // code — e.g. `_strptime.py`'s own `time.struct_time(tt[:9])`). The
+    // previous stub just returned its argument completely unchanged (a
+    // bare tuple, with none of the named-attribute access a real
+    // struct_time provides).
     d.insert("struct_time".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
         name: "struct_time".to_string(),
         func: |args| {
-            if args.is_empty() { Ok(py_tuple(vec![])) }
-            else { Ok(args[0].clone()) }
+            if args.is_empty() { return Err(PyError::type_error("struct_time() takes at least 1 argument")); }
+            let get = |i: usize| -> i64 {
+                match &*args[0].borrow() {
+                    PyObject::Tuple(items) | PyObject::List(items) => items.get(i).and_then(|v| v.as_i64()).unwrap_or(0),
+                    _ => 0,
+                }
+            };
+            Ok(make_struct_time(get(0), get(1), get(2), get(3), get(4), get(5), get(6), get(7).saturating_sub(1), get(8)))
         },
     }));
+    // Real CPython's `_strptime.py` reads `time._STRUCT_TM_ITEMS` (value 11
+    // — 9 named fields + `tm_zone`/`tm_gmtoff`) to know how much of its own
+    // internal working tuple to slice off before calling
+    // `time.struct_time(...)`. This interpreter's struct_time only
+    // implements the 9 core fields (no `tm_zone`/`tm_gmtoff`), but the
+    // constant must still exist and be large enough that the slice
+    // `tt[:11]` doesn't silently truncate real fields.
+    d.insert("_STRUCT_TM_ITEMS".to_string(), py_int(11));
 
     d
 }

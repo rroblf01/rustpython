@@ -382,6 +382,15 @@ impl VirtualMachine {
 
           let datetime_dict = create_datetime_dict();
           modules.insert("datetime".to_string(), create_module("datetime", datetime_dict));
+          // `_datetime` is real CPython's C-accelerated backing module —
+          // `datetime.py` itself does `from _datetime import *` when
+          // available. This interpreter's `datetime` is already a single,
+          // natively-implemented module (no separate accelerated/pure-
+          // Python split), so `_datetime` is just an alias — needed only so
+          // code that imports `_datetime` directly (real trigger: CPython's
+          // own `test_module.py`-style introspection, checking that both
+          // names resolve) doesn't raise `ImportError`.
+          modules.insert("_datetime".to_string(), create_module("_datetime", create_datetime_dict()));
 
           let zoneinfo_dict = create_zoneinfo_dict();
           modules.insert("zoneinfo".to_string(), create_module("zoneinfo", zoneinfo_dict));
@@ -643,6 +652,10 @@ impl VirtualMachine {
 
           // Native operator module
           modules.insert("operator".to_string(), create_module("operator", create_operator_dict()));
+          // `_operator` — real CPython's C-accelerated backing module for
+          // `operator.py` (`from _operator import *`); same alias rationale
+          // as `_datetime` above.
+          modules.insert("_operator".to_string(), create_module("_operator", create_operator_dict()));
 
           // Native reprlib module
           modules.insert("reprlib".to_string(), create_module("reprlib", create_reprlib_dict()));
@@ -733,11 +746,26 @@ impl VirtualMachine {
           // Native xml.etree.ElementTree module
           let xml_etree_mod = create_module("xml.etree.ElementTree", create_xml_etree_dict());
           modules.insert("xml.etree.ElementTree".to_string(), xml_etree_mod.clone());
+          // `xml.etree` (the bare PACKAGE, distinct from its
+          // `.ElementTree` submodule) previously had no entry of its own in
+          // `vm.modules` at all — only the leaf `xml.etree.ElementTree` was
+          // registered — so `import xml.etree` (without the submodule
+          // suffix, a real, common form — real trigger: several CPython
+          // corpus files) raised `ImportError: No module named 'xml.etree'`
+          // even though the deeper `xml.etree.ElementTree` import worked
+          // fine. Fixed by registering the package itself too, with
+          // `ElementTree` wired as its own attribute (mirroring the
+          // existing `xml`-package-wires-`etree` pattern just below).
+          let xml_etree_pkg = create_module("xml.etree", HashMap::new());
+          if let PyObject::Module { dict: xml_etree_pkg_dict, .. } = &mut *xml_etree_pkg.borrow_mut() {
+              xml_etree_pkg_dict.insert("ElementTree".to_string(), xml_etree_mod.clone());
+          }
+          modules.insert("xml.etree".to_string(), xml_etree_pkg.clone());
           // Native xml module (empty package)
           let xml_mod = create_module("xml", create_xml_dict());
           // Wire etree as a submodule of xml
           if let PyObject::Module { dict: xml_el_dict, .. } = &mut *xml_mod.borrow_mut() {
-              xml_el_dict.insert("etree".to_string(), xml_etree_mod.clone());
+              xml_el_dict.insert("etree".to_string(), xml_etree_pkg.clone());
           }
           modules.insert("xml".to_string(), xml_mod);
 
@@ -2979,7 +3007,18 @@ impl VirtualMachine {
                         let chars: Vec<PyObjectRef> = s.chars().map(|c| py_str(&c.to_string())).collect();
                         self.frames[fi].push(PyObjectRef::new(PyObject::ListIter { list: chars, index: 0 }));
                     }
-                    PyObject::Set(s) => {
+                    // `FrozenSet` was missing from this match entirely
+                    // (only mutable `Set` was handled) — `for x in
+                    // frozenset(...):`/`for x in some_frozenset:` fell to
+                    // the `_` catch-all below and raised `TypeError:
+                    // 'frozenset' object is not iterable` outright, a
+                    // foundational gap for one of Python's basic builtin
+                    // container types. `builtin_iter`'s OWN, separate
+                    // FrozenSet handling (used by `iter()`/`list()`/etc.,
+                    // not by a `for` STATEMENT, which compiles to this
+                    // opcode instead) had the identical gap, fixed
+                    // alongside this one.
+                    PyObject::Set(s) | PyObject::FrozenSet(s) => {
                         self.frames[fi].push(PyObjectRef::new(PyObject::ListIter { list: s.to_vec(), index: 0 }));
                     }
                     PyObject::Bytes(b) => {
@@ -6840,7 +6879,15 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
         let start = idx;
         while idx < len && chars[idx].is_ascii_digit() { idx += 1; }
         if idx > start {
-            Some(chars[start..idx].iter().collect::<String>().parse::<usize>().unwrap())
+            // A format spec width this large (more digits than fit in a
+            // `usize`) is nonsensical for any real display — real CPython
+            // raises `ValueError` for absurd widths/precisions (deliberately
+            // tested: CPython's own `test_format.py::test_precision` builds
+            // a `.%sf % (sys.maxsize + 1)` spec specifically to check this)
+            // rather than crashing. Bare `.unwrap()` here panicked the whole
+            // process on `ParseIntError` instead.
+            Some(chars[start..idx].iter().collect::<String>().parse::<usize>()
+                .map_err(|_| PyError::value_error("Format specifier width too large"))?)
         } else {
             None
         }
@@ -6863,7 +6910,27 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
         let start = idx;
         while idx < len && chars[idx].is_ascii_digit() { idx += 1; }
         if idx > start {
-            Some(chars[start..idx].iter().collect::<String>().parse::<usize>().unwrap())
+            // See the matching `width` comment above — same overflow-panic
+            // fix, same real trigger (`test_format.py::test_precision`'s
+            // `.%sf % (sys.maxsize + 1)`).
+            let p = chars[start..idx].iter().collect::<String>().parse::<usize>()
+                .map_err(|_| PyError::value_error("Format specifier precision too large"))?;
+            // A precision this large parses fine as a `usize` (e.g.
+            // `sys.maxsize + 1` == 2**63, well within range) but Rust's own
+            // `format!("{:.prec$}", ...)` panics with "argument out of
+            // range" trying to render it (asking for ~9*10^18 decimal
+            // digits of a float is obviously never actually intended) —
+            // confirmed via CPython's own `test_format.py::test_precision`,
+            // which deliberately builds `.%sf % (sys.maxsize + 1)`
+            // expecting a catchable `ValueError`, not a process crash.
+            // 1000 decimal digits is already far beyond any real
+            // formatting need (a `f64`'s own precision exhausts after ~17
+            // significant digits) but comfortably below wherever Rust's
+            // internal limit actually sits.
+            if p > 1000 {
+                return Err(PyError::value_error("precision too big"));
+            }
+            Some(p)
         } else {
             Some(0) // '.' with no digits means precision 0
         }

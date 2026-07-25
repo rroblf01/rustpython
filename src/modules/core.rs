@@ -315,6 +315,27 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
             Ok(py_str(&format!("<{} object at 0x{}>", type_name, ptr_hex)))
         },
     }));
+    // `object.__str__` — real CPython's default just delegates to
+    // `__repr__` (a subclass overriding only `__repr__`, not `__str__`,
+    // still gets a sensible `str()`). Was missing entirely — `object.
+    // __str__` (accessed as a CLASS attribute, e.g. `__str__ =
+    // object.__str__`, a real idiom for explicitly opting back into the
+    // default identity-based string form — real trigger: CPython's own
+    // `xmlrpc/client.py`, `class Error(Exception): __str__ =
+    // object.__str__`) raised `AttributeError: 'object' object has no
+    // attribute '__str__'` even though plain `str(some_instance)` already
+    // worked fine via this interpreter's own internal generic fallback
+    // (that fallback was never reified as a real, gettable attribute on
+    // the `object` type itself).
+    object_dict.insert("__str__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "__str__".to_string(),
+        func: |args| {
+            if args.is_empty() {
+                return Err(PyError::type_error("__str__ requires at least 1 argument (self)"));
+            }
+            Ok(py_str(&args[0].repr()))
+        },
+    }));
     // __eq__(self, other): identity comparison. This previously compared
     // type NAMES instead of identity — i.e. any two *distinct* instances of
     // the same plain class (no custom __eq__ override) compared equal to

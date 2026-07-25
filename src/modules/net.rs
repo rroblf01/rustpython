@@ -402,6 +402,12 @@ fn http_response_read(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 pub fn create_http_client_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
 
+    // Real CPython's `http.client.HTTP_PORT`/`HTTPS_PORT` — plain integer
+    // constants, missing entirely. Real trigger: CPython's own
+    // `http/cookiejar.py`, `from http.client import HTTP_PORT`.
+    d.insert("HTTP_PORT".to_string(), py_int(80));
+    d.insert("HTTPS_PORT".to_string(), py_int(443));
+
     // Minimal exception hierarchy — real code commonly catches
     // `http.client.HTTPException` (or a specific subclass) around request
     // handling. Plain marker classes (no custom `__init__`/state) are

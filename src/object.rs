@@ -4659,8 +4659,20 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         PyObject::Str(s) => Ok(py_list(s.chars().map(|c| py_str(&c.to_string())).collect())),
         PyObject::Bytes(b) => Ok(PyObjectRef::new(PyObject::ListIter { list: b.iter().map(|byte| py_int(*byte as i64)).collect(), index: 0 })),
         PyObject::ByteArray(b) => Ok(PyObjectRef::new(PyObject::ListIter { list: b.iter().map(|byte| py_int(*byte as i64)).collect(), index: 0 })),
-        PyObject::Set(s) => Ok(py_list(s.to_vec())),
-        PyObject::FrozenSet(s) => Ok(py_list(s.to_vec())),
+        // `iter(a_set)` must return a real ITERATOR (advanceable via
+        // `builtin_next`), not the bare materialized list `py_list` builds —
+        // a raw `PyObject::List` isn't itself a valid iterator shape (unlike
+        // `List`/`Dict` just above and below, both correctly wrapped in
+        // `ListIter`). This meant `for x in frozenset(...)`/`for x in
+        // some_set:` raised `TypeError: 'frozenset' object is not
+        // iterable` outright — a foundational gap for two of Python's most
+        // basic builtin container types. Real trigger: vendoring
+        // `_strptime.py` (`for i in calendar.day_abbr` style iteration
+        // deeper in its own dependency chain hits a frozenset somewhere in
+        // `unicodedata`/locale data) — but the bug is general, not specific
+        // to that file.
+        PyObject::Set(s) => Ok(PyObjectRef::new(PyObject::ListIter { list: s.to_vec(), index: 0 })),
+        PyObject::FrozenSet(s) => Ok(PyObjectRef::new(PyObject::ListIter { list: s.to_vec(), index: 0 })),
         PyObject::Range { start, stop, step } => {
             Ok(PyObjectRef::new(PyObject::RangeIter { current: *start, stop: *stop, step: *step }))
         }
@@ -10237,6 +10249,76 @@ pub fn to_index(obj: &PyObjectRef) -> PyResult<BigInt> {
     }
 }
 
+/// Real Python slice-index normalization for a sequence of length `len` —
+/// mirrors CPython's own `PySlice_GetIndicesEx`. Converts a possibly-
+/// negative, possibly-omitted (`None`) start/stop pair into concrete,
+/// in-bounds `isize` values a caller can safely loop
+/// `while i (< or >) stop { ...; i += step }` over and cast to `usize`
+/// without ever going negative.
+///
+/// Was NOT applied consistently anywhere in this file before this fix:
+/// `List`/`Tuple` read-slicing did `start_val.max(0).min(len)` — clamping a
+/// negative value straight to 0 instead of first adding `len` (so
+/// `[1,2,3,4,5][-3:]`, meaning "last 3 elements", silently returned the
+/// WHOLE list instead — a silent wrong-answer bug, not a crash). `Str`/
+/// `Bytes`/`ByteArray` read-slicing did no clamping at all, so a negative
+/// start/stop was cast straight from a negative `isize` to `usize`,
+/// wrapping around to an astronomical value and panicking on the first
+/// array access (confirmed via the simplest possible repro: `"hello"[-3:]`
+/// crashed the whole process). Negative slice bounds are one of the most
+/// common idioms in all of Python (`seq[:-1]`, `seq[-n:]`) — this was a
+/// severe, high-blast-radius bug hiding in plain sight.
+fn normalize_slice_bounds(start: Option<isize>, stop: Option<isize>, step: isize, len: usize) -> (isize, isize) {
+    let len = len as isize;
+    if step > 0 {
+        let start = match start {
+            None => 0,
+            Some(v) if v < 0 => (len + v).max(0),
+            Some(v) => v.min(len),
+        };
+        let stop = match stop {
+            None => len,
+            Some(v) if v < 0 => (len + v).max(0),
+            Some(v) => v.min(len),
+        };
+        (start, stop)
+    } else {
+        let start = match start {
+            None => len - 1,
+            Some(v) if v < 0 => (len + v).max(-1),
+            Some(v) => v.min(len - 1),
+        };
+        let stop = match stop {
+            None => -1,
+            Some(v) if v < 0 => (len + v).max(-1),
+            Some(v) => v.min(len - 1),
+        };
+        (start, stop)
+    }
+}
+
+/// Extracts `(start, stop, step)` as `Option<isize>`/`isize` from a
+/// `PyObject::Slice`'s three borrowed fields, ready to hand to
+/// `normalize_slice_bounds`.
+///
+/// Rejects a literal `step=0` with a real `ValueError` — this interpreter's
+/// `slice()`/`BUILD_SLICE` construction does NOT reject it up front (unlike
+/// what an earlier version of this comment assumed), so `some_list[::0]`
+/// previously reached the iteration loops below with `step_val = 0` and
+/// hung the whole process forever (`i += 0` never advances past `stop_n`,
+/// an infinite loop — confirmed via the simplest repro, `[1,2,3][::0]`).
+/// Real CPython raises `ValueError: slice step cannot be zero` at the point
+/// a zero-step slice is actually USED for indexing, matched here.
+fn extract_slice_fields(start: &PyObjectRef, stop: &PyObjectRef, step: &PyObjectRef) -> PyResult<(Option<isize>, Option<isize>, isize)> {
+    let step_val = if let PyObject::Int(i) = &*step.borrow() { i.to_isize().unwrap_or(1) } else { 1 };
+    if step_val == 0 {
+        return Err(PyError::value_error("slice step cannot be zero"));
+    }
+    let start_val = if let PyObject::Int(i) = &*start.borrow() { i.to_isize() } else { None };
+    let stop_val = if let PyObject::Int(i) = &*stop.borrow() { i.to_isize() } else { None };
+    Ok((start_val, stop_val, step_val))
+}
+
 pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRef> {
     // Check for __getitem__ on custom classes and __class_getitem__ on types (PEP 560)
     let f = {
@@ -10340,28 +10422,18 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                 PyObject::Slice { start, stop, step } => {
                     let mut result = Vec::new();
                     let len = items.len();
-                    let s = start.borrow();
-                    let e = stop.borrow();
-                    let st = step.borrow();
-                    let step_val = if let PyObject::Int(i) = &*st { i.to_isize().unwrap_or(1) } else { 1 };
+                    let (start_val, stop_val, step_val) = extract_slice_fields(start, stop, step)?;
+                    let (start_n, stop_n) = normalize_slice_bounds(start_val, stop_val, step_val, len);
+                    let mut i = start_n;
                     if step_val > 0 {
-                        let start_val = if let PyObject::Int(i) = &*s { i.to_isize().unwrap_or(0) } else { 0 };
-                        let stop_val = if let PyObject::Int(i) = &*e { i.to_isize().unwrap_or(len as isize) } else { len as isize };
-                        let start_clamped = start_val.max(0).min(len as isize);
-                        let stop_clamped = stop_val.max(0).min(len as isize);
-                        let mut i = start_clamped;
-                        while i < stop_clamped && i < len as isize {
+                        while i < stop_n {
                             result.push(items[i as usize].clone());
-                            i += step_val;
+                            match i.checked_add(step_val) { Some(next) => i = next, None => break };
                         }
                     } else {
-                        let start_val = if let PyObject::Int(i) = &*s { i.to_isize().unwrap_or((len as isize) - 1) } else { (len as isize) - 1 };
-                        let stop_val = if let PyObject::Int(i) = &*e { i.to_isize().unwrap_or(-1) } else { -1 };
-                        let start_clamped = start_val.min((len as isize) - 1);
-                        let mut i = start_clamped;
-                        while i > stop_val && i >= 0 {
+                        while i > stop_n {
                             result.push(items[i as usize].clone());
-                            i += step_val;
+                            match i.checked_add(step_val) { Some(next) => i = next, None => break };
                         }
                     }
                     Ok(py_list(result))
@@ -10384,28 +10456,18 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                 PyObject::Slice { start, stop, step } => {
                     let mut result = Vec::new();
                     let len = items.len();
-                    let s = start.borrow();
-                    let e = stop.borrow();
-                    let st = step.borrow();
-                    let step_val = if let PyObject::Int(i) = &*st { i.to_isize().unwrap_or(1) } else { 1 };
+                    let (start_val, stop_val, step_val) = extract_slice_fields(start, stop, step)?;
+                    let (start_n, stop_n) = normalize_slice_bounds(start_val, stop_val, step_val, len);
+                    let mut i = start_n;
                     if step_val > 0 {
-                        let start_val = if let PyObject::Int(i) = &*s { i.to_isize().unwrap_or(0) } else { 0 };
-                        let stop_val = if let PyObject::Int(i) = &*e { i.to_isize().unwrap_or(len as isize) } else { len as isize };
-                        let start_clamped = start_val.max(0).min(len as isize);
-                        let stop_clamped = stop_val.max(0).min(len as isize);
-                        let mut i = start_clamped;
-                        while i < stop_clamped && i < len as isize {
+                        while i < stop_n {
                             result.push(items[i as usize].clone());
-                            i += step_val;
+                            match i.checked_add(step_val) { Some(next) => i = next, None => break };
                         }
                     } else {
-                        let start_val = if let PyObject::Int(i) = &*s { i.to_isize().unwrap_or((len as isize) - 1) } else { (len as isize) - 1 };
-                        let stop_val = if let PyObject::Int(i) = &*e { i.to_isize().unwrap_or(-1) } else { -1 };
-                        let start_clamped = start_val.min((len as isize) - 1);
-                        let mut i = start_clamped;
-                        while i > stop_val && i >= 0 {
+                        while i > stop_n {
                             result.push(items[i as usize].clone());
-                            i += step_val;
+                            match i.checked_add(step_val) { Some(next) => i = next, None => break };
                         }
                     }
                     Ok(py_tuple(result))
@@ -10431,26 +10493,19 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                 PyObject::Slice { start, stop, step } => {
                     let chars: Vec<char> = s.chars().collect();
                     let len = chars.len();
-                    let s = start.borrow();
-                    let e = stop.borrow();
-                    let st = step.borrow();
-                    let step_val = if let PyObject::Int(i) = &*st { i.to_isize().unwrap_or(1) } else { 1 };
+                    let (start_val, stop_val, step_val) = extract_slice_fields(start, stop, step)?;
+                    let (start_n, stop_n) = normalize_slice_bounds(start_val, stop_val, step_val, len);
                     let mut result = String::new();
+                    let mut i = start_n;
                     if step_val > 0 {
-                        let start_val = if let PyObject::Int(i) = &*s { i.to_isize().unwrap_or(0) } else { 0 };
-                        let stop_val = if let PyObject::Int(i) = &*e { i.to_isize().unwrap_or(len as isize) } else { len as isize };
-                        let mut i = start_val;
-                        while i < stop_val && i < len as isize {
+                        while i < stop_n {
                             result.push(chars[i as usize]);
-                            i += step_val;
+                            match i.checked_add(step_val) { Some(next) => i = next, None => break };
                         }
                     } else {
-                        let start_val = if let PyObject::Int(i) = &*s { i.to_isize().unwrap_or((len as isize) - 1) } else { (len as isize) - 1 };
-                        let stop_val = if let PyObject::Int(i) = &*e { i.to_isize().unwrap_or(-1) } else { -1 };
-                        let mut i = start_val;
-                        while i > stop_val && i >= 0 {
+                        while i > stop_n {
                             result.push(chars[i as usize]);
-                            i += step_val;
+                            match i.checked_add(step_val) { Some(next) => i = next, None => break };
                         }
                     }
                     Ok(py_str(&result))
@@ -10473,26 +10528,19 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                 }
                 PyObject::Slice { start, stop, step } => {
                     let len = b.len();
-                    let s = start.borrow();
-                    let e = stop.borrow();
-                    let st = step.borrow();
-                    let step_val = if let PyObject::Int(i) = &*st { i.to_isize().unwrap_or(1) } else { 1 };
+                    let (start_val, stop_val, step_val) = extract_slice_fields(start, stop, step)?;
+                    let (start_n, stop_n) = normalize_slice_bounds(start_val, stop_val, step_val, len);
                     let mut result = Vec::new();
+                    let mut i = start_n;
                     if step_val > 0 {
-                        let start_val = if let PyObject::Int(i) = &*s { i.to_isize().unwrap_or(0) } else { 0 };
-                        let stop_val = if let PyObject::Int(i) = &*e { i.to_isize().unwrap_or(len as isize) } else { len as isize };
-                        let mut i = start_val;
-                        while i < stop_val && i < len as isize {
+                        while i < stop_n {
                             result.push(b[i as usize]);
-                            i += step_val;
+                            match i.checked_add(step_val) { Some(next) => i = next, None => break };
                         }
                     } else {
-                        let start_val = if let PyObject::Int(i) = &*s { i.to_isize().unwrap_or((len as isize) - 1) } else { (len as isize) - 1 };
-                        let stop_val = if let PyObject::Int(i) = &*e { i.to_isize().unwrap_or(-1) } else { -1 };
-                        let mut i = start_val;
-                        while i > stop_val && i >= 0 {
+                        while i > stop_n {
                             result.push(b[i as usize]);
-                            i += step_val;
+                            match i.checked_add(step_val) { Some(next) => i = next, None => break };
                         }
                     }
                     Ok(PyObjectRef::imm(PyObject::Bytes(result)))
@@ -10514,26 +10562,19 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                 }
                 PyObject::Slice { start, stop, step } => {
                     let len = b.len();
-                    let s = start.borrow();
-                    let e = stop.borrow();
-                    let st = step.borrow();
-                    let step_val = if let PyObject::Int(i) = &*st { i.to_isize().unwrap_or(1) } else { 1 };
+                    let (start_val, stop_val, step_val) = extract_slice_fields(start, stop, step)?;
+                    let (start_n, stop_n) = normalize_slice_bounds(start_val, stop_val, step_val, len);
                     let mut result = Vec::new();
+                    let mut i = start_n;
                     if step_val > 0 {
-                        let start_val = if let PyObject::Int(i) = &*s { i.to_isize().unwrap_or(0) } else { 0 };
-                        let stop_val = if let PyObject::Int(i) = &*e { i.to_isize().unwrap_or(len as isize) } else { len as isize };
-                        let mut i = start_val;
-                        while i < stop_val && i < len as isize {
+                        while i < stop_n {
                             result.push(b[i as usize]);
-                            i += step_val;
+                            match i.checked_add(step_val) { Some(next) => i = next, None => break };
                         }
                     } else {
-                        let start_val = if let PyObject::Int(i) = &*s { i.to_isize().unwrap_or((len as isize) - 1) } else { (len as isize) - 1 };
-                        let stop_val = if let PyObject::Int(i) = &*e { i.to_isize().unwrap_or(-1) } else { -1 };
-                        let mut i = start_val;
-                        while i > stop_val && i >= 0 {
+                        while i > stop_n {
                             result.push(b[i as usize]);
-                            i += step_val;
+                            match i.checked_add(step_val) { Some(next) => i = next, None => break };
                         }
                     }
                     Ok(PyObjectRef::new(PyObject::ByteArray(result)))
@@ -10642,29 +10683,32 @@ pub fn py_setitem(obj: &PyObjectRef, index: &PyObjectRef, value: PyObjectRef) ->
             PyObject::List(items) => items,
             _ => unreachable!(),
         };
-        let len = items.len() as isize;
-        let s = start.borrow();
-        let e = stop.borrow();
-        let st = step.borrow();
-        let step_val = if let PyObject::Int(i) = &*st { i.to_isize().unwrap_or(1) } else { 1 };
+        let len = items.len();
+        let (start_val, stop_val, step_val) = extract_slice_fields(&start, &stop, &step)?;
+        let (start_n, stop_n) = normalize_slice_bounds(start_val, stop_val, step_val, len);
         if step_val == 1 {
-            let start_val = (if let PyObject::Int(i) = &*s { i.to_isize().unwrap_or(0) } else { 0 }).clamp(0, len);
-            let stop_val = (if let PyObject::Int(i) = &*e { i.to_isize().unwrap_or(len) } else { len }).clamp(start_val, len);
-            items.splice(start_val as usize..stop_val as usize, new_items);
+            // `stop_n` can legitimately be < `start_n` here (e.g. an empty
+            // slice like `lst[5:2]`) — `splice` requires a valid, ordered
+            // range, so clamp it up to `start_n` in that case (matching
+            // real Python's own "empty slice" semantics: nothing is
+            // removed, `new_items` is just inserted at `start_n`).
+            let stop_n = stop_n.max(start_n);
+            items.splice(start_n as usize..stop_n as usize, new_items);
             return Ok(());
         } else {
             // Extended slice: replacement length must match slice length exactly
             let mut indices = Vec::new();
+            let mut i = start_n;
             if step_val > 0 {
-                let start_val = if let PyObject::Int(i) = &*s { i.to_isize().unwrap_or(0) } else { 0 };
-                let stop_val = if let PyObject::Int(i) = &*e { i.to_isize().unwrap_or(len) } else { len };
-                let mut i = start_val;
-                while i < stop_val && i < len { indices.push(i as usize); i += step_val; }
+                while i < stop_n {
+                    indices.push(i as usize);
+                    match i.checked_add(step_val) { Some(next) => i = next, None => break }
+                }
             } else {
-                let start_val = if let PyObject::Int(i) = &*s { i.to_isize().unwrap_or(len - 1) } else { len - 1 };
-                let stop_val = if let PyObject::Int(i) = &*e { i.to_isize().unwrap_or(-1) } else { -1 };
-                let mut i = start_val;
-                while i > stop_val && i >= 0 { indices.push(i as usize); i += step_val; }
+                while i > stop_n {
+                    indices.push(i as usize);
+                    match i.checked_add(step_val) { Some(next) => i = next, None => break }
+                }
             }
             if indices.len() != new_items.len() {
                 return Err(PyError::value_error(format!(

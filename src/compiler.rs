@@ -1438,6 +1438,26 @@ impl Compiler {
                     self.emit(Opcode::LOAD_CONST, const_none); // level = 0 (None == 0)
                     self.emit(Opcode::IMPORT_NAME, name_idx);
                     if let Some(asname) = &alias.asname {
+                        // `import a.b.c as x` must bind `x` to the LEAF
+                        // submodule `a.b.c`, NOT the top-level package `a`
+                        // that `IMPORT_NAME` returns when given an empty
+                        // fromlist (matching real `__import__` semantics —
+                        // fromlist empty => top package; fromlist non-empty
+                        // => the named submodule). Previously stored
+                        // whatever `IMPORT_NAME` pushed directly under
+                        // `asname` with no attribute-chasing at all, so
+                        // `import xml.etree.ElementTree as ET` bound `ET`
+                        // to the `xml` PACKAGE instead of the `ElementTree`
+                        // submodule (`ET.Element(...)` then raised
+                        // `AttributeError: 'module' object has no attribute
+                        // 'Element'` — confirmed via repro). Real CPython's
+                        // own bytecode for this form does the identical
+                        // walk: import once, then `LOAD_ATTR` down through
+                        // each dotted component past the first.
+                        for component in alias.name.split('.').skip(1) {
+                            let attr_idx = self.get_name_index(component) as u32;
+                            self.emit(Opcode::LOAD_ATTR, attr_idx);
+                        }
                         let store_idx = self.get_name_index(asname) as u32;
                         self.emit(Opcode::STORE_NAME, store_idx);
                     } else {

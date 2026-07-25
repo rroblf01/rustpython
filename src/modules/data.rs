@@ -1923,14 +1923,28 @@ pub fn create_calendar_dict() -> HashMap<String, PyObjectRef> {
         };
     }
 
-    // Add constants to module
+    // Add constants to module.
+    // `month_name`/`month_abbr` are 1-INDEXED in real CPython (`[0]` is a
+    // deliberate empty-string placeholder, `[1]` = "January" .. `[12]` =
+    // "December") — matching every other month-numbering convention in
+    // Python (`date.month`, `time.tm_mon`, `strftime("%m")`, all 1-12).
+    // Missing the `[0]` placeholder here meant `calendar.month_name[12]`
+    // (December, the extremely common `month_name[some_real_month_number]`
+    // idiom) actually returned November — an off-by-one silently giving
+    // the WRONG month name for every single lookup, not a crash. Real
+    // trigger: CPython's own `_strptime.py`, `[calendar.month_abbr[i] for i
+    // in range(13)]` (deliberately ranging through 13 to include the
+    // placeholder) raising `IndexError` outright once vendored, since the
+    // 12-element list had no index 12 at all.
     d.insert("month_name".to_string(), py_list(vec![
+        py_str(""),
         py_str("January"), py_str("February"), py_str("March"),
         py_str("April"), py_str("May"), py_str("June"),
         py_str("July"), py_str("August"), py_str("September"),
         py_str("October"), py_str("November"), py_str("December"),
     ]));
     d.insert("month_abbr".to_string(), py_list(vec![
+        py_str(""),
         py_str("Jan"), py_str("Feb"), py_str("Mar"), py_str("Apr"),
         py_str("May"), py_str("Jun"), py_str("Jul"), py_str("Aug"),
         py_str("Sep"), py_str("Oct"), py_str("Nov"), py_str("Dec"),
@@ -2145,6 +2159,45 @@ pub fn create_calendar_dict() -> HashMap<String, PyObjectRef> {
     });
 
     // ---- Module-level calendar functions ----
+    // `calendar.timegm(tuple)` — the inverse of `time.gmtime()`: given a
+    // struct_time-shaped tuple (or any 6+-element sequence with year/month/
+    // day/hour/min/sec in that order), return Unix seconds treating it as
+    // UTC. Missing entirely — real trigger: CPython's own `http/cookiejar.py`
+    // (`from calendar import timegm`), needed to convert a parsed
+    // `Expires=` cookie header back into a comparable timestamp. Accepts
+    // both a real `time.struct_time` (attribute-accessible, see
+    // `modules/time.rs`) and a plain tuple, matching real `timegm`'s own
+    // "any sequence" acceptance.
+    cal_func!("timegm", |args| {
+        if args.is_empty() { return Err(PyError::type_error("timegm() missing required argument")); }
+        let get = |i: usize, field: &str| -> i64 {
+            match &*args[0].borrow() {
+                PyObject::Instance { dict, .. } => dict.get(field).and_then(|v| v.as_i64()).unwrap_or(0),
+                PyObject::Tuple(items) | PyObject::List(items) => items.get(i).and_then(|v| v.as_i64()).unwrap_or(0),
+                _ => 0,
+            }
+        };
+        let year = get(0, "tm_year");
+        let month = get(1, "tm_mon");
+        let mday = get(2, "tm_mday");
+        let hour = get(3, "tm_hour");
+        let minute = get(4, "tm_min");
+        let second = get(5, "tm_sec");
+        // Howard Hinnant civil-days-from-epoch algorithm (same one used by
+        // `modules/time.rs`'s `civil_to_days`/`epoch_to_ymd`, duplicated
+        // here rather than made cross-module-public since `calendar` and
+        // `time` are populated by two separate, independent dict-builder
+        // functions with no shared internal-helpers module).
+        let y = if month <= 2 { year - 1 } else { year };
+        let era = if y >= 0 { y } else { y - 399 } / 400;
+        let yoe = y - era * 400;
+        let mp = if month > 2 { month - 3 } else { month + 9 };
+        let doy = (153 * mp + 2) / 5 + mday - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        let days = era * 146097 + doe - 719468;
+        Ok(py_int(days * 86400 + hour * 3600 + minute * 60 + second))
+    });
+
     cal_func!("isleap", |args| {
         if args.len() < 1 {
             return Err(PyError::type_error("isleap() missing required argument (year)"));
