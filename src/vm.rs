@@ -239,6 +239,70 @@ fn formal_param_index(varnames: &[String], arg_count: usize, kwonlyarg_count: us
     None
 }
 
+/// Parses a single `ConstValue` (the compiler's own, still-textual constant
+/// representation — e.g. `ConstValue::Int(String)` holds the LITERAL SOURCE
+/// TEXT of an int literal, not a pre-parsed number) into the real
+/// `PyObjectRef` a `LOAD_CONST` of it should push. Factored out of
+/// `LOAD_CONST`'s own opcode handler so its result can be cached on the
+/// `CodeObject` (see `CodeObject::const_cache`'s doc comment) — this
+/// function itself is unaware of caching, it's just the (moderately
+/// expensive, for `Int`/`Float`/`Complex`) one-time parse.
+fn eval_const_value(const_val: ConstValue) -> PyResult<PyObjectRef> {
+    Ok(match const_val {
+        ConstValue::None => py_none(),
+        ConstValue::Bool(b) => py_bool(b),
+        ConstValue::Int(s) => {
+            // Strips ALL underscores (digit separators, e.g. `1_000_000`),
+            // not just leading ones — `try_exec_simple`'s OWN independent
+            // copy of this same parsing logic used `s.trim_start_matches
+            // ('_')` instead (fixed to match, in the same pass as adding
+            // its own const-cache use, since both copies must agree).
+            let s_clean: String = s.chars().filter(|&c| c != '_').collect();
+            if let Some(oct) = s_clean.strip_prefix("0o").or_else(|| s_clean.strip_prefix("0O")) {
+                if let Ok(n) = i64::from_str_radix(oct, 8) { py_int(n) }
+                else { let n = BigInt::parse_bytes(oct.as_bytes(), 8).ok_or_else(|| PyError::value_error(format!("invalid integer: {}", s)))?; PyObjectRef::imm(PyObject::Int(n)) }
+            } else if let Some(hex) = s_clean.strip_prefix("0x").or_else(|| s_clean.strip_prefix("0X")) {
+                if let Ok(n) = i64::from_str_radix(hex, 16) { py_int(n) }
+                else { let n = BigInt::parse_bytes(hex.as_bytes(), 16).ok_or_else(|| PyError::value_error(format!("invalid integer: {}", s)))?; PyObjectRef::imm(PyObject::Int(n)) }
+            } else if let Some(bin) = s_clean.strip_prefix("0b").or_else(|| s_clean.strip_prefix("0B")) {
+                if let Ok(n) = i64::from_str_radix(bin, 2) { py_int(n) }
+                else { let n = BigInt::parse_bytes(bin.as_bytes(), 2).ok_or_else(|| PyError::value_error(format!("invalid integer: {}", s)))?; PyObjectRef::imm(PyObject::Int(n)) }
+            } else if let Ok(n) = s_clean.parse::<i64>() {
+                py_int(n)  // uses small int cache
+            } else {
+                let n: BigInt = s_clean.parse().map_err(|_| {
+                    PyError::value_error(format!("invalid integer: {}", s))
+                })?;
+                PyObjectRef::imm(PyObject::Int(n))
+            }
+        }
+        ConstValue::Float(s) => {
+            let f: f64 = s.parse().map_err(|_| {
+                PyError::value_error(format!("invalid float: {}", s))
+            })?;
+            py_float(f)
+        }
+        ConstValue::String(s) => py_str(&s),
+        ConstValue::Bytes(b) => PyObjectRef::imm(PyObject::Bytes(b)),
+        ConstValue::Complex { real, imag } => {
+            let re: f64 = real.parse().map_err(|_| {
+                PyError::value_error(format!("invalid complex literal: {}", real))
+            })?;
+            let im: f64 = imag.parse().map_err(|_| {
+                PyError::value_error(format!("invalid complex literal: {}", imag))
+            })?;
+            PyObjectRef::imm(PyObject::Complex(re, im))
+        }
+        ConstValue::Code(code) => {
+            PyObjectRef::imm(PyObject::Code(code))
+        }
+        ConstValue::Tuple(items) => {
+            let objs: Vec<PyObjectRef> = items.into_iter().map(|s| py_str(&s)).collect();
+            PyObjectRef::imm(PyObject::Tuple(objs))
+        }
+    })
+}
+
 impl VirtualMachine {
     pub fn new() -> Self {
         if std::env::var("RPY_DEBUG_VM_NEW").is_ok() {
@@ -1725,27 +1789,39 @@ impl VirtualMachine {
                     if idx < locals.len() { locals[idx] = Some(val); }
                 }
                 Opcode::LOAD_CONST => {
-                    let const_val = code.consts.get(instr.arg as usize)?;
-                    let obj = match const_val {
-                        ConstValue::None => py_none(),
-                        ConstValue::Bool(b) => py_bool(*b),
-                        ConstValue::Int(s) => {
-                            let s_trim = s.trim_start_matches('_');
-                            if let Some(oct) = s_trim.strip_prefix("0o").or_else(|| s_trim.strip_prefix("0O")) {
-                                if let Ok(n) = i64::from_str_radix(oct, 8) { py_int(n) }
-                                else { let n = num_bigint::BigInt::parse_bytes(oct.as_bytes(), 8)?; PyObjectRef::imm(PyObject::Int(n)) }
-                            } else if let Some(hex) = s_trim.strip_prefix("0x").or_else(|| s_trim.strip_prefix("0X")) {
-                                if let Ok(n) = i64::from_str_radix(hex, 16) { py_int(n) }
-                                else { let n = num_bigint::BigInt::parse_bytes(hex.as_bytes(), 16)?; PyObjectRef::imm(PyObject::Int(n)) }
-                            } else if let Some(bin) = s_trim.strip_prefix("0b").or_else(|| s_trim.strip_prefix("0B")) {
-                                if let Ok(n) = i64::from_str_radix(bin, 2) { py_int(n) }
-                                else { let n = num_bigint::BigInt::parse_bytes(bin.as_bytes(), 2)?; PyObjectRef::imm(PyObject::Int(n)) }
-                            } else if let Ok(n) = s.parse::<i64>() { py_int(n) }
-                            else { let n: num_bigint::BigInt = s.parse().ok()?; PyObjectRef::imm(PyObject::Int(n)) }
+                    // Shares `eval_const_value`/`const_cache` with the main
+                    // `execute_instruction` LOAD_CONST handler — this fast
+                    // path (no-`Frame` "simple function" execution) used to
+                    // have its OWN independent copy of the same parsing
+                    // logic, uncached, and using `s.trim_start_matches('_')`
+                    // (only strips LEADING underscores) instead of the main
+                    // copy's `s.chars().filter(|&c| c != '_')` (strips ALL
+                    // of them) — an inconsistency that would have mis-parsed
+                    // a mid-literal digit separator like `1_000_000`
+                    // differently depending on which path happened to
+                    // execute a given function.
+                    let const_idx = instr.arg as usize;
+                    let cached = code.const_cache.borrow().get(const_idx).and_then(|c| c.clone());
+                    let obj = if let Some(obj) = cached {
+                        obj
+                    } else {
+                        let const_val = code.consts.get(const_idx)?.clone();
+                        // Only Function/Complex/Bytes/Tuple/Code consts are
+                        // NOT handled here (this fast path only ever runs
+                        // for "simple" functions — see this fn's own doc
+                        // comment — which realistically only ever load
+                        // None/Bool/Int/Float/String constants); fall back
+                        // to the slow path for anything else via `None`.
+                        if !matches!(const_val, ConstValue::None | ConstValue::Bool(_) | ConstValue::Int(_) | ConstValue::Float(_) | ConstValue::String(_)) {
+                            return None;
                         }
-                        ConstValue::Float(s) => py_float(s.parse().ok()?),
-                        ConstValue::String(s) => py_str(s),
-                        _ => return None,
+                        let obj = eval_const_value(const_val).ok()?;
+                        let mut cache = code.const_cache.borrow_mut();
+                        if cache.len() <= const_idx {
+                            cache.resize(const_idx + 1, None);
+                        }
+                        cache[const_idx] = Some(obj.clone());
+                        obj
                     };
                     stack.push(obj);
                 }
@@ -1965,56 +2041,30 @@ impl VirtualMachine {
 
             Opcode::LOAD_CONST => {
                 let const_idx = arg as usize;
-                let const_val = self.frames[fi].code.consts.get(const_idx).ok_or_else(|| {
-                    PyError::runtime_error(format!("constant index out of range: {}", const_idx))
-                })?.clone();
-                let obj = match const_val {
-                    ConstValue::None => py_none(),
-                    ConstValue::Bool(b) => py_bool(b),
-                    ConstValue::Int(s) => {
-                        let s_clean: String = s.chars().filter(|&c| c != '_').collect();
-                        if let Some(oct) = s_clean.strip_prefix("0o").or_else(|| s_clean.strip_prefix("0O")) {
-                            if let Ok(n) = i64::from_str_radix(oct, 8) { py_int(n) }
-                            else { let n = BigInt::parse_bytes(oct.as_bytes(), 8).ok_or_else(|| PyError::value_error(format!("invalid integer: {}", s)))?; PyObjectRef::imm(PyObject::Int(n)) }
-                        } else if let Some(hex) = s_clean.strip_prefix("0x").or_else(|| s_clean.strip_prefix("0X")) {
-                            if let Ok(n) = i64::from_str_radix(hex, 16) { py_int(n) }
-                            else { let n = BigInt::parse_bytes(hex.as_bytes(), 16).ok_or_else(|| PyError::value_error(format!("invalid integer: {}", s)))?; PyObjectRef::imm(PyObject::Int(n)) }
-                        } else if let Some(bin) = s_clean.strip_prefix("0b").or_else(|| s_clean.strip_prefix("0B")) {
-                            if let Ok(n) = i64::from_str_radix(bin, 2) { py_int(n) }
-                            else { let n = BigInt::parse_bytes(bin.as_bytes(), 2).ok_or_else(|| PyError::value_error(format!("invalid integer: {}", s)))?; PyObjectRef::imm(PyObject::Int(n)) }
-                        } else if let Ok(n) = s.parse::<i64>() {
-                            py_int(n)  // uses small int cache
-                        } else {
-                            let n: BigInt = s.parse().map_err(|_| {
-                                PyError::value_error(format!("invalid integer: {}", s))
-                            })?;
-                            PyObjectRef::imm(PyObject::Int(n))
-                        }
+                // Fast path: this exact LOAD_CONST was already parsed once
+                // before (by this same CodeObject, possibly on a PRIOR call
+                // — the cache lives on the `Rc`-shared CodeObject itself,
+                // not the per-call Frame) — every `consts[i]` value is a
+                // pure, deterministic source of one Python value, so a
+                // cached hit is always correct, never stale (see
+                // `CodeObject::const_cache`'s own doc comment for why this
+                // is safe unlike the Frame-level LOAD_ATTR/LOAD_GLOBAL
+                // caches, which read genuinely mutable state).
+                let cached = self.frames[fi].code.const_cache.borrow()
+                    .get(const_idx).and_then(|c| c.clone());
+                let obj = if let Some(obj) = cached {
+                    obj
+                } else {
+                    let const_val = self.frames[fi].code.consts.get(const_idx).ok_or_else(|| {
+                        PyError::runtime_error(format!("constant index out of range: {}", const_idx))
+                    })?.clone();
+                    let obj = eval_const_value(const_val)?;
+                    let mut cache = self.frames[fi].code.const_cache.borrow_mut();
+                    if cache.len() <= const_idx {
+                        cache.resize(const_idx + 1, None);
                     }
-                    ConstValue::Float(s) => {
-                        let f: f64 = s.parse().map_err(|_| {
-                            PyError::value_error(format!("invalid float: {}", s))
-                        })?;
-                        py_float(f)
-                    }
-                    ConstValue::String(s) => py_str(&s),
-                    ConstValue::Bytes(b) => PyObjectRef::imm(PyObject::Bytes(b)),
-                    ConstValue::Complex { real, imag } => {
-                        let re: f64 = real.parse().map_err(|_| {
-                            PyError::value_error(format!("invalid complex literal: {}", real))
-                        })?;
-                        let im: f64 = imag.parse().map_err(|_| {
-                            PyError::value_error(format!("invalid complex literal: {}", imag))
-                        })?;
-                        PyObjectRef::imm(PyObject::Complex(re, im))
-                    }
-                    ConstValue::Code(code) => {
-                        PyObjectRef::imm(PyObject::Code(code))
-                    }
-                    ConstValue::Tuple(items) => {
-                        let objs: Vec<PyObjectRef> = items.into_iter().map(|s| py_str(&s)).collect();
-                        PyObjectRef::imm(PyObject::Tuple(objs))
-                    }
+                    cache[const_idx] = Some(obj.clone());
+                    obj
                 };
                 self.frames[fi].push(obj);
             }

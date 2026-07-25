@@ -1,4 +1,7 @@
+use std::cell::RefCell;
 use std::fmt;
+
+use crate::object::PyObjectRef;
 
 // Some variants are reserved for planned work (register-based bytecode
 // phase in ROADMAP-v2.md; match-statement opcodes with a VM handler
@@ -293,6 +296,27 @@ pub struct CodeObject {
     /// PyObject::Function.defaults right after the `num_defaults` positional
     /// ones, in the same left-to-right order as the `true` entries here.
     pub kwonly_defaults_mask: Vec<bool>,
+    /// Lazily-populated cache of each `LOAD_CONST`'s already-parsed result,
+    /// indexed by `consts` position. Without this, `LOAD_CONST` re-derives
+    /// the actual `PyObjectRef` from scratch on EVERY execution of that
+    /// instruction — for `ConstValue::Int(String)`/`Float(String)`, that
+    /// means re-parsing the same string (underscore-cleaning, `0x`/`0o`/
+    /// `0b` prefix detection, radix parsing) every single time, even though
+    /// the same bytecode offset always parses the same source text to the
+    /// same value; for `ConstValue::Code(Box<CodeObject>)` (a nested
+    /// function/lambda's own compiled body), it means a full recursive
+    /// clone of that nested `CodeObject` — including ITS OWN `consts`/
+    /// `instructions` — every time a `def`/`lambda` inside a loop body
+    /// executes. `RefCell` since `CodeObject` is normally shared via `Rc`
+    /// (immutable from the outside) but this cache is populated lazily
+    /// as a pure implementation detail, not user-visible state — every
+    /// entry is a deterministic function of the corresponding `consts[i]`,
+    /// so sharing cache hits across any `Rc`-cloned handle to the same
+    /// `CodeObject` is always correct, never stale (unlike the `Frame`-level
+    /// `LOAD_ATTR`/`LOAD_GLOBAL` inline caches, which read MUTABLE state —
+    /// instance/class attributes, globals — and were found this same
+    /// session to need real invalidation before they can safely cache).
+    pub const_cache: RefCell<Vec<Option<PyObjectRef>>>,
 }
 
 impl CodeObject {
@@ -315,6 +339,7 @@ impl CodeObject {
             kwarg_name: None,
             num_defaults: 0,
             kwonly_defaults_mask: Vec::new(),
+            const_cache: RefCell::new(Vec::new()),
         }
     }
 
@@ -485,6 +510,7 @@ impl CodeObject {
             kwarg_name,
             num_defaults,
             kwonly_defaults_mask,
+            const_cache: RefCell::new(Vec::new()),
         })
     }
 }
