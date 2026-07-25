@@ -98,6 +98,61 @@ pub fn create_socket_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
+thread_local! {
+    static CALLED_PROCESS_ERROR_TYPE: std::cell::RefCell<Option<PyObjectRef>> = std::cell::RefCell::new(None);
+}
+
+/// `subprocess.CalledProcessError` — was missing entirely, so
+/// `check_output`'s own non-zero-exit-status path raised a generic
+/// `RuntimeError` instead of the specific, real exception real code
+/// commonly catches by name (`except subprocess.CalledProcessError as e:
+/// ... e.returncode`). A real `Exception`-derived `Type` (not just a
+/// plain marker) exposing `.returncode`/`.cmd`/`.output`/`.stdout`/
+/// `.stderr` as real instance attributes, matching real CPython's shape.
+fn get_called_process_error_type() -> PyObjectRef {
+    let existing = CALLED_PROCESS_ERROR_TYPE.with(|c| c.borrow().clone());
+    if let Some(t) = existing { return t; }
+    let mut type_dict: HashMap<String, PyObjectRef> = HashMap::new();
+    type_dict.insert("__str__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "__str__".to_string(),
+        func: |args| {
+            if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+                let rc = dict.get("returncode").and_then(|v| v.as_i64()).unwrap_or(-1);
+                let cmd = dict.get("cmd").map(|v| v.str()).unwrap_or_default();
+                Ok(py_str(&format!("Command '{}' returned non-zero exit status {}.", cmd, rc)))
+            } else { Ok(py_str("")) }
+        },
+    }));
+    // No native `Exception` PyObject::Type exists to list as a real base
+    // here (builtin exceptions are represented as `BuiltinFunction`
+    // markers elsewhere, not `Type`s) — `except CalledProcessError:`
+    // matches by exact class identity via the normal Instance/Type MRO
+    // walk regardless, so this is enough for the common case, just not
+    // also catchable via a bare `except Exception:`.
+    let typ = PyObjectRef::new(PyObject::Type { name: "CalledProcessError".to_string(), dict: type_dict, bases: vec![], mro: vec![] });
+    // A class's own `mro` must include ITSELF (real Python: `C.__mro__[0]
+    // is C`) — `except CalledProcessError as e:`'s matching walks
+    // `instance.typ`'s `mro` looking for the `except` clause's referenced
+    // class, so an empty `mro` here made an exact-class match fail
+    // entirely (confirmed via repro: `check_output` raising this and being
+    // caught by its own exact type name still fell through uncaught).
+    if let PyObject::Type { mro, .. } = &mut *typ.borrow_mut() {
+        *mro = vec![typ.clone()];
+    }
+    CALLED_PROCESS_ERROR_TYPE.with(|c| { *c.borrow_mut() = Some(typ.clone()); });
+    typ
+}
+
+fn make_called_process_error(returncode: i64, cmd: &str, output: Vec<u8>, stderr: Vec<u8>) -> PyObjectRef {
+    let mut dict = crate::object::AttrMap::new();
+    dict.insert("returncode".to_string(), py_int(returncode));
+    dict.insert("cmd".to_string(), py_str(cmd));
+    dict.insert("output".to_string(), PyObjectRef::imm(PyObject::Bytes(output.clone())));
+    dict.insert("stdout".to_string(), PyObjectRef::imm(PyObject::Bytes(output)));
+    dict.insert("stderr".to_string(), PyObjectRef::imm(PyObject::Bytes(stderr)));
+    PyObjectRef::new(PyObject::Instance { typ: get_called_process_error_type(), dict })
+}
+
 pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! sub_func {
@@ -105,6 +160,7 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
             d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
         };
     }
+    d.insert("CalledProcessError".to_string(), get_called_process_error_type());
 
     sub_func!("run", |args| {
         if args.is_empty() {
@@ -177,7 +233,9 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
                 .map_err(|e| PyError::OsError(format!("{}", e)))?
         };
         if !output.status.success() {
-            return Err(PyError::runtime_error(format!("Command returned non-zero exit status")));
+            let rc = output.status.code().unwrap_or(-1) as i64;
+            let instance = make_called_process_error(rc, &args[0].str(), output.stdout, output.stderr);
+            return Err(PyError::Exception("CalledProcessError".to_string(), instance));
         }
         // Return stdout as bytes
         Ok(PyObjectRef::imm(PyObject::Bytes(output.stdout)))

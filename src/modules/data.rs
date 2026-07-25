@@ -1994,6 +1994,15 @@ pub fn create_calendar_dict() -> HashMap<String, PyObjectRef> {
         py_str("Mon"), py_str("Tue"), py_str("Wed"), py_str("Thu"),
         py_str("Fri"), py_str("Sat"), py_str("Sun"),
     ]));
+    // Weekday constants (0=Monday..6=Sunday, matching `calendar.weekday()`'s
+    // own return convention) — were missing entirely.
+    d.insert("MONDAY".to_string(), py_int(0));
+    d.insert("TUESDAY".to_string(), py_int(1));
+    d.insert("WEDNESDAY".to_string(), py_int(2));
+    d.insert("THURSDAY".to_string(), py_int(3));
+    d.insert("FRIDAY".to_string(), py_int(4));
+    d.insert("SATURDAY".to_string(), py_int(5));
+    d.insert("SUNDAY".to_string(), py_int(6));
 
     // Calendar helper functions (inner fn items are not captured by closures)
     fn is_leap(y: i64) -> bool {

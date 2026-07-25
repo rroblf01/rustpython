@@ -45,38 +45,138 @@ pub fn create_textwrap_dict() -> HashMap<String, PyObjectRef> {
         Ok(py_str(&result))
     });
 
+    // Extracts `width` from either a positional 2nd argument OR a
+    // `width=` keyword (arriving as this project's own trailing packed-
+    // kwargs-dict convention) — real code calls `textwrap.fill(text,
+    // width=30)` far more often than the purely-positional form, which
+    // this function's own PREVIOUS version (`args[2]`-only) completely
+    // missed, silently falling back to the default 70 regardless of what
+    // was actually requested.
+    fn extract_width(args: &[PyObjectRef]) -> usize {
+        if let Some(kwargs) = args.last().and_then(|a| if let PyObject::Dict(d) = &*a.borrow() { Some(d.clone()) } else { None }) {
+            if let Some(w) = kwargs.get(&py_str("width")).ok().flatten().and_then(|v| v.as_i64()) {
+                return w as usize;
+            }
+        }
+        args.get(1).and_then(|v| v.as_i64()).map(|w| w as usize).unwrap_or(70)
+    }
+
     tw_func!("fill", |args| {
-        if args.len() < 1 {
+        if args.is_empty() {
             return Err(PyError::type_error("fill() takes at least 1 argument"));
         }
         let text = args[0].str();
-        let width = if args.len() > 2 {
-            args[2].as_i64().unwrap_or(70) as usize
-        } else {
-            70
-        };
-        if width == 0 || width >= text.len() {
-            return Ok(py_str(&text));
+        let width = extract_width(args);
+        Ok(py_str(&wrap_lines(&text, width, "", "").join("\n")))
+    });
+
+    // Shared word-wrap core used by both `fill()` (joins with `\n`, already
+    // existed above) and the new `wrap()`/`TextWrapper.wrap()` (returns the
+    // list of lines directly — the more fundamental of the two operations
+    // in real `textwrap`, `fill()` is literally defined as `'\n'.join(wrap(...))`).
+    fn wrap_lines(text: &str, width: usize, initial_indent: &str, subsequent_indent: &str) -> Vec<String> {
+        if width == 0 {
+            return vec![text.to_string()];
         }
         let words: Vec<&str> = text.split_whitespace().collect();
         let mut lines: Vec<String> = Vec::new();
         let mut current = String::new();
         for word in words {
+            let indent = if lines.is_empty() { initial_indent } else { subsequent_indent };
             if current.is_empty() {
-                current = word.to_string();
+                current = format!("{}{}", indent, word);
             } else if current.len() + 1 + word.len() <= width {
                 current.push(' ');
                 current.push_str(word);
             } else {
                 lines.push(current);
-                current = word.to_string();
+                let indent = subsequent_indent;
+                current = format!("{}{}", indent, word);
             }
         }
         if !current.is_empty() {
             lines.push(current);
         }
-        Ok(py_str(&lines.join("\n")))
+        lines
+    }
+
+    // `textwrap.wrap(text, width=70)` — was missing entirely, even though
+    // `fill()` (which just joins `wrap()`'s own result with `\n`) already
+    // existed; real code very commonly wants the individual lines as a
+    // list (e.g. to prefix each with `"> "` for a quoted reply, or to count
+    // lines) rather than a single joined string.
+    tw_func!("wrap", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("wrap() takes at least 1 argument"));
+        }
+        let text = args[0].str();
+        let width = extract_width(args);
+        let lines = wrap_lines(&text, width, "", "");
+        Ok(py_list(lines.into_iter().map(|l| py_str(&l)).collect()))
     });
+
+    // `textwrap.TextWrapper` — the real, OOP-configurable counterpart to
+    // the plain `wrap()`/`fill()` functions (lets code set `width`/
+    // `initial_indent`/`subsequent_indent` once and reuse across many
+    // calls) — was missing entirely. A synthetic native `Type` (same
+    // pattern as `time.struct_time`/`platform.uname_result` elsewhere in
+    // this project) storing its config as instance attributes, with real
+    // `.wrap(text)`/`.fill(text)` methods reading them back.
+    {
+        let mut type_dict: HashMap<String, PyObjectRef> = HashMap::new();
+        type_dict.insert("__init__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__init__".to_string(),
+            func: |args| {
+                if args.is_empty() { return Err(PyError::type_error("__init__() missing self")); }
+                let kwargs = args.last().and_then(|a| if let PyObject::Dict(d) = &*a.borrow() { Some(d.clone()) } else { None });
+                let get_kw = |name: &str| kwargs.as_ref().and_then(|d| d.get(&py_str(name)).ok().flatten());
+                let width = get_kw("width").and_then(|v| v.as_i64()).unwrap_or(70);
+                let initial_indent = get_kw("initial_indent").map(|v| v.str()).unwrap_or_default();
+                let subsequent_indent = get_kw("subsequent_indent").map(|v| v.str()).unwrap_or_default();
+                if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
+                    dict.insert("width".to_string(), py_int(width));
+                    dict.insert("initial_indent".to_string(), py_str(&initial_indent));
+                    dict.insert("subsequent_indent".to_string(), py_str(&subsequent_indent));
+                }
+                Ok(py_none())
+            },
+        }));
+        type_dict.insert("wrap".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "wrap".to_string(),
+            func: |args| {
+                if args.len() < 2 { return Err(PyError::type_error("wrap() takes exactly 1 argument")); }
+                let (width, ii, si) = if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+                    (
+                        dict.get("width").and_then(|v| v.as_i64()).unwrap_or(70) as usize,
+                        dict.get("initial_indent").map(|v| v.str()).unwrap_or_default(),
+                        dict.get("subsequent_indent").map(|v| v.str()).unwrap_or_default(),
+                    )
+                } else { (70, String::new(), String::new()) };
+                let text = args[1].str();
+                let lines = wrap_lines(&text, width, &ii, &si);
+                Ok(py_list(lines.into_iter().map(|l| py_str(&l)).collect()))
+            },
+        }));
+        type_dict.insert("fill".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "fill".to_string(),
+            func: |args| {
+                if args.len() < 2 { return Err(PyError::type_error("fill() takes exactly 1 argument")); }
+                let (width, ii, si) = if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+                    (
+                        dict.get("width").and_then(|v| v.as_i64()).unwrap_or(70) as usize,
+                        dict.get("initial_indent").map(|v| v.str()).unwrap_or_default(),
+                        dict.get("subsequent_indent").map(|v| v.str()).unwrap_or_default(),
+                    )
+                } else { (70, String::new(), String::new()) };
+                let text = args[1].str();
+                let lines = wrap_lines(&text, width, &ii, &si);
+                Ok(py_str(&lines.join("\n")))
+            },
+        }));
+        d.insert("TextWrapper".to_string(), PyObjectRef::new(PyObject::Type {
+            name: "TextWrapper".to_string(), dict: type_dict, bases: vec![], mro: vec![],
+        }));
+    }
 
     tw_func!("shorten", |args| {
         if args.len() < 1 {

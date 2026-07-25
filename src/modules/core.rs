@@ -1456,6 +1456,16 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
     };
     d.insert("prefix".to_string(), py_str(&prefix));
     d.insert("exec_prefix".to_string(), py_str(&exec_prefix));
+    // `sys.base_prefix`/`base_exec_prefix` — real CPython's own venv-
+    // detection idiom (`sys.prefix != sys.base_prefix`) needs these to be
+    // the REAL, non-venv installation prefix regardless of whether a venv
+    // is currently active — unlike `prefix`/`exec_prefix` above (which
+    // deliberately follow the active venv). Was missing entirely, meaning
+    // any code doing this exact "am I in a venv" check (a common pattern
+    // — `pip`, `venv` itself, build tooling) raised `AttributeError`
+    // instead of getting a straight answer.
+    d.insert("base_prefix".to_string(), py_str("/usr"));
+    d.insert("base_exec_prefix".to_string(), py_str("/usr"));
     d.insert("winver".to_string(), py_str("3.12"));
     // sys.exc_info() — returns current exception info from VM. Real logic
     // lives in `sys_exc_info_builtin` (a real top-level fn, not inlined
@@ -1468,6 +1478,33 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
     sys_func!("exc_info", sys_exc_info_builtin);
     sys_func!("getrecursionlimit", sys_getrecursionlimit_builtin);
     sys_func!("setrecursionlimit", sys_setrecursionlimit_builtin);
+    // `sys.getsizeof(obj)` — was missing entirely. Real CPython reports the
+    // actual C-level memory footprint of `obj`, which has no equivalent
+    // meaning against this interpreter's own, completely different object
+    // representation — so this is a deliberate APPROXIMATION (rough,
+    // per-type base size + a per-element estimate for containers) good
+    // enough for code that just checks `getsizeof(x) > 0` or compares
+    // relative sizes between two objects of the same type, not for code
+    // asserting on an exact byte count (which would be fragile even
+    // between two real CPython builds/versions anyway).
+    sys_func!("getsizeof", |args| {
+        if args.is_empty() { return Err(PyError::type_error("getsizeof() takes at least 1 argument")); }
+        let size = match &*args[0].borrow() {
+            PyObject::None => 16,
+            PyObject::Bool(_) => 28,
+            PyObject::Int(_) => 28,
+            PyObject::Float(_) => 24,
+            PyObject::Str(s) => 49 + s.len() as i64,
+            PyObject::Bytes(b) => 33 + b.len() as i64,
+            PyObject::ByteArray(b) => 56 + b.len() as i64,
+            PyObject::List(v) => 56 + 8 * v.len() as i64,
+            PyObject::Tuple(v) => 40 + 8 * v.len() as i64,
+            PyObject::Dict(d) => 64 + 32 * d.len() as i64,
+            PyObject::Set(s) | PyObject::FrozenSet(s) => 216 + 32 * s.len() as i64,
+            _ => 48,
+        };
+        Ok(py_int(size))
+    });
     d
 }
 
@@ -2487,6 +2524,14 @@ pub fn create_os_path_dict() -> HashMap<String, PyObjectRef> {
     path_func!("isdir", |args| {
         if args.is_empty() { return Err(PyError::type_error("isdir() takes at least 1 argument")); }
         Ok(py_bool(std::path::Path::new(&args[0].str()).is_dir()))
+    });
+
+    // `os.path.isabs(path)` — was missing entirely; a common, basic
+    // path-classification check (does this path already start from the
+    // filesystem root, or is it relative to somewhere).
+    path_func!("isabs", |args| {
+        if args.is_empty() { return Err(PyError::type_error("isabs() takes at least 1 argument")); }
+        Ok(py_bool(std::path::Path::new(&crate::object::path_arg_to_string(&args[0])).is_absolute()))
     });
 
     // --- Path resolution and normalization ---
