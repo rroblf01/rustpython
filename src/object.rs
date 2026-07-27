@@ -904,56 +904,136 @@ pub type PyResult<T> = Result<T, PyError>;
 
 #[derive(Clone)]
 pub struct PySet {
-    buckets: std::collections::HashMap<usize, Vec<PyObjectRef>>,
+    entries: Vec<Option<PyObjectRef>>,
+    indices: Vec<u32>,
     size: usize,
 }
 
 impl PySet {
-    pub fn new() -> Self { PySet { buckets: std::collections::HashMap::new(), size: 0 } }
+    pub fn new() -> Self { PySet { entries: Vec::new(), indices: Vec::new(), size: 0 } }
     pub fn is_empty(&self) -> bool { self.size == 0 }
     pub fn len(&self) -> usize { self.size }
-    pub fn clear(&mut self) { self.buckets.clear(); self.size = 0; }
-    fn bucket(&self, key: &PyObjectRef) -> PyResult<Option<&Vec<PyObjectRef>>> {
-        let h = key.hash()?; Ok(self.buckets.get(&h))
+    pub fn clear(&mut self) { self.entries.clear(); self.indices.clear(); self.size = 0; }
+
+    fn mask(&self) -> usize { self.indices.len() - 1 }
+
+    fn find(&self, key: &PyObjectRef, h: usize) -> Option<usize> {
+        if self.indices.is_empty() { return None; }
+        let mask = self.mask();
+        let start = h & mask;
+        let mut i = start;
+        loop {
+            let idx_val = self.indices[i];
+            if idx_val == 0 { return None; }
+            let entry_idx = (idx_val - 1) as usize;
+            if let Some(k) = &self.entries[entry_idx] {
+                if k.equals(key).unwrap_or(false) {
+                    return Some(entry_idx);
+                }
+            }
+            i = (i + 1) & mask;
+            if i == start { return None; }
+        }
     }
-    fn find(bucket: &[PyObjectRef], key: &PyObjectRef) -> Option<usize> {
-        bucket.iter().position(|k| k.equals(key).unwrap_or(false))
+
+    fn probe(&self, key: &PyObjectRef, h: usize) -> (usize, Option<usize>) {
+        if self.indices.is_empty() { return (0, None); }
+        let mask = self.mask();
+        let start = h & mask;
+        let mut first_tomb = None;
+        let mut i = start;
+        loop {
+            let idx_val = self.indices[i];
+            if idx_val == 0 { return (first_tomb.unwrap_or(i), None); }
+            let entry_idx = (idx_val - 1) as usize;
+            if self.entries[entry_idx].is_none() {
+                if first_tomb.is_none() { first_tomb = Some(i); }
+            } else if let Some(k) = &self.entries[entry_idx] {
+                if k.equals(key).unwrap_or(false) {
+                    return (i, Some(entry_idx));
+                }
+            }
+            i = (i + 1) & mask;
+            if i == start { return (first_tomb.unwrap_or(i), None); }
+        }
     }
+
+    fn ensure_capacity(&mut self, additional: usize) {
+        let needed = self.size + additional;
+        if self.indices.is_empty() {
+            self.indices = vec![0u32; 8];
+        } else if needed * 3 > self.indices.len() * 2 {
+            self.rehash(self.indices.len() * 2);
+        }
+    }
+
+    fn rehash(&mut self, new_cap: usize) {
+        let mut new_idx = vec![0u32; new_cap];
+        let mask = new_cap - 1;
+        for (ei, entry) in self.entries.iter().enumerate() {
+            if let Some(key) = entry {
+                if let Ok(h) = key.hash() {
+                    let mut i = h & mask;
+                    while new_idx[i] != 0 { i = (i + 1) & mask; }
+                    new_idx[i] = (ei + 1) as u32;
+                }
+            }
+        }
+        self.indices = new_idx;
+    }
+
     pub fn contains(&self, key: &PyObjectRef) -> PyResult<bool> {
-        match self.bucket(key)? { Some(b) => Ok(Self::find(b, key).is_some()), None => Ok(false) }
+        let h = key.hash()?;
+        Ok(self.find(key, h).is_some())
     }
+
     pub fn add(&mut self, key: PyObjectRef) -> PyResult<()> {
         let h = key.hash()?;
-        let bucket = self.buckets.entry(h).or_default();
-        if !Self::find(bucket, &key).is_some() { bucket.push(key); self.size += 1; }
+        self.ensure_capacity(1);
+        let (slot, existing) = self.probe(&key, h);
+        if existing.is_some() { return Ok(()); }
+        let entry_idx = self.entries.len();
+        self.entries.push(Some(key));
+        self.indices[slot] = (entry_idx + 1) as u32;
+        self.size += 1;
         Ok(())
     }
+
     pub fn remove(&mut self, key: &PyObjectRef) -> PyResult<PyObjectRef> {
         let h = key.hash()?;
-        let bucket = self.buckets.get_mut(&h).ok_or_else(|| PyError::key_error(key.str()))?;
-        let pos = Self::find(bucket, key).ok_or_else(|| PyError::key_error(key.str()))?;
-        self.size -= 1; Ok(bucket.swap_remove(pos))
+        let existing = self.find(key, h).ok_or_else(|| PyError::key_error(key.str()))?;
+        let removed = self.entries[existing].take().unwrap();
+        self.size -= 1;
+        Ok(removed)
     }
+
     pub fn pop(&mut self) -> Option<PyObjectRef> {
-        let bucket = self.buckets.values_mut().next()?;
-        let val = bucket.pop()?;
-        if bucket.is_empty() { self.buckets.retain(|_, v| !v.is_empty()); }
-        self.size -= 1; Some(val)
+        for entry in self.entries.iter_mut().rev() {
+            if let Some(val) = entry.take() {
+                self.size -= 1;
+                return Some(val);
+            }
+        }
+        None
     }
+
     pub fn to_vec(&self) -> Vec<PyObjectRef> {
-        self.buckets.values().flat_map(|b| b.clone()).collect()
+        self.entries.iter().filter_map(|e| e.clone()).collect()
     }
+
     pub fn from_vec(vec: Vec<PyObjectRef>) -> PyResult<Self> {
         let mut set = PySet::new();
         for item in vec { set.add(item)?; }
         Ok(set)
     }
+
     pub fn is_superset(&self, other: &PySet) -> bool {
         for item in other.to_vec() {
             if self.contains(&item).unwrap_or(false) == false { return false; }
         }
         true
     }
+
     pub fn is_subset(&self, other: &PySet) -> bool {
         other.is_superset(self)
     }

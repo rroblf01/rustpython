@@ -243,6 +243,7 @@ fn real_main() {
         eprintln!("size_of PyObjectRef: {}", std::mem::size_of::<object::PyObjectRef>());
         eprintln!("size_of PyObject: {}", std::mem::size_of::<object::PyObject>());
         eprintln!("size_of PyDict: {}", std::mem::size_of::<object::PyDict>());
+        eprintln!("size_of PySet: {}", std::mem::size_of::<object::PySet>());
         eprintln!("size_of vm::Frame: {}", std::mem::size_of::<vm::Frame>());
         eprintln!("size_of SmallVec<[PyObjectRef;8]>: {}", std::mem::size_of::<smallvec::SmallVec<[object::PyObjectRef; 8]>>());
         eprintln!("size_of InternedMap: {}", std::mem::size_of::<crate::interner::InternedMap<object::PyObjectRef>>());
