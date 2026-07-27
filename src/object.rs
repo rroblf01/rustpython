@@ -8831,9 +8831,9 @@ impl PyObject {
                 let func_name = &f.code.name;
                 let dict = &f.dict;
                 match name {
-                    "__name__" => Ok(dict.get("__name__").cloned().unwrap_or(py_str(func_name))),
-                    "__qualname__" => Ok(dict.get("__qualname__").cloned().unwrap_or(py_str(func_name))),
-                    "name" => Ok(dict.get("name").cloned().unwrap_or(py_str(func_name))),
+                    "__name__" => Ok(dict.get("__name__").cloned().unwrap_or(py_str(crate::interner::lookup_str(*func_name)))),
+                    "__qualname__" => Ok(dict.get("__qualname__").cloned().unwrap_or(py_str(crate::interner::lookup_str(*func_name)))),
+                    "name" => Ok(dict.get("name").cloned().unwrap_or(py_str(crate::interner::lookup_str(*func_name)))),
                     "__doc__" => Ok(dict.get("__doc__").cloned().unwrap_or(py_none())),
                     "__code__" => Ok(dict.get("__code__").cloned().unwrap_or(py_none())),
                     "__globals__" => Ok(dict.get("__globals__").cloned().unwrap_or(py_none())),
@@ -8870,9 +8870,8 @@ impl PyObject {
                         let raw = func.borrow().get_attribute(name).map_err(|_| {
                             if std::env::var("RPY_DEBUG_ATTR").is_ok() {
                                 let (fn_name, fn_file) = if let PyObject::Function(ref inner_f) = &*func.borrow() {
-                                let code = &inner_f.code;
-                                let n = &inner_f.code.name;
-                                    (n.clone(), code.filename.clone())
+                                    let code = &inner_f.code;
+                                    (code.name.to_string(), code.filename.to_string())
                                 } else { ("?".to_string(), "?".to_string()) };
                                 let self_kind = match &*self_obj.borrow() {
                                     PyObject::Type { name, .. } => format!("Type({})", name),
@@ -10804,8 +10803,8 @@ impl PyObject {
             }
             PyObject::Code(c) => {
                 match name {
-                    "co_filename" => Ok(py_str(&c.filename)),
-                    "co_name" => Ok(py_str(&c.name)),
+                    "co_filename" => Ok(py_str(crate::interner::lookup_str(c.filename))),
+                    "co_name" => Ok(py_str(crate::interner::lookup_str(c.name))),
                     "co_argcount" => Ok(py_int(c.arg_count as i64)),
                     "co_nlocals" => Ok(py_int(c.nlocals as i64)),
                     "co_varnames" => Ok(py_tuple(c.varnames.iter().map(|&v| py_str(crate::interner::lookup_str(v))).collect())),

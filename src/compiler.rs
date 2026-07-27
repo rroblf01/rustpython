@@ -101,7 +101,7 @@ enum ScopeType {
 impl Compiler {
     pub fn new() -> Self {
         Compiler {
-            code: CodeObject::new("<module>".to_string()),
+            code: CodeObject::new("<module>"),
             labels: Vec::new(),
             label_positions: Vec::new(),
             label_stack: Vec::new(),
@@ -119,7 +119,7 @@ impl Compiler {
     }
 
     pub fn compile(&mut self, program: &Program, filename: &str) -> Result<CodeObject, String> {
-        self.code.filename = filename.to_string();
+        self.code.filename = crate::interner::intern(filename);
         // Ensure constant 0 is always None for module return
         if self.code.consts.is_empty() || !matches!(&self.code.consts[0], ConstValue::None) {
             self.code.consts.insert(0, ConstValue::None);
@@ -2698,7 +2698,7 @@ impl Compiler {
         
 
         // Save outer code BEFORE enter_scope (which takes cellvars/freevars from self.code)
-        let mut new_code = CodeObject::new(name.clone());
+        let mut new_code = CodeObject::new(&name);
         new_code.filename = self.code.filename.clone();
         let old_code = std::mem::replace(&mut self.code, new_code);
         let old_labels = std::mem::replace(&mut self.labels, Vec::new());
@@ -2839,7 +2839,7 @@ impl Compiler {
         }
 
         self.code.nlocals = self.code.varnames.len();
-        self.code.name = name.clone();
+        self.code.name = crate::interner::intern(&name);
         self.code.first_lineno = 1;
 
         self.code.cellvars = inner_cell_vars;
@@ -2967,7 +2967,7 @@ impl Compiler {
         self.enter_scope(ScopeType::ClassBody);
         self.class_name_stack.push(name.clone());
 
-        let mut new_class_code = CodeObject::new(name.clone());
+        let mut new_class_code = CodeObject::new(&name);
         new_class_code.filename = self.code.filename.clone();
         let old_code = std::mem::replace(&mut self.code, new_class_code);
         self.varnames_stack.push(Self::enclosing_snapshot(&old_code));
@@ -3024,7 +3024,7 @@ impl Compiler {
         self.emit(Opcode::RETURN_VALUE, 0);
 
         self.code.nlocals = self.code.varnames.len();
-        self.code.name = name.clone();
+        self.code.name = crate::interner::intern(&name);
         self.code.first_lineno = 1;
 
         let inner_free_vars = self.code.freevars.clone();

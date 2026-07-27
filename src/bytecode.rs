@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::fmt;
 
+use crate::interner::StrId;
 use crate::object::PyObjectRef;
 
 // Some variants are reserved for planned work (register-based bytecode
@@ -272,7 +273,7 @@ pub(crate) fn needs_arg(op: Opcode) -> bool {
 
 #[derive(Debug, Clone)]
 pub struct CodeObject {
-    pub name: String,
+    pub name: StrId,
     pub arg_count: usize,
     pub kwonlyarg_count: usize,
     pub nlocals: usize,
@@ -282,7 +283,7 @@ pub struct CodeObject {
     pub varnames: Vec<crate::interner::StrId>,
     pub freevars: Box<Vec<String>>,
     pub cellvars: Box<Vec<String>>,
-    pub filename: String,
+    pub filename: StrId,
     pub first_lineno: usize,
     pub flags: u16,
     pub vararg_name: Option<Box<String>>,
@@ -320,9 +321,9 @@ pub struct CodeObject {
 }
 
 impl CodeObject {
-    pub fn new(name: String) -> Self {
+    pub fn new(name: &str) -> Self {
         CodeObject {
-            name,
+            name: crate::interner::intern(name),
             arg_count: 0,
             kwonlyarg_count: 0,
             nlocals: 0,
@@ -332,7 +333,7 @@ impl CodeObject {
             varnames: Vec::new(),
             freevars: Box::new(Vec::new()),
             cellvars: Box::new(Vec::new()),
-            filename: "<unknown>".to_string(),
+            filename: crate::interner::intern("<unknown>"),
             first_lineno: 1,
             flags: 0,
             vararg_name: None,
@@ -366,7 +367,7 @@ impl CodeObject {
     /// Vectors are length-prefixed: u32 count.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::new();
-        write_str(&mut buf, &self.name);
+        write_str(&mut buf, crate::interner::lookup_str(self.name));
         write_u32(&mut buf, self.arg_count as u32);
         write_u32(&mut buf, self.kwonlyarg_count as u32);
         write_u32(&mut buf, self.nlocals as u32);
@@ -400,7 +401,7 @@ impl CodeObject {
         write_str_vec(&mut buf, &self.cellvars);
 
         // Remaining fields
-        write_str(&mut buf, &self.filename);
+        write_str(&mut buf, crate::interner::lookup_str(self.filename));
         write_u32(&mut buf, self.first_lineno as u32);
         write_u16(&mut buf, self.flags);
 
@@ -431,7 +432,7 @@ impl CodeObject {
     pub fn from_bytes(data: &[u8]) -> Result<Self, String> {
         let mut pos: usize = 0;
 
-        let name = read_str(data, &mut pos)?;
+        let name = crate::interner::intern(&read_str(data, &mut pos)?);
         let arg_count = read_u32(data, &mut pos)? as usize;
         let kwonlyarg_count = read_u32(data, &mut pos)? as usize;
         let nlocals = read_u32(data, &mut pos)? as usize;
@@ -466,7 +467,7 @@ impl CodeObject {
         let cellvars = Box::new(read_str_vec(data, &mut pos)?);
 
         // Remaining fields
-        let filename = read_str(data, &mut pos)?;
+        let filename = crate::interner::intern(&read_str(data, &mut pos)?);
         let first_lineno = read_u32(data, &mut pos)? as usize;
         let flags = read_u16(data, &mut pos)?;
 

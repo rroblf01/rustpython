@@ -700,7 +700,7 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
         if let Ok(code) = obj.get_attribute("__code__") {
             let code_borrowed = code.borrow();
             if let PyObject::Code(c) = &*code_borrowed {
-                return Ok(py_str(&c.filename));
+                return Ok(py_str(crate::interner::lookup_str(c.filename)));
             }
         }
         Ok(py_str("<unknown>"))
@@ -711,7 +711,7 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
         if let Ok(code) = obj.get_attribute("__code__") {
             let code_borrowed = code.borrow();
             if let PyObject::Code(c) = &*code_borrowed {
-                return Ok(py_str(&c.filename));
+                return Ok(py_str(crate::interner::lookup_str(c.filename)));
             }
         }
         Ok(py_none())
@@ -724,7 +724,7 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
             if let PyObject::Code(c) = &*code_borrowed { Some(c.filename.clone()) } else { None }
         });
         if let Some(fname) = filename {
-            if let Ok(src) = std::fs::read_to_string(&fname) {
+            if let Ok(src) = std::fs::read_to_string(crate::interner::lookup_str(fname)) {
                 return Ok(py_str(&src));
             }
         }

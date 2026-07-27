@@ -2024,9 +2024,9 @@ impl VirtualMachine {
                             // on this first, innermost pass.
                             if self.last_traceback.is_empty() {
                                 self.last_error_line = Some(line);
-                                self.last_error_file = Some(f.code.filename.clone());
+                                self.last_error_file = Some(crate::interner::lookup_str(f.code.filename).to_string());
                             }
-                            self.last_traceback.insert(0, (f.code.filename.clone(), line, f.code.name.clone()));
+                            self.last_traceback.insert(0, (crate::interner::lookup_str(f.code.filename).to_string(), line, crate::interner::lookup_str(f.code.name).to_string()));
                         }
                         return Err(e);
                     } else {
