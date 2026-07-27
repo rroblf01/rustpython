@@ -4117,7 +4117,7 @@ impl VirtualMachine {
                         v
                     }
                 };
-                if items.len() < total {
+                if items.len() < before + after {
                     return Err(PyError::value_error(format!(
                         "cannot unpack {} items into {} values", items.len(), total
                     )));

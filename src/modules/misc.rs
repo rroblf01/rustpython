@@ -2302,6 +2302,12 @@ fn pickle_serialize(obj: &PyObjectRef, buf: &mut Vec<u8>) -> PyResult<()> {
             }
             buf.push(b'}');
         }
+        PyObject::Slice { start, stop, step } => {
+            buf.push(b's');
+            pickle_serialize(start, buf)?;
+            pickle_serialize(stop, buf)?;
+            pickle_serialize(step, buf)?;
+        }
         PyObject::Range { start, stop, step } => {
             buf.push(b'R');
             pickle_serialize(&py_int(*start), buf)?;
@@ -2454,6 +2460,12 @@ fn pickle_deserialize(data: &[u8], pos: &mut usize) -> PyResult<PyObjectRef> {
             let e = stop.as_i64().unwrap_or(0);
             let p = step.as_i64().unwrap_or(1);
             Ok(PyObjectRef::imm(PyObject::Range { start: s, stop: e, step: p }))
+        }
+        b's' => {
+            let start = pickle_deserialize(data, pos)?;
+            let stop = pickle_deserialize(data, pos)?;
+            let step = pickle_deserialize(data, pos)?;
+            Ok(PyObjectRef::imm(PyObject::Slice { start, stop, step }))
         }
         _ => Err(PyError::type_error(format!(
             "unknown pickle marker byte: 0x{:02x}",

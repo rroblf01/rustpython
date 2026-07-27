@@ -317,7 +317,8 @@ impl PyObjectRef {
     pub fn as_i64(&self) -> Option<i64> {
         match self {
             PyObjectRef::SmallInt(n) => Some(*n),
-            PyObjectRef::SmallBool(_) | PyObjectRef::SmallFloat(_) | PyObjectRef::SmallStr(_) | PyObjectRef::None => None,
+            PyObjectRef::SmallBool(b) => Some(if *b { 1 } else { 0 }),
+            PyObjectRef::SmallFloat(_) | PyObjectRef::SmallStr(_) | PyObjectRef::None => None,
             PyObjectRef::Imm(_) | PyObjectRef::Mut(_) => match &*self.borrow() {
                 PyObject::Int(b) => b.to_i64(),
                 _ => None,
@@ -329,7 +330,8 @@ impl PyObjectRef {
         match self {
             PyObjectRef::SmallFloat(f) => Some(*f),
             PyObjectRef::SmallInt(n) => Some(*n as f64),
-            PyObjectRef::SmallBool(_) | PyObjectRef::SmallStr(_) | PyObjectRef::None => None,
+            PyObjectRef::SmallBool(b) => Some(if *b { 1.0 } else { 0.0 }),
+            PyObjectRef::SmallStr(_) | PyObjectRef::None => None,
             PyObjectRef::Imm(_) | PyObjectRef::Mut(_) => match &*self.borrow() {
                 PyObject::Int(b) => b.to_f64(),
                 PyObject::Float(f) => Some(*f),
@@ -1748,6 +1750,13 @@ impl PyObject {
                     let bits = v.to_bits();
                     h = h.wrapping_mul(1000003).wrapping_add(bits as usize);
                 }
+                Ok(h)
+            }
+            PyObject::Slice { start, stop, step } => {
+                let mut h: usize = 0x345679;
+                h = h.wrapping_mul(1000003).wrapping_add(start.hash()?);
+                h = h.wrapping_mul(1000003).wrapping_add(stop.hash()?);
+                h = h.wrapping_mul(1000003).wrapping_add(step.hash()?);
                 Ok(h)
             }
             PyObject::CompiledRegex { pattern, flags, .. } => {
@@ -10457,6 +10466,16 @@ impl PyObject {
                 if name == "__dict__" {
                     return Ok(PyObjectRef::new(PyObject::Dict(PyDict::new())));
                 }
+                if bf_name == "bool" && name == "__new__" {
+                    return Ok(PyObjectRef::imm(PyObject::BuiltinFunction {
+                        name: "__new__".to_string(),
+                        func: |args| {
+                            if args.is_empty() { return Ok(py_bool(false)); }
+                            if args.len() >= 2 { return Ok(py_bool(args[1].truthy())); }
+                            Ok(py_bool(false))
+                        },
+                    }));
+                }
                 Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", self.type_name(), name)))
             }
             PyObject::FrozenSet(_items) => {
@@ -10528,6 +10547,31 @@ impl PyObject {
                             Ok(py_tuple(vec![py_int(res_start as i64), py_int(res_stop as i64), py_int(s_step as i64)]))
                         }))))
                     }
+                    "__hash__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__hash__".to_string(),
+                        func: |args| {
+                            if let PyObject::Slice { start, stop, step } = &*args[0].borrow() {
+                                let h = args[0].hash()?;
+                                Ok(py_int(h as i64))
+                            } else { Err(PyError::runtime_error("__hash__ on non-slice")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__reduce__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__reduce__".to_string(),
+                        func: |args| {
+                            if let PyObject::Slice { start, stop, step } = &*args[0].borrow() {
+                                Ok(py_tuple(vec![
+                                    PyObjectRef::imm(PyObject::BuiltinFunction {
+                                        name: "slice".to_string(),
+                                        func: builtin_slice,
+                                    }),
+                                    py_tuple(vec![start.clone(), stop.clone(), step.clone()]),
+                                ]))
+                            } else { Err(PyError::runtime_error("__reduce__ on non-slice")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     _ => Err(PyError::attribute_error(format!("'slice' object has no attribute '{}'", name))),
                 }
             }
