@@ -3329,8 +3329,9 @@ impl VirtualMachine {
                                     if let Some(val) = found {
                                         let val_borrowed = val.borrow();
                                         match &*val_borrowed {
-                                            PyObject::Property { getter: Some(g), .. } => {
+                                            PyObject::Property(ref d) if d.getter.is_some() => {
                                                 drop(typ_ref);
+                                                let g = d.getter.as_ref().unwrap();
                                                 return Some(self.call_function(g.clone(), vec![obj.clone()], vec![]).unwrap_or_else(|_| val.clone()));
                                             }
                                             PyObject::StaticMethod { func } => {
@@ -3602,9 +3603,9 @@ impl VirtualMachine {
                                         };
                                         match metatype_hit {
                                             Some(val) => {
-                                                let is_property = matches!(&*val.borrow(), PyObject::Property { getter: Some(_), .. });
+                                                let is_property = if let PyObject::Property(ref d) = &*val.borrow() { d.getter.is_some() } else { false };
                                                 if is_property {
-                                                    let getter = if let PyObject::Property { getter: Some(g), .. } = &*val.borrow() { g.clone() } else { unreachable!() };
+                                                    let getter = if let PyObject::Property(ref d) = &*val.borrow() { d.getter.clone().unwrap() } else { unreachable!() };
                                                     drop(obj_borrowed);
                                                     let result = self.call_function(getter, vec![obj.clone()], vec![])?;
                                                     self.frames[fi].push(result);
@@ -3806,7 +3807,7 @@ impl VirtualMachine {
                     // instead of seeing what's already loaded.
                     let property_setter = {
                         let d = descriptor.borrow();
-                        if let PyObject::Property { setter: Some(s), .. } = &*d { Some(s.clone()) } else { None }
+                        if let PyObject::Property(ref data) = &*d { data.setter.clone() } else { None }
                     };
                     if let Some(setter_fn) = property_setter {
                         self.call_function(setter_fn, vec![obj.clone(), val.clone()], vec![])?;
@@ -5146,8 +5147,8 @@ impl VirtualMachine {
         }?;
         let val_borrowed = found.borrow();
         match &*val_borrowed {
-            PyObject::Property { getter: Some(g), .. } => {
-                let g = g.clone();
+            PyObject::Property(ref d) if d.getter.is_some() => {
+                let g = d.getter.clone().unwrap();
                 drop(val_borrowed);
                 Some(self.call_function(g, vec![obj.clone()], vec![]).unwrap_or_else(|_| found.clone()))
             }

@@ -198,7 +198,7 @@ extern "C" fn jit_build_map(n: i64, items: *const PyObjectRef, out: *mut PyObjec
             let val = &*items.offset(i * 2 + 1);
             let _ = d.set(key.clone(), val.clone());
         }
-        std::ptr::write(out, crate::object::PyObjectRef::new(crate::object::PyObject::Dict(d)));
+        std::ptr::write(out, crate::object::PyObjectRef::new(crate::object::PyObject::Dict(Box::new(d))));
     }
 }
 
@@ -820,8 +820,9 @@ impl JitCompiler {
         let base = result.len();
         result.resize(base + code.names.len(), crate::object::py_none());
         for (i, name) in code.names.iter().enumerate() {
-            let val = globals.get(name)
-                .or_else(|| builtins.get(name))
+            let name_str = crate::interner::lookup_str(*name);
+            let val = globals.get(name_str)
+                .or_else(|| builtins.get(name_str))
                 .cloned()
                 .unwrap_or_else(crate::object::py_none);
             result[base + i] = val;
@@ -832,7 +833,7 @@ impl JitCompiler {
     pub fn precompute_with_names(code: &CodeObject) -> Vec<PyObjectRef> {
         let mut result = Self::precompute_consts(code);
         for name in &code.names {
-            result.push(crate::object::py_str(name));
+            result.push(crate::object::py_str(crate::interner::lookup_str(*name)));
         }
         result
     }

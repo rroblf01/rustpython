@@ -641,12 +641,12 @@ pub fn create_pathlib_dict() -> HashMap<String, PyObjectRef> {
                 Ok(py_str(&parent))
             },
         });
-        path_type_dict.insert("parent".to_string(), PyObjectRef::new(PyObject::Property {
+        path_type_dict.insert("parent".to_string(), PyObjectRef::new(PyObject::Property(Box::new(PropertyData {
             getter: Some(getter),
             setter: None,
             deleter: None,
             doc: None,
-        }));
+        }))));
     }
 
     // .name -> basename (file or last component, property getter)
@@ -664,12 +664,12 @@ pub fn create_pathlib_dict() -> HashMap<String, PyObjectRef> {
                 Ok(py_str(&name))
             },
         });
-        path_type_dict.insert("name".to_string(), PyObjectRef::new(PyObject::Property {
+        path_type_dict.insert("name".to_string(), PyObjectRef::new(PyObject::Property(Box::new(PropertyData {
             getter: Some(getter),
             setter: None,
             deleter: None,
             doc: None,
-        }));
+        }))));
     }
 
     // .suffix -> extension (e.g. ".txt", property getter)
@@ -687,12 +687,12 @@ pub fn create_pathlib_dict() -> HashMap<String, PyObjectRef> {
                 Ok(py_str(&suffix))
             },
         });
-        path_type_dict.insert("suffix".to_string(), PyObjectRef::new(PyObject::Property {
+        path_type_dict.insert("suffix".to_string(), PyObjectRef::new(PyObject::Property(Box::new(PropertyData {
             getter: Some(getter),
             setter: None,
             deleter: None,
             doc: None,
-        }));
+        }))));
     }
 
     // .stem -> filename without extension (property getter)
@@ -710,12 +710,12 @@ pub fn create_pathlib_dict() -> HashMap<String, PyObjectRef> {
                 Ok(py_str(&stem))
             },
         });
-        path_type_dict.insert("stem".to_string(), PyObjectRef::new(PyObject::Property {
+        path_type_dict.insert("stem".to_string(), PyObjectRef::new(PyObject::Property(Box::new(PropertyData {
             getter: Some(getter),
             setter: None,
             deleter: None,
             doc: None,
-        }));
+        }))));
     }
 
     // .exists() -> bool

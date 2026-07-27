@@ -1460,12 +1460,7 @@ pub enum PyObject {
         cls: PyObjectRef,
         obj: PyObjectRef,
     },
-    Property {
-        getter: Option<PyObjectRef>,
-        setter: Option<PyObjectRef>,
-        deleter: Option<PyObjectRef>,
-        doc: Option<String>,
-    },
+    Property(Box<PropertyData>),
     StaticMethod {
         func: PyObjectRef,
     },
@@ -1487,12 +1482,7 @@ pub enum PyObject {
     },
     Array(PyArray),
     CompiledRegex {
-        // fancy_regex (not the plain `regex` crate) — needed for
-        // lookahead/lookbehind, which real Python `re` patterns use
-        // routinely (Django's own camelCase-to-verbose-name conversion:
-        // `(?<=[a-z])[A-Z]`) and the `regex` crate fundamentally can't
-        // support (a deliberate linear-time-matching guarantee, not a bug).
-        regex: fancy_regex::Regex,
+        regex: Box<fancy_regex::Regex>,
         pattern: String,
         flags: i32,
     },
@@ -1507,6 +1497,14 @@ pub enum PyObject {
         future: PyObjectRef,
         yielded: bool,
     },
+}
+
+#[derive(Clone, Debug)]
+pub struct PropertyData {
+    pub getter: Option<PyObjectRef>,
+    pub setter: Option<PyObjectRef>,
+    pub deleter: Option<PyObjectRef>,
+    pub doc: Option<String>,
 }
 
 pub enum SocketInner {
@@ -1588,7 +1586,7 @@ impl PyObject {
             PyObject::Event(_) => "Event",
             PyObject::Queue(_) => "Queue",
             PyObject::Super { .. } => "super",
-            PyObject::Property { .. } => "property",
+            PyObject::Property(_) => "property",
             PyObject::StaticMethod { .. } => "staticmethod",
             PyObject::ClassMethod { .. } => "classmethod",
             PyObject::Generator { .. } => "generator",
@@ -1721,7 +1719,7 @@ impl PyObject {
             PyObject::Event(_) => "<Event>".to_string(),
             PyObject::Queue(_) => "<Queue>".to_string(),
             PyObject::Super { .. } => format!("<super object>"),
-            PyObject::Property { .. } => format!("<property object>"),
+            PyObject::Property(_) => format!("<property object>"),
             PyObject::StaticMethod { .. } => format!("<staticmethod object>"),
             PyObject::ClassMethod { .. } => format!("<classmethod object>"),
             PyObject::Generator { .. } => format!("<generator object>"),
@@ -6494,12 +6492,12 @@ pub fn builtin_property(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let setter = if args.len() > 1 { Some(args[1].clone()) } else { None };
     let deleter = if args.len() > 2 { Some(args[2].clone()) } else { None };
     let doc = if args.len() > 3 { Some(args[3].str()) } else { None };
-    Ok(PyObjectRef::new(PyObject::Property {
+    Ok(PyObjectRef::new(PyObject::Property(Box::new(PropertyData {
         getter,
         setter,
         deleter,
         doc,
-    }))
+    }))))
 }
 
 /// Return a new Property with the given setter (used by @x.setter)
@@ -6507,16 +6505,16 @@ pub fn property_setter(prop: &PyObjectRef, new_setter: PyObjectRef) -> PyObjectR
     let (getter, deleter, doc) = {
         let b = prop.borrow();
         match &*b {
-            PyObject::Property { getter, deleter, doc, .. } => (getter.clone(), deleter.clone(), doc.clone()),
+            PyObject::Property(ref d) => (d.getter.clone(), d.deleter.clone(), d.doc.clone()),
             _ => return prop.clone(),
         }
     };
-    PyObjectRef::new(PyObject::Property {
+    PyObjectRef::new(PyObject::Property(Box::new(PropertyData {
         getter,
         setter: Some(new_setter),
         deleter,
         doc,
-    })
+    })))
 }
 
 /// Return a new Property with the given deleter (used by @x.deleter)
@@ -6524,16 +6522,16 @@ pub fn property_deleter(prop: &PyObjectRef, new_deleter: PyObjectRef) -> PyObjec
     let (getter, setter, doc) = {
         let b = prop.borrow();
         match &*b {
-            PyObject::Property { getter, setter, doc, .. } => (getter.clone(), setter.clone(), doc.clone()),
+            PyObject::Property(ref d) => (d.getter.clone(), d.setter.clone(), d.doc.clone()),
             _ => return prop.clone(),
         }
     };
-    PyObjectRef::new(PyObject::Property {
+    PyObjectRef::new(PyObject::Property(Box::new(PropertyData {
         getter,
         setter,
         deleter: Some(new_deleter),
         doc,
-    })
+    })))
 }
 
 /// Builtin for property.setter(func) — returns new Property with setter
@@ -7230,7 +7228,7 @@ impl PyObject {
                     }
                 }).ok_or_else(|| PyError::attribute_error(format!("'{}' object has no attribute '{}'", get_type_name_for_instance(typ), name)))
             }
-            PyObject::Property { getter, setter, deleter, doc, .. } => {
+            PyObject::Property(ref d) => { let getter = &d.getter; let setter = &d.setter; let deleter = &d.deleter; let doc = &d.doc;
                 match name {
                     "fget" => getter.clone().ok_or_else(|| PyError::attribute_error("property has no getter".to_string())),
                     "fset" => setter.clone().ok_or_else(|| PyError::attribute_error("property has no setter".to_string())),
@@ -7244,8 +7242,10 @@ impl PyObject {
                                     if args.len() < 4 { return Err(PyError::type_error("__get__() takes 2 positional arguments")); }
                                     // args: [self_obj, descriptor, instance, owner]
                                     let g = args[1].borrow();
-                                    if let PyObject::Property { getter: Some(getter_fn), .. } = &*g {
-                                        call_bound_method(getter_fn.clone(), args[2].clone(), vec![])
+                                    if let PyObject::Property(ref data) = &*g {
+                                        if let Some(ref getter_fn) = data.getter {
+                                            call_bound_method(getter_fn.clone(), args[2].clone(), vec![])
+                                        } else { Err(PyError::runtime_error("property has no getter")) }
                                     } else { Err(PyError::runtime_error("property has no getter")) }
                                 },
                                 self_obj: PyObjectRef::new(PyObject::None),
@@ -7260,8 +7260,10 @@ impl PyObject {
                                     if args.len() < 4 { return Err(PyError::type_error("__set__() takes 2 positional arguments")); }
                                     // args: [self_obj, descriptor, instance, value]
                                     let s = args[1].borrow();
-                                    if let PyObject::Property { setter: Some(setter_fn), .. } = &*s {
-                                        call_bound_method(setter_fn.clone(), args[2].clone(), vec![args[3].clone()])
+                                    if let PyObject::Property(ref data) = &*s {
+                                        if let Some(ref setter_fn) = data.setter {
+                                            call_bound_method(setter_fn.clone(), args[2].clone(), vec![args[3].clone()])
+                                        } else { Err(PyError::runtime_error("property has no setter")) }
                                     } else { Err(PyError::runtime_error("property has no setter")) }
                                 },
                                 self_obj: PyObjectRef::new(PyObject::None),
@@ -7271,12 +7273,12 @@ impl PyObject {
                     "setter" | "deleter" | "getter" => {
                         let is_setter = name == "setter";
                         let prop_obj = PyObjectRef::new(match self {
-                            PyObject::Property { getter, setter, deleter, doc } => PyObject::Property {
-                                getter: getter.clone(),
-                                setter: setter.clone(),
-                                deleter: deleter.clone(),
-                                doc: doc.clone(),
-                            },
+                            PyObject::Property(ref d) => PyObject::Property(Box::new(PropertyData {
+                                getter: d.getter.clone(),
+                                setter: d.setter.clone(),
+                                deleter: d.deleter.clone(),
+                                doc: d.doc.clone(),
+                            })),
                             _ => unreachable!(),
                         });
                         Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
@@ -10115,7 +10117,7 @@ impl PyObject {
                 }
             }
             PyObject::CompiledRegex { regex, pattern, flags } => {
-                let re = regex.clone();
+                let re = (*regex).clone();
                 let pat = pattern.clone();
                 let fl = *flags;
                 match name {
@@ -10301,7 +10303,8 @@ impl PyObject {
                                                 }));
                                                 break;
                                             }
-                                            PyObject::Property { getter: Some(g), .. } => {
+                                            PyObject::Property(ref d) if d.getter.is_some() => {
+                                                let g = d.getter.as_ref().unwrap();
                                                 found = Some(builtin_call(g, &[obj.clone()]).unwrap_or_else(|_| val.clone()));
                                                 break;
                                             }

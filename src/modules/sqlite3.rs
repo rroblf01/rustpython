@@ -49,7 +49,7 @@ fn create_connection(conn: Rc<std::cell::RefCell<rusqlite::Connection>>) -> PyOb
     PyObjectRef::new(PyObject::Instance {
         typ: PyObjectRef::new(PyObject::Type {
             name: "sqlite3.Connection".to_string(),
-            dict: HashMap::from([
+            dict: Box::new(HashMap::from([
                 ("cursor".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
                     name: "cursor".to_string(),
                     func: |_args| {
@@ -59,7 +59,7 @@ fn create_connection(conn: Rc<std::cell::RefCell<rusqlite::Connection>>) -> PyOb
                         Ok(PyObjectRef::new(PyObject::Instance {
                             typ: PyObjectRef::new(PyObject::Type {
                                 name: "sqlite3.Cursor".to_string(),
-                                dict: HashMap::from([
+                                dict: Box::new(HashMap::from([
                                     ("__iter__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
                                         name: "__iter__".to_string(),
                                         func: |args| Ok(args[0].clone()),
@@ -68,7 +68,7 @@ fn create_connection(conn: Rc<std::cell::RefCell<rusqlite::Connection>>) -> PyOb
                                         name: "__next__".to_string(),
                                         func: |_args| Err(PyError::StopIteration),
                                     })),
-                                ]),
+                                ])),
                                 bases: vec![],
                                 mro: vec![],
                             }),
@@ -98,7 +98,7 @@ fn create_connection(conn: Rc<std::cell::RefCell<rusqlite::Connection>>) -> PyOb
                     name: "close".to_string(),
                     func: |_args| Ok(py_none()),
                 })),
-            ]),
+            ])),
             bases: vec![],
             mro: vec![],
         }),

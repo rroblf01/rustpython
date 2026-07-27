@@ -181,14 +181,14 @@ fn trace_children(obj: &PyObject, out: &mut Vec<PyObjectRef>) {
             out.push(cls.clone());
             out.push(obj.clone());
         }
-        PyObject::Property { getter, setter, deleter, .. } => {
-            if let Some(g) = getter {
+        PyObject::Property(ref d) => {
+            if let Some(g) = &d.getter {
                 out.push(g.clone());
             }
-            if let Some(s) = setter {
+            if let Some(s) = &d.setter {
                 out.push(s.clone());
             }
-            if let Some(d) = deleter {
+            if let Some(d) = &d.deleter {
                 out.push(d.clone());
             }
         }

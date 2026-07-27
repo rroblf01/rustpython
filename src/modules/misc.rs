@@ -437,7 +437,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         match compile_python_regex(&pattern) {
             Ok(re) => {
                 Ok(PyObjectRef::new(PyObject::CompiledRegex {
-                    regex: re,
+                    regex: Box::new(re),
                     pattern: pattern.to_string(),
                     flags,
                 }))
@@ -1577,9 +1577,9 @@ fn make_uuid(hex32: String) -> PyObjectRef {
             Err(PyError::runtime_error("UUID instance missing _hex"))
         },
     });
-    type_dict.insert("hex".to_string(), PyObjectRef::new(PyObject::Property {
+    type_dict.insert("hex".to_string(), PyObjectRef::new(PyObject::Property(Box::new(PropertyData {
         getter: Some(hex_getter), setter: None, deleter: None, doc: None,
-    }));
+    }))));
     let int_getter = PyObjectRef::new(PyObject::BuiltinFunction {
         name: "int".to_string(),
         func: |args| {
@@ -1592,9 +1592,9 @@ fn make_uuid(hex32: String) -> PyObjectRef {
             Err(PyError::runtime_error("UUID instance missing _hex"))
         },
     });
-    type_dict.insert("int".to_string(), PyObjectRef::new(PyObject::Property {
+    type_dict.insert("int".to_string(), PyObjectRef::new(PyObject::Property(Box::new(PropertyData {
         getter: Some(int_getter), setter: None, deleter: None, doc: None,
-    }));
+    }))));
 
     let typ = PyObjectRef::new(PyObject::Type {
         name: "UUID".to_string(),
@@ -6019,12 +6019,12 @@ pub fn create_contextvars_dict() -> HashMap<String, PyObjectRef> {
                 Err(PyError::type_error("ContextVar instance has no _name"))
             },
         });
-        contextvar_type_dict.insert("name".to_string(), PyObjectRef::new(PyObject::Property {
+        contextvar_type_dict.insert("name".to_string(), PyObjectRef::new(PyObject::Property(Box::new(PropertyData {
             getter: Some(getter),
             setter: None,
             deleter: None,
             doc: None,
-        }));
+        }))));
     }
 
     // get(self, default=None)

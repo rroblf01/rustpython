@@ -1538,9 +1538,9 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
     let closed_getter = PyObjectRef::new(PyObject::BuiltinFunction {
         name: "closed".to_string(), func: |_: &[PyObjectRef]| Ok(py_bool(false)),
     });
-    iobase_dict.insert("closed".to_string(), PyObjectRef::new(PyObject::Property {
+    iobase_dict.insert("closed".to_string(), PyObjectRef::new(PyObject::Property(Box::new(PropertyData {
         getter: Some(closed_getter), setter: None, deleter: None, doc: None,
-    }));
+    }))));
     iobase_dict.insert("__enter__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
         name: "__enter__".to_string(), func: |args: &[PyObjectRef]| Ok(args[0].clone()),
     }));
