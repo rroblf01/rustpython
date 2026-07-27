@@ -1022,6 +1022,34 @@ impl PySet {
         Ok(())
     }
 
+    /// Insert `key` (already confirmed absent by a prior `probe()` done
+    /// against a SNAPSHOT — see the `"add"` `BuiltinMethod` closure) purely
+    /// mechanically: finds an empty/tombstone slot by hash alone, no
+    /// `.equals()` calls at all. Callers use this specifically so the
+    /// actual mutation never runs arbitrary Python while a live
+    /// `borrow_mut()` of the enclosing `PyObjectRef` is held.
+    fn insert_no_check(&mut self, key: PyObjectRef, h: usize) {
+        self.ensure_capacity(1);
+        let mask = self.mask();
+        let start = h & mask;
+        let mut i = start;
+        let mut first_tomb = None;
+        let slot = loop {
+            let idx_val = self.indices[i];
+            if idx_val == 0 { break first_tomb.unwrap_or(i); }
+            let entry_idx = (idx_val - 1) as usize;
+            if self.entries[entry_idx].is_none() && first_tomb.is_none() {
+                first_tomb = Some(i);
+            }
+            i = (i + 1) & mask;
+            if i == start { break first_tomb.unwrap_or(i); }
+        };
+        let entry_idx = self.entries.len();
+        self.entries.push(Some(key));
+        self.indices[slot] = (entry_idx + 1) as u32;
+        self.size += 1;
+    }
+
     pub fn remove(&mut self, key: &PyObjectRef) -> PyResult<PyObjectRef> {
         let h = key.hash()?;
         let existing = self.find(key, h).ok_or_else(|| PyError::key_error(key.str()))?;
@@ -1064,6 +1092,36 @@ impl PySet {
     pub fn is_subset(&self, other: &PySet) -> bool {
         other.is_superset(self)
     }
+}
+
+/// Safely add `key` to a live `PyObject::Set` referenced by `target`,
+/// WITHOUT ever holding `target`'s own `borrow_mut()` across a
+/// `.equals()` call. Probing for an existing equal element can run
+/// arbitrary Python (a custom `__eq__`) that mutates THIS SAME set (e.g.
+/// `s.add(X())`/`s.clear()` from within its own `__eq__`) — real,
+/// deliberate CPython regression tests: `test_set.py`'s
+/// `test_hash_collision_concurrent_add` and `TestOperationsMutating`
+/// (bpo-46615). Holding a live borrow across that used to panic with
+/// "RefCell already borrowed" the instant the reentrant call made its own
+/// borrow. Used by both `set.add()` and `set.update()`'s BuiltinMethod
+/// closures — any other call site that adds items to a set one at a time
+/// in a loop should use this too rather than `PySet::add` directly.
+fn pyset_safe_add(target: &PyObjectRef, key: PyObjectRef) -> PyResult<()> {
+    let h = key.hash()?;
+    let snapshot = {
+        let obj = target.borrow();
+        match &*obj {
+            PyObject::Set(set) => set.clone(),
+            _ => return Err(PyError::runtime_error("add on non-set")),
+        }
+    };
+    let (_, existing) = snapshot.probe(&key, h);
+    if existing.is_none() {
+        if let PyObject::Set(set) = &mut *target.borrow_mut() {
+            set.insert_no_check(key, h);
+        }
+    }
+    Ok(())
 }
 
 // ---- PyDict: hash-based dict with arbitrary hashable keys ----
@@ -3091,6 +3149,44 @@ pub fn py_bit_and(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
         _ => Err(PyError::type_error(format!("unsupported operand type(s) for &: '{}' and '{}'",
             a_obj.type_name(), b_obj.type_name()))),
     }
+}
+
+/// Stable merge sort driven by an arbitrary Python-visible `is_less(a, b)`
+/// predicate — used instead of `[T]::sort_by` (`Vec::sort_by`) specifically
+/// because Rust's sort implementation panics outright ("user-provided
+/// comparison function does not correctly implement a total order") the
+/// moment it detects an inconsistent comparator. Real CPython's own
+/// `list.sort()`/`sorted()` tolerate this — deliberately exercised by
+/// CPython's own test suite (e.g. `test_sort.py`'s `test_bug453523`-style
+/// tests with intentionally broken `__lt__`) — producing a
+/// not-necessarily-fully-sorted result rather than crashing. A
+/// straightforward merge sort only ever does pairwise comparisons and
+/// never relies on any total-order invariant to stay memory-safe, so it
+/// can't panic regardless of what the predicate returns.
+fn py_stable_sort_by<F>(mut items: Vec<PyObjectRef>, is_less: &F) -> Vec<PyObjectRef>
+where
+    F: Fn(&PyObjectRef, &PyObjectRef) -> bool,
+{
+    let n = items.len();
+    if n <= 1 { return items; }
+    let right = items.split_off(n / 2);
+    let left = py_stable_sort_by(items, is_less);
+    let right = py_stable_sort_by(right, is_less);
+    let mut merged = Vec::with_capacity(left.len() + right.len());
+    let mut li = 0;
+    let mut ri = 0;
+    while li < left.len() && ri < right.len() {
+        if is_less(&right[ri], &left[li]) {
+            merged.push(right[ri].clone());
+            ri += 1;
+        } else {
+            merged.push(left[li].clone());
+            li += 1;
+        }
+    }
+    merged.extend_from_slice(&left[li..]);
+    merged.extend_from_slice(&right[ri..]);
+    merged
 }
 
 // ---- Comparison Operations ----
@@ -5143,12 +5239,15 @@ pub fn builtin_sorted(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             Err(e) => return Err(e),
         }
     }
-    // Use Rust's stable sort (O(n log n))
+    // Sort with comparison, optionally applying key function. Uses the
+    // panic-tolerant `py_stable_sort_by` (see its own doc comment) rather
+    // than `Vec::sort_by`, since a deliberately-inconsistent comparator
+    // (real CPython test: `test_sort.py`'s `test_bug453523`) makes the
+    // standard library's sort abort the whole process.
     let len = v.len();
     if len > 1 {
-        // Sort with comparison, optionally applying key function
         let key_fn_ref = key_fn.clone();
-        v.sort_by(|a, b| {
+        v = py_stable_sort_by(v, &|a, b| {
             let a_val = if let Some(ref kf) = key_fn_ref {
                 call_bound_method(kf.clone(), a.clone(), vec![]).unwrap_or_else(|_| a.clone())
             } else {
@@ -5162,14 +5261,7 @@ pub fn builtin_sorted(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             // Route through py_compare (not the raw Compare trait methods)
             // so user-defined classes' __lt__/__gt__ are consulted — the
             // trait impl alone has no notion of Instance dunder dispatch.
-            match py_compare(&a_val, &b_val, 0) {
-                Ok(result) if result.truthy() => std::cmp::Ordering::Less,
-                Ok(_) => match py_compare(&b_val, &a_val, 0) {
-                    Ok(result) if result.truthy() => std::cmp::Ordering::Greater,
-                    _ => std::cmp::Ordering::Equal,
-                },
-                Err(_) => std::cmp::Ordering::Equal,
-            }
+            py_compare(&a_val, &b_val, 0).map(|r| r.truthy()).unwrap_or(false)
         });
     }
     Ok(py_list(v))
@@ -7768,24 +7860,46 @@ impl PyObject {
                     "sort" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "sort".to_string(),
                         func: |args| {
+                            // Snapshot the list's items into a DETACHED `Vec`
+                            // and sort THAT, rather than holding
+                            // `args[0].borrow_mut()` for the whole
+                            // `sort_by()` call — `py_compare` can invoke a
+                            // user-defined `__lt__`/`__gt__` that mutates
+                            // THIS SAME list mid-sort (real CPython handles
+                            // this by sorting a detached internal copy too,
+                            // then writing the result back — see
+                            // `list.sort`'s own docs on "the list … is not
+                            // guaranteed to be in any particular state"
+                            // during a comparison that mutates it). Holding
+                            // a live borrow across that used to panic with
+                            // "RefCell already borrowed" the instant the
+                            // reentrant comparator tried its own borrow —
+                            // confirmed via CPython's own `test_sort.py`.
+                            let items: Vec<PyObjectRef> = {
+                                let obj = args[0].borrow();
+                                match &*obj {
+                                    PyObject::List(list) => list.clone(),
+                                    _ => return Err(PyError::runtime_error("sort on non-list")),
+                                }
+                            };
+                            // Route through py_compare so user-defined
+                            // classes' __lt__/__gt__ are consulted —
+                            // this used to only compare ints/floats
+                            // correctly and fall back to comparing
+                            // str() reprs for everything else. Uses the
+                            // panic-tolerant `py_stable_sort_by` (see its
+                            // own doc comment) rather than `Vec::sort_by`,
+                            // since a deliberately-inconsistent comparator
+                            // (real CPython test: `test_bug453523`) makes
+                            // the standard library's sort abort the whole
+                            // process.
+                            let items = py_stable_sort_by(items, &|a, b| {
+                                py_compare(a, b, 0).map(|r| r.truthy()).unwrap_or(false)
+                            });
                             if let PyObject::List(list) = &mut *args[0].borrow_mut() {
-                                // Route through py_compare so user-defined
-                                // classes' __lt__/__gt__ are consulted —
-                                // this used to only compare ints/floats
-                                // correctly and fall back to comparing
-                                // str() reprs for everything else.
-                                list.sort_by(|a, b| {
-                                    match py_compare(a, b, 0) {
-                                        Ok(result) if result.truthy() => std::cmp::Ordering::Less,
-                                        Ok(_) => match py_compare(b, a, 0) {
-                                            Ok(result) if result.truthy() => std::cmp::Ordering::Greater,
-                                            _ => std::cmp::Ordering::Equal,
-                                        },
-                                        Err(_) => std::cmp::Ordering::Equal,
-                                    }
-                                });
-                                Ok(py_none())
-                            } else { Err(PyError::runtime_error("sort on non-list")) }
+                                *list = items;
+                            }
+                            Ok(py_none())
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -8968,8 +9082,8 @@ impl PyObject {
                         name: "add".to_string(),
                         func: |args| {
                             if args.len() < 2 { return Err(PyError::type_error("add() takes exactly one argument")); }
-                            if let PyObject::Set(set) = &mut *args[0].borrow_mut() { set.add(args[1].clone())?; Ok(py_none()) }
-                            else { Err(PyError::runtime_error("add on non-set")) }
+                            pyset_safe_add(&args[0], args[1].clone())?;
+                            Ok(py_none())
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -9143,15 +9257,24 @@ impl PyObject {
                         name: "update".to_string(),
                         func: |args| {
                             if args.len() < 2 { return Err(PyError::type_error("update() takes at least 1 argument")); }
-                            if let PyObject::Set(set) = &mut *args[0].borrow_mut() {
-                                for other_arg in &args[1..] {
+                            if !matches!(&*args[0].borrow(), PyObject::Set(_)) {
+                                return Err(PyError::runtime_error("update on non-set"));
+                            }
+                            // Each item is added via `pyset_safe_add`, which never
+                            // holds `args[0]`'s own borrow across an `.equals()`
+                            // call (unlike the old `args[0].borrow_mut()`-for-the-
+                            // whole-loop version) — see its doc comment for why.
+                            for other_arg in &args[1..] {
+                                let items: Vec<PyObjectRef> = {
                                     let other = other_arg.borrow();
-                                    if let PyObject::Set(other_set) = &*other {
-                                        for item in other_set.to_vec() { set.add(item)?; }
+                                    match &*other {
+                                        PyObject::Set(other_set) => other_set.to_vec(),
+                                        _ => Vec::new(),
                                     }
-                                }
-                                Ok(py_none())
-                            } else { Err(PyError::runtime_error("update on non-set")) }
+                                };
+                                for item in items { pyset_safe_add(&args[0], item)?; }
+                            }
+                            Ok(py_none())
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
