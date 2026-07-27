@@ -1892,6 +1892,13 @@ impl VirtualMachine {
                     ip = ip - (instr.arg as usize + 1);
                 }
                 Opcode::RETURN_VALUE => return Some(Ok(stack.pop()?)),
+                Opcode::LOAD_ATTR => {
+                    let obj = stack.pop()?;
+                    let name_id = code.names[instr.arg as usize];
+                    let name = crate::interner::lookup_str(name_id);
+                    let val = obj.borrow().get_attribute(name);
+                    match val { Ok(v) => stack.push(v), Err(e) => return Some(Err(e)) }
+                }
                 _ => return None,
             }
         }
