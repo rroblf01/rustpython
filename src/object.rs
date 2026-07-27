@@ -2977,6 +2977,8 @@ pub fn py_compare(a: &PyObjectRef, b: &PyObjectRef, op: u32) -> PyResult<PyObjec
             3 => ai >= bi,
             4 => ai > bi,
             5 => ai != bi,
+            8 => a.is(b),
+            9 => !a.is(b),
             _ => return Ok(py_bool(false)),
         }));
     }
