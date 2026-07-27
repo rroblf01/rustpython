@@ -224,13 +224,14 @@ fn find_lib_dir() -> String {
 /// kwargs.pop('dest', None)` called as `f(dest=...)`) got silently
 /// misrouted into that local's fast-locals slot instead of `**kwargs`,
 /// making it vanish from `kwargs` entirely.
-fn formal_param_index(varnames: &[String], arg_count: usize, kwonlyarg_count: usize, kwonly_start: usize, key: &str) -> Option<usize> {
-    if let Some(idx) = varnames.get(0..arg_count).and_then(|s| s.iter().position(|n| n == key)) {
+fn formal_param_index(varnames: &[crate::interner::StrId], arg_count: usize, kwonlyarg_count: usize, kwonly_start: usize, key: &str) -> Option<usize> {
+    let key_id = crate::interner::intern(key);
+    if let Some(idx) = varnames.get(0..arg_count).and_then(|s| s.iter().position(|&n| n == key_id)) {
         return Some(idx);
     }
     if kwonlyarg_count > 0 {
         let end = kwonly_start + kwonlyarg_count;
-        if let Some(rel) = varnames.get(kwonly_start..end).and_then(|s| s.iter().position(|n| n == key)) {
+        if let Some(rel) = varnames.get(kwonly_start..end).and_then(|s| s.iter().position(|&n| n == key_id)) {
             return Some(kwonly_start + rel);
         }
     }
@@ -2115,7 +2116,7 @@ impl VirtualMachine {
 
             Opcode::LOAD_NAME => {
                 let name_idx = arg as usize;
-                let name = &self.frames[fi].code.names[name_idx];
+                let name = crate::interner::lookup_str(self.frames[fi].code.names[name_idx]);
                 let val = {
                     let f = &self.frames[self.frames.len() - 1];
                     f.get_local(name).cloned()
@@ -2135,9 +2136,7 @@ impl VirtualMachine {
 
             Opcode::STORE_NAME => {
                 let name_idx = arg as usize;
-                let name = self.frames[fi].code.names.get(name_idx).ok_or_else(|| {
-                    PyError::runtime_error("name index out of range")
-                })?.clone();
+                let name = crate::interner::lookup(self.frames[fi].code.names[name_idx]);
                 let val = self.frames[fi].pop()?;
                 if let Some(order) = self.frames[fi].name_order.clone() {
                     let mut order = order.borrow_mut();
@@ -2169,7 +2168,7 @@ impl VirtualMachine {
                                 self.frames[fi].code.varnames);
                         }
                         return Err(PyError::name_error(format!("local variable '{}' referenced before assignment",
-                            self.frames[fi].code.varnames.get(var_idx).map_or("?", |s| &**s))));
+                            self.frames[fi].code.varnames.get(var_idx).map_or("?", |&s| crate::interner::lookup_str(s)))));
                     }
                 }
             }
@@ -2181,10 +2180,8 @@ impl VirtualMachine {
                 if var_idx < frame.fast_locals.len() {
                     frame.fast_locals[var_idx] = Some(val.clone());
                 }
-                let name = frame.code.varnames.get(var_idx).ok_or_else(|| {
-                    PyError::runtime_error("varname index out of range")
-                })?.clone();
-                frame.insert_local(&name, val);
+                let name = crate::interner::lookup_str(frame.code.varnames[var_idx]);
+                frame.insert_local(name, val);
             }
 
             Opcode::LOAD_GLOBAL => {
@@ -2194,7 +2191,7 @@ impl VirtualMachine {
                     self.frames[fi].push(cached);
                 } else {
                     let name_idx = arg as usize;
-                    let name = &self.frames[fi].code.names[name_idx];
+                    let name = crate::interner::lookup_str(self.frames[fi].code.names[name_idx]);
                     let val = {
                         let f = &self.frames[self.frames.len() - 1];
                         let v = f.globals.borrow().get(name).cloned()
@@ -2218,9 +2215,7 @@ impl VirtualMachine {
 
             Opcode::STORE_GLOBAL => {
                 let name_idx = arg as usize;
-                let name = self.frames[fi].code.names.get(name_idx).ok_or_else(|| {
-                    PyError::runtime_error("name index out of range")
-                })?.clone();
+                let name = crate::interner::lookup(self.frames[fi].code.names[name_idx]);
                 let val = self.frames[fi].pop()?;
                 self.frames[fi].globals.borrow_mut().insert(name, val);
             }
@@ -2232,7 +2227,7 @@ impl VirtualMachine {
                     let code = &f.code;
                     if idx < code.cellvars.len() {
                         let name = &code.cellvars[idx];
-                        let var_idx = code.varnames.iter().position(|n| n == name)
+                        let var_idx = code.varnames.iter().position(|&n| crate::interner::intern_eq(n, name))
                             .ok_or_else(|| PyError::name_error(format!("variable '{}' not found", name)))?;
                         (f.fast_locals[var_idx].clone(), false, name.clone())
                     } else {
@@ -2280,7 +2275,7 @@ impl VirtualMachine {
                 let has_cellvars = idx < self.frames[fi].code.cellvars.len();
                 if has_cellvars {
                     let name = &self.frames[fi].code.cellvars[idx];
-                    let var_idx = self.frames[fi].code.varnames.iter().position(|n| n == name)
+                    let var_idx = self.frames[fi].code.varnames.iter().position(|&n| crate::interner::intern_eq(n, name))
                         .ok_or_else(|| PyError::runtime_error("variable not found"))?;
                     if var_idx < self.frames[fi].fast_locals.len() {
                         if let Some(cell) = self.frames[fi].fast_locals[var_idx].clone() {
@@ -2314,13 +2309,13 @@ impl VirtualMachine {
 
             Opcode::DELETE_FAST => {
                 let var_idx = arg as usize;
-                let name = self.frames[fi].code.varnames[var_idx].clone();
+                let name = self.frames[fi].code.varnames[var_idx].to_string();
                 self.frames[fi].remove_local(&name);
             }
 
             Opcode::DELETE_NAME => {
                 let name_idx = arg as usize;
-                let name = self.frames[fi].code.names[name_idx].clone();
+                let name = self.frames[fi].code.names[name_idx].to_string();
                 if let Some(live_module) = self.frames[fi].live_module.clone() {
                     if let PyObject::Module { dict, .. } = &mut *live_module.borrow_mut() {
                         dict.remove(&name);
@@ -2496,7 +2491,7 @@ impl VirtualMachine {
                 if var_idx < self.frames[fi].fast_locals.len() {
                     self.frames[fi].fast_locals[var_idx] = Some(val.clone());
                 }
-                let name = self.frames[fi].code.varnames.get(var_idx).ok_or_else(|| {
+                let name = Some(crate::interner::lookup_str(self.frames[fi].code.varnames[var_idx])).ok_or_else(|| {
                     PyError::runtime_error("varname index out of range")
                 })?.clone();
                 self.frames[fi].insert_local(&name, val);
@@ -2533,7 +2528,7 @@ impl VirtualMachine {
             Opcode::REG_LOAD_GLOBAL => {
                 let dst = (arg >> 4) as usize;
                 let name_idx = (arg & 0xFF) as usize;
-                let name = &self.frames[fi].code.names[name_idx];
+                let name = crate::interner::lookup_str(self.frames[fi].code.names[name_idx]);
                 // Check inline cache first
                 let instr_ip = self.frames[fi].ip - 1;
                 if let Some(cached) = self.frames[fi].global_cache.get(instr_ip).and_then(|c| c.clone()) {
@@ -3243,9 +3238,7 @@ impl VirtualMachine {
 
             Opcode::LOAD_ATTR => {
                 let name_idx = arg as usize;
-                let name = self.frames[fi].code.names.get(name_idx).ok_or_else(|| {
-                    PyError::runtime_error("name index out of range")
-                })?.clone();
+                let name = crate::interner::lookup(self.frames[fi].code.names[name_idx]);
                 let obj = self.frames[fi].pop()?;
                 let result = {
                     let obj_borrowed = obj.borrow();
@@ -3750,9 +3743,7 @@ impl VirtualMachine {
 
             Opcode::STORE_ATTR => {
                 let name_idx = arg as usize;
-                let name = self.frames[fi].code.names.get(name_idx).ok_or_else(|| {
-                    PyError::runtime_error("name index out of range")
-                })?.clone();
+                let name = crate::interner::lookup(self.frames[fi].code.names[name_idx]);
                 let val = self.frames[fi].pop()?;
                 let obj = self.frames[fi].pop()?;
                 if std::env::var("RPY_DEBUG_ATTR").is_ok() {
@@ -3879,9 +3870,7 @@ impl VirtualMachine {
 
             Opcode::DELETE_ATTR => {
                 let name_idx = arg as usize;
-                let name = self.frames[fi].code.names.get(name_idx).ok_or_else(|| {
-                    PyError::runtime_error("name index out of range")
-                })?.clone();
+                let name = crate::interner::lookup(self.frames[fi].code.names[name_idx]);
                 let obj = self.frames[fi].pop()?;
                 // Check for __delattr__ on Instance types first
                 {
@@ -4543,9 +4532,7 @@ impl VirtualMachine {
 
             Opcode::IMPORT_NAME => {
                 let name_idx = arg as usize;
-                let name = self.frames[fi].code.names.get(name_idx).ok_or_else(|| {
-                    PyError::runtime_error("name index out of range")
-                })?.clone();
+                let name = crate::interner::lookup(self.frames[fi].code.names[name_idx]);
                 // Pop level (int, TOS) and fromlist (TOS1)
                 let level_val = self.frames[fi].pop()?;
                 let _fromlist = self.frames[fi].pop()?;
@@ -4678,9 +4665,7 @@ impl VirtualMachine {
 
             Opcode::IMPORT_FROM => {
                 let name_idx = arg as usize;
-                let name = self.frames[fi].code.names.get(name_idx).ok_or_else(|| {
-                    PyError::runtime_error("name index out of range")
-                })?.clone();
+                let name = crate::interner::lookup(self.frames[fi].code.names[name_idx]);
                 let module = self.frames[fi].peek(0)?;
                 // Handle 'from module import *' — when the imported name is '*',
                 // iterate over the module's dict and store all names in current scope
@@ -4822,7 +4807,7 @@ impl VirtualMachine {
                     let f = &self.frames[self.frames.len() - 1];
                     if idx < f.code.cellvars.len() {
                         let name = &f.code.cellvars[idx];
-                        if let Some(var_idx) = f.code.varnames.iter().position(|n| n == name) {
+                        if let Some(var_idx) = f.code.varnames.iter().position(|&n| crate::interner::intern_eq(n, name)) {
                             if let Some(val) = f.fast_locals.get(var_idx).and_then(|v| v.clone()) {
                                 val
                             } else {
@@ -5465,8 +5450,8 @@ impl VirtualMachine {
                     // came back empty regardless of the frame lookup bug.
                     for (i, slot) in frame.fast_locals.iter().enumerate() {
                         if let Some(v) = slot {
-                            if let Some(name) = frame.code.varnames.get(i) {
-                                d.set(py_str(name), v.clone())?;
+                            if let Some(&name) = frame.code.varnames.get(i) {
+                                d.set(py_str(crate::interner::lookup_str(name)), v.clone())?;
                             }
                         }
                     }
@@ -5796,7 +5781,7 @@ impl VirtualMachine {
 
             // Assign positional args to named parameters
             for i in 0..npos.min(named_params) {
-                let name_clone = new_frame.code.varnames[i].clone();
+                let name_clone = new_frame.code.varnames[i].to_string();
                 new_frame.insert_local(&name_clone, args[i].clone());
                 if i < new_frame.fast_locals.len() {
                     new_frame.fast_locals[i] = Some(args[i].clone());
@@ -5810,7 +5795,7 @@ impl VirtualMachine {
                     extra.push(args[i].clone());
                 }
                 let vararg_val = py_tuple(extra);
-                if let Some(idx) = new_frame.code.varnames.iter().position(|n| n == vararg_name) {
+                if let Some(idx) = new_frame.code.varnames.iter().position(|&n| crate::interner::intern_eq(n, vararg_name)) {
                     if idx < new_frame.fast_locals.len() {
                         new_frame.fast_locals[idx] = Some(vararg_val.clone());
                     }
@@ -5828,7 +5813,7 @@ impl VirtualMachine {
                 for i in npos..named_params {
                     if i >= first_default {
                         let default_idx = i - first_default;
-                        let name_clone = new_frame.code.varnames[i].clone();
+                        let name_clone = new_frame.code.varnames[i].to_string();
                         let val = if default_idx < defaults.len() {
                             defaults[default_idx].clone()
                         } else {
@@ -5898,7 +5883,7 @@ impl VirtualMachine {
                     let idx = kwonly_start + k;
                     if idx < new_frame.fast_locals.len() && new_frame.fast_locals[idx].is_none() {
                         if let Some(val) = default_val {
-                            let name_clone = new_frame.code.varnames[idx].clone();
+                            let name_clone = new_frame.code.varnames[idx].to_string();
                             new_frame.insert_local(&name_clone, val.clone());
                             new_frame.fast_locals[idx] = Some(val);
                         }

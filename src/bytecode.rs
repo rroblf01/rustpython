@@ -278,8 +278,8 @@ pub struct CodeObject {
     pub nlocals: usize,
     pub instructions: Vec<Instr>,
     pub consts: Vec<ConstValue>,
-    pub names: Vec<String>,
-    pub varnames: Vec<String>,
+    pub names: Vec<crate::interner::StrId>,
+    pub varnames: Vec<crate::interner::StrId>,
     pub freevars: Vec<String>,
     pub cellvars: Vec<String>,
     pub filename: String,
@@ -394,8 +394,8 @@ impl CodeObject {
         }
 
         // String vectors
-        write_str_vec(&mut buf, &self.names);
-        write_str_vec(&mut buf, &self.varnames);
+        write_name_vec(&mut buf, &self.names);
+        write_name_vec(&mut buf, &self.varnames);
         write_str_vec(&mut buf, &self.freevars);
         write_str_vec(&mut buf, &self.cellvars);
 
@@ -460,8 +460,8 @@ impl CodeObject {
         }
 
         // String vectors
-        let names = read_str_vec(data, &mut pos)?;
-        let varnames = read_str_vec(data, &mut pos)?;
+        let names = read_name_vec(data, &mut pos)?;
+        let varnames = read_name_vec(data, &mut pos)?;
         let freevars = read_str_vec(data, &mut pos)?;
         let cellvars = read_str_vec(data, &mut pos)?;
 
@@ -547,6 +547,23 @@ fn write_str_vec(buf: &mut Vec<u8>, vec: &[String]) {
     for s in vec {
         write_str(buf, s);
     }
+}
+
+fn write_name_vec(buf: &mut Vec<u8>, vec: &[crate::interner::StrId]) {
+    write_u32(buf, vec.len() as u32);
+    for &id in vec {
+        write_str(buf, crate::interner::lookup_str(id));
+    }
+}
+
+fn read_name_vec(data: &[u8], pos: &mut usize) -> Result<Vec<crate::interner::StrId>, String> {
+    let len = read_u32(data, pos)? as usize;
+    let mut vec = Vec::with_capacity(len);
+    for _ in 0..len {
+        let s = read_str(data, pos)?;
+        vec.push(crate::interner::intern(&s));
+    }
+    Ok(vec)
 }
 
 fn write_const_value(buf: &mut Vec<u8>, cv: &ConstValue) {

@@ -193,7 +193,7 @@ impl Compiler {
     /// decided after this scope's body — and any further-nested scope — has
     /// already been compiled), so they must be listed explicitly here.
     fn enclosing_snapshot(code: &CodeObject) -> Vec<String> {
-        let mut names = code.varnames.clone();
+        let mut names: Vec<String> = code.varnames.iter().map(|&id| crate::interner::lookup(id)).collect();
         names.extend(code.freevars.iter().cloned());
         names
     }
@@ -210,22 +210,24 @@ impl Compiler {
     }
 
     fn get_var_index(&mut self, name: &str) -> Option<usize> {
-        self.code.varnames.iter().position(|n| n == name)
+        let interned = crate::interner::intern(name);
+        self.code.varnames.iter().position(|&n| n == interned)
     }
 
     fn add_varname(&mut self, name: &str) -> usize {
         if let Some(idx) = self.get_var_index(name) {
             return idx;
         }
-        self.code.varnames.push(name.to_string());
+        self.code.varnames.push(crate::interner::intern(name));
         self.code.varnames.len() - 1
     }
 
     fn get_name_index(&mut self, name: &str) -> usize {
-        if let Some(idx) = self.code.names.iter().position(|n| n == name) {
+        let interned = crate::interner::intern(name);
+        if let Some(idx) = self.code.names.iter().position(|&n| n == interned) {
             return idx;
         }
-        self.code.names.push(name.to_string());
+        self.code.names.push(crate::interner::intern(name));
         self.code.names.len() - 1
     }
 

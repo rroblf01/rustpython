@@ -751,14 +751,14 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
         let code = &inner_f.code;
         let defaults = &inner_f.defaults;
             let arg_count = code.arg_count.min(code.varnames.len());
-            let positional_args: Vec<PyObjectRef> = code.varnames[..arg_count].iter().map(|n| py_str(n)).collect();
+            let positional_args: Vec<PyObjectRef> = code.varnames[..arg_count].iter().map(|&n| py_str(crate::interner::lookup_str(n))).collect();
             // varnames layout is: positional args, then *args (if any), then
             // kwonly args, then **kwargs (if any) — the vararg slot must be
             // skipped when locating where kwonly names start.
             let kwonly_start = arg_count + if code.vararg_name.is_some() { 1 } else { 0 };
             let kwonlyargs: Vec<PyObjectRef> = if code.kwonlyarg_count > 0 {
                 code.varnames.get(kwonly_start..kwonly_start + code.kwonlyarg_count)
-                    .map(|s| s.iter().map(|n| py_str(n)).collect())
+                    .map(|s| s.iter().map(|&n| py_str(crate::interner::lookup_str(n))).collect())
                     .unwrap_or_default()
             } else {
                 vec![]
@@ -778,7 +778,7 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
                         if !*has_default { continue; }
                         if let Some(pname) = code.varnames.get(kwonly_start + k) {
                             if let Some(v) = defaults.get(kwdefault_idx) {
-                                d.set(py_str(pname), v.clone())?;
+                                d.set(py_str(crate::interner::lookup_str(*pname)), v.clone())?;
                             }
                         }
                         kwdefault_idx += 1;
@@ -857,10 +857,10 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
             let num_defaults = code.num_defaults;
             let first_default_idx = arg_count.saturating_sub(num_defaults);
             for i in 0..arg_count {
-                let pname = code.varnames[i].clone();
+                let pname_str = crate::interner::lookup_str(code.varnames[i]);
                 let default = if i >= first_default_idx { defaults[i - first_default_idx].clone() } else { py_none() };
-                let p = make_param(&pname, 1, default, &param_type); // POSITIONAL_OR_KEYWORD
-                params.set(py_str(&pname), p)?;
+                let p = make_param(pname_str, 1, default, &param_type); // POSITIONAL_OR_KEYWORD
+                params.set(py_str(pname_str), p)?;
             }
             if let Some(va) = &code.vararg_name {
                 let p = make_param(va, 2, py_none(), &param_type); // VAR_POSITIONAL
@@ -882,8 +882,8 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
                         } else {
                             py_none()
                         };
-                        let p = make_param(pname, 3, default, &param_type); // KEYWORD_ONLY
-                        params.set(py_str(pname), p)?;
+                        let p = make_param(&crate::interner::lookup_str(*pname), 3, default, &param_type); // KEYWORD_ONLY
+                        params.set(py_str(crate::interner::lookup_str(*pname)), p)?;
                     }
                 }
             }

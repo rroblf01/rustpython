@@ -25,6 +25,24 @@ pub fn lookup(id: StrId) -> String {
     GLOBAL_INTERNER.with(|i| i.borrow().lookup(id).to_string())
 }
 
+/// Compare a StrId with a &str without allocating.
+pub fn intern_eq(id: StrId, s: &str) -> bool {
+    GLOBAL_INTERNER.with(|i| i.borrow().lookup(id) == s)
+}
+
+/// Return the interned `&str` for a StrId — the string is process-lifetime.
+pub fn lookup_str(id: StrId) -> &'static str {
+    GLOBAL_INTERNER.with(|i| {
+        let interner = i.borrow();
+        let s: &str = interner.lookup(id);
+        // SAFETY: intern() uses Box::leak() so the string lives for 'static.
+        // The &str returned by lookup() is tied to the Interner's borrow guard,
+        // but the underlying memory is permanently valid.
+        let leaked: &'static str = unsafe { std::mem::transmute::<&str, &'static str>(s) };
+        leaked
+    })
+}
+
 /// A compact string identifier (u32 index).
 /// 4 bytes instead of a String's 24 bytes + heap allocation.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -33,6 +51,18 @@ pub struct StrId(pub u32);
 impl StrId {
     #[allow(dead_code)]
     pub const EMPTY: StrId = StrId(u32::MAX);
+}
+
+impl std::fmt::Display for StrId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", lookup_str(*self))
+    }
+}
+
+impl PartialEq<String> for StrId {
+    fn eq(&self, other: &String) -> bool {
+        lookup_str(*self) == other.as_str()
+    }
 }
 
 /// Thread-safe string interner with O(1) insert and lookup.

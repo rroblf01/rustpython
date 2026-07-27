@@ -4721,12 +4721,12 @@ pub fn call_bound_method(func: PyObjectRef, self_obj: PyObjectRef, args: Vec<PyO
             // Set self at index 0
             if !code.varnames.is_empty() {
                 frame.fast_locals[0] = Some(self_obj.clone());
-                frame.insert_local(&code.varnames[0].clone(), self_obj);
+                frame.insert_local(crate::interner::lookup_str(code.varnames[0]), self_obj);
             }
             let npos = args.len();
             let named_params = if code.vararg_name.is_some() || code.kwarg_name.is_some() {
                 code.varnames.iter().position(|n| {
-                    Some(n.clone()) == code.vararg_name || Some(n.clone()) == code.kwarg_name
+                    code.vararg_name.as_deref() == Some(crate::interner::lookup_str(*n)) || code.kwarg_name.as_deref() == Some(crate::interner::lookup_str(*n))
                 }).unwrap_or(code.varnames.len())
             } else {
                 code.varnames.len()
@@ -4735,7 +4735,7 @@ pub fn call_bound_method(func: PyObjectRef, self_obj: PyObjectRef, args: Vec<PyO
                 let idx = i + 1;
                 if idx < code.varnames.len() {
                     frame.fast_locals[idx] = Some(args[i].clone());
-                    frame.insert_local(&code.varnames[idx].clone(), args[i].clone());
+                    frame.insert_local(crate::interner::lookup_str(code.varnames[idx]), args[i].clone());
                 }
             }
             if let Some(vararg_name) = &code.vararg_name {
@@ -4754,7 +4754,7 @@ pub fn call_bound_method(func: PyObjectRef, self_obj: PyObjectRef, args: Vec<PyO
                         if default_idx < defaults.len() {
                             let val = defaults[default_idx].clone();
                             frame.fast_locals[idx] = Some(val.clone());
-                            frame.insert_local(&code.varnames[idx].clone(), val);
+                            frame.insert_local(crate::interner::lookup_str(code.varnames[idx]), val);
                         }
                     }
                 }
@@ -6294,7 +6294,7 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
                 let npos = a.len();
                 let named_params = if code.vararg_name.is_some() || code.kwarg_name.is_some() {
                     code.varnames.iter().position(|n| {
-                        Some(n.clone()) == code.vararg_name || Some(n.clone()) == code.kwarg_name
+                        code.vararg_name.as_deref() == Some(crate::interner::lookup_str(*n)) || code.kwarg_name.as_deref() == Some(crate::interner::lookup_str(*n))
                     }).unwrap_or(code.varnames.len())
                 } else {
                     code.varnames.len()
@@ -6318,7 +6318,7 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
                 for i in 0..npos.min(named_params) {
                     if i < code.varnames.len() {
                         frame.fast_locals[i] = Some(a[i].clone());
-                        frame.insert_local(&code.varnames[i].clone(), a[i].clone());
+                        frame.insert_local(crate::interner::lookup_str(code.varnames[i]), a[i].clone());
                     }
                 }
                 if let Some(vararg_name) = &code.vararg_name {
@@ -6348,7 +6348,7 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
                             if i < frame.fast_locals.len() {
                                 frame.fast_locals[i] = Some(defaults[default_idx].clone());
                             }
-                            frame.insert_local(&code.varnames[i].clone(), defaults[default_idx].clone());
+                            frame.insert_local(crate::interner::lookup_str(code.varnames[i]), defaults[default_idx].clone());
                         }
                     }
                 }
@@ -10720,7 +10720,7 @@ impl PyObject {
                     "co_name" => Ok(py_str(&c.name)),
                     "co_argcount" => Ok(py_int(c.arg_count as i64)),
                     "co_nlocals" => Ok(py_int(c.nlocals as i64)),
-                    "co_varnames" => Ok(py_tuple(c.varnames.iter().map(|v| py_str(v)).collect())),
+                    "co_varnames" => Ok(py_tuple(c.varnames.iter().map(|&v| py_str(crate::interner::lookup_str(v))).collect())),
                     "co_flags" => Ok(py_int(c.flags as i64)),
                     _ => Err(PyError::attribute_error(format!("'code' object has no attribute '{}'", name))),
                 }
