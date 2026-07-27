@@ -2720,8 +2720,8 @@ impl Compiler {
         let enclosing_varnames = self.compute_enclosing_names();
         let (cell_vars, free_vars) =
             Self::analyze_function(args, body, &self.global_names, &self.nonlocal_names, Some(&enclosing_varnames));
-        self.code.cellvars = cell_vars;
-        self.code.freevars = free_vars;
+        self.code.cellvars = Box::new(cell_vars);
+        self.code.freevars = Box::new(free_vars);
 
         // PEP 3135: Add __class__ as cell var for methods inside a class body
         if self.scope == ScopeType::Function {
@@ -2750,7 +2750,7 @@ impl Compiler {
         let mut arg_count_finalized = false;
         for arg in args {
             if arg.is_vararg {
-                self.code.vararg_name = Some(arg.arg.clone());
+                self.code.vararg_name = Some(Box::new(arg.arg.clone()));
                 if !arg_count_finalized {
                     self.code.arg_count = num_positional;
                     arg_count_finalized = true;
@@ -2758,7 +2758,7 @@ impl Compiler {
                 continue;
             }
             if arg.is_kwarg {
-                self.code.kwarg_name = Some(arg.arg.clone());
+                self.code.kwarg_name = Some(Box::new(arg.arg.clone()));
                 continue;
             }
             if arg.is_kwonly {
@@ -2781,7 +2781,7 @@ impl Compiler {
         // Defaults are at the end of positional args, count them
         self.code.num_defaults = defaults_count;
         self.code.kwonlyarg_count = kwonly_count;
-        self.code.kwonly_defaults_mask = kwonly_defaults_mask;
+        self.code.kwonly_defaults_mask = Box::new(kwonly_defaults_mask);
 
         // Add all args to varnames (including vararg/kwarg at the end)
         for arg in args {
@@ -2789,14 +2789,14 @@ impl Compiler {
         }
 
         // Add cell vars to varnames too (so they get fast_locals slots)
-        for cell_var in self.code.cellvars.clone() {
+        for cell_var in self.code.cellvars.clone().into_iter() {
             if self.get_var_index(&cell_var).is_none() {
                 self.add_varname(&cell_var);
             }
         }
 
         // Emit MAKE_CELL for each cell var at function start
-        for cell_var in &self.code.cellvars.clone() {
+        for cell_var in self.code.cellvars.clone().iter() {
             if let Some(idx) = self.get_var_index(cell_var) {
                 self.emit(Opcode::MAKE_CELL, idx as u32);
             }
@@ -2864,7 +2864,7 @@ impl Compiler {
 
         // Emit LOAD_CLOSURE for each free var of the inner function
         let mut nfree = 0usize;
-        for fv_name in &inner_free_vars {
+        for fv_name in inner_free_vars.iter() {
             let found = self.code.cellvars.iter().any(|n| n == fv_name)
                 || self.code.freevars.iter().any(|n| n == fv_name)
                 || self.get_var_index(fv_name).is_some();
@@ -2994,7 +2994,7 @@ impl Compiler {
             &self.nonlocal_names,
             Some(&enclosing_varnames),
         );
-        self.code.freevars = free_vars;
+        self.code.freevars = Box::new(free_vars);
 
         // Real Python implicitly seeds __module__ = <enclosing module's
         // __name__> and __qualname__ = <class name> as the first two
@@ -3040,7 +3040,7 @@ impl Compiler {
         // Relay any free variables this class body's methods need, using the
         // same mechanism as an ordinary nested function.
         let mut nfree = 0usize;
-        for fv_name in &inner_free_vars {
+        for fv_name in inner_free_vars.iter() {
             let found = self.code.cellvars.iter().any(|n| n == fv_name)
                 || self.code.freevars.iter().any(|n| n == fv_name)
                 || self.get_var_index(fv_name).is_some();

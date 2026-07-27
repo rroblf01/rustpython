@@ -4804,7 +4804,7 @@ pub fn call_bound_method(func: PyObjectRef, self_obj: PyObjectRef, args: Vec<PyO
             let npos = args.len();
             let named_params = if code.vararg_name.is_some() || code.kwarg_name.is_some() {
                 code.varnames.iter().position(|n| {
-                    code.vararg_name.as_deref() == Some(crate::interner::lookup_str(*n)) || code.kwarg_name.as_deref() == Some(crate::interner::lookup_str(*n))
+                    code.vararg_name.as_ref().map(|b| b.as_str()) == Some(crate::interner::lookup_str(*n)) || code.kwarg_name.as_ref().map(|b| b.as_str()) == Some(crate::interner::lookup_str(*n))
                 }).unwrap_or(code.varnames.len())
             } else {
                 code.varnames.len()
@@ -4821,7 +4821,7 @@ pub fn call_bound_method(func: PyObjectRef, self_obj: PyObjectRef, args: Vec<PyO
                 for i in (named_params.saturating_sub(1))..npos {
                     extra.push(args[i].clone());
                 }
-                frame.insert_local(&vararg_name, py_tuple(extra));
+                frame.insert_local(vararg_name.as_str(), py_tuple(extra));
             }
             if npos < named_params.saturating_sub(1) {
                 let num_defaults = code.num_defaults;
@@ -6372,7 +6372,7 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
                 let npos = a.len();
                 let named_params = if code.vararg_name.is_some() || code.kwarg_name.is_some() {
                     code.varnames.iter().position(|n| {
-                        code.vararg_name.as_deref() == Some(crate::interner::lookup_str(*n)) || code.kwarg_name.as_deref() == Some(crate::interner::lookup_str(*n))
+                        code.vararg_name.as_ref().map(|b| b.as_str()) == Some(crate::interner::lookup_str(*n)) || code.kwarg_name.as_ref().map(|b| b.as_str()) == Some(crate::interner::lookup_str(*n))
                     }).unwrap_or(code.varnames.len())
                 } else {
                     code.varnames.len()
@@ -6404,7 +6404,7 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
                     for i in named_params..npos {
                         extra.push(a[i].clone());
                     }
-                    frame.insert_local(&vararg_name, py_tuple(extra));
+                    frame.insert_local(vararg_name.as_str(), py_tuple(extra));
                 }
                 if npos < named_params {
                     let num_defaults = code.num_defaults;
@@ -6432,7 +6432,7 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
                 }
                 if let Some(kwarg_name) = &code.kwarg_name {
                     if !frame.contains_local(kwarg_name) {
-                        frame.insert_local(&kwarg_name, py_dict());
+                        frame.insert_local(kwarg_name.as_str(), py_dict());
                     }
                 }
                 vm.frames.push(frame);

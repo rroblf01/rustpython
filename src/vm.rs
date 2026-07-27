@@ -5844,12 +5844,12 @@ impl VirtualMachine {
                         }
                     }
                 }
-                if let Some(idx) = new_frame.code.varnames.iter().position(|n| n == kwarg_name) {
+                if let Some(idx) = new_frame.code.varnames.iter().position(|n| crate::interner::lookup_str(*n) == kwarg_name.as_str()) {
                     if idx < new_frame.fast_locals.len() {
                         new_frame.fast_locals[idx] = Some(kw_dict.clone());
                     }
                 }
-                new_frame.insert_local(&kwarg_name, kw_dict);
+                new_frame.insert_local(kwarg_name.as_str(), kw_dict);
             } else {
                 // No **kwargs: keyword args must still bind to the matching
                 // named parameter's FAST local slot (LOAD_FAST reads

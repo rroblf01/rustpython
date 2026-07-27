@@ -280,13 +280,13 @@ pub struct CodeObject {
     pub consts: Vec<ConstValue>,
     pub names: Vec<crate::interner::StrId>,
     pub varnames: Vec<crate::interner::StrId>,
-    pub freevars: Vec<String>,
-    pub cellvars: Vec<String>,
+    pub freevars: Box<Vec<String>>,
+    pub cellvars: Box<Vec<String>>,
     pub filename: String,
     pub first_lineno: usize,
     pub flags: u16,
-    pub vararg_name: Option<String>,
-    pub kwarg_name: Option<String>,
+    pub vararg_name: Option<Box<String>>,
+    pub kwarg_name: Option<Box<String>>,
     pub num_defaults: usize,
     /// Per keyword-only parameter (in order, length == kwonlyarg_count),
     /// whether it has a default value. Keyword-only defaults can't use the
@@ -295,7 +295,7 @@ pub struct CodeObject {
     /// so each slot is tracked individually. Values live in
     /// PyObject::Function.defaults right after the `num_defaults` positional
     /// ones, in the same left-to-right order as the `true` entries here.
-    pub kwonly_defaults_mask: Vec<bool>,
+    pub kwonly_defaults_mask: Box<Vec<bool>>,
     /// Lazily-populated cache of each `LOAD_CONST`'s already-parsed result,
     /// indexed by `consts` position. Without this, `LOAD_CONST` re-derives
     /// the actual `PyObjectRef` from scratch on EVERY execution of that
@@ -330,15 +330,15 @@ impl CodeObject {
             consts: Vec::new(),
             names: Vec::new(),
             varnames: Vec::new(),
-            freevars: Vec::new(),
-            cellvars: Vec::new(),
+            freevars: Box::new(Vec::new()),
+            cellvars: Box::new(Vec::new()),
             filename: "<unknown>".to_string(),
             first_lineno: 1,
             flags: 0,
             vararg_name: None,
             kwarg_name: None,
             num_defaults: 0,
-            kwonly_defaults_mask: Vec::new(),
+            kwonly_defaults_mask: Box::new(Vec::new()),
             const_cache: RefCell::new(Vec::new()),
         }
     }
@@ -419,7 +419,7 @@ impl CodeObject {
         write_u32(&mut buf, self.num_defaults as u32);
 
         write_u32(&mut buf, self.kwonly_defaults_mask.len() as u32);
-        for &b in &self.kwonly_defaults_mask {
+        for &b in self.kwonly_defaults_mask.iter() {
             write_u8(&mut buf, if b { 1 } else { 0 });
         }
 
@@ -462,8 +462,8 @@ impl CodeObject {
         // String vectors
         let names = read_name_vec(data, &mut pos)?;
         let varnames = read_name_vec(data, &mut pos)?;
-        let freevars = read_str_vec(data, &mut pos)?;
-        let cellvars = read_str_vec(data, &mut pos)?;
+        let freevars = Box::new(read_str_vec(data, &mut pos)?);
+        let cellvars = Box::new(read_str_vec(data, &mut pos)?);
 
         // Remaining fields
         let filename = read_str(data, &mut pos)?;
@@ -472,14 +472,14 @@ impl CodeObject {
 
         // vararg_name
         let vararg_name = if read_u8(data, &mut pos)? != 0 {
-            Some(read_str(data, &mut pos)?)
+            Some(Box::new(read_str(data, &mut pos)?))
         } else {
             None
         };
 
         // kwarg_name
         let kwarg_name = if read_u8(data, &mut pos)? != 0 {
-            Some(read_str(data, &mut pos)?)
+            Some(Box::new(read_str(data, &mut pos)?))
         } else {
             None
         };
@@ -487,7 +487,7 @@ impl CodeObject {
         let num_defaults = read_u32(data, &mut pos)? as usize;
 
         let kwonly_mask_count = read_u32(data, &mut pos)? as usize;
-        let mut kwonly_defaults_mask = Vec::with_capacity(kwonly_mask_count);
+        let mut kwonly_defaults_mask = Box::new(Vec::with_capacity(kwonly_mask_count));
         for _ in 0..kwonly_mask_count {
             kwonly_defaults_mask.push(read_u8(data, &mut pos)? != 0);
         }
