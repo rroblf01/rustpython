@@ -187,7 +187,7 @@ pub fn create_shutil_dict() -> HashMap<String, PyObjectRef> {
         } else { (80, 24) };
         let columns = std::env::var("COLUMNS").ok().and_then(|s| s.parse::<i64>().ok()).unwrap_or(fallback_cols);
         let lines = std::env::var("LINES").ok().and_then(|s| s.parse::<i64>().ok()).unwrap_or(fallback_lines);
-        let typ = PyObjectRef::new(PyObject::Type { name: "os.terminal_size".to_string(), dict: HashMap::new(), bases: vec![], mro: vec![] });
+        let typ = PyObjectRef::new(PyObject::Type { name: "os.terminal_size".to_string(), dict: Box::new(HashMap::new()), bases: vec![], mro: vec![] });
         let mut dict = AttrMap::new();
         dict.insert("columns".to_string(), py_int(columns));
         dict.insert("lines".to_string(), py_int(lines));
@@ -446,7 +446,7 @@ fn build_gzip_file(filename: &str, mode: &str, compresslevel: u32, mtime: Option
     }
 
     Ok(PyObjectRef::new(PyObject::Instance {
-        typ: PyObjectRef::new(PyObject::Type { name: "GzipFile".to_string(), dict: type_dict, bases: vec![], mro: vec![] }),
+        typ: PyObjectRef::new(PyObject::Type { name: "GzipFile".to_string(), dict: Box::new(type_dict), bases: vec![], mro: vec![] }),
         dict: AttrMap::new(),
     }))
 }
@@ -572,7 +572,7 @@ pub fn create_tarfile_dict() -> HashMap<String, PyObjectRef> {
         Ok(PyObjectRef::new(PyObject::Instance {
             typ: PyObjectRef::new(PyObject::Module {
                 name: "tarfile.TarFile".to_string(),
-                dict: HashMap::new(),
+                dict: Box::new(HashMap::new()),
             }),
             dict: inst_dict,
         }))
@@ -799,7 +799,7 @@ pub fn create_pathlib_dict() -> HashMap<String, PyObjectRef> {
     // Create the Path Type object
     let path_type = PyObjectRef::new(PyObject::Type {
         name: "Path".to_string(),
-        dict: path_type_dict,
+        dict: Box::new(path_type_dict),
         bases: vec![],
         mro: vec![],
     });

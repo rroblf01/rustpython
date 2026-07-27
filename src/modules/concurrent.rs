@@ -41,7 +41,7 @@ pub fn create_concurrent_futures_dict() -> HashMap<String, PyObjectRef> {
     // Executor base class (used by asgiref for type hints)
     let executor_type = PyObjectRef::new(PyObject::Type {
         name: "Executor".to_string(),
-        dict: HashMap::new(),
+        dict: Box::new(HashMap::new()),
         bases: vec![],
         mro: vec![],
     });

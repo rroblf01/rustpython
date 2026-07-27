@@ -1250,11 +1250,11 @@ pub enum PyObject {
     },
     Module {
         name: String,
-        dict: HashMap<String, PyObjectRef>,
+        dict: Box<HashMap<String, PyObjectRef>>,
     },
     Type {
         name: String,
-        dict: HashMap<String, PyObjectRef>,
+        dict: Box<HashMap<String, PyObjectRef>>,
         bases: Vec<PyObjectRef>,
         mro: Vec<PyObjectRef>,
     },
@@ -3377,7 +3377,7 @@ pub fn builtin_type_of(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 let name = borrowed.type_name();
                 Ok(PyObjectRef::new(PyObject::Type {
                     name,
-                    dict: HashMap::new(),
+                    dict: Box::new(HashMap::new()),
                     bases: vec![],
                     mro: vec![],
                 }))
@@ -4201,7 +4201,7 @@ pub fn builtin_object(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // Create a new bare object instance
     let object_type = PyObjectRef::new(PyObject::Type {
         name: "object".to_string(),
-        dict: HashMap::new(),
+        dict: Box::new(HashMap::new()),
         bases: vec![],
         mro: vec![],
     });
@@ -5588,7 +5588,7 @@ pub fn builtin_help(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 }
                 println!();
                 println!("Methods:");
-                for (key, val) in dict {
+                for (key, val) in dict.iter() {
                     if matches!(&*val.borrow(), PyObject::Function(_) | PyObject::BuiltinFunction { .. }) {
                         println!("  {}()", key);
                     }
@@ -6808,7 +6808,7 @@ impl PyObject {
                 PyObject::Type { .. } => {
                     return Ok(PyObjectRef::new(PyObject::Type {
                         name: "type".to_string(),
-                        dict: HashMap::new(),
+                        dict: Box::new(HashMap::new()),
                         bases: vec![],
                         mro: vec![],
                     }));
@@ -6816,7 +6816,7 @@ impl PyObject {
                 _ => {
                     return Ok(PyObjectRef::new(PyObject::Type {
                         name: self.type_name().to_string(),
-                        dict: HashMap::new(),
+                        dict: Box::new(HashMap::new()),
                         bases: vec![],
                         mro: vec![],
                     }));
@@ -11971,7 +11971,7 @@ pub struct QueueInner {
 pub fn create_module(name: &str, dict: HashMap<String, PyObjectRef>) -> PyObjectRef {
     PyObjectRef::new(PyObject::Module {
         name: name.to_string(),
-        dict,
+        dict: Box::new(dict),
     })
 }
 
@@ -12262,7 +12262,7 @@ fn zipfile_infolist(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         PyObjectRef::new(PyObject::Instance {
             typ: PyObjectRef::new(PyObject::Module {
                 name: "zipfile.ZipInfo".to_string(),
-                dict: HashMap::new(),
+                dict: Box::new(HashMap::new()),
             }),
             dict: info_dict,
         })
@@ -12368,7 +12368,7 @@ pub fn zipfile_constructor(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Ok(PyObjectRef::new(PyObject::Instance {
         typ: PyObjectRef::new(PyObject::Module {
             name: "zipfile.ZipFile".to_string(),
-            dict: HashMap::new(),
+            dict: Box::new(HashMap::new()),
         }),
         dict: inst_dict,
     }))
@@ -12733,7 +12733,7 @@ pub fn shelf_open(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // Build Shelf type
     let shelf_type = PyObjectRef::new(PyObject::Type {
         name: "Shelf".to_string(),
-        dict: type_dict,
+        dict: Box::new(type_dict),
         bases: vec![],
         // MRO includes self so __getitem__ lookup works
         mro: vec![],
@@ -12774,7 +12774,7 @@ fn create_urlopen_response(body: Vec<u8>) -> PyObjectRef {
 
     let resp_type = PyObjectRef::new(PyObject::Type {
         name: "HTTPResponse".to_string(),
-        dict: type_dict,
+        dict: Box::new(type_dict),
         bases: vec![],
         mro: vec![],
     });
@@ -12978,7 +12978,7 @@ pub fn create_urllib_parse_dict() -> HashMap<String, PyObjectRef> {
         let type_dict = HashMap::new();
         let parse_type = PyObjectRef::new(PyObject::Type {
             name: "ParseResult".to_string(),
-            dict: type_dict,
+            dict: Box::new(type_dict),
             bases: vec![],
             mro: vec![],
         });

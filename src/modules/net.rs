@@ -129,7 +129,7 @@ fn get_called_process_error_type() -> PyObjectRef {
     // matches by exact class identity via the normal Instance/Type MRO
     // walk regardless, so this is enough for the common case, just not
     // also catchable via a bare `except Exception:`.
-    let typ = PyObjectRef::new(PyObject::Type { name: "CalledProcessError".to_string(), dict: type_dict, bases: vec![], mro: vec![] });
+    let typ = PyObjectRef::new(PyObject::Type { name: "CalledProcessError".to_string(), dict: Box::new(type_dict), bases: vec![], mro: vec![] });
     // A class's own `mro` must include ITSELF (real Python: `C.__mro__[0]
     // is C`) — `except CalledProcessError as e:`'s matching walks
     // `instance.typ`'s `mro` looking for the `except` clause's referenced
@@ -367,7 +367,7 @@ pub fn create_http_dict() -> HashMap<String, PyObjectRef> {
 
     let http_status_type = PyObjectRef::new(PyObject::Type {
         name: "HTTPStatus".to_string(),
-        dict: status_dict,
+        dict: Box::new(status_dict),
         bases: vec![],
         mro: vec![],
     });
@@ -580,7 +580,7 @@ pub fn create_http_client_dict() -> HashMap<String, PyObjectRef> {
     fn make_http_exc(name: &str, base: Option<PyObjectRef>) -> PyObjectRef {
         let bases = base.map(|b| vec![b]).unwrap_or_default();
         PyObjectRef::new(crate::object::PyObject::Type {
-            name: name.to_string(), dict: HashMap::new(), bases: bases.clone(), mro: bases,
+            name: name.to_string(), dict: Box::new(HashMap::new()), bases: bases.clone(), mro: bases,
         })
     }
     let http_exception = make_http_exc("HTTPException", None);
@@ -624,7 +624,7 @@ pub fn create_http_client_dict() -> HashMap<String, PyObjectRef> {
     );
     let http_resp_type = PyObjectRef::new(PyObject::Type {
         name: "HTTPResponse".to_string(),
-        dict: resp_dict,
+        dict: Box::new(resp_dict),
         bases: vec![],
         mro: vec![],
     });
@@ -912,7 +912,7 @@ pub fn create_http_client_dict() -> HashMap<String, PyObjectRef> {
                                 func: http_response_read,
                             }),
                         );
-                        rd
+                        Box::new(rd)
                     },
                     bases: vec![],
                     mro: vec![],
@@ -948,7 +948,7 @@ pub fn create_http_client_dict() -> HashMap<String, PyObjectRef> {
 
     let http_conn_type = PyObjectRef::new(PyObject::Type {
         name: "HTTPConnection".to_string(),
-        dict: conn_dict,
+        dict: Box::new(conn_dict),
         bases: vec![],
         mro: vec![],
     });
@@ -1013,7 +1013,7 @@ pub fn create_smtplib_dict() -> HashMap<String, PyObjectRef> {
 
     let smtp_type = PyObjectRef::new(PyObject::Type {
         name: "SMTP".to_string(),
-        dict: smtp_dict,
+        dict: Box::new(smtp_dict),
         bases: vec![],
         mro: vec![],
     });

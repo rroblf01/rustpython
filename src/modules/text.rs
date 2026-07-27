@@ -174,7 +174,7 @@ pub fn create_textwrap_dict() -> HashMap<String, PyObjectRef> {
             },
         }));
         d.insert("TextWrapper".to_string(), PyObjectRef::new(PyObject::Type {
-            name: "TextWrapper".to_string(), dict: type_dict, bases: vec![], mro: vec![],
+            name: "TextWrapper".to_string(), dict: Box::new(type_dict), bases: vec![], mro: vec![],
         }));
     }
 

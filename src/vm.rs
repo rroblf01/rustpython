@@ -1309,7 +1309,7 @@ impl VirtualMachine {
         for name in &type_names {
             let type_obj = PyObjectRef::new(PyObject::Type {
                 name: name.to_string(),
-                dict: HashMap::new(),
+                dict: Box::new(HashMap::new()),
                 bases: vec![],
                 mro: vec![],
             });
@@ -6125,7 +6125,7 @@ impl VirtualMachine {
                         }));
                         PyObjectRef::new(PyObject::Type {
                             name: "object".to_string(),
-                            dict: obj_dict,
+                            dict: Box::new(obj_dict),
                             bases: vec![],
                             mro: vec![],
                         })
@@ -6349,7 +6349,7 @@ impl VirtualMachine {
         }
         PyObjectRef::new(PyObject::Type {
             name,
-            dict: HashMap::new(),
+            dict: Box::new(HashMap::new()),
             bases: vec![],
             mro: vec![],
         })
@@ -6598,7 +6598,7 @@ impl VirtualMachine {
 
         let class = PyObjectRef::new(PyObject::Type {
             name: name_str,
-            dict: namespace_dict.clone(),
+            dict: Box::new(namespace_dict.clone()),
             bases: bases_vec.clone(),
             mro: vec![],
         });

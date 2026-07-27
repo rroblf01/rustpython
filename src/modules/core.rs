@@ -85,7 +85,7 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
             name: "__bool__".to_string(),
             func: |_args| Ok(py_bool(true)),
         }));
-        let nie_type = PyObjectRef::new(PyObject::Type { name: "NotImplementedType".to_string(), dict: nie_dict, bases: vec![], mro: vec![] });
+        let nie_type = PyObjectRef::new(PyObject::Type { name: "NotImplementedType".to_string(), dict: Box::new(nie_dict), bases: vec![], mro: vec![] });
         let not_implemented = PyObjectRef::imm(PyObject::Instance { typ: nie_type, dict: AttrMap::new() });
         builtins.insert("NotImplemented".to_string(), not_implemented);
     }
@@ -250,21 +250,21 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
 
     let math_module = PyObjectRef::new(PyObject::Module {
         name: "math".to_string(),
-        dict: create_math_dict(),
+        dict: Box::new(create_math_dict()),
     });
     builtins.insert("math".to_string(), math_module.clone());
 
     // ── _codecs (needed by encodings module) ────────────────────────────────
     let codecs_module = PyObjectRef::new(PyObject::Module {
         name: "_codecs".to_string(),
-        dict: create_codecs_dict(),
+        dict: Box::new(create_codecs_dict()),
     });
     builtins.insert("_codecs".to_string(), codecs_module.clone());
 
     // ── _abc (needed by abc.py for ABCMeta, used by io/__init__.py) ────────
     let abc_module = PyObjectRef::new(PyObject::Module {
         name: "_abc".to_string(),
-        dict: create_abc_builtins_dict(),
+        dict: Box::new(create_abc_builtins_dict()),
     });
     builtins.insert("_abc".to_string(), abc_module.clone());
 
@@ -449,7 +449,7 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     }));
     let object_type = PyObjectRef::new(PyObject::Type {
         name: "object".to_string(),
-        dict: object_dict,
+        dict: Box::new(object_dict),
         bases: vec![],
         mro: vec![],
     });
@@ -486,7 +486,7 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     }));
     let type_type = PyObjectRef::new(PyObject::Type {
         name: "type".to_string(),
-        dict: type_dict,
+        dict: Box::new(type_dict),
         bases: vec![object_type.clone()],
         mro: vec![],
     });
@@ -866,7 +866,7 @@ fn _abc_abcmeta(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     };
     let class = PyObjectRef::new(PyObject::Type {
         name: name_str,
-        dict: namespace_dict,
+        dict: Box::new(namespace_dict),
         bases: bases_vec.clone(),
         mro: vec![],
     });
@@ -1324,7 +1324,7 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
         d.insert("flags".to_string(), PyObjectRef::new(PyObject::Instance {
             typ: PyObjectRef::new(PyObject::Type {
                 name: "flags".to_string(),
-                dict: HashMap::new(),
+                dict: Box::new(HashMap::new()),
                 bases: vec![],
                 mro: vec![],
             }),
@@ -1353,7 +1353,7 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
         d.insert("hash_info".to_string(), PyObjectRef::new(PyObject::Instance {
             typ: PyObjectRef::new(PyObject::Type {
                 name: "hash_info".to_string(),
-                dict: HashMap::new(),
+                dict: Box::new(HashMap::new()),
                 bases: vec![],
                 mro: vec![],
             }),
@@ -1380,7 +1380,7 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
         d.insert("float_info".to_string(), PyObjectRef::new(PyObject::Instance {
             typ: PyObjectRef::new(PyObject::Type {
                 name: "float_info".to_string(),
-                dict: HashMap::new(),
+                dict: Box::new(HashMap::new()),
                 bases: vec![],
                 mro: vec![],
             }),
@@ -1406,7 +1406,7 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
         d.insert("_jit".to_string(), PyObjectRef::new(PyObject::Instance {
             typ: PyObjectRef::new(PyObject::Type {
                 name: "_jit".to_string(),
-                dict: HashMap::new(),
+                dict: Box::new(HashMap::new()),
                 bases: vec![],
                 mro: vec![],
             }),

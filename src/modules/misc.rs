@@ -294,7 +294,7 @@ fn make_match_object(re_match: Option<fancy_regex::Match<'_>>, _num_groups: usiz
 
             let typ = PyObjectRef::new(PyObject::Type {
                 name: "Match".to_string(),
-                dict: type_dict,
+                dict: Box::new(type_dict),
                 bases: vec![],
                 mro: vec![],
             });
@@ -523,7 +523,7 @@ pub fn create_threading_dict() -> HashMap<String, PyObjectRef> {
         Ok(PyObjectRef::new(PyObject::Instance {
             typ: PyObjectRef::new(PyObject::Type {
                 name: "local".to_string(),
-                dict: HashMap::new(),
+                dict: Box::new(HashMap::new()),
                 bases: vec![],
                 mro: vec![],
             }),
@@ -861,7 +861,7 @@ pub fn create_collections_abc_dict() -> HashMap<String, PyObjectRef> {
         PyObjectRef::new(PyObject::Instance {
             typ: PyObjectRef::new(PyObject::Type {
                 name: repr,
-                dict: type_dict,
+                dict: Box::new(type_dict),
                 bases: vec![],
                 mro: vec![],
             }),
@@ -873,7 +873,7 @@ pub fn create_collections_abc_dict() -> HashMap<String, PyObjectRef> {
         ($name:expr) => {
             PyObjectRef::new(PyObject::Type {
                 name: $name.to_string(),
-                dict: HashMap::from([
+                dict: Box::new(HashMap::from([
                     ("__class_getitem__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
                         name: "__class_getitem__".to_string(),
                         func: |args| {
@@ -881,7 +881,7 @@ pub fn create_collections_abc_dict() -> HashMap<String, PyObjectRef> {
                             Ok(generic_alias_placeholder(format!("{}[{}]", args[0].str(), args[1].str())))
                         },
                     })),
-                ]),
+                ])),
                 bases: vec![],
                 mro: vec![],
             })
@@ -955,7 +955,7 @@ fn build_simple_namespace_type() -> PyObjectRef {
             _ => Ok(py_bool(false)),
         }
     }));
-    PyObjectRef::new(PyObject::Type { name: "types.SimpleNamespace".to_string(), dict: type_dict, bases: vec![], mro: vec![] })
+    PyObjectRef::new(PyObject::Type { name: "types.SimpleNamespace".to_string(), dict: Box::new(type_dict), bases: vec![], mro: vec![] })
 }
 
 fn get_simple_namespace_type() -> PyObjectRef {
@@ -1095,7 +1095,7 @@ pub fn create_types_dict() -> HashMap<String, PyObjectRef> {
             name: "__init__".to_string(),
             func: |_args| Ok(py_none()),
         }));
-        let code_type = PyObjectRef::new(PyObject::Type { name: "code".to_string(), dict: code_type_dict, bases: vec![], mro: vec![] });
+        let code_type = PyObjectRef::new(PyObject::Type { name: "code".to_string(), dict: Box::new(code_type_dict), bases: vec![], mro: vec![] });
         d.insert("CodeType".to_string(), code_type);
     }
     d.insert("CellType".to_string(), py_str("cell"));
@@ -1598,7 +1598,7 @@ fn make_uuid(hex32: String) -> PyObjectRef {
 
     let typ = PyObjectRef::new(PyObject::Type {
         name: "UUID".to_string(),
-        dict: type_dict,
+        dict: Box::new(type_dict),
         bases: vec![],
         mro: vec![],
     });
@@ -1820,7 +1820,7 @@ fn build_uname_result_type() -> PyObjectRef {
             Ok(py_str(&format!("uname_result({})", body)))
         } else { Ok(py_str("uname_result(...)")) }
     }));
-    PyObjectRef::new(PyObject::Type { name: "platform.uname_result".to_string(), dict: type_dict, bases: vec![], mro: vec![] })
+    PyObjectRef::new(PyObject::Type { name: "platform.uname_result".to_string(), dict: Box::new(type_dict), bases: vec![], mro: vec![] })
 }
 
 fn get_uname_result_type() -> PyObjectRef {
@@ -2201,7 +2201,7 @@ fn build_topological_sorter_type() -> PyObjectRef {
         Ok(py_bool(non_empty))
     }));
 
-    PyObjectRef::new(PyObject::Type { name: "TopologicalSorter".to_string(), dict: type_dict, bases: vec![], mro: vec![] })
+    PyObjectRef::new(PyObject::Type { name: "TopologicalSorter".to_string(), dict: Box::new(type_dict), bases: vec![], mro: vec![] })
 }
 
 fn get_topological_sorter_type() -> PyObjectRef {
@@ -2622,7 +2622,7 @@ pub fn create_logging_dict() -> HashMap<String, PyObjectRef> {
                     },
                     self_obj: py_none(),
                 }));
-                type_dict
+                Box::new(type_dict)
             },
             bases: vec![],
             mro: vec![],
@@ -2641,7 +2641,7 @@ pub fn create_logging_dict() -> HashMap<String, PyObjectRef> {
     // Handler base class
     let handler_class = PyObjectRef::new(PyObject::Type {
         name: "Handler".to_string(),
-        dict: HashMap::from([
+        dict: Box::new(HashMap::from([
             ("__init__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
                 name: "__init__".to_string(),
                 func: |args| {
@@ -2655,7 +2655,7 @@ pub fn create_logging_dict() -> HashMap<String, PyObjectRef> {
                 name: "setLevel".to_string(),
                 func: |_| Ok(py_none()),
             })),
-        ]),
+        ])),
         bases: vec![],
         mro: vec![],
     });
@@ -2672,7 +2672,7 @@ pub fn create_logging_dict() -> HashMap<String, PyObjectRef> {
     // no `name=` restriction applied).
     let filter_class = PyObjectRef::new(PyObject::Type {
         name: "Filter".to_string(),
-        dict: HashMap::from([
+        dict: Box::new(HashMap::from([
             ("__init__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
                 name: "__init__".to_string(),
                 func: |args| {
@@ -2685,7 +2685,7 @@ pub fn create_logging_dict() -> HashMap<String, PyObjectRef> {
                 name: "filter".to_string(),
                 func: |_| Ok(py_bool(true)),
             })),
-        ]),
+        ])),
         bases: vec![],
         mro: vec![],
     });
@@ -2702,7 +2702,7 @@ pub fn create_logging_dict() -> HashMap<String, PyObjectRef> {
     // `record.getMessage()` if no format string was given.
     let formatter_class = PyObjectRef::new(PyObject::Type {
         name: "Formatter".to_string(),
-        dict: HashMap::from([
+        dict: Box::new(HashMap::from([
             ("__init__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
                 name: "__init__".to_string(),
                 func: |args| {
@@ -2742,7 +2742,7 @@ pub fn create_logging_dict() -> HashMap<String, PyObjectRef> {
                     Ok(py_str(&text))
                 },
             })),
-        ]),
+        ])),
         bases: vec![],
         mro: vec![],
     });
@@ -3727,7 +3727,7 @@ pub fn create_wave_dict() -> HashMap<String, PyObjectRef> {
 
                     let typ = PyObjectRef::new(PyObject::Type {
                         name: "Wave_read".to_string(),
-                        dict: type_dict,
+                        dict: Box::new(type_dict),
                         bases: vec![],
                         mro: vec![],
                     });
@@ -3881,7 +3881,7 @@ fn email_message_constructor(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 
     let email_type = PyObjectRef::new(PyObject::Type {
         name: "EmailMessage".to_string(),
-        dict: type_dict,
+        dict: Box::new(type_dict),
         bases: vec![],
         mro: vec![],
     });
@@ -3939,7 +3939,7 @@ pub fn create_email_dict() -> HashMap<String, PyObjectRef> {
 
         let mime_type = PyObjectRef::new(PyObject::Type {
             name: "MIMEText".to_string(),
-            dict: type_dict,
+            dict: Box::new(type_dict),
             bases: vec![],
             mro: vec![],
         });
@@ -3989,7 +3989,7 @@ pub fn create_email_mime_text_dict() -> HashMap<String, PyObjectRef> {
 
             let mime_type = PyObjectRef::new(PyObject::Type {
                 name: "MIMEText".to_string(),
-                dict: type_dict,
+                dict: Box::new(type_dict),
                 bases: vec![],
                 mro: vec![],
             });
@@ -4018,7 +4018,7 @@ pub fn create_email_header_dict() -> HashMap<String, PyObjectRef> {
             Ok(PyObjectRef::new(PyObject::Instance {
                 typ: PyObjectRef::new(PyObject::Type {
                     name: "email.header.Header".to_string(),
-                    dict: HashMap::new(),
+                    dict: Box::new(HashMap::new()),
                     bases: vec![],
                     mro: vec![],
                 }),
@@ -4558,7 +4558,7 @@ pub fn create_configparser_dict() -> HashMap<String, PyObjectRef> {
 
             let typ = PyObjectRef::new(PyObject::Type {
                 name: "ConfigParser".to_string(),
-                dict: type_dict,
+                dict: Box::new(type_dict),
                 bases: vec![],
                 mro: vec![],
             });
@@ -4985,7 +4985,7 @@ pub fn create_sunau_dict() -> HashMap<String, PyObjectRef> {
 
         let typ = PyObjectRef::new(PyObject::Type {
             name: "Au_read".to_string(),
-            dict: type_dict,
+            dict: Box::new(type_dict),
             bases: vec![],
             mro: vec![],
         });
@@ -5144,7 +5144,7 @@ pub fn create_xml_etree_dict() -> HashMap<String, PyObjectRef> {
 
     let element_type = PyObjectRef::new(PyObject::Type {
         name: "Element".to_string(),
-        dict: element_type_dict,
+        dict: Box::new(element_type_dict),
         bases: vec![],
         mro: vec![],
     });
@@ -5407,7 +5407,7 @@ pub fn create_argparse_dict() -> HashMap<String, PyObjectRef> {
         // Create Namespace instance
         let ns_type = PyObjectRef::new(PyObject::Type {
             name: "Namespace".to_string(),
-            dict: HashMap::new(),
+            dict: Box::new(HashMap::new()),
             bases: vec![],
             mro: vec![],
         });
@@ -5456,7 +5456,7 @@ pub fn create_argparse_dict() -> HashMap<String, PyObjectRef> {
 
     let parser_type = PyObjectRef::new(PyObject::Type {
         name: "ArgumentParser".to_string(),
-        dict: parser_type_dict,
+        dict: Box::new(parser_type_dict),
         bases: vec![],
         mro: vec![],
     });
@@ -5464,7 +5464,7 @@ pub fn create_argparse_dict() -> HashMap<String, PyObjectRef> {
     d.insert("ArgumentParser".to_string(), parser_type);
     // Action subclasses needed by Django management commands
     fn make_action(name: &str) -> PyObjectRef {
-        PyObjectRef::new(PyObject::Type { name: name.to_string(), dict: HashMap::new(), bases: vec![], mro: vec![] })
+        PyObjectRef::new(PyObject::Type { name: name.to_string(), dict: Box::new(HashMap::new()), bases: vec![], mro: vec![] })
     }
     d.insert("HelpFormatter".to_string(), make_action("HelpFormatter"));
     d.insert("SUPPRESS".to_string(), py_str("==SUPPRESS=="));
@@ -5574,7 +5574,7 @@ pub fn create_asyncio_dict() -> HashMap<String, PyObjectRef> {
 
     let future_type = PyObjectRef::new(PyObject::Type {
         name: "Future".to_string(),
-        dict: future_type_dict,
+        dict: Box::new(future_type_dict),
         bases: vec![],
         mro: vec![],
     });
@@ -5626,7 +5626,7 @@ pub fn create_asyncio_dict() -> HashMap<String, PyObjectRef> {
 
     let task_type = PyObjectRef::new(PyObject::Type {
         name: "Task".to_string(),
-        dict: task_type_dict,
+        dict: Box::new(task_type_dict),
         bases: vec![],
         mro: vec![],
     });
@@ -6156,7 +6156,7 @@ pub fn create_contextvars_dict() -> HashMap<String, PyObjectRef> {
     // Create the ContextVar Type object
     let contextvar_type = PyObjectRef::new(PyObject::Type {
         name: "ContextVar".to_string(),
-        dict: contextvar_type_dict,
+        dict: Box::new(contextvar_type_dict),
         bases: vec![],
         mro: vec![],
     });
@@ -6185,7 +6185,7 @@ pub fn create_contextvars_dict() -> HashMap<String, PyObjectRef> {
                 },
             }));
             td.insert("__name__".to_string(), py_str("Token"));
-            td
+            Box::new(td)
         },
         bases: vec![],
         mro: vec![],
@@ -6233,7 +6233,7 @@ pub fn create_contextvars_dict() -> HashMap<String, PyObjectRef> {
 
             Ok(PyObjectRef::new(PyObject::Module {
                 name: "Context".to_string(),
-                dict: ctx_module_dict,
+                dict: Box::new(ctx_module_dict),
             }))
         },
     });

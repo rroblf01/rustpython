@@ -88,7 +88,7 @@ fn build_struct_time_type() -> PyObjectRef {
             Ok(py_str("time.struct_time(...)"))
         }
     }));
-    PyObjectRef::new(PyObject::Type { name: "time.struct_time".to_string(), dict: type_dict, bases: vec![], mro: vec![] })
+    PyObjectRef::new(PyObject::Type { name: "time.struct_time".to_string(), dict: Box::new(type_dict), bases: vec![], mro: vec![] })
 }
 
 fn get_struct_time_type() -> PyObjectRef {
@@ -356,7 +356,7 @@ pub fn create_time_dict() -> HashMap<String, PyObjectRef> {
         Ok(PyObjectRef::new(PyObject::Instance {
             typ: PyObjectRef::new(PyObject::Type {
                 name: "namespace".to_string(),
-                dict: HashMap::new(),
+                dict: Box::new(HashMap::new()),
                 bases: vec![],
                 mro: vec![],
             }),
@@ -828,7 +828,7 @@ fn get_tzinfo_type() -> PyObjectRef {
     type_dict.insert("utcoffset".to_string(), bf!("utcoffset", |_args| Err(PyError::runtime_error("tzinfo subclasses must override utcoffset()"))));
     type_dict.insert("dst".to_string(), bf!("dst", |_args| Err(PyError::runtime_error("tzinfo subclasses must override dst()"))));
     type_dict.insert("tzname".to_string(), bf!("tzname", |_args| Err(PyError::runtime_error("tzinfo subclasses must override tzname()"))));
-    let typ = PyObjectRef::new(PyObject::Type { name: "tzinfo".to_string(), dict: type_dict, bases: vec![], mro: vec![] });
+    let typ = PyObjectRef::new(PyObject::Type { name: "tzinfo".to_string(), dict: Box::new(type_dict), bases: vec![], mro: vec![] });
     TZINFO_TYPE.with(|c| { *c.borrow_mut() = Some(typ.clone()); });
     typ
 }
@@ -982,7 +982,7 @@ fn build_timedelta_type() -> PyObjectRef {
         Ok(make_timedelta_from_us(timedelta_total_us(&args[0]) / divisor as i128))
     }));
 
-    PyObjectRef::new(PyObject::Type { name: "timedelta".to_string(), dict: type_dict, bases: vec![], mro: vec![] })
+    PyObjectRef::new(PyObject::Type { name: "timedelta".to_string(), dict: Box::new(type_dict), bases: vec![], mro: vec![] })
 }
 
 fn make_timedelta_with_type(typ: PyObjectRef, days: i64, seconds: i64, microseconds: i64) -> PyObjectRef {
@@ -1143,7 +1143,7 @@ fn build_date_type() -> PyObjectRef {
         Ok(make_date(y, m, d))
     }));
 
-    PyObjectRef::new(PyObject::Type { name: "date".to_string(), dict: type_dict, bases: vec![], mro: vec![] })
+    PyObjectRef::new(PyObject::Type { name: "date".to_string(), dict: Box::new(type_dict), bases: vec![], mro: vec![] })
 }
 
 fn make_date(year: i64, month: i64, day: i64) -> PyObjectRef {
@@ -1284,7 +1284,7 @@ fn build_time_type() -> PyObjectRef {
         }
     }));
 
-    PyObjectRef::new(PyObject::Type { name: "time".to_string(), dict: type_dict, bases: vec![], mro: vec![] })
+    PyObjectRef::new(PyObject::Type { name: "time".to_string(), dict: Box::new(type_dict), bases: vec![], mro: vec![] })
 }
 
 fn make_time(hour: i64, minute: i64, second: i64, microsecond: i64, tzinfo: PyObjectRef, fold: i64) -> PyObjectRef {
@@ -1668,7 +1668,7 @@ fn build_datetime_type() -> PyObjectRef {
         parse_datetime_isoformat(&s)
     }));
 
-    PyObjectRef::new(PyObject::Type { name: "datetime".to_string(), dict: type_dict, bases: vec![], mro: vec![] })
+    PyObjectRef::new(PyObject::Type { name: "datetime".to_string(), dict: Box::new(type_dict), bases: vec![], mro: vec![] })
 }
 
 fn make_datetime(year: i64, month: i64, day: i64, hour: i64, minute: i64, second: i64, microsecond: i64, tzinfo: PyObjectRef, fold: i64) -> PyObjectRef {
@@ -1741,7 +1741,7 @@ fn build_timezone_type() -> PyObjectRef {
         }
     }));
 
-    PyObjectRef::new(PyObject::Type { name: "timezone".to_string(), dict: type_dict, bases: vec![], mro: vec![] })
+    PyObjectRef::new(PyObject::Type { name: "timezone".to_string(), dict: Box::new(type_dict), bases: vec![], mro: vec![] })
 }
 
 fn make_timezone_with_type(typ: PyObjectRef, offset_seconds: i64, name: Option<String>) -> PyObjectRef {
@@ -1837,7 +1837,7 @@ fn build_zoneinfo_type() -> PyObjectRef {
         builtin_hash(&[py_str(&key)])
     }));
 
-    PyObjectRef::new(PyObject::Type { name: "ZoneInfo".to_string(), dict: type_dict, bases: vec![], mro: vec![] })
+    PyObjectRef::new(PyObject::Type { name: "ZoneInfo".to_string(), dict: Box::new(type_dict), bases: vec![], mro: vec![] })
 }
 
 fn get_zoneinfo_type() -> PyObjectRef {

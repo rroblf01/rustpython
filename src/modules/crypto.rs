@@ -428,7 +428,7 @@ pub fn create_hmac_dict() -> HashMap<String, PyObjectRef> {
         Ok(PyObjectRef::new(PyObject::Instance {
             typ: PyObjectRef::new(PyObject::Type {
                 name: "hmac".to_string(),
-                dict: type_dict,
+                dict: Box::new(type_dict),
                 bases: vec![],
                 mro: vec![],
             }),

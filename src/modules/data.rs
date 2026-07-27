@@ -128,7 +128,7 @@ pub fn create_collections_dict() -> HashMap<String, PyObjectRef> {
             type_dict.insert(f.clone(), PyObjectRef::new(PyObject::Instance {
                 typ: PyObjectRef::new(PyObject::Type {
                     name: "member_descriptor".to_string(),
-                    dict: HashMap::new(),
+                    dict: Box::new(HashMap::new()),
                     bases: vec![],
                     mro: vec![],
                 }),
@@ -137,7 +137,7 @@ pub fn create_collections_dict() -> HashMap<String, PyObjectRef> {
         }
         Ok(PyObjectRef::new(PyObject::Type {
             name: typename,
-            dict: type_dict,
+            dict: Box::new(type_dict),
             bases: vec![],
             mro: vec![],
         }))
@@ -330,7 +330,7 @@ pub fn create_functools_dict() -> HashMap<String, PyObjectRef> {
         let dispatcher = PyObjectRef::new(PyObject::Instance {
             typ: PyObjectRef::new(PyObject::Type {
                 name: "singledispatch".to_string(),
-                dict: call_type_dict,
+                dict: Box::new(call_type_dict),
                 bases: vec![],
                 mro: vec![],
             }),
@@ -484,7 +484,7 @@ pub fn create_functools_dict() -> HashMap<String, PyObjectRef> {
             let key_obj = PyObjectRef::new(PyObject::Instance {
                 typ: PyObjectRef::new(PyObject::Type {
                     name: "cmp_to_key".to_string(),
-                    dict: type_dict,
+                    dict: Box::new(type_dict),
                     bases: vec![],
                     mro: vec![],
                 }),
@@ -558,7 +558,7 @@ pub fn create_itertools_dict() -> HashMap<String, PyObjectRef> {
             }
             Ok(py_list(items))
         }))));
-        let chain_type = PyObjectRef::new(PyObject::Type { name: "chain".to_string(), dict: chain_type_dict, bases: vec![], mro: vec![] });
+        let chain_type = PyObjectRef::new(PyObject::Type { name: "chain".to_string(), dict: Box::new(chain_type_dict), bases: vec![], mro: vec![] });
         d.insert("chain".to_string(), PyObjectRef::new(PyObject::Instance { typ: chain_type, dict: AttrMap::new() }));
     }
 
@@ -1801,7 +1801,7 @@ fn build_decimal_type() -> PyObjectRef {
         Ok(decval_to_instance(&DecValue { special: DecSpecial::Finite, sign: n < 0, coeff: num_bigint::BigInt::from(n.abs()), exp: 0 }))
     }));
 
-    PyObjectRef::new(PyObject::Type { name: "Decimal".to_string(), dict: type_dict, bases: vec![], mro: vec![] })
+    PyObjectRef::new(PyObject::Type { name: "Decimal".to_string(), dict: Box::new(type_dict), bases: vec![], mro: vec![] })
 }
 
 fn build_context_type() -> PyObjectRef {
@@ -1827,7 +1827,7 @@ fn build_context_type() -> PyObjectRef {
         let prec = if let PyObject::Instance { dict, .. } = &*args[0].borrow() { dict.get("prec").and_then(|v| v.as_i64()).unwrap_or(28) } else { 28 };
         Ok(py_str(&format!("Context(prec={})", prec)))
     }));
-    PyObjectRef::new(PyObject::Type { name: "Context".to_string(), dict: type_dict, bases: vec![], mro: vec![] })
+    PyObjectRef::new(PyObject::Type { name: "Context".to_string(), dict: Box::new(type_dict), bases: vec![], mro: vec![] })
 }
 
 fn get_context_type() -> PyObjectRef {
@@ -1895,7 +1895,7 @@ pub fn create_decimal_dict() -> HashMap<String, PyObjectRef> {
             name: "__exit__".to_string(),
             func: |_args| { DECIMAL_CURRENT_CONTEXT.with(|c| { *c.borrow_mut() = (28, "ROUND_HALF_EVEN".to_string()); }); Ok(py_bool(false)) },
         }));
-        let cm_typ = PyObjectRef::new(PyObject::Type { name: "_ContextManager".to_string(), dict: cm_dict, bases: vec![], mro: vec![] });
+        let cm_typ = PyObjectRef::new(PyObject::Type { name: "_ContextManager".to_string(), dict: Box::new(cm_dict), bases: vec![], mro: vec![] });
         let mut inst_dict = AttrMap::new();
         inst_dict.insert("prec".to_string(), py_int(precision as i64));
         inst_dict.insert("rounding".to_string(), py_str(&rounding));
@@ -2142,7 +2142,7 @@ pub fn create_calendar_dict() -> HashMap<String, PyObjectRef> {
         Ok(PyObjectRef::new(PyObject::Instance {
             typ: PyObjectRef::new(PyObject::Type {
                 name: "HTMLCalendar".to_string(),
-                dict: type_dict,
+                dict: Box::new(type_dict),
                 bases: vec![],
                 mro: vec![],
             }),
@@ -2195,7 +2195,7 @@ pub fn create_calendar_dict() -> HashMap<String, PyObjectRef> {
         Ok(PyObjectRef::new(PyObject::Instance {
             typ: PyObjectRef::new(PyObject::Type {
                 name: "TextCalendar".to_string(),
-                dict: type_dict,
+                dict: Box::new(type_dict),
                 bases: vec![],
                 mro: vec![],
             }),
@@ -2526,7 +2526,7 @@ pub fn create_random_cmodule_dict() -> HashMap<String, PyObjectRef> {
 
     let random_type = PyObjectRef::new(PyObject::Type {
         name: "Random".to_string(),
-        dict: type_dict,
+        dict: Box::new(type_dict),
         bases: vec![],
         mro: vec![],
     });

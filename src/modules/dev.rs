@@ -120,7 +120,7 @@ pub fn create_warnings_dict() -> HashMap<String, PyObjectRef> {
     }));
     d.insert("catch_warnings".to_string(), PyObjectRef::new(PyObject::Type {
         name: "catch_warnings".to_string(),
-        dict: cw_dict,
+        dict: Box::new(cw_dict),
         bases: vec![],
         mro: vec![],
     }));
@@ -142,7 +142,7 @@ pub fn create_abc_dict() -> HashMap<String, PyObjectRef> {
         Ok(PyObjectRef::new(PyObject::Instance {
             typ: PyObjectRef::new(PyObject::Module {
                 name: "abc".to_string(),
-                dict: HashMap::new(),
+                dict: Box::new(HashMap::new()),
             }),
             dict: AttrMap::new(),
         }))
@@ -164,7 +164,7 @@ pub fn create_abc_dict() -> HashMap<String, PyObjectRef> {
         let name = if !args.is_empty() { args[0].str() } else { "ABCMeta".to_string() };
         Ok(PyObjectRef::new(PyObject::Type {
             name,
-            dict: HashMap::new(),
+            dict: Box::new(HashMap::new()),
             bases: vec![],
             mro: vec![],
         }))
@@ -241,7 +241,7 @@ pub fn create_dataclasses_dict() -> HashMap<String, PyObjectRef> {
     // separately-tracked gap, not something this placeholder fixes.
     d.insert("Field".to_string(), PyObjectRef::new(PyObject::Type {
         name: "Field".to_string(),
-        dict: HashMap::new(),
+        dict: Box::new(HashMap::new()),
         bases: vec![],
         mro: vec![],
     }));
@@ -322,7 +322,7 @@ pub fn create_dataclasses_dict() -> HashMap<String, PyObjectRef> {
         let name = args[0].str();
         Ok(PyObjectRef::new(PyObject::Type {
             name,
-            dict: HashMap::new(),
+            dict: Box::new(HashMap::new()),
             bases: vec![],
             mro: vec![],
         }))
@@ -399,7 +399,7 @@ pub fn create_unittest_dict() -> HashMap<String, PyObjectRef> {
 
     let testcase_class = PyObjectRef::new(PyObject::Type {
         name: "TestCase".to_string(),
-        dict: tc_dict,
+        dict: Box::new(tc_dict),
         bases: vec![],
         mro: vec![],
     });
@@ -608,7 +608,7 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
     d.insert("_sentinel".to_string(), PyObjectRef::new(PyObject::Instance {
         typ: PyObjectRef::new(PyObject::Type {
             name: "_sentinel".to_string(),
-            dict: HashMap::new(),
+            dict: Box::new(HashMap::new()),
             bases: vec![],
             mro: vec![],
         }),
@@ -838,7 +838,7 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
             param_type_dict.insert("KEYWORD_ONLY".to_string(), py_int(3));
             param_type_dict.insert("VAR_KEYWORD".to_string(), py_int(4));
             param_type_dict.insert("empty".to_string(), py_none());
-            let param_type = PyObjectRef::new(PyObject::Type { name: "Parameter".to_string(), dict: param_type_dict, bases: vec![], mro: vec![] });
+            let param_type = PyObjectRef::new(PyObject::Type { name: "Parameter".to_string(), dict: Box::new(param_type_dict), bases: vec![], mro: vec![] });
             let make_param = |pname: &str, kind: i64, default: PyObjectRef, param_type: &PyObjectRef| {
                 let mut inst_dict = AttrMap::new();
                 inst_dict.insert("name".to_string(), py_str(pname));
@@ -891,7 +891,7 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
                 let p = make_param(kw, 4, py_none(), &param_type); // VAR_KEYWORD
                 params.set(py_str(kw), p)?;
             }
-            let sig_type = PyObjectRef::new(PyObject::Type { name: "Signature".to_string(), dict: HashMap::new(), bases: vec![], mro: vec![] });
+            let sig_type = PyObjectRef::new(PyObject::Type { name: "Signature".to_string(), dict: Box::new(HashMap::new()), bases: vec![], mro: vec![] });
             let mut sig_dict = AttrMap::new();
             sig_dict.insert("parameters".to_string(), PyObjectRef::new(PyObject::Dict(Box::new(params))));
             Ok(PyObjectRef::new(PyObject::Instance { typ: sig_type, dict: sig_dict }))
@@ -919,8 +919,8 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
     param_type_dict.insert("KEYWORD_ONLY".to_string(), py_int(3));
     param_type_dict.insert("VAR_KEYWORD".to_string(), py_int(4));
     param_type_dict.insert("empty".to_string(), py_none());
-    d.insert("Parameter".to_string(), PyObjectRef::new(PyObject::Type { name: "Parameter".to_string(), dict: param_type_dict, bases: vec![], mro: vec![] }));
-    d.insert("Signature".to_string(), PyObjectRef::new(PyObject::Type { name: "Signature".to_string(), dict: HashMap::new(), bases: vec![], mro: vec![] }));
+    d.insert("Parameter".to_string(), PyObjectRef::new(PyObject::Type { name: "Parameter".to_string(), dict: Box::new(param_type_dict), bases: vec![], mro: vec![] }));
+    d.insert("Signature".to_string(), PyObjectRef::new(PyObject::Type { name: "Signature".to_string(), dict: Box::new(HashMap::new()), bases: vec![], mro: vec![] }));
 
     // Code object flags (CO_* constants)
     d.insert("CO_OPTIMIZED".to_string(), py_int(0x0001));
@@ -1464,7 +1464,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
         type_dict.insert("close".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| Ok(py_none())))));
 
         Ok(PyObjectRef::new(PyObject::Instance {
-            typ: PyObjectRef::new(PyObject::Type { name: "BytesIO".to_string(), dict: type_dict, bases: vec![], mro: vec![] }),
+            typ: PyObjectRef::new(PyObject::Type { name: "BytesIO".to_string(), dict: Box::new(type_dict), bases: vec![], mro: vec![] }),
             dict: AttrMap::new(),
         }))
     });
@@ -1507,7 +1507,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
     // BlockingIOError — exception type (needs to support attribute setting like __module__)
     d.insert("BlockingIOError".to_string(), PyObjectRef::new(PyObject::Type {
         name: "BlockingIOError".to_string(),
-        dict: HashMap::new(),
+        dict: Box::new(HashMap::new()),
         bases: vec![],
         mro: vec![],
     }));
@@ -1519,7 +1519,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
     }));
     d.insert("UnsupportedOperation".to_string(), PyObjectRef::new(PyObject::Type {
         name: "UnsupportedOperation".to_string(),
-        dict: uo_dict,
+        dict: Box::new(uo_dict),
         bases: vec![],
         mro: vec![],
     }));
@@ -1548,7 +1548,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
         name: "__exit__".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
     }));
     let iobase_cls = PyObjectRef::new(PyObject::Type {
-        name: "IOBase".to_string(), dict: iobase_dict, bases: vec![], mro: vec![],
+        name: "IOBase".to_string(), dict: Box::new(iobase_dict), bases: vec![], mro: vec![],
     });
     d.insert("IOBase".to_string(), iobase_cls.clone());
     d.insert("_IOBase".to_string(), iobase_cls.clone());
@@ -1575,7 +1575,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
         name: "register".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
     }));
     let raw_cls = PyObjectRef::new(PyObject::Type {
-        name: "RawIOBase".to_string(), dict: raw_dict,
+        name: "RawIOBase".to_string(), dict: Box::new(raw_dict),
         bases: vec![iobase_cls.clone()], mro: vec![iobase_cls.clone()],
     });
     d.insert("RawIOBase".to_string(), raw_cls.clone());
@@ -1603,7 +1603,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
         name: "register".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
     }));
     let buf_cls = PyObjectRef::new(PyObject::Type {
-        name: "BufferedIOBase".to_string(), dict: buf_dict,
+        name: "BufferedIOBase".to_string(), dict: Box::new(buf_dict),
         bases: vec![iobase_cls.clone()], mro: vec![iobase_cls.clone()],
     });
     d.insert("BufferedIOBase".to_string(), buf_cls.clone());
@@ -1628,7 +1628,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
         name: "register".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
     }));
     let text_cls = PyObjectRef::new(PyObject::Type {
-        name: "TextIOBase".to_string(), dict: text_dict,
+        name: "TextIOBase".to_string(), dict: Box::new(text_dict),
         bases: vec![iobase_cls.clone()], mro: vec![iobase_cls.clone()],
     });
     d.insert("TextIOBase".to_string(), text_cls.clone());
@@ -1800,7 +1800,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
 
         Ok(PyObjectRef::new(PyObject::Instance {
             typ: PyObjectRef::new(PyObject::Type {
-                name: "StringIO".to_string(), dict: type_dict,
+                name: "StringIO".to_string(), dict: Box::new(type_dict),
                 bases: vec![text_cls.clone()], mro: vec![text_cls.clone()],
             }),
             dict: AttrMap::new(),
@@ -1809,13 +1809,13 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
     d.insert("StringIO".to_string(), PyObjectRef::new(PyObject::Closure(stringio_closure)));
 
     // BufferedReader, BufferedWriter, BufferedRWPair, BufferedRandom — stubs
-    let br_dict = HashMap::new(); let br_cls = PyObjectRef::new(PyObject::Type { name: "BufferedReader".to_string(), dict: br_dict, bases: vec![buf_cls.clone()], mro: vec![buf_cls.clone()] });
+    let br_dict = HashMap::new(); let br_cls = PyObjectRef::new(PyObject::Type { name: "BufferedReader".to_string(), dict: Box::new(br_dict), bases: vec![buf_cls.clone()], mro: vec![buf_cls.clone()] });
     d.insert("BufferedReader".to_string(), br_cls.clone());
-    let bw_dict = HashMap::new(); let bw_cls = PyObjectRef::new(PyObject::Type { name: "BufferedWriter".to_string(), dict: bw_dict, bases: vec![buf_cls.clone()], mro: vec![buf_cls.clone()] });
+    let bw_dict = HashMap::new(); let bw_cls = PyObjectRef::new(PyObject::Type { name: "BufferedWriter".to_string(), dict: Box::new(bw_dict), bases: vec![buf_cls.clone()], mro: vec![buf_cls.clone()] });
     d.insert("BufferedWriter".to_string(), bw_cls.clone());
-    let brp_dict = HashMap::new(); let brp_cls = PyObjectRef::new(PyObject::Type { name: "BufferedRWPair".to_string(), dict: brp_dict, bases: vec![buf_cls.clone()], mro: vec![buf_cls.clone()] });
+    let brp_dict = HashMap::new(); let brp_cls = PyObjectRef::new(PyObject::Type { name: "BufferedRWPair".to_string(), dict: Box::new(brp_dict), bases: vec![buf_cls.clone()], mro: vec![buf_cls.clone()] });
     d.insert("BufferedRWPair".to_string(), brp_cls.clone());
-    let brnd_dict = HashMap::new(); let brnd_cls = PyObjectRef::new(PyObject::Type { name: "BufferedRandom".to_string(), dict: brnd_dict, bases: vec![buf_cls.clone()], mro: vec![buf_cls.clone()] });
+    let brnd_dict = HashMap::new(); let brnd_cls = PyObjectRef::new(PyObject::Type { name: "BufferedRandom".to_string(), dict: Box::new(brnd_dict), bases: vec![buf_cls.clone()], mro: vec![buf_cls.clone()] });
     d.insert("BufferedRandom".to_string(), brnd_cls.clone());
 
     // TextIOWrapper — stub type needed by io.py
@@ -1823,7 +1823,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
     tiw_dict.insert("read".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "read".to_string(), func: |_: &[PyObjectRef]| Ok(py_str("")) }));
     tiw_dict.insert("write".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "write".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()) }));
     tiw_dict.insert("close".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "close".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()) }));
-    let tiw_cls = PyObjectRef::new(PyObject::Type { name: "TextIOWrapper".to_string(), dict: tiw_dict, bases: vec![], mro: vec![] });
+    let tiw_cls = PyObjectRef::new(PyObject::Type { name: "TextIOWrapper".to_string(), dict: Box::new(tiw_dict), bases: vec![], mro: vec![] });
     d.insert("TextIOWrapper".to_string(), tiw_cls);
 
     d.insert("_WindowsConsoleIO".to_string(), py_str("_WindowsConsoleIO"));
