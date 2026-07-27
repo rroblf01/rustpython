@@ -928,7 +928,7 @@ fn build_simple_namespace_type() -> PyObjectRef {
     // confirmed against real Python behavior, not guessed.
     type_dict.insert("__repr__".to_string(), bf!("__repr__", |args| {
         if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
-            let mut items: Vec<(String, PyObjectRef)> = dict.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            let mut items: Vec<(String, PyObjectRef)> = dict.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
             items.sort_by(|a, b| a.0.cmp(&b.0));
             let body = items.iter().map(|(k, v)| format!("{}={}", k, v.repr())).collect::<Vec<_>>().join(", ");
             Ok(py_str(&format!("namespace({})", body)))

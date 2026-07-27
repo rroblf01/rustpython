@@ -951,7 +951,7 @@ fn getmembers_dict_of(obj: &PyObjectRef) -> Vec<(String, PyObjectRef)> {
         PyObject::Function(ref f) => f.dict.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
         PyObject::Type { dict, .. } => dict.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
         PyObject::Module { dict, .. } => dict.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-        PyObject::Instance { dict, .. } => dict.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        PyObject::Instance { dict, .. } => dict.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(),
         _ => Vec::new(),
     };
     items.sort_by(|a, b| a.0.cmp(&b.0));

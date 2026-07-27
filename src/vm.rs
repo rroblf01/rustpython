@@ -124,7 +124,7 @@ impl Frame {
                 "END".to_string()
             };
             let arg = if instr_ip < self.code.instructions.len() { self.code.instructions[instr_ip].arg } else { 0 };
-            let line_no = if instr_ip < self.code.instructions.len() { self.code.instructions[instr_ip].line_no.unwrap_or(0) } else { 0 };
+            let line_no = if instr_ip < self.code.instructions.len() { self.code.line_number(instr_ip) } else { 0 };
             PyError::runtime_error(format!("stack underflow at {} arg={} line={} code={} file={}", op_str, arg, line_no, self.code.name, self.code.filename))
         })
     }
@@ -2017,7 +2017,7 @@ impl VirtualMachine {
                         // some level below DOES catch it — see the `else` branch).
                         if let Some(f) = self.frames.get(frame_floor) {
                             let idx = f.ip.saturating_sub(1).min(f.code.instructions.len().saturating_sub(1));
-                            let line = f.code.instructions.get(idx).and_then(|i| i.line_no).unwrap_or(f.code.first_lineno);
+                            let line = f.code.line_number(idx);
                             // Each enclosing level re-runs this same branch as
                             // the error keeps propagating outward — only the
                             // FIRST (innermost, deepest) occurrence should set
@@ -2169,7 +2169,7 @@ impl VirtualMachine {
                         if std::env::var("RPY_DEBUG_NAMEERROR").is_ok() {
                             eprintln!("LOAD_FAST unbound: func={} file={} line={:?} varnames={:?}",
                                 self.frames[fi].code.name, self.frames[fi].code.filename,
-                                self.frames[fi].code.instructions.get(self.frames[fi].ip.saturating_sub(1)).and_then(|i| i.line_no),
+                                self.frames[fi].code.line_number(self.frames[fi].ip.saturating_sub(1)),
                                 self.frames[fi].code.varnames);
                         }
                         return Err(PyError::name_error(format!("local variable '{}' referenced before assignment",

@@ -249,8 +249,8 @@ impl Compiler {
     }
 
     fn emit(&mut self, op: Opcode, arg: u32) {
-        let mut instr = Instr::with_arg(op, arg);
-        instr.line_no = Some(self.current_line);
+        let instr = Instr::with_arg(op, arg);
+        self.code.line_numbers.push(self.current_line as u32);
         self.code.instructions.push(instr);
     }
 

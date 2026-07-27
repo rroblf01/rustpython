@@ -255,12 +255,11 @@ impl Opcode {
 pub struct Instr {
     pub op: Opcode,
     pub arg: u32,
-    pub line_no: Option<usize>,
 }
 
 impl Instr {
     pub fn with_arg(op: Opcode, arg: u32) -> Self {
-        Instr { op, arg, line_no: None }
+        Instr { op, arg }
     }
 }
 
@@ -346,6 +345,9 @@ pub struct CodeObject {
     /// instance/class attributes, globals — and were found this same
     /// session to need real invalidation before they can safely cache).
     pub const_cache: RefCell<Vec<Option<PyObjectRef>>>,
+    /// Line number for each instruction (0 = unknown).
+    /// Same length as `instructions`; stored separately so Instr stays 8 bytes.
+    pub line_numbers: Vec<u32>,
 }
 
 impl CodeObject {
@@ -369,7 +371,13 @@ impl CodeObject {
             num_defaults: 0,
             kwonly_defaults_mask: Box::new(Vec::new()),
             const_cache: RefCell::new(Vec::new()),
+            line_numbers: Vec::new(),
         }
+    }
+
+    /// Look up the line number for a given instruction index.
+    pub fn line_number(&self, idx: usize) -> usize {
+        self.line_numbers.get(idx).copied().filter(|&ln| ln != 0).map(|ln| ln as usize).unwrap_or(self.first_lineno)
     }
 
     /// Serialize this CodeObject to a byte vector.
@@ -400,20 +408,16 @@ impl CodeObject {
         write_u32(&mut buf, self.kwonlyarg_count as u32);
         write_u32(&mut buf, self.nlocals as u32);
 
-        // Instructions
+        // Instructions (no line_no — stored separately as line_numbers)
         write_u32(&mut buf, self.instructions.len() as u32);
         for instr in &self.instructions {
             write_u16(&mut buf, instr.op as u16);
             write_u32(&mut buf, instr.arg);
-            match instr.line_no {
-                Some(ln) => {
-                    write_u8(&mut buf, 1);
-                    write_u32(&mut buf, ln as u32);
-                }
-                None => {
-                    write_u8(&mut buf, 0);
-                }
-            }
+        }
+        // Line numbers (same length as instructions)
+        write_u32(&mut buf, self.line_numbers.len() as u32);
+        for &ln in &self.line_numbers {
+            write_u32(&mut buf, ln);
         }
 
         // Constants
@@ -465,20 +469,20 @@ impl CodeObject {
         let kwonlyarg_count = read_u32(data, &mut pos)? as usize;
         let nlocals = read_u32(data, &mut pos)? as usize;
 
-        // Instructions
+        // Instructions (no embedded line_no — stored separately)
         let instr_count = read_u32(data, &mut pos)? as usize;
         let mut instructions = Vec::with_capacity(instr_count);
         for _ in 0..instr_count {
             let op_val = read_u16(data, &mut pos)?;
             let op = Opcode::from_u16(op_val).ok_or_else(|| format!("Unknown opcode: {}", op_val))?;
             let arg = read_u32(data, &mut pos)?;
-            let has_line = read_u8(data, &mut pos)?;
-            let line_no = if has_line != 0 {
-                Some(read_u32(data, &mut pos)? as usize)
-            } else {
-                None
-            };
-            instructions.push(Instr { op, arg, line_no });
+            instructions.push(Instr { op, arg });
+        }
+        // Line numbers (same length as instructions)
+        let ln_count = read_u32(data, &mut pos)? as usize;
+        let mut line_numbers = Vec::with_capacity(ln_count);
+        for _ in 0..ln_count {
+            line_numbers.push(read_u32(data, &mut pos)?);
         }
 
         // Constants
@@ -540,6 +544,7 @@ impl CodeObject {
             num_defaults,
             kwonly_defaults_mask,
             const_cache: RefCell::new(Vec::new()),
+            line_numbers,
         })
     }
 }

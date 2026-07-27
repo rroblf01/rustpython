@@ -21,39 +21,141 @@ use crate::bytecode::*;
 // PyObjectRef` parameter — that invariant is enforced by construction in
 // this file's codegen, not by the callee, so it isn't re-derived per function.
 extern "C" fn jit_py_add(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
+    unsafe {
+        if let (PyObjectRef::SmallInt(av), PyObjectRef::SmallInt(bv)) = (&*a, &*b) {
+            if let Some(sum) = av.checked_add(*bv) {
+                std::ptr::write(out, PyObjectRef::SmallInt(sum));
+                return;
+            }
+        }
+    }
     unsafe { std::ptr::write(out, crate::object::py_add(&*a, &*b).unwrap_or_else(|_| crate::object::py_none())); }
 }
 extern "C" fn jit_py_sub(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
+    unsafe {
+        if let (PyObjectRef::SmallInt(av), PyObjectRef::SmallInt(bv)) = (&*a, &*b) {
+            if let Some(diff) = av.checked_sub(*bv) {
+                std::ptr::write(out, PyObjectRef::SmallInt(diff));
+                return;
+            }
+        }
+    }
     unsafe { std::ptr::write(out, crate::object::py_sub(&*a, &*b).unwrap_or_else(|_| crate::object::py_none())); }
 }
 extern "C" fn jit_py_mul(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
+    unsafe {
+        if let (PyObjectRef::SmallInt(av), PyObjectRef::SmallInt(bv)) = (&*a, &*b) {
+            if let Some(prod) = av.checked_mul(*bv) {
+                std::ptr::write(out, PyObjectRef::SmallInt(prod));
+                return;
+            }
+        }
+    }
     unsafe { std::ptr::write(out, crate::object::py_mul(&*a, &*b).unwrap_or_else(|_| crate::object::py_none())); }
 }
 extern "C" fn jit_py_div(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
+    unsafe {
+        if let (PyObjectRef::SmallInt(av), PyObjectRef::SmallInt(bv)) = (&*a, &*b) {
+            // Integer division returns float, so only fast-path if exact
+            if *bv != 0 && av % bv == 0 {
+                std::ptr::write(out, PyObjectRef::SmallFloat(*av as f64 / *bv as f64));
+                return;
+            }
+        }
+    }
     unsafe { std::ptr::write(out, crate::object::py_div(&*a, &*b).unwrap_or_else(|_| crate::object::py_none())); }
 }
 extern "C" fn jit_py_floor_div(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
+    unsafe {
+        if let (PyObjectRef::SmallInt(av), PyObjectRef::SmallInt(bv)) = (&*a, &*b) {
+            if let Some(q) = av.checked_div(*bv) {
+                // Rust's / on i64 truncates toward zero; Python floor-div truncates toward -inf.
+                // Adjust when signs differ and there's a remainder.
+                let adjusted = if (av ^ bv) < 0 && av % *bv != 0 { q - 1 } else { q };
+                std::ptr::write(out, PyObjectRef::SmallInt(adjusted));
+                return;
+            }
+        }
+    }
     unsafe { std::ptr::write(out, crate::object::py_floor_div(&*a, &*b).unwrap_or_else(|_| crate::object::py_none())); }
 }
 extern "C" fn jit_py_mod(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
+    unsafe {
+        if let (PyObjectRef::SmallInt(av), PyObjectRef::SmallInt(bv)) = (&*a, &*b) {
+            if *bv != 0 {
+                // Python modulus: result has sign of divisor (bv)
+                let r = av % *bv;
+                let adjusted = if (r ^ bv) >= 0 { r } else { r + *bv };
+                std::ptr::write(out, PyObjectRef::SmallInt(adjusted));
+                return;
+            }
+        }
+    }
     unsafe { std::ptr::write(out, crate::object::py_mod(&*a, &*b).unwrap_or_else(|_| crate::object::py_none())); }
 }
 extern "C" fn jit_py_pow(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
+    unsafe {
+        if let (PyObjectRef::SmallInt(av), PyObjectRef::SmallInt(bv)) = (&*a, &*b) {
+            if *bv >= 0 && *bv <= 20 {
+                if let Some(p) = av.checked_pow(*bv as u32) {
+                    std::ptr::write(out, PyObjectRef::SmallInt(p));
+                    return;
+                }
+            }
+        }
+    }
     unsafe { std::ptr::write(out, crate::object::py_pow(&*a, &*b).unwrap_or_else(|_| crate::object::py_none())); }
 }
 extern "C" fn jit_py_lshift(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
+    unsafe {
+        if let (PyObjectRef::SmallInt(av), PyObjectRef::SmallInt(bv)) = (&*a, &*b) {
+            if *bv >= 0 && *bv < 64 {
+                if let Some(s) = av.checked_shl(*bv as u32) {
+                    std::ptr::write(out, PyObjectRef::SmallInt(s));
+                    return;
+                }
+            }
+        }
+    }
     unsafe { std::ptr::write(out, crate::object::py_lshift(&*a, &*b).unwrap_or_else(|_| crate::object::py_none())); }
 }
 extern "C" fn jit_py_rshift(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
+    unsafe {
+        if let (PyObjectRef::SmallInt(av), PyObjectRef::SmallInt(bv)) = (&*a, &*b) {
+            if *bv >= 0 && *bv < 64 {
+                // Rust right-shift is arithmetic (sign-extending) for i64, matching Python
+                std::ptr::write(out, PyObjectRef::SmallInt(av >> *bv));
+                return;
+            }
+        }
+    }
     unsafe { std::ptr::write(out, crate::object::py_rshift(&*a, &*b).unwrap_or_else(|_| crate::object::py_none())); }
 }
 extern "C" fn jit_py_bit_and(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
+    unsafe {
+        if let (PyObjectRef::SmallInt(av), PyObjectRef::SmallInt(bv)) = (&*a, &*b) {
+            std::ptr::write(out, PyObjectRef::SmallInt(av & bv));
+            return;
+        }
+    }
     unsafe { std::ptr::write(out, crate::object::py_bit_and(&*a, &*b).unwrap_or_else(|_| crate::object::py_none())); }
 }
 extern "C" fn jit_py_bit_or(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
+    unsafe {
+        if let (PyObjectRef::SmallInt(av), PyObjectRef::SmallInt(bv)) = (&*a, &*b) {
+            std::ptr::write(out, PyObjectRef::SmallInt(av | bv));
+            return;
+        }
+    }
     unsafe { std::ptr::write(out, crate::object::py_bit_or(&*a, &*b).unwrap_or_else(|_| crate::object::py_none())); }
 }
 extern "C" fn jit_py_bit_xor(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
+    unsafe {
+        if let (PyObjectRef::SmallInt(av), PyObjectRef::SmallInt(bv)) = (&*a, &*b) {
+            std::ptr::write(out, PyObjectRef::SmallInt(av ^ bv));
+            return;
+        }
+    }
     unsafe { std::ptr::write(out, crate::object::py_bit_xor(&*a, &*b).unwrap_or_else(|_| crate::object::py_none())); }
 }
 extern "C" fn jit_py_compare(a: *const PyObjectRef, b: *const PyObjectRef, op: i64, out: *mut PyObjectRef) {
@@ -945,6 +1047,7 @@ impl JitCompiler {
         let has_loop = code.instructions.iter().any(|i| matches!(i.op, Opcode::JUMP_BACKWARD | Opcode::FOR_ITER));
         if !has_loop { return None; }
 
+        // Check all opcodes are supported
         let supported: &[Opcode] = &[
             Opcode::LOAD_FAST, Opcode::LOAD_CONST,
             Opcode::BINARY_OP, Opcode::RETURN_VALUE,

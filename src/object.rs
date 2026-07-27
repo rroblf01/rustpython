@@ -29,7 +29,7 @@ impl DictMap for HashMap<String, PyObjectRef> {
 /// deliberately keep `HashMap`, where hashing actually pays for itself.
 #[derive(Debug, Clone, Default)]
 pub struct AttrMap {
-    entries: Vec<(String, PyObjectRef)>,
+    entries: Vec<(StrId, PyObjectRef)>,
 }
 
 impl AttrMap {
@@ -37,41 +37,46 @@ impl AttrMap {
         AttrMap { entries: Vec::new() }
     }
 
-    fn position(&self, key: &str) -> Option<usize> {
-        self.entries.iter().position(|(k, _)| k == key)
+    fn position(&self, key: StrId) -> Option<usize> {
+        self.entries.iter().position(|(k, _)| *k == key)
     }
 
     pub fn get(&self, key: &str) -> Option<&PyObjectRef> {
-        self.position(key).map(|i| &self.entries[i].1)
+        let sid = interner::intern(key);
+        self.position(sid).map(|i| &self.entries[i].1)
     }
 
     pub fn get_mut(&mut self, key: &str) -> Option<&mut PyObjectRef> {
-        match self.position(key) {
+        let sid = interner::intern(key);
+        match self.position(sid) {
             Some(i) => Some(&mut self.entries[i].1),
             None => None,
         }
     }
 
     pub fn insert(&mut self, key: String, value: PyObjectRef) -> Option<PyObjectRef> {
-        match self.position(&key) {
+        let sid = interner::intern(&key);
+        match self.position(sid) {
             Some(i) => Some(std::mem::replace(&mut self.entries[i].1, value)),
             None => {
-                self.entries.push((key, value));
+                self.entries.push((sid, value));
                 None
             }
         }
     }
 
     pub fn remove(&mut self, key: &str) -> Option<PyObjectRef> {
-        self.position(key).map(|i| self.entries.remove(i).1)
+        let sid = interner::intern(key);
+        self.position(sid).map(|i| self.entries.remove(i).1)
     }
 
     pub fn contains_key(&self, key: &str) -> bool {
-        self.position(key).is_some()
+        let sid = interner::intern(key);
+        self.position(sid).is_some()
     }
 
-    pub fn keys(&self) -> impl Iterator<Item = &String> {
-        self.entries.iter().map(|(k, _)| k)
+    pub fn keys(&self) -> impl Iterator<Item = &str> {
+        self.entries.iter().map(|(k, _)| interner::lookup_str(*k))
     }
 
     pub fn values(&self) -> impl Iterator<Item = &PyObjectRef> {
@@ -82,12 +87,12 @@ impl AttrMap {
         self.entries.iter_mut().map(|(_, v)| v)
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&String, &PyObjectRef)> {
-        self.entries.iter().map(|(k, v)| (k, v))
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &PyObjectRef)> {
+        self.entries.iter().map(|(k, v)| (interner::lookup_str(*k), v))
     }
 
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&String, &mut PyObjectRef)> {
-        self.entries.iter_mut().map(|(k, v)| (&*k, v))
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&str, &mut PyObjectRef)> {
+        self.entries.iter_mut().map(|(k, v)| (interner::lookup_str(*k), v))
     }
 
     pub fn len(&self) -> usize {
@@ -103,9 +108,10 @@ impl AttrMap {
     }
 
     pub fn entry(&mut self, key: String) -> AttrEntry<'_> {
-        match self.position(&key) {
+        let sid = interner::intern(&key);
+        match self.position(sid) {
             Some(i) => AttrEntry::Occupied(&mut self.entries[i].1),
-            None => AttrEntry::Vacant(self, key),
+            None => AttrEntry::Vacant(self, sid),
         }
     }
 }
@@ -139,16 +145,16 @@ impl FromIterator<(String, PyObjectRef)> for AttrMap {
 }
 
 impl IntoIterator for AttrMap {
-    type Item = (String, PyObjectRef);
-    type IntoIter = std::vec::IntoIter<(String, PyObjectRef)>;
+    type Item = (StrId, PyObjectRef);
+    type IntoIter = std::vec::IntoIter<(StrId, PyObjectRef)>;
     fn into_iter(self) -> Self::IntoIter {
         self.entries.into_iter()
     }
 }
 
 impl<'a> IntoIterator for &'a AttrMap {
-    type Item = (&'a String, &'a PyObjectRef);
-    type IntoIter = Box<dyn Iterator<Item = (&'a String, &'a PyObjectRef)> + 'a>;
+    type Item = (&'a str, &'a PyObjectRef);
+    type IntoIter = Box<dyn Iterator<Item = (&'a str, &'a PyObjectRef)> + 'a>;
     fn into_iter(self) -> Self::IntoIter {
         Box::new(self.iter())
     }
@@ -156,15 +162,15 @@ impl<'a> IntoIterator for &'a AttrMap {
 
 pub enum AttrEntry<'a> {
     Occupied(&'a mut PyObjectRef),
-    Vacant(&'a mut AttrMap, String),
+    Vacant(&'a mut AttrMap, StrId),
 }
 
 impl<'a> AttrEntry<'a> {
     pub fn or_insert_with<F: FnOnce() -> PyObjectRef>(self, f: F) -> &'a mut PyObjectRef {
         match self {
             AttrEntry::Occupied(v) => v,
-            AttrEntry::Vacant(map, key) => {
-                map.entries.push((key, f()));
+            AttrEntry::Vacant(map, sid) => {
+                map.entries.push((sid, f()));
                 &mut map.entries.last_mut().unwrap().1
             }
         }
@@ -2140,10 +2146,6 @@ where
 }
 
 thread_local! {
-    static SMALL_INT_CACHE: std::cell::RefCell<Vec<Option<PyObjectRef>>> = std::cell::RefCell::new(vec![None; 263]);
-}
-
-thread_local! {
     // Every user-defined class ever built (registered from
     // `VirtualMachine::default_build_class`), kept alive for the process's
     // lifetime — backs `type.__subclasses__()`. Real CPython tracks this via
@@ -2183,19 +2185,6 @@ pub(crate) fn direct_subclasses_of(cls: &PyObjectRef) -> Vec<PyObjectRef> {
 pub fn py_int(i: impl Into<BigInt>) -> PyObjectRef {
     let big = i.into();
     if let Some(n) = big.to_i64() {
-        if n >= -5 && n <= 257 {
-            let idx = (n + 5) as usize;
-            return SMALL_INT_CACHE.with(|cache| {
-                let mut cache = cache.borrow_mut();
-                if let Some(ref cached) = cache[idx] {
-                    cached.clone()
-                } else {
-                    let val = PyObjectRef::imm(PyObject::Int(BigInt::from(n)));
-                    cache[idx] = Some(val.clone());
-                    val
-                }
-            });
-        }
         return PyObjectRef::SmallInt(n);
     }
     PyObjectRef::imm(PyObject::Int(big))
@@ -7220,7 +7209,7 @@ impl PyObject {
                             }
                             // Fallback: provide common dict methods for dict-like instances
                             if name == "__iter__" || name == "items" || name == "keys" || name == "values" {
-                                let dict_snapshot: Vec<(String, PyObjectRef)> = dict.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                                let dict_snapshot: Vec<(String, PyObjectRef)> = dict.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
                                 let result = instance_builtin_dict_method(name, dict_snapshot);
                                 return result;
                             }
