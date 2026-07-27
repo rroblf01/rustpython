@@ -1,5 +1,6 @@
 use std::rc::Rc;
 use std::cell::RefCell;
+use crate::interner::{self, StrId};
 
 /// DictMap trait: provides get_str/insert_str/contains_key_str for HashMap and InternedMap.
 pub trait DictMap {
@@ -1274,7 +1275,7 @@ impl PyDict {
 /// `PyObject` enum so the enum itself stays small (176 -> 8 bytes in enum).
 pub struct PyFunction {
     pub code: Rc<CodeObject>,
-    pub globals: Rc<RefCell<HashMap<String, PyObjectRef>>>,
+    pub globals: Rc<RefCell<HashMap<StrId, PyObjectRef>>>,
     pub defaults: Vec<PyObjectRef>,
     pub closure: Vec<PyObjectRef>,
     pub dict: HashMap<String, PyObjectRef>,
@@ -3591,7 +3592,7 @@ pub fn type_new_builtin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         .map(|d| dict_arg_to_hashmap(d, "").unwrap_or_default().into_iter().collect())
         .unwrap_or_default();
     let metatype = with_vm_mut(|vm| {
-        let is_bare_type = vm.builtins.get("type").map(|t| t.is(&metacls)).unwrap_or(false);
+        let is_bare_type = vm.builtins.get(&interner::intern("type")).map(|t| t.is(&metacls)).unwrap_or(false);
         if is_bare_type { None } else { Some(metacls.clone()) }
     })?;
     with_vm_mut(|vm| vm.default_build_class(name_str, bases_vec, namespace_dict, kwargs, metatype))?
@@ -4504,7 +4505,7 @@ pub fn builtin_globals(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         let globals = frame.globals.borrow();
         let mut d = crate::object::PyDict::new();
         for (k, v) in globals.iter() {
-            d.set(py_str(k), v.clone())?;
+            d.set(py_str(interner::lookup_str(*k)), v.clone())?;
         }
         Ok(PyObjectRef::new(PyObject::Dict(Box::new(d))))
     })?

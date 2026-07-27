@@ -5,7 +5,14 @@ use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 use smallvec::SmallVec;
 use crate::bytecode::*;
-use crate::interner::{self, InternedMap};
+use crate::interner::{self, StrId, InternedMap};
+
+/// Convert a HashMap<String, V> to HashMap<StrId, V> by interning all keys.
+fn str_map_to_strid_map<V>(map: HashMap<String, V>) -> HashMap<StrId, V> {
+    map.into_iter().map(|(k, v)| (interner::intern(&k), v)).collect()
+}
+
+
 use crate::modules::*;
 use crate::object::*;
 use crate::parser::Parser;
@@ -22,8 +29,8 @@ pub struct Frame {
     pub code: Rc<CodeObject>,
     pub locals: InternedMap<PyObjectRef>,
     pub fast_locals: Vec<Option<PyObjectRef>>,
-    pub globals: Rc<RefCell<HashMap<String, PyObjectRef>>>,
-    pub builtins: Rc<HashMap<String, PyObjectRef>>,
+    pub globals: Rc<RefCell<HashMap<StrId, PyObjectRef>>>,
+    pub builtins: Rc<HashMap<StrId, PyObjectRef>>,
     pub stack: SmallVec<[PyObjectRef; 4]>,
     pub ip: usize,
     pub base_sp: usize,
@@ -44,7 +51,7 @@ pub struct Frame {
     /// Optional reference to the enclosing module's globals.
     /// Used by class bodies to resolve LOAD_NAME against module-level names
     /// and by MAKE_FUNCTION to set __module__ on created functions.
-    pub module_globals: Option<Rc<RefCell<HashMap<String, PyObjectRef>>>>,
+    pub module_globals: Option<Rc<RefCell<HashMap<StrId, PyObjectRef>>>>,
     /// First-insertion order of names STORE_NAME'd into this frame's
     /// `globals` — only populated for class-body frames (set up by
     /// `__build_class__`), since that's the one case where order is
@@ -77,9 +84,9 @@ pub struct ExceptionHandler {
 impl Frame {
     pub fn new(
         code: Rc<CodeObject>,
-        globals: Rc<RefCell<HashMap<String, PyObjectRef>>>,
-        builtins: Rc<HashMap<String, PyObjectRef>>,
-        module_globals: Option<Rc<RefCell<HashMap<String, PyObjectRef>>>>,
+        globals: Rc<RefCell<HashMap<StrId, PyObjectRef>>>,
+        builtins: Rc<HashMap<StrId, PyObjectRef>>,
+        module_globals: Option<Rc<RefCell<HashMap<StrId, PyObjectRef>>>>,
     ) -> Self {
         let instr_count = code.instructions.len();
         let names_len = code.names.len();
@@ -154,9 +161,9 @@ impl Frame {
 
 pub struct VirtualMachine {
     pub frames: Vec<Frame>,
-    pub builtins: Rc<HashMap<String, PyObjectRef>>,
+    pub builtins: Rc<HashMap<StrId, PyObjectRef>>,
     pub modules: HashMap<String, PyObjectRef>,
-    pub globals: Rc<RefCell<HashMap<String, PyObjectRef>>>,
+    pub globals: Rc<RefCell<HashMap<StrId, PyObjectRef>>>,
     #[cfg(feature = "jit")]
     pub jit: RefCell<JitCompiler>,
     /// Execution profile counters — how many times each instruction ran.
@@ -312,15 +319,19 @@ impl VirtualMachine {
     }
 
     pub fn new_with_args(argv: Vec<String>) -> Self {
-        let mut builtins = create_builtins();
-        let globals_map = HashMap::from([
-            ("__name__".to_string(), py_str("__main__")),
-            ("__builtins__".to_string(), create_module("builtins", builtins.clone())),
+        let builtins_str_map = create_builtins();
+        let mut builtins: HashMap<StrId, PyObjectRef> = str_map_to_strid_map(builtins_str_map);
+        let builtins_to_module = |map: &HashMap<StrId, PyObjectRef>| {
+            map.iter().map(|(k,v)| (interner::lookup_str(*k).to_string(), v.clone())).collect::<HashMap<String, PyObjectRef>>()
+        };
+        let globals_map: HashMap<StrId, PyObjectRef> = HashMap::from([
+            (interner::intern("__name__"), py_str("__main__")),
+            (interner::intern("__builtins__"), create_module("builtins", builtins_to_module(&builtins))),
         ]);
         let globals = Rc::new(RefCell::new(globals_map));
 
          let mut modules = HashMap::new();
-         modules.insert("builtins".to_string(), create_module("builtins", builtins.clone()));
+         modules.insert("builtins".to_string(), create_module("builtins", builtins_to_module(&builtins)));
          modules.insert("math".to_string(), create_module("math", create_math_dict()));
          modules.insert("_codecs".to_string(), create_module("_codecs", create_codecs_dict()));
 
@@ -357,8 +368,8 @@ impl VirtualMachine {
          if !sys_dict.contains_key("path_importer_cache") {
              sys_dict.insert("path_importer_cache".to_string(), py_dict());
          }
-         modules.insert("sys".to_string(), create_module("sys", sys_dict.clone()));
-          builtins.extend(sys_dict.clone());
+          modules.insert("sys".to_string(), create_module("sys", sys_dict.clone()));
+           for (k, v) in sys_dict.clone() { builtins.insert(interner::intern(&k), v); }
 
          // Native os module
          let os_mod = create_module("os", create_os_dict());
@@ -1028,9 +1039,12 @@ impl VirtualMachine {
              }
          }
 
-         let mut vm = VirtualMachine {
+          // Wrap builtins in Rc for sharing across frames
+          let builtins = Rc::new(builtins);
+
+          let mut vm = VirtualMachine {
               frames: Vec::new(),
-              builtins: Rc::new(builtins),
+              builtins: Rc::clone(&builtins),
               modules,
               globals,
               #[cfg(feature = "jit")]
@@ -1140,14 +1154,14 @@ impl VirtualMachine {
         // __name__` as their first statement (see compile_class_body), which
         // would otherwise NameError here since this dict starts empty.
         let dedicated_globals = Rc::new(RefCell::new(HashMap::from([
-            ("__name__".to_string(), py_str(module_name)),
+            (interner::intern("__name__"), py_str(module_name)),
         ])));
         if self.exec_code(code, Some(Rc::clone(&dedicated_globals))).is_err() {
             return;
         }
         let extracted: Vec<(String, PyObjectRef)> = {
             let globals = dedicated_globals.borrow();
-            names.iter().filter_map(|name| globals.get(*name).cloned().map(|v| (name.to_string(), v))).collect()
+            names.iter().filter_map(|name| globals.get(&interner::intern(name)).cloned().map(|v| (name.to_string(), v))).collect()
         };
         EXECUTED_STDLIB_CACHE.with(|c| c.borrow_mut().insert(module_name.to_string(), Rc::new(extracted.clone())));
         if let Some(module) = self.modules.get(module_name) {
@@ -1162,9 +1176,9 @@ impl VirtualMachine {
     fn acquire_frame(
         &mut self,
         code: Rc<CodeObject>,
-        globals: Rc<RefCell<HashMap<String, PyObjectRef>>>,
-        builtins: Rc<HashMap<String, PyObjectRef>>,
-        module_globals: Option<Rc<RefCell<HashMap<String, PyObjectRef>>>>,
+        globals: Rc<RefCell<HashMap<StrId, PyObjectRef>>>,
+        builtins: Rc<HashMap<StrId, PyObjectRef>>,
+        module_globals: Option<Rc<RefCell<HashMap<StrId, PyObjectRef>>>>,
     ) -> Frame {
         if let Some(mut frame) = self.frame_pool.pop() {
             let nlocals = code.nlocals;
@@ -1252,7 +1266,7 @@ impl VirtualMachine {
         result
     }
 
-    pub fn exec_code(&mut self, code: CodeObject, globals: Option<Rc<RefCell<HashMap<String, PyObjectRef>>>>) -> PyResult<PyObjectRef> {
+    pub fn exec_code(&mut self, code: CodeObject, globals: Option<Rc<RefCell<HashMap<StrId, PyObjectRef>>>>) -> PyResult<PyObjectRef> {
         self.exec_code_with_module(code, globals, None)
     }
 
@@ -1261,7 +1275,7 @@ impl VirtualMachine {
     /// own `dict` immediately — not just once execution finishes (see
     /// `Frame::live_module`'s doc comment for why this matters for
     /// circular imports).
-    pub fn exec_code_with_module(&mut self, code: CodeObject, globals: Option<Rc<RefCell<HashMap<String, PyObjectRef>>>>, live_module: Option<PyObjectRef>) -> PyResult<PyObjectRef> {
+    pub fn exec_code_with_module(&mut self, code: CodeObject, globals: Option<Rc<RefCell<HashMap<StrId, PyObjectRef>>>>, live_module: Option<PyObjectRef>) -> PyResult<PyObjectRef> {
         let g = globals.unwrap_or_else(|| self.globals.clone());
         let mut frame = self.acquire_frame(Rc::new(code), g, Rc::clone(&self.builtins), None);
         frame.live_module = live_module;
@@ -1697,22 +1711,22 @@ impl VirtualMachine {
         };
 
         let is_package = path.ends_with("__init__.py");
-        let mut globals_map = HashMap::from([
-            ("__name__".to_string(), py_str(name)),
-            ("__file__".to_string(), py_str(path)),
-            ("__builtins__".to_string(), create_module("builtins", self.builtins.as_ref().clone())),
+        let mut globals_map: HashMap<StrId, PyObjectRef> = HashMap::from([
+            (interner::intern("__name__"), py_str(name)),
+            (interner::intern("__file__"), py_str(path)),
+            (interner::intern("__builtins__"), create_module("builtins", self.builtins.iter().map(|(k,v)| (interner::lookup_str(*k).to_string(), v.clone())).collect())),
         ]);
         if is_package {
             if let Some(pkg_dir) = std::path::Path::new(path).parent() {
                 let pkg_dir_str = pkg_dir.to_string_lossy().to_string();
-                globals_map.insert("__path__".to_string(), py_list(vec![py_str(&pkg_dir_str)]));
-                globals_map.insert("__package__".to_string(), py_str(name));
+                globals_map.insert(interner::intern("__path__"), py_list(vec![py_str(&pkg_dir_str)]));
+                globals_map.insert(interner::intern("__package__"), py_str(name));
             }
         } else {
             // For non-package modules, __package__ should be set to the parent package name
             // (e.g., "django.apps" for "django.apps.registry") so relative imports work
             let pkg = name.rfind('.').map(|dot| &name[..dot]).unwrap_or("");
-            globals_map.insert("__package__".to_string(), 
+            globals_map.insert(interner::intern("__package__"), 
                 if pkg.is_empty() { py_str("") } else { py_str(pkg) });
         }
         let module_globals = Rc::new(RefCell::new(globals_map));
@@ -1746,7 +1760,7 @@ impl VirtualMachine {
         if let Some(lm) = &live_module {
             if let PyObject::Module { dict, .. } = &mut *lm.borrow_mut() {
                 for (k, v) in module_globals.borrow().iter() {
-                    dict.insert(k.clone(), v.clone());
+                    dict.insert(interner::lookup_str(*k).to_string(), v.clone());
                 }
             }
         }
@@ -1775,11 +1789,11 @@ impl VirtualMachine {
         // still mid-execution).
         if let Some(existing) = self.modules.get(name).cloned() {
             if let PyObject::Module { dict, .. } = &mut *existing.borrow_mut() {
-                dict.extend(globals_copy);
+                for (k, v) in globals_copy.iter() { dict.insert(interner::lookup_str(*k).to_string(), v.clone()); }
             }
             return Ok(existing);
         }
-        Ok(create_module(name, globals_copy))
+        Ok(create_module(name, globals_copy.into_iter().map(|(k,v)| (interner::lookup_str(k).to_string(), v)).collect()))
     }
 
     /// Try to execute a simple function without creating a Frame.
@@ -2111,13 +2125,13 @@ impl VirtualMachine {
                 let val = {
                     let f = &self.frames[self.frames.len() - 1];
                     f.get_local(name).cloned()
-                        .or_else(|| f.globals.borrow().get(name).cloned())
+                        .or_else(|| f.globals.borrow().get(&interner::intern(name)).cloned())
                         .or_else(|| {
                             // Check module_globals (enclosing module scope for class bodies)
                             f.module_globals.as_ref()
-                                .and_then(|mg| mg.borrow().get(name).cloned())
+                                .and_then(|mg| mg.borrow().get(&interner::intern(name)).cloned())
                         })
-                        .or_else(|| f.builtins.get(name).cloned())
+                        .or_else(|| f.builtins.get(&interner::intern(name)).cloned())
                 };
                 match val {
                     Some(v) => self.frames[fi].push(v),
@@ -2140,7 +2154,7 @@ impl VirtualMachine {
                         dict.insert(name.clone(), val.clone());
                     }
                 }
-                self.frames[fi].globals.borrow_mut().insert(name, val);
+                self.frames[fi].globals.borrow_mut().insert(interner::intern(&name), val);
             }
 
             Opcode::LOAD_FAST => {
@@ -2185,10 +2199,10 @@ impl VirtualMachine {
                     let name = crate::interner::lookup_str(self.frames[fi].code.names[name_idx]);
                     let val = {
                         let f = &self.frames[self.frames.len() - 1];
-                        let v = f.globals.borrow().get(name).cloned()
+                        let v = f.globals.borrow().get(&interner::intern(name)).cloned()
                             .or_else(|| f.module_globals.as_ref()
-                                .and_then(|mg| mg.borrow().get(name).cloned()))
-                            .or_else(|| f.builtins.get(name).cloned());
+                                .and_then(|mg| mg.borrow().get(&interner::intern(name)).cloned()))
+                            .or_else(|| f.builtins.get(&interner::intern(name)).cloned());
                         v
                     };
                     match val {
@@ -2208,7 +2222,7 @@ impl VirtualMachine {
                 let name_idx = arg as usize;
                 let name = crate::interner::lookup(self.frames[fi].code.names[name_idx]);
                 let val = self.frames[fi].pop()?;
-                self.frames[fi].globals.borrow_mut().insert(name, val);
+                self.frames[fi].globals.borrow_mut().insert(interner::intern(&name), val);
             }
 
             Opcode::LOAD_DEREF => {
@@ -2243,12 +2257,12 @@ impl VirtualMachine {
                 } else if is_freevar {
                     let val = {
                         let globals = self.frames[fi].globals.borrow();
-                        globals.get(&name_str).cloned()
+                        globals.get(&interner::intern(&name_str)).cloned()
                     };
                     if let Some(v) = val {
                         self.frames[fi].push(v);
                     } else {
-                        let val = self.frames[fi].builtins.get(&name_str).cloned();
+                        let val = self.frames[fi].builtins.get(&interner::intern(&name_str)).cloned();
                         if let Some(v) = val {
                             self.frames[fi].push(v);
                         } else {
@@ -2312,7 +2326,7 @@ impl VirtualMachine {
                         dict.remove(&name);
                     }
                 }
-                self.frames[fi].globals.borrow_mut().remove(&name);
+                self.frames[fi].globals.borrow_mut().remove(&interner::intern(&name));
             }
 
             Opcode::POP_TOP => {
@@ -2527,8 +2541,8 @@ impl VirtualMachine {
                         self.frames[fi].registers[dst] = Some(cached);
                     }
                 } else {
-                    let val = self.frames[fi].globals.borrow().get(name).cloned()
-                        .or_else(|| self.frames[fi].builtins.get(name).cloned());
+                    let val = self.frames[fi].globals.borrow().get(&interner::intern(name)).cloned()
+                        .or_else(|| self.frames[fi].builtins.get(&interner::intern(name)).cloned());
                     if let Some(v) = val {
                         if instr_ip < self.frames[fi].global_cache.len() {
                             self.frames[fi].global_cache[instr_ip] = Some(v.clone());
@@ -2697,7 +2711,7 @@ impl VirtualMachine {
                 }
                 if let Some(ref mg) = self.frames[fi].module_globals {
                     let mg = mg.borrow();
-                    if let Some(module_name) = mg.get("__name__") {
+                    if let Some(module_name) = mg.get(&interner::intern("__name__")) {
                         if let PyObject::Str(s) = &*module_name.borrow() {
                             if let PyObject::Function(ref mut inner_f) = &mut *func.borrow_mut() {
                 let dict = &mut inner_f.dict;
@@ -4533,7 +4547,7 @@ impl VirtualMachine {
                     };
                     if level > 0 {
                         let pkg = self.frames[fi].globals.borrow()
-                            .get("__package__").cloned()
+                            .get(&interner::intern("__package__")).cloned()
                             .and_then(|p| {
                                 let p = p.borrow();
                                 if let PyObject::Str(s) = &*p { Some(s.to_string()) } else { None }
@@ -4560,7 +4574,7 @@ impl VirtualMachine {
                             // Fallback: use __name__ up to last dot as package
                             _ => {
                                 let n = self.frames[fi].globals.borrow()
-                                    .get("__name__").cloned()
+                                    .get(&interner::intern("__name__")).cloned()
                                     .and_then(|n| {
                                         let n = n.borrow();
                                         if let PyObject::Str(s) = &*n { Some(s.to_string()) } else { None }
@@ -4690,7 +4704,7 @@ impl VirtualMachine {
                                     dict.insert(import_name.clone(), val.clone());
                                 }
                             }
-                            self.frames[fi].globals.borrow_mut().insert(import_name.clone(), val.clone());
+                            self.frames[fi].globals.borrow_mut().insert(interner::intern(&import_name), val.clone());
                         }
                         // Push placeholder module result (the loop above already pushed values)
                         // The POP_TOP after IMPORT_FROM loop will clean up
@@ -4726,8 +4740,8 @@ impl VirtualMachine {
                 let found = found.or_else(|| {
                     self.frames.iter().find_map(|f| {
                         let g = f.globals.borrow();
-                        if g.get("__name__").map(|n| n.str()).as_deref() == Some(module_name.as_str()) {
-                            g.get(&name).cloned()
+                        if g.get(&interner::intern("__name__")).map(|n| n.str()).as_deref() == Some(module_name.as_str()) {
+                            g.get(&interner::intern(&name)).cloned()
                         } else {
                             None
                         }
@@ -4905,7 +4919,7 @@ impl VirtualMachine {
                     let exc_borrowed = exc.borrow();
                     match &*exc_borrowed {
                         PyObject::Exception { typ, .. } => {
-                            let typ_obj = self.frames[fi].builtins.get(typ).cloned()
+                            let typ_obj = self.frames[fi].builtins.get(&interner::intern(&typ)).cloned()
                                 .unwrap_or_else(|| py_str(typ));
                             (typ_obj, exc.clone())
                         }
@@ -5424,7 +5438,7 @@ impl VirtualMachine {
                 let mut d = crate::object::PyDict::new();
                 if is_globals {
                     for (k, v) in frame.globals.borrow().iter() {
-                        d.set(py_str(k), v.clone())?;
+                        d.set(py_str(interner::lookup_str(*k)), v.clone())?;
                     }
                 } else {
                     // Merge fast-locals (function-scope named params/vars,
@@ -5555,9 +5569,9 @@ impl VirtualMachine {
                 let globals_dict = args.get(1).filter(|g| matches!(&*g.borrow(), PyObject::Dict(_)));
                 let locals_dict = args.get(2).filter(|l| matches!(&*l.borrow(), PyObject::Dict(_))).or(globals_dict);
                 let namespace = if let Some(g) = globals_dict {
-                    let mut hm = crate::object::dict_arg_to_hashmap(g, "exec() globals must be a dict")?;
+                    let mut hm: HashMap<StrId, PyObjectRef> = str_map_to_strid_map(crate::object::dict_arg_to_hashmap(g, "exec() globals must be a dict")?);
                     if let Some(l) = args.get(2).filter(|l| matches!(&*l.borrow(), PyObject::Dict(_))) {
-                        hm.extend(crate::object::dict_arg_to_hashmap(l, "exec() locals must be a dict")?);
+                        hm.extend(str_map_to_strid_map(crate::object::dict_arg_to_hashmap(l, "exec() locals must be a dict")?));
                     }
                     Some(Rc::new(RefCell::new(hm)))
                 } else {
@@ -5568,7 +5582,7 @@ impl VirtualMachine {
                 if let Some(target) = locals_dict {
                     if let PyObject::Dict(d) = &mut *target.borrow_mut() {
                         for (k, v) in globals_rc.borrow().iter() {
-                            let _ = d.set(py_str(k), v.clone());
+                            let _ = d.set(py_str(interner::lookup_str(*k)), v.clone());
                         }
                     }
                 }
@@ -5891,7 +5905,7 @@ impl VirtualMachine {
         // before the generic Type-calling convention below, which would
         // otherwise build a plain Instance (wrong: `type(x)` must return a
         // real class/type object, not an instance of `type`).
-        if self.builtins.get("type").map(|t| t.is(&callable)).unwrap_or(false) {
+        if self.builtins.get(&interner::intern("type")).map(|t| t.is(&callable)).unwrap_or(false) {
             if !keywords.is_empty() {
                 return Err(PyError::type_error("type() takes no keyword arguments"));
             }
@@ -6079,7 +6093,7 @@ impl VirtualMachine {
             // Classes without explicit bases implicitly inherit from object
             let bases_vec = if bases_vec.is_empty() {
                 // Look up 'object' type from builtins
-                let object_type = self.builtins.get("object").cloned()
+                let object_type = self.builtins.get(&interner::intern("object")).cloned()
                     .unwrap_or_else(|| {
                         // Fallback: create a minimal object type
                         let mut obj_dict = HashMap::new();
@@ -6147,7 +6161,7 @@ impl VirtualMachine {
                 None
             };
 
-            let namespace = Rc::new(RefCell::new(HashMap::new()));
+            let namespace: Rc<RefCell<HashMap<StrId, PyObjectRef>>> = Rc::new(RefCell::new(HashMap::new()));
             let name_order = Rc::new(RefCell::new(Vec::new()));
 
             // Capture the calling frame's module_globals (or globals as fallback)
@@ -6193,7 +6207,7 @@ impl VirtualMachine {
                 _ => return Err(PyError::type_error("class body must be a function")),
             }
 
-            let namespace_dict = namespace.borrow().clone();
+            let namespace_dict: HashMap<String, PyObjectRef> = namespace.borrow().iter().map(|(k,v)| (interner::lookup_str(*k).to_string(), v.clone())).collect();
             let order = name_order.borrow().clone();
 
             // If `__prepare__` produced a namespace object, replay the body's
@@ -6312,7 +6326,7 @@ impl VirtualMachine {
             PyObject::ExceptionGroup { .. } => "ExceptionGroup".to_string(),
             other => other.type_name().to_string(),
         };
-        if let Some(builtin) = self.builtins.get(&name) {
+        if let Some(builtin) = self.builtins.get(&interner::intern(&name)) {
             return builtin.clone();
         }
         PyObjectRef::new(PyObject::Type {
@@ -6522,7 +6536,7 @@ impl VirtualMachine {
             },
             None => vec![],
         };
-        let is_bare_type = self.builtins.get("type").map(|t| t.is(&metacls)).unwrap_or(false);
+        let is_bare_type = self.builtins.get(&interner::intern("type")).map(|t| t.is(&metacls)).unwrap_or(false);
         let metatype = if is_bare_type { None } else { Some(metacls) };
         self.default_build_class(name_str, bases_vec, namespace_dict, kwargs, metatype)
     }

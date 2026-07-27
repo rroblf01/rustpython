@@ -459,7 +459,7 @@ fn real_main() {
                 // (real trigger: several of CPython's own `Lib/test/
                 // test_*.py` files read `__file__` directly for fixture
                 // data next to the script).
-                vm.globals.borrow_mut().insert("__file__".to_string(), object::py_str(filename));
+                vm.globals.borrow_mut().insert(crate::interner::intern("__file__"), object::py_str(filename));
                 match vm.run(code) {
                     Ok(_val) => {}
                     Err(e) => {
