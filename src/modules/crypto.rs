@@ -163,6 +163,14 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
         Ok(out)
     }
 
+    // CRITICAL, general — `b64encode` (and this file's other `bNNencode`
+    // functions) returned a plain `str`, not `bytes` — real CPython's
+    // `base64.b64encode`/etc. ALWAYS return `bytes` (encoded data is
+    // fundamentally binary-safe output, not text), a distinction real code
+    // relies on constantly: `base64.b64encode(data).decode('ascii')` (an
+    // extremely common idiom to get a STR from the bytes result) raised
+    // `AttributeError: 'str' object has no attribute 'decode'` here, since
+    // there was already a `str` where a real `bytes` was expected.
     b64_func!("b64encode", |args| {
         if args.len() != 1 { return Err(PyError::type_error("b64encode() takes exactly one argument")); }
         let data = args[0].borrow();
@@ -171,7 +179,7 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
             PyObject::ByteArray(b) => b.clone(),
             _ => return Err(PyError::type_error("b64encode() argument must be bytes")),
         };
-        Ok(py_str(&b64_encode(&bytes)))
+        Ok(PyObjectRef::imm(PyObject::Bytes(b64_encode(&bytes).into_bytes())))
     });
 
     // encodebytes/decodebytes: the legacy MIME-oriented form base64.b64encode
@@ -212,14 +220,96 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
         }
     });
 
+    // Accepts `bytes` too (not just `str`) — real `base64.b64decode` does,
+    // and now that `b64encode` correctly returns `bytes` (fixed above),
+    // `b64decode(b64encode(x))` must round-trip without the caller having
+    // to manually `.decode('ascii')` in between.
     b64_func!("b64decode", |args| {
         if args.len() != 1 { return Err(PyError::type_error("b64decode() takes exactly one argument")); }
         let data = args[0].borrow();
         let s = match &*data {
             PyObject::Str(s) => s.to_string(),
-            _ => return Err(PyError::type_error("b64decode() argument must be a string")),
+            PyObject::Bytes(b) => String::from_utf8_lossy(b).to_string(),
+            _ => return Err(PyError::type_error("b64decode() argument must be a string or bytes")),
         };
         match b64_decode(&s) {
+            Ok(bytes) => Ok(PyObjectRef::imm(PyObject::Bytes(bytes))),
+            Err(e) => Err(PyError::value_error(e)),
+        }
+    });
+
+    // `base64.b32encode`/`b32decode` (RFC 4648 Base32) were missing
+    // entirely — same general shape as the existing hand-written base64
+    // codec just above, reused rather than pulling in a new dependency.
+    const B32_ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+
+    fn b32_encode(data: &[u8]) -> String {
+        let mut out = String::new();
+        for chunk in data.chunks(5) {
+            let mut buf = [0u8; 5];
+            buf[..chunk.len()].copy_from_slice(chunk);
+            let n = ((buf[0] as u64) << 32) | ((buf[1] as u64) << 24) | ((buf[2] as u64) << 16) | ((buf[3] as u64) << 8) | (buf[4] as u64);
+            // Number of valid output characters (before padding) for a
+            // partial final chunk, per RFC 4648's own table.
+            let out_chars = match chunk.len() { 1 => 2, 2 => 4, 3 => 5, 4 => 7, _ => 8 };
+            for i in 0..8 {
+                if i < out_chars {
+                    let shift = 35 - i * 5;
+                    let idx = ((n >> shift) & 0x1F) as usize;
+                    out.push(B32_ALPHABET[idx] as char);
+                } else {
+                    out.push('=');
+                }
+            }
+        }
+        out
+    }
+
+    fn b32_decode(s: &str) -> Result<Vec<u8>, String> {
+        let mut rev = [255u8; 256];
+        for (i, &c) in B32_ALPHABET.iter().enumerate() {
+            rev[c as usize] = i as u8;
+        }
+        let s = s.trim_end_matches('=');
+        let mut out = Vec::new();
+        for chunk in s.as_bytes().chunks(8) {
+            let mut n: u64 = 0;
+            let mut valid_bits = 0;
+            for &c in chunk {
+                let v = rev[c as usize];
+                if v == 255 { return Err("Invalid base32 character".to_string()); }
+                n = (n << 5) | v as u64;
+                valid_bits += 5;
+            }
+            // Left-align the accumulated bits within a 40-bit window, then
+            // emit one byte per complete group of 8 bits.
+            n <<= 40 - valid_bits;
+            let total_bytes = valid_bits / 8;
+            for i in 0..total_bytes {
+                out.push(((n >> (32 - i * 8)) & 0xFF) as u8);
+            }
+        }
+        Ok(out)
+    }
+
+    b64_func!("b32encode", |args| {
+        if args.len() != 1 { return Err(PyError::type_error("b32encode() takes exactly one argument")); }
+        let data = match &*args[0].borrow() {
+            PyObject::Bytes(b) => b.clone(),
+            PyObject::ByteArray(b) => b.clone(),
+            _ => return Err(PyError::type_error("b32encode() argument must be bytes")),
+        };
+        Ok(PyObjectRef::imm(PyObject::Bytes(b32_encode(&data).into_bytes())))
+    });
+
+    b64_func!("b32decode", |args| {
+        if args.len() != 1 { return Err(PyError::type_error("b32decode() takes exactly one argument")); }
+        let s = match &*args[0].borrow() {
+            PyObject::Str(s) => s.to_string(),
+            PyObject::Bytes(b) => String::from_utf8_lossy(b).to_string(),
+            _ => return Err(PyError::type_error("b32decode() argument must be a string or bytes")),
+        };
+        match b32_decode(&s) {
             Ok(bytes) => Ok(PyObjectRef::imm(PyObject::Bytes(bytes))),
             Err(e) => Err(PyError::value_error(e)),
         }
@@ -452,6 +542,20 @@ pub fn create_zlib_dict() -> HashMap<String, PyObjectRef> {
         };
     }
 
+    // `zlib.compress`/`decompress` were complete no-op STUBS — returned the
+    // input bytes completely UNCHANGED, silently claiming to "compress"
+    // without doing anything at all. This wasn't just a missing-feature
+    // gap: any code round-tripping through `zlib.compress`/`decompress`
+    // itself never noticed (garbage in, same garbage out), but real
+    // interop with ACTUAL zlib-compressed data from anywhere else (a file,
+    // a network payload, `pickle`'s own optional compression, `gzip`
+    // internals) would either silently produce bogus "decompressed"
+    // output or fail outright. `flate2` (this project's own existing
+    // dependency, already used for the real `gzip` module — see
+    // `modules/files.rs`) provides a dedicated zlib encoder/decoder, not
+    // just the gzip-framed one — wiring it in here was a small, contained
+    // fix reusing infrastructure that already existed for a different
+    // module.
     z_func!("compress", |args| {
         if args.is_empty() {
             return Err(PyError::type_error("compress() missing required argument (data)"));
@@ -461,8 +565,12 @@ pub fn create_zlib_dict() -> HashMap<String, PyObjectRef> {
             PyObject::ByteArray(b) => b.clone(),
             _ => return Err(PyError::type_error("compress() argument must be bytes")),
         };
-        // Simplified stub: return data as-is
-        Ok(PyObjectRef::imm(PyObject::Bytes(data)))
+        let level = if args.len() > 1 { args[1].as_i64().unwrap_or(6).clamp(0, 9) as u32 } else { 6 };
+        use std::io::Write;
+        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(level));
+        encoder.write_all(&data).map_err(|e| PyError::OsError(format!("{}", e)))?;
+        let compressed = encoder.finish().map_err(|e| PyError::OsError(format!("{}", e)))?;
+        Ok(PyObjectRef::imm(PyObject::Bytes(compressed)))
     });
 
     z_func!("decompress", |args| {
@@ -474,8 +582,11 @@ pub fn create_zlib_dict() -> HashMap<String, PyObjectRef> {
             PyObject::ByteArray(b) => b.clone(),
             _ => return Err(PyError::type_error("decompress() argument must be bytes")),
         };
-        // Simplified stub: return data as-is
-        Ok(PyObjectRef::imm(PyObject::Bytes(data)))
+        use std::io::Read;
+        let mut decoder = flate2::read::ZlibDecoder::new(&data[..]);
+        let mut out = Vec::new();
+        decoder.read_to_end(&mut out).map_err(|e| PyError::value_error(format!("Error -3 while decompressing data: {}", e)))?;
+        Ok(PyObjectRef::imm(PyObject::Bytes(out)))
     });
 
     d

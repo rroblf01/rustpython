@@ -186,7 +186,21 @@ def get_attribute(obj, name):
         return attribute
 
 verbose = 1              # Flag set to 0 by regrtest.py
-use_resources = None     # Flag set to {} by regrtest.py
+# Real CPython's `use_resources` also defaults to `None` here, but real
+# CPython's `regrtest.py` test RUNNER always sets this to `{}` (no extra
+# resources enabled) before running anything, unless the user explicitly
+# passes `-u cpu`/`-u network`/`-u all` etc. This project's test files are
+# run directly as standalone scripts (`rustpython test_x.py`), never through
+# an equivalent of regrtest, so `use_resources` would otherwise stay `None`
+# forever — and `is_resource_enabled()` treats `None` as "everything
+# enabled". That silently un-gates every `@support.requires_resource(...)`-
+# decorated test (cpu/network/large-memory/etc.) that real CPython's own
+# default test runs always skip. Confirmed via `test_statistics.py`'s
+# `test_float_sqrt_of_frac` — a `@requires_resource('cpu')` test with a
+# 60_000-iteration Fraction-arithmetic loop — running in full every time
+# instead of being skipped, needlessly consuming minutes of CPU/RAM. `{}`
+# here reproduces regrtest's normal default posture directly.
+use_resources = {}      # Flag set to {} by regrtest.py
 max_memuse = 0           # Disable bigmem tests (they will still be run with
                          # small sizes, to make sure they work.)
 real_max_memuse = 0

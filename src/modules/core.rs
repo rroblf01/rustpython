@@ -1128,6 +1128,25 @@ pub fn create_math_dict() -> HashMap<String, PyObjectRef> {
         }
         Ok(py_int(result))
     });
+    // `math.isqrt` was missing entirely (not even a stub) — real trigger:
+    // CPython's own `test_math.testIsqrt`, which feeds it values up to
+    // `2**200` and `10**5001`. Since those are real arbitrary-precision
+    // bigints, this MUST use a proper bigint square root (`num_bigint`'s own
+    // `BigInt::sqrt`, a Newton's-method implementation) rather than
+    // converting to `f64` first (`f64::sqrt` silently loses precision far
+    // below even `2**64`, and can't represent a 5001-digit input at all).
+    math_func!("isqrt", |args| {
+        if args.len() != 1 { return Err(PyError::type_error("isqrt() takes exactly one argument")); }
+        let n = match &*args[0].borrow() {
+            PyObject::Int(i) => i.clone(),
+            PyObject::Bool(b) => num_bigint::BigInt::from(if *b { 1 } else { 0 }),
+            _ => return Err(PyError::type_error("isqrt() argument must be an integer")),
+        };
+        if n.sign() == num_bigint::Sign::Minus {
+            return Err(PyError::value_error("isqrt() argument must be nonnegative"));
+        }
+        Ok(py_int(n.sqrt()))
+    });
 
     // Additional math functions
     math_func!("ldexp", |args| {
@@ -1358,6 +1377,49 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
                 mro: vec![],
             }),
             dict: hash_info_dict,
+        }));
+    }
+    {
+        // sys.int_info — describes the internal representation of Python
+        // `int`. This interpreter backs arbitrary-precision ints with
+        // `num-bigint`, not CPython's own 30-bit-digit array — these
+        // values are CPython's OWN real constants (`bits_per_digit=30`,
+        // `sizeof_digit=4`), reported for compatibility with code that
+        // merely inspects them (e.g. `sys.int_info.bits_per_digit`)
+        // without depending on this interpreter's actual internal
+        // representation matching bit-for-bit.
+        let mut int_info_dict = AttrMap::new();
+        int_info_dict.insert("bits_per_digit".to_string(), py_int(30));
+        int_info_dict.insert("sizeof_digit".to_string(), py_int(4));
+        int_info_dict.insert("default_max_str_digits".to_string(), py_int(4300));
+        int_info_dict.insert("str_digits_check_threshold".to_string(), py_int(640));
+        d.insert("int_info".to_string(), PyObjectRef::new(PyObject::Instance {
+            typ: PyObjectRef::new(PyObject::Type {
+                name: "int_info".to_string(),
+                dict: Box::new(HashMap::new()),
+                bases: vec![],
+                mro: vec![],
+            }),
+            dict: int_info_dict,
+        }));
+    }
+    {
+        // sys.thread_info — describes the threading implementation. This
+        // interpreter's own `threading` module is backed by real OS
+        // threads (`std::thread`), which is exactly what CPython's own
+        // "pthread" report describes on any POSIX platform.
+        let mut thread_info_dict = AttrMap::new();
+        thread_info_dict.insert("name".to_string(), py_str("pthread"));
+        thread_info_dict.insert("lock".to_string(), py_str("mutex+cond"));
+        thread_info_dict.insert("version".to_string(), py_none());
+        d.insert("thread_info".to_string(), PyObjectRef::new(PyObject::Instance {
+            typ: PyObjectRef::new(PyObject::Type {
+                name: "thread_info".to_string(),
+                dict: Box::new(HashMap::new()),
+                bases: vec![],
+                mro: vec![],
+            }),
+            dict: thread_info_dict,
         }));
     }
     {

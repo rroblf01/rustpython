@@ -319,6 +319,82 @@ impl VirtualMachine {
     }
 
     pub fn new_with_args(argv: Vec<String>) -> Self {
+        // Constructing a full VM means running EVERY native module
+        // constructor below (~100+ modules) plus filesystem-based venv/
+        // site-packages detection — cheap for the ONE real, top-level
+        // program VM, but catastrophic for the many *disposable* VMs
+        // spun up just to resume one step of a generator/coroutine
+        // (`generator_next_fallback`, `coroutine_send_fallback` below —
+        // see their own doc comments on why a disposable VM is used at
+        // all) since `next()` on a generator does this on EVERY SINGLE
+        // resume. Confirmed via a minimal repro: a no-op
+        // `@contextlib.contextmanager` (whose `__enter__`/`__exit__` each
+        // call `next()` once) entered/exited 14,202 times in a bare loop
+        // took 30+ seconds — should be near-instant, and this was the
+        // actual root cause behind several CPython test files (test_math,
+        // test_statistics, ...) appearing to hang. Real CPython has
+        // exactly ONE `sys`/`os`/etc. module per process for its entire
+        // lifetime, shared by every generator resume — rebuilding them
+        // fresh per resume was never semantically necessary, just an
+        // artifact of how disposable-VM construction happened to be
+        // written. Caching the built `(builtins, modules)` state after the
+        // FIRST construction and Rc-cloning it into every subsequent
+        // `new()` call matches that real-CPython "one shared stdlib per
+        // process" model directly, and follows the same pattern already
+        // established (and proven safe) by `install_source_defined_stdlib`'s
+        // own `EXECUTED_STDLIB_CACHE` further below — sharing the actual
+        // module/function objects across VM instances doesn't change any
+        // observable behavior for ordinary user code (isinstance/identity/
+        // method dispatch all keep working, since it's genuinely the same
+        // objects everywhere, exactly as real CPython's own process-wide
+        // module singletons behave). Safe regardless of `argv`: the ONE
+        // real top-level VM (constructed directly with the process's real
+        // `sys.argv` in `main.rs`) always runs first and populates this
+        // cache; every later disposable VM goes through `new()`, which
+        // passes that same real `std::env::args()` anyway.
+        thread_local! {
+            static VM_STATE_CACHE: RefCell<Option<(Rc<HashMap<StrId, PyObjectRef>>, HashMap<String, PyObjectRef>)>> = RefCell::new(None);
+        }
+        if let Some((cached_builtins, cached_modules)) = VM_STATE_CACHE.with(|c| c.borrow().clone()) {
+            let globals_map: HashMap<StrId, PyObjectRef> = HashMap::from([
+                (interner::intern("__name__"), py_str("__main__")),
+                (interner::intern("__builtins__"), create_module("builtins", cached_builtins.iter().map(|(k, v)| (interner::lookup_str(*k).to_string(), v.clone())).collect::<HashMap<String, PyObjectRef>>())),
+            ]);
+            let globals = Rc::new(RefCell::new(globals_map));
+            let mut vm = VirtualMachine {
+                frames: Vec::new(),
+                builtins: Rc::clone(&cached_builtins),
+                modules: cached_modules,
+                globals,
+                #[cfg(feature = "jit")]
+                jit: RefCell::new(JitCompiler::new()),
+                profile: RefCell::new(HashMap::new()),
+                last_error_line: None,
+                last_error_file: None,
+                last_traceback: Vec::new(),
+                frame_pool: Vec::new(),
+                type_registry: HashMap::new(),
+                exc_type: None,
+                exc_value: None,
+                exc_traceback: None,
+                recursion_limit: 1000,
+            };
+            vm.populate_type_registry();
+            vm.install_source_defined_stdlib("collections", crate::modules::COLLECTIONS_USER_TYPES_SOURCE, &["UserList", "UserDict", "UserString", "Counter", "defaultdict", "ChainMap"]);
+            vm.install_source_defined_stdlib("functools", crate::modules::FUNCTOOLS_EXTRA_SOURCE, &["lru_cache", "cache"]);
+            vm.install_source_defined_stdlib("enum", crate::modules::ENUM_SOURCE, &[
+                "auto", "nonmember", "member", "property", "EnumType", "EnumMeta",
+                "Enum", "IntEnum", "StrEnum", "unique",
+            ]);
+            vm.install_source_defined_stdlib("gettext", crate::modules::GETTEXT_SOURCE, &[
+                "NullTranslations", "GNUTranslations", "find", "translation", "install",
+                "textdomain", "bindtextdomain", "gettext", "ngettext", "pgettext", "npgettext",
+                "dgettext", "dngettext",
+            ]);
+            vm.install_source_defined_stdlib("json", crate::modules::JSON_EXTRA_SOURCE, &["JSONEncoder", "dumps"]);
+            return vm;
+        }
+
         let builtins_str_map = create_builtins();
         let mut builtins: HashMap<StrId, PyObjectRef> = str_map_to_strid_map(builtins_str_map);
         let builtins_to_module = |map: &HashMap<StrId, PyObjectRef>| {
@@ -1041,6 +1117,15 @@ impl VirtualMachine {
 
           // Wrap builtins in Rc for sharing across frames
           let builtins = Rc::new(builtins);
+
+          // Populate the disposable-VM fast path's cache (see the doc
+          // comment at the top of this function) — safe to do BEFORE the
+          // `install_source_defined_stdlib` calls below even though those
+          // still mutate module dicts afterward: this clones the `modules`
+          // HashMap's *entries* (Rc-bumps), not the module objects
+          // themselves, so any mutation those calls make lands on the same
+          // shared objects this cache already points to.
+          VM_STATE_CACHE.with(|c| *c.borrow_mut() = Some((Rc::clone(&builtins), modules.clone())));
 
           let mut vm = VirtualMachine {
               frames: Vec::new(),
@@ -3216,7 +3301,10 @@ impl VirtualMachine {
                             }
                             PyObject::RangeIter { current, stop: _, step } => {
                                 let v = py_int(*current);
-                                *current += *step;
+                                // See the matching fix in `object.rs`'s
+                                // `builtin_next` `RangeIter` arm — plain
+                                // `+=` panics near i64::MAX/MIN.
+                                *current = current.checked_add(*step).unwrap_or(if *step > 0 { i64::MAX } else { i64::MIN });
                                 v
                             }
                             // `EnumerateIter` no longer reaches this arm at
@@ -3824,6 +3912,26 @@ impl VirtualMachine {
                     } else {
                         // Descriptor exists but no __set__ (non-data descriptor), fall through
                     }
+                }
+                // `obj.borrow_mut()` panics unconditionally for any
+                // non-`Mut`-wrapped value (SmallInt/SmallBool/SmallFloat/
+                // SmallStr/None, or an `Imm`-wrapped Tuple/Bytes/Function/
+                // Type/Code/boxed-Int/Str/Float) — genuinely attribute-
+                // settable things (Instance, Type, Module, Exception) are
+                // ALWAYS `Mut` in this codebase, so anything reaching here
+                // that ISN'T `Mut` is a real attempt to set an attribute on
+                // an immutable/inline value (`(5).x = 1`, `"s".x = 1`,
+                // `(1, 2).x = 1`) — real CPython raises a plain
+                // `AttributeError` there, not a process-ending crash. This
+                // was one of the highest-impact bugs found this session:
+                // it crashed the WHOLE interpreter process (not just the
+                // current statement) for something this common — including
+                // every test file that deliberately checks this raises via
+                // `self.assertRaises(AttributeError, setattr, x, 'attr', v)`.
+                if !matches!(&obj, PyObjectRef::Mut(_)) {
+                    return Err(PyError::attribute_error(format!(
+                        "'{}' object has no attribute '{}'", obj.borrow().type_name(), name
+                    )));
                 }
                 obj.borrow_mut().set_attribute(&name, val)?;
             }

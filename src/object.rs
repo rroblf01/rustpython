@@ -508,7 +508,25 @@ impl PyObjectRef {
                 if let Some(typ) = typ_opt {
                     if let Some(f) = lookup_dunder_via_mro(&typ, "__bool__") {
                         if let Ok(result) = call_bound_method(f, self.clone(), vec![]) {
-                            return result.truthy();
+                            // Real CPython requires `__bool__` to return an
+                            // actual `bool` — a class with `def __bool__(self):
+                            // return self` is a real (if malformed) pattern
+                            // covered by CPython's own test suite
+                            // (`test_bool.test_convert_to_bool`), and real
+                            // CPython raises `TypeError` immediately rather
+                            // than re-evaluating the returned object's
+                            // truthiness. Recursing into `.truthy()` here
+                            // instead — as this used to — infinite-loops
+                            // (each call returns `self` again) since this
+                            // infallible method has no way to raise
+                            // TypeError; `bool()` itself (`builtin_bool`)
+                            // does the proper check and errors correctly,
+                            // this implicit-truth-testing path just needs to
+                            // terminate rather than hang.
+                            if let PyObjectRef::SmallBool(b) = result {
+                                return b;
+                            }
+                            return true;
                         }
                     }
                     if let Some(native) = native_backing_of(self) {
@@ -1803,7 +1821,15 @@ impl PyObject {
                 let f = lookup_dunder_via_mro(typ, "__bool__");
                 if let Some(f) = f {
                     if let Ok(result) = call_bound_method(f, PyObjectRef::new(PyObject::Instance { typ: typ.clone(), dict: dict.clone() }), vec![]) {
-                        return result.truthy();
+                        // See the matching comment in `PyObjectRef::truthy()`:
+                        // a non-bool `__bool__` return (e.g. `return self`)
+                        // must not recurse into `.truthy()` again — that
+                        // infinite-loops instead of erroring like real
+                        // CPython does.
+                        if let PyObjectRef::SmallBool(b) = result {
+                            return b;
+                        }
+                        return true;
                     }
                 }
                 true
@@ -2741,8 +2767,26 @@ pub fn py_div(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
 pub fn py_floor_div(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
         if bi == 0 { return Err(PyError::zero_division()); }
-        let q = ai / bi; let r = ai % bi;
-        return if r != 0 && ((ai < 0) != (bi < 0)) { Ok(py_int(q - 1)) } else { Ok(py_int(q)) };
+        // `i64::MIN / -1` (and `% -1`) overflows outright — same classic
+        // edge case as `py_mod`'s fix just above; fall back to BigInt
+        // rather than let a plain `/`/`%` panic.
+        if let (Some(q), Some(r)) = (ai.checked_div(bi), ai.checked_rem(bi)) {
+            return if r != 0 && ((ai < 0) != (bi < 0)) {
+                match q.checked_sub(1) {
+                    Some(result) => Ok(py_int(result)),
+                    None => Ok(py_int(BigInt::from(q) - 1)),
+                }
+            } else {
+                Ok(py_int(q))
+            };
+        }
+        let big_a = BigInt::from(ai);
+        let big_b = BigInt::from(bi);
+        return if big_a.sign() == Sign::Minus && &(&big_a % &big_b) != &BigInt::zero() {
+            Ok(py_int((&big_a / &big_b) - 1))
+        } else {
+            Ok(py_int(&big_a / &big_b))
+        };
     }
     if let Some(r) = try_dunder_binop(a, b, "__floordiv__")? { return Ok(r); }
     if let Some(r) = try_dunder_binop(b, a, "__rfloordiv__")? { return Ok(r); }
@@ -2777,8 +2821,38 @@ pub fn py_floor_div(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
 pub fn py_mod(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
         if bi == 0 { return Err(PyError::zero_division()); }
-        let rem = ai % bi;
-        return if rem < 0 { Ok(py_int(rem + bi)) } else { Ok(py_int(rem)) };
+        // `ai % bi` itself can panic outright (`i64::MIN % -1` overflows,
+        // same classic edge case as division), and even when it doesn't,
+        // `rem + bi` (both operands can be large-magnitude negatives) can
+        // still overflow i64 — real, confirmed trigger: CPython's own
+        // `test_range.py` exercises ranges near the i64 boundary. Fall back
+        // to BigInt on either.
+        //
+        // The adjustment condition itself must compare the REMAINDER's
+        // sign against the DIVISOR's sign (Python's `%` always returns a
+        // result with the same sign as the divisor) — checking merely
+        // `rem < 0` (the previous condition here, and in the BigInt arm
+        // below) is wrong for a positive-dividend/negative-divisor pair:
+        // `7 % -3` needs `1 + (-3) = -2`, but `1 < 0` is false, so it
+        // wrongly returned the unadjusted `1`. Confirmed against real
+        // Python: `7 % -3 == -2`, `-7 % -3 == -1` (not `-4`).
+        if let Some(rem) = ai.checked_rem(bi) {
+            if rem != 0 && (rem < 0) != (bi < 0) {
+                if let Some(result) = rem.checked_add(bi) {
+                    return Ok(py_int(result));
+                }
+            } else {
+                return Ok(py_int(rem));
+            }
+        }
+        let big_a = BigInt::from(ai);
+        let big_b = BigInt::from(bi);
+        let rem = &big_a % &big_b;
+        return if !rem.is_zero() && (rem.sign() == Sign::Minus) != (big_b.sign() == Sign::Minus) {
+            Ok(py_int(rem + big_b))
+        } else {
+            Ok(py_int(rem))
+        };
     }
     if let Some(r) = try_dunder_binop(a, b, "__mod__")? { return Ok(r); }
     if let Some(r) = try_dunder_binop(b, a, "__rmod__")? { return Ok(r); }
@@ -2788,7 +2862,7 @@ pub fn py_mod(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
         (PyObject::Int(a), PyObject::Int(b)) => {
             if b.is_zero() { return Err(PyError::zero_division()); }
             let rem = a % b;
-            if rem.sign() == Sign::Minus {
+            if !rem.is_zero() && (rem.sign() == Sign::Minus) != (b.sign() == Sign::Minus) {
                 Ok(py_int(rem + b))
             } else {
                 Ok(py_int(rem))
@@ -2796,10 +2870,33 @@ pub fn py_mod(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
         }
         (PyObject::Float(a), PyObject::Float(b)) => {
             if *b == 0.0 { return Err(PyError::zero_division()); }
-            Ok(py_float(a % b))
+            py_float_mod(*a, *b)
+        }
+        // Mixed int/float `%` (`5 % 2.0`, `5.0 % 2`) was missing entirely —
+        // fell to the `_` catch-all TypeError below instead of promoting
+        // to float like every other mixed-numeric-tower operator here does.
+        (PyObject::Int(a), PyObject::Float(b)) => {
+            if *b == 0.0 { return Err(PyError::zero_division()); }
+            py_float_mod(a.to_f64().unwrap(), *b)
+        }
+        (PyObject::Float(a), PyObject::Int(b)) => {
+            if b.is_zero() { return Err(PyError::zero_division()); }
+            py_float_mod(*a, b.to_f64().unwrap())
         }
         _ => Err(PyError::type_error(format!("unsupported operand type(s) for %: '{}' and '{}'",
             a_obj.type_name(), b_obj.type_name()))),
+    }
+}
+
+/// Python's `%` for floats follows the DIVISOR's sign (floor-mod), unlike
+/// Rust's `%` (which follows the dividend, like C's `fmod`) — e.g. real
+/// Python's `7.5 % -3.0 == -1.5`, not `1.5`.
+fn py_float_mod(a: f64, b: f64) -> PyResult<PyObjectRef> {
+    let rem = a % b;
+    if rem != 0.0 && (rem < 0.0) != (b < 0.0) {
+        Ok(py_float(rem + b))
+    } else {
+        Ok(py_float(rem))
     }
 }
 
@@ -2808,15 +2905,27 @@ pub fn py_pow(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
         if bi < 0 { return Ok(py_float((ai as f64).powi(bi as i32))); }
         if bi == 0 { return Ok(py_int(1)); }
         if bi == 1 { return Ok(py_int(ai)); }
-        if bi > 63 {
-            // Use BigInt for large exponents to avoid overflow
-            let big_a = BigInt::from(ai);
-            let _big_b = BigInt::from(bi);
-            let result = big_a.pow(bi as u32);
-            return Ok(py_int(result));
+        // Real CPython promotes to an arbitrary-precision int the instant
+        // a computation would overflow, regardless of how "small" the
+        // exponent looks. The previous "use BigInt only when bi > 63"
+        // heuristic was unsound two ways: (1) the boundary itself was off
+        // by one — `2**63` (exponent exactly 63) fell into the FAST i64
+        // path below and silently wrapped via `wrapping_mul` to
+        // `i64::MIN` instead of the correct `9223372036854775808`; (2) an
+        // exponent under 63 can still overflow i64 if the BASE is large
+        // enough (`3**40` already exceeds i64::MAX). Confirmed via
+        // CPython's own `test_math.testIsqrt`, which fed `2**e` for `e`
+        // up to 200 into `isqrt` and got a spurious `ValueError:
+        // isqrt() argument must be nonnegative` from the wrapped-negative
+        // `2**63`. Using checked arithmetic and falling back to BigInt on
+        // ANY overflow (not just large exponents) fixes both.
+        if bi <= u32::MAX as i64 {
+            if let Some(result) = ai.checked_pow(bi as u32) {
+                return Ok(py_int(result));
+            }
         }
-        let mut result: i64 = 1;
-        for _ in 0..bi { result = result.wrapping_mul(ai); }
+        let big_a = BigInt::from(ai);
+        let result = big_a.pow(bi as u32);
         return Ok(py_int(result));
     }
     if let Some(r) = try_dunder_binop(a, b, "__pow__")? { return Ok(r); }
@@ -3361,6 +3470,29 @@ pub fn contains_op(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<bool> {
             items.contains(b)
         }
         PyObject::FrozenSet(items) => items.contains(b),
+        // `x in some_bytes` — real CPython accepts either a single int
+        // byte value (`0x25 in b"a%b"`) or a bytes-like subsequence
+        // (`b"%20" in b"a%20b"`). Was missing entirely (fell through to
+        // the `_` catch-all's "is not iterable" TypeError) — a real
+        // trigger: `urllib.parse.unquote_to_bytes`'s `b"%" not in string`
+        // early-exit check.
+        PyObject::Bytes(data) | PyObject::ByteArray(data) => {
+            let bval = b.borrow();
+            match &*bval {
+                PyObject::Int(n) => {
+                    let byte = n.to_i64().unwrap_or(-1);
+                    Ok((0..=255).contains(&byte) && data.contains(&(byte as u8)))
+                }
+                PyObject::Bytes(needle) | PyObject::ByteArray(needle) => {
+                    if needle.is_empty() {
+                        Ok(true)
+                    } else {
+                        Ok(data.windows(needle.len()).any(|w| w == needle.as_slice()))
+                    }
+                }
+                _ => Err(PyError::type_error("argument should be integer or bytes-like object")),
+            }
+        }
         PyObject::Range { start, stop, step } => {
             let item = b.borrow();
             if let PyObject::Int(n) = &*item {
@@ -3496,7 +3628,20 @@ pub fn builtin_len(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             if let Some(f) = f {
                 let result = call_bound_method(f, args[0].clone(), vec![])?;
                 let n = result.borrow();
-                if let PyObject::Int(i) = &*n { return Ok(py_int(i.clone())) }
+                if let PyObject::Int(i) = &*n {
+                    // Real CPython rejects a negative `__len__()` result
+                    // with `ValueError: __len__() should return >= 0` —
+                    // this was missing entirely, silently accepting -1 as
+                    // a length. Confirmed via CPython's own
+                    // `test_bool.test_sane_len`, which asserts `bool()`'s
+                    // and `len()`'s error messages for the same bad
+                    // `__len__` values are identical — `bool()` delegates
+                    // to this same function specifically so that holds.
+                    if i.sign() == Sign::Minus {
+                        return Err(PyError::value_error("__len__() should return >= 0"));
+                    }
+                    return Ok(py_int(i.clone()));
+                }
                 return Err(PyError::type_error("__len__() should return an int"))
             }
             if let Some(native) = dict.get(NATIVE_BACKING_KEY) {
@@ -3512,7 +3657,12 @@ pub fn builtin_len(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             if let Some(f) = f {
                 let result = call_bound_method(f, args[0].clone(), vec![])?;
                 let n = result.borrow();
-                if let PyObject::Int(i) = &*n { return Ok(py_int(i.clone())) }
+                if let PyObject::Int(i) = &*n {
+                    if i.sign() == Sign::Minus {
+                        return Err(PyError::value_error("__len__() should return >= 0"));
+                    }
+                    return Ok(py_int(i.clone()));
+                }
                 return Err(PyError::type_error("__len__() should return an int"));
             }
             Err(PyError::type_error(format!("object of type '{}' has no len()", obj.type_name())))
@@ -3561,6 +3711,26 @@ pub fn builtin_range(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
 }
 
+thread_local! {
+    // `type(x)` for a builtin-native value (int/str/list/...) used to build
+    // a BRAND NEW, throwaway `PyObject::Type` on every single call — so
+    // `type(5) is type(6)` (and even `type(5) is type(5)`, two separate
+    // calls) was ALWAYS `False`, since no two calls ever returned the same
+    // object. This is an extremely common idiom (`type(self) is type(other)`
+    // total-ordering-style guards, `type(x) == int` checks) — confirmed via
+    // CPython's own `test_math.testIsqrt`'s `self.assertIs(type(s), int)`.
+    // Caching one canonical Type object per builtin type NAME here fixes
+    // same-kind identity comparisons. NOTE this does NOT make `type(5) is
+    // int` true — `int`/`str`/etc. are registered in builtins as plain
+    // `PyObject::BuiltinFunction` constructors, not as real Type objects
+    // (a separate, much larger architectural gap: making them real,
+    // subclassable/callable Type objects would touch every one of this
+    // file's many `PyObject::BuiltinFunction { name: "int", .. }`-style
+    // special cases). `isinstance()` already works around this with its own
+    // name-based comparison; `type(x) is int` remains unsupported.
+    static PRIMITIVE_TYPE_CACHE: std::cell::RefCell<HashMap<String, PyObjectRef>> = std::cell::RefCell::new(HashMap::new());
+}
+
 pub fn builtin_type_of(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() == 1 {
         // type(obj) -> return the type of an object
@@ -3570,12 +3740,18 @@ pub fn builtin_type_of(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             PyObject::Type { .. } => Ok(args[0].clone()),
             _ => {
                 let name = borrowed.type_name();
-                Ok(PyObjectRef::new(PyObject::Type {
-                    name,
+                drop(borrowed);
+                if let Some(cached) = PRIMITIVE_TYPE_CACHE.with(|c| c.borrow().get(&name).cloned()) {
+                    return Ok(cached);
+                }
+                let new_type = PyObjectRef::new(PyObject::Type {
+                    name: name.clone(),
                     dict: Box::new(HashMap::new()),
                     bases: vec![],
                     mro: vec![],
-                }))
+                });
+                PRIMITIVE_TYPE_CACHE.with(|c| { c.borrow_mut().insert(name, new_type.clone()); });
+                Ok(new_type)
             }
         }
     } else if args.len() == 3 {
@@ -3971,27 +4147,51 @@ pub fn builtin_repr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 
 pub fn builtin_bool(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() > 1 { return Err(PyError::type_error("bool() takes at most 1 argument")); }
-    if args.is_empty() { Ok(py_bool(false)) }
-    else {
+    if args.is_empty() { return Ok(py_bool(false)); }
+    let typ_opt = {
         let obj = args[0].borrow();
         if let PyObject::Instance { typ, .. } = &*obj {
-            let f = lookup_dunder_via_mro(typ, "__bool__");
-            if let Some(f) = f {
-                if matches!(&*f.borrow(), PyObject::None) {
-                    return Err(PyError::type_error("__bool__ should return a bool"));
-                }
+            if matches!(lookup_dunder_via_mro(typ, "__bool__").map(|f| f.borrow().clone()).unwrap_or(PyObject::None), PyObject::None)
+                && matches!(lookup_dunder_via_mro(typ, "__len__").map(|f| f.borrow().clone()).unwrap_or(PyObject::None), PyObject::None)
+            {
+                None
             } else {
-                let f = lookup_dunder_via_mro(typ, "__len__");
-                if let Some(f) = f {
-                    if matches!(&*f.borrow(), PyObject::None) {
-                        return Err(PyError::type_error("__len__ should return an int"));
-                    }
-                }
+                Some(typ.clone())
             }
+        } else {
+            None
         }
-        drop(obj);
-        Ok(py_bool(args[0].truthy()))
+    };
+    if let Some(typ) = typ_opt {
+        // Unlike the infallible `.truthy()` (used for implicit if/while/and/or
+        // truth-testing, which must never hang even on a malformed
+        // `__bool__`), the explicit `bool()` builtin CAN and must raise the
+        // real CPython error when `__bool__` doesn't return an actual `bool`
+        // (e.g. `def __bool__(self): return self`) — confirmed via CPython's
+        // own `test_bool.test_convert_to_bool`.
+        if let Some(f) = lookup_dunder_via_mro(&typ, "__bool__") {
+            let result = call_bound_method(f, args[0].clone(), vec![])?;
+            return match result {
+                PyObjectRef::SmallBool(b) => Ok(py_bool(b)),
+                other => Err(PyError::type_error(format!(
+                    "__bool__ should return bool, returned {}",
+                    other.borrow().type_name()
+                ))),
+            };
+        }
+        if lookup_dunder_via_mro(&typ, "__len__").is_some() {
+            // Delegate to `builtin_len` itself rather than re-deriving the
+            // same validation here — CPython's own `test_bool.test_sane_len`
+            // asserts `bool()`'s and `len()`'s error messages for the same
+            // bad `__len__` return value are byte-for-byte IDENTICAL (real
+            // CPython's `bool()` calls the same `PyObject_Size` under the
+            // hood); sharing this code is what guarantees that instead of
+            // two hand-written messages silently drifting apart.
+            let n = builtin_len(&[args[0].clone()])?;
+            return Ok(py_bool(n.as_i64().unwrap_or(0) != 0));
+        }
     }
+    Ok(py_bool(args[0].truthy()))
 }
 
 pub fn builtin_list(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
@@ -4653,15 +4853,20 @@ pub fn builtin_setattr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         return Err(PyError::type_error("setattr() takes exactly 3 arguments"));
     }
     let attr_name = args[1].str();
-    // The inline `PyObjectRef` variants (SmallInt/SmallBool/SmallFloat/
-    // SmallStr/None) have no backing `RefCell` at all — `borrow_mut()`
-    // panics for them by design (there's nothing to mutate). Real Python
-    // just raises a normal `AttributeError` for `setattr(5, 'x', 1)`;
-    // check for this case first instead of letting it crash the process.
-    if matches!(args[0],
-        PyObjectRef::SmallInt(_) | PyObjectRef::SmallBool(_) | PyObjectRef::SmallFloat(_)
-        | PyObjectRef::SmallStr(_) | PyObjectRef::None
-    ) {
+    // `.borrow_mut()` panics unconditionally for anything that ISN'T
+    // `PyObjectRef::Mut` — that's every inline variant (SmallInt/SmallBool/
+    // SmallFloat/SmallStr/None, no backing RefCell at all) AND every
+    // `Imm`-wrapped value (boxed Int/Str/Float, Tuple, Bytes, Function,
+    // Code, Type — immutable by this codebase's design, even though real
+    // CPython DOES allow setting arbitrary attributes on a plain function).
+    // A previous fix here only covered the inline variants, so
+    // `setattr(some_function, 'x', 1)` (a real CPython feature we don't
+    // support, but a common thing for tests to exercise, e.g. CPython's own
+    // `test_funcattrs.py`) still crashed the whole process. Raising the
+    // same `AttributeError` real CPython gives for a genuinely
+    // attribute-less type is a strictly better fallback than a crash, even
+    // where CPython itself would have allowed it.
+    if !matches!(args[0], PyObjectRef::Mut(_)) {
         return Err(PyError::attribute_error(format!(
             "'{}' object has no attribute '{}'", args[0].borrow().type_name(), attr_name
         )));
@@ -4685,6 +4890,12 @@ pub fn builtin_delattr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     };
     if let Some(f) = f {
         return call_bound_method(f, args[0].clone(), vec![args[1].clone()]);
+    }
+    // See the matching guard in `builtin_setattr` just above.
+    if !matches!(args[0], PyObjectRef::Mut(_)) {
+        return Err(PyError::attribute_error(format!(
+            "'{}' object has no attribute '{}'", args[0].borrow().type_name(), attr_name
+        )));
     }
     args[0].borrow_mut().del_attribute(&attr_name)?;
     Ok(py_none())
@@ -5209,7 +5420,15 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 else { Err(PyError::stop_iteration()) }
             } else {
                 let v = py_int(*current);
-                *current += *step;
+                // A plain `+=` panics ("attempt to add with overflow") once
+                // `current` gets within `step` of i64::MAX/MIN — real,
+                // confirmed trigger: CPython's own `test_range.py` exercises
+                // ranges near those boundaries. Saturating instead just
+                // clamps `current` past `stop` on the affected side, which
+                // correctly starves the NEXT call into `StopIteration`
+                // above — the just-returned `v` here is unaffected either
+                // way.
+                *current = current.checked_add(*step).unwrap_or(if *step > 0 { i64::MAX } else { i64::MIN });
                 Ok(v)
             }
         }
@@ -6654,6 +6873,47 @@ fn extract_slots(slots_val: &PyObjectRef, result: &mut Vec<String>) {
         }
         _ => {}
     }
+}
+
+/// Resolve `str.find`/`index`/`count`/etc.'s optional `start`/`end`
+/// arguments into clamped, in-bounds `[start, end)` CHARACTER indices —
+/// same semantics as slice bounds (negative indices count from the end,
+/// out-of-range values clamp rather than error).
+fn resolve_str_slice_bounds(len: usize, start: Option<i64>, end: Option<i64>) -> (usize, usize) {
+    let clamp = |v: i64| -> usize {
+        let v = if v < 0 { (v + len as i64).max(0) } else { v };
+        v.min(len as i64) as usize
+    };
+    let s = start.map(clamp).unwrap_or(0);
+    let e = end.map(clamp).unwrap_or(len);
+    (s, e.max(s))
+}
+
+/// Extract an optional integer argument, treating a missing arg OR an
+/// explicit `None` the same way (both mean "not given" — real CPython's
+/// `str.find(sub, start=None)` etc. accept `None` as a valid stand-in for
+/// "no bound").
+fn opt_i64_arg(a: Option<&PyObjectRef>) -> Option<i64> {
+    a.and_then(|v| {
+        if matches!(&*v.borrow(), PyObject::None) { None } else { v.as_i64() }
+    })
+}
+
+/// Shared core of `str.find`/`rfind`/`index`/`rindex` — operates on
+/// CHARACTER (not byte) indices throughout, unlike a bare `str::find`/
+/// `str::rfind` call (which return byte offsets — silently wrong as a
+/// Python character index for any non-ASCII haystack), and properly
+/// honors `start`/`end` (previously ignored entirely: `s.find(x, 5)`
+/// searched from position 0 regardless of the `5`).
+fn str_find_impl(haystack: &str, needle: &str, start: Option<i64>, end: Option<i64>, reverse: bool) -> Option<usize> {
+    let chars: Vec<char> = haystack.chars().collect();
+    let (s, e) = resolve_str_slice_bounds(chars.len(), start, end);
+    if s > e {
+        return None;
+    }
+    let sub: String = chars[s..e].iter().collect();
+    let found = if reverse { sub.rfind(needle) } else { sub.find(needle) };
+    found.map(|byte_idx| s + sub[..byte_idx].chars().count())
 }
 
 /// Get the effective __slots__ for a type, checking the entire MRO.
@@ -8136,16 +8396,36 @@ impl PyObject {
                     "startswith" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "startswith".to_string(),
                         func: |args| {
-                            if args.len() < 2 { return Err(PyError::type_error("startswith() takes exactly one argument")); }
-                            Ok(py_bool(args[0].str().starts_with(&args[1].str())))
+                            if args.len() < 2 { return Err(PyError::type_error("startswith() takes at least 1 argument")); }
+                            let s = args[0].str();
+                            let chars: Vec<char> = s.chars().collect();
+                            let start = opt_i64_arg(args.get(2));
+                            let end = opt_i64_arg(args.get(3));
+                            let (st, en) = resolve_str_slice_bounds(chars.len(), start, end);
+                            let sub: String = chars[st..en].iter().collect();
+                            let prefixes: Vec<String> = match &*args[1].borrow() {
+                                PyObject::Tuple(items) => items.iter().map(|x| x.str()).collect(),
+                                _ => vec![args[1].str()],
+                            };
+                            Ok(py_bool(prefixes.iter().any(|p| sub.starts_with(p.as_str()))))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
                     "endswith" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "endswith".to_string(),
                         func: |args| {
-                            if args.len() < 2 { return Err(PyError::type_error("endswith() takes exactly one argument")); }
-                            Ok(py_bool(args[0].str().ends_with(&args[1].str())))
+                            if args.len() < 2 { return Err(PyError::type_error("endswith() takes at least 1 argument")); }
+                            let s = args[0].str();
+                            let chars: Vec<char> = s.chars().collect();
+                            let start = opt_i64_arg(args.get(2));
+                            let end = opt_i64_arg(args.get(3));
+                            let (st, en) = resolve_str_slice_bounds(chars.len(), start, end);
+                            let sub: String = chars[st..en].iter().collect();
+                            let suffixes: Vec<String> = match &*args[1].borrow() {
+                                PyObject::Tuple(items) => items.iter().map(|x| x.str()).collect(),
+                                _ => vec![args[1].str()],
+                            };
+                            Ok(py_bool(suffixes.iter().any(|p| sub.ends_with(p.as_str()))))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -8153,10 +8433,67 @@ impl PyObject {
                         name: "find".to_string(),
                         func: |args| {
                             if args.len() < 2 { return Err(PyError::type_error("find() takes at least 1 argument")); }
-                            match args[0].str().find(&args[1].str()) {
-                                Some(i) => Ok(py_int(i as i64)),
-                                None => Ok(py_int(-1)),
-                            }
+                            let s = args[0].str();
+                            let needle = args[1].str();
+                            let start = opt_i64_arg(args.get(2));
+                            let end = opt_i64_arg(args.get(3));
+                            Ok(py_int(str_find_impl(&s, &needle, start, end, false).map(|i| i as i64).unwrap_or(-1)))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "rfind" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "rfind".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("rfind() takes at least 1 argument")); }
+                            let s = args[0].str();
+                            let needle = args[1].str();
+                            let start = opt_i64_arg(args.get(2));
+                            let end = opt_i64_arg(args.get(3));
+                            Ok(py_int(str_find_impl(&s, &needle, start, end, true).map(|i| i as i64).unwrap_or(-1)))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "index" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "index".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("index() takes at least 1 argument")); }
+                            let s = args[0].str();
+                            let needle = args[1].str();
+                            let start = opt_i64_arg(args.get(2));
+                            let end = opt_i64_arg(args.get(3));
+                            str_find_impl(&s, &needle, start, end, false)
+                                .map(|i| py_int(i as i64))
+                                .ok_or_else(|| PyError::value_error("substring not found"))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "rindex" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "rindex".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("rindex() takes at least 1 argument")); }
+                            let s = args[0].str();
+                            let needle = args[1].str();
+                            let start = opt_i64_arg(args.get(2));
+                            let end = opt_i64_arg(args.get(3));
+                            str_find_impl(&s, &needle, start, end, true)
+                                .map(|i| py_int(i as i64))
+                                .ok_or_else(|| PyError::value_error("substring not found"))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "count" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "count".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("count() takes at least 1 argument")); }
+                            let s = args[0].str();
+                            let needle = args[1].str();
+                            let start = opt_i64_arg(args.get(2));
+                            let end = opt_i64_arg(args.get(3));
+                            let chars: Vec<char> = s.chars().collect();
+                            let (st, en) = resolve_str_slice_bounds(chars.len(), start, end);
+                            let sub: String = chars[st..en].iter().collect();
+                            let c = if needle.is_empty() { sub.chars().count() + 1 } else { sub.matches(needle.as_str()).count() };
+                            Ok(py_int(c as i64))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -9974,7 +10311,7 @@ impl PyObject {
                                     val.to_bytes_be()
                                 };
                                 // Handle negative numbers for signed=True
-                                if signed && val.sign() == num_bigint::Sign::Minus {
+                                if signed && val.sign() == Sign::Minus {
                                     // For signed negative, compute two's complement
                                     let abs_val = -val.clone();
                                     let (_, abs_bytes) = if byteorder == "little" {
@@ -10564,7 +10901,7 @@ impl PyObject {
                     _ => Err(PyError::attribute_error(format!("'future_await_iterator' object has no attribute '{}'", name))),
                 }
             }
-            PyObject::BuiltinFunction { name: bf_name, .. } => {
+            PyObject::BuiltinFunction { name: bf_name, func } => {
                 if bf_name == "bytes" && name == "fromhex" {
                     return Ok(PyObjectRef::imm(PyObject::BuiltinFunction {
                         name: "fromhex".to_string(),
@@ -10741,6 +11078,39 @@ impl PyObject {
                             Ok(py_bool(false))
                         },
                     }));
+                }
+                // A handful of generic dunders every real builtin function/
+                // type has in CPython, regardless of which specific one —
+                // were missing across the board (not one-off gaps), so
+                // adding them here (rather than per-name like `fromhex`/
+                // `__getformat__` above) covers `int`/`str`/`list`/`dict`/
+                // any other native constructor uniformly. Real trigger:
+                // CPython's own `test_heapq.py` (`__module__`), `test_call.py`/
+                // `test_structseq.py` (`__new__`/`__init__` — common
+                // "is this constructible via type.__new__" introspection),
+                // `test_complex.py` (`__hash__` — checking hashability).
+                if name == "__module__" {
+                    return Ok(py_str("builtins"));
+                }
+                if name == "__hash__" {
+                    return Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__hash__".to_string(),
+                        func: |args| Ok(py_int(args[0].hash()? as i64)),
+                        self_obj: py_none(),
+                    }));
+                }
+                if name == "__new__" || name == "__init__" {
+                    // Pragmatic stand-in: real CPython's builtin `__new__`/
+                    // `__init__` slots are the actual C-level allocators/
+                    // initializers, not separately-callable Python-visible
+                    // functions with independent behavior worth
+                    // reimplementing here — returning the constructor
+                    // itself is "good enough" for introspection code that
+                    // just checks these exist/are callable (real trigger:
+                    // `test_structseq.py`'s `SomeStructType.__new__`-based
+                    // construction pattern) without claiming to model the
+                    // real two-phase alloc/init protocol.
+                    return Ok(PyObjectRef::imm(PyObject::BuiltinFunction { name: bf_name.clone(), func: *func }));
                 }
                 Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", self.type_name(), name)))
             }
@@ -11402,7 +11772,13 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                     if i < 0 || i >= len {
                         return Err(PyError::index_error("bytes index out of range"));
                     }
-                    Ok(PyObjectRef::imm(PyObject::Bytes(vec![b[i as usize]])))
+                    // Real CPython: `bytes[int]` returns an `int` (0-255);
+                    // only `bytes[slice]` returns a `bytes` object. This
+                    // returned a length-1 `bytes` for a plain int index
+                    // instead — silently broke any code doing byte-at-a-time
+                    // processing via `b[i]` (as opposed to `for byte in b`,
+                    // which already correctly yielded ints).
+                    Ok(py_int(b[i as usize] as i64))
                 }
                 PyObject::Slice { start, stop, step } => {
                     let len = b.len();
@@ -11436,7 +11812,9 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                     if i < 0 || i >= len {
                         return Err(PyError::index_error("bytearray index out of range"));
                     }
-                    Ok(PyObjectRef::new(PyObject::ByteArray(vec![b[i as usize]])))
+                    // Same fix as `bytes[int]` above: a plain int index
+                    // must yield an `int`, not a length-1 `bytearray`.
+                    Ok(py_int(b[i as usize] as i64))
                 }
                 PyObject::Slice { start, stop, step } => {
                     let len = b.len();
@@ -13071,27 +13449,13 @@ fn percent_encode_byte(byte: u8) -> String {
     format!("%{:02X}", byte)
 }
 
-/// Percent-decode a string (for unquote)
+/// Percent-decode a string (for unquote). Routes through
+/// [`percent_decode_to_bytes`] and re-decodes as UTF-8 — decoding a char at
+/// a time (the previous approach) mangled multi-byte percent sequences:
+/// `%C3%A9` must become the single character 'é', not two mojibake chars
+/// from pushing each raw byte value as its own `char`.
 fn percent_decode(s: &str) -> String {
-    let mut result = String::new();
-    let mut chars = s.chars();
-    while let Some(c) = chars.next() {
-        if c == '%' {
-            let hex: String = chars.by_ref().take(2).collect();
-            if hex.len() == 2 {
-                if let Ok(byte) = u8::from_str_radix(&hex, 16) {
-                    result.push(byte as char);
-                    continue;
-                }
-            }
-            // Invalid percent encoding, preserve original
-            result.push('%');
-            result.push_str(&hex);
-        } else {
-            result.push(c);
-        }
-    }
-    result
+    String::from_utf8_lossy(&percent_decode_to_bytes(s)).into_owned()
 }
 
 /// Check if a byte should be encoded in URL (for quote)
@@ -13109,6 +13473,31 @@ fn needs_percent_encode(byte: u8, safe: &str) -> bool {
         return false;
     }
     true
+}
+
+/// Percent-decode into raw bytes (the primitive both `unquote`'s
+/// str-returning form and `unquote_to_bytes` build on) — decoding straight
+/// to `Vec<u8>` instead of `String` avoids mangling non-ASCII percent
+/// sequences a char at a time (e.g. `%C3%A9` must become the single
+/// UTF-8-decoded character 'é', not two separate mojibake chars).
+fn percent_decode_to_bytes(s: &str) -> Vec<u8> {
+    let bytes = s.as_bytes();
+    let mut result = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(hex) = std::str::from_utf8(&bytes[i + 1..i + 3]) {
+                if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                    result.push(byte);
+                    i += 3;
+                    continue;
+                }
+            }
+        }
+        result.push(bytes[i]);
+        i += 1;
+    }
+    result
 }
 
 pub fn create_urllib_parse_dict() -> HashMap<String, PyObjectRef> {
