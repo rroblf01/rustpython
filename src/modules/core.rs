@@ -979,6 +979,13 @@ pub fn create_math_dict() -> HashMap<String, PyObjectRef> {
             _ => Err(PyError::type_error("pow() argument must be a number")),
         }
     });
+    math_func!("fma", |args| {
+        if args.len() != 3 { return Err(PyError::type_error("fma() takes exactly three arguments")); }
+        let a = args[0].as_f64().unwrap_or(f64::NAN);
+        let b = args[1].as_f64().unwrap_or(f64::NAN);
+        let c = args[2].as_f64().unwrap_or(f64::NAN);
+        Ok(py_float(a.mul_add(b, c)))
+    });
     math_func!("log", |args| {
         if args.len() < 1 || args.len() > 2 { return Err(PyError::type_error("log() takes one or two arguments")); }
         let v = args[0].borrow();
@@ -1490,6 +1497,11 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
     sys_func!("exc_info", sys_exc_info_builtin);
     sys_func!("getrecursionlimit", sys_getrecursionlimit_builtin);
     sys_func!("setrecursionlimit", sys_setrecursionlimit_builtin);
+    sys_func!("_getframe", |args| {
+        let level = if args.is_empty() { 0 } else { args[0].as_i64().unwrap_or(0) };
+        // Return a basic frame representation
+        Ok(py_none())
+    });
     sys_func!("get_int_max_str_digits", |_| {
         Ok(py_int(crate::object::INT_MAX_STR_DIGITS.with(|d| d.get())))
     });
