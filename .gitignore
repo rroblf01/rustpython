@@ -11,3 +11,7 @@ testproject/
 .venv/
 .claude/
 CLAUDE.md
+# Temp test files
+@test_*
+b'@test_*
+<FakePath*
