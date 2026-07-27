@@ -3603,6 +3603,20 @@ pub fn builtin_float(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             let f: f64 = normalized.parse().map_err(|_| PyError::value_error(format!("could not convert string to float: '{}'", s)))?;
             Ok(py_float(f))
         }
+        PyObject::ByteArray(b) => {
+            let s = std::str::from_utf8(b).map_err(|_| PyError::value_error("could not convert bytearray to float: invalid utf-8"))?;
+            let s = s.trim_matches(|c: char| c.is_whitespace());
+            let normalized: String = s.chars().map(|c| {
+                match c {
+                    '\u{0660}'..='\u{0669}' => char::from_u32('0' as u32 + (c as u32 - 0x0660)).unwrap_or(c),
+                    '\u{06F0}'..='\u{06F9}' => char::from_u32('0' as u32 + (c as u32 - 0x06F0)).unwrap_or(c),
+                    '\u{0966}'..='\u{096F}' => char::from_u32('0' as u32 + (c as u32 - 0x0966)).unwrap_or(c),
+                    _ => c,
+                }
+            }).collect();
+            let f: f64 = normalized.parse().map_err(|_| PyError::value_error(format!("could not convert string to float: '{}'", s)))?;
+            Ok(py_float(f))
+        }
         PyObject::Instance { typ, .. } => {
             match lookup_dunder_via_mro(typ, "__float__") {
                 Some(f) => {
@@ -9838,6 +9852,42 @@ impl PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
+                    "is_integer" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "is_integer".to_string(),
+                        func: |args| {
+                            if let PyObject::Float(v) = &*args[0].borrow() {
+                                Ok(py_bool(v.fract() == 0.0))
+                            } else { Err(PyError::runtime_error("is_integer on non-float")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__ceil__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__ceil__".to_string(),
+                        func: |args| {
+                            if let PyObject::Float(v) = &*args[0].borrow() {
+                                Ok(py_int(v.ceil() as i64))
+                            } else { Err(PyError::runtime_error("__ceil__ on non-float")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__floor__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__floor__".to_string(),
+                        func: |args| {
+                            if let PyObject::Float(v) = &*args[0].borrow() {
+                                Ok(py_int(v.floor() as i64))
+                            } else { Err(PyError::runtime_error("__floor__ on non-float")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__trunc__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__trunc__".to_string(),
+                        func: |args| {
+                            if let PyObject::Float(v) = &*args[0].borrow() {
+                                Ok(py_int(v.trunc() as i64))
+                            } else { Err(PyError::runtime_error("__trunc__ on non-float")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     _ => Err(PyError::attribute_error(format!("'float' object has no attribute '{}'", name))),
                 }
             }
@@ -10323,6 +10373,15 @@ impl PyObject {
                                     Ok(py_str(&format!("{}0x1.{}p{:+}", sign, if hex_mantissa.is_empty() { "0" } else { hex_mantissa }, exp)))
                                 }
                             } else { Err(PyError::type_error("hex() argument must be float")) }
+                        },
+                    }));
+                }
+                if bf_name == "float" && name == "from_number" {
+                    return Ok(PyObjectRef::imm(PyObject::BuiltinFunction {
+                        name: "from_number".to_string(),
+                        func: |args| {
+                            if args.is_empty() { return Err(PyError::type_error("float.from_number() takes exactly 1 argument")); }
+                            Ok(py_float(args[0].as_f64().unwrap_or(f64::NAN)))
                         },
                     }));
                 }

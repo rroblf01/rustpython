@@ -1,5 +1,47 @@
 use std::fmt;
 
+fn unicode_name_to_char(name: &str) -> Option<char> {
+    Some(match name {
+        "EM SPACE" => '\u{2003}',
+        "EN SPACE" => '\u{2002}',
+        "NOT SIGN" => '\u{00AC}',
+        "EURO SIGN" => '\u{20AC}',
+        "POUND SIGN" => '\u{00A3}',
+        "COPYRIGHT SIGN" => '\u{00A9}',
+        "REGISTERED SIGN" => '\u{00AE}',
+        "SECTION SIGN" => '\u{00A7}',
+        "BULLET" => '\u{2022}',
+        "HORIZONTAL ELLIPSIS" => '\u{2026}',
+        "LEFTWARDS ARROW" => '\u{2190}',
+        "UPWARDS ARROW" => '\u{2191}',
+        "RIGHTWARDS ARROW" => '\u{2192}',
+        "DOWNWARDS ARROW" => '\u{2193}',
+        "LEFT DOUBLE QUOTATION MARK" => '\u{201C}',
+        "RIGHT DOUBLE QUOTATION MARK" => '\u{201D}',
+        "LEFT SINGLE QUOTATION MARK" => '\u{2018}',
+        "RIGHT SINGLE QUOTATION MARK" => '\u{2019}',
+        "LATIN SMALL LETTER SHARP S" => '\u{00DF}',
+        "MICRO SIGN" => '\u{00B5}',
+        "DEGREE SIGN" => '\u{00B0}',
+        "PLUS-MINUS SIGN" => '\u{00B1}',
+        "SUPERSCRIPT TWO" => '\u{00B2}',
+        "SUPERSCRIPT THREE" => '\u{00B3}',
+        "ACUTE ACCENT" => '\u{00B4}',
+        "MICRO SIGN" => '\u{00B5}',
+        "PILCROW SIGN" => '\u{00B6}',
+        "MIDDLE DOT" => '\u{00B7}',
+        "CEDILLA" => '\u{00B8}',
+        "SUPERSCRIPT ONE" => '\u{00B9}',
+        "MASCULINE ORDINAL INDICATOR" => '\u{00BA}',
+        "RIGHT-POINTING DOUBLE ANGLE QUOTATION MARK" => '\u{00BB}',
+        "VULGAR FRACTION ONE QUARTER" => '\u{00BC}',
+        "VULGAR FRACTION ONE HALF" => '\u{00BD}',
+        "VULGAR FRACTION THREE QUARTERS" => '\u{00BE}',
+        "INVERTED QUESTION MARK" => '\u{00BF}',
+        _ => return None,
+    })
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
     Name(String),
@@ -470,6 +512,23 @@ impl Lexer {
                                 let val = u32::from_str_radix(&digits, 16).unwrap_or(0xFFFD);
                                 s.push(std::char::from_u32(val).unwrap_or('\u{FFFD}'));
                             }
+                            Some('N') => {
+                                if self.advance() == Some('{') {
+                                    let mut name = String::new();
+                                    loop {
+                                        match self.advance() {
+                                            Some('}') => break,
+                                            Some(c) => name.push(c),
+                                            None => break,
+                                        }
+                                    }
+                                    let ch = unicode_name_to_char(&name).unwrap_or('\u{FFFD}');
+                                    s.push(ch);
+                                } else {
+                                    s.push('\\');
+                                    s.push('N');
+                                }
+                            }
                             Some(c) if c == '\n' => {}
                             Some(c) => {
                                 s.push('\\');
@@ -558,6 +617,23 @@ impl Lexer {
                                 let digits: String = (0..8).map(|_| self.advance().unwrap_or('0')).collect();
                                 let val = u32::from_str_radix(&digits, 16).unwrap_or(0xFFFD);
                                 s.push(std::char::from_u32(val).unwrap_or('\u{FFFD}'));
+                            }
+                            Some('N') => {
+                                if self.advance() == Some('{') {
+                                    let mut name = String::new();
+                                    loop {
+                                        match self.advance() {
+                                            Some('}') => break,
+                                            Some(c) => name.push(c),
+                                            None => break,
+                                        }
+                                    }
+                                    let ch = unicode_name_to_char(&name).unwrap_or('\u{FFFD}');
+                                    s.push(ch);
+                                } else {
+                                    s.push('\\');
+                                    s.push('N');
+                                }
                             }
                             Some(c) if c == '\n' => {}
                             Some(c) => {
