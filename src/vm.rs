@@ -3915,15 +3915,24 @@ impl VirtualMachine {
 
             Opcode::LIST_EXTEND => {
                 let val = self.frames[fi].pop()?;
-                let items = {
+                let items: Vec<PyObjectRef> = {
                     let val_ref = val.borrow();
                     match &*val_ref {
                         PyObject::List(v) => v.clone(),
                         PyObject::Tuple(v) => v.clone(),
                         _ => {
-                            return Err(PyError::runtime_error(
-                                "LIST_EXTEND requires a list or tuple",
-                            ));
+                            drop(val_ref);
+                            let iterator = crate::object::builtin_iter(&[val.clone()])
+                                .map_err(|_| PyError::runtime_error("LIST_EXTEND requires an iterable"))?;
+                            let mut result = Vec::new();
+                            loop {
+                                match crate::object::builtin_next(&[iterator.clone()]) {
+                                    Ok(item) => result.push(item),
+                                    Err(e) if crate::object::is_stop_iteration_error(&e) => break,
+                                    Err(e) => return Err(e),
+                                }
+                            }
+                            result
                         }
                     }
                 };

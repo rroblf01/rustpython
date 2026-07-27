@@ -72,7 +72,7 @@ fn create_connection(conn: Rc<std::cell::RefCell<rusqlite::Connection>>) -> PyOb
                                 bases: vec![],
                                 mro: vec![],
                             }),
-                            dict: HashMap::new(),
+                            dict: crate::object::AttrMap::new(),
                         }))
                     },
                 })),
@@ -102,6 +102,6 @@ fn create_connection(conn: Rc<std::cell::RefCell<rusqlite::Connection>>) -> PyOb
             bases: vec![],
             mro: vec![],
         }),
-        dict: HashMap::new(),
+        dict: crate::object::AttrMap::new(),
     })
 }
