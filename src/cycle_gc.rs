@@ -142,15 +142,15 @@ fn trace_children(obj: &PyObject, out: &mut Vec<PyObjectRef>) {
             out.push(typ.clone());
             out.extend(dict.values().cloned());
         }
-        PyObject::Function { defaults, closure, dict, .. } => {
+        PyObject::Function(ref f) => {
             // Deliberately NOT tracing `globals` (the module's own
             // namespace) — it's always reachable via the module object
             // itself, and tracing it here would make every function
             // pull in everything else in its defining module as a
             // "child" for no real benefit.
-            out.extend(defaults.iter().cloned());
-            out.extend(closure.iter().cloned());
-            out.extend(dict.values().cloned());
+            out.extend(f.defaults.iter().cloned());
+            out.extend(f.closure.iter().cloned());
+            out.extend(f.dict.values().cloned());
         }
         PyObject::BoundMethod { func, self_obj } => {
             out.push(func.clone());
@@ -228,10 +228,10 @@ fn clear_children(obj: &mut PyObject) {
         PyObject::Dict(d) => d.clear(),
         PyObject::Set(s) | PyObject::FrozenSet(s) => s.clear(),
         PyObject::Instance { dict, .. } => dict.clear(),
-        PyObject::Function { defaults, closure, dict, .. } => {
-            defaults.clear();
-            closure.clear();
-            dict.clear();
+        PyObject::Function(ref mut f) => {
+            f.defaults.clear();
+            f.closure.clear();
+            f.dict.clear();
         }
         PyObject::BoundMethod { func, self_obj } => {
             *func = crate::object::py_none();

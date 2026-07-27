@@ -2703,7 +2703,7 @@ impl VirtualMachine {
                 let globals = self.frames[fi].module_globals.clone()
                     .unwrap_or_else(|| self.frames[fi].globals.clone());
                 let code_obj = code.clone();
-                let func = PyObjectRef::new(PyObject::Function {
+                let func = PyObjectRef::new(PyObject::Function(Box::new(PyFunction {
                     code: code_obj.clone(),
                     globals,
                     name,
@@ -2712,16 +2712,18 @@ impl VirtualMachine {
                     dict: HashMap::new(),
                     jit_ptr: std::cell::Cell::new(0),
                     jit_consts: std::cell::RefCell::new(Vec::new()),
-                });
+                })));
                 // Set __code__ and __module__ on the function
-                if let PyObject::Function { dict, .. } = &mut *func.borrow_mut() {
+                if let PyObject::Function(ref mut inner_f) = &mut *func.borrow_mut() {
+                let dict = &mut inner_f.dict;
                     dict.insert("__code__".to_string(), PyObjectRef::imm(PyObject::Code(code_obj)));
                 }
                 if let Some(ref mg) = self.frames[fi].module_globals {
                     let mg = mg.borrow();
                     if let Some(module_name) = mg.get("__name__") {
                         if let PyObject::Str(s) = &*module_name.borrow() {
-                            if let PyObject::Function { dict, .. } = &mut *func.borrow_mut() {
+                            if let PyObject::Function(ref mut inner_f) = &mut *func.borrow_mut() {
+                let dict = &mut inner_f.dict;
                                 dict.insert("__module__".to_string(), py_str(s));
                             }
                         }
@@ -3293,7 +3295,7 @@ impl VirtualMachine {
                                 }
                                 drop(obj_borrowed);
                                 pd.instance_ref = Some(obj.clone());
-                                self.frames[fi].push(PyObjectRef::new(PyObject::Dict(pd)));
+                                self.frames[fi].push(PyObjectRef::new(PyObject::Dict(Box::new(pd))));
                                 return Ok(None);
                             }
                             if name == "__class__" {
@@ -3367,7 +3369,7 @@ impl VirtualMachine {
                                                     self_obj: class_obj,
                                                 }));
                                             }
-                                            PyObject::Function { .. } => {
+                                            PyObject::Function(_) => {
                                                 let is_instance_obj = matches!(&*obj.borrow(), PyObject::Instance { .. });
                                                 if is_instance_obj {
                                                     return Some(PyObjectRef::imm(PyObject::BoundMethod {
@@ -3633,7 +3635,7 @@ impl VirtualMachine {
                                                 // distinct from ordinary `SomeClass.method`
                                                 // access (the `is_function => Ok(attr)` case
                                                 // below), which correctly stays unbound.
-                                                if matches!(&*val.borrow(), PyObject::Function { .. }) {
+                                                if matches!(&*val.borrow(), PyObject::Function(_)) {
                                                     drop(obj_borrowed);
                                                     self.frames[fi].push(PyObjectRef::imm(PyObject::BoundMethod {
                                                         func: val,
@@ -3722,7 +3724,7 @@ impl VirtualMachine {
                                 // non-frozenset` (self_obj had silently
                                 // become the `keyword` module itself).
                                 let is_placeholder_self = matches!(&*attr.borrow(), PyObject::BuiltinMethod { self_obj, .. } if matches!(&*self_obj.borrow(), PyObject::None));
-                                let is_function = matches!(&*attr.borrow(), PyObject::Function { .. });
+                                let is_function = matches!(&*attr.borrow(), PyObject::Function(_));
                                 if is_placeholder_self {
                                     let (n, func) = {
                                         let b = attr.borrow();
@@ -5172,7 +5174,7 @@ impl VirtualMachine {
                 let func_clone = func.clone();
                 Some(PyObjectRef::imm(PyObject::BoundMethod { func: func_clone, self_obj: typ.clone() }))
             }
-            PyObject::Function { .. } => {
+            PyObject::Function(_) => {
                 Some(PyObjectRef::imm(PyObject::BoundMethod { func: found.clone(), self_obj: obj.clone() }))
             }
             PyObject::BuiltinFunction { name: n, .. } if crate::object::is_builtin_exception_class_name(n) => {
@@ -5228,7 +5230,7 @@ impl VirtualMachine {
                     for (k, v) in &keywords {
                         let _ = dict.set(crate::object::py_str(k), v.clone());
                     }
-                    all_args.push(PyObjectRef::new(PyObject::Dict(dict)));
+                    all_args.push(PyObjectRef::new(PyObject::Dict(Box::new(dict))));
                 }
                 return self.type_new_impl(&all_args);
             }
@@ -5306,7 +5308,7 @@ impl VirtualMachine {
                         // `new_method_proxy`-style `__getattr__` forwarding
                         // via `getattr(self._wrapped, name)`).
                         let is_instance_obj = matches!(&*obj.borrow(), PyObject::Instance { .. });
-                        let is_function = matches!(&*v.borrow(), PyObject::Function { .. });
+                        let is_function = matches!(&*v.borrow(), PyObject::Function(_));
                         if is_instance_obj && is_function {
                             return Ok(PyObjectRef::imm(PyObject::BoundMethod { func: v, self_obj: obj.clone() }));
                         }
@@ -5476,7 +5478,7 @@ impl VirtualMachine {
                         d.set(py_str(&name), v.clone())?;
                     }
                 }
-                return Ok(PyObjectRef::new(PyObject::Dict(d)));
+                return Ok(PyObjectRef::new(PyObject::Dict(Box::new(d))));
             }
         }
 
@@ -5674,7 +5676,7 @@ impl VirtualMachine {
                     let _ = dict.set(crate::object::py_str(k), v.clone());
                 }
                 let mut new_args = args;
-                new_args.push(crate::object::PyObjectRef::new(crate::object::PyObject::Dict(dict)));
+                new_args.push(crate::object::PyObjectRef::new(crate::object::PyObject::Dict(Box::new(dict))));
                 return func(&new_args);
             }
             return func(&args);
@@ -5690,7 +5692,7 @@ impl VirtualMachine {
                 for (k, v) in keywords {
                     let _ = dict.set(crate::object::py_str(&k), v);
                 }
-                new_args.push(crate::object::PyObjectRef::new(crate::object::PyObject::Dict(dict)));
+                new_args.push(crate::object::PyObjectRef::new(crate::object::PyObject::Dict(Box::new(dict))));
             }
             // `generator.throw()` needs real `&mut self` access so the
             // resumed generator body's `sys.exc_info()` sees THIS VM's
@@ -5719,7 +5721,13 @@ impl VirtualMachine {
         }
 
         #[cfg_attr(not(feature = "jit"), allow(unused_variables))]
-        if let PyObject::Function { code, globals: func_globals, defaults, closure, jit_ptr, jit_consts, .. } = &*callable.borrow() {
+        if let PyObject::Function(ref inner_f) = &*callable.borrow() {
+            let code = &inner_f.code;
+            let func_globals = &inner_f.globals;
+            let defaults = &inner_f.defaults;
+            let closure = &inner_f.closure;
+            let jit_ptr = &inner_f.jit_ptr;
+            let jit_consts = &inner_f.jit_consts;
             // Try JIT compiled execution (fast path for hot functions)
             #[cfg(feature = "jit")]
             if defaults.is_empty() && keywords.is_empty() {
@@ -6185,7 +6193,9 @@ impl VirtualMachine {
             };
 
             match &*func.borrow() {
-                PyObject::Function { code, closure, .. } => {
+                PyObject::Function(ref f) => {
+            let code = &f.code;
+            let closure = &f.closure;
                     let code = code.clone();
                     let closure = closure.clone();
                     let mut new_frame = self.acquire_frame(code, namespace.clone(), Rc::clone(&self.builtins), caller_module_globals);
@@ -6698,7 +6708,7 @@ impl VirtualMachine {
                     pd.set(py_str(k), v.clone())?;
                 }
             }
-            PyObjectRef::new(PyObject::Dict(pd))
+            PyObjectRef::new(PyObject::Dict(Box::new(pd)))
         };
         let bases_tuple = PyObjectRef::imm(PyObject::Tuple(bases_vec.clone()));
 

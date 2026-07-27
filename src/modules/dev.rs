@@ -259,14 +259,14 @@ pub fn create_dataclasses_dict() -> HashMap<String, PyObjectRef> {
                 for (k, v) in dict.iter() {
                     let _ = new_dict.set(py_str(k), v.clone());
                 }
-                Ok(PyObjectRef::new(PyObject::Dict(new_dict)))
+                Ok(PyObjectRef::new(PyObject::Dict(Box::new(new_dict))))
             }
             PyObject::Dict(pydict) => {
                 let mut new_dict = PyDict::new();
                 for (k, v) in pydict.items() {
                     let _ = new_dict.set(k, v);
                 }
-                Ok(PyObjectRef::new(PyObject::Dict(new_dict)))
+                Ok(PyObjectRef::new(PyObject::Dict(Box::new(new_dict))))
             }
             _ => Err(PyError::type_error("asdict() argument must be a dataclass instance")),
         }
@@ -446,7 +446,7 @@ pub fn create_dis_dict() -> HashMap<String, PyObjectRef> {
         let obj = args[0].borrow();
         match &*obj {
             PyObject::Code(code) => Ok(code.as_ref().clone()),
-            PyObject::Function { code, .. } => Ok((**code).clone()),
+            PyObject::Function(ref f) => Ok((*f.code).clone()),
             _ => Err(PyError::type_error("argument must be a code object or function")),
         }
     }
@@ -618,14 +618,14 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
     inspect_func!("isfunction", |args| {
         if args.len() < 1 { return Err(PyError::type_error("isfunction() requires 1 argument")); }
         let obj = args[0].borrow();
-        Ok(py_bool(matches!(&*obj, PyObject::Function { .. })))
+        Ok(py_bool(matches!(&*obj, PyObject::Function(_))))
     });
 
     inspect_func!("isgeneratorfunction", |args| {
         if args.len() < 1 { return Err(PyError::type_error("isgeneratorfunction() requires 1 argument")); }
         let obj = args[0].borrow();
         let is_gen = match &*obj {
-            PyObject::Function { code, .. } => (code.flags & 0x0020) != 0,
+            PyObject::Function(ref f) => (f.code.flags & 0x0020) != 0,
             _ => false,
         };
         Ok(py_bool(is_gen))
@@ -635,7 +635,7 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
         if args.len() < 1 { return Err(PyError::type_error("iscoroutinefunction() requires 1 argument")); }
         let obj = args[0].borrow();
         let is_coro = match &*obj {
-            PyObject::Function { code, .. } => (code.flags & 0x0080) != 0,
+            PyObject::Function(ref f) => (f.code.flags & 0x0080) != 0,
             _ => false,
         };
         Ok(py_bool(is_coro))
@@ -684,7 +684,7 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
         if args.len() < 1 { return Err(PyError::type_error("getdoc() requires 1 argument")); }
         let obj = args[0].borrow();
         let doc = match &*obj {
-            PyObject::Function { ref dict, .. } => dict.get("__doc__").cloned(),
+            PyObject::Function(ref f) => f.dict.get("__doc__").cloned(),
             PyObject::Type { ref dict, .. } => dict.get("__doc__").cloned(),
             PyObject::Module { ref dict, .. } => dict.get("__doc__").cloned(),
             PyObject::Instance { ref dict, .. } => dict.get("__doc__").cloned(),
@@ -747,7 +747,9 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
             _ => args[0].clone(),
         };
         let b = target.borrow();
-        if let PyObject::Function { code, defaults, .. } = &*b {
+        if let PyObject::Function(ref inner_f) = &*b {
+        let code = &inner_f.code;
+        let defaults = &inner_f.defaults;
             let arg_count = code.arg_count.min(code.varnames.len());
             let positional_args: Vec<PyObjectRef> = code.varnames[..arg_count].iter().map(|n| py_str(n)).collect();
             // varnames layout is: positional args, then *args (if any), then
@@ -826,7 +828,9 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
             _ => args[0].clone(),
         };
         let b = target.borrow();
-        if let PyObject::Function { code, defaults, .. } = &*b {
+        if let PyObject::Function(ref inner_f) = &*b {
+        let code = &inner_f.code;
+        let defaults = &inner_f.defaults;
             let mut param_type_dict = HashMap::new();
             param_type_dict.insert("POSITIONAL_ONLY".to_string(), py_int(0));
             param_type_dict.insert("POSITIONAL_OR_KEYWORD".to_string(), py_int(1));
@@ -889,7 +893,7 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
             }
             let sig_type = PyObjectRef::new(PyObject::Type { name: "Signature".to_string(), dict: HashMap::new(), bases: vec![], mro: vec![] });
             let mut sig_dict = AttrMap::new();
-            sig_dict.insert("parameters".to_string(), PyObjectRef::new(PyObject::Dict(params)));
+            sig_dict.insert("parameters".to_string(), PyObjectRef::new(PyObject::Dict(Box::new(params))));
             Ok(PyObjectRef::new(PyObject::Instance { typ: sig_type, dict: sig_dict }))
         } else {
             // Real CPython raises ValueError here (not TypeError) — "no
@@ -944,7 +948,7 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
 fn getmembers_dict_of(obj: &PyObjectRef) -> Vec<(String, PyObjectRef)> {
     let b = obj.borrow();
     let mut items: Vec<(String, PyObjectRef)> = match &*b {
-        PyObject::Function { dict, .. } => dict.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        PyObject::Function(ref f) => f.dict.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
         PyObject::Type { dict, .. } => dict.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
         PyObject::Module { dict, .. } => dict.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
         PyObject::Instance { dict, .. } => dict.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),

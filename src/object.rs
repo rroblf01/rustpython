@@ -1123,6 +1123,34 @@ impl PyDict {
     }
 }
 
+/// Boxed function data — separates Function's large payload from the
+/// `PyObject` enum so the enum itself stays small (176 -> 8 bytes in enum).
+pub struct PyFunction {
+    pub code: Rc<CodeObject>,
+    pub globals: Rc<RefCell<HashMap<String, PyObjectRef>>>,
+    pub name: String,
+    pub defaults: Vec<PyObjectRef>,
+    pub closure: Vec<PyObjectRef>,
+    pub dict: HashMap<String, PyObjectRef>,
+    pub jit_ptr: std::cell::Cell<usize>,
+    pub jit_consts: std::cell::RefCell<Vec<PyObjectRef>>,
+}
+
+impl Clone for PyFunction {
+    fn clone(&self) -> Self {
+        PyFunction {
+            code: self.code.clone(),
+            globals: self.globals.clone(),
+            name: self.name.clone(),
+            defaults: self.defaults.clone(),
+            closure: self.closure.clone(),
+            dict: self.dict.clone(),
+            jit_ptr: std::cell::Cell::new(self.jit_ptr.get()),
+            jit_consts: std::cell::RefCell::new(self.jit_consts.borrow().clone()),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub enum PyObject {
     None,
@@ -1135,7 +1163,7 @@ pub enum PyObject {
     ByteArray(Vec<u8>),
     List(Vec<PyObjectRef>),
     Tuple(Vec<PyObjectRef>),
-    Dict(PyDict),
+    Dict(Box<PyDict>),
     Set(PySet),
     FrozenSet(PySet),
     Range {
@@ -1210,16 +1238,7 @@ pub enum PyObject {
     // no longer deep-clones its whole compiled body (instructions, consts,
     // ...) on every iteration — it did before, since this field previously
     // forced an owned copy.
-    Function {
-        code: Rc<CodeObject>,
-        globals: Rc<RefCell<HashMap<String, PyObjectRef>>>,
-        name: String,
-        defaults: Vec<PyObjectRef>,
-        closure: Vec<PyObjectRef>,
-        dict: HashMap<String, PyObjectRef>,
-        jit_ptr: std::cell::Cell<usize>,
-        jit_consts: std::cell::RefCell<Vec<PyObjectRef>>,
-    },
+    Function(Box<PyFunction>),
     BuiltinFunction {
         name: String,
         func: BuiltinFunc,
@@ -1405,7 +1424,7 @@ impl PyObject {
             PyObject::ZipIterator { .. } => "zip",
             PyObject::Slice { .. } => "slice",
             PyObject::Code(_) => "code",
-            PyObject::Function { .. } => "function",
+            PyObject::Function(_) => "function",
             PyObject::BuiltinFunction { .. } => "builtin_function_or_method",
             PyObject::BuiltinMethod { .. } => "builtin_method",
             PyObject::Module { .. } => "module",
@@ -1527,7 +1546,7 @@ impl PyObject {
             PyObject::Slice { start, stop, step } => {
                 format!("slice({}, {}, {})", start.repr(), stop.repr(), step.repr())
             }
-            PyObject::Function { name, .. } => format!("<function {}>", name),
+            PyObject::Function(ref f) => format!("<function {}>", f.name),
             PyObject::BuiltinFunction { name, .. } => format!("<built-in function {}>", name),
             PyObject::BuiltinMethod { name, .. } => format!("<built-in method {}>", name),
             PyObject::Module { name, .. } => format!("<module '{}'>", name),
@@ -1769,7 +1788,7 @@ impl PyObject {
             // address is stable across calls as long as callers don't
             // reconstruct a throwaway clone first (unlike the Instance case
             // above, which needed its own fix for exactly that reason).
-            PyObject::Function { .. } | PyObject::BuiltinFunction { .. } | PyObject::BuiltinMethod { .. }
+            PyObject::Function(_) | PyObject::BuiltinFunction { .. } | PyObject::BuiltinMethod { .. }
             | PyObject::Type { .. } | PyObject::Module { .. } | PyObject::BoundMethod { .. } => {
                 Ok(self as *const PyObject as usize)
             }
@@ -1902,7 +1921,7 @@ impl PyObject {
             (PyObject::CompiledRegex { pattern: a, flags: af, .. }, PyObject::CompiledRegex { pattern: b, flags: bf, .. }) => a == b && af == bf,
             // Reference-identity types (matching the identity-based hash
             // above): equal iff it's really the same underlying object.
-            (PyObject::Function { .. }, PyObject::Function { .. })
+            (PyObject::Function(_), PyObject::Function(_))
             | (PyObject::BuiltinFunction { .. }, PyObject::BuiltinFunction { .. })
             | (PyObject::BuiltinMethod { .. }, PyObject::BuiltinMethod { .. })
             | (PyObject::Type { .. }, PyObject::Type { .. })
@@ -2087,7 +2106,7 @@ pub fn py_tuple(items: Vec<PyObjectRef>) -> PyObjectRef {
 }
 
 pub fn py_dict() -> PyObjectRef {
-    PyObjectRef::new(PyObject::Dict(PyDict::new()))
+    PyObjectRef::new(PyObject::Dict(Box::new(PyDict::new())))
 }
 
 pub fn py_set() -> PyObjectRef {
@@ -2778,7 +2797,7 @@ pub fn py_bit_or(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
             for k in b.keys() {
                 if let Ok(Some(v)) = b.get(&k) { merged.set(k, v)?; }
             }
-            Ok(PyObjectRef::new(PyObject::Dict(merged)))
+            Ok(PyObjectRef::new(PyObject::Dict(Box::new(merged))))
         }
         _ => Err(PyError::type_error(format!("unsupported operand type(s) for |: '{}' and '{}'",
             a_obj.type_name(), b_obj.type_name()))),
@@ -3925,7 +3944,7 @@ pub fn builtin_dict(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             }
         }
     }
-    Ok(PyObjectRef::new(PyObject::Dict(d)))
+    Ok(PyObjectRef::new(PyObject::Dict(Box::new(d))))
 }
 
 pub fn builtin_set(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
@@ -4344,7 +4363,7 @@ pub fn builtin_globals(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         for (k, v) in globals.iter() {
             d.set(py_str(k), v.clone())?;
         }
-        Ok(PyObjectRef::new(PyObject::Dict(d)))
+        Ok(PyObjectRef::new(PyObject::Dict(Box::new(d))))
     })?
 }
 
@@ -4356,7 +4375,7 @@ pub fn builtin_locals(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             let name = crate::interner::lookup(k);
             d.set(py_str(&name), v.clone())?;
         }
-        Ok(PyObjectRef::new(PyObject::Dict(d)))
+        Ok(PyObjectRef::new(PyObject::Dict(Box::new(d))))
     })?
 }
 
@@ -4592,7 +4611,12 @@ pub fn call_bound_method(func: PyObjectRef, self_obj: PyObjectRef, args: Vec<PyO
             all_args.extend(args);
             func(&all_args)
         }
-        PyObject::Function { code, globals: g, defaults, name: fname, closure, .. } => {
+        PyObject::Function(ref f) => {
+            let code = &f.code;
+            let g = &f.globals;
+            let defaults = &f.defaults;
+            let fname = &f.name;
+            let closure = &f.closure;
             if std::env::var("RPY_DEBUG_IMPORT").is_ok() {
                 eprintln!("CALL_BOUND_METHOD (disposable VM): fname={} code_name={} filename={}", fname, code.name, code.filename);
             }
@@ -5079,14 +5103,14 @@ pub fn builtin_vars(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             for (k, v) in dict.iter() {
                 pd.set(py_str(k), v.clone())?;
             }
-            Ok(PyObjectRef::new(PyObject::Dict(pd)))
+            Ok(PyObjectRef::new(PyObject::Dict(Box::new(pd))))
         }
         PyObject::Module { dict, .. } => {
             let mut pd = PyDict::new();
             for (k, v) in dict.iter() {
                 pd.set(py_str(k), v.clone())?;
             }
-            Ok(PyObjectRef::new(PyObject::Dict(pd)))
+            Ok(PyObjectRef::new(PyObject::Dict(Box::new(pd))))
         }
         _ => Err(PyError::type_error(format!("vars() argument must have __dict__ attribute"))),
     }
@@ -5352,7 +5376,7 @@ pub fn builtin_callable(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
     let obj = args[0].borrow();
     let is_callable = matches!(&*obj,
-        PyObject::Function { .. } | PyObject::BuiltinFunction { .. } |
+        PyObject::Function(_) | PyObject::BuiltinFunction { .. } |
         PyObject::BuiltinMethod { .. } | PyObject::Type { .. } | PyObject::BuildClass |
         PyObject::BoundMethod { .. } | PyObject::Partial { .. } |
         PyObject::Generator { .. } | PyObject::Coroutine { .. } |
@@ -5565,12 +5589,14 @@ pub fn builtin_help(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 println!();
                 println!("Methods:");
                 for (key, val) in dict {
-                    if matches!(&*val.borrow(), PyObject::Function { .. } | PyObject::BuiltinFunction { .. }) {
+                    if matches!(&*val.borrow(), PyObject::Function(_) | PyObject::BuiltinFunction { .. }) {
                         println!("  {}()", key);
                     }
                 }
             }
-            PyObject::Function { name, dict, .. } => {
+            PyObject::Function(ref f) => {
+            let name = &f.name;
+            let dict = &f.dict;
                 println!("Help on function {}:", name);
                 if let Some(doc) = dict.get("__doc__") {
                     println!("  {}", doc.str());
@@ -6169,7 +6195,7 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
         match &*obj {
             PyObject::BuiltinFunction { .. } => 0,
             PyObject::BuiltinMethod { .. } => 1,
-            PyObject::Function { .. } => 2,
+            PyObject::Function(_) => 2,
             PyObject::BoundMethod { .. } => 3,
             PyObject::Type { .. } => 4,
             PyObject::BuildClass => 5,
@@ -6189,7 +6215,12 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
             } else { unreachable!() }
         }
         2 => {
-            if let PyObject::Function { code, globals: g, defaults, name: fname, closure, .. } = &*f.borrow() {
+            if let PyObject::Function(ref inner_f) = &*f.borrow() {
+            let code = &inner_f.code;
+            let g = &inner_f.globals;
+            let defaults = &inner_f.defaults;
+            let fname = &inner_f.name;
+            let closure = &inner_f.closure;
                 if std::env::var("RPY_DEBUG_IMPORT").is_ok() {
                     eprintln!("BUILTIN_CALL (disposable VM): fname={} code_name={} filename={}", fname, code.name, code.filename);
                 }
@@ -6852,7 +6883,7 @@ impl PyObject {
                     for (k, v) in dict.iter() {
                         let _ = pd.set(py_str(k), v.clone());
                     }
-                    return Ok(PyObjectRef::new(PyObject::Dict(pd)));
+                    return Ok(PyObjectRef::new(PyObject::Dict(Box::new(pd))));
                 }
                 if name == "__name__" {
                     return Ok(py_str(mod_name));
@@ -6880,7 +6911,7 @@ impl PyObject {
                         if k == NATIVE_BASE_MARKER || k == METATYPE_KEY { continue; }
                         let _ = pd.set(py_str(k), v.clone());
                     }
-                    return Ok(PyObjectRef::new(PyObject::Dict(pd)));
+                    return Ok(PyObjectRef::new(PyObject::Dict(Box::new(pd))));
                 }
                 if name == "__mro__" {
                     return Ok(PyObjectRef::new(PyObject::Tuple(mro.clone())));
@@ -6981,7 +7012,7 @@ impl PyObject {
                         if k == NATIVE_BACKING_KEY { continue; }
                         let _ = pd.set(py_str(k), v.clone());
                     }
-                    return Ok(PyObjectRef::new(PyObject::Dict(pd)));
+                    return Ok(PyObjectRef::new(PyObject::Dict(Box::new(pd))));
                 }
                 if name == "__weakref__" {
                     // __weakref__ slot exists but returns None by default
@@ -8274,7 +8305,7 @@ impl PyObject {
                             if let PyObject::Dict(dict) = &*d {
                                 let mut new_dict = PyDict::new();
                                 for (k, v) in dict.items() { new_dict.set(k, v)?; }
-                                Ok(PyObjectRef::new(PyObject::Dict(new_dict)))
+                                Ok(PyObjectRef::new(PyObject::Dict(Box::new(new_dict))))
                             } else { Err(PyError::runtime_error("copy on non-dict")) }
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
@@ -8293,7 +8324,7 @@ impl PyObject {
                                     Err(e) => return Err(e),
                                 }
                             }
-                            Ok(PyObjectRef::new(PyObject::Dict(new_dict)))
+                            Ok(PyObjectRef::new(PyObject::Dict(Box::new(new_dict))))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -8386,7 +8417,7 @@ impl PyObject {
                                     let mut new_dict = PyDict::new();
                                     for (k, v) in dict.items() { new_dict.set(k, v)?; }
                                     for (k, v) in other_dict.items() { new_dict.set(k, v)?; }
-                                    Ok(PyObjectRef::new(PyObject::Dict(new_dict)))
+                                    Ok(PyObjectRef::new(PyObject::Dict(Box::new(new_dict))))
                                 } else { Err(PyError::runtime_error("__or__ on non-dict")) }
                             } else { Err(PyError::type_error("__or__() argument must be a dict")) }
                         },
@@ -8646,7 +8677,9 @@ impl PyObject {
                     _ => Err(PyError::attribute_error(format!("'set' object has no attribute '{}'", name))),
                 }
             }
-            PyObject::Function { name: func_name, dict, .. } => {
+            PyObject::Function(ref f) => {
+            let func_name = &f.name;
+            let dict = &f.dict;
                 match name {
                     "__name__" => Ok(dict.get("__name__").cloned().unwrap_or(py_str(func_name))),
                     "__qualname__" => Ok(dict.get("__qualname__").cloned().unwrap_or(py_str(func_name))),
@@ -8686,7 +8719,9 @@ impl PyObject {
                     _ => {
                         let raw = func.borrow().get_attribute(name).map_err(|_| {
                             if std::env::var("RPY_DEBUG_ATTR").is_ok() {
-                                let (fn_name, fn_file) = if let PyObject::Function { code, name: n, .. } = &*func.borrow() {
+                                let (fn_name, fn_file) = if let PyObject::Function(ref inner_f) = &*func.borrow() {
+                                let code = &inner_f.code;
+                                let n = &inner_f.name;
                                     (n.clone(), code.filename.clone())
                                 } else { ("?".to_string(), "?".to_string()) };
                                 let self_kind = match &*self_obj.borrow() {
@@ -10112,11 +10147,11 @@ impl PyObject {
                                             // passes `mcs` itself) — shifting
                                             // every subsequent positional arg
                                             // by one.
-                                            PyObject::Function { .. } | PyObject::BuiltinFunction { .. } if name == "__new__" => {
+                                            PyObject::Function(_) | PyObject::BuiltinFunction { .. } if name == "__new__" => {
                                                 found = Some(val.clone());
                                                 break;
                                             }
-                                            PyObject::Function { .. } | PyObject::BuiltinFunction { .. } => {
+                                            PyObject::Function(_) | PyObject::BuiltinFunction { .. } => {
                                                 found = Some(PyObjectRef::new(PyObject::BoundMethod {
                                                     func: val.clone(),
                                                     self_obj: obj.clone(),
@@ -10455,7 +10490,7 @@ impl PyObject {
                             for k in keys {
                                 d.set(k, value.clone())?;
                             }
-                            Ok(PyObjectRef::new(PyObject::Dict(d)))
+                            Ok(PyObjectRef::new(PyObject::Dict(Box::new(d))))
                         },
                     }));
                 }
@@ -10496,7 +10531,7 @@ impl PyObject {
                     return Ok(PyObjectRef::new(PyObject::Tuple(vec![])));
                 }
                 if name == "__dict__" {
-                    return Ok(PyObjectRef::new(PyObject::Dict(PyDict::new())));
+                    return Ok(PyObjectRef::new(PyObject::Dict(Box::new(PyDict::new()))));
                 }
                 if bf_name == "bool" && name == "__new__" {
                     return Ok(PyObjectRef::imm(PyObject::BuiltinFunction {
@@ -10802,8 +10837,8 @@ impl ObjectAccess for PyObject {
                 dict.insert_str(&name, value);
                 Ok(())
             }
-            PyObject::Function { dict, .. } => {
-                dict.insert_str(&name, value);
+            PyObject::Function(ref mut f) => {
+                f.dict.insert_str(&name, value);
                 Ok(())
             }
             PyObject::Dict(_) | PyObject::List(_) | PyObject::Tuple(_) | PyObject::Set(_) | PyObject::FrozenSet(_) => {
@@ -11984,7 +12019,7 @@ pub fn deepcopy_one(obj: &PyObjectRef, memo: &PyObjectRef) -> Result<PyObjectRef
             Ok(new_list)
         }
         PyObject::Dict(_) => {
-            let new_dict = PyObjectRef::new(PyObject::Dict(PyDict::new()));
+            let new_dict = PyObjectRef::new(PyObject::Dict(Box::new(PyDict::new())));
             remember(memo, obj, &new_dict);
             let items = if let PyObject::Dict(d) = &*obj.borrow() { d.items() } else { unreachable!() };
             for (k, v) in items {

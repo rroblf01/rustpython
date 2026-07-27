@@ -342,7 +342,7 @@ pub fn create_functools_dict() -> HashMap<String, PyObjectRef> {
             for (type_name, impl_func) in reg.iter() {
                 py_registry.set(py_str(type_name), impl_func.clone()).ok();
             }
-            let _ = dispatcher.borrow_mut().set_attribute("registry", PyObjectRef::new(PyObject::Dict(py_registry)));
+            let _ = dispatcher.borrow_mut().set_attribute("registry", PyObjectRef::new(PyObject::Dict(Box::new(py_registry))));
         }
         let reg_register = registry.clone();
         let _dispatch_clone = dispatcher.clone();
@@ -1813,7 +1813,7 @@ fn build_context_type() -> PyObjectRef {
     }
     type_dict.insert("__init__".to_string(), bf!("__init__", |args| {
         let ctor_args = args[1..].to_vec();
-        let kw: Option<PyDict> = ctor_args.last().and_then(|a| if let PyObject::Dict(d) = &*a.borrow() { Some(d.clone()) } else { None });
+        let kw: Option<PyDict> = ctor_args.last().and_then(|a| if let PyObject::Dict(d) = &*a.borrow() { Some((**d).clone()) } else { None });
         let get_kw = |name: &str| kw.as_ref().and_then(|d| d.get(&py_str(name)).ok().flatten());
         let precision = get_kw("prec").and_then(|v| v.as_i64()).unwrap_or(28) as usize;
         let rounding = get_kw("rounding").map(|v| v.str()).unwrap_or_else(|| "ROUND_HALF_EVEN".to_string());

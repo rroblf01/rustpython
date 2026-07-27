@@ -2190,7 +2190,7 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
     for (key, val) in std::env::vars() {
         environ_pydict.set(py_str(&key), py_str(&val)).ok();
     }
-    d.insert("environ".to_string(), PyObjectRef::new(PyObject::Dict(environ_pydict)));
+    d.insert("environ".to_string(), PyObjectRef::new(PyObject::Dict(Box::new(environ_pydict))));
 
     // --- os.getpid() ---
     os_func!("getpid", |_| {

@@ -589,7 +589,7 @@ pub fn create_weakref_weak_val_dict() -> PyObjectRef {
                     for (k, v) in items.items() {
                         let _ = new_dict.set(k, v);
                     }
-                    return Ok(PyObjectRef::new(PyObject::Dict(new_dict)));
+                    return Ok(PyObjectRef::new(PyObject::Dict(Box::new(new_dict))));
                 }
             }
             Ok(py_dict())
@@ -607,7 +607,7 @@ pub fn create_weakref_weak_key_dict() -> PyObjectRef {
                     for (k, v) in items.items() {
                         let _ = new_dict.set(k, v);
                     }
-                    return Ok(PyObjectRef::new(PyObject::Dict(new_dict)));
+                    return Ok(PyObjectRef::new(PyObject::Dict(Box::new(new_dict))));
                 }
             }
             Ok(py_dict())
@@ -679,7 +679,7 @@ pub fn create_copy_dict() -> HashMap<String, PyObjectRef> {
                 for (k, v) in dict.items() {
                     let _ = new_dict.set(k, v);
                 }
-                Ok(PyObjectRef::new(PyObject::Dict(new_dict)))
+                Ok(PyObjectRef::new(PyObject::Dict(Box::new(new_dict))))
             }
             PyObject::Set(s) => {
                 let mut new_set = PySet::new();
@@ -2450,7 +2450,7 @@ fn pickle_deserialize(data: &[u8], pos: &mut usize) -> PyResult<PyObjectRef> {
                 return Err(PyError::type_error("unterminated dict in pickle data"));
             }
             *pos += 1; // skip '}'
-            Ok(PyObjectRef::new(PyObject::Dict(dict)))
+            Ok(PyObjectRef::new(PyObject::Dict(Box::new(dict))))
         }
         b'R' => {
             let start = pickle_deserialize(data, pos)?;
