@@ -8540,6 +8540,7 @@ impl PyObject {
                 match name {
                     "__name__" => Ok(dict.get("__name__").cloned().unwrap_or(py_str(func_name))),
                     "__qualname__" => Ok(dict.get("__qualname__").cloned().unwrap_or(py_str(func_name))),
+                    "name" => Ok(dict.get("name").cloned().unwrap_or(py_str(func_name))),
                     "__doc__" => Ok(dict.get("__doc__").cloned().unwrap_or(py_none())),
                     "__code__" => Ok(dict.get("__code__").cloned().unwrap_or(py_none())),
                     "__globals__" => Ok(dict.get("__globals__").cloned().unwrap_or(py_none())),
@@ -10324,6 +10325,43 @@ impl PyObject {
                     "start" => Ok(py_int(*start)),
                     "stop" => Ok(py_int(*stop)),
                     "step" => Ok(py_int(*step)),
+                    "count" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "count".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("count() takes exactly 1 argument")); }
+                            let val = &args[1];
+                            let mut count = 0i64;
+                            if let PyObject::Range { start, stop, step } = &*args[0].borrow() {
+                                let mut current = *start;
+                                while if *step > 0 { current < *stop } else { current > *stop } {
+                                    let item = PyObjectRef::imm(PyObject::Int(num_bigint::BigInt::from(current)));
+                                    if py_compare(&item, val, 2).unwrap_or(py_bool(false)).truthy() { count += 1; }
+                                    current += step;
+                                }
+                            }
+                            Ok(py_int(count))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "index" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "index".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("index() takes at least 1 argument")); }
+                            let val = &args[1];
+                            if let PyObject::Range { start, stop, step } = &*args[0].borrow() {
+                                let mut current = *start;
+                                let mut idx = 0i64;
+                                while if *step > 0 { current < *stop } else { current > *stop } {
+                                    let item = PyObjectRef::imm(PyObject::Int(num_bigint::BigInt::from(current)));
+                                    if py_compare(&item, val, 2).unwrap_or(py_bool(false)).truthy() { return Ok(py_int(idx)); }
+                                    current += step;
+                                    idx += 1;
+                                }
+                            }
+                            Err(PyError::value_error("value not in range"))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     _ => Err(PyError::attribute_error(format!("'range' object has no attribute '{}'", name))),
                 }
             }
