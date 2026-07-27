@@ -675,6 +675,18 @@ pub fn create_codecs_dict() -> HashMap<String, PyObjectRef> {
             Ok(py_none())
         },
     }));
+    d.insert("unregister".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "unregister".to_string(),
+        func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+            if args.len() < 1 {
+                return Err(PyError::type_error("unregister() requires at least 1 argument"));
+            }
+            CODEC_SEARCH_FUNCTIONS.with(|fns| {
+                fns.borrow_mut().retain(|f| !f.is(&args[0]));
+            });
+            Ok(py_none())
+        },
+    }));
     d
 }
 

@@ -3224,6 +3224,10 @@ pub fn create_gc_dict() -> HashMap<String, PyObjectRef> {
         Ok(py_tuple(vec![py_int(tracked as i64), py_int(0), py_int(0)]))
     });
 
+    gc_func!("is_tracked", |_| {
+        Ok(py_bool(false))
+    });
+
     d
 }
 

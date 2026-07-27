@@ -4514,8 +4514,12 @@ pub fn builtin_memoryview(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() != 1 {
         return Err(PyError::type_error("memoryview() takes exactly one argument"));
     }
-    // Return a string representation since we don't have a full memoryview type
-    Ok(py_str(&format!("<memory at 0x{:x}>", std::ptr::from_ref(&args[0]) as usize)))
+    let obj = args[0].borrow();
+    match &*obj {
+        PyObject::Bytes(b) => Ok(PyObjectRef::new(PyObject::ByteArray(b.clone()))),
+        PyObject::ByteArray(b) => Ok(PyObjectRef::new(PyObject::ByteArray(b.clone()))),
+        _ => Err(PyError::type_error("memoryview: unsupported type")),
+    }
 }
 
 pub fn builtin_input(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
