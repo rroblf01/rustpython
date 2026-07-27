@@ -82,6 +82,7 @@ impl Frame {
         module_globals: Option<Rc<RefCell<HashMap<String, PyObjectRef>>>>,
     ) -> Self {
         let instr_count = code.instructions.len();
+        let names_len = code.names.len();
         Frame {
             fast_locals: vec![None; code.nlocals],
             code,
@@ -94,7 +95,7 @@ impl Frame {
             exception_handlers: Box::new(Vec::new()),
             closure: Box::new(Vec::new()),
             active_exception: None,
-            attr_cache: Box::new(vec![None; instr_count]),
+            attr_cache: Box::new(vec![None; names_len]),
             global_cache: Box::new(vec![None; instr_count]),
             registers: Box::new(Vec::new()),
             module_globals,
@@ -1167,6 +1168,8 @@ impl VirtualMachine {
     ) -> Frame {
         if let Some(mut frame) = self.frame_pool.pop() {
             let nlocals = code.nlocals;
+            let names_len = code.names.len();
+            let instr_len = code.instructions.len();
             frame.code = code;
             frame.globals = globals;
             frame.builtins = builtins;
@@ -1180,29 +1183,10 @@ impl VirtualMachine {
             frame.exception_handlers.clear();
             frame.closure.clear();
             frame.active_exception = None;
-            // NOTE: `.clear()` (not resized back to `code.instructions.len()`)
-            // leaves both caches at length 0, which makes `LOAD_ATTR`/
-            // `LOAD_GLOBAL`'s inline-cache checks (`instr_ip < cache.len()`)
-            // permanently miss for any pooled (reused) frame — i.e. nearly
-            // all real execution, since the pool holds ≤32 frames and gets
-            // reused constantly. This is INTENTIONAL, not an oversight: a
-            // real attempt to fix it (just resizing back, restoring the
-            // caching) was reverted after confirming BOTH caches have no
-            // invalidation on external mutation — `global_cache` doesn't
-            // invalidate when a DIFFERENT function reassigns the same
-            // global via `global x` mid-loop, and `attr_cache` (despite
-            // storing a `type_version_tag`, keyed by the CLASS's own
-            // identity) doesn't invalidate when a class attribute is
-            // reassigned (`SomeClass.attr = new_value`) — both return
-            // silently-stale values once actually active. See
-            // [[project_goal_cpython314]] memory for the confirmed repro of
-            // both and what a correct fix (generation-counter-based
-            // invalidation touching every globals/class-attribute mutation
-            // site) would need. Left disabled (matching this project's
-            // shipped behavior before this was investigated) since a
-            // silently-wrong answer is worse than a slow-but-correct one.
             frame.attr_cache.clear();
+            frame.attr_cache.resize(names_len, None);
             frame.global_cache.clear();
+            frame.global_cache.resize(instr_len, None);
             frame.registers.clear();
             frame.name_order = None;
             frame.live_module = None;
