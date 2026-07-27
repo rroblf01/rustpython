@@ -719,3 +719,30 @@ pub enum ConstValue {
     Code(Box<CodeObject>),
     Tuple(Vec<String>),
 }
+
+impl ConstValue {
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            ConstValue::Int(s) => {
+                // Parse string representation, handling 0x, 0o, 0b prefixes
+                let s = s.trim();
+                if let Ok(v) = s.parse::<i64>() {
+                    return Some(v);
+                }
+                // Handle underscores
+                let cleaned: String = s.chars().filter(|c| *c != '_').collect();
+                if cleaned.starts_with("0x") || cleaned.starts_with("0X") {
+                    i64::from_str_radix(&cleaned[2..], 16).ok()
+                } else if cleaned.starts_with("0o") || cleaned.starts_with("0O") {
+                    i64::from_str_radix(&cleaned[2..], 8).ok()
+                } else if cleaned.starts_with("0b") || cleaned.starts_with("0B") {
+                    i64::from_str_radix(&cleaned[2..], 2).ok()
+                } else {
+                    cleaned.parse::<i64>().ok()
+                }
+            }
+            ConstValue::Bool(b) => Some(if *b { 1 } else { 0 }),
+            _ => None,
+        }
+    }
+}

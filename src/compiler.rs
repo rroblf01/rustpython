@@ -160,6 +160,7 @@ impl Compiler {
         }
         // Remove NOP instructions (dead code elimination)
         self.code.instructions.retain(|i| i.op != Opcode::NOP);
+
         Ok(self.code.clone())
     }
 
