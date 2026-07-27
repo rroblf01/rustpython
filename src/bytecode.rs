@@ -148,7 +148,35 @@ pub enum Opcode {
     CHECK_EXC_MATCH_STAR = 120,
 }
 
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum OpGroup {
+    Load, Store, Delete, Arith, Call, Control, Build, Stack, Other,
+}
+
 impl Opcode {
+    /// Categorize opcode into a dispatch group for faster matching.
+    /// Each group is small enough (5-15 members) that LLVM generates
+    /// a dense jump table instead of a binary search tree.
+    pub fn group(self) -> OpGroup {
+        use Opcode::*;
+        match self {
+            LOAD_FAST | LOAD_CONST | LOAD_GLOBAL | LOAD_NAME | LOAD_DEREF | LOAD_ATTR => OpGroup::Load,
+            STORE_FAST | STORE_NAME | STORE_GLOBAL | STORE_DEREF | STORE_ATTR | STORE_SUBSCR => OpGroup::Store,
+            DELETE_FAST | DELETE_NAME | DELETE_ATTR | DELETE_SUBSCR => OpGroup::Delete,
+            BINARY_OP | COMPARE_OP | CONTAINS_OP | IS_OP | UNARY_NEGATIVE | UNARY_NOT | UNARY_INVERT => OpGroup::Arith,
+            CALL | CALL_FUNCTION_EX | CALL_KW | PUSH_NULL => OpGroup::Call,
+            JUMP_FORWARD | JUMP_BACKWARD | JUMP | POP_JUMP_IF_FALSE | POP_JUMP_IF_TRUE 
+                | POP_JUMP_IF_NONE | POP_JUMP_IF_NOT_NONE | FOR_ITER => OpGroup::Control,
+            BUILD_LIST | BUILD_TUPLE | BUILD_MAP | BUILD_SET | BUILD_SLICE | BUILD_STRING
+                | LIST_APPEND | LIST_EXTEND | MAP_ADD | SET_ADD | SET_UPDATE | UNPACK_SEQUENCE | UNPACK_EX => OpGroup::Build,
+            DUP_TOP | POP_TOP | COPY | SWAP | GET_ITER => OpGroup::Stack,
+            RETURN_VALUE | YIELD_VALUE | RAISE_VARARGS | RERAISE | SEND => OpGroup::Control,
+            _ => OpGroup::Other,
+        }
+    }
+
     pub fn from_u16(n: u16) -> Option<Opcode> {
         use Opcode::*;
         Some(match n {
