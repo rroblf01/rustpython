@@ -1629,17 +1629,10 @@ impl PyObject {
             // pre-materialized `items` list — and was arguably wrong
             // before too, since it's not what real Python does.
             PyObject::EnumerateIter { .. } => true,
-            PyObject::Instance { typ, .. } => {
-                // Check for __bool__ method (walking the MRO so inherited
-                // __bool__ is found, not just one defined on the leaf type).
-                // If no __bool__, objects are truthy by default.
-                // NOTE: this can't pass the real `self` PyObjectRef through —
-                // `truthy()` only has `&PyObject`, not the Rc-wrapped handle —
-                // so a __bool__ that reads instance attributes (self.foo)
-                // will see an empty dict here. Pre-existing limitation.
+            PyObject::Instance { typ, dict } => {
                 let f = lookup_dunder_via_mro(typ, "__bool__");
                 if let Some(f) = f {
-                    if let Ok(result) = call_bound_method(f, PyObjectRef::new(PyObject::Instance { typ: typ.clone(), dict: AttrMap::new() }), vec![]) {
+                    if let Ok(result) = call_bound_method(f, PyObjectRef::new(PyObject::Instance { typ: typ.clone(), dict: dict.clone() }), vec![]) {
                         return result.truthy();
                     }
                 }
@@ -1900,6 +1893,12 @@ impl PyObject {
                 }
             }
             (PyObject::Array(a), PyObject::Array(b)) => a.typecode == b.typecode && a.data == b.data,
+            (PyObject::Slice { start: as_, stop: ae, step: ap }, PyObject::Slice { start: bs, stop: be, step: bp }) => {
+                as_.equals(bs)? && ae.equals(be)? && ap.equals(bp)?
+            }
+            (PyObject::Range { start: a, stop: ae, step: ap }, PyObject::Range { start: b, stop: be, step: bp }) => {
+                a == b && ae == be && ap == bp
+            }
             (PyObject::CompiledRegex { pattern: a, flags: af, .. }, PyObject::CompiledRegex { pattern: b, flags: bf, .. }) => a == b && af == bf,
             // Reference-identity types (matching the identity-based hash
             // above): equal iff it's really the same underlying object.
@@ -3757,8 +3756,28 @@ pub fn builtin_repr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 }
 
 pub fn builtin_bool(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() > 1 { return Err(PyError::type_error("bool() takes at most 1 argument")); }
     if args.is_empty() { Ok(py_bool(false)) }
-    else { Ok(py_bool(args[0].truthy())) }
+    else {
+        let obj = args[0].borrow();
+        if let PyObject::Instance { typ, .. } = &*obj {
+            let f = lookup_dunder_via_mro(typ, "__bool__");
+            if let Some(f) = f {
+                if matches!(&*f.borrow(), PyObject::None) {
+                    return Err(PyError::type_error("__bool__ should return a bool"));
+                }
+            } else {
+                let f = lookup_dunder_via_mro(typ, "__len__");
+                if let Some(f) = f {
+                    if matches!(&*f.borrow(), PyObject::None) {
+                        return Err(PyError::type_error("__len__ should return an int"));
+                    }
+                }
+            }
+        }
+        drop(obj);
+        Ok(py_bool(args[0].truthy()))
+    }
 }
 
 pub fn builtin_list(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
@@ -4223,6 +4242,10 @@ pub fn builtin_hash(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 }
             }
             Ok(py_int(hash as i64))
+        }
+        PyObject::Slice { start, stop, step } => {
+            let h = args[0].hash()?;
+            Ok(py_int(h as i64))
         }
         PyObject::None => Ok(py_int(123456789)),
         PyObject::Instance { .. } => {
@@ -9771,6 +9794,15 @@ impl PyObject {
                                 }
                             } else { Err(PyError::runtime_error("to_bytes on non-int")) }
                         },
+                            self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__index__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__index__".to_string(),
+                        func: |args| {
+                            if let PyObject::Int(v) = &*args[0].borrow() {
+                                Ok(py_int(v.clone()))
+                            } else { Err(PyError::runtime_error("__index__ on non-int")) }
+                        },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
                     _ => Err(PyError::attribute_error(format!("'int' object has no attribute '{}'", name))),
@@ -10528,23 +10560,32 @@ impl PyObject {
                     "stop" => Ok(match &*stop.borrow() { PyObject::None => py_none(), _ => py_int(stop.as_i64().unwrap_or(0)) }),
                     "step" => Ok(match &*step.borrow() { PyObject::None => py_none(), _ => py_int(step.as_i64().unwrap_or(1)) }),
                     "indices" => {
-                        let s_start = match &*start.borrow() { PyObject::None => 0, _ => start.as_i64().unwrap_or(0) };
-                        let s_stop = match &*stop.borrow() { PyObject::None => 0, _ => stop.as_i64().unwrap_or(0) };
-                        let s_step = match &*step.borrow() { PyObject::None => 1, _ => step.as_i64().unwrap_or(1) };
+                        let is_start_none = matches!(&*start.borrow(), PyObject::None);
+                        let is_stop_none = matches!(&*stop.borrow(), PyObject::None);
+                        let is_step_none = matches!(&*step.borrow(), PyObject::None);
+                        let s_start_raw = start.as_i64().unwrap_or(0);
+                        let s_stop_raw = stop.as_i64().unwrap_or(0);
+                        let s_step_raw = step.as_i64().unwrap_or(1);
                         Ok(PyObjectRef::imm(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
                             if args.is_empty() { return Err(PyError::type_error("indices() takes exactly 1 argument")); }
                             let length = args[0].as_i64().ok_or_else(|| PyError::type_error("indices() argument must be an int"))?;
-                            if s_step == 0 { return Err(PyError::value_error("slice step cannot be zero")); }
-                            let (res_start, res_stop) = if s_step > 0 {
-                                let start_val = if s_start < 0 { (length + s_start).max(0) } else { s_start.min(length) };
-                                let stop_val = if s_stop < 0 { (length + s_stop).max(0) } else { s_stop.min(length) };
+                            if length < 0 { return Err(PyError::value_error("length should not be negative")); }
+                            let step = if is_step_none || s_step_raw == 0 { 1 } else { s_step_raw };
+                            if step == 0 { return Err(PyError::value_error("slice step cannot be zero")); }
+                            let start = if is_start_none { if step > 0 { 0 } else { length - 1 } }
+                                else { s_start_raw };
+                            let stop = if is_stop_none { if step > 0 { length } else { -length - 1 } }
+                                else { s_stop_raw };
+                            let (res_start, res_stop) = if step > 0 {
+                                let start_val = if start < 0 { (length + start).max(0) } else { start.min(length) };
+                                let stop_val = if stop < 0 { (length + stop).max(0) } else { stop.min(length) };
                                 (start_val, stop_val)
                             } else {
-                                let start_val = if s_start < 0 { (length + s_start).max(-1) } else { s_start.min(length - 1) };
-                                let stop_val = if s_stop < 0 { (length + s_stop).max(-1) } else { s_stop.min(length - 1) };
+                                let start_val = if start < 0 { (length + start).max(-1) } else { start.min(length - 1) };
+                                let stop_val = if stop < 0 { (length + stop).max(-1) } else { stop.min(length - 1) };
                                 (start_val, stop_val)
                             };
-                            Ok(py_tuple(vec![py_int(res_start as i64), py_int(res_stop as i64), py_int(s_step as i64)]))
+                            Ok(py_tuple(vec![py_int(res_start as i64), py_int(res_stop as i64), py_int(step as i64)]))
                         }))))
                     }
                     "__hash__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
@@ -10674,6 +10715,42 @@ impl PyObject {
                                 }
                             }
                             Err(PyError::value_error("value not in range"))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__getitem__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__getitem__".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("__getitem__() takes exactly 1 argument")); }
+                            if let PyObject::Range { start, stop, step } = &*args[0].borrow() {
+                                let idx = &args[1];
+                                let length = {
+                                    if *step > 0 && *start >= *stop { 0 }
+                                    else if *step < 0 && *start <= *stop { 0 }
+                                    else {
+                                        let raw_len = stop.checked_sub(*start).unwrap_or(i64::MAX);
+                                        let len = raw_len.checked_div(*step).unwrap_or(0);
+                                        if raw_len % *step != 0 { len.abs() + 1 } else { len.abs() }
+                                    }
+                                };
+                                if let PyObject::Slice { start: s, stop: e, step: p } = &*idx.borrow() {
+                                    let sp = p.as_i64().unwrap_or(1);
+                                    let s_start = match &*s.borrow() { PyObject::None => if sp > 0 { 0 } else { length - 1 }, _ => s.as_i64().unwrap_or(0) };
+                                    let s_stop = match &*e.borrow() { PyObject::None => if sp > 0 { length } else { -length - 1 }, _ => e.as_i64().unwrap_or(0) };
+                                    let s_step = if sp == 0 { 1 } else { sp };
+                                    let norm_start = if s_start < 0 { (length + s_start).max(0) } else { s_start.min(length) };
+                                    let norm_stop = if s_stop < 0 { (length + s_stop).max(0) } else { s_stop.min(length) };
+                                    let new_start = *start + norm_start * *step;
+                                    let new_step = *step * s_step;
+                                    let new_stop = *start + norm_stop * *step;
+                                    Ok(PyObjectRef::imm(PyObject::Range { start: new_start, stop: new_stop, step: new_step }))
+                                } else {
+                                    let i = idx.as_i64().ok_or_else(|| PyError::type_error("range indices must be integers or slices"))?;
+                                    let pos = if i < 0 { length + i } else { i };
+                                    if pos < 0 || pos >= length { return Err(PyError::IndexError("range object index out of range".to_string())); }
+                                    Ok(py_int(*start + *step * pos))
+                                }
+                            } else { Err(PyError::runtime_error("__getitem__ on non-range")) }
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -11166,6 +11243,46 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                 }
             } else {
                 Err(PyError::type_error("array indices must be integers"))
+            }
+        }
+        PyObject::Range { start, stop, step } => {
+            let idx = index.borrow();
+            match &*idx {
+                PyObject::Int(i) => {
+                    let len = if *step > 0 && *start >= *stop { 0 }
+                        else if *step < 0 && *start <= *stop { 0 }
+                        else {
+                            let raw_len = stop.checked_sub(*start).unwrap_or(i64::MAX);
+                            let l = raw_len.checked_div(*step).unwrap_or(0);
+                            if raw_len % *step != 0 { l.abs() + 1 } else { l.abs() }
+                        };
+                    let i64_val = i.to_i64().unwrap_or(0);
+                    let pos = if i64_val < 0 { len + i64_val } else { i64_val };
+                    if pos < 0 || pos >= len {
+                        return Err(PyError::index_error("range object index out of range"));
+                    }
+                    Ok(py_int(*start + *step * pos))
+                }
+                PyObject::Slice { start: s, stop: e, step: p } => {
+                    let len = if *step > 0 && *start >= *stop { 0 }
+                        else if *step < 0 && *start <= *stop { 0 }
+                        else {
+                            let raw_len = stop.checked_sub(*start).unwrap_or(i64::MAX);
+                            let l = raw_len.checked_div(*step).unwrap_or(0);
+                            if raw_len % *step != 0 { l.abs() + 1 } else { l.abs() }
+                        };
+                    let sp = p.as_i64().unwrap_or(1);
+                    let s_start = match &*s.borrow() { PyObject::None => if sp > 0 { 0 } else { len - 1 }, _ => s.as_i64().unwrap_or(0) };
+                    let s_stop = match &*e.borrow() { PyObject::None => if sp > 0 { len } else { -len - 1 }, _ => e.as_i64().unwrap_or(0) };
+                    let s_step = if sp == 0 { 1 } else { sp };
+                    let norm_start = if s_start < 0 { (len + s_start).max(0) } else { s_start.min(len) };
+                    let norm_stop = if s_stop < 0 { (len + s_stop).max(0) } else { s_stop.min(len) };
+                    let new_start = *start + norm_start * *step;
+                    let new_step = *step * s_step;
+                    let new_stop = *start + norm_stop * *step;
+                    Ok(PyObjectRef::imm(PyObject::Range { start: new_start, stop: new_stop, step: new_step }))
+                }
+                _ => Err(PyError::type_error("range indices must be integers or slices")),
             }
         }
         PyObject::Instance { dict, .. } => {
