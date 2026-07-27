@@ -18,7 +18,7 @@ codegen-units = 16
 strip = false
 
 [features]
-default = []
+default = ["jit"]
 profile = []  # Enable execution profiling for PGO JIT
 gc = []       # Enable experimental tracing garbage collector
 jit = ["cranelift", "cranelift-frontend", "cranelift-jit", "cranelift-module", "cranelift-native"]  # Enable Cranelift JIT compilation for hot bytecode
