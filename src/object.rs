@@ -189,10 +189,11 @@ pub type BuiltinFunc = fn(&[PyObjectRef]) -> PyResult<PyObjectRef>;
 pub static ALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
 pub static IMM_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-/// Temporary owned, Rc-held, or RefCell-referenced PyObject
+/// Temporary owned, Rc-held, or directly-borrowed PyObject
 pub enum RefOrOwned<'a> {
     Ref(std::cell::Ref<'a, PyObject>),
     Owned(PyObject),
+    Borrow(&'a PyObject),
 }
 
 impl<'a> std::ops::Deref for RefOrOwned<'a> {
@@ -201,6 +202,7 @@ impl<'a> std::ops::Deref for RefOrOwned<'a> {
         match self {
             RefOrOwned::Ref(r) => &**r,
             RefOrOwned::Owned(o) => o,
+            RefOrOwned::Borrow(b) => b,
         }
     }
 }
@@ -276,7 +278,14 @@ impl PyObjectRef {
             PyObjectRef::SmallStr(s) => RefOrOwned::Owned(PyObject::Str(compact_str::CompactString::from(s.as_str()))),
             PyObjectRef::None => RefOrOwned::Owned(PyObject::None),
             PyObjectRef::Mut(rc) => RefOrOwned::Ref(rc.borrow()),
-            PyObjectRef::Imm(rc) => RefOrOwned::Ref(rc.borrow()),
+            PyObjectRef::Imm(rc) => {
+                // Fast path: Imm objects are never mutated, so we can skip
+                // RefCell::borrow() and return a direct pointer. The RefCell
+                // is still present for borrow_mut() protection, but the read
+                // path avoids the atomic increment/decrement entirely.
+                let ptr: *const PyObject = rc.as_ref().as_ptr();
+                RefOrOwned::Borrow(unsafe { &*ptr })
+            }
         }
     }
 
@@ -294,19 +303,7 @@ impl PyObjectRef {
                     }
                 }
             }
-            PyObjectRef::Imm(rc) => {
-                let result = rc.try_borrow_mut();
-                match result {
-                    Ok(guard) => guard,
-                    Err(_) => {
-                        use std::io::Write;
-                        let _ = std::io::stderr().write_all(b"RefCell CONFLICT - Imm borrow_mut while borrowed\n");
-                        let _ = std::io::stderr().flush();
-                        panic!("RefCell already borrowed (Imm)");
-                    }
-                }
-            }
-            _ => panic!("borrow_mut on non-mutable value"),
+            _ => panic!("borrow_mut called on non-Mut value"),
         }
     }
 
