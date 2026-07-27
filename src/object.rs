@@ -980,25 +980,89 @@ impl PySet {
 #[derive(Clone)]
 pub struct PyDict {
     entries: Vec<Option<(PyObjectRef, PyObjectRef)>>,
-    index: std::collections::HashMap<usize, Vec<usize>>,
+    indices: Vec<u32>,
     size: usize,
     pub instance_ref: Option<PyObjectRef>,
 }
 
 impl PyDict {
     pub fn new() -> Self {
-        PyDict { entries: Vec::new(), index: std::collections::HashMap::new(), size: 0, instance_ref: None }
+        PyDict { entries: Vec::new(), indices: Vec::new(), size: 0, instance_ref: None }
     }
     pub fn is_empty(&self) -> bool { self.size == 0 }
     pub fn len(&self) -> usize { self.size }
-    pub fn clear(&mut self) { self.entries.clear(); self.index.clear(); self.size = 0; }
+    pub fn clear(&mut self) { self.entries.clear(); self.indices.clear(); self.size = 0; }
 
-    /// Position of `key` within `entries`, if present (skips tombstones).
+    fn mask(&self) -> usize { self.indices.len() - 1 }
+
+    /// Find the entry index for `key` via linear probing, or None.
     fn find(&self, key: &PyObjectRef, h: usize) -> Option<usize> {
-        let chain = self.index.get(&h)?;
-        chain.iter().copied().find(|&i| {
-            matches!(&self.entries[i], Some((k, _)) if k.equals(key).unwrap_or(false))
-        })
+        if self.indices.is_empty() { return None; }
+        let mask = self.mask();
+        let start = h & mask;
+        let mut i = start;
+        loop {
+            let idx_val = self.indices[i];
+            if idx_val == 0 { return None; }
+            let entry_idx = (idx_val - 1) as usize;
+            if let Some((k, _)) = &self.entries[entry_idx] {
+                if k.equals(key).unwrap_or(false) {
+                    return Some(entry_idx);
+                }
+            }
+            i = (i + 1) & mask;
+            if i == start { return None; }
+        }
+    }
+
+    /// Probe for the key: returns (index_slot, Some(entry_index)) if found,
+    /// or (first_empty_or_tombstone_slot, None) if not found.
+    fn probe(&self, key: &PyObjectRef, h: usize) -> (usize, Option<usize>) {
+        if self.indices.is_empty() { return (0, None); }
+        let mask = self.mask();
+        let start = h & mask;
+        let mut first_tomb = None;
+        let mut i = start;
+        loop {
+            let idx_val = self.indices[i];
+            if idx_val == 0 {
+                return (first_tomb.unwrap_or(i), None);
+            }
+            let entry_idx = (idx_val - 1) as usize;
+            if self.entries[entry_idx].is_none() {
+                if first_tomb.is_none() { first_tomb = Some(i); }
+            } else if let Some((k, _)) = &self.entries[entry_idx] {
+                if k.equals(key).unwrap_or(false) {
+                    return (i, Some(entry_idx));
+                }
+            }
+            i = (i + 1) & mask;
+            if i == start { return (first_tomb.unwrap_or(i), None); }
+        }
+    }
+
+    fn ensure_capacity(&mut self, additional: usize) {
+        let needed = self.size + additional;
+        if self.indices.is_empty() {
+            self.indices = vec![0u32; 8];
+        } else if needed * 3 > self.indices.len() * 2 {
+            self.rehash(self.indices.len() * 2);
+        }
+    }
+
+    fn rehash(&mut self, new_cap: usize) {
+        let mut new_idx = vec![0u32; new_cap];
+        let mask = new_cap - 1;
+        for (ei, entry) in self.entries.iter().enumerate() {
+            if let Some((key, _)) = entry {
+                if let Ok(h) = key.hash() {
+                    let mut i = h & mask;
+                    while new_idx[i] != 0 { i = (i + 1) & mask; }
+                    new_idx[i] = (ei + 1) as u32;
+                }
+            }
+        }
+        self.indices = new_idx;
     }
     pub fn contains(&self, key: &PyObjectRef) -> PyResult<bool> {
         let h = key.hash()?;
@@ -1033,19 +1097,21 @@ impl PyDict {
     /// refcounted object model, which has no equivalent static aliasing
     /// restriction.
     pub fn set_with_hash(&mut self, key: PyObjectRef, value: PyObjectRef, h: usize) -> PyResult<()> {
-        match self.find(&key, h) {
-            Some(i) => self.entries[i].as_mut().unwrap().1 = value.clone(),
-            None => {
-                let idx = self.entries.len();
-                self.entries.push(Some((key.clone(), value.clone())));
-                self.index.entry(h).or_default().push(idx);
-                self.size += 1;
-            }
+        self.ensure_capacity(1);
+        let (slot, existing) = self.probe(&key, h);
+        let val_for_instance = value.clone();
+        if let Some(entry_idx) = existing {
+            self.entries[entry_idx].as_mut().unwrap().1 = value;
+        } else {
+            let entry_idx = self.entries.len();
+            self.entries.push(Some((key.clone(), value)));
+            self.indices[slot] = (entry_idx + 1) as u32;
+            self.size += 1;
         }
         // Propagate to Instance dict if this is a __dict__ view
         if let Some(ref inst_ref) = self.instance_ref {
             if let PyObject::Instance { dict, .. } = &mut *inst_ref.borrow_mut() {
-                dict.insert(key.str(), value);
+                dict.insert(key.str(), val_for_instance);
             }
         }
         Ok(())
@@ -1058,11 +1124,8 @@ impl PyDict {
     /// `set_with_hash`'s doc comment for why a caller holding `obj`'s own
     /// mutable borrow must compute the hash before taking it.
     pub fn remove_with_hash(&mut self, key: &PyObjectRef, h: usize) -> PyResult<PyObjectRef> {
-        let i = self.find(key, h).ok_or_else(|| PyError::key_error(key.str()))?;
-        let removed = self.entries[i].take().unwrap().1;
-        if let Some(chain) = self.index.get_mut(&h) {
-            chain.retain(|&j| j != i);
-        }
+        let existing = self.find(key, h).ok_or_else(|| PyError::key_error(key.str()))?;
+        let removed = self.entries[existing].take().unwrap().1;
         self.size -= 1;
         Ok(removed)
     }
