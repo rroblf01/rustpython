@@ -3239,6 +3239,10 @@ pub fn create_sysconfig_dict() -> HashMap<String, PyObjectRef> {
         Ok(py_str("3.13"))
     });
 
+    syscfg_func!("is_python_build", |_| {
+        Ok(py_bool(false))
+    });
+
     d
 }
 

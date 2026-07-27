@@ -338,6 +338,25 @@ impl VirtualMachine {
          if let Some(shared_path) = reused_shared_path.clone() {
              sys_dict.insert("path".to_string(), shared_path);
          }
+         // sys.meta_path — import hooks
+         if !sys_dict.contains_key("meta_path") {
+             let meta_path = py_list(vec![
+                 PyObjectRef::imm(PyObject::BuiltinFunction {
+                     name: "BuiltinImporter".to_string(),
+                     func: |args| {
+                         if args.len() < 2 { return Err(PyError::type_error("find_spec() requires 2 arguments")); }
+                         Err(PyError::ImportError(format!("No module named '{}'", args[1].str())))
+                     },
+                 }),
+             ]);
+             sys_dict.insert("meta_path".to_string(), meta_path);
+         }
+         if !sys_dict.contains_key("path_hooks") {
+             sys_dict.insert("path_hooks".to_string(), py_list(vec![]));
+         }
+         if !sys_dict.contains_key("path_importer_cache") {
+             sys_dict.insert("path_importer_cache".to_string(), py_dict());
+         }
          modules.insert("sys".to_string(), create_module("sys", sys_dict.clone()));
           builtins.extend(sys_dict.clone());
 

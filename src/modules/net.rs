@@ -203,6 +203,36 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
         Ok(result)
     });
 
+    sub_func!("check_call", |args| {
+        // Run a command and check return code
+        if args.is_empty() {
+            return Err(PyError::type_error("check_call() missing required argument"));
+        }
+        let cmd_str = args[0].str();
+        let shell = if args.len() > 1 { args[1].truthy() } else { false };
+        let output = if shell {
+            std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&cmd_str)
+                .output()
+                .map_err(|e| PyError::OsError(format!("{}", e)))?
+        } else {
+            let cmd_args: Vec<&str> = cmd_str.split_whitespace().collect();
+            if cmd_args.is_empty() {
+                return Err(PyError::type_error("check_call() requires a non-empty command"));
+            }
+            std::process::Command::new(cmd_args[0])
+                .args(&cmd_args[1..])
+                .output()
+                .map_err(|e| PyError::OsError(format!("{}", e)))?
+        };
+        let returncode = output.status.code().unwrap_or(-1);
+        if returncode != 0 {
+            return Err(PyError::runtime_error(format!("Command returned non-zero exit status {}", returncode)));
+        }
+        Ok(py_none())
+    });
+
     sub_func!("check_output", |args| {
         if args.is_empty() {
             return Err(PyError::type_error("check_output() missing required argument"));
