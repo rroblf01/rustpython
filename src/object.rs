@@ -367,6 +367,7 @@ impl PyObjectRef {
         match (self, other) {
             (PyObjectRef::SmallInt(a), PyObjectRef::SmallInt(b)) => a == b,
             (PyObjectRef::SmallBool(a), PyObjectRef::SmallBool(b)) => a == b,
+            (PyObjectRef::SmallFloat(a), PyObjectRef::SmallFloat(b)) => a.to_bits() == b.to_bits(),
             (PyObjectRef::None, PyObjectRef::None) => true,
             (PyObjectRef::Mut(a), PyObjectRef::Mut(b)) => Rc::ptr_eq(a, b),
             (PyObjectRef::Imm(a), PyObjectRef::Imm(b)) => Rc::ptr_eq(a, b),
@@ -931,7 +932,7 @@ impl PySet {
             if idx_val == 0 { return None; }
             let entry_idx = (idx_val - 1) as usize;
             if let Some(k) = &self.entries[entry_idx] {
-                if k.equals(key).unwrap_or(false) {
+                if k.is(key) || k.equals(key).unwrap_or(false) {
                     return Some(entry_idx);
                 }
             }
@@ -1094,7 +1095,7 @@ impl PyDict {
             if idx_val == 0 { return None; }
             let entry_idx = (idx_val - 1) as usize;
             if let Some((k, _)) = &self.entries[entry_idx] {
-                if k.equals(key).unwrap_or(false) {
+                if k.is(key) || k.equals(key).unwrap_or(false) {
                     return Some(entry_idx);
                 }
             }
@@ -2026,7 +2027,7 @@ impl PyObject {
                 if a.len() != b.len() { eq = false; }
                 if eq {
                     for (x, y) in a.iter().zip(b.iter()) {
-                        if !x.equals(y)? { eq = false; break; }
+                        if !(x.is(y) || x.equals(y)?) { eq = false; break; }
                     }
                 }
                 eq
@@ -2036,7 +2037,7 @@ impl PyObject {
                 if a.len() != b.len() { eq = false; }
                 if eq {
                     for (x, y) in a.iter().zip(b.iter()) {
-                        if !x.equals(y)? { eq = false; break; }
+                        if !(x.is(y) || x.equals(y)?) { eq = false; break; }
                     }
                 }
                 eq
@@ -2914,6 +2915,12 @@ fn i64_binop(a: &PyObjectRef, b: &PyObjectRef, f: impl Fn(i64, i64) -> i64) -> O
 }
 
 pub fn py_bit_or(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
+    // Bool __or__ returns bool, not int (CPython: True | True -> True, but True | 1 -> int)
+    if let (Some(av), Some(bv)) = (a.as_i64(), b.as_i64()) {
+        if matches!(&*a.borrow(), PyObject::Bool(_)) && matches!(&*b.borrow(), PyObject::Bool(_)) {
+            return Ok(py_bool((av | bv) != 0));
+        }
+    }
     if let Some(r) = i64_binop(a, b, |x, y| x | y) { return r; }
     if let Some(r) = try_dunder_binop(a, b, "__or__")? { return Ok(r); }
     if let Some(r) = try_dunder_binop(b, a, "__ror__")? { return Ok(r); }
@@ -2938,6 +2945,12 @@ pub fn py_bit_or(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
 }
 
 pub fn py_bit_xor(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
+    // Bool __xor__ returns bool, not int (CPython: True ^ True -> False, but True ^ 1 -> int)
+    if let (Some(av), Some(bv)) = (a.as_i64(), b.as_i64()) {
+        if matches!(&*a.borrow(), PyObject::Bool(_)) && matches!(&*b.borrow(), PyObject::Bool(_)) {
+            return Ok(py_bool((av ^ bv) != 0));
+        }
+    }
     if let Some(r) = i64_binop(a, b, |x, y| x ^ y) { return r; }
     if let Some(r) = try_dunder_binop(a, b, "__xor__")? { return Ok(r); }
     if let Some(r) = try_dunder_binop(b, a, "__rxor__")? { return Ok(r); }
@@ -2952,6 +2965,12 @@ pub fn py_bit_xor(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
 }
 
 pub fn py_bit_and(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
+    // Bool __and__ returns bool, not int (CPython: True & True -> True, but True & 1 -> int)
+    if let (Some(av), Some(bv)) = (a.as_i64(), b.as_i64()) {
+        if matches!(&*a.borrow(), PyObject::Bool(_)) && matches!(&*b.borrow(), PyObject::Bool(_)) {
+            return Ok(py_bool((av & bv) != 0));
+        }
+    }
     if let Some(r) = i64_binop(a, b, |x, y| x & y) { return r; }
     if let Some(r) = try_dunder_binop(a, b, "__and__")? { return Ok(r); }
     if let Some(r) = try_dunder_binop(b, a, "__rand__")? { return Ok(r); }
@@ -3230,6 +3249,18 @@ impl Compare for PyObject {
 
 // ---- Containment ----
 
+fn is_index_error(e: &PyError) -> bool {
+    matches!(e, PyError::IndexError(_))
+}
+
+/// Get the class name for an object, handling Instance types correctly.
+fn class_name_for_obj(obj: &PyObjectRef) -> String {
+    match &*obj.borrow() {
+        PyObject::Instance { typ, .. } => get_type_name_for_instance(typ),
+        _ => obj.get_type_name(),
+    }
+}
+
 pub fn contains_op(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<bool> {
     // Check for __contains__ on instances
     let f = {
@@ -3246,6 +3277,10 @@ pub fn contains_op(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<bool> {
         }
     };
     if let Some(f) = f {
+        // If __contains__ is explicitly set to None, it blocks the containment check
+        if matches!(&*f.borrow(), PyObject::None) {
+        return Err(PyError::type_error(format!("argument of type '{}' is not a container or iterable", class_name_for_obj(a))));
+        }
         let result = call_bound_method(f, a.clone(), vec![b.clone()])?;
         return Ok(result.truthy());
     }
@@ -3262,38 +3297,63 @@ pub fn contains_op(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<bool> {
             }
         }
     }
+    // Instance fallback: if __contains__ is not defined, try __getitem__
+    if matches!(&*a.borrow(), PyObject::Instance { .. }) {
+        let getitem_f = {
+            let container = a.borrow();
+            if let PyObject::Instance { typ, .. } = &*container {
+                lookup_dunder_via_mro(typ, "__getitem__")
+            } else { None }
+        };
+        if let Some(f) = getitem_f {
+            let mut i = 0i64;
+            loop {
+                let args_vec = vec![a.clone(), py_int(i)];
+                let result = call_bound_method(f.clone(), a.clone(), vec![py_int(i)]);
+                match result {
+                    Ok(item) => { if item.equals(b)? { return Ok(true); } }
+                    Err(e) if is_index_error(&e) => return Ok(false),
+                    Err(e) => return Err(e),
+                }
+                i += 1;
+            }
+        }
+        // Helper: get the correct class name for an Instance object
+        return Err(PyError::type_error(format!("argument of type '{}' is not a container or iterable", class_name_for_obj(a))));
+    }
     let container = a.borrow();
     match &*container {
         PyObject::Str(s) => {
             let item_str = b.str();
             Ok(s.contains(&item_str))
         }
-        PyObject::List(items) => {
-            // Clone the item list out of the borrow BEFORE iterating —
-            // `item.equals(b)` can run arbitrary Python (a custom
-            // `__eq__`), and holding `container`'s borrow live across that
-            // call means a pathological `__eq__` that mutates THIS SAME
-            // list (e.g. a test deliberately exercising a
-            // clears-itself-during-comparison edge case) hits `list.clear()`
-            // (or any other mutator) while this borrow is still held,
-            // panicking with "RefCell already borrowed" instead of either
-            // completing or raising a normal Python-level error. Confirmed
-            // via a real trigger in CPython's own `test_deque.py`.
-            let items = items.clone();
-            drop(container);
-            for item in &items {
-                if item.equals(b)? { return Ok(true); }
+            PyObject::List(items) => {
+                // Clone the item list out of the borrow BEFORE iterating —
+                // `item.equals(b)` can run arbitrary Python (a custom
+                // `__eq__`), and holding `container`'s borrow live across that
+                // call means a pathological `__eq__` that mutates THIS SAME
+                // list (e.g. a test deliberately exercising a
+                // clears-itself-during-comparison edge case) hits `list.clear()`
+                // (or any other mutator) while this borrow is still held,
+                // panicking with "RefCell already borrowed" instead of either
+                // completing or raising a normal Python-level error. Confirmed
+                // via a real trigger in CPython's own `test_deque.py`.
+                let items = items.clone();
+                drop(container);
+                for item in &items {
+                    // Identity check first (for NaN: nan is nan but nan != nan)
+                    if item.is(b) || item.equals(b)? { return Ok(true); }
+                }
+                Ok(false)
             }
-            Ok(false)
-        }
-        PyObject::Tuple(items) => {
-            let items = items.clone();
-            drop(container);
-            for item in &items {
-                if item.equals(b)? { return Ok(true); }
+            PyObject::Tuple(items) => {
+                let items = items.clone();
+                drop(container);
+                for item in &items {
+                    if item.is(b) || item.equals(b)? { return Ok(true); }
+                }
+                Ok(false)
             }
-            Ok(false)
-        }
         PyObject::Dict(d) => {
             d.contains(b)
         }
