@@ -473,6 +473,84 @@ extern "C" fn jit_is_op(a: *const PyObjectRef, b: *const PyObjectRef, invert: i6
     }
 }
 
+
+extern "C" fn jit_make_function(items: *const crate::object::PyObjectRef, arg: i64, out: *mut crate::object::PyObjectRef) {
+    unsafe {
+        let has_closure = (arg & 0x100) != 0;
+        let n_defaults = (arg & 0xFF) as usize;
+        let n_kwdefaults = ((arg >> 9) & 0xFF) as usize;
+        let mut total = n_defaults + n_kwdefaults;
+        let mut kwdefaults: Vec<crate::object::PyObjectRef> = Vec::new();
+        for _ in 0..n_kwdefaults {
+            kwdefaults.push((*items.offset(total as isize - 1)).clone());
+            total -= 1;
+        }
+        let mut defaults: Vec<crate::object::PyObjectRef> = Vec::new();
+        for _ in 0..n_defaults {
+            defaults.push((*items.offset(total as isize - 1)).clone());
+            total -= 1;
+        }
+        defaults.reverse();
+        kwdefaults.reverse();
+        defaults.extend(kwdefaults);
+        let code_obj = (*items.offset(total as isize - 1)).clone();
+        total -= 1;
+        let code = match &*code_obj.borrow() {
+            crate::object::PyObject::Code(c) => c.clone(),
+            _ => { std::ptr::write(out, crate::object::py_none()); return; }
+        };
+        let closure = if has_closure {
+            let closure_tuple = (*items.offset(total as isize - 1)).clone();
+            total -= 1;
+            let items_b = closure_tuple.borrow();
+            if let crate::object::PyObject::Tuple(items_v) = &*items_b {
+                items_v.clone()
+            } else { Vec::new() }
+        } else { Vec::new() };
+        let globals = crate::object::with_vm_mut(|vm| {
+            let fi = vm.frames.len() - 1;
+            vm.frames[fi].module_globals.clone()
+                .unwrap_or_else(|| vm.frames[fi].globals.clone())
+        });
+        let func_obj = match globals {
+            Ok(g) => {
+                let code_rc = code.clone();
+                let func = crate::object::PyObject::Function(Box::new(crate::object::PyFunction {
+                    code,
+                    globals: g,
+                    defaults,
+                    closure,
+                    dict: std::collections::HashMap::new(),
+                    jit_ptr: std::cell::Cell::new(0),
+                    jit_consts: std::cell::RefCell::new(Vec::new()),
+                }));
+                let func_ref = crate::object::PyObjectRef::new(func);
+                // Set __code__ and __module__
+                if let crate::object::PyObject::Function(ref mut inner_f) = &mut *func_ref.borrow_mut() {
+                    let dict = &mut inner_f.dict;
+                    dict.insert("__code__".to_string(), crate::object::PyObjectRef::imm(crate::object::PyObject::Code(code_rc)));
+                    if let Ok(mg) = crate::object::with_vm_mut(|vm| {
+                        let fi = vm.frames.len() - 1;
+                        let mg = vm.frames[fi].module_globals.clone();
+                        if let Some(mg) = mg {
+                            let b = mg.borrow();
+                            b.get(&crate::interner::intern("__name__")).cloned()
+                        } else { None }
+                    }) {
+                        if let Some(name) = mg {
+                            dict.insert("__module__".to_string(), name);
+                        }
+                    }
+                }
+                func_ref
+            }
+            Err(_) => crate::object::py_none(),
+        };
+        std::ptr::write(out, func_obj);
+    }
+}
+
+
 extern "C" fn jit_invert(val: *const PyObjectRef, out: *mut PyObjectRef) {
     unsafe {
         let borrowed = (*val).borrow();
@@ -525,6 +603,7 @@ pub struct JitCompiler {
     unpack_ex_func: cranelift_module::FuncId,
     setup_with_func: cranelift_module::FuncId,
     with_exit_func: cranelift_module::FuncId,
+    make_function_func: cranelift_module::FuncId,
 }
 
 impl JitCompiler {
@@ -574,6 +653,7 @@ impl JitCompiler {
         builder.symbol("jit_unpack_ex", jit_unpack_ex as *const u8);
         builder.symbol("jit_setup_with", jit_setup_with as *const u8);
         builder.symbol("jit_with_exit", jit_with_exit as *const u8);
+        builder.symbol("jit_make_function", jit_make_function as *const u8);
         let mut module = JITModule::new(builder);
         let binop_sig = Self::make_binop_sig();
         let cmp_sig = Self::make_cmp_sig();
@@ -587,6 +667,7 @@ impl JitCompiler {
         let import_from_sig = Self::make_import_from_sig();
         let unpack_ex_sig = Self::make_unpack_ex_sig();
         let context_sig = Self::make_context_sig();
+        let make_function_sig = Self::make_make_function_sig();
         let add_func = module.declare_function("jit_py_add", Linkage::Import, &binop_sig).unwrap();
         let sub_func = module.declare_function("jit_py_sub", Linkage::Import, &binop_sig).unwrap();
         let mul_func = module.declare_function("jit_py_mul", Linkage::Import, &binop_sig).unwrap();
@@ -626,6 +707,7 @@ impl JitCompiler {
         let unpack_ex_func = module.declare_function("jit_unpack_ex", Linkage::Import, &unpack_ex_sig).unwrap();
         let setup_with_func = module.declare_function("jit_setup_with", Linkage::Import, &context_sig).unwrap();
         let with_exit_func = module.declare_function("jit_with_exit", Linkage::Import, &context_sig).unwrap();
+        let make_function_func = module.declare_function("jit_make_function", Linkage::Import, &make_function_sig).unwrap();
         JitCompiler {
             builder_context: FunctionBuilderContext::new(),
             module,
@@ -668,6 +750,7 @@ impl JitCompiler {
             unpack_ex_func,
             setup_with_func,
             with_exit_func,
+            make_function_func,
         }
     }
 
@@ -774,6 +857,15 @@ impl JitCompiler {
     }
 
     // make_context_sig: mgr ptr, out ptr
+    fn make_make_function_sig() -> cranelift::codegen::ir::Signature {
+        let mut s = cranelift::codegen::ir::Signature::new(cranelift::codegen::isa::CallConv::SystemV);
+        s.params.push(AbiParam::new(types::I64));
+        s.params.push(AbiParam::new(types::I64));
+        s.params.push(AbiParam::new(types::I64));
+        s.returns.push(AbiParam::new(types::I64));
+        s
+    }
+
     fn make_context_sig() -> cranelift::codegen::ir::Signature {
         let mut s = cranelift::codegen::ir::Signature::new(cranelift::codegen::isa::CallConv::SystemV);
         s.params.push(AbiParam::new(types::I64));
@@ -879,6 +971,7 @@ impl JitCompiler {
             Opcode::STORE_SUBSCR, Opcode::IS_OP, Opcode::UNARY_INVERT,
             Opcode::IMPORT_NAME, Opcode::IMPORT_FROM, Opcode::UNPACK_EX,
             Opcode::SETUP_WITH, Opcode::WITH_EXIT,
+            Opcode::MAKE_FUNCTION,
         ];
         for instr in &code.instructions {
             if !supported.contains(&instr.op) { eprintln!("JIT: unsupported opcode {:?} in '{}'", instr.op, code.name); return None; }
@@ -937,6 +1030,7 @@ impl JitCompiler {
         let unpack_ex_func_ref = self.module.declare_func_in_func(self.unpack_ex_func, &mut ctx.func);
         let setup_with_func_ref = self.module.declare_func_in_func(self.setup_with_func, &mut ctx.func);
         let with_exit_func_ref = self.module.declare_func_in_func(self.with_exit_func, &mut ctx.func);
+        let make_function_func_ref = self.module.declare_func_in_func(self.make_function_func, &mut ctx.func);
 
         // Pre-scan for branch targets
         let mut targets: HashSet<usize> = HashSet::new();
@@ -1432,6 +1526,37 @@ impl JitCompiler {
                     let names_ptr = builder.ins().iadd_imm(consts_ptr, names_offset * 24);
                     let name_idx_val = builder.ins().iconst(types::I64, name_idx);
                     builder.ins().call(load_attr_func_ref, &[val_addr, names_ptr, name_idx_val, out_addr]);
+                    let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
+                    let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
+                    eval_stack.push([res_lo, res_hi]);
+                }
+                Opcode::MAKE_FUNCTION => {
+                    // MAKE_FUNCTION: pop closure, defaults, code, name, create function
+                    let has_closure = (instr.arg & 0x100) != 0;
+                    let n_defaults = (instr.arg & 0xFF) as usize;
+                    let n_kwdefaults = ((instr.arg >> 9) & 0xFF) as usize;
+                    let n_items = n_defaults + n_kwdefaults + 1 + if has_closure { 1 } else { 0 };
+                    let memflags = cranelift::codegen::ir::MemFlags::new();
+                    let mut items: Vec<[Value; 2]> = Vec::with_capacity(n_items);
+                    for _ in 0..n_items { items.push(eval_stack.pop().unwrap()); }
+                    items.reverse();
+                    let array_size = ((n_items * 24).max(16)) as u32;
+                    let array_slot = builder.create_sized_stack_slot(StackSlotData::new(
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, array_size, 0,
+                    ));
+                    let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                    ));
+                    let array_addr = builder.ins().stack_addr(types::I64, array_slot, 0);
+                    let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
+                    for (i, item) in items.iter().enumerate() {
+                        let offset = (i * 24) as i32;
+                        let item_addr = builder.ins().iadd_imm(array_addr, offset as i64);
+                        builder.ins().store(memflags, item[0], item_addr, 0);
+                        builder.ins().store(memflags, item[1], item_addr, 8);
+                    }
+                    let arg_val = builder.ins().iconst(types::I64, instr.arg as i64);
+                    builder.ins().call(make_function_func_ref, &[array_addr, arg_val, out_addr]);
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
                     eval_stack.push([res_lo, res_hi]);
