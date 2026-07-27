@@ -4715,7 +4715,7 @@ pub fn call_bound_method(func: PyObjectRef, self_obj: PyObjectRef, args: Vec<PyO
             // Django-free repro: a `dataclass`-generated `__repr__` closing
             // over its own field-name list worked fine called directly
             // (`obj.__repr__()`) but raised NameError through `repr(obj)`.
-            frame.closure = closure.clone();
+            frame.closure = Box::new(closure.clone());
             let code = code.clone();
             let defaults = defaults.clone();
             // Set self at index 0
@@ -6314,7 +6314,7 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
                 // pointer-identity checks like the `type(x)` special case.
                 let mut vm = super::vm::VirtualMachine::new();
                 let mut frame = super::vm::Frame::new(code.clone(), g.clone(), std::rc::Rc::clone(&vm.builtins), None);
-                frame.closure = closure;
+                frame.closure = Box::new(closure);
                 for i in 0..npos.min(named_params) {
                     if i < code.varnames.len() {
                         frame.fast_locals[i] = Some(a[i].clone());

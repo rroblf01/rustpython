@@ -24,24 +24,23 @@ pub struct Frame {
     pub fast_locals: Vec<Option<PyObjectRef>>,
     pub globals: Rc<RefCell<HashMap<String, PyObjectRef>>>,
     pub builtins: Rc<HashMap<String, PyObjectRef>>,
-    pub stack: SmallVec<[PyObjectRef; 8]>,
+    pub stack: SmallVec<[PyObjectRef; 4]>,
     pub ip: usize,
     pub base_sp: usize,
-    pub exception_handlers: Vec<ExceptionHandler>,
-    pub return_value: Option<PyResult<PyObjectRef>>,
-    pub closure: Vec<PyObjectRef>,
+    pub exception_handlers: Box<Vec<ExceptionHandler>>,
+    pub closure: Box<Vec<PyObjectRef>>,
     /// Active exception for re-raise. Set by PUSH_EXC_INFO, consumed by RERAISE.
     /// This is separate from the value stack so that POP_EXCEPT (which pops the
     /// exception from the value stack) does not break RERAISE in try/finally blocks.
-    pub active_exception: Option<PyObjectRef>,
+    pub active_exception: Option<Box<PyObjectRef>>,
     /// Inline attribute cache — caches LOAD_ATTR results per instruction offset.
     /// Cleared when the frame is created; populated on first attribute access.
-    pub attr_cache: Vec<Option<(u64, PyObjectRef)>>,  // (type_version_tag, cached_value)
+    pub attr_cache: Box<Vec<Option<(u64, PyObjectRef)>>>,  // (type_version_tag, cached_value)
     /// Inline global cache — caches LOAD_GLOBAL results per instruction offset.
-    pub global_cache: Vec<Option<PyObjectRef>>,
+    pub global_cache: Box<Vec<Option<PyObjectRef>>>,
     /// Virtual registers for register-based bytecode execution.
     /// 256 virtual registers (u8 index) — no stack needed for most ops.
-    pub registers: Vec<Option<PyObjectRef>>,
+    pub registers: Box<Vec<Option<PyObjectRef>>>,
     /// Optional reference to the enclosing module's globals.
     /// Used by class bodies to resolve LOAD_NAME against module-level names
     /// and by MAKE_FUNCTION to set __module__ on created functions.
@@ -92,13 +91,12 @@ impl Frame {
             stack: SmallVec::new(),
             ip: 0,
             base_sp: 0,
-            exception_handlers: Vec::new(),
-            return_value: None,
-            closure: Vec::new(),
+            exception_handlers: Box::new(Vec::new()),
+            closure: Box::new(Vec::new()),
             active_exception: None,
-            attr_cache: vec![None; instr_count],
-            global_cache: vec![None; instr_count],
-            registers: Vec::new(),
+            attr_cache: Box::new(vec![None; instr_count]),
+            global_cache: Box::new(vec![None; instr_count]),
+            registers: Box::new(Vec::new()),
             module_globals,
             name_order: None,
             live_module: None,
@@ -1179,7 +1177,6 @@ impl VirtualMachine {
             frame.ip = 0;
             frame.base_sp = 0;
             frame.exception_handlers.clear();
-            frame.return_value = None;
             frame.closure.clear();
             frame.active_exception = None;
             // NOTE: `.clear()` (not resized back to `code.instructions.len()`)
@@ -2441,7 +2438,7 @@ impl VirtualMachine {
             Opcode::REG_MOV => {
                 // Lazily initialize registers
                 if self.frames[fi].registers.is_empty() {
-                    self.frames[fi].registers = vec![None; 256];
+                    self.frames[fi].registers = Box::new(vec![None; 256]);
                 }
                 let dst = (arg >> 4) as usize;
                 let src = (arg & 0xF) as usize;
@@ -4176,7 +4173,7 @@ impl VirtualMachine {
                 // This provides a stable source for RERAISE even after POP_EXCEPT
                 // pops the exception from the value stack (as in try/finally).
                 if let Ok(exc) = self.frames[fi].peek(0) {
-                    self.frames[fi].active_exception = Some(exc);
+                    self.frames[fi].active_exception = Some(Box::new(exc));
                 }
             }
 
@@ -4361,7 +4358,7 @@ impl VirtualMachine {
                 // POP_EXCEPT (which pops from the value stack) does not break
                 // RERAISE in try/finally blocks.
                 let reraise_exc = if let Some(exc) = self.frames[fi].active_exception.take() {
-                    exc
+                    *exc
                 } else {
                     match self.frames[fi].pop() {
                         Ok(exc) => exc,
@@ -4407,7 +4404,7 @@ impl VirtualMachine {
                         // `active_exception` (set by PUSH_EXC_INFO exactly
                         // for this purpose, per its own doc comment).
                         let reraise_exc = if let Some(exc) = self.frames[fi].active_exception.take() {
-                            Some(exc)
+                            Some(*exc)
                         } else {
                             self.frames[fi].stack.pop()
                         };
@@ -5791,7 +5788,7 @@ impl VirtualMachine {
             let defaults = defaults.clone();
             let code_rc = Rc::new(code.clone());
             let mut new_frame = self.acquire_frame(Rc::clone(&code_rc), func_globals, Rc::clone(&self.builtins), None);
-            new_frame.closure = closure.clone();
+            new_frame.closure = Box::new(closure.clone());
             let code = code;
 
             let npos = args.len();
@@ -6199,7 +6196,7 @@ impl VirtualMachine {
                     let code = code.clone();
                     let closure = closure.clone();
                     let mut new_frame = self.acquire_frame(code, namespace.clone(), Rc::clone(&self.builtins), caller_module_globals);
-                    new_frame.closure = closure;
+                    new_frame.closure = Box::new(closure);
                     new_frame.name_order = Some(name_order.clone());
                     self.frames.push(new_frame);
                     // Must pop this frame unconditionally, including on

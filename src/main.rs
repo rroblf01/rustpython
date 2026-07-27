@@ -244,10 +244,17 @@ fn real_main() {
         eprintln!("size_of PyObject: {}", std::mem::size_of::<object::PyObject>());
         eprintln!("size_of PyDict: {}", std::mem::size_of::<object::PyDict>());
         eprintln!("size_of vm::Frame: {}", std::mem::size_of::<vm::Frame>());
+        eprintln!("size_of SmallVec<[PyObjectRef;8]>: {}", std::mem::size_of::<smallvec::SmallVec<[object::PyObjectRef; 8]>>());
+        eprintln!("size_of InternedMap: {}", std::mem::size_of::<crate::interner::InternedMap<object::PyObjectRef>>());
+        eprintln!("size_of Option<PyResult>: {}", std::mem::size_of::<Option<Result<object::PyObjectRef, object::PyError>>>());
+        eprintln!("size_of Rc<RefCell<HashMap>>: {}", std::mem::size_of::<std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, object::PyObjectRef>>>>());
         eprintln!("size_of bytecode::CodeObject: {}", std::mem::size_of::<bytecode::CodeObject>());
         eprintln!("size_of bytecode::Instr: {}", std::mem::size_of::<bytecode::Instr>());
         eprintln!("size_of String: {}", std::mem::size_of::<String>());
         eprintln!("size_of HashMap<String,i64> empty: {}", std::mem::size_of::<std::collections::HashMap<String, i64>>());
+        eprintln!("size_of Vec<Option<PyObjectRef>>: {}", std::mem::size_of::<Vec<Option<object::PyObjectRef>>>());
+        eprintln!("size_of Vec<Option<(u64,PyObjectRef)>>: {}", std::mem::size_of::<Vec<Option<(u64, object::PyObjectRef)>>>());
+        eprintln!("size_of ExceptionHandler: {}", std::mem::size_of::<vm::ExceptionHandler>());
         {
             let mut m: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
             m.insert("x".to_string(), 1);
