@@ -2682,11 +2682,6 @@ impl VirtualMachine {
                 } else {
                     Vec::new()
                 };
-                let name = if !code.name.is_empty() {
-                    code.name.clone()
-                } else {
-                    "<function>".to_string()
-                };
                 // Use module_globals when available (class body execution) so that
                 // functions defined inside a class body capture the module's globals
                 // (e.g. 'empty' from django.utils.functional) rather than the class
@@ -2698,7 +2693,6 @@ impl VirtualMachine {
                 let func = PyObjectRef::new(PyObject::Function(Box::new(PyFunction {
                     code: code_obj.clone(),
                     globals,
-                    name,
                     defaults,
                     closure,
                     dict: HashMap::new(),

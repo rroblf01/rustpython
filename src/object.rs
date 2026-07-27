@@ -1271,7 +1271,6 @@ impl PyDict {
 pub struct PyFunction {
     pub code: Rc<CodeObject>,
     pub globals: Rc<RefCell<HashMap<String, PyObjectRef>>>,
-    pub name: String,
     pub defaults: Vec<PyObjectRef>,
     pub closure: Vec<PyObjectRef>,
     pub dict: HashMap<String, PyObjectRef>,
@@ -1284,7 +1283,6 @@ impl Clone for PyFunction {
         PyFunction {
             code: self.code.clone(),
             globals: self.globals.clone(),
-            name: self.name.clone(),
             defaults: self.defaults.clone(),
             closure: self.closure.clone(),
             dict: self.dict.clone(),
@@ -1687,7 +1685,7 @@ impl PyObject {
             PyObject::Slice { start, stop, step } => {
                 format!("slice({}, {}, {})", start.repr(), stop.repr(), step.repr())
             }
-            PyObject::Function(ref f) => format!("<function {}>", f.name),
+            PyObject::Function(ref f) => format!("<function {}>", f.code.name),
             PyObject::BuiltinFunction { name, .. } => format!("<built-in function {}>", name),
             PyObject::BuiltinMethod { name, .. } => format!("<built-in method {}>", name),
             PyObject::Module { name, .. } => format!("<module '{}'>", name),
@@ -4756,7 +4754,7 @@ pub fn call_bound_method(func: PyObjectRef, self_obj: PyObjectRef, args: Vec<PyO
             let code = &f.code;
             let g = &f.globals;
             let defaults = &f.defaults;
-            let fname = &f.name;
+            let fname = &f.code.name;
             let closure = &f.closure;
             if std::env::var("RPY_DEBUG_IMPORT").is_ok() {
                 eprintln!("CALL_BOUND_METHOD (disposable VM): fname={} code_name={} filename={}", fname, code.name, code.filename);
@@ -5736,7 +5734,7 @@ pub fn builtin_help(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 }
             }
             PyObject::Function(ref f) => {
-            let name = &f.name;
+            let name = &f.code.name;
             let dict = &f.dict;
                 println!("Help on function {}:", name);
                 if let Some(doc) = dict.get("__doc__") {
@@ -6360,7 +6358,7 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
             let code = &inner_f.code;
             let g = &inner_f.globals;
             let defaults = &inner_f.defaults;
-            let fname = &inner_f.name;
+            let fname = &inner_f.code.name;
             let closure = &inner_f.closure;
                 if std::env::var("RPY_DEBUG_IMPORT").is_ok() {
                     eprintln!("BUILTIN_CALL (disposable VM): fname={} code_name={} filename={}", fname, code.name, code.filename);
@@ -8823,8 +8821,8 @@ impl PyObject {
                 }
             }
             PyObject::Function(ref f) => {
-            let func_name = &f.name;
-            let dict = &f.dict;
+                let func_name = &f.code.name;
+                let dict = &f.dict;
                 match name {
                     "__name__" => Ok(dict.get("__name__").cloned().unwrap_or(py_str(func_name))),
                     "__qualname__" => Ok(dict.get("__qualname__").cloned().unwrap_or(py_str(func_name))),
@@ -8866,7 +8864,7 @@ impl PyObject {
                             if std::env::var("RPY_DEBUG_ATTR").is_ok() {
                                 let (fn_name, fn_file) = if let PyObject::Function(ref inner_f) = &*func.borrow() {
                                 let code = &inner_f.code;
-                                let n = &inner_f.name;
+                                let n = &inner_f.code.name;
                                     (n.clone(), code.filename.clone())
                                 } else { ("?".to_string(), "?".to_string()) };
                                 let self_kind = match &*self_obj.borrow() {
