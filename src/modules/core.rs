@@ -1478,9 +1478,12 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
     sys_func!("exc_info", sys_exc_info_builtin);
     sys_func!("getrecursionlimit", sys_getrecursionlimit_builtin);
     sys_func!("setrecursionlimit", sys_setrecursionlimit_builtin);
-    sys_func!("get_int_max_str_digits", |_| Ok(py_int(4300)));
+    sys_func!("get_int_max_str_digits", |_| {
+        Ok(py_int(crate::object::INT_MAX_STR_DIGITS.with(|d| d.get())))
+    });
     sys_func!("set_int_max_str_digits", |args| {
-        let _val = if args.len() >= 1 { args[0].as_i64().unwrap_or(4300) } else { 4300 };
+        let val = if args.len() >= 1 { args[0].as_i64().unwrap_or(4300) } else { 4300 };
+        crate::object::INT_MAX_STR_DIGITS.with(|d| d.set(val));
         Ok(py_none())
     });
     // `sys.getsizeof(obj)` — was missing entirely. Real CPython reports the

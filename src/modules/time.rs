@@ -336,6 +336,34 @@ pub fn create_time_dict() -> HashMap<String, PyObjectRef> {
         Ok(py_float(now.as_secs_f64()))
     });
 
+    // get_clock_info(name) -> namespace with clock info attributes
+    time_func!("get_clock_info", |args| {
+        if args.is_empty() { return Err(PyError::type_error("get_clock_info() missing required argument")); }
+        let name = args[0].str();
+        let implementation = match name.as_str() {
+            "monotonic" => py_str("clock_gettime(CLOCK_MONOTONIC)"),
+            "perf_counter" => py_str("clock_gettime(CLOCK_MONOTONIC)"),
+            "time" => py_str("gettimeofday()"),
+            "process_time" => py_str("clock_gettime(CLOCK_PROCESS_CPUTIME_ID)"),
+            "thread_time" => py_str("clock_gettime(CLOCK_THREAD_CPUTIME_ID)"),
+            _ => py_str("clock_gettime"),
+        };
+        let mut dict = AttrMap::new();
+        dict.insert("implementation".to_string(), implementation);
+        dict.insert("monotonic".to_string(), py_bool(name == "monotonic" || name == "perf_counter"));
+        dict.insert("adjustable".to_string(), py_bool(false));
+        dict.insert("resolution".to_string(), py_float(1e-9));
+        Ok(PyObjectRef::new(PyObject::Instance {
+            typ: PyObjectRef::new(PyObject::Type {
+                name: "namespace".to_string(),
+                dict: HashMap::new(),
+                bases: vec![],
+                mro: vec![],
+            }),
+            dict,
+        }))
+    });
+
     // gmtime(secs=None) -> struct_time
     time_func!("gmtime", |args| {
         let secs = if !args.is_empty() { args[0].as_i64().unwrap_or(0) } else {

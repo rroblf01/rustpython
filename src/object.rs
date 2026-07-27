@@ -1937,6 +1937,10 @@ thread_local! {
     pub static VM_PTR: std::cell::RefCell<Option<*mut super::vm::VirtualMachine>> = std::cell::RefCell::new(None);
 }
 
+thread_local! {
+    pub static INT_MAX_STR_DIGITS: std::cell::Cell<i64> = const { std::cell::Cell::new(4300) };
+}
+
 /// Safely access the current VM via VM_PTR.
 ///
 /// Returns `Err(runtime_error)` if no VM is active.
@@ -3431,6 +3435,18 @@ pub fn builtin_int(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         PyObject::Float(f) => Ok(py_int(*f as i64)),
         PyObject::Str(s) => {
             let s_trim = s.trim();
+            #[cfg(not(feature = "no_int_str_limit"))]
+            if args.len() < 2 {
+                let limit = INT_MAX_STR_DIGITS.with(|d| d.get());
+                if limit > 0 {
+                    let digit_len = s_trim.trim_start_matches(|c: char| c == '+' || c == '-').len();
+                    if digit_len > limit as usize {
+                        return Err(PyError::value_error(format!(
+                            "Exceeds the limit ({} digits) for integer string conversion; use sys.set_int_max_str_digits()", limit
+                        )));
+                    }
+                }
+            }
             // Remove underscores (Python visual separator, e.g. "0xFF_FF" or "1_000_000")
             let s_clean: String = s_trim.chars().filter(|&c| c != '_').collect();
             // Split optional sign from body
@@ -3560,7 +3576,31 @@ pub fn builtin_float(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         PyObject::Int(i) => Ok(py_float(i.to_f64().unwrap_or(0.0))),
         PyObject::Float(f) => Ok(py_float(*f)),
         PyObject::Str(s) => {
-            let f: f64 = s.trim().parse().map_err(|_| PyError::value_error(format!("could not convert string to float: '{}'", s)))?;
+            let s: &str = s;
+            let s = s.trim_matches(|c: char| c.is_whitespace());
+            let normalized: String = s.chars().map(|c| {
+                match c {
+                    '\u{0660}'..='\u{0669}' => char::from_u32('0' as u32 + (c as u32 - 0x0660)).unwrap_or(c),
+                    '\u{06F0}'..='\u{06F9}' => char::from_u32('0' as u32 + (c as u32 - 0x06F0)).unwrap_or(c),
+                    '\u{0966}'..='\u{096F}' => char::from_u32('0' as u32 + (c as u32 - 0x0966)).unwrap_or(c),
+                    _ => c,
+                }
+            }).collect();
+            let f: f64 = normalized.parse().map_err(|_| PyError::value_error(format!("could not convert string to float: '{}'", s)))?;
+            Ok(py_float(f))
+        }
+        PyObject::Bytes(b) => {
+            let s = std::str::from_utf8(b).map_err(|_| PyError::value_error("could not convert bytes to float: invalid utf-8"))?;
+            let s = s.trim_matches(|c: char| c.is_whitespace());
+            let normalized: String = s.chars().map(|c| {
+                match c {
+                    '\u{0660}'..='\u{0669}' => char::from_u32('0' as u32 + (c as u32 - 0x0660)).unwrap_or(c),
+                    '\u{06F0}'..='\u{06F9}' => char::from_u32('0' as u32 + (c as u32 - 0x06F0)).unwrap_or(c),
+                    '\u{0966}'..='\u{096F}' => char::from_u32('0' as u32 + (c as u32 - 0x0966)).unwrap_or(c),
+                    _ => c,
+                }
+            }).collect();
+            let f: f64 = normalized.parse().map_err(|_| PyError::value_error(format!("could not convert string to float: '{}'", s)))?;
             Ok(py_float(f))
         }
         PyObject::Instance { typ, .. } => {
@@ -3916,10 +3956,9 @@ pub fn builtin_bytes(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 }
                 Ok(PyObjectRef::imm(PyObject::Bytes(result)))
             }
-            PyObject::Set(items) => {
-                let vec = items.to_vec();
+            PyObject::Set(items) | PyObject::FrozenSet(items) => {
                 let mut result = Vec::new();
-                for item in vec {
+                for item in items.to_vec() {
                     let item_b = item.borrow();
                     if let PyObject::Int(i) = &*item_b {
                         let n = i.to_i64().ok_or_else(|| PyError::value_error("bytes() requires int in range 0-255"))?;
@@ -3933,10 +3972,19 @@ pub fn builtin_bytes(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 }
                 Ok(PyObjectRef::imm(PyObject::Bytes(result)))
             }
-            PyObject::FrozenSet(items) => {
-                let vec = items.to_vec();
+            _ => {
+                drop(obj);
+                let it = match builtin_iter(&[args[0].clone()]) {
+                    Ok(it) => it,
+                    Err(_) => return Err(PyError::type_error(format!("cannot convert '{}' to bytes", args[0].borrow().type_name()))),
+                };
                 let mut result = Vec::new();
-                for item in vec {
+                loop {
+                    let item = match builtin_next(&[it.clone()]) {
+                        Ok(val) => val,
+                        Err(PyError::StopIteration) => break,
+                        Err(e) => return Err(e),
+                    };
                     let item_b = item.borrow();
                     if let PyObject::Int(i) = &*item_b {
                         let n = i.to_i64().ok_or_else(|| PyError::value_error("bytes() requires int in range 0-255"))?;
@@ -3945,12 +3993,11 @@ pub fn builtin_bytes(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                         }
                         result.push(n as u8);
                     } else {
-                        return Err(PyError::type_error("bytes() argument must be integer or iterable"));
+                        return Err(PyError::type_error("bytes() argument must be an integer or iterable"));
                     }
                 }
                 Ok(PyObjectRef::imm(PyObject::Bytes(result)))
             }
-            _ => Err(PyError::type_error(format!("cannot convert '{}' to bytes", obj.type_name()))),
         }
     }
 }
@@ -6716,7 +6763,7 @@ impl PyObject {
             }));
         }
         match self {
-            PyObject::Complex(re, im) => {
+             PyObject::Complex(re, im) => {
                 match name {
                     "real" => Ok(py_float(*re)),
                     "imag" => Ok(py_float(*im)),
@@ -6731,6 +6778,19 @@ impl PyObject {
                         },
                         self_obj: PyObjectRef::imm(PyObject::Complex(*re, *im)),
                     })),
+                    "__complex__" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                        name: "__complex__".to_string(),
+                        func: |args| {
+                            let obj = args[0].borrow();
+                            match &*obj {
+                                PyObject::Complex(re, im) => Ok(PyObjectRef::imm(PyObject::Complex(*re, *im))),
+                                _ => Err(PyError::type_error("__complex__() requires a complex self")),
+                            }
+                        },
+                        self_obj: PyObjectRef::imm(PyObject::Complex(*re, *im)),
+                    })),
+                    "__float__" => Err(PyError::type_error("can't convert complex to float")),
+                    "__int__" => Err(PyError::type_error("can't convert complex to int")),
                     _ => Err(PyError::attribute_error(format!("'complex' object has no attribute '{}'", name))),
                 }
             }
@@ -10182,6 +10242,16 @@ impl PyObject {
                         func: builtin_bytes_fromhex,
                     }));
                 }
+                if bf_name == "complex" && name == "from_number" {
+                    return Ok(PyObjectRef::imm(PyObject::BuiltinFunction {
+                        name: "from_number".to_string(),
+                        func: |args| {
+                            if args.is_empty() { return Err(PyError::type_error("complex.from_number() takes exactly 1 argument")); }
+                            let n = args[0].as_f64().unwrap_or(0.0);
+                            Ok(PyObjectRef::imm(PyObject::Complex(n, 0.0)))
+                        },
+                    }));
+                }
                 if bf_name == "float" && name == "__getformat__" {
                     // `float.__getformat__("double"/"float")` — real CPython
                     // queries the platform's actual float representation;
@@ -10193,6 +10263,67 @@ impl PyObject {
                     return Ok(PyObjectRef::imm(PyObject::BuiltinFunction {
                         name: "__getformat__".to_string(),
                         func: |_args| Ok(py_str("IEEE, little-endian")),
+                    }));
+                }
+                if bf_name == "float" && name == "fromhex" {
+                    return Ok(PyObjectRef::imm(PyObject::BuiltinFunction {
+                        name: "fromhex".to_string(),
+                        func: |args| {
+                            if args.is_empty() { return Err(PyError::type_error("float.fromhex() requires exactly 1 argument")); }
+                            let s = args[0].str();
+                            let s = s.trim();
+                            let lower = s.to_lowercase();
+                            if lower == "nan" { return Ok(py_float(f64::NAN)); }
+                            if lower == "inf" || lower == "+inf" || lower == "-inf" || lower == "infinity" || lower == "+infinity" || lower == "-infinity" {
+                                let sign = if lower.starts_with('-') { -1.0 } else { 1.0 };
+                                return Ok(py_float(sign * f64::INFINITY));
+                            }
+                            let s = s.strip_prefix("+").unwrap_or(s);
+                            let sign = if s.starts_with('-') { -1.0 } else { 1.0 };
+                            let s = s.strip_prefix('-').unwrap_or(s.strip_prefix('+').unwrap_or(s));
+                            let s = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"))
+                                .ok_or_else(|| PyError::value_error(format!("invalid hex float literal: {}", s)))?;
+                            let (int_part, rest) = s.split_once('.').unwrap_or((s, ""));
+                            let (frac_part, exp_part) = rest.split_once('p').or_else(|| rest.split_once('P'))
+                                .unwrap_or((rest, ""));
+                            let int_val = i64::from_str_radix(int_part, 16).unwrap_or(0);
+                            let frac_val = if !frac_part.is_empty() {
+                                let frac_bits = i64::from_str_radix(frac_part, 16).unwrap_or(0);
+                                let frac_len = frac_part.len() as u32;
+                                frac_bits as f64 / (16u64.pow(frac_len) as f64)
+                            } else { 0.0 };
+                            let exp: i32 = if !exp_part.is_empty() {
+                                exp_part.parse().map_err(|_| PyError::value_error(format!("invalid hex float exponent: {}", exp_part)))?
+                            } else { 0 };
+                            let significand = int_val as f64 + frac_val;
+                            let result = sign * significand * (2.0f64).powi(exp);
+                            Ok(py_float(result))
+                        },
+                    }));
+                }
+                if bf_name == "float" && name == "hex" {
+                    return Ok(PyObjectRef::imm(PyObject::BuiltinFunction {
+                        name: "hex".to_string(),
+                        func: |args| {
+                            if args.is_empty() { return Err(PyError::type_error("hex() takes exactly 1 argument")); }
+                            let obj = args[0].borrow();
+                            if let PyObject::Float(v) = &*obj {
+                                let bits = v.to_bits();
+                                let sign = if (bits >> 63) != 0 { "-" } else { "" };
+                                let biased_exp = ((bits >> 52) & 0x7ff) as i64;
+                                let mantissa = bits & 0x000f_ffff_ffff_ffff;
+                                if biased_exp == 0x7ff {
+                                    if mantissa == 0 { Ok(py_str(&format!("{}inf", sign))) }
+                                    else { Ok(py_str(&format!("{}nan", sign))) }
+                                } else if *v == 0.0 { Ok(py_str(&format!("{}0x0.0p+0", sign))) }
+                                else {
+                                    let exp = biased_exp - 1023;
+                                    let hex_mantissa = format!("{:013x}", mantissa);
+                                    let hex_mantissa = hex_mantissa.trim_end_matches('0');
+                                    Ok(py_str(&format!("{}0x1.{}p{:+}", sign, if hex_mantissa.is_empty() { "0" } else { hex_mantissa }, exp)))
+                                }
+                            } else { Err(PyError::type_error("hex() argument must be float")) }
+                        },
                     }));
                 }
                 if bf_name == "int" && name == "from_bytes" {
@@ -10309,6 +10440,34 @@ impl PyObject {
                     _ => Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", self.type_name(), name))),
                 }
             }
+            PyObject::Slice { start, stop, step } => {
+                match name {
+                    "start" => Ok(match &*start.borrow() { PyObject::None => py_none(), _ => py_int(start.as_i64().unwrap_or(0)) }),
+                    "stop" => Ok(match &*stop.borrow() { PyObject::None => py_none(), _ => py_int(stop.as_i64().unwrap_or(0)) }),
+                    "step" => Ok(match &*step.borrow() { PyObject::None => py_none(), _ => py_int(step.as_i64().unwrap_or(1)) }),
+                    "indices" => {
+                        let s_start = match &*start.borrow() { PyObject::None => 0, _ => start.as_i64().unwrap_or(0) };
+                        let s_stop = match &*stop.borrow() { PyObject::None => 0, _ => stop.as_i64().unwrap_or(0) };
+                        let s_step = match &*step.borrow() { PyObject::None => 1, _ => step.as_i64().unwrap_or(1) };
+                        Ok(PyObjectRef::imm(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                            if args.is_empty() { return Err(PyError::type_error("indices() takes exactly 1 argument")); }
+                            let length = args[0].as_i64().ok_or_else(|| PyError::type_error("indices() argument must be an int"))?;
+                            if s_step == 0 { return Err(PyError::value_error("slice step cannot be zero")); }
+                            let (res_start, res_stop) = if s_step > 0 {
+                                let start_val = if s_start < 0 { (length + s_start).max(0) } else { s_start.min(length) };
+                                let stop_val = if s_stop < 0 { (length + s_stop).max(0) } else { s_stop.min(length) };
+                                (start_val, stop_val)
+                            } else {
+                                let start_val = if s_start < 0 { (length + s_start).max(-1) } else { s_start.min(length - 1) };
+                                let stop_val = if s_stop < 0 { (length + s_stop).max(-1) } else { s_stop.min(length - 1) };
+                                (start_val, stop_val)
+                            };
+                            Ok(py_tuple(vec![py_int(res_start as i64), py_int(res_stop as i64), py_int(s_step as i64)]))
+                        }))))
+                    }
+                    _ => Err(PyError::attribute_error(format!("'slice' object has no attribute '{}'", name))),
+                }
+            }
             PyObject::Code(c) => {
                 match name {
                     "co_filename" => Ok(py_str(&c.filename)),
@@ -10325,6 +10484,55 @@ impl PyObject {
                     "start" => Ok(py_int(*start)),
                     "stop" => Ok(py_int(*stop)),
                     "step" => Ok(py_int(*step)),
+                    "__reduce__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__reduce__".to_string(),
+                        func: |args| {
+                            let s: &PyObjectRef = &args[0];
+                            if let PyObject::Range { start, stop, step } = &*s.borrow() {
+                                Ok(py_tuple(vec![
+                                    PyObjectRef::imm(PyObject::BuiltinFunction {
+                                        name: "range".to_string(),
+                                        func: builtin_range,
+                                    }),
+                                    py_tuple(vec![py_int(*start), py_int(*stop), py_int(*step)]),
+                                ]))
+                            } else { Err(PyError::runtime_error("__reduce__ on non-range")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__iter__" => Ok(PyObjectRef::new(PyObject::RangeIter { current: *start, stop: *stop, step: *step })),
+                    "__contains__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__contains__".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("__contains__() takes exactly one argument")); }
+                            let val = &args[1];
+                            if let PyObject::Range { start, stop, step } = &*args[0].borrow() {
+                                let mut current = *start;
+                                while if *step > 0 { current < *stop } else { current > *stop } {
+                                    let item = PyObjectRef::imm(PyObject::Int(num_bigint::BigInt::from(current)));
+                                    if py_compare(&item, val, 2).unwrap_or(py_bool(false)).truthy() { return Ok(py_bool(true)); }
+                                    current += step;
+                                }
+                            }
+                            Ok(py_bool(false))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__len__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__len__".to_string(),
+                        func: |args| {
+                            if args.is_empty() { return Err(PyError::type_error("__len__() takes exactly one argument")); }
+                            let obj = args[0].borrow();
+                            if let PyObject::Range { start, stop, step } = &*obj {
+                                if *step > 0 && *start >= *stop { return Ok(py_int(0)); }
+                                if *step < 0 && *start <= *stop { return Ok(py_int(0)); }
+                                let raw_len = stop.checked_sub(*start).unwrap_or(i64::MAX);
+                                let len = raw_len.checked_div(*step).unwrap_or(0) as i64;
+                                if raw_len % *step != 0 { Ok(py_int(len.abs() + 1)) } else { Ok(py_int(len.abs())) }
+                            } else { Err(PyError::runtime_error("__len__ on non-range")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     "count" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "count".to_string(),
                         func: |args| {
