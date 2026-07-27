@@ -1017,8 +1017,12 @@ impl PySet {
         None
     }
 
+    pub fn iter(&self) -> impl Iterator<Item = &PyObjectRef> {
+        self.entries.iter().filter_map(|e| e.as_ref())
+    }
+
     pub fn to_vec(&self) -> Vec<PyObjectRef> {
-        self.entries.iter().filter_map(|e| e.clone()).collect()
+        self.iter().cloned().collect()
     }
 
     pub fn from_vec(vec: Vec<PyObjectRef>) -> PyResult<Self> {
@@ -1028,8 +1032,8 @@ impl PySet {
     }
 
     pub fn is_superset(&self, other: &PySet) -> bool {
-        for item in other.to_vec() {
-            if self.contains(&item).unwrap_or(false) == false { return false; }
+        for item in other.iter() {
+            if self.contains(item).unwrap_or(false) == false { return false; }
         }
         true
     }
@@ -1209,14 +1213,17 @@ impl PyDict {
         self.size -= 1;
         Ok(removed)
     }
+    pub fn iter(&self) -> impl Iterator<Item = (&PyObjectRef, &PyObjectRef)> {
+        self.entries.iter().filter_map(|e| e.as_ref().map(|(k, v)| (k, v)))
+    }
     pub fn keys(&self) -> Vec<PyObjectRef> {
-        self.entries.iter().filter_map(|e| e.as_ref().map(|(k, _)| k.clone())).collect()
+        self.iter().map(|(k, _)| k.clone()).collect()
     }
     pub fn values(&self) -> Vec<PyObjectRef> {
-        self.entries.iter().filter_map(|e| e.as_ref().map(|(_, v)| v.clone())).collect()
+        self.iter().map(|(_, v)| v.clone()).collect()
     }
     pub fn items(&self) -> Vec<(PyObjectRef, PyObjectRef)> {
-        self.entries.iter().filter_map(|e| e.clone()).collect()
+        self.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
     }
     /// Get a value by object identity (pointer comparison), used for memo cache.
     /// Get a value by object IDENTITY (same semantics as the `is` operator
