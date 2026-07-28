@@ -144,7 +144,15 @@ test-uv: $(RUSTPYTHON)
 
 # ── CPython test suite ─────────────────────────────
 CPYTHON_TIMEOUT := 120
-CPYTHON_PARALLEL := 12
+# Kept below nproc (12 on the dev machine this was tuned on) on purpose:
+# 12-way parallel *debug*-profile (unoptimized, no LTO) rustpython processes
+# saturate every core, leaving the rest of the system starved for CPU during
+# the whole sweep — felt like a hang even though it was actually memory-safe
+# (swap fills from BEFORE the run, not active pageout under load; see
+# cpython_test_suite_compat.md memory for the full diagnosis). 8 leaves a
+# few cores free for the desktop/other work while barely affecting sweep
+# wall-clock (most of the 398 files finish in well under a second each).
+CPYTHON_PARALLEL := 8
 
 test-cpython: build-test
 	@echo -e "$(CYAN)==> Running CPython compatibility tests ($(CPYTHON_TIMEOUT)s timeout, $(CPYTHON_PARALLEL) parallel)...$(RESET)"
@@ -166,17 +174,18 @@ test-cpython: build-test
 	'; \
 	echo ""; \
 	echo "=== RESULTS ==="; \
-	p_count=$$(grep -c "^PASS|" /tmp/rustpython-test-logs/cpython/summary/*.txt 2>/dev/null || echo 0); \
-	f_count=$$(grep -c "^FAIL|" /tmp/rustpython-test-logs/cpython/summary/*.txt 2>/dev/null || echo 0); \
-	t_count=$$(grep -c "^TIMEOUT|" /tmp/rustpython-test-logs/cpython/summary/*.txt 2>/dev/null || echo 0); \
-	p_count=$$(grep -c "^PARSE_ERROR|" /tmp/rustpython-test-logs/cpython/summary/*.txt 2>/dev/null || echo 0); \
-	echo "  PASS: $$p_count"; \
-	echo "  FAIL: $$f_count"; \
-	echo "  TIMEOUT: $$t_count"; \
-	echo "  PARSE_ERROR: $$p_count"; \
+	latest=$$(tail -qn1 /tmp/rustpython-test-logs/cpython/summary/*.txt 2>/dev/null); \
+	pass_count=$$(echo "$$latest" | grep -c "^PASS|"); \
+	fail_count=$$(echo "$$latest" | grep -c "^FAIL|"); \
+	timeout_count=$$(echo "$$latest" | grep -c "^TIMEOUT|"); \
+	parse_count=$$(echo "$$latest" | grep -c "^PARSE_ERROR|"); \
+	echo "  PASS: $$pass_count"; \
+	echo "  FAIL: $$fail_count"; \
+	echo "  TIMEOUT: $$timeout_count"; \
+	echo "  PARSE_ERROR: $$parse_count"; \
 	TOTAL=$$(ls /tmp/rustpython-test-logs/cpython/summary/*.txt 2>/dev/null | wc -l); \
 	echo "  TOTAL: $$TOTAL"; \
-	[ $$f_count -eq 0 ] || echo -e "$(YELLOW)  ⚠  $$f_count failures + $$t_count timeouts + $$p_count parse errors$(RESET)"
+	[ $$fail_count -eq 0 ] || echo -e "$(YELLOW)  ⚠  $$fail_count failures + $$timeout_count timeouts + $$parse_count parse errors$(RESET)"
 
 test-cpython-quick: CPYTHON_TIMEOUT := 30
 test-cpython-quick: test-cpython

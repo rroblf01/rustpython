@@ -907,6 +907,14 @@ impl PyError {
             cause: None,
         }))
     }
+    pub fn memory_error(msg: impl Into<String>) -> Self {
+        let msg = msg.into();
+        PyError::Exception("MemoryError".to_string(), PyObjectRef::new(PyObject::Exception {
+            typ: "MemoryError".to_string(),
+            args: vec![py_str(&msg)],
+            cause: None,
+        }))
+    }
     pub fn runtime_error(msg: impl Into<String>) -> Self {
         PyError::RuntimeError(msg.into())
     }
@@ -2840,11 +2848,24 @@ pub fn py_mul(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
         }
         (PyObject::List(v), PyObject::Int(n)) => {
             if let Some(n) = n.to_usize() {
+                // Pre-check + pre-reserve the total size (real CPython's
+                // `list_resize` does the equivalent `new_allocated *
+                // sizeof(PyObject*)` overflow check) — without this,
+                // `lst * huge_n` grows the result one `extend()` at a time,
+                // succeeding right up until it has consumed all of physical
+                // RAM instead of failing fast. See `test_list.py`'s
+                // `test_overflow`/`test_list_resize_overflow`, which expect
+                // exactly `(MemoryError, OverflowError)` here.
                 let mut result = Vec::new();
-                for _ in 0..n {
-                    result.extend(v.clone());
+                match v.len().checked_mul(n) {
+                    Some(total) if result.try_reserve_exact(total).is_ok() => {
+                        for _ in 0..n {
+                            result.extend(v.clone());
+                        }
+                        Ok(py_list(result))
+                    }
+                    _ => Err(PyError::memory_error("could not allocate list")),
                 }
-                Ok(py_list(result))
             } else {
                 Err(PyError::value_error("cannot multiply list by negative number"))
             }
@@ -2852,10 +2873,15 @@ pub fn py_mul(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
         (PyObject::Tuple(v), PyObject::Int(n)) => {
             if let Some(n) = n.to_usize() {
                 let mut result = Vec::new();
-                for _ in 0..n {
-                    result.extend(v.clone());
+                match v.len().checked_mul(n) {
+                    Some(total) if result.try_reserve_exact(total).is_ok() => {
+                        for _ in 0..n {
+                            result.extend(v.clone());
+                        }
+                        Ok(py_tuple(result))
+                    }
+                    _ => Err(PyError::memory_error("could not allocate tuple")),
                 }
-                Ok(py_tuple(result))
             } else {
                 Err(PyError::value_error("cannot multiply tuple by negative number"))
             }
@@ -3875,6 +3901,26 @@ pub fn builtin_len(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
 }
 
+/// Cheap, best-effort size hint for materializing an arbitrary iterable
+/// into a `Vec` (used by `list()`/`tuple()`). Real CPython pre-sizes via
+/// `PyObject_LengthHint` before iterating, so a source with an O(1) `len()`
+/// (e.g. `range(huge)`) fails fast with a single allocation attempt instead
+/// of growing the backing buffer one doubling at a time — which, for
+/// something like `list(range(sys.maxsize // 2))`, can consume the
+/// system's entire RAM over many reallocations before ever failing (each
+/// individual `push()` succeeds right up until physical memory runs out).
+/// Returns `None` (not an error) when the object has no usable `__len__` —
+/// callers should just skip pre-reservation and fall back to incremental
+/// growth, which is fine for ordinary bounded iterables/generators.
+fn iterable_length_hint(obj: &PyObjectRef) -> Option<usize> {
+    let len_obj = builtin_len(std::slice::from_ref(obj)).ok()?;
+    let borrowed = len_obj.borrow();
+    match &*borrowed {
+        PyObject::Int(n) => n.to_usize(),
+        _ => None,
+    }
+}
+
 pub fn builtin_range(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     match args.len() {
         1 => {
@@ -4524,6 +4570,11 @@ pub fn builtin_list(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     Err(_) => return Err(PyError::type_error(format!("cannot convert '{}' object to list", args[0].borrow().type_name()))),
                 };
                 let mut collected = Vec::new();
+                if let Some(hint) = iterable_length_hint(&args[0]) {
+                    if collected.try_reserve_exact(hint).is_err() {
+                        return Err(PyError::memory_error("could not allocate list"));
+                    }
+                }
                 loop {
                     match builtin_next(&[it.clone()]) {
                         Ok(val) => collected.push(val),
@@ -4561,6 +4612,11 @@ pub fn builtin_tuple(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
     let iterator = builtin_iter(&[args[0].clone()])?;
     let mut items: Vec<PyObjectRef> = Vec::new();
+    if let Some(hint) = iterable_length_hint(&args[0]) {
+        if items.try_reserve_exact(hint).is_err() {
+            return Err(PyError::memory_error("could not allocate tuple"));
+        }
+    }
     loop {
         match builtin_next(&[iterator.clone()]) {
             Ok(v) => items.push(v),
@@ -6219,6 +6275,34 @@ pub fn builtin_reversed(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
     // Check type with a short-lived borrow to avoid holding the RefCell
     // borrow while iterating (which could trigger borrow_mut conflicts).
+    // `range` needs its own O(1) case (real CPython's `range.__reversed__`)
+    // — without this it fell into the generic "drain every element into a
+    // Vec, then reverse" fallback further down, which for a `range` spanning
+    // billions of elements tries to materialize the WHOLE thing first. Same
+    // unbounded-incremental-growth bug as the `list()`/`list * n` memory
+    // bombs fixed elsewhere (confirmed via CPython's own `test_range.py`,
+    // `test_range_iterators`, whose `reversed(range(start, end, step))`
+    // calls span ranges up to ~2**33 elements — enough to consume all
+    // available RAM before ever finishing). `range`'s length is always
+    // O(1) to compute, so the reversed sequence can be derived directly,
+    // arithmetically, without ever iterating the original.
+    {
+        let obj = args[0].borrow();
+        if let PyObject::Range { start, stop, step } = &*obj {
+            let (start, stop, step) = (*start, *stop, *step);
+            let empty = (step > 0 && start >= stop) || (step < 0 && start <= stop);
+            if empty {
+                return Ok(PyObjectRef::new(PyObject::RangeIter { current: 0, stop: 0, step: 1 }));
+            }
+            let raw_len = (stop as i128) - (start as i128);
+            let step128 = step as i128;
+            let q = raw_len / step128;
+            let count: i128 = if raw_len % step128 != 0 { q.abs() + 1 } else { q.abs() };
+            let last = (start as i128 + (count - 1) * step128) as i64;
+            let new_stop = start.wrapping_sub(step);
+            return Ok(PyObjectRef::new(PyObject::RangeIter { current: last, stop: new_stop, step: -step }));
+        }
+    }
     let kind = {
         let obj = args[0].borrow();
         match &*obj {
