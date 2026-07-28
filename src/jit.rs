@@ -295,6 +295,56 @@ extern "C" fn jit_call(func: *const PyObjectRef, nargs: i64, args: *const PyObje
         std::ptr::write(out, crate::object::py_none());
     }
 }
+
+/// Keyword-argument-aware sibling of `jit_call` — the `CALL` opcode's `arg`
+/// packs BOTH counts into one `u32` (`npos | (nkw << 8)`, matching vm.rs's
+/// own `Opcode::CALL` handler exactly: `npos = arg & 0xFF`, `nkw = (arg >>
+/// 8) & 0xFF`), with `items` holding `npos` positional values followed by
+/// `nkw` (name, value) pairs. `jit_call`/this file's codegen previously
+/// only ever read `instr.arg` directly AS `nargs` — for ANY call with at
+/// least one keyword argument this treated `nkw`'s packed-in bits as
+/// thousands of extra positional args to pop (real trigger: `import_helper.
+/// forget()`'s own `cache_from_source(source, optimization=opt)` call
+/// compiled to `CALL arg=257` — `1 | (1 << 8)` — inside a for-loop, JIT-
+/// compiled because it has a loop; popped 257 stack slots instead of 2,
+/// underflowing and panicking "called `Option::unwrap()` on a `None`
+/// value"). Any keyword-argument call reaching a JIT-eligible function
+/// was broken this way.
+extern "C" fn jit_call_kw(func: *const PyObjectRef, npos: i64, nkw: i64, items: *const PyObjectRef, out: *mut PyObjectRef) {
+    unsafe {
+        let npos = npos as usize;
+        let nkw = nkw as usize;
+        let mut args: Vec<PyObjectRef> = Vec::with_capacity(npos);
+        for i in 0..npos as isize {
+            args.push((*items.offset(i)).clone());
+        }
+        let mut keywords: Vec<(String, PyObjectRef)> = Vec::with_capacity(nkw);
+        for k in 0..nkw {
+            let name_ref = &*items.offset((npos + 2 * k) as isize);
+            let val_ref = (*items.offset((npos + 2 * k + 1) as isize)).clone();
+            if let crate::object::PyObject::Str(name) = &*name_ref.borrow() {
+                keywords.push((name.to_string(), val_ref));
+            }
+        }
+        let func_val = (*func).clone();
+        // Same "builtins/closures first, then VM callback" shape as
+        // `jit_call` — but `crate::object::call_function` (the fast path)
+        // has no keywords parameter at all, so any call with `nkw > 0`
+        // must go straight to `vm.call_function`.
+        if nkw == 0 {
+            if let Ok(val) = crate::object::call_function(&func_val, args.clone()) {
+                std::ptr::write(out, val);
+                return;
+            }
+        }
+        let cb_result = crate::object::with_vm_mut(|vm| vm.call_function(func_val, args, keywords));
+        if let Ok(Ok(val)) = cb_result {
+            std::ptr::write(out, val);
+            return;
+        }
+        std::ptr::write(out, crate::object::py_none());
+    }
+}
 thread_local! {
     static ATTR_CACHE: std::cell::RefCell<std::collections::HashMap<(String, String), crate::object::PyObjectRef>> =
         std::cell::RefCell::new(std::collections::HashMap::new());
@@ -742,6 +792,7 @@ pub struct JitCompiler {
     contains_func: cranelift_module::FuncId,
     get_iter_func: cranelift_module::FuncId,
     call_func: cranelift_module::FuncId,
+    call_kw_func: cranelift_module::FuncId,
     load_attr_func: cranelift_module::FuncId,
     for_iter_func: cranelift_module::FuncId,
     build_map_func: cranelift_module::FuncId,
@@ -794,6 +845,7 @@ impl JitCompiler {
         builder.symbol("jit_contains", jit_contains as *const u8);
         builder.symbol("jit_get_iter", jit_get_iter as *const u8);
         builder.symbol("jit_call", jit_call as *const u8);
+        builder.symbol("jit_call_kw", jit_call_kw as *const u8);
         builder.symbol("jit_load_attr", jit_load_attr as *const u8);
         builder.symbol("jit_for_iter", jit_for_iter as *const u8);
         builder.symbol("jit_build_map", jit_build_map as *const u8);
@@ -850,6 +902,8 @@ impl JitCompiler {
         let contains_func = module.declare_function("jit_contains", Linkage::Import, &binop_sig).unwrap();
         let get_iter_func = module.declare_function("jit_get_iter", Linkage::Import, &unary_sig).unwrap();
         let call_func = module.declare_function("jit_call", Linkage::Import, &call_sig).unwrap();
+        let call_kw_sig = Self::make_call_kw_sig();
+        let call_kw_func = module.declare_function("jit_call_kw", Linkage::Import, &call_kw_sig).unwrap();
         let load_attr_func = module.declare_function("jit_load_attr", Linkage::Import, &load_attr_sig).unwrap();
         let for_iter_func = module.declare_function("jit_for_iter", Linkage::Import, &truthy_sig).unwrap();
         let build_map_func = module.declare_function("jit_build_map", Linkage::Import, &call_sig).unwrap();
@@ -895,6 +949,7 @@ impl JitCompiler {
             contains_func,
             get_iter_func,
             call_func,
+            call_kw_func,
             load_attr_func,
             for_iter_func,
             build_map_func,
@@ -930,6 +985,16 @@ impl JitCompiler {
         s.params.push(AbiParam::new(types::I64));
         s.params.push(AbiParam::new(types::I64));
         s.params.push(AbiParam::new(types::I64));
+        s
+    }
+
+    fn make_call_kw_sig() -> cranelift::codegen::ir::Signature {
+        let mut s = cranelift::codegen::ir::Signature::new(cranelift::codegen::isa::CallConv::SystemV);
+        s.params.push(AbiParam::new(types::I64)); // func ptr
+        s.params.push(AbiParam::new(types::I64)); // npos
+        s.params.push(AbiParam::new(types::I64)); // nkw
+        s.params.push(AbiParam::new(types::I64)); // items array ptr
+        s.params.push(AbiParam::new(types::I64)); // out ptr
         s
     }
 
@@ -1185,6 +1250,7 @@ impl JitCompiler {
         let contains_func_ref = self.module.declare_func_in_func(self.contains_func, &mut ctx.func);
         let get_iter_func_ref = self.module.declare_func_in_func(self.get_iter_func, &mut ctx.func);
         let call_func_ref = self.module.declare_func_in_func(self.call_func, &mut ctx.func);
+        let call_kw_func_ref = self.module.declare_func_in_func(self.call_kw_func, &mut ctx.func);
         let load_attr_func_ref = self.module.declare_func_in_func(self.load_attr_func, &mut ctx.func);
         let for_iter_func_ref = self.module.declare_func_in_func(self.for_iter_func, &mut ctx.func);
         let build_map_func_ref = self.module.declare_func_in_func(self.build_map_func, &mut ctx.func);
@@ -1700,13 +1766,29 @@ impl JitCompiler {
                     eval_stack.push([res_lo, res_hi]);
                 }
                 Opcode::CALL => {
-                    let nargs = instr.arg as usize;
+                    // `arg` packs BOTH counts (matching vm.rs's own
+                    // `Opcode::CALL` handler exactly): `npos = arg & 0xFF`
+                    // positional args, `nkw = (arg >> 8) & 0xFF` keyword
+                    // (name, value) pairs following them on the stack.
+                    // Previously read `instr.arg` directly AS `nargs` —
+                    // correct only when `nkw == 0` (arg fits in the low
+                    // byte unchanged); any call with at least one keyword
+                    // argument packs a nonzero `nkw` into the upper bits,
+                    // which got misread as thousands of extra positional
+                    // args to pop (real trigger: `cache_from_source(source,
+                    // optimization=opt)` compiling to `CALL arg=257` —
+                    // `1 | (1 << 8)` — inside a JIT-eligible loop, popping
+                    // 257 stack slots instead of 2 and panicking with a
+                    // `None`-value `unwrap()` on the exhausted `eval_stack`).
+                    let npos = instr.arg as usize & 0xFF;
+                    let nkw = (instr.arg as usize >> 8) & 0xFF;
+                    let total = npos + 2 * nkw;
                     let memflags = cranelift::codegen::ir::MemFlags::new();
-                    let mut args: Vec<[Value; 2]> = Vec::with_capacity(nargs);
-                    for _ in 0..nargs { args.push(eval_stack.pop().unwrap()); }
+                    let mut args: Vec<[Value; 2]> = Vec::with_capacity(total);
+                    for _ in 0..total { args.push(eval_stack.pop().unwrap()); }
                     let func = eval_stack.pop().unwrap();
                     args.reverse();
-                    let array_size = ((nargs * 24).max(16)) as u32;
+                    let array_size = ((total * 24).max(16)) as u32;
                     let tmp_func = builder.create_sized_stack_slot(StackSlotData::new(
                         cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
@@ -1727,8 +1809,14 @@ impl JitCompiler {
                         builder.ins().store(memflags, item[0], item_addr, 0);
                         builder.ins().store(memflags, item[1], item_addr, 8);
                     }
-                    let nargs_val = builder.ins().iconst(types::I64, nargs as i64);
-                    builder.ins().call(call_func_ref, &[func_addr, nargs_val, array_addr, out_addr]);
+                    if nkw == 0 {
+                        let nargs_val = builder.ins().iconst(types::I64, npos as i64);
+                        builder.ins().call(call_func_ref, &[func_addr, nargs_val, array_addr, out_addr]);
+                    } else {
+                        let npos_val = builder.ins().iconst(types::I64, npos as i64);
+                        let nkw_val = builder.ins().iconst(types::I64, nkw as i64);
+                        builder.ins().call(call_kw_func_ref, &[func_addr, npos_val, nkw_val, array_addr, out_addr]);
+                    }
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
                     eval_stack.push([res_lo, res_hi]);

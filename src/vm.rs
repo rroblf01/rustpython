@@ -634,8 +634,20 @@ impl VirtualMachine {
           // Native wave module
           modules.insert_str("wave", create_module("wave", create_wave_dict()));
 
-          // Native numbers module (Number ABC stubs)
-          modules.insert_str("numbers", create_module("numbers", create_numbers_dict()));
+          // Native numbers module — DISABLED: was bare STRING placeholders
+          // (`d.insert_str("Number", py_str("Number"))` etc.) instead of
+          // real ABC classes — `isinstance(x, numbers.Number)` may have
+          // worked via some ad hoc string-matching path, but anything
+          // doing real class things with them (`numbers.Number.register
+          // (Decimal)` — needed by `decimal`'s own real implementation,
+          // see its own doc comment above) raised `AttributeError: 'str'
+          // object has no attribute 'register'`. Real CPython's `numbers.
+          // py` is small (427 lines) and pure Python (just `abc.ABCMeta`/
+          // `abstractmethod`) — vendored verbatim instead, same pattern as
+          // `decimal`/`html.parser` above. `create_numbers_dict` (modules/
+          // misc.rs) is now dead code, kept only in case `Lib/numbers.py`
+          // needs to be reverted.
+          // modules.insert_str("numbers", create_module("numbers", create_numbers_dict()));
 
           // `ast` now loads from Lib/ast.py — needs real (if minimal, marker-
           // only) node classes for PEP 649 lazy-annotation stringification
@@ -666,7 +678,21 @@ impl VirtualMachine {
           // Native contextlib module — DISABLED: real Lib/contextlib.py is used instead
           // modules.insert_str("contextlib", create_module("contextlib", create_contextlib_dict()));
 
-          // Native decimal module
+          // Native decimal module. (Attempted vendoring real CPython's
+          // `decimal.py`/`_pydecimal.py` this session — got as far as
+          // `numbers.Number.register(Decimal)` working [needed the
+          // `numbers` vendor + a new generic `.register()`/`isinstance`-
+          // registry fallback, both kept, see below] before hitting
+          // `int.bit_length` accessed UNBOUND off the `int` type itself
+          // (`_nbits = int.bit_length`) — `int` is a `PyObject::
+          // BuiltinFunction`, not a real `Type`, so it has no attribute
+          // lookup for "what method would an instance's `.bit_length()`
+          // resolve to" at all. That's a deeper, general "unbound method
+          // access on a native-backed type" gap shared with list/dict/str/
+          // etc., not specific to decimal — reverted the vendor rather
+          // than chase it further this session. `Lib/decimal.py`/`Lib/
+          // _pydecimal.py` were removed again; re-attempt once unbound
+          // native-type method access is fixed.)
           modules.insert_str("decimal", create_module("decimal", create_decimal_dict()));
 
           // Native fractions module

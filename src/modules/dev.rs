@@ -149,13 +149,69 @@ pub fn create_abc_dict() -> HashMap<String, PyObjectRef> {
         }))
     });
 
-    // abstractmethod — returns the function unchanged
+    // abstractmethod — marks the function with `__isabstractmethod__ =
+    // True` (previously just returned it unchanged, with no marker at
+    // all — meant `update_abstractmethods`/`isabstract`/anything checking
+    // `getattr(f, '__isabstractmethod__', False)` could never find a
+    // single abstract method anywhere, silently defeating the entire ABC
+    // mechanism) and returns it, matching real CPython.
     abc_func!("abstractmethod", |args| {
-        if !args.is_empty() {
-            Ok(args[0].clone())
+        if args.is_empty() { return Ok(py_none()); }
+        let f = &args[0];
+        let _ = f.borrow_mut().set_attribute("__isabstractmethod__", py_bool(true));
+        Ok(f.clone())
+    });
+
+    // update_abstractmethods(cls) — recomputes `cls.__abstractmethods__`
+    // from scratch: parent classes' own abstract methods that `cls`
+    // still hasn't overridden, plus any of `cls`'s OWN methods newly
+    // marked via `@abstractmethod`. Missing entirely before (`AttributeError:
+    // 'module' object has no attribute 'update_abstractmethods'` — real
+    // trigger: `numbers.py`'s own test suite calling this directly after
+    // patching in concrete method implementations).
+    abc_func!("update_abstractmethods", |args| {
+        if args.is_empty() { return Err(PyError::type_error("update_abstractmethods() requires 1 argument")); }
+        let cls = args[0].clone();
+        let mut abstracts: Vec<String> = Vec::new();
+        let extracted: Option<(Vec<PyObjectRef>, Vec<String>)> = if let PyObject::Type { dict, bases, .. } = &*cls.borrow() {
+            Some((bases.clone(), dict.keys().map(|k| interner::lookup_str(*k).to_string()).collect()))
         } else {
-            Ok(py_none())
+            None
+        };
+        let (bases, dict_names) = match extracted {
+            Some(v) => v,
+            None => return Ok(cls),
+        };
+        for base in &bases {
+            if let Ok(base_abstracts) = base.borrow().get_attribute("__abstractmethods__") {
+                if let PyObject::FrozenSet(items) = &*base_abstracts.borrow() {
+                    for item in items.to_vec() {
+                        let name = item.str();
+                        let still_abstract = if let Ok(val) = cls.borrow().get_attribute(&name) {
+                            val.borrow().get_attribute("__isabstractmethod__").map(|v| v.truthy()).unwrap_or(false)
+                        } else {
+                            true
+                        };
+                        if still_abstract && !abstracts.contains(&name) {
+                            abstracts.push(name);
+                        }
+                    }
+                }
+            }
         }
+        for name in &dict_names {
+            if let Ok(val) = cls.borrow().get_attribute(name) {
+                if val.borrow().get_attribute("__isabstractmethod__").map(|v| v.truthy()).unwrap_or(false)
+                    && !abstracts.contains(name)
+                {
+                    abstracts.push(name.clone());
+                }
+            }
+        }
+        let mut set = PySet::new();
+        for name in &abstracts { set.add(py_str(name))?; }
+        cls.borrow_mut().set_attribute("__abstractmethods__", PyObjectRef::imm(PyObject::FrozenSet(set)))?;
+        Ok(cls)
     });
 
     // ABCMeta — minimal metaclass stub (needed by io.py et al)

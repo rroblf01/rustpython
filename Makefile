@@ -31,7 +31,7 @@ RESET  := \033[0m
 
 .PHONY: all build release static test test-rust test-python test-cpython
 .PHONY: lint lint-clippy lint-ruff lint-typos lint-fmt
-.PHONY: check clean run bench fmt docs install-tools
+.PHONY: check clean clean-logs clean-pycache run bench fmt docs install-tools
 .PHONY: help
 
 # ── Default ──────────────────────────────────────
@@ -274,11 +274,16 @@ clean:
 	@echo -e "$(CYAN)==> Cleaning...$(RESET)"
 	cargo clean
 	@rm -rf /tmp/rustpython-test-logs
+	@find . -name "__pycache__" -not -path "./target/*" -exec rm -rf {} + 2>/dev/null || true
 	@echo -e "$(GREEN)✔  Cleaned$(RESET)"
 
 clean-logs:
 	@rm -rf /tmp/rustpython-test-logs
 	@echo "Logs cleaned"
+
+clean-pycache:
+	@find . -name "__pycache__" -not -path "./target/*" -exec rm -rf {} + 2>/dev/null || true
+	@echo "__pycache__ cleaned"
 
 # ── Documentation ─────────────────────────────────
 docs:

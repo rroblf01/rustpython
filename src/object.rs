@@ -4316,6 +4316,95 @@ pub fn builtin_complex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Ok(PyObjectRef::imm(PyObject::Complex(re, im)))
 }
 
+/// Does `typ`'s mro/bases include a builtin exception class (`Exception`,
+/// `OSError`, ...)? Those are `PyObject::BuiltinFunction` (the exception's
+/// own constructor), never a real `PyObject::Type` — invisible to
+/// `lookup_dunder_via_mro`'s dict-based walk, so a plain `class MyError
+/// (Exception): pass` (no custom `__str__`/`__repr__` override) fell
+/// through to the fully-generic `<MyError object>` instead of real
+/// `BaseException.__str__`/`__repr__`'s args-based formatting (`str(exc)`
+/// for a single-arg exception should be that arg's `str()`, not a useless
+/// placeholder — this broke essentially every custom exception hierarchy's
+/// error messages).
+/// Read a class's OWN `_abc_registry` (set by `.register()`, the generic
+/// `PyObject::Type` fallback method — see its own doc comment) — NEVER via
+/// `get_attribute`/`lookup_dunder_via_mro`-style MRO walking. A virtual
+/// registration against one ABC (`Complex.register(complex)`) must NOT be
+/// visible when checking a MORE SPECIFIC descendant ABC (`Integral`) just
+/// because `Integral` inherits from `Complex` — registration doesn't flow
+/// "downward" in specificity that way. (`.register()` itself has the exact
+/// same "must not read via MRO" requirement, for a different reason — see
+/// its own inline comment.)
+fn own_abc_registry(typ: &PyObjectRef) -> Vec<PyObjectRef> {
+    if let PyObject::Type { dict, .. } = &*typ.borrow() {
+        dict.get_str("_abc_registry").and_then(|r| {
+            if let PyObject::FrozenSet(items) = &*r.borrow() { Some(items.to_vec()) } else { None }
+        }).unwrap_or_default()
+    } else {
+        Vec::new()
+    }
+}
+
+/// Is anything matching `matcher` registered against `base` ITSELF, or
+/// against any REAL (regular inheritance, non-virtual) subclass of `base`?
+/// Needed because registration should propagate to less-specific ABCs in
+/// the same real hierarchy: `numbers.py`'s `Integral.register(int)` must
+/// also make `issubclass(int, Real)`/`issubclass(int, Complex)` true,
+/// since `Integral` is a real subclass of `Real`/`Complex` (NOT because
+/// `int` itself was registered against them directly — it wasn't). Walks
+/// `direct_subclasses_of` recursively; cheap in practice since real ABC
+/// hierarchies (`numbers`, `collections.abc`) are shallow.
+fn abc_registry_matches_in_subtree(base: &PyObjectRef, matcher: &dyn Fn(&PyObjectRef) -> bool) -> bool {
+    if own_abc_registry(base).iter().any(|r| matcher(r)) {
+        return true;
+    }
+    direct_subclasses_of(base).iter().any(|sub| abc_registry_matches_in_subtree(sub, matcher))
+}
+
+fn is_exception_type(typ: &PyObjectRef) -> bool {
+    if let PyObject::Type { mro, bases, .. } = &*typ.borrow() {
+        let entries = if mro.is_empty() { bases } else { mro };
+        entries.iter().any(|b| {
+            if let PyObject::BuiltinFunction { name, .. } = &*b.borrow() {
+                is_builtin_exception_class_name(name)
+            } else {
+                false
+            }
+        })
+    } else {
+        false
+    }
+}
+
+/// Real `BaseException.__str__`: no args -> `""`, one arg -> that arg's
+/// `str()`, multiple args -> `str()` of the whole args tuple.
+fn exception_instance_str(instance: &PyObjectRef) -> String {
+    let args = if let PyObject::Instance { dict, .. } = &*instance.borrow() {
+        dict.get("args").cloned()
+    } else {
+        None
+    };
+    match args.map(|a| a.borrow().clone()) {
+        Some(PyObject::Tuple(items)) if items.len() == 1 => items[0].str(),
+        Some(PyObject::Tuple(items)) if !items.is_empty() => py_tuple(items).str(),
+        _ => String::new(),
+    }
+}
+
+/// Real `BaseException.__repr__`: `ClassName(repr(arg1), repr(arg2), ...)`.
+fn exception_instance_repr(instance: &PyObjectRef, class_name: &str) -> String {
+    let args = if let PyObject::Instance { dict, .. } = &*instance.borrow() {
+        dict.get("args").cloned()
+    } else {
+        None
+    };
+    let args_str = match args.map(|a| a.borrow().clone()) {
+        Some(PyObject::Tuple(items)) => items.iter().map(|a| a.repr()).collect::<Vec<_>>().join(", "),
+        _ => String::new(),
+    };
+    format!("{}({})", class_name, args_str)
+}
+
 pub fn builtin_str(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() { Ok(py_str("")) }
     else {
@@ -4327,6 +4416,10 @@ pub fn builtin_str(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         };
         if let Some(f) = f {
             return call_bound_method(f, args[0].clone(), vec![]);
+        }
+        let is_exc = if let PyObject::Instance { typ, .. } = &*args[0].borrow() { is_exception_type(typ) } else { false };
+        if is_exc {
+            return Ok(py_str(&exception_instance_str(&args[0])));
         }
         Ok(py_str(&args[0].str()))
     }
@@ -4345,6 +4438,18 @@ pub fn builtin_repr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     };
     if let Some(f) = f {
         return call_bound_method(f, args[0].clone(), vec![]);
+    }
+    let class_name = if let PyObject::Instance { typ, .. } = &*args[0].borrow() {
+        if is_exception_type(typ) {
+            Some(typ.borrow().type_name().to_string())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    if let Some(class_name) = class_name {
+        return Ok(py_str(&exception_instance_repr(&args[0], &class_name)));
     }
     Ok(py_str(&args[0].repr()))
 }
@@ -5878,6 +5983,20 @@ pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     }
                 }
             }
+            drop(typ_ref);
+            // `ABCMeta.register(subclass)`-style virtual subclass checks
+            // (see `.register`'s own doc comment, `get_attribute`'s
+            // `PyObject::Type` arm) — `class` (the ABC) records registered
+            // classes in its own `_abc_registry` frozenset (read via
+            // `own_abc_registry`, NOT `get_attribute` — see its own doc
+            // comment for why inherited/MRO-walked registries are wrong
+            // here); `obj`'s class (or any of ITS ancestors, for a real
+            // subclass of a registered virtual-subclass root) counts too.
+            if abc_registry_matches_in_subtree(&args[1], &|registered| {
+                typ.is(registered) || matches!(&*typ.borrow(), PyObject::Type { mro, .. } if mro.iter().any(|c| c.is(registered)))
+            }) {
+                return Ok(py_bool(true));
+            }
             Ok(py_bool(false))
         }
         (PyObject::Instance { typ, .. }, _) => {
@@ -5946,6 +6065,25 @@ pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             // Direct type name match for built-in types (int, str, list, etc.)
             if obj_type == class_name {
                 return Ok(py_bool(true));
+            }
+            // See `builtin_isinstance`'s other `_abc_registry` fallback —
+            // this one covers a PRIMITIVE (inline `SmallInt`/`SmallStr`/...
+            // or boxed `Int`/`Str`/...) checked against an ABC that
+            // registered the matching builtin type name (real trigger:
+            // `numbers.py`'s own `Integral.register(int)`/`Real.register
+            // (float)`/`Complex.register(complex)` — needed for
+            // `isinstance(5, numbers.Integral)` to work at all).
+            if let PyObject::Type { .. } = &*class {
+                if abc_registry_matches_in_subtree(&args[1], &|registered| {
+                    let registered_name = match &*registered.borrow() {
+                        PyObject::BuiltinFunction { name, .. } => name.clone(),
+                        PyObject::Type { name, .. } => name.clone(),
+                        _ => return false,
+                    };
+                    registered_name == obj_type
+                }) {
+                    return Ok(py_bool(true));
+                }
             }
             // Exception hierarchy
             Ok(py_bool(crate::vm::is_exception_subclass(&obj_type, &class_name)))
@@ -6149,6 +6287,11 @@ pub fn builtin_issubclass(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     return Ok(py_bool(true));
                 }
             }
+            // See `builtin_isinstance`'s matching fallback for
+            // `ABCMeta.register`-style virtual subclass checks.
+            if abc_registry_matches_in_subtree(&args[1], &|registered| cls_mro.iter().any(|c| c.is(registered))) {
+                return Ok(py_bool(true));
+            }
             Ok(py_bool(false))
         }
         (PyObject::Type { mro: cls_mro, .. }, _) => {
@@ -6196,7 +6339,28 @@ pub fn builtin_issubclass(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 PyObject::Type { name, .. } => name.clone(),
                 _ => base.str(),
             };
-            Ok(py_bool(crate::vm::is_exception_subclass(cls_name, &base_name)))
+            if crate::vm::is_exception_subclass(cls_name, &base_name) {
+                return Ok(py_bool(true));
+            }
+            // See `builtin_isinstance`'s `_abc_registry` fallback — this
+            // covers `issubclass(int, numbers.Integral)`-style checks
+            // where the SUBCLASS side (`int`/`float`/`complex`/...) is
+            // itself a `BuiltinFunction`, not a `Type`. Real trigger:
+            // `numbers.py`'s own `Integral.register(int)`/`Real.register
+            // (float)`/`Complex.register(complex)`.
+            if let PyObject::Type { .. } = &*base {
+                if abc_registry_matches_in_subtree(&args[1], &|registered| {
+                    let registered_name = match &*registered.borrow() {
+                        PyObject::BuiltinFunction { name, .. } => name.clone(),
+                        PyObject::Type { name, .. } => name.clone(),
+                        _ => return false,
+                    };
+                    &registered_name == cls_name
+                }) {
+                    return Ok(py_bool(true));
+                }
+            }
+            Ok(py_bool(false))
         }
         _ => {
             if std::env::var("RPY_DEBUG_ISSUBCLASS").is_ok() {
@@ -7712,6 +7876,67 @@ impl PyObject {
                 }
                 if name == "__qualname__" {
                     return Ok(py_str(type_name));
+                }
+                // `ABCMeta.register(subclass)` — real CPython's `abc.py`
+                // wraps a native `_abc_register` primitive that this
+                // project already implements (`modules/core.rs`) but never
+                // actually wires up: `class Foo(metaclass=ABCMeta): ...`
+                // doesn't go through a real `class ABCMeta(type):` (this
+                // project's own `ABCMeta` is a plain `BuiltinFunction`, not
+                // a `type` subclass — real per-metaclass method lookup
+                // falling back from `SomeClass.register` to `type
+                // (SomeClass).register` is a deeper, unimplemented
+                // architecture piece), so `SomeClass.register` never
+                // resolved to anything at all. Providing `.register` as a
+                // generic fallback on EVERY class (not gated on "was this
+                // built via ABCMeta") is pragmatic rather than fully
+                // correct — but calling `.register()` on a non-ABC class
+                // isn't something real code does unintentionally, so
+                // there's no real-world downside. Records the virtual
+                // subclass in a `_abc_registry` frozenset attribute on the
+                // class; `isinstance`/`issubclass` consult it (see
+                // `builtin_isinstance`/`builtin_issubclass`). Real trigger:
+                // `numbers.Number.register(Decimal)` — needed by real
+                // CPython's own (vendored) `_pydecimal.py`.
+                if name == "register" && !dict.contains_key_str("register") {
+                    return Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "register".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("register() takes exactly one argument")); }
+                            let cls = &args[0];
+                            let subclass = args[1].clone();
+                            // Read the registry from `cls`'s OWN dict only
+                            // — NOT via `get_attribute` (which walks the
+                            // MRO). `Real.register(float)` must not see
+                            // (and then re-save as ITS OWN registry,
+                            // permanently merging the two) whatever
+                            // `Complex.register(complex)` already stored,
+                            // just because `Real` is a subclass of
+                            // `Complex` and doesn't have its own registry
+                            // entry yet. Confirmed via `numbers.py`'s own
+                            // `Complex.register(complex)`/`Real.register
+                            // (float)`/`Integral.register(int)`: without
+                            // this, `Integral._abc_registry` ended up
+                            // accumulating `{complex, float, int}` (all
+                            // three merged in), making `issubclass(complex,
+                            // Integral)` wrongly `True`.
+                            let existing: Vec<PyObjectRef> = if let PyObject::Type { dict, .. } = &*cls.borrow() {
+                                dict.get_str("_abc_registry").and_then(|r| {
+                                    if let PyObject::FrozenSet(items) = &*r.borrow() { Some(items.to_vec()) } else { None }
+                                }).unwrap_or_default()
+                            } else {
+                                Vec::new()
+                            };
+                            if !existing.iter().any(|r| r.is(&subclass)) {
+                                let mut set = PySet::new();
+                                for item in &existing { set.add(item.clone())?; }
+                                set.add(subclass.clone())?;
+                                cls.borrow_mut().set_attribute("_abc_registry", PyObjectRef::imm(PyObject::FrozenSet(set)))?;
+                            }
+                            Ok(subclass)
+                        },
+                        self_obj: py_none(),
+                    }));
                 }
                 if name == "__subclasses__" && !dict.contains_key_str("__subclasses__") {
                     // NOTE: self_obj here is a placeholder — LOAD_ATTR's fast
@@ -11663,6 +11888,36 @@ impl PyObject {
                         if start_idx < mro.len() {
                             let mut found = None;
                             for base in mro.iter().skip(start_idx) {
+                                // A builtin exception base (`class MyError
+                                // (OSError): ...`) is a `PyObject::
+                                // BuiltinFunction` (the exception's own
+                                // constructor), never a real `PyObject::
+                                // Type` — invisible to the dict-lookup
+                                // walk just below, so `super().__init__
+                                // (...)` inside such a subclass's own
+                                // `__init__` always raised `AttributeError:
+                                // 'super' object has no attribute
+                                // '__init__'` instead of reaching real
+                                // `BaseException.__init__`'s behavior
+                                // (store the given args as `self.args`).
+                                // Extremely common idiom — any custom
+                                // exception hierarchy that calls
+                                // `super().__init__(...)` (real trigger:
+                                // `urllib.error.URLError(OSError)`).
+                                if name == "__init__" {
+                                    if let PyObject::BuiltinFunction { name: bname, .. } = &*base.borrow() {
+                                        if is_builtin_exception_class_name(bname) {
+                                            let target = obj.clone();
+                                            found = Some(PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                                                if let PyObject::Instance { dict, .. } = &mut *target.borrow_mut() {
+                                                    dict.insert("args".to_string(), py_tuple(args.to_vec()));
+                                                }
+                                                Ok(py_none())
+                                            }))));
+                                            break;
+                                        }
+                                    }
+                                }
                                 if let PyObject::Type { dict, .. } = &*base.borrow() {
                                     if let Some(val) = dict.get_str(&name) {
                                         let val_borrowed = val.borrow();
