@@ -5396,6 +5396,29 @@ impl VirtualMachine {
                         if is_instance_obj && is_function {
                             return Ok(PyObjectRef::imm(PyObject::BoundMethod { func: v, self_obj: obj.clone() }));
                         }
+                        // `@classmethod`-decorated attributes found on a
+                        // class (`obj` a `PyObject::Type`) come back from
+                        // plain `get_attribute` as the raw, un-invoked
+                        // `ClassMethod` descriptor — only LOAD_ATTR's own
+                        // opcode handler binds it into a callable
+                        // `BoundMethod`. Without this, `getattr(SomeClass,
+                        // 'a_classmethod')()` raised `TypeError:
+                        // 'classmethod' object is not callable` even
+                        // though `SomeClass.a_classmethod()` worked fine.
+                        // Real trigger: `unittest.suite.py`'s
+                        // `getattr(currentClass, 'setUpClass', None)` —
+                        // every `TestCase` subclass's default
+                        // `@classmethod setUpClass`/`tearDownClass` hit
+                        // this the moment `_isnotsuite()` (itself only
+                        // fixed to work correctly this same session) let
+                        // per-class fixture handling actually run for the
+                        // first time.
+                        let is_type_obj = matches!(&*obj.borrow(), PyObject::Type { .. });
+                        if is_type_obj {
+                            if let PyObject::ClassMethod { func } = &*v.borrow() {
+                                return Ok(PyObjectRef::imm(PyObject::BoundMethod { func: func.clone(), self_obj: obj.clone() }));
+                            }
+                        }
                         // Native (non-Instance) types — File, List, Dict,
                         // Set, ... — expose their own methods as
                         // `BuiltinMethod` values with a `PyObject::None`
@@ -7017,8 +7040,21 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
             // a `.%sf % (sys.maxsize + 1)` spec specifically to check this)
             // rather than crashing. Bare `.unwrap()` here panicked the whole
             // process on `ParseIntError` instead.
-            Some(chars[start..idx].iter().collect::<String>().parse::<usize>()
-                .map_err(|_| PyError::value_error("Format specifier width too large"))?)
+            let w = chars[start..idx].iter().collect::<String>().parse::<usize>()
+                .map_err(|_| PyError::value_error("Format specifier width too large"))?;
+            // Unlike the overflow case above, a width of e.g. `sys.maxsize +
+            // 1` (2**63) parses into a `usize` just fine — but actually
+            // padding a string out to that length tries to allocate an
+            // astronomical buffer (`apply_padding`'s `fill.repeat(w -
+            // s.len())`), aborting the whole process with "memory
+            // allocation of N bytes failed" instead of raising a catchable
+            // `ValueError`. Same real trigger as the precision cap below
+            // (`test_format.py::test_format_huge_width`, `.../huge_item_
+            // number`) — capped at the same threshold for consistency.
+            if w > 1000 {
+                return Err(PyError::value_error("Format specifier width too large"));
+            }
+            Some(w)
         } else {
             None
         }

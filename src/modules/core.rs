@@ -1279,6 +1279,33 @@ pub fn sys_exc_info_builtin(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Ok(result.unwrap_or_else(|_| py_tuple(vec![py_none(), py_none(), py_none()])))
 }
 
+thread_local! {
+    // `sys.settrace`/`gettrace`: stores the current global trace function.
+    // This does NOT actually fire 'call'/'line'/'return'/'exception' trace
+    // events during execution (that needs deep VM instrumentation — a much
+    // larger feature, not attempted here) — it only makes the get/set
+    // protocol itself work, which is enough for the extremely common
+    // `self.addCleanup(sys.settrace, sys.gettrace())` /
+    // `sys.settrace(None); assert sys.gettrace() is None` setup/teardown
+    // pattern (real trigger: `test_sys_settrace.py`'s own test fixtures)
+    // to stop raising `AttributeError: 'module' object has no attribute
+    // 'settrace'` on every single test in the file, rather than crashing
+    // before even reaching whatever the test itself checks.
+    static CURRENT_TRACE_FUNC: std::cell::RefCell<Option<PyObjectRef>> = std::cell::RefCell::new(None);
+}
+
+pub fn sys_settrace_builtin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    let func = args.first().cloned().unwrap_or_else(py_none);
+    CURRENT_TRACE_FUNC.with(|f| {
+        *f.borrow_mut() = if matches!(&*func.borrow(), PyObject::None) { None } else { Some(func) };
+    });
+    Ok(py_none())
+}
+
+pub fn sys_gettrace_builtin(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    Ok(CURRENT_TRACE_FUNC.with(|f| f.borrow().clone()).unwrap_or_else(py_none))
+}
+
 pub fn sys_getrecursionlimit_builtin(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let result = crate::object::with_vm_mut(|vm| py_int(vm.recursion_limit as i64));
     Ok(result.unwrap_or_else(|_| py_int(1000)))
@@ -1559,6 +1586,8 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
     sys_func!("exc_info", sys_exc_info_builtin);
     sys_func!("getrecursionlimit", sys_getrecursionlimit_builtin);
     sys_func!("setrecursionlimit", sys_setrecursionlimit_builtin);
+    sys_func!("settrace", sys_settrace_builtin);
+    sys_func!("gettrace", sys_gettrace_builtin);
     sys_func!("_getframe", |args| {
         let level = if args.is_empty() { 0 } else { args[0].as_i64().unwrap_or(0) };
         // Return a basic frame representation
@@ -2917,6 +2946,33 @@ pub fn create_operator_dict() -> HashMap<String, PyObjectRef> {
     op_func!("index", |args| {
         if args.is_empty() { return Err(PyError::type_error("operator.index requires 1 argument")); }
         to_index(&args[0]).map(|i| py_int(i))
+    });
+    op_func!("indexOf", |args| {
+        if args.len() < 2 { return Err(PyError::type_error("operator.indexOf requires 2 arguments")); }
+        let it = crate::object::builtin_iter(&[args[0].clone()])?;
+        let mut idx: i64 = 0;
+        loop {
+            match crate::object::builtin_next(&[it.clone()]) {
+                Ok(v) => {
+                    if crate::object::py_compare(&v, &args[1], 2)?.truthy() { return Ok(py_int(idx)); }
+                    idx += 1;
+                }
+                Err(PyError::StopIteration) => return Err(PyError::value_error("sequence.index(x): x not in sequence")),
+                Err(e) => return Err(e),
+            }
+        }
+    });
+    op_func!("countOf", |args| {
+        if args.len() < 2 { return Err(PyError::type_error("operator.countOf requires 2 arguments")); }
+        let it = crate::object::builtin_iter(&[args[0].clone()])?;
+        let mut count: i64 = 0;
+        loop {
+            match crate::object::builtin_next(&[it.clone()]) {
+                Ok(v) => { if crate::object::py_compare(&v, &args[1], 2)?.truthy() { count += 1; } }
+                Err(PyError::StopIteration) => return Ok(py_int(count)),
+                Err(e) => return Err(e),
+            }
+        }
     });
     op_func!("truth", |args| {
         if args.is_empty() { return Err(PyError::type_error("operator.truth requires 1 argument")); }

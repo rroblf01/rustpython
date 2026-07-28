@@ -978,6 +978,16 @@ pub fn create_types_dict() -> HashMap<String, PyObjectRef> {
         if args.is_empty() { return Err(PyError::type_error("FunctionType() requires an argument")); }
         Ok(args[0].clone())
     });
+    // Real `types.DynamicClassAttribute` differs from plain `property` only
+    // in a narrow metaclass-interop edge case (raising `AttributeError` on
+    // class-level access so a metaclass's own `__getattr__` can take over —
+    // `enum.py`'s own `Enum.name`/`Enum.value` use this internally). Aliased
+    // to `property` directly rather than modeling that edge case: covers
+    // the overwhelming majority of real usage (structural
+    // getter/setter/deleter behavior), and unblocks the `ImportError:
+    // cannot import name 'DynamicClassAttribute' from 'types'` that
+    // otherwise hits any code merely importing it.
+    t_func!("DynamicClassAttribute", builtin_property);
     t_func!("LambdaType", |args| {
         if args.is_empty() { return Err(PyError::type_error("LambdaType() requires an argument")); }
         Ok(args[0].clone())
@@ -2490,6 +2500,51 @@ pub fn create_pickle_dict() -> HashMap<String, PyObjectRef> {
 
     d.insert_str("HIGHEST_PROTOCOL", py_int(5));
     d.insert_str("DEFAULT_PROTOCOL", py_int(4));
+    // Real CPython's `pickle.py` internal constant, used for isinstance
+    // checks in the pure-Python pickler fallback path — `isinstance()`
+    // here does its own name-based comparison against a `PyObject::Type`
+    // (see `builtin_type_of`'s doc comment), so building this from real
+    // `type(...)` calls on sample instances works correctly.
+    d.insert_str("bytes_types", py_tuple(vec![
+        crate::object::builtin_type_of(&[PyObjectRef::imm(PyObject::Bytes(Vec::new()))]).unwrap_or_else(|_| py_none()),
+        crate::object::builtin_type_of(&[PyObjectRef::new(PyObject::ByteArray(Vec::new()))]).unwrap_or_else(|_| py_none()),
+    ]));
+    // Minimal `PickleBuffer` stub — real CPython's wraps a buffer-protocol
+    // object for out-of-band (protocol 5) pickling; this project's own
+    // `pickle_serialize`/deserialize don't implement the out-of-band
+    // buffer protocol at all, so this only makes `PickleBuffer(obj)`
+    // constructible/importable (unblocking any code that merely
+    // references the name) with `.raw()` returning the wrapped object
+    // and `.release()` a no-op, not a real zero-copy buffer view.
+    d.insert_str("PickleBuffer", PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "PickleBuffer".to_string(),
+        func: |args| {
+            if args.is_empty() { return Err(PyError::type_error("PickleBuffer() requires an argument")); }
+            let mut inst_dict = AttrMap::new();
+            inst_dict.insert("_obj".to_string(), args[0].clone());
+            Ok(PyObjectRef::new(PyObject::Instance {
+                typ: PyObjectRef::new(PyObject::Type {
+                    name: "PickleBuffer".to_string(),
+                    dict: Box::new(str_map_to_typedict(HashMap::from([
+                        ("raw".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                            name: "raw".to_string(),
+                            func: |args| {
+                                if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+                                    Ok(dict.get("_obj").cloned().unwrap_or_else(py_none))
+                                } else { Ok(py_none()) }
+                            },
+                        })),
+                        ("release".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                            name: "release".to_string(), func: |_args| Ok(py_none()),
+                        })),
+                    ]))),
+                    bases: vec![],
+                    mro: vec![],
+                }),
+                dict: inst_dict,
+            }))
+        },
+    }));
 
     d.insert_str("PickleError", PyObjectRef::new(PyObject::BuiltinFunction { name: "PickleError".to_string(), func: crate::object::builtin_make_exception_pickleerror }));
     d.insert_str("PicklingError", PyObjectRef::new(PyObject::BuiltinFunction { name: "PicklingError".to_string(), func: crate::object::builtin_make_exception_picklingerror }));

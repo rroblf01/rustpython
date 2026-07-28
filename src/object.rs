@@ -2501,7 +2501,15 @@ fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String, String> {
                 }
             }
             if !width_str.is_empty() {
-                width = Some(width_str.parse::<usize>().map_err(|_| "invalid width".to_string())?);
+                let w = width_str.parse::<usize>().map_err(|_| "invalid width".to_string())?;
+                // A width like `sys.maxsize + 1` parses into a valid `usize`
+                // but then panics trying to actually pad a string/number out
+                // to that length — real CPython raises `ValueError` instead
+                // (`test_str.py::test_formatting_huge_width`: `"%{}f" %
+                // (sys.maxsize + 1)`). Same cap as the `.precision` check
+                // just below, for consistency.
+                if w > 1000 { return Err("width too big".to_string()); }
+                width = Some(w);
             }
             // Parse optional `.precision` (e.g. `%.3f`, `%6.2f`) — this was
             // entirely unparsed before, so any precision-qualified float
@@ -2521,7 +2529,14 @@ fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String, String> {
                     }
                 }
                 precision = Some(if prec_str.is_empty() { 0 } else {
-                    prec_str.parse::<usize>().map_err(|_| "invalid precision".to_string())?
+                    let p = prec_str.parse::<usize>().map_err(|_| "invalid precision".to_string())?;
+                    // See the matching `width` cap above — a precision this
+                    // large parses fine but panics Rust's own `format!`
+                    // machinery when actually used (`test_str.py::
+                    // test_formatting_huge_precision`: `"%.{}f" %
+                    // (sys.maxsize + 1)`).
+                    if p > 1000 { return Err("precision too big".to_string()); }
+                    p
                 });
             }
 
@@ -5031,7 +5046,31 @@ pub fn builtin_getattr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
     let attr_name = args[1].str();
     match args[0].borrow().get_attribute(&attr_name) {
-        Ok(val) => Ok(val),
+        Ok(val) => {
+            // `get_attribute`'s own `PyObject::Type` handling unwraps
+            // `StaticMethod` descriptors but NOT `ClassMethod` ones — that
+            // binding is instead done separately, only inside vm.rs's
+            // `LOAD_ATTR` opcode handler (which has direct access to a
+            // `PyObjectRef` for the class to bind against; `get_attribute`
+            // only gets `&self`/`&PyObject`, with no such handle). That
+            // meant `Foo.bar()` (going through `LOAD_ATTR`) correctly
+            // called a `@classmethod`-decorated `bar`, but
+            // `getattr(Foo, 'bar')()` returned the raw, uncallable
+            // `ClassMethod` descriptor object instead — `TypeError:
+            // 'classmethod' object is not callable`. Real trigger:
+            // `unittest.suite.py`'s `getattr(currentClass, 'setUpClass',
+            // None)` — every single `TestCase` subclass's default
+            // `@classmethod setUpClass`/`tearDownClass` hit this.
+            if matches!(&*args[0].borrow(), PyObject::Type { .. }) {
+                if let PyObject::ClassMethod { func } = &*val.borrow() {
+                    return Ok(PyObjectRef::new(PyObject::BoundMethod {
+                        func: func.clone(),
+                        self_obj: args[0].clone(),
+                    }));
+                }
+            }
+            Ok(val)
+        }
         Err(_) if args.len() >= 3 => Ok(args[2].clone()),
         Err(e) => Err(e),
     }
@@ -5432,7 +5471,24 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         PyObject::Dict(d) => {
             Ok(PyObjectRef::new(PyObject::ListIter { list: d.keys(), index: 0 }))
         }
-        _ => Ok(args[0].clone()),
+        // Already an iterator object (one of `builtin_next`'s own
+        // recognized variants) — `iter(it)` on an existing iterator
+        // just returns it unchanged, matching real Python.
+        PyObject::ListIter { .. } | PyObject::RangeIter { .. } | PyObject::CycleIter { .. }
+        | PyObject::EnumerateIter { .. } | PyObject::MapIterator { .. } | PyObject::FilterIterator { .. }
+        | PyObject::ZipIterator { .. } | PyObject::FutureAwaitIterator { .. } => Ok(args[0].clone()),
+        // Anything else (plain functions, ints, ...) is genuinely not
+        // iterable. The previous fallback (`Ok(args[0].clone())`)
+        // silently treated ANY object as if it were already a valid
+        // iterator instead of raising here — `builtin_next` then had no
+        // recognized shape to advance either, and its OWN fallback
+        // apparently tried calling the object as if `__next__` meant
+        // "call it", reentrantly re-borrowing the same `RefCell` and
+        // panicking with "RefCell already borrowed" instead of a clean
+        // `TypeError` (confirmed via `operator.countOf(countOf, countOf)`
+        // — a non-iterable `BuiltinFunction` passed to `iter()` — from
+        // CPython's own `test_iter.py::test_countOf`).
+        other => Err(PyError::type_error(format!("'{}' object is not iterable", other.type_name()))),
     }
 }
 
@@ -7101,6 +7157,97 @@ fn str_find_impl(haystack: &str, needle: &str, start: Option<i64>, end: Option<i
     found.map(|byte_idx| s + sub[..byte_idx].chars().count())
 }
 
+/// Extract a raw byte slice out of a bytes-like `PyObjectRef` (`bytes` or
+/// `bytearray` — the two realistic cases the `bytes` method table below
+/// needs to accept, matching real CPython's "bytes-like object" argument
+/// convention for e.g. `b"x".startswith(bytearray(b"x"))`). Returns `None`
+/// for anything else (str, int, etc.), which callers turn into a TypeError.
+fn arg_bytes(v: &PyObjectRef) -> Option<Vec<u8>> {
+    match &*v.borrow() {
+        PyObject::Bytes(b) => Some(b.clone()),
+        PyObject::ByteArray(b) => Some(b.clone()),
+        _ => None,
+    }
+}
+
+/// `startswith`/`endswith` accept either a single bytes-like object or a
+/// tuple of them — extracted here once rather than duplicated in both
+/// methods. Non-bytes-like tuple members are silently dropped (matching
+/// `filter_map`'s effect elsewhere in this file for the analogous `str`
+/// case), not raised as a TypeError — this mirrors how the existing `str`
+/// implementation already behaves via `.map(|x| x.str())` for its own
+/// prefix/suffix tuple, i.e. permissive rather than strict.
+fn extract_bytes_or_tuple(v: &PyObjectRef) -> Vec<Vec<u8>> {
+    let items: Vec<PyObjectRef> = {
+        let b = v.borrow();
+        if let PyObject::Tuple(items) = &*b { items.clone() } else { drop(b); vec![v.clone()] }
+    };
+    items.iter().filter_map(arg_bytes).collect()
+}
+
+/// `bytearray`'s own string-ish methods (upper/split/strip/etc.) delegate
+/// to the `bytes` method table above via `bytearray_delegate` (build a
+/// temporary `bytes` from the bytearray's current contents, call the same
+/// named method on it, done) rather than duplicating ~30 methods' worth of
+/// byte-manipulation logic a second time. Real CPython's `bytearray`
+/// methods return `bytearray` (not `bytes`) for the transformed result,
+/// and e.g. `bytearray.split()` returns a list of `bytearray` — this
+/// walks the `bytes`-method's result and converts any `Bytes` found
+/// (directly, or nested inside a `List`/`Tuple` — covering `split`'s list
+/// and `partition`'s tuple) back into `ByteArray`. Bools/ints (`count`,
+/// `isalpha`, ...) pass through unchanged.
+fn bytes_result_to_bytearray(v: PyObjectRef) -> PyObjectRef {
+    let converted = {
+        let b = v.borrow();
+        match &*b {
+            PyObject::Bytes(bytes) => Some(PyObjectRef::new(PyObject::ByteArray(bytes.clone()))),
+            PyObject::List(items) => Some(py_list(items.iter().map(|i| bytes_result_to_bytearray(i.clone())).collect())),
+            PyObject::Tuple(items) => Some(PyObjectRef::imm(PyObject::Tuple(items.iter().map(|i| bytes_result_to_bytearray(i.clone())).collect()))),
+            _ => None,
+        }
+    };
+    converted.unwrap_or(v)
+}
+
+/// Calls `bytes`'s implementation of `method_name` against a temporary
+/// `bytes` snapshot of a `bytearray`'s current contents, forwarding the
+/// rest of `args` unchanged, then converts the result back per
+/// `bytes_result_to_bytearray`'s doc comment. See `bytearray`'s dispatch
+/// arms below — one line each, all funneling through this.
+fn bytearray_delegate(method_name: &str, args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if let PyObject::ByteArray(b) = &*args[0].borrow() {
+        let temp = PyObjectRef::imm(PyObject::Bytes(b.clone()));
+        let method = temp.borrow().get_attribute(method_name)?;
+        let result = if let PyObject::BuiltinMethod { func, .. } = &*method.borrow() {
+            let mut new_args = vec![temp.clone()];
+            new_args.extend_from_slice(&args[1..]);
+            func(&new_args)?
+        } else {
+            return Err(PyError::runtime_error(format!("{}: bad method", method_name)));
+        };
+        Ok(bytes_result_to_bytearray(result))
+    } else {
+        Err(PyError::runtime_error(format!("{} on non-bytearray", method_name)))
+    }
+}
+
+/// Byte-slice analogue of `str_find_impl` — no unicode decoding needed
+/// since `bytes` operates byte-for-byte.
+fn bytes_find_impl(haystack: &[u8], needle: &[u8], start: Option<i64>, end: Option<i64>, reverse: bool) -> Option<usize> {
+    let (s, e) = resolve_str_slice_bounds(haystack.len(), start, end);
+    if s > e { return None; }
+    let sub = &haystack[s..e];
+    if needle.is_empty() {
+        return Some(if reverse { e } else { s });
+    }
+    if needle.len() > sub.len() { return None; }
+    if reverse {
+        sub.windows(needle.len()).rposition(|w| w == needle).map(|i| s + i)
+    } else {
+        sub.windows(needle.len()).position(|w| w == needle).map(|i| s + i)
+    }
+}
+
 /// Get the effective __slots__ for a type, checking the entire MRO.
 /// Returns None if no __slots__ is defined anywhere in the hierarchy.
 /// Look up a dunder method (e.g. `__len__`) on a type, walking its MRO —
@@ -8212,6 +8359,562 @@ impl PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
+                    "startswith" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "startswith".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("startswith() takes at least 1 argument")); }
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let start = opt_i64_arg(args.get(2));
+                                let end = opt_i64_arg(args.get(3));
+                                let (st, en) = resolve_str_slice_bounds(b.len(), start, end);
+                                let sub = &b[st..en];
+                                let prefixes = extract_bytes_or_tuple(&args[1]);
+                                Ok(py_bool(prefixes.iter().any(|p| sub.starts_with(p.as_slice()))))
+                            } else { Err(PyError::runtime_error("startswith on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "endswith" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "endswith".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("endswith() takes at least 1 argument")); }
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let start = opt_i64_arg(args.get(2));
+                                let end = opt_i64_arg(args.get(3));
+                                let (st, en) = resolve_str_slice_bounds(b.len(), start, end);
+                                let sub = &b[st..en];
+                                let suffixes = extract_bytes_or_tuple(&args[1]);
+                                Ok(py_bool(suffixes.iter().any(|p| sub.ends_with(p.as_slice()))))
+                            } else { Err(PyError::runtime_error("endswith on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "find" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "find".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("find() takes at least 1 argument")); }
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let needle = arg_bytes(&args[1]).ok_or_else(|| PyError::type_error("argument should be a bytes-like object"))?;
+                                let start = opt_i64_arg(args.get(2));
+                                let end = opt_i64_arg(args.get(3));
+                                Ok(py_int(bytes_find_impl(b, &needle, start, end, false).map(|i| i as i64).unwrap_or(-1)))
+                            } else { Err(PyError::runtime_error("find on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "rfind" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "rfind".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("rfind() takes at least 1 argument")); }
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let needle = arg_bytes(&args[1]).ok_or_else(|| PyError::type_error("argument should be a bytes-like object"))?;
+                                let start = opt_i64_arg(args.get(2));
+                                let end = opt_i64_arg(args.get(3));
+                                Ok(py_int(bytes_find_impl(b, &needle, start, end, true).map(|i| i as i64).unwrap_or(-1)))
+                            } else { Err(PyError::runtime_error("rfind on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "index" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "index".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("index() takes at least 1 argument")); }
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let needle = arg_bytes(&args[1]).ok_or_else(|| PyError::type_error("argument should be a bytes-like object"))?;
+                                let start = opt_i64_arg(args.get(2));
+                                let end = opt_i64_arg(args.get(3));
+                                bytes_find_impl(b, &needle, start, end, false)
+                                    .map(|i| py_int(i as i64))
+                                    .ok_or_else(|| PyError::value_error("subsection not found"))
+                            } else { Err(PyError::runtime_error("index on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "rindex" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "rindex".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("rindex() takes at least 1 argument")); }
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let needle = arg_bytes(&args[1]).ok_or_else(|| PyError::type_error("argument should be a bytes-like object"))?;
+                                let start = opt_i64_arg(args.get(2));
+                                let end = opt_i64_arg(args.get(3));
+                                bytes_find_impl(b, &needle, start, end, true)
+                                    .map(|i| py_int(i as i64))
+                                    .ok_or_else(|| PyError::value_error("subsection not found"))
+                            } else { Err(PyError::runtime_error("rindex on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "count" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "count".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("count() takes at least 1 argument")); }
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let needle = arg_bytes(&args[1]).ok_or_else(|| PyError::type_error("argument should be a bytes-like object"))?;
+                                let start = opt_i64_arg(args.get(2));
+                                let end = opt_i64_arg(args.get(3));
+                                let (st, en) = resolve_str_slice_bounds(b.len(), start, end);
+                                let sub = &b[st..en];
+                                let c = if needle.is_empty() {
+                                    sub.len() + 1
+                                } else {
+                                    sub.windows(needle.len()).filter(|w| *w == needle.as_slice()).count()
+                                };
+                                Ok(py_int(c as i64))
+                            } else { Err(PyError::runtime_error("count on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "replace" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "replace".to_string(),
+                        func: |args| {
+                            if args.len() < 3 { return Err(PyError::type_error("replace() takes at least 2 arguments")); }
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let old = arg_bytes(&args[1]).ok_or_else(|| PyError::type_error("argument should be a bytes-like object"))?;
+                                let new = arg_bytes(&args[2]).ok_or_else(|| PyError::type_error("argument should be a bytes-like object"))?;
+                                let maxcount = if args.len() > 3 { args[3].as_i64().unwrap_or(-1) } else { -1 };
+                                if old.is_empty() {
+                                    let mut result = new.clone();
+                                    for (i, byte) in b.iter().enumerate() {
+                                        if maxcount >= 0 && (i as i64) >= maxcount {
+                                            result.extend_from_slice(&b[i..]);
+                                            return Ok(PyObjectRef::imm(PyObject::Bytes(result)));
+                                        }
+                                        result.push(*byte);
+                                        result.extend_from_slice(&new);
+                                    }
+                                    return Ok(PyObjectRef::imm(PyObject::Bytes(result)));
+                                }
+                                let mut result = Vec::new();
+                                let mut rest = &b[..];
+                                let mut count = 0i64;
+                                loop {
+                                    if maxcount >= 0 && count >= maxcount { break; }
+                                    match rest.windows(old.len()).position(|w| w == old.as_slice()) {
+                                        Some(idx) => {
+                                            result.extend_from_slice(&rest[..idx]);
+                                            result.extend_from_slice(&new);
+                                            rest = &rest[idx + old.len()..];
+                                            count += 1;
+                                        }
+                                        None => break,
+                                    }
+                                }
+                                result.extend_from_slice(rest);
+                                Ok(PyObjectRef::imm(PyObject::Bytes(result)))
+                            } else { Err(PyError::runtime_error("replace on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "split" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "split".to_string(),
+                        func: |args| {
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let sep = if args.len() > 1 && !matches!(&*args[1].borrow(), PyObject::None) {
+                                    Some(arg_bytes(&args[1]).ok_or_else(|| PyError::type_error("argument should be a bytes-like object"))?)
+                                } else { None };
+                                let maxsplit = if args.len() > 2 { args[2].as_i64().unwrap_or(-1) } else { -1 };
+                                let parts: Vec<Vec<u8>> = match &sep {
+                                    Some(sep) => {
+                                        if sep.is_empty() { return Err(PyError::value_error("empty separator")); }
+                                        let mut parts = Vec::new();
+                                        let mut rest = &b[..];
+                                        let mut count = 0i64;
+                                        loop {
+                                            if maxsplit >= 0 && count >= maxsplit { break; }
+                                            match rest.windows(sep.len()).position(|w| w == sep.as_slice()) {
+                                                Some(idx) => { parts.push(rest[..idx].to_vec()); rest = &rest[idx + sep.len()..]; count += 1; }
+                                                None => break,
+                                            }
+                                        }
+                                        parts.push(rest.to_vec());
+                                        parts
+                                    }
+                                    None => {
+                                        let mut parts: Vec<Vec<u8>> = Vec::new();
+                                        let mut rest = &b[..];
+                                        loop {
+                                            if maxsplit >= 0 && parts.len() >= maxsplit as usize { break; }
+                                            let ws_start = rest.iter().position(|c| !c.is_ascii_whitespace()).unwrap_or(rest.len());
+                                            rest = &rest[ws_start..];
+                                            if rest.is_empty() { break; }
+                                            let idx = rest.iter().position(|c| c.is_ascii_whitespace()).unwrap_or(rest.len());
+                                            parts.push(rest[..idx].to_vec());
+                                            rest = &rest[idx..];
+                                        }
+                                        let tail_start = rest.iter().position(|c| !c.is_ascii_whitespace()).unwrap_or(rest.len());
+                                        let tail_end = rest.iter().rposition(|c| !c.is_ascii_whitespace()).map(|i| i + 1).unwrap_or(tail_start);
+                                        if tail_start < tail_end { parts.push(rest[tail_start..tail_end].to_vec()); }
+                                        parts
+                                    }
+                                };
+                                Ok(py_list(parts.into_iter().map(|v| PyObjectRef::imm(PyObject::Bytes(v))).collect()))
+                            } else { Err(PyError::runtime_error("split on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "rsplit" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "rsplit".to_string(),
+                        func: |args| {
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let sep = if args.len() > 1 && !matches!(&*args[1].borrow(), PyObject::None) {
+                                    Some(arg_bytes(&args[1]).ok_or_else(|| PyError::type_error("argument should be a bytes-like object"))?)
+                                } else { None };
+                                let maxsplit = if args.len() > 2 { args[2].as_i64().unwrap_or(-1) } else { -1 };
+                                let parts: Vec<Vec<u8>> = match &sep {
+                                    Some(sep) => {
+                                        if sep.is_empty() { return Err(PyError::value_error("empty separator")); }
+                                        let mut parts = Vec::new();
+                                        let mut rest = &b[..];
+                                        let mut count = 0i64;
+                                        loop {
+                                            if maxsplit >= 0 && count >= maxsplit { break; }
+                                            match rest.windows(sep.len()).rposition(|w| w == sep.as_slice()) {
+                                                Some(idx) => { parts.push(rest[idx + sep.len()..].to_vec()); rest = &rest[..idx]; count += 1; }
+                                                None => break,
+                                            }
+                                        }
+                                        parts.push(rest.to_vec());
+                                        parts.reverse();
+                                        parts
+                                    }
+                                    None => {
+                                        let mut parts: Vec<Vec<u8>> = Vec::new();
+                                        let mut rest = &b[..];
+                                        loop {
+                                            if maxsplit >= 0 && parts.len() >= maxsplit as usize { break; }
+                                            let ws_end = rest.iter().rposition(|c| !c.is_ascii_whitespace()).map(|i| i + 1).unwrap_or(0);
+                                            rest = &rest[..ws_end];
+                                            if rest.is_empty() { break; }
+                                            let idx = rest.iter().rposition(|c| c.is_ascii_whitespace()).map(|i| i + 1).unwrap_or(0);
+                                            parts.push(rest[idx..].to_vec());
+                                            rest = &rest[..idx];
+                                        }
+                                        let head_start = rest.iter().position(|c| !c.is_ascii_whitespace()).unwrap_or(rest.len());
+                                        let head_end = rest.iter().rposition(|c| !c.is_ascii_whitespace()).map(|i| i + 1).unwrap_or(head_start);
+                                        if head_start < head_end { parts.push(rest[head_start..head_end].to_vec()); }
+                                        parts.reverse();
+                                        parts
+                                    }
+                                };
+                                Ok(py_list(parts.into_iter().map(|v| PyObjectRef::imm(PyObject::Bytes(v))).collect()))
+                            } else { Err(PyError::runtime_error("rsplit on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "strip" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "strip".to_string(),
+                        func: |args| {
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let chars = if args.len() > 1 && !matches!(&*args[1].borrow(), PyObject::None) { arg_bytes(&args[1]) } else { None };
+                                let is_strip = |c: &u8| match &chars { Some(cs) => cs.contains(c), None => c.is_ascii_whitespace() };
+                                let start = b.iter().position(|c| !is_strip(c)).unwrap_or(b.len());
+                                let end = b.iter().rposition(|c| !is_strip(c)).map(|i| i + 1).unwrap_or(start);
+                                Ok(PyObjectRef::imm(PyObject::Bytes(b[start..end.max(start)].to_vec())))
+                            } else { Err(PyError::runtime_error("strip on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "lstrip" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "lstrip".to_string(),
+                        func: |args| {
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let chars = if args.len() > 1 && !matches!(&*args[1].borrow(), PyObject::None) { arg_bytes(&args[1]) } else { None };
+                                let is_strip = |c: &u8| match &chars { Some(cs) => cs.contains(c), None => c.is_ascii_whitespace() };
+                                let start = b.iter().position(|c| !is_strip(c)).unwrap_or(b.len());
+                                Ok(PyObjectRef::imm(PyObject::Bytes(b[start..].to_vec())))
+                            } else { Err(PyError::runtime_error("lstrip on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "rstrip" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "rstrip".to_string(),
+                        func: |args| {
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let chars = if args.len() > 1 && !matches!(&*args[1].borrow(), PyObject::None) { arg_bytes(&args[1]) } else { None };
+                                let is_strip = |c: &u8| match &chars { Some(cs) => cs.contains(c), None => c.is_ascii_whitespace() };
+                                let end = b.iter().rposition(|c| !is_strip(c)).map(|i| i + 1).unwrap_or(0);
+                                Ok(PyObjectRef::imm(PyObject::Bytes(b[..end].to_vec())))
+                            } else { Err(PyError::runtime_error("rstrip on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "join" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "join".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("join() takes exactly one argument")); }
+                            let sep = if let PyObject::Bytes(b) = &*args[0].borrow() { b.clone() } else { return Err(PyError::runtime_error("join on non-bytes")); };
+                            let iterator = crate::object::builtin_iter(&[args[1].clone()])?;
+                            let mut parts: Vec<Vec<u8>> = Vec::new();
+                            loop {
+                                match crate::object::builtin_next(&[iterator.clone()]) {
+                                    Ok(v) => parts.push(arg_bytes(&v).ok_or_else(|| PyError::type_error("sequence item: expected a bytes-like object"))?),
+                                    Err(PyError::StopIteration) => break,
+                                    Err(e) => return Err(e),
+                                }
+                            }
+                            Ok(PyObjectRef::imm(PyObject::Bytes(parts.join(sep.as_slice()))))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "upper" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "upper".to_string(),
+                        func: |args| if let PyObject::Bytes(b) = &*args[0].borrow() { Ok(PyObjectRef::imm(PyObject::Bytes(b.iter().map(|c| c.to_ascii_uppercase()).collect()))) } else { Err(PyError::runtime_error("upper on non-bytes")) },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "lower" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "lower".to_string(),
+                        func: |args| if let PyObject::Bytes(b) = &*args[0].borrow() { Ok(PyObjectRef::imm(PyObject::Bytes(b.iter().map(|c| c.to_ascii_lowercase()).collect()))) } else { Err(PyError::runtime_error("lower on non-bytes")) },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "swapcase" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "swapcase".to_string(),
+                        func: |args| if let PyObject::Bytes(b) = &*args[0].borrow() {
+                            Ok(PyObjectRef::imm(PyObject::Bytes(b.iter().map(|c| {
+                                if c.is_ascii_uppercase() { c.to_ascii_lowercase() } else if c.is_ascii_lowercase() { c.to_ascii_uppercase() } else { *c }
+                            }).collect())))
+                        } else { Err(PyError::runtime_error("swapcase on non-bytes")) },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "capitalize" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "capitalize".to_string(),
+                        func: |args| if let PyObject::Bytes(b) = &*args[0].borrow() {
+                            let mut result: Vec<u8> = b.iter().map(|c| c.to_ascii_lowercase()).collect();
+                            if let Some(first) = result.first_mut() { *first = first.to_ascii_uppercase(); }
+                            Ok(PyObjectRef::imm(PyObject::Bytes(result)))
+                        } else { Err(PyError::runtime_error("capitalize on non-bytes")) },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "title" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "title".to_string(),
+                        func: |args| if let PyObject::Bytes(b) = &*args[0].borrow() {
+                            let mut result = Vec::with_capacity(b.len());
+                            let mut prev_cased = false;
+                            for &c in b.iter() {
+                                if c.is_ascii_alphabetic() {
+                                    result.push(if prev_cased { c.to_ascii_lowercase() } else { c.to_ascii_uppercase() });
+                                    prev_cased = true;
+                                } else {
+                                    result.push(c);
+                                    prev_cased = false;
+                                }
+                            }
+                            Ok(PyObjectRef::imm(PyObject::Bytes(result)))
+                        } else { Err(PyError::runtime_error("title on non-bytes")) },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "isalpha" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "isalpha".to_string(), func: |args| if let PyObject::Bytes(b) = &*args[0].borrow() { Ok(py_bool(!b.is_empty() && b.iter().all(|c| c.is_ascii_alphabetic()))) } else { Err(PyError::runtime_error("isalpha on non-bytes")) }, self_obj: PyObjectRef::new(PyObject::None) })),
+                    "isdigit" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "isdigit".to_string(), func: |args| if let PyObject::Bytes(b) = &*args[0].borrow() { Ok(py_bool(!b.is_empty() && b.iter().all(|c| c.is_ascii_digit()))) } else { Err(PyError::runtime_error("isdigit on non-bytes")) }, self_obj: PyObjectRef::new(PyObject::None) })),
+                    "isalnum" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "isalnum".to_string(), func: |args| if let PyObject::Bytes(b) = &*args[0].borrow() { Ok(py_bool(!b.is_empty() && b.iter().all(|c| c.is_ascii_alphanumeric()))) } else { Err(PyError::runtime_error("isalnum on non-bytes")) }, self_obj: PyObjectRef::new(PyObject::None) })),
+                    "isspace" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "isspace".to_string(), func: |args| if let PyObject::Bytes(b) = &*args[0].borrow() { Ok(py_bool(!b.is_empty() && b.iter().all(|c| c.is_ascii_whitespace()))) } else { Err(PyError::runtime_error("isspace on non-bytes")) }, self_obj: PyObjectRef::new(PyObject::None) })),
+                    "isupper" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "isupper".to_string(), func: |args| if let PyObject::Bytes(b) = &*args[0].borrow() { Ok(py_bool(b.iter().any(|c| c.is_ascii_alphabetic()) && b.iter().all(|c| !c.is_ascii_lowercase()))) } else { Err(PyError::runtime_error("isupper on non-bytes")) }, self_obj: PyObjectRef::new(PyObject::None) })),
+                    "islower" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "islower".to_string(), func: |args| if let PyObject::Bytes(b) = &*args[0].borrow() { Ok(py_bool(b.iter().any(|c| c.is_ascii_alphabetic()) && b.iter().all(|c| !c.is_ascii_uppercase()))) } else { Err(PyError::runtime_error("islower on non-bytes")) }, self_obj: PyObjectRef::new(PyObject::None) })),
+                    "istitle" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "istitle".to_string(),
+                        func: |args| if let PyObject::Bytes(b) = &*args[0].borrow() {
+                            let mut prev_cased = false;
+                            let mut is_title = true;
+                            let mut saw_alpha = false;
+                            for &c in b.iter() {
+                                if c.is_ascii_uppercase() {
+                                    saw_alpha = true;
+                                    if prev_cased { is_title = false; break; }
+                                    prev_cased = true;
+                                } else if c.is_ascii_lowercase() {
+                                    saw_alpha = true;
+                                    if !prev_cased { is_title = false; break; }
+                                    prev_cased = true;
+                                } else {
+                                    prev_cased = false;
+                                }
+                            }
+                            Ok(py_bool(is_title && saw_alpha))
+                        } else { Err(PyError::runtime_error("istitle on non-bytes")) },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "partition" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "partition".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("partition() takes exactly one argument")); }
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let sep = arg_bytes(&args[1]).ok_or_else(|| PyError::type_error("argument should be a bytes-like object"))?;
+                                if sep.is_empty() { return Err(PyError::value_error("empty separator")); }
+                                match b.windows(sep.len()).position(|w| w == sep.as_slice()) {
+                                    Some(idx) => Ok(py_tuple(vec![
+                                        PyObjectRef::imm(PyObject::Bytes(b[..idx].to_vec())),
+                                        PyObjectRef::imm(PyObject::Bytes(sep.clone())),
+                                        PyObjectRef::imm(PyObject::Bytes(b[idx + sep.len()..].to_vec())),
+                                    ])),
+                                    None => Ok(py_tuple(vec![
+                                        PyObjectRef::imm(PyObject::Bytes(b.clone())),
+                                        PyObjectRef::imm(PyObject::Bytes(Vec::new())),
+                                        PyObjectRef::imm(PyObject::Bytes(Vec::new())),
+                                    ])),
+                                }
+                            } else { Err(PyError::runtime_error("partition on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "rpartition" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "rpartition".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("rpartition() takes exactly one argument")); }
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let sep = arg_bytes(&args[1]).ok_or_else(|| PyError::type_error("argument should be a bytes-like object"))?;
+                                if sep.is_empty() { return Err(PyError::value_error("empty separator")); }
+                                match b.windows(sep.len()).rposition(|w| w == sep.as_slice()) {
+                                    Some(idx) => Ok(py_tuple(vec![
+                                        PyObjectRef::imm(PyObject::Bytes(b[..idx].to_vec())),
+                                        PyObjectRef::imm(PyObject::Bytes(sep.clone())),
+                                        PyObjectRef::imm(PyObject::Bytes(b[idx + sep.len()..].to_vec())),
+                                    ])),
+                                    None => Ok(py_tuple(vec![
+                                        PyObjectRef::imm(PyObject::Bytes(Vec::new())),
+                                        PyObjectRef::imm(PyObject::Bytes(Vec::new())),
+                                        PyObjectRef::imm(PyObject::Bytes(b.clone())),
+                                    ])),
+                                }
+                            } else { Err(PyError::runtime_error("rpartition on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "splitlines" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "splitlines".to_string(),
+                        func: |args| {
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let keepends = args.get(1).map(|v| v.truthy()).unwrap_or(false);
+                                let mut lines = Vec::new();
+                                let mut start = 0;
+                                let mut i = 0;
+                                while i < b.len() {
+                                    if b[i] == b'\n' || b[i] == b'\r' {
+                                        let end = if b[i] == b'\r' && i + 1 < b.len() && b[i + 1] == b'\n' { i + 2 } else { i + 1 };
+                                        lines.push(if keepends { b[start..end].to_vec() } else { b[start..i].to_vec() });
+                                        start = end;
+                                        i = end;
+                                    } else {
+                                        i += 1;
+                                    }
+                                }
+                                if start < b.len() { lines.push(b[start..].to_vec()); }
+                                Ok(py_list(lines.into_iter().map(|v| PyObjectRef::imm(PyObject::Bytes(v))).collect()))
+                            } else { Err(PyError::runtime_error("splitlines on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "expandtabs" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "expandtabs".to_string(),
+                        func: |args| {
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let tabsize = if args.len() > 1 { args[1].as_i64().unwrap_or(8).max(0) as usize } else { 8 };
+                                let mut result = Vec::with_capacity(b.len());
+                                let mut col = 0usize;
+                                for &c in b.iter() {
+                                    if c == b'\t' {
+                                        if tabsize > 0 {
+                                            let spaces = tabsize - (col % tabsize);
+                                            result.extend(std::iter::repeat(b' ').take(spaces));
+                                            col += spaces;
+                                        }
+                                    } else if c == b'\n' || c == b'\r' {
+                                        result.push(c);
+                                        col = 0;
+                                    } else {
+                                        result.push(c);
+                                        col += 1;
+                                    }
+                                }
+                                Ok(PyObjectRef::imm(PyObject::Bytes(result)))
+                            } else { Err(PyError::runtime_error("expandtabs on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "zfill" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "zfill".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("zfill() takes exactly 1 argument")); }
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let w = args[1].as_i64().unwrap_or(0).max(0) as usize;
+                                if w <= b.len() { return Ok(PyObjectRef::imm(PyObject::Bytes(b.clone()))); }
+                                let has_sign = matches!(b.first(), Some(b'+') | Some(b'-'));
+                                let (sign, rest): (&[u8], &[u8]) = if has_sign { (&b[..1], &b[1..]) } else { (&b[..0], &b[..]) };
+                                let pad = w - b.len();
+                                let mut result = sign.to_vec();
+                                result.extend(std::iter::repeat(b'0').take(pad));
+                                result.extend_from_slice(rest);
+                                Ok(PyObjectRef::imm(PyObject::Bytes(result)))
+                            } else { Err(PyError::runtime_error("zfill on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "ljust" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "ljust".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("ljust() takes at least 1 argument")); }
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let w = args[1].as_i64().unwrap_or(0).max(0) as usize;
+                                let fill = if args.len() > 2 { arg_bytes(&args[2]).and_then(|v| v.first().copied()).unwrap_or(b' ') } else { b' ' };
+                                let mut result = b.clone();
+                                if w > b.len() { result.extend(std::iter::repeat(fill).take(w - b.len())); }
+                                Ok(PyObjectRef::imm(PyObject::Bytes(result)))
+                            } else { Err(PyError::runtime_error("ljust on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "rjust" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "rjust".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("rjust() takes at least 1 argument")); }
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let w = args[1].as_i64().unwrap_or(0).max(0) as usize;
+                                let fill = if args.len() > 2 { arg_bytes(&args[2]).and_then(|v| v.first().copied()).unwrap_or(b' ') } else { b' ' };
+                                if w <= b.len() { return Ok(PyObjectRef::imm(PyObject::Bytes(b.clone()))); }
+                                let mut result: Vec<u8> = std::iter::repeat(fill).take(w - b.len()).collect();
+                                result.extend_from_slice(b);
+                                Ok(PyObjectRef::imm(PyObject::Bytes(result)))
+                            } else { Err(PyError::runtime_error("rjust on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "center" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "center".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("center() takes at least 1 argument")); }
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let w = args[1].as_i64().unwrap_or(0).max(0) as usize;
+                                let fill = if args.len() > 2 { arg_bytes(&args[2]).and_then(|v| v.first().copied()).unwrap_or(b' ') } else { b' ' };
+                                if w <= b.len() { return Ok(PyObjectRef::imm(PyObject::Bytes(b.clone()))); }
+                                let pad = w - b.len();
+                                let left = pad / 2;
+                                let right = pad - left;
+                                let mut result: Vec<u8> = std::iter::repeat(fill).take(left).collect();
+                                result.extend_from_slice(b);
+                                result.extend(std::iter::repeat(fill).take(right));
+                                Ok(PyObjectRef::imm(PyObject::Bytes(result)))
+                            } else { Err(PyError::runtime_error("center on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "translate" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "translate".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("translate() takes at least 1 argument")); }
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let table = if matches!(&*args[1].borrow(), PyObject::None) { None } else { arg_bytes(&args[1]) };
+                                let delete = if args.len() > 2 { arg_bytes(&args[2]).unwrap_or_default() } else { Vec::new() };
+                                let mut result = Vec::with_capacity(b.len());
+                                for &c in b.iter() {
+                                    if delete.contains(&c) { continue; }
+                                    match &table {
+                                        Some(t) if t.len() == 256 => result.push(t[c as usize]),
+                                        _ => result.push(c),
+                                    }
+                                }
+                                Ok(PyObjectRef::imm(PyObject::Bytes(result)))
+                            } else { Err(PyError::runtime_error("translate on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     _ => Err(PyError::attribute_error(format!("'bytes' object has no attribute '{}'", name))),
                 }
             }
@@ -8404,6 +9107,45 @@ impl PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
+                    // Delegate to `bytes`'s implementation — see
+                    // `bytearray_delegate`'s doc comment above.
+                    "startswith" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "startswith".to_string(), func: |args| bytearray_delegate("startswith", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "endswith" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "endswith".to_string(), func: |args| bytearray_delegate("endswith", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "find" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "find".to_string(), func: |args| bytearray_delegate("find", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "rfind" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "rfind".to_string(), func: |args| bytearray_delegate("rfind", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "index" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "index".to_string(), func: |args| bytearray_delegate("index", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "rindex" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "rindex".to_string(), func: |args| bytearray_delegate("rindex", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "count" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "count".to_string(), func: |args| bytearray_delegate("count", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "replace" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "replace".to_string(), func: |args| bytearray_delegate("replace", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "split" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "split".to_string(), func: |args| bytearray_delegate("split", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "rsplit" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "rsplit".to_string(), func: |args| bytearray_delegate("rsplit", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "strip" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "strip".to_string(), func: |args| bytearray_delegate("strip", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "lstrip" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "lstrip".to_string(), func: |args| bytearray_delegate("lstrip", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "rstrip" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "rstrip".to_string(), func: |args| bytearray_delegate("rstrip", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "join" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "join".to_string(), func: |args| bytearray_delegate("join", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "upper" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "upper".to_string(), func: |args| bytearray_delegate("upper", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "lower" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "lower".to_string(), func: |args| bytearray_delegate("lower", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "title" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "title".to_string(), func: |args| bytearray_delegate("title", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "capitalize" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "capitalize".to_string(), func: |args| bytearray_delegate("capitalize", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "swapcase" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "swapcase".to_string(), func: |args| bytearray_delegate("swapcase", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "isalpha" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "isalpha".to_string(), func: |args| bytearray_delegate("isalpha", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "isdigit" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "isdigit".to_string(), func: |args| bytearray_delegate("isdigit", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "isalnum" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "isalnum".to_string(), func: |args| bytearray_delegate("isalnum", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "isspace" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "isspace".to_string(), func: |args| bytearray_delegate("isspace", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "isupper" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "isupper".to_string(), func: |args| bytearray_delegate("isupper", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "islower" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "islower".to_string(), func: |args| bytearray_delegate("islower", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "istitle" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "istitle".to_string(), func: |args| bytearray_delegate("istitle", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "partition" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "partition".to_string(), func: |args| bytearray_delegate("partition", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "rpartition" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "rpartition".to_string(), func: |args| bytearray_delegate("rpartition", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "splitlines" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "splitlines".to_string(), func: |args| bytearray_delegate("splitlines", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "expandtabs" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "expandtabs".to_string(), func: |args| bytearray_delegate("expandtabs", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "zfill" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "zfill".to_string(), func: |args| bytearray_delegate("zfill", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "ljust" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "ljust".to_string(), func: |args| bytearray_delegate("ljust", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "rjust" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "rjust".to_string(), func: |args| bytearray_delegate("rjust", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "center" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "center".to_string(), func: |args| bytearray_delegate("center", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "translate" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "translate".to_string(), func: |args| bytearray_delegate("translate", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "decode" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "decode".to_string(), func: |args| bytearray_delegate("decode", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "hex" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "hex".to_string(), func: |args| bytearray_delegate("hex", args), self_obj: PyObjectRef::new(PyObject::None) })),
                     _ => Err(PyError::attribute_error(format!("'bytearray' object has no attribute '{}'", name))),
                 }
             }
@@ -8740,7 +9482,13 @@ impl PyObject {
                             // args[0] = self_obj (py_none), args[1] = format string, args[2] = value
                             if args.len() < 3 { return Err(PyError::type_error("__mod__() too few args")); }
                             let fmt = args[1].str();
-                            let result = string_interpolate(&fmt, &args[2]).map_err(|e| PyError::runtime_error(e))?;
+                            // Real CPython's `%`-formatting errors (bad
+                            // conversion char, huge width/precision,
+                            // mismatched mapping key, ...) are all
+                            // `ValueError`, not `RuntimeError` — confirmed by
+                            // `test_str.py`'s own `assertRaises(ValueError)`
+                            // around several of these.
+                            let result = string_interpolate(&fmt, &args[2]).map_err(PyError::value_error)?;
                             Ok(py_str(&result))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),

@@ -5,25 +5,36 @@ import _codecs
 def lookup(encoding):
     return _codecs.lookup(encoding)
 
+# `_codecs.lookup()` returns a plain positional tuple (encode, decode,
+# stream_reader, stream_writer, name) rather than a real `CodecInfo`
+# object with named-attribute access (`.encode`, `.decode`, ...) — index
+# into it by position instead. Previously these four all did
+# `lookup(encoding).encode`/`.decode`/etc., which raised `AttributeError:
+# 'tuple' object has no attribute 'encode'` on every call, breaking
+# `codecs.encode()`/`codecs.decode()` (both go through these) entirely.
 def getencoder(encoding):
-    return lookup(encoding).encode
+    return lookup(encoding)[0]
 
 def getdecoder(encoding):
-    return lookup(encoding).decode
+    return lookup(encoding)[1]
 
 def getreader(encoding):
-    return lookup(encoding).streamreader
+    return lookup(encoding)[2]
 
 def getwriter(encoding):
-    return lookup(encoding).streamwriter
+    return lookup(encoding)[3]
 
 def encode(obj, encoding='utf-8', errors='strict'):
+    # The codec-level encode/decode functions return `(result, length)`
+    # (matching the real C-level codec protocol) — the public
+    # `codecs.encode`/`decode` wrappers return just `result`. Previously
+    # returned the raw 2-tuple unchanged.
     encoder = getencoder(encoding)
-    return encoder(obj, errors)
+    return encoder(obj, errors)[0]
 
 def decode(obj, encoding='utf-8', errors='strict'):
     decoder = getdecoder(encoding)
-    return decoder(obj, errors)
+    return decoder(obj, errors)[0]
 
 # Standard codec encodings
 BOM = b'\xff\xfe'
@@ -86,27 +97,18 @@ class StreamReader:
     def read(self, size=-1):
         return self.stream.read(size)
 
-# Register encodings
-_encodings = {}
-def register(encoding):
-    _encodings[encoding.name] = encoding
+# Real `codecs.register`/`unregister`: a search function is appended to
+# (or removed from) `_codecs`'s own search-function list, consulted by
+# `_codecs.lookup()` for encoding names it doesn't recognize directly.
+# (A previous version of `register` here did something unrelated —
+# `_encodings[encoding.name] = encoding`, registering a *codec object* by
+# name into a local dict that `lookup()` never actually consulted — dead
+# code that happened to share the name real `codecs.register` uses. Real
+# CPython code doing `codecs.register(search_function); ...;
+# codecs.unregister(search_function)` — e.g. `test_str.py`'s own test
+# setup — needs the real, function-list-based semantics.)
+def register(search_function):
+    _codecs.register(search_function)
 
-def search_function(encoding):
-    return _encodings.get(encoding)
-
-# UTF-8
-class utf_8_codec:
-    name = 'utf-8'
-    @staticmethod
-    def encode(input, errors='strict'):
-        if isinstance(input, str):
-            return (input.encode('utf-8'), len(input))
-        raise TypeError('expected str')
-    
-    @staticmethod
-    def decode(input, errors='strict'):
-        if isinstance(input, bytes):
-            return (input.decode('utf-8'), len(input))
-        raise TypeError('expected bytes')
-
-register(utf_8_codec)
+def unregister(search_function):
+    _codecs.unregister(search_function)
