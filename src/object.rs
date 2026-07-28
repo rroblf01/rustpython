@@ -2,6 +2,65 @@ use std::rc::Rc;
 use std::cell::RefCell;
 use crate::interner::{self, StrId};
 
+/// A minimal FxHash-style hasher (the same public-domain algorithm used by
+/// `rustc-hash`/Firefox's own internals: rotate-xor-multiply per word, no
+/// cryptographic mixing at all) — used in place of `std::collections::
+/// HashMap`'s default `RandomState`/SipHash for internal, never-untrusted-
+/// input lookup tables (`Module`/`Type` dicts, see `TypeDict` below).
+/// SipHash's DoS-resistance is designed for maps keyed by attacker-
+/// controlled data (e.g. HTTP header names); a class's own method/attribute
+/// names are never that, so paying SipHash's per-hash setup/mixing cost
+/// buys nothing here — hashing a `StrId` (a plain `u32`) should be close to
+/// free, not go through several rounds of a cryptographic-strength mix.
+/// Implemented locally rather than adding a `rustc-hash` dependency since
+/// the whole algorithm is ~15 lines and this project already prefers
+/// reimplementing over adding crates where practical (see CLAUDE.md).
+#[derive(Default)]
+pub struct FxHasher {
+    hash: u64,
+}
+
+const FX_SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+
+impl std::hash::Hasher for FxHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        let mut hash = self.hash;
+        let mut chunks = bytes.chunks_exact(8);
+        for chunk in &mut chunks {
+            let word = u64::from_ne_bytes(chunk.try_into().unwrap());
+            hash = (hash.rotate_left(5) ^ word).wrapping_mul(FX_SEED);
+        }
+        let rem = chunks.remainder();
+        if !rem.is_empty() {
+            let mut buf = [0u8; 8];
+            buf[..rem.len()].copy_from_slice(rem);
+            let word = u64::from_ne_bytes(buf);
+            hash = (hash.rotate_left(5) ^ word).wrapping_mul(FX_SEED);
+        }
+        self.hash = hash;
+    }
+    fn write_u8(&mut self, i: u8) { self.write_u64(i as u64); }
+    fn write_u16(&mut self, i: u16) { self.write_u64(i as u64); }
+    fn write_u32(&mut self, i: u32) { self.write_u64(i as u64); }
+    fn write_u64(&mut self, i: u64) {
+        self.hash = (self.hash.rotate_left(5) ^ i).wrapping_mul(FX_SEED);
+    }
+    fn write_usize(&mut self, i: usize) { self.write_u64(i as u64); }
+    fn finish(&self) -> u64 { self.hash }
+}
+
+/// `BuildHasher` for `FxHasher` — pass this as a `HashMap`'s 3rd type
+/// parameter (`HashMap<K, V, FxBuildHasher>`) to opt out of SipHash.
+pub type FxBuildHasher = std::hash::BuildHasherDefault<FxHasher>;
+
+/// `Module`/`Type` dicts' concrete map type: `StrId`-keyed (see
+/// `str_map_to_typedict`'s doc comment) AND `FxHasher`-hashed. `StrId` is
+/// just a `u32`, so `FxHasher`'s single rotate-xor-multiply per lookup is
+/// both correct (see `FxHasher`'s own doc comment on why SipHash's
+/// DoS-resistance is wasted effort here) and meaningfully cheaper per
+/// attribute/method lookup than SipHash's multi-round mixing.
+pub type TypeDict = HashMap<StrId, PyObjectRef, FxBuildHasher>;
+
 /// DictMap trait: provides get_str/insert_str/contains_key_str for HashMap and InternedMap.
 pub trait DictMap {
     fn get_str(&self, name: &str) -> Option<&PyObjectRef>;
@@ -12,6 +71,40 @@ impl DictMap for HashMap<String, PyObjectRef> {
     fn get_str(&self, name: &str) -> Option<&PyObjectRef> { self.get(name) }
     fn insert_str(&mut self, name: &str, val: PyObjectRef) -> Option<PyObjectRef> { self.insert(name.to_string(), val) }
     fn contains_key_str(&self, name: &str) -> bool { self.contains_key(name) }
+}
+/// `Module`/`Type` dicts' storage — real hashing (unlike `AttrMap`'s linear
+/// scan) still pays for itself here since a module/class can hold many
+/// entries (every function `os` exports, every method a big class
+/// defines), but each entry no longer needs its own heap-allocated
+/// `String` key: `StrId` is a small `Copy` integer (already interned by
+/// every `.insert_str()`/`.get_str()` call below), so this cuts the
+/// redundant per-entry allocation for repeated names like `"__init__"`/
+/// `"__repr__"` across every class/module that defines them, and hashing
+/// a `u32` is far cheaper than hashing a variable-length string.
+impl<S: std::hash::BuildHasher> DictMap for HashMap<StrId, PyObjectRef, S> {
+    fn get_str(&self, name: &str) -> Option<&PyObjectRef> { self.get(&interner::intern(name)) }
+    fn insert_str(&mut self, name: &str, val: PyObjectRef) -> Option<PyObjectRef> { self.insert(interner::intern(name), val) }
+    fn contains_key_str(&self, name: &str) -> bool { self.contains_key(&interner::intern(name)) }
+}
+
+/// Convert a `HashMap<String, V>` to `HashMap<StrId, V>` (default hasher)
+/// by interning all keys — a general-purpose helper used anywhere a
+/// String-keyed map needs to become StrId-keyed (the VM's own top-level
+/// `builtins`/`exec()`-scratch-globals maps, in `vm.rs`), NOT only for
+/// `Module`/`Type` dict construction. See `str_map_to_typedict` for the
+/// `TypeDict` (fast-hasher)-targeting variant used specifically there.
+pub(crate) fn str_map_to_strid_map<V>(map: HashMap<String, V>) -> HashMap<StrId, V> {
+    map.into_iter().map(|(k, v)| (interner::intern(&k), v)).collect()
+}
+
+/// Same as `str_map_to_strid_map`, but targets `TypeDict`'s shape
+/// (`StrId`-keyed AND `FxHasher`-hashed) directly — the conversion boundary
+/// used when a `HashMap<String, PyObjectRef>` built by a `create_X_dict()`-
+/// style function (unchanged, still string-keyed — there's no need to touch
+/// the ~1800 call sites across `src/modules/*.rs` that build these) is
+/// stored into a real `PyObject::Module`/`PyObject::Type`'s `dict` field.
+pub(crate) fn str_map_to_typedict<V>(map: HashMap<String, V>) -> HashMap<StrId, V, FxBuildHasher> {
+    map.into_iter().map(|(k, v)| (interner::intern(&k), v)).collect()
 }
 
 /// Dense, linear-scan small map used for `PyObject::Instance.dict`.
@@ -1479,11 +1572,11 @@ pub enum PyObject {
     },
     Module {
         name: String,
-        dict: Box<HashMap<String, PyObjectRef>>,
+        dict: Box<TypeDict>,
     },
     Type {
         name: String,
-        dict: Box<HashMap<String, PyObjectRef>>,
+        dict: Box<TypeDict>,
         bases: Vec<PyObjectRef>,
         mro: Vec<PyObjectRef>,
     },
@@ -3657,7 +3750,7 @@ pub(crate) fn print_with_vm(vm: &mut super::vm::VirtualMachine, args: &[PyObject
     let target = match file {
         Some(f) => f,
         None => vm.modules.get("sys")
-            .and_then(|m| if let PyObject::Module { dict, .. } = &*m.borrow() { dict.get("stdout").cloned() } else { None })
+            .and_then(|m| if let PyObject::Module { dict, .. } = &*m.borrow() { dict.get_str("stdout").cloned() } else { None })
             .ok_or_else(|| PyError::runtime_error("lost sys.stdout"))?,
     };
 
@@ -3842,7 +3935,7 @@ pub fn builtin_type_of(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 }
                 let new_type = PyObjectRef::new(PyObject::Type {
                     name: name.clone(),
-                    dict: Box::new(HashMap::new()),
+                    dict: Box::new(TypeDict::default()),
                     bases: vec![],
                     mro: vec![],
                 });
@@ -4692,7 +4785,7 @@ pub fn builtin_object(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // Create a new bare object instance
     let object_type = PyObjectRef::new(PyObject::Type {
         name: "object".to_string(),
-        dict: Box::new(HashMap::new()),
+        dict: Box::new(TypeDict::default()),
         bases: vec![],
         mro: vec![],
     });
@@ -4823,12 +4916,12 @@ pub fn builtin_dir(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         }
         PyObject::Module { dict, .. } => {
             for key in dict.keys() {
-                names.push(py_str(key));
+                names.push(py_str(interner::lookup_str(*key)));
             }
         }
         PyObject::Type { dict, .. } => {
             for key in dict.keys() {
-                names.push(py_str(key));
+                names.push(py_str(interner::lookup_str(*key)));
             }
         }
         _ => {}
@@ -5614,7 +5707,7 @@ pub fn builtin_vars(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         PyObject::Module { dict, .. } => {
             let mut pd = PyDict::new();
             for (k, v) in dict.iter() {
-                pd.set(py_str(k), v.clone())?;
+                pd.set(py_str(interner::lookup_str(*k)), v.clone())?;
             }
             Ok(PyObjectRef::new(PyObject::Dict(Box::new(pd))))
         }
@@ -6089,14 +6182,14 @@ pub fn builtin_help(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         match &*obj {
             PyObject::Type { name, dict, .. } => {
                 println!("Help on class {}:", name);
-                if let Some(doc) = dict.get("__doc__") {
+                if let Some(doc) = dict.get_str("__doc__") {
                     println!("  {}", doc.str());
                 }
                 println!();
                 println!("Methods:");
                 for (key, val) in dict.iter() {
                     if matches!(&*val.borrow(), PyObject::Function(_) | PyObject::BuiltinFunction { .. }) {
-                        println!("  {}()", key);
+                        println!("  {}()", interner::lookup_str(*key));
                     }
                 }
             }
@@ -6405,7 +6498,7 @@ pub(crate) fn import_impl(vm: &mut super::vm::VirtualMachine, name: &str, has_do
                     vm.modules.insert(top_name.clone(), module.clone());
                     if let Some(sys_mod) = vm.modules.get("sys") {
                         if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
-                            if let Some(mod_dict) = dict.get("modules") {
+                            if let Some(mod_dict) = dict.get_str("modules") {
                                 mod_dict.borrow_mut().set_attribute(&top_name, module.clone()).ok();
                             }
                         }
@@ -6425,7 +6518,7 @@ pub(crate) fn import_impl(vm: &mut super::vm::VirtualMachine, name: &str, has_do
                 vm.modules.insert(name.to_string(), module.clone());
                 if let Some(sys_mod) = vm.modules.get("sys") {
                     if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
-                        if let Some(mod_dict) = dict.get("modules") {
+                        if let Some(mod_dict) = dict.get_str("modules") {
                             mod_dict.borrow_mut().set_attribute(name, module.clone()).ok();
                         }
                     }
@@ -6455,7 +6548,7 @@ pub(crate) fn import_impl(vm: &mut super::vm::VirtualMachine, name: &str, has_do
             // Also add to sys.modules
             if let Some(sys_mod) = vm.modules.get("sys") {
                 if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
-                    if let Some(mod_dict) = dict.get("modules") {
+                    if let Some(mod_dict) = dict.get_str("modules") {
                         mod_dict.borrow_mut().set_attribute(&resolved_name, module.clone()).ok();
                     }
                 }
@@ -7099,7 +7192,7 @@ pub(crate) const METATYPE_KEY: &str = "__metatype__";
 /// `__build_class__`'s metaclass-inheritance resolution).
 pub(crate) fn metatype_of(typ: &PyObjectRef) -> Option<PyObjectRef> {
     if let PyObject::Type { dict, .. } = &*typ.borrow() {
-        dict.get(METATYPE_KEY).cloned()
+        dict.get_str(METATYPE_KEY).cloned()
     } else {
         None
     }
@@ -7349,13 +7442,13 @@ impl PyObject {
                 // a `PyObjectRef`, not the bare `&PyObject` available here;
                 // falling back to plain `"type"` is correct for the
                 // overwhelmingly common no-custom-metaclass case.
-                PyObject::Type { dict, .. } if dict.contains_key(METATYPE_KEY) => {
-                    return Ok(dict.get(METATYPE_KEY).unwrap().clone());
+                PyObject::Type { dict, .. } if dict.contains_key_str(METATYPE_KEY) => {
+                    return Ok(dict.get_str(METATYPE_KEY).unwrap().clone());
                 }
                 PyObject::Type { .. } => {
                     return Ok(PyObjectRef::new(PyObject::Type {
                         name: "type".to_string(),
-                        dict: Box::new(HashMap::new()),
+                        dict: Box::new(TypeDict::default()),
                         bases: vec![],
                         mro: vec![],
                     }));
@@ -7363,7 +7456,7 @@ impl PyObject {
                 _ => {
                     return Ok(PyObjectRef::new(PyObject::Type {
                         name: self.type_name().to_string(),
-                        dict: Box::new(HashMap::new()),
+                        dict: Box::new(TypeDict::default()),
                         bases: vec![],
                         mro: vec![],
                     }));
@@ -7428,7 +7521,7 @@ impl PyObject {
 
                     let mut pd = PyDict::new();
                     for (k, v) in dict.iter() {
-                        let _ = pd.set(py_str(k), v.clone());
+                        let _ = pd.set(py_str(interner::lookup_str(*k)), v.clone());
                     }
                     return Ok(PyObjectRef::new(PyObject::Dict(Box::new(pd))));
                 }
@@ -7438,7 +7531,7 @@ impl PyObject {
                 dict.get_str(&name).cloned().ok_or_else(|| {
                     if std::env::var("RPY_DEBUG_ATTR").is_ok() {
                         eprintln!("MODULE_ATTR_FAIL: module={} attr={} keys={:?}", mod_name, name, {
-                            let mut ks: Vec<&String> = dict.keys().collect();
+                            let mut ks: Vec<&str> = dict.keys().map(|k| interner::lookup_str(*k)).collect();
                             ks.sort();
                             ks
                         });
@@ -7455,8 +7548,9 @@ impl PyObject {
                     // and must not leak into user-visible introspection.
                     let mut pd = PyDict::new();
                     for (k, v) in dict.iter() {
-                        if k == NATIVE_BASE_MARKER || k == METATYPE_KEY { continue; }
-                        let _ = pd.set(py_str(k), v.clone());
+                        let k_str = interner::lookup_str(*k);
+                        if k_str == NATIVE_BASE_MARKER || k_str == METATYPE_KEY { continue; }
+                        let _ = pd.set(py_str(k_str), v.clone());
                     }
                     return Ok(PyObjectRef::new(PyObject::Dict(Box::new(pd))));
                 }
@@ -11576,11 +11670,11 @@ impl ObjectAccess for PyObject {
                 Ok(())
             }
             PyObject::Module { dict, .. } => {
-                dict.remove(name).ok_or_else(|| PyError::attribute_error(format!("module has no attribute '{}'", name)))?;
+                dict.remove(&interner::intern(name)).ok_or_else(|| PyError::attribute_error(format!("module has no attribute '{}'", name)))?;
                 Ok(())
             }
             PyObject::Type { dict, .. } => {
-                dict.remove(name).ok_or_else(|| PyError::attribute_error(format!("type has no attribute '{}'", name)))?;
+                dict.remove(&interner::intern(name)).ok_or_else(|| PyError::attribute_error(format!("type has no attribute '{}'", name)))?;
                 Ok(())
             }
             _ => Err(PyError::attribute_error(format!(
@@ -12671,7 +12765,7 @@ pub struct QueueInner {
 pub fn create_module(name: &str, dict: HashMap<String, PyObjectRef>) -> PyObjectRef {
     PyObjectRef::new(PyObject::Module {
         name: name.to_string(),
-        dict: Box::new(dict),
+        dict: Box::new(str_map_to_typedict(dict)),
     })
 }
 
@@ -12962,7 +13056,7 @@ fn zipfile_infolist(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         PyObjectRef::new(PyObject::Instance {
             typ: PyObjectRef::new(PyObject::Module {
                 name: "zipfile.ZipInfo".to_string(),
-                dict: Box::new(HashMap::new()),
+                dict: Box::new(TypeDict::default()),
             }),
             dict: info_dict,
         })
@@ -13068,7 +13162,7 @@ pub fn zipfile_constructor(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Ok(PyObjectRef::new(PyObject::Instance {
         typ: PyObjectRef::new(PyObject::Module {
             name: "zipfile.ZipFile".to_string(),
-            dict: Box::new(HashMap::new()),
+            dict: Box::new(TypeDict::default()),
         }),
         dict: inst_dict,
     }))
@@ -13433,7 +13527,7 @@ pub fn shelf_open(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // Build Shelf type
     let shelf_type = PyObjectRef::new(PyObject::Type {
         name: "Shelf".to_string(),
-        dict: Box::new(type_dict),
+        dict: Box::new(str_map_to_typedict(type_dict)),
         bases: vec![],
         // MRO includes self so __getitem__ lookup works
         mro: vec![],
@@ -13474,7 +13568,7 @@ fn create_urlopen_response(body: Vec<u8>) -> PyObjectRef {
 
     let resp_type = PyObjectRef::new(PyObject::Type {
         name: "HTTPResponse".to_string(),
-        dict: Box::new(type_dict),
+        dict: Box::new(str_map_to_typedict(type_dict)),
         bases: vec![],
         mro: vec![],
     });
@@ -13689,7 +13783,7 @@ pub fn create_urllib_parse_dict() -> HashMap<String, PyObjectRef> {
         let type_dict = HashMap::new();
         let parse_type = PyObjectRef::new(PyObject::Type {
             name: "ParseResult".to_string(),
-            dict: Box::new(type_dict),
+            dict: Box::new(str_map_to_typedict(type_dict)),
             bases: vec![],
             mro: vec![],
         });

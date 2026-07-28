@@ -13,7 +13,7 @@ pub fn create_concurrent_futures_dict() -> HashMap<String, PyObjectRef> {
     }
 
     // Standard exceptions
-    d.insert("InvalidStateError".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    d.insert_str("InvalidStateError", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "InvalidStateError".to_string(),
         func: |args| {
             let msg = if args.is_empty() { String::new() } else { args[0].str() };
@@ -24,7 +24,7 @@ pub fn create_concurrent_futures_dict() -> HashMap<String, PyObjectRef> {
             }))
         },
     }));
-    d.insert("TimeoutError".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    d.insert_str("TimeoutError", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "TimeoutError".to_string(),
         func: |args| {
             let msg = if args.is_empty() { String::new() } else { args[0].str() };
@@ -41,11 +41,11 @@ pub fn create_concurrent_futures_dict() -> HashMap<String, PyObjectRef> {
     // Executor base class (used by asgiref for type hints)
     let executor_type = PyObjectRef::new(PyObject::Type {
         name: "Executor".to_string(),
-        dict: Box::new(HashMap::new()),
+        dict: Box::new(str_map_to_typedict(HashMap::new())),
         bases: vec![],
         mro: vec![],
     });
-    d.insert("Executor".to_string(), executor_type);
+    d.insert_str("Executor", executor_type);
 
     cf_func!("ThreadPoolExecutor", |args| {
         let max_workers = if args.len() > 0 {
@@ -60,7 +60,7 @@ pub fn create_concurrent_futures_dict() -> HashMap<String, PyObjectRef> {
         let mut inst_dict = AttrMap::new();
 
         // submit(fn, *args, **kwargs) -> returns a Future-like object
-        inst_dict.insert("submit".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        inst_dict.insert_str("submit", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "submit".to_string(),
             func: |s_args| {
                 // Minimal stub: if we have a callable, try calling it
@@ -72,23 +72,23 @@ pub fn create_concurrent_futures_dict() -> HashMap<String, PyObjectRef> {
                 }
                 // Return a simple completed future
                 let mut fut_dict = AttrMap::new();
-                fut_dict.insert("result".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                fut_dict.insert_str("result", PyObjectRef::new(PyObject::BuiltinFunction {
                     name: "result".to_string(),
                     func: |_| Ok(py_none()),
                 }));
-                fut_dict.insert("done".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                fut_dict.insert_str("done", PyObjectRef::new(PyObject::BuiltinFunction {
                     name: "done".to_string(),
                     func: |_| Ok(py_bool(true)),
                 }));
-                fut_dict.insert("cancel".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                fut_dict.insert_str("cancel", PyObjectRef::new(PyObject::BuiltinFunction {
                     name: "cancel".to_string(),
                     func: |_| Ok(py_bool(false)),
                 }));
-                fut_dict.insert("add_done_callback".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                fut_dict.insert_str("add_done_callback", PyObjectRef::new(PyObject::BuiltinFunction {
                     name: "add_done_callback".to_string(),
                     func: |_| Ok(py_none()),
                 }));
-                fut_dict.insert("exception".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                fut_dict.insert_str("exception", PyObjectRef::new(PyObject::BuiltinFunction {
                     name: "exception".to_string(),
                     func: |_| Ok(py_none()),
                 }));
@@ -100,19 +100,19 @@ pub fn create_concurrent_futures_dict() -> HashMap<String, PyObjectRef> {
         }));
 
         // map(fn, *iterables) -> returns list of results
-        inst_dict.insert("map".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        inst_dict.insert_str("map", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "map".to_string(),
             func: |_| Ok(py_list(vec![])),
         }));
 
         // shutdown(wait=True)
-        inst_dict.insert("shutdown".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        inst_dict.insert_str("shutdown", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "shutdown".to_string(),
             func: |_| Ok(py_none()),
         }));
 
         // __enter__ / __exit__ for context manager
-        inst_dict.insert("__enter__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        inst_dict.insert_str("__enter__", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "__enter__".to_string(),
             func: |ctx_args| {
                 // Return self
@@ -123,12 +123,12 @@ pub fn create_concurrent_futures_dict() -> HashMap<String, PyObjectRef> {
             },
         }));
 
-        inst_dict.insert("__exit__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        inst_dict.insert_str("__exit__", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "__exit__".to_string(),
             func: |_| Ok(py_bool(false)),
         }));
 
-        inst_dict.insert("_max_workers".to_string(), py_int(max_workers as i64));
+        inst_dict.insert_str("_max_workers", py_int(max_workers as i64));
 
         Ok(PyObjectRef::new(PyObject::Instance {
             typ: py_str("ThreadPoolExecutor"),
@@ -149,19 +149,19 @@ pub fn create_concurrent_futures_dict() -> HashMap<String, PyObjectRef> {
         };
 
         let mut inst_dict = AttrMap::new();
-        inst_dict.insert("submit".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        inst_dict.insert_str("submit", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "submit".to_string(),
             func: |_| {
                 let mut fut_dict = AttrMap::new();
-                fut_dict.insert("result".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                fut_dict.insert_str("result", PyObjectRef::new(PyObject::BuiltinFunction {
                     name: "result".to_string(),
                     func: |_| Ok(py_none()),
                 }));
-                fut_dict.insert("done".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                fut_dict.insert_str("done", PyObjectRef::new(PyObject::BuiltinFunction {
                     name: "done".to_string(),
                     func: |_| Ok(py_bool(true)),
                 }));
-                fut_dict.insert("cancel".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                fut_dict.insert_str("cancel", PyObjectRef::new(PyObject::BuiltinFunction {
                     name: "cancel".to_string(),
                     func: |_| Ok(py_bool(false)),
                 }));
@@ -171,15 +171,15 @@ pub fn create_concurrent_futures_dict() -> HashMap<String, PyObjectRef> {
                 }))
             },
         }));
-        inst_dict.insert("map".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        inst_dict.insert_str("map", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "map".to_string(),
             func: |_| Ok(py_list(vec![])),
         }));
-        inst_dict.insert("shutdown".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        inst_dict.insert_str("shutdown", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "shutdown".to_string(),
             func: |_| Ok(py_none()),
         }));
-        inst_dict.insert("_max_workers".to_string(), py_int(max_workers as i64));
+        inst_dict.insert_str("_max_workers", py_int(max_workers as i64));
         Ok(PyObjectRef::new(PyObject::Instance {
             typ: py_str("ProcessPoolExecutor"),
             dict: inst_dict,
@@ -190,39 +190,39 @@ pub fn create_concurrent_futures_dict() -> HashMap<String, PyObjectRef> {
 
     cf_func!("Future", |_args| {
         let mut inst_dict = AttrMap::new();
-        inst_dict.insert("result".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        inst_dict.insert_str("result", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "result".to_string(),
             func: |_| Ok(py_none()),
         }));
-        inst_dict.insert("done".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        inst_dict.insert_str("done", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "done".to_string(),
             func: |_| Ok(py_bool(false)),
         }));
-        inst_dict.insert("cancel".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        inst_dict.insert_str("cancel", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "cancel".to_string(),
             func: |_| Ok(py_bool(false)),
         }));
-        inst_dict.insert("cancelled".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        inst_dict.insert_str("cancelled", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "cancelled".to_string(),
             func: |_| Ok(py_bool(false)),
         }));
-        inst_dict.insert("running".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        inst_dict.insert_str("running", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "running".to_string(),
             func: |_| Ok(py_bool(false)),
         }));
-        inst_dict.insert("add_done_callback".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        inst_dict.insert_str("add_done_callback", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "add_done_callback".to_string(),
             func: |_| Ok(py_none()),
         }));
-        inst_dict.insert("exception".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        inst_dict.insert_str("exception", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "exception".to_string(),
             func: |_| Ok(py_none()),
         }));
-        inst_dict.insert("set_result".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        inst_dict.insert_str("set_result", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "set_result".to_string(),
             func: |_| Ok(py_none()),
         }));
-        inst_dict.insert("set_exception".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        inst_dict.insert_str("set_exception", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "set_exception".to_string(),
             func: |_| Ok(py_none()),
         }));
@@ -256,9 +256,9 @@ pub fn create_concurrent_futures_dict() -> HashMap<String, PyObjectRef> {
 
     // ── constants ───────────────────────────────────────────────────────
 
-    d.insert("FIRST_COMPLETED".to_string(), py_str("FIRST_COMPLETED"));
-    d.insert("FIRST_EXCEPTION".to_string(), py_str("FIRST_EXCEPTION"));
-    d.insert("ALL_COMPLETED".to_string(), py_str("ALL_COMPLETED"));
+    d.insert_str("FIRST_COMPLETED", py_str("FIRST_COMPLETED"));
+    d.insert_str("FIRST_EXCEPTION", py_str("FIRST_EXCEPTION"));
+    d.insert_str("ALL_COMPLETED", py_str("ALL_COMPLETED"));
 
     d
 }

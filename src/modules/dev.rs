@@ -1,4 +1,5 @@
 use crate::object::*;
+use crate::interner;
 use crate::bytecode::{CodeObject, needs_arg};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -68,7 +69,7 @@ pub fn create_warnings_dict() -> HashMap<String, PyObjectRef> {
     });
 
     // Insert the current filter state as a readable attribute
-    d.insert("filters".to_string(), py_list(vec![]));
+    d.insert_str("filters", py_list(vec![]));
 
     warn_func!("resetwarnings", |_| Ok(py_none()));
     warn_func!("filterwarnings", |_| Ok(py_none()));
@@ -79,7 +80,7 @@ pub fn create_warnings_dict() -> HashMap<String, PyObjectRef> {
     // Added as a thin wrapper around `warn` (this interpreter's own `warn`
     // just prints, so the exact message shape matters less than not
     // raising `AttributeError` on import).
-    d.insert("_DEPRECATED_MSG".to_string(), py_str("{name!r} is deprecated"));
+    d.insert_str("_DEPRECATED_MSG", py_str("{name!r} is deprecated"));
     warn_func!("_deprecated", |args| {
         let name = if !args.is_empty() { args[0].str() } else { String::new() };
         println!("DeprecationWarning: {} is deprecated", name);
@@ -95,32 +96,32 @@ pub fn create_warnings_dict() -> HashMap<String, PyObjectRef> {
     // or iterates expecting none, not for code asserting on captured
     // messages.
     let mut cw_dict = HashMap::new();
-    cw_dict.insert("__init__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    cw_dict.insert_str("__init__", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "__init__".to_string(),
         func: |args| {
             if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
                 let record = args.iter().skip(1).any(|a| matches!(&*a.borrow(), PyObject::Dict(d) if d.get(&py_str("record")).ok().flatten().map(|v| v.truthy()).unwrap_or(false)));
-                dict.insert("_record".to_string(), py_bool(record));
+                dict.insert_str("_record", py_bool(record));
             }
             Ok(py_none())
         },
     }));
-    cw_dict.insert("__enter__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    cw_dict.insert_str("__enter__", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "__enter__".to_string(),
         func: |args| {
             let record = if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
-                dict.get("_record").map(|v| v.truthy()).unwrap_or(false)
+                dict.get_str("_record").map(|v| v.truthy()).unwrap_or(false)
             } else { false };
             if record { Ok(py_list(vec![])) } else { Ok(py_none()) }
         },
     }));
-    cw_dict.insert("__exit__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    cw_dict.insert_str("__exit__", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "__exit__".to_string(),
         func: |_args| Ok(py_bool(false)),
     }));
-    d.insert("catch_warnings".to_string(), PyObjectRef::new(PyObject::Type {
+    d.insert_str("catch_warnings", PyObjectRef::new(PyObject::Type {
         name: "catch_warnings".to_string(),
-        dict: Box::new(cw_dict),
+        dict: Box::new(str_map_to_typedict(cw_dict)),
         bases: vec![],
         mro: vec![],
     }));
@@ -142,7 +143,7 @@ pub fn create_abc_dict() -> HashMap<String, PyObjectRef> {
         Ok(PyObjectRef::new(PyObject::Instance {
             typ: PyObjectRef::new(PyObject::Module {
                 name: "abc".to_string(),
-                dict: Box::new(HashMap::new()),
+                dict: Box::new(str_map_to_typedict(HashMap::new())),
             }),
             dict: AttrMap::new(),
         }))
@@ -164,7 +165,7 @@ pub fn create_abc_dict() -> HashMap<String, PyObjectRef> {
         let name = if !args.is_empty() { args[0].str() } else { "ABCMeta".to_string() };
         Ok(PyObjectRef::new(PyObject::Type {
             name,
-            dict: Box::new(HashMap::new()),
+            dict: Box::new(str_map_to_typedict(HashMap::new())),
             bases: vec![],
             mro: vec![],
         }))
@@ -201,10 +202,10 @@ pub fn create_dataclasses_dict() -> HashMap<String, PyObjectRef> {
     fn mark_dataclass(cls: &PyObjectRef) -> PyResult<PyObjectRef> {
         let mut borrowed = cls.borrow_mut();
         if let PyObject::Instance { ref mut dict, .. } = &mut *borrowed {
-            dict.insert("_dataclass_".to_string(), py_bool(true));
+            dict.insert_str("_dataclass_", py_bool(true));
         }
         if let PyObject::Type { ref mut dict, .. } = &mut *borrowed {
-            dict.insert("_dataclass_".to_string(), py_bool(true));
+            dict.insert_str("_dataclass_", py_bool(true));
         }
         drop(borrowed);
         Ok(cls.clone())
@@ -239,9 +240,9 @@ pub fn create_dataclasses_dict() -> HashMap<String, PyObjectRef> {
     // function above: real @dataclass should synthesize __init__/__repr__/
     // __eq__ from annotated fields; this only tags the class, a known,
     // separately-tracked gap, not something this placeholder fixes.
-    d.insert("Field".to_string(), PyObjectRef::new(PyObject::Type {
+    d.insert_str("Field", PyObjectRef::new(PyObject::Type {
         name: "Field".to_string(),
-        dict: Box::new(HashMap::new()),
+        dict: Box::new(str_map_to_typedict(HashMap::new())),
         bases: vec![],
         mro: vec![],
     }));
@@ -301,10 +302,10 @@ pub fn create_dataclasses_dict() -> HashMap<String, PyObjectRef> {
         let borrowed = obj.borrow();
         match &*borrowed {
             PyObject::Instance { dict, .. } => {
-                Ok(py_bool(dict.contains_key("_dataclass_")))
+                Ok(py_bool(dict.contains_key_str("_dataclass_")))
             }
             PyObject::Type { dict, .. } => {
-                Ok(py_bool(dict.contains_key("_dataclass_")))
+                Ok(py_bool(dict.contains_key_str("_dataclass_")))
             }
             PyObject::Dict(pydict) => {
                 let _ = pydict;
@@ -322,7 +323,7 @@ pub fn create_dataclasses_dict() -> HashMap<String, PyObjectRef> {
         let name = args[0].str();
         Ok(PyObjectRef::new(PyObject::Type {
             name,
-            dict: Box::new(HashMap::new()),
+            dict: Box::new(str_map_to_typedict(HashMap::new())),
             bases: vec![],
             mro: vec![],
         }))
@@ -344,67 +345,67 @@ pub fn create_unittest_dict() -> HashMap<String, PyObjectRef> {
     let mut tc_dict = HashMap::new();
 
     // __init__ — no-op stub
-    tc_dict.insert("__init__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    tc_dict.insert_str("__init__", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "__init__".to_string(),
         func: |_args| Ok(py_none()),
     }));
 
     // assertEqual(self, a, b) — no-op stub
-    tc_dict.insert("assertEqual".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    tc_dict.insert_str("assertEqual", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "assertEqual".to_string(),
         func: |_args| Ok(py_none()),
     }));
 
     // assertTrue(self, expr) — no-op stub
-    tc_dict.insert("assertTrue".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    tc_dict.insert_str("assertTrue", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "assertTrue".to_string(),
         func: |_args| Ok(py_none()),
     }));
 
     // assertFalse(self, expr) — no-op stub
-    tc_dict.insert("assertFalse".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    tc_dict.insert_str("assertFalse", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "assertFalse".to_string(),
         func: |_args| Ok(py_none()),
     }));
 
     // assertRaises(self, exc, callable=None, *args) — no-op stub
-    tc_dict.insert("assertRaises".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    tc_dict.insert_str("assertRaises", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "assertRaises".to_string(),
         func: |_args| Ok(py_none()),
     }));
 
     // assertIn(self, a, b) — no-op stub
-    tc_dict.insert("assertIn".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    tc_dict.insert_str("assertIn", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "assertIn".to_string(),
         func: |_args| Ok(py_none()),
     }));
 
     // assertNotIn(self, a, b) — no-op stub
-    tc_dict.insert("assertNotIn".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    tc_dict.insert_str("assertNotIn", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "assertNotIn".to_string(),
         func: |_args| Ok(py_none()),
     }));
 
     // assertIsNone(self, obj) — no-op stub
-    tc_dict.insert("assertIsNone".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    tc_dict.insert_str("assertIsNone", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "assertIsNone".to_string(),
         func: |_args| Ok(py_none()),
     }));
 
     // assertIsNotNone(self, obj) — no-op stub
-    tc_dict.insert("assertIsNotNone".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    tc_dict.insert_str("assertIsNotNone", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "assertIsNotNone".to_string(),
         func: |_args| Ok(py_none()),
     }));
 
     let testcase_class = PyObjectRef::new(PyObject::Type {
         name: "TestCase".to_string(),
-        dict: Box::new(tc_dict),
+        dict: Box::new(str_map_to_typedict(tc_dict)),
         bases: vec![],
         mro: vec![],
     });
 
-    d.insert("TestCase".to_string(), testcase_class);
+    d.insert_str("TestCase", testcase_class);
 
     // main() — stub that does nothing
     unittest_func!("main", |_args| {
@@ -484,7 +485,7 @@ pub fn create_dis_dict() -> HashMap<String, PyObjectRef> {
     });
 
     // Also add some opcode name constants for reference
-    d.insert("opname".to_string(), py_str("dis module for bytecode disassembly"));
+    d.insert_str("opname", py_str("dis module for bytecode disassembly"));
     // Real CPython's `dis` re-exports these opcode-classification lists
     // from `opcode` (which describes CPython's OWN bytecode format — not
     // this interpreter's, so there's nothing meaningful to populate them
@@ -507,10 +508,10 @@ pub fn create_dis_dict() -> HashMap<String, PyObjectRef> {
 /// here, correct since this interpreter has no such optimization to gate).
 pub fn create_opcode_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
-    d.insert("ENABLE_SPECIALIZATION".to_string(), py_bool(false));
-    d.insert("ENABLE_SPECIALIZATION_FT".to_string(), py_bool(false));
+    d.insert_str("ENABLE_SPECIALIZATION", py_bool(false));
+    d.insert_str("ENABLE_SPECIALIZATION_FT", py_bool(false));
     // stack_effect(opcode, oparg) -> int: return the stack effect of an opcode
-    d.insert("stack_effect".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    d.insert_str("stack_effect", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "stack_effect".to_string(),
         func: |args| {
             if args.is_empty() { return Err(PyError::type_error("stack_effect() missing required argument")); }
@@ -539,8 +540,8 @@ pub fn create_doctest_dict() -> HashMap<String, PyObjectRef> {
     // TestResults constructor — returns an instance with failed=0, attempted=0
     doctest_func!("TestResults", |_args| {
         let mut dict = AttrMap::new();
-        dict.insert("failed".to_string(), py_int(0));
-        dict.insert("attempted".to_string(), py_int(0));
+        dict.insert_str("failed", py_int(0));
+        dict.insert_str("attempted", py_int(0));
         Ok(PyObjectRef::new(PyObject::Instance {
             typ: py_str("TestResults"),
             dict,
@@ -550,8 +551,8 @@ pub fn create_doctest_dict() -> HashMap<String, PyObjectRef> {
     // testmod(m=None) — runs doctests on a module, returns TestResults(failed=0, attempted=0)
     doctest_func!("testmod", |_args| {
         let mut dict = AttrMap::new();
-        dict.insert("failed".to_string(), py_int(0));
-        dict.insert("attempted".to_string(), py_int(0));
+        dict.insert_str("failed", py_int(0));
+        dict.insert_str("attempted", py_int(0));
         Ok(PyObjectRef::new(PyObject::Instance {
             typ: py_str("TestResults"),
             dict,
@@ -561,8 +562,8 @@ pub fn create_doctest_dict() -> HashMap<String, PyObjectRef> {
     // testfile(filename) — runs doctests in a file, returns TestResults(failed=0, attempted=0)
     doctest_func!("testfile", |_args| {
         let mut dict = AttrMap::new();
-        dict.insert("failed".to_string(), py_int(0));
-        dict.insert("attempted".to_string(), py_int(0));
+        dict.insert_str("failed", py_int(0));
+        dict.insert_str("attempted", py_int(0));
         Ok(PyObjectRef::new(PyObject::Instance {
             typ: py_str("TestResults"),
             dict,
@@ -577,7 +578,7 @@ pub fn create_doctest_dict() -> HashMap<String, PyObjectRef> {
     // DocTestFinder class stub
     doctest_func!("DocTestFinder", |_args| {
         let mut dict = AttrMap::new();
-        dict.insert("find".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        dict.insert_str("find", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "find".to_string(),
             func: |_| Ok(py_list(vec![])),
         }));
@@ -605,10 +606,10 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
     // `find_name_in_mro(cls, name, default=inspect._sentinel)`. Any
     // distinct object identity works; a bare Instance of an empty marker
     // Type is the simplest one available.
-    d.insert("_sentinel".to_string(), PyObjectRef::new(PyObject::Instance {
+    d.insert_str("_sentinel", PyObjectRef::new(PyObject::Instance {
         typ: PyObjectRef::new(PyObject::Type {
             name: "_sentinel".to_string(),
-            dict: Box::new(HashMap::new()),
+            dict: Box::new(str_map_to_typedict(HashMap::new())),
             bases: vec![],
             mro: vec![],
         }),
@@ -672,7 +673,7 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
         if args.len() < 1 { return Err(PyError::type_error("isabstract() requires 1 argument")); }
         let obj = args[0].borrow();
         let has_abstract_methods = match &*obj {
-            PyObject::Type { dict, .. } => dict.get("__abstractmethods__")
+            PyObject::Type { dict, .. } => dict.get_str("__abstractmethods__")
                 .map(|v| v.truthy())
                 .unwrap_or(false),
             _ => false,
@@ -684,10 +685,10 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
         if args.len() < 1 { return Err(PyError::type_error("getdoc() requires 1 argument")); }
         let obj = args[0].borrow();
         let doc = match &*obj {
-            PyObject::Function(ref f) => f.dict.get("__doc__").cloned(),
-            PyObject::Type { ref dict, .. } => dict.get("__doc__").cloned(),
-            PyObject::Module { ref dict, .. } => dict.get("__doc__").cloned(),
-            PyObject::Instance { ref dict, .. } => dict.get("__doc__").cloned(),
+            PyObject::Function(ref f) => f.dict.get_str("__doc__").cloned(),
+            PyObject::Type { ref dict, .. } => dict.get_str("__doc__").cloned(),
+            PyObject::Module { ref dict, .. } => dict.get_str("__doc__").cloned(),
+            PyObject::Instance { ref dict, .. } => dict.get_str("__doc__").cloned(),
             _ => None,
         };
         Ok(doc.unwrap_or(py_none()))
@@ -832,18 +833,18 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
         let code = &inner_f.code;
         let defaults = &inner_f.defaults;
             let mut param_type_dict = HashMap::new();
-            param_type_dict.insert("POSITIONAL_ONLY".to_string(), py_int(0));
-            param_type_dict.insert("POSITIONAL_OR_KEYWORD".to_string(), py_int(1));
-            param_type_dict.insert("VAR_POSITIONAL".to_string(), py_int(2));
-            param_type_dict.insert("KEYWORD_ONLY".to_string(), py_int(3));
-            param_type_dict.insert("VAR_KEYWORD".to_string(), py_int(4));
-            param_type_dict.insert("empty".to_string(), py_none());
-            let param_type = PyObjectRef::new(PyObject::Type { name: "Parameter".to_string(), dict: Box::new(param_type_dict), bases: vec![], mro: vec![] });
+            param_type_dict.insert_str("POSITIONAL_ONLY", py_int(0));
+            param_type_dict.insert_str("POSITIONAL_OR_KEYWORD", py_int(1));
+            param_type_dict.insert_str("VAR_POSITIONAL", py_int(2));
+            param_type_dict.insert_str("KEYWORD_ONLY", py_int(3));
+            param_type_dict.insert_str("VAR_KEYWORD", py_int(4));
+            param_type_dict.insert_str("empty", py_none());
+            let param_type = PyObjectRef::new(PyObject::Type { name: "Parameter".to_string(), dict: Box::new(str_map_to_typedict(param_type_dict)), bases: vec![], mro: vec![] });
             let make_param = |pname: &str, kind: i64, default: PyObjectRef, param_type: &PyObjectRef| {
                 let mut inst_dict = AttrMap::new();
-                inst_dict.insert("name".to_string(), py_str(pname));
-                inst_dict.insert("kind".to_string(), py_int(kind));
-                inst_dict.insert("default".to_string(), default);
+                inst_dict.insert_str("name", py_str(pname));
+                inst_dict.insert_str("kind", py_int(kind));
+                inst_dict.insert_str("default", default);
                 PyObjectRef::new(PyObject::Instance { typ: param_type.clone(), dict: inst_dict })
             };
             let mut params = PyDict::new();
@@ -891,9 +892,9 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
                 let p = make_param(kw, 4, py_none(), &param_type); // VAR_KEYWORD
                 params.set(py_str(kw), p)?;
             }
-            let sig_type = PyObjectRef::new(PyObject::Type { name: "Signature".to_string(), dict: Box::new(HashMap::new()), bases: vec![], mro: vec![] });
+            let sig_type = PyObjectRef::new(PyObject::Type { name: "Signature".to_string(), dict: Box::new(str_map_to_typedict(HashMap::new())), bases: vec![], mro: vec![] });
             let mut sig_dict = AttrMap::new();
-            sig_dict.insert("parameters".to_string(), PyObjectRef::new(PyObject::Dict(Box::new(params))));
+            sig_dict.insert_str("parameters", PyObjectRef::new(PyObject::Dict(Box::new(params))));
             Ok(PyObjectRef::new(PyObject::Instance { typ: sig_type, dict: sig_dict }))
         } else {
             // Real CPython raises ValueError here (not TypeError) — "no
@@ -913,34 +914,34 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
 
     // Parameter class stub (needed by Django's inspect module usage)
     let mut param_type_dict = HashMap::new();
-    param_type_dict.insert("POSITIONAL_ONLY".to_string(), py_int(0));
-    param_type_dict.insert("POSITIONAL_OR_KEYWORD".to_string(), py_int(1));
-    param_type_dict.insert("VAR_POSITIONAL".to_string(), py_int(2));
-    param_type_dict.insert("KEYWORD_ONLY".to_string(), py_int(3));
-    param_type_dict.insert("VAR_KEYWORD".to_string(), py_int(4));
-    param_type_dict.insert("empty".to_string(), py_none());
-    d.insert("Parameter".to_string(), PyObjectRef::new(PyObject::Type { name: "Parameter".to_string(), dict: Box::new(param_type_dict), bases: vec![], mro: vec![] }));
-    d.insert("Signature".to_string(), PyObjectRef::new(PyObject::Type { name: "Signature".to_string(), dict: Box::new(HashMap::new()), bases: vec![], mro: vec![] }));
+    param_type_dict.insert_str("POSITIONAL_ONLY", py_int(0));
+    param_type_dict.insert_str("POSITIONAL_OR_KEYWORD", py_int(1));
+    param_type_dict.insert_str("VAR_POSITIONAL", py_int(2));
+    param_type_dict.insert_str("KEYWORD_ONLY", py_int(3));
+    param_type_dict.insert_str("VAR_KEYWORD", py_int(4));
+    param_type_dict.insert_str("empty", py_none());
+    d.insert_str("Parameter", PyObjectRef::new(PyObject::Type { name: "Parameter".to_string(), dict: Box::new(str_map_to_typedict(param_type_dict)), bases: vec![], mro: vec![] }));
+    d.insert_str("Signature", PyObjectRef::new(PyObject::Type { name: "Signature".to_string(), dict: Box::new(str_map_to_typedict(HashMap::new())), bases: vec![], mro: vec![] }));
 
     // Code object flags (CO_* constants)
-    d.insert("CO_OPTIMIZED".to_string(), py_int(0x0001));
-    d.insert("CO_NEWLOCALS".to_string(), py_int(0x0002));
-    d.insert("CO_VARARGS".to_string(), py_int(0x0004));
-    d.insert("CO_VARKEYWORDS".to_string(), py_int(0x0008));
-    d.insert("CO_NESTED".to_string(), py_int(0x0010));
-    d.insert("CO_GENERATOR".to_string(), py_int(0x0020));
-    d.insert("CO_NOFREE".to_string(), py_int(0x0040));
-    d.insert("CO_COROUTINE".to_string(), py_int(0x0080));
-    d.insert("CO_ITERABLE_COROUTINE".to_string(), py_int(0x0100));
-    d.insert("CO_ASYNC_GENERATOR".to_string(), py_int(0x0200));
-    d.insert("CO_FUTURE_DIVISION".to_string(), py_int(0x2000));
-    d.insert("CO_FUTURE_ABSOLUTE_IMPORT".to_string(), py_int(0x4000));
-    d.insert("CO_FUTURE_WITH_STATEMENT".to_string(), py_int(0x8000));
-    d.insert("CO_FUTURE_PRINT_FUNCTION".to_string(), py_int(0x10000));
-    d.insert("CO_FUTURE_UNICODE_LITERALS".to_string(), py_int(0x20000));
-    d.insert("CO_FUTURE_BARRY_AS_BDFL".to_string(), py_int(0x40000));
-    d.insert("CO_FUTURE_GENERATOR_STOP".to_string(), py_int(0x80000));
-    d.insert("CO_FUTURE_ANNOTATIONS".to_string(), py_int(0x100000));
+    d.insert_str("CO_OPTIMIZED", py_int(0x0001));
+    d.insert_str("CO_NEWLOCALS", py_int(0x0002));
+    d.insert_str("CO_VARARGS", py_int(0x0004));
+    d.insert_str("CO_VARKEYWORDS", py_int(0x0008));
+    d.insert_str("CO_NESTED", py_int(0x0010));
+    d.insert_str("CO_GENERATOR", py_int(0x0020));
+    d.insert_str("CO_NOFREE", py_int(0x0040));
+    d.insert_str("CO_COROUTINE", py_int(0x0080));
+    d.insert_str("CO_ITERABLE_COROUTINE", py_int(0x0100));
+    d.insert_str("CO_ASYNC_GENERATOR", py_int(0x0200));
+    d.insert_str("CO_FUTURE_DIVISION", py_int(0x2000));
+    d.insert_str("CO_FUTURE_ABSOLUTE_IMPORT", py_int(0x4000));
+    d.insert_str("CO_FUTURE_WITH_STATEMENT", py_int(0x8000));
+    d.insert_str("CO_FUTURE_PRINT_FUNCTION", py_int(0x10000));
+    d.insert_str("CO_FUTURE_UNICODE_LITERALS", py_int(0x20000));
+    d.insert_str("CO_FUTURE_BARRY_AS_BDFL", py_int(0x40000));
+    d.insert_str("CO_FUTURE_GENERATOR_STOP", py_int(0x80000));
+    d.insert_str("CO_FUTURE_ANNOTATIONS", py_int(0x100000));
 
     d
 }
@@ -949,8 +950,8 @@ fn getmembers_dict_of(obj: &PyObjectRef) -> Vec<(String, PyObjectRef)> {
     let b = obj.borrow();
     let mut items: Vec<(String, PyObjectRef)> = match &*b {
         PyObject::Function(ref f) => f.dict.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-        PyObject::Type { dict, .. } => dict.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-        PyObject::Module { dict, .. } => dict.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        PyObject::Type { dict, .. } => dict.iter().map(|(k, v)| (interner::lookup_str(*k).to_string(), v.clone())).collect(),
+        PyObject::Module { dict, .. } => dict.iter().map(|(k, v)| (interner::lookup_str(*k).to_string(), v.clone())).collect(),
         PyObject::Instance { dict, .. } => dict.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(),
         _ => Vec::new(),
     };
@@ -1041,23 +1042,23 @@ pub fn create_profile_dict() -> HashMap<String, PyObjectRef> {
     // Profiler stub class
     prof_func!("Profile", |_args| {
         let mut inst_dict = AttrMap::new();
-        inst_dict.insert("enable".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        inst_dict.insert_str("enable", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "enable".to_string(),
             func: |_| Ok(py_none()),
         }));
-        inst_dict.insert("disable".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        inst_dict.insert_str("disable", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "disable".to_string(),
             func: |_| Ok(py_none()),
         }));
-        inst_dict.insert("create_stats".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        inst_dict.insert_str("create_stats", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "create_stats".to_string(),
             func: |_| Ok(py_none()),
         }));
-        inst_dict.insert("print_stats".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        inst_dict.insert_str("print_stats", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "print_stats".to_string(),
             func: |_| Ok(py_none()),
         }));
-        inst_dict.insert("dump_stats".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        inst_dict.insert_str("dump_stats", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "dump_stats".to_string(),
             func: |_| Ok(py_none()),
         }));
@@ -1074,7 +1075,7 @@ pub fn create_profile_dict() -> HashMap<String, PyObjectRef> {
 
 pub fn create_cprofile_dict() -> HashMap<String, PyObjectRef> {
     let mut d = create_profile_dict();
-    d.insert("__name__".to_string(), py_str("cProfile"));
+    d.insert_str("__name__", py_str("cProfile"));
     d
 }
 
@@ -1089,44 +1090,44 @@ pub fn create_resource_dict() -> HashMap<String, PyObjectRef> {
     }
 
     // Resource usage constants (POSIX standard)
-    d.insert("RUSAGE_SELF".to_string(), py_int(0));
-    d.insert("RUSAGE_CHILDREN".to_string(), py_int(-1));
-    d.insert("RUSAGE_BOTH".to_string(), py_int(-2));
-    d.insert("RUSAGE_THREAD".to_string(), py_int(1));
+    d.insert_str("RUSAGE_SELF", py_int(0));
+    d.insert_str("RUSAGE_CHILDREN", py_int(-1));
+    d.insert_str("RUSAGE_BOTH", py_int(-2));
+    d.insert_str("RUSAGE_THREAD", py_int(1));
 
     // Priority constants
-    d.insert("PRIO_PROCESS".to_string(), py_int(0));
-    d.insert("PRIO_PGRP".to_string(), py_int(1));
-    d.insert("PRIO_USER".to_string(), py_int(2));
+    d.insert_str("PRIO_PROCESS", py_int(0));
+    d.insert_str("PRIO_PGRP", py_int(1));
+    d.insert_str("PRIO_USER", py_int(2));
 
     // RLIMIT constants (common ones)
-    d.insert("RLIMIT_CPU".to_string(), py_int(0));
-    d.insert("RLIMIT_FSIZE".to_string(), py_int(1));
-    d.insert("RLIMIT_DATA".to_string(), py_int(2));
-    d.insert("RLIMIT_STACK".to_string(), py_int(3));
-    d.insert("RLIMIT_CORE".to_string(), py_int(4));
-    d.insert("RLIMIT_NOFILE".to_string(), py_int(7));
-    d.insert("RLIMIT_AS".to_string(), py_int(9));
+    d.insert_str("RLIMIT_CPU", py_int(0));
+    d.insert_str("RLIMIT_FSIZE", py_int(1));
+    d.insert_str("RLIMIT_DATA", py_int(2));
+    d.insert_str("RLIMIT_STACK", py_int(3));
+    d.insert_str("RLIMIT_CORE", py_int(4));
+    d.insert_str("RLIMIT_NOFILE", py_int(7));
+    d.insert_str("RLIMIT_AS", py_int(9));
 
     res_func!("getrusage", |_args| {
         let mut result_dict = AttrMap::new();
         let zero = py_int(0);
-        result_dict.insert("ru_utime".to_string(), py_float(0.0));
-        result_dict.insert("ru_stime".to_string(), py_float(0.0));
-        result_dict.insert("ru_maxrss".to_string(), zero.clone());
-        result_dict.insert("ru_ixrss".to_string(), zero.clone());
-        result_dict.insert("ru_idrss".to_string(), zero.clone());
-        result_dict.insert("ru_isrss".to_string(), zero.clone());
-        result_dict.insert("ru_minflt".to_string(), zero.clone());
-        result_dict.insert("ru_majflt".to_string(), zero.clone());
-        result_dict.insert("ru_nswap".to_string(), zero.clone());
-        result_dict.insert("ru_inblock".to_string(), zero.clone());
-        result_dict.insert("ru_oublock".to_string(), zero.clone());
-        result_dict.insert("ru_msgsnd".to_string(), zero.clone());
-        result_dict.insert("ru_msgrcv".to_string(), zero.clone());
-        result_dict.insert("ru_nsignals".to_string(), zero.clone());
-        result_dict.insert("ru_nvcsw".to_string(), zero.clone());
-        result_dict.insert("ru_nivcsw".to_string(), zero.clone());
+        result_dict.insert_str("ru_utime", py_float(0.0));
+        result_dict.insert_str("ru_stime", py_float(0.0));
+        result_dict.insert_str("ru_maxrss", zero.clone());
+        result_dict.insert_str("ru_ixrss", zero.clone());
+        result_dict.insert_str("ru_idrss", zero.clone());
+        result_dict.insert_str("ru_isrss", zero.clone());
+        result_dict.insert_str("ru_minflt", zero.clone());
+        result_dict.insert_str("ru_majflt", zero.clone());
+        result_dict.insert_str("ru_nswap", zero.clone());
+        result_dict.insert_str("ru_inblock", zero.clone());
+        result_dict.insert_str("ru_oublock", zero.clone());
+        result_dict.insert_str("ru_msgsnd", zero.clone());
+        result_dict.insert_str("ru_msgrcv", zero.clone());
+        result_dict.insert_str("ru_nsignals", zero.clone());
+        result_dict.insert_str("ru_nvcsw", zero.clone());
+        result_dict.insert_str("ru_nivcsw", zero.clone());
         Ok(PyObjectRef::new(PyObject::Instance {
             typ: py_str("struct_rusage"),
             dict: result_dict,
@@ -1161,7 +1162,7 @@ pub fn create_trace_dict() -> HashMap<String, PyObjectRef> {
 
     trace_func!("Trace", |_args| {
         let mut inst_dict = AttrMap::new();
-        inst_dict.insert("run".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        inst_dict.insert_str("run", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "run".to_string(),
             func: |args| {
                 let cmd = if !args.is_empty() { args[0].str() } else { String::new() };
@@ -1177,11 +1178,11 @@ pub fn create_trace_dict() -> HashMap<String, PyObjectRef> {
                 Ok(py_none())
             },
         }));
-        inst_dict.insert("runctx".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        inst_dict.insert_str("runctx", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "runctx".to_string(),
             func: |_| Ok(py_none()),
         }));
-        inst_dict.insert("results".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        inst_dict.insert_str("results", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "results".to_string(),
             func: |_| Ok(py_none()),
         }));
@@ -1194,7 +1195,7 @@ pub fn create_trace_dict() -> HashMap<String, PyObjectRef> {
     // Coverage results class
     trace_func!("CoverageResults", |_args| {
         let mut inst_dict = AttrMap::new();
-        inst_dict.insert("write_results".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        inst_dict.insert_str("write_results", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "write_results".to_string(),
             func: |_| Ok(py_none()),
         }));
@@ -1285,8 +1286,8 @@ pub fn create_imp_dict() -> HashMap<String, PyObjectRef> {
     imp_func!("source_hash", |_| Ok(PyObjectRef::imm(PyObject::Bytes(vec![0u8; 8]))));
     imp_func!("_fix_co_filename", |_| Ok(py_none()));
 
-    d.insert("check_hash_based_pycs".to_string(), py_str("never"));
-    d.insert("_frozen_module_names".to_string(), py_list(vec![]));
+    d.insert_str("check_hash_based_pycs", py_str("never"));
+    d.insert_str("_frozen_module_names", py_list(vec![]));
     // Both were bare `py_none()` placeholders — not callable at all — which
     // broke `test.support.import_helper.frozen_modules()`/
     // `multi_interp_extensions_check()` (both real CPython context managers
@@ -1310,16 +1311,16 @@ pub fn create_zipimport_dict() -> HashMap<String, PyObjectRef> {
     zip_func!("zipimporter", |args| {
         let _path = if !args.is_empty() { args[0].str() } else { String::new() };
         let mut inst_dict = AttrMap::new();
-        inst_dict.insert("find_spec".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        inst_dict.insert_str("find_spec", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "find_spec".to_string(), func: |_| Ok(py_none()),
         }));
-        inst_dict.insert("find_module".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        inst_dict.insert_str("find_module", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "find_module".to_string(), func: |_| Ok(py_none()),
         }));
-        inst_dict.insert("get_code".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        inst_dict.insert_str("get_code", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "get_code".to_string(), func: |_| Ok(py_none()),
         }));
-        inst_dict.insert("get_source".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        inst_dict.insert_str("get_source", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "get_source".to_string(), func: |_| Ok(py_none()),
         }));
         Ok(PyObjectRef::new(PyObject::Instance {
@@ -1327,7 +1328,7 @@ pub fn create_zipimport_dict() -> HashMap<String, PyObjectRef> {
             dict: inst_dict,
         }))
     });
-    d.insert("_zip_directory_cache".to_string(), py_dict());
+    d.insert_str("_zip_directory_cache", py_dict());
     d
 }
 
@@ -1385,13 +1386,13 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
         let pos_rc = Rc::new(RefCell::new(0usize));
         let mut type_dict = HashMap::new();
 
-        type_dict.insert("__init__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        type_dict.insert_str("__init__", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "__init__".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
         }));
 
         let b_read = buf_rc.clone();
         let p_read = pos_rc.clone();
-        type_dict.insert("read".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| {
+        type_dict.insert_str("read", PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| {
             let data = b_read.borrow();
             let pos = (*p_read.borrow()).min(data.len());
             let end = if !args.is_empty() {
@@ -1406,7 +1407,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
 
         let b_readline = buf_rc.clone();
         let p_readline = pos_rc.clone();
-        type_dict.insert("readline".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
+        type_dict.insert_str("readline", PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
             let data = b_readline.borrow();
             let pos = (*p_readline.borrow()).min(data.len());
             let remaining = &data[pos..];
@@ -1418,7 +1419,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
 
         let b_write = buf_rc.clone();
         let p_write = pos_rc.clone();
-        type_dict.insert("write".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |w_args: &[PyObjectRef]| {
+        type_dict.insert_str("write", PyObjectRef::new(PyObject::Closure(Rc::new(move |w_args: &[PyObjectRef]| {
             if w_args.is_empty() {
                 return Err(PyError::type_error("write() takes exactly one argument"));
             }
@@ -1441,7 +1442,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
 
         let b_seek = buf_rc.clone();
         let p_seek = pos_rc.clone();
-        type_dict.insert("seek".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |s_args: &[PyObjectRef]| {
+        type_dict.insert_str("seek", PyObjectRef::new(PyObject::Closure(Rc::new(move |s_args: &[PyObjectRef]| {
             let offset = s_args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let whence = s_args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
             let len = b_seek.borrow().len() as i64;
@@ -1452,19 +1453,19 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
         }))));
 
         let p_tell = pos_rc.clone();
-        type_dict.insert("tell".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
+        type_dict.insert_str("tell", PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
             Ok(py_int(*p_tell.borrow() as i64))
         }))));
 
         let b_getvalue = buf_rc.clone();
-        type_dict.insert("getvalue".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
+        type_dict.insert_str("getvalue", PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
             Ok(PyObjectRef::imm(PyObject::Bytes(b_getvalue.borrow().clone())))
         }))));
 
-        type_dict.insert("close".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| Ok(py_none())))));
+        type_dict.insert_str("close", PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| Ok(py_none())))));
 
         Ok(PyObjectRef::new(PyObject::Instance {
-            typ: PyObjectRef::new(PyObject::Type { name: "BytesIO".to_string(), dict: Box::new(type_dict), bases: vec![], mro: vec![] }),
+            typ: PyObjectRef::new(PyObject::Type { name: "BytesIO".to_string(), dict: Box::new(str_map_to_typedict(type_dict)), bases: vec![], mro: vec![] }),
             dict: AttrMap::new(),
         }))
     });
@@ -1472,7 +1473,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
     // IncrementalNewlineDecoder — stub
     io_func!("IncrementalNewlineDecoder", |_args| {
         let mut type_dict = AttrMap::new();
-        type_dict.insert("decode".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        type_dict.insert_str("decode", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "decode".to_string(),
             func: |m_args| {
                 if m_args.len() < 2 { return Err(PyError::type_error("decode() takes 1 argument")); }
@@ -1499,27 +1500,27 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
         Ok(py_str(&args[0].str()))
     });
 
-    d.insert("open".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    d.insert_str("open", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "open".to_string(), func: builtin_open,
     }));
-    d.insert("DEFAULT_BUFFER_SIZE".to_string(), py_int(8192));
+    d.insert_str("DEFAULT_BUFFER_SIZE", py_int(8192));
 
     // BlockingIOError — exception type (needs to support attribute setting like __module__)
-    d.insert("BlockingIOError".to_string(), PyObjectRef::new(PyObject::Type {
+    d.insert_str("BlockingIOError", PyObjectRef::new(PyObject::Type {
         name: "BlockingIOError".to_string(),
-        dict: Box::new(HashMap::new()),
+        dict: Box::new(str_map_to_typedict(HashMap::new())),
         bases: vec![],
         mro: vec![],
     }));
 
     // UnsupportedOperation — exception type (needs __module__ set by io.py)
     let mut uo_dict = HashMap::new();
-    uo_dict.insert("__init__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    uo_dict.insert_str("__init__", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "__init__".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
     }));
-    d.insert("UnsupportedOperation".to_string(), PyObjectRef::new(PyObject::Type {
+    d.insert_str("UnsupportedOperation", PyObjectRef::new(PyObject::Type {
         name: "UnsupportedOperation".to_string(),
-        dict: Box::new(uo_dict),
+        dict: Box::new(str_map_to_typedict(uo_dict)),
         bases: vec![],
         mro: vec![],
     }));
@@ -1528,111 +1529,111 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
 
     // IOBase — abstract base class with close, closed, __enter__, __exit__
     let mut iobase_dict = HashMap::new();
-    iobase_dict.insert("__doc__".to_string(), py_str("IOBase abstract class"));
-    iobase_dict.insert("__init__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    iobase_dict.insert_str("__doc__", py_str("IOBase abstract class"));
+    iobase_dict.insert_str("__init__", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "__init__".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
     }));
-    iobase_dict.insert("close".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    iobase_dict.insert_str("close", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "close".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
     }));
     let closed_getter = PyObjectRef::new(PyObject::BuiltinFunction {
         name: "closed".to_string(), func: |_: &[PyObjectRef]| Ok(py_bool(false)),
     });
-    iobase_dict.insert("closed".to_string(), PyObjectRef::new(PyObject::Property(Box::new(PropertyData {
+    iobase_dict.insert_str("closed", PyObjectRef::new(PyObject::Property(Box::new(PropertyData {
         getter: Some(closed_getter), setter: None, deleter: None, doc: None,
     }))));
-    iobase_dict.insert("__enter__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    iobase_dict.insert_str("__enter__", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "__enter__".to_string(), func: |args: &[PyObjectRef]| Ok(args[0].clone()),
     }));
-    iobase_dict.insert("__exit__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    iobase_dict.insert_str("__exit__", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "__exit__".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
     }));
     let iobase_cls = PyObjectRef::new(PyObject::Type {
-        name: "IOBase".to_string(), dict: Box::new(iobase_dict), bases: vec![], mro: vec![],
+        name: "IOBase".to_string(), dict: Box::new(str_map_to_typedict(iobase_dict)), bases: vec![], mro: vec![],
     });
-    d.insert("IOBase".to_string(), iobase_cls.clone());
-    d.insert("_IOBase".to_string(), iobase_cls.clone());
+    d.insert_str("IOBase", iobase_cls.clone());
+    d.insert_str("_IOBase", iobase_cls.clone());
 
     // RawIOBase — extends IOBase
     let mut raw_dict = HashMap::new();
-    raw_dict.insert("__doc__".to_string(), py_str("RawIOBase abstract class"));
-    raw_dict.insert("__init__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    raw_dict.insert_str("__doc__", py_str("RawIOBase abstract class"));
+    raw_dict.insert_str("__init__", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "__init__".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
     }));
-    raw_dict.insert("read".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    raw_dict.insert_str("read", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "read".to_string(), func: |_: &[PyObjectRef]| Ok(PyObjectRef::imm(PyObject::Bytes(vec![]))),
     }));
-    raw_dict.insert("readinto".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    raw_dict.insert_str("readinto", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "readinto".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
     }));
-    raw_dict.insert("write".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    raw_dict.insert_str("write", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "write".to_string(), func: |_: &[PyObjectRef]| Ok(py_int(0)),
     }));
-    raw_dict.insert("close".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    raw_dict.insert_str("close", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "close".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
     }));
-    raw_dict.insert("register".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    raw_dict.insert_str("register", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "register".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
     }));
     let raw_cls = PyObjectRef::new(PyObject::Type {
-        name: "RawIOBase".to_string(), dict: Box::new(raw_dict),
+        name: "RawIOBase".to_string(), dict: Box::new(str_map_to_typedict(raw_dict)),
         bases: vec![iobase_cls.clone()], mro: vec![iobase_cls.clone()],
     });
-    d.insert("RawIOBase".to_string(), raw_cls.clone());
-    d.insert("_RawIOBase".to_string(), raw_cls.clone());
+    d.insert_str("RawIOBase", raw_cls.clone());
+    d.insert_str("_RawIOBase", raw_cls.clone());
 
     // BufferedIOBase — extends IOBase
     let mut buf_dict = HashMap::new();
-    buf_dict.insert("__doc__".to_string(), py_str("BufferedIOBase abstract class"));
-    buf_dict.insert("__init__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    buf_dict.insert_str("__doc__", py_str("BufferedIOBase abstract class"));
+    buf_dict.insert_str("__init__", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "__init__".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
     }));
-    buf_dict.insert("read".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    buf_dict.insert_str("read", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "read".to_string(), func: |_: &[PyObjectRef]| Ok(PyObjectRef::imm(PyObject::Bytes(vec![]))),
     }));
-    buf_dict.insert("read1".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    buf_dict.insert_str("read1", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "read1".to_string(), func: |_: &[PyObjectRef]| Ok(PyObjectRef::imm(PyObject::Bytes(vec![]))),
     }));
-    buf_dict.insert("write".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    buf_dict.insert_str("write", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "write".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
     }));
-    buf_dict.insert("close".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    buf_dict.insert_str("close", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "close".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
     }));
-    buf_dict.insert("register".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    buf_dict.insert_str("register", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "register".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
     }));
     let buf_cls = PyObjectRef::new(PyObject::Type {
-        name: "BufferedIOBase".to_string(), dict: Box::new(buf_dict),
+        name: "BufferedIOBase".to_string(), dict: Box::new(str_map_to_typedict(buf_dict)),
         bases: vec![iobase_cls.clone()], mro: vec![iobase_cls.clone()],
     });
-    d.insert("BufferedIOBase".to_string(), buf_cls.clone());
-    d.insert("_BufferedIOBase".to_string(), buf_cls.clone());
+    d.insert_str("BufferedIOBase", buf_cls.clone());
+    d.insert_str("_BufferedIOBase", buf_cls.clone());
 
     // TextIOBase — text I/O base class (extends IOBase)
     let mut text_dict = HashMap::new();
-    text_dict.insert("__doc__".to_string(), py_str("TextIOBase abstract class"));
-    text_dict.insert("__init__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    text_dict.insert_str("__doc__", py_str("TextIOBase abstract class"));
+    text_dict.insert_str("__init__", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "__init__".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
     }));
-    text_dict.insert("read".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    text_dict.insert_str("read", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "read".to_string(), func: |_: &[PyObjectRef]| Ok(py_str("")),
     }));
-    text_dict.insert("write".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    text_dict.insert_str("write", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "write".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
     }));
-    text_dict.insert("close".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    text_dict.insert_str("close", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "close".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
     }));
-    text_dict.insert("register".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    text_dict.insert_str("register", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "register".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
     }));
     let text_cls = PyObjectRef::new(PyObject::Type {
-        name: "TextIOBase".to_string(), dict: Box::new(text_dict),
+        name: "TextIOBase".to_string(), dict: Box::new(str_map_to_typedict(text_dict)),
         bases: vec![iobase_cls.clone()], mro: vec![iobase_cls.clone()],
     });
-    d.insert("TextIOBase".to_string(), text_cls.clone());
-    d.insert("_TextIOBase".to_string(), text_cls.clone());
+    d.insert_str("TextIOBase", text_cls.clone());
+    d.insert_str("_TextIOBase", text_cls.clone());
 
     // StringIO — real in-memory text buffer with actual position tracking
     // (char-indexed, matching Python's own str model — NOT byte-indexed).
@@ -1652,7 +1653,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
         let mut type_dict = HashMap::new();
 
         // __init__ — no-op (initial_value already consumed by factory)
-        type_dict.insert("__init__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        type_dict.insert_str("__init__", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "__init__".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
         }));
 
@@ -1668,7 +1669,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
 
         // read(size=-1) — from the current position, advancing it.
         let (b, p) = (buffer.clone(), pos.clone());
-        type_dict.insert("read".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| {
+        type_dict.insert_str("read", PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| {
             let chars: Vec<char> = b.borrow().chars().collect();
             let start = (*p.borrow()).min(chars.len());
             let end = match opt_size(args, 0) {
@@ -1681,7 +1682,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
 
         // readline(size=-1) — up to and including the next '\n', or EOF.
         let (b, p) = (buffer.clone(), pos.clone());
-        type_dict.insert("readline".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| {
+        type_dict.insert_str("readline", PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| {
             let chars: Vec<char> = b.borrow().chars().collect();
             let start = (*p.borrow()).min(chars.len());
             let limit = opt_size(args, 0).map(|n| (start + n as usize).min(chars.len())).unwrap_or(chars.len());
@@ -1699,7 +1700,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
         // by the written length. Matches real `StringIO.write`'s
         // "positioned write", not a plain append.
         let (b, p) = (buffer.clone(), pos.clone());
-        type_dict.insert("write".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |w_args: &[PyObjectRef]| {
+        type_dict.insert_str("write", PyObjectRef::new(PyObject::Closure(Rc::new(move |w_args: &[PyObjectRef]| {
             let text = if !w_args.is_empty() { w_args[0].str() } else { String::new() };
             let mut chars: Vec<char> = b.borrow().chars().collect();
             let start = *p.borrow();
@@ -1719,18 +1720,18 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
 
         // getvalue — full buffer contents regardless of current position.
         let b_get = buffer.clone();
-        type_dict.insert("getvalue".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
+        type_dict.insert_str("getvalue", PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
             Ok(py_str(&b_get.borrow()))
         }))));
 
         // close — no-op
-        type_dict.insert("close".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
+        type_dict.insert_str("close", PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
             Ok(py_none())
         }))));
 
         // seek(pos, whence=0) — 0=absolute, 1=relative, 2=from end.
         let (b, p) = (buffer.clone(), pos.clone());
-        type_dict.insert("seek".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| {
+        type_dict.insert_str("seek", PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| {
             let target = args.get(0).and_then(|a| a.as_i64()).unwrap_or(0);
             let whence = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
             let len = b.borrow().chars().count() as i64;
@@ -1746,7 +1747,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
 
         // tell — current position.
         let p_tell = pos.clone();
-        type_dict.insert("tell".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
+        type_dict.insert_str("tell", PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
             Ok(py_int(*p_tell.borrow() as i64))
         }))));
 
@@ -1754,7 +1755,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
         // position if omitted); does NOT move the current position (matches
         // real `io.StringIO.truncate`).
         let (b, p) = (buffer.clone(), pos.clone());
-        type_dict.insert("truncate".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| {
+        type_dict.insert_str("truncate", PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| {
             let mut chars: Vec<char> = b.borrow().chars().collect();
             let size = opt_size(args, 0).map(|n| n as usize).unwrap_or(*p.borrow()).min(chars.len());
             chars.truncate(size);
@@ -1765,7 +1766,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
         // readlines(hint=-1) — split remaining content into lines (each
         // keeping its trailing '\n' except possibly the last).
         let (b, p) = (buffer.clone(), pos.clone());
-        type_dict.insert("readlines".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
+        type_dict.insert_str("readlines", PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
             let chars: Vec<char> = b.borrow().chars().collect();
             let start = (*p.borrow()).min(chars.len());
             let rest: String = chars[start..].iter().collect();
@@ -1781,11 +1782,11 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
         }))));
 
         // __iter__/__next__ — iterate remaining lines, StopIteration at EOF.
-        type_dict.insert("__iter__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        type_dict.insert_str("__iter__", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "__iter__".to_string(), func: |args: &[PyObjectRef]| Ok(args[0].clone()),
         }));
         let (b, p) = (buffer.clone(), pos.clone());
-        type_dict.insert("__next__".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
+        type_dict.insert_str("__next__", PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
             let chars: Vec<char> = b.borrow().chars().collect();
             let start = (*p.borrow()).min(chars.len());
             if start >= chars.len() { return Err(PyError::StopIteration); }
@@ -1800,33 +1801,33 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
 
         Ok(PyObjectRef::new(PyObject::Instance {
             typ: PyObjectRef::new(PyObject::Type {
-                name: "StringIO".to_string(), dict: Box::new(type_dict),
+                name: "StringIO".to_string(), dict: Box::new(str_map_to_typedict(type_dict)),
                 bases: vec![text_cls.clone()], mro: vec![text_cls.clone()],
             }),
             dict: AttrMap::new(),
         }))
     });
-    d.insert("StringIO".to_string(), PyObjectRef::new(PyObject::Closure(stringio_closure)));
+    d.insert_str("StringIO", PyObjectRef::new(PyObject::Closure(stringio_closure)));
 
     // BufferedReader, BufferedWriter, BufferedRWPair, BufferedRandom — stubs
-    let br_dict = HashMap::new(); let br_cls = PyObjectRef::new(PyObject::Type { name: "BufferedReader".to_string(), dict: Box::new(br_dict), bases: vec![buf_cls.clone()], mro: vec![buf_cls.clone()] });
-    d.insert("BufferedReader".to_string(), br_cls.clone());
-    let bw_dict = HashMap::new(); let bw_cls = PyObjectRef::new(PyObject::Type { name: "BufferedWriter".to_string(), dict: Box::new(bw_dict), bases: vec![buf_cls.clone()], mro: vec![buf_cls.clone()] });
-    d.insert("BufferedWriter".to_string(), bw_cls.clone());
-    let brp_dict = HashMap::new(); let brp_cls = PyObjectRef::new(PyObject::Type { name: "BufferedRWPair".to_string(), dict: Box::new(brp_dict), bases: vec![buf_cls.clone()], mro: vec![buf_cls.clone()] });
-    d.insert("BufferedRWPair".to_string(), brp_cls.clone());
-    let brnd_dict = HashMap::new(); let brnd_cls = PyObjectRef::new(PyObject::Type { name: "BufferedRandom".to_string(), dict: Box::new(brnd_dict), bases: vec![buf_cls.clone()], mro: vec![buf_cls.clone()] });
-    d.insert("BufferedRandom".to_string(), brnd_cls.clone());
+    let br_dict = HashMap::new(); let br_cls = PyObjectRef::new(PyObject::Type { name: "BufferedReader".to_string(), dict: Box::new(str_map_to_typedict(br_dict)), bases: vec![buf_cls.clone()], mro: vec![buf_cls.clone()] });
+    d.insert_str("BufferedReader", br_cls.clone());
+    let bw_dict = HashMap::new(); let bw_cls = PyObjectRef::new(PyObject::Type { name: "BufferedWriter".to_string(), dict: Box::new(str_map_to_typedict(bw_dict)), bases: vec![buf_cls.clone()], mro: vec![buf_cls.clone()] });
+    d.insert_str("BufferedWriter", bw_cls.clone());
+    let brp_dict = HashMap::new(); let brp_cls = PyObjectRef::new(PyObject::Type { name: "BufferedRWPair".to_string(), dict: Box::new(str_map_to_typedict(brp_dict)), bases: vec![buf_cls.clone()], mro: vec![buf_cls.clone()] });
+    d.insert_str("BufferedRWPair", brp_cls.clone());
+    let brnd_dict = HashMap::new(); let brnd_cls = PyObjectRef::new(PyObject::Type { name: "BufferedRandom".to_string(), dict: Box::new(str_map_to_typedict(brnd_dict)), bases: vec![buf_cls.clone()], mro: vec![buf_cls.clone()] });
+    d.insert_str("BufferedRandom", brnd_cls.clone());
 
     // TextIOWrapper — stub type needed by io.py
     let mut tiw_dict = HashMap::new();
-    tiw_dict.insert("read".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "read".to_string(), func: |_: &[PyObjectRef]| Ok(py_str("")) }));
-    tiw_dict.insert("write".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "write".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()) }));
-    tiw_dict.insert("close".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "close".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()) }));
-    let tiw_cls = PyObjectRef::new(PyObject::Type { name: "TextIOWrapper".to_string(), dict: Box::new(tiw_dict), bases: vec![], mro: vec![] });
-    d.insert("TextIOWrapper".to_string(), tiw_cls);
+    tiw_dict.insert_str("read", PyObjectRef::new(PyObject::BuiltinFunction { name: "read".to_string(), func: |_: &[PyObjectRef]| Ok(py_str("")) }));
+    tiw_dict.insert_str("write", PyObjectRef::new(PyObject::BuiltinFunction { name: "write".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()) }));
+    tiw_dict.insert_str("close", PyObjectRef::new(PyObject::BuiltinFunction { name: "close".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()) }));
+    let tiw_cls = PyObjectRef::new(PyObject::Type { name: "TextIOWrapper".to_string(), dict: Box::new(str_map_to_typedict(tiw_dict)), bases: vec![], mro: vec![] });
+    d.insert_str("TextIOWrapper", tiw_cls);
 
-    d.insert("_WindowsConsoleIO".to_string(), py_str("_WindowsConsoleIO"));
+    d.insert_str("_WindowsConsoleIO", py_str("_WindowsConsoleIO"));
 
     d
 }

@@ -124,7 +124,7 @@ pub fn create_textwrap_dict() -> HashMap<String, PyObjectRef> {
     // `.wrap(text)`/`.fill(text)` methods reading them back.
     {
         let mut type_dict: HashMap<String, PyObjectRef> = HashMap::new();
-        type_dict.insert("__init__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        type_dict.insert_str("__init__", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "__init__".to_string(),
             func: |args| {
                 if args.is_empty() { return Err(PyError::type_error("__init__() missing self")); }
@@ -134,22 +134,22 @@ pub fn create_textwrap_dict() -> HashMap<String, PyObjectRef> {
                 let initial_indent = get_kw("initial_indent").map(|v| v.str()).unwrap_or_default();
                 let subsequent_indent = get_kw("subsequent_indent").map(|v| v.str()).unwrap_or_default();
                 if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
-                    dict.insert("width".to_string(), py_int(width));
-                    dict.insert("initial_indent".to_string(), py_str(&initial_indent));
-                    dict.insert("subsequent_indent".to_string(), py_str(&subsequent_indent));
+                    dict.insert_str("width", py_int(width));
+                    dict.insert_str("initial_indent", py_str(&initial_indent));
+                    dict.insert_str("subsequent_indent", py_str(&subsequent_indent));
                 }
                 Ok(py_none())
             },
         }));
-        type_dict.insert("wrap".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        type_dict.insert_str("wrap", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "wrap".to_string(),
             func: |args| {
                 if args.len() < 2 { return Err(PyError::type_error("wrap() takes exactly 1 argument")); }
                 let (width, ii, si) = if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
                     (
-                        dict.get("width").and_then(|v| v.as_i64()).unwrap_or(70) as usize,
-                        dict.get("initial_indent").map(|v| v.str()).unwrap_or_default(),
-                        dict.get("subsequent_indent").map(|v| v.str()).unwrap_or_default(),
+                        dict.get_str("width").and_then(|v| v.as_i64()).unwrap_or(70) as usize,
+                        dict.get_str("initial_indent").map(|v| v.str()).unwrap_or_default(),
+                        dict.get_str("subsequent_indent").map(|v| v.str()).unwrap_or_default(),
                     )
                 } else { (70, String::new(), String::new()) };
                 let text = args[1].str();
@@ -157,15 +157,15 @@ pub fn create_textwrap_dict() -> HashMap<String, PyObjectRef> {
                 Ok(py_list(lines.into_iter().map(|l| py_str(&l)).collect()))
             },
         }));
-        type_dict.insert("fill".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        type_dict.insert_str("fill", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "fill".to_string(),
             func: |args| {
                 if args.len() < 2 { return Err(PyError::type_error("fill() takes exactly 1 argument")); }
                 let (width, ii, si) = if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
                     (
-                        dict.get("width").and_then(|v| v.as_i64()).unwrap_or(70) as usize,
-                        dict.get("initial_indent").map(|v| v.str()).unwrap_or_default(),
-                        dict.get("subsequent_indent").map(|v| v.str()).unwrap_or_default(),
+                        dict.get_str("width").and_then(|v| v.as_i64()).unwrap_or(70) as usize,
+                        dict.get_str("initial_indent").map(|v| v.str()).unwrap_or_default(),
+                        dict.get_str("subsequent_indent").map(|v| v.str()).unwrap_or_default(),
                     )
                 } else { (70, String::new(), String::new()) };
                 let text = args[1].str();
@@ -173,8 +173,8 @@ pub fn create_textwrap_dict() -> HashMap<String, PyObjectRef> {
                 Ok(py_str(&lines.join("\n")))
             },
         }));
-        d.insert("TextWrapper".to_string(), PyObjectRef::new(PyObject::Type {
-            name: "TextWrapper".to_string(), dict: Box::new(type_dict), bases: vec![], mro: vec![],
+        d.insert_str("TextWrapper", PyObjectRef::new(PyObject::Type {
+            name: "TextWrapper".to_string(), dict: Box::new(str_map_to_typedict(type_dict)), bases: vec![], mro: vec![],
         }));
     }
 
@@ -359,22 +359,22 @@ pub fn create_string_dict() -> HashMap<String, PyObjectRef> {
     let whitespace = " \t\n\r\u{0b}\u{0c}";
     let printable = &format!("{}{}{}{}", digits, ascii_letters, punctuation, whitespace);
 
-    d.insert("ascii_letters".to_string(), py_str(ascii_letters));
-    d.insert("ascii_lowercase".to_string(), py_str(ascii_lowercase));
-    d.insert("ascii_uppercase".to_string(), py_str(ascii_uppercase));
-    d.insert("digits".to_string(), py_str(digits));
-    d.insert("hexdigits".to_string(), py_str(hexdigits));
-    d.insert("octdigits".to_string(), py_str(octdigits));
-    d.insert("punctuation".to_string(), py_str(punctuation));
-    d.insert("printable".to_string(), py_str(printable));
-    d.insert("whitespace".to_string(), py_str(whitespace));
+    d.insert_str("ascii_letters", py_str(ascii_letters));
+    d.insert_str("ascii_lowercase", py_str(ascii_lowercase));
+    d.insert_str("ascii_uppercase", py_str(ascii_uppercase));
+    d.insert_str("digits", py_str(digits));
+    d.insert_str("hexdigits", py_str(hexdigits));
+    d.insert_str("octdigits", py_str(octdigits));
+    d.insert_str("punctuation", py_str(punctuation));
+    d.insert_str("printable", py_str(printable));
+    d.insert_str("whitespace", py_str(whitespace));
 
     d
 }
 
 pub fn create_reprlib_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
-    d.insert("repr".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    d.insert_str("repr", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "repr".to_string(),
         func: |args| {
             if args.is_empty() {
@@ -408,12 +408,12 @@ pub fn create_reprlib_dict() -> HashMap<String, PyObjectRef> {
 
 pub fn create_mimetypes_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
-    d.insert("guess_type".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "guess_type".to_string(), func: mime_guess_type }));
-    d.insert("guess_extension".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "guess_extension".to_string(), func: mime_guess_extension }));
-    d.insert("add_type".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "add_type".to_string(), func: mime_add_type }));
+    d.insert_str("guess_type", PyObjectRef::new(PyObject::BuiltinFunction { name: "guess_type".to_string(), func: mime_guess_type }));
+    d.insert_str("guess_extension", PyObjectRef::new(PyObject::BuiltinFunction { name: "guess_extension".to_string(), func: mime_guess_extension }));
+    d.insert_str("add_type", PyObjectRef::new(PyObject::BuiltinFunction { name: "add_type".to_string(), func: mime_add_type }));
     // list of known types, init, read_mime_types, etc. can be added as needed
-    d.insert("known_types".to_string(), py_dict());
-    d.insert("inited".to_string(), py_bool(false));
+    d.insert_str("known_types", py_dict());
+    d.insert_str("inited", py_bool(false));
     d
 }
 
@@ -486,12 +486,12 @@ pub fn create_string_dict_v2() -> HashMap<String, PyObjectRef> {
         func: |_args| {
             let mut dict = AttrMap::new();
 
-            dict.insert("vformat".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            dict.insert_str("vformat", PyObjectRef::new(PyObject::BuiltinFunction {
                 name: "vformat".to_string(),
                 func: |_| Ok(py_str("vformat stub")),
             }));
 
-            dict.insert("format".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            dict.insert_str("format", PyObjectRef::new(PyObject::BuiltinFunction {
                 name: "format".to_string(),
                 func: |fargs| {
                     if fargs.is_empty() { return Ok(py_str("")); }
@@ -499,27 +499,27 @@ pub fn create_string_dict_v2() -> HashMap<String, PyObjectRef> {
                 },
             }));
 
-            dict.insert("parse".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            dict.insert_str("parse", PyObjectRef::new(PyObject::BuiltinFunction {
                 name: "parse".to_string(),
                 func: |_| Ok(py_list(vec![])),
             }));
 
-            dict.insert("get_field".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            dict.insert_str("get_field", PyObjectRef::new(PyObject::BuiltinFunction {
                 name: "get_field".to_string(),
                 func: |_| Ok(py_str("")),
             }));
 
-            dict.insert("get_value".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            dict.insert_str("get_value", PyObjectRef::new(PyObject::BuiltinFunction {
                 name: "get_value".to_string(),
                 func: |_| Ok(py_str("")),
             }));
 
-            dict.insert("check_unused_args".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            dict.insert_str("check_unused_args", PyObjectRef::new(PyObject::BuiltinFunction {
                 name: "check_unused_args".to_string(),
                 func: |_| Ok(py_none()),
             }));
 
-            dict.insert("format_field".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            dict.insert_str("format_field", PyObjectRef::new(PyObject::BuiltinFunction {
                 name: "format_field".to_string(),
                 func: |fargs| {
                     if fargs.is_empty() { return Ok(py_str("")); }
@@ -527,7 +527,7 @@ pub fn create_string_dict_v2() -> HashMap<String, PyObjectRef> {
                 },
             }));
 
-            dict.insert("convert_field".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            dict.insert_str("convert_field", PyObjectRef::new(PyObject::BuiltinFunction {
                 name: "convert_field".to_string(),
                 func: |fargs| {
                     if fargs.is_empty() { return Ok(py_str("")); }
@@ -542,7 +542,7 @@ pub fn create_string_dict_v2() -> HashMap<String, PyObjectRef> {
         },
     });
 
-    d.insert("Formatter".to_string(), formatter);
+    d.insert_str("Formatter", formatter);
     d
 }
 
@@ -705,7 +705,7 @@ pub fn create_difflib_dict() -> HashMap<String, PyObjectRef> {
         name: "SequenceMatcher".to_string(),
         func: |_args| {
             let mut dict = AttrMap::new();
-            dict.insert("ratio".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            dict.insert_str("ratio", PyObjectRef::new(PyObject::BuiltinFunction {
                 name: "ratio".to_string(),
                 func: |_| Ok(py_float(1.0)),
             }));
@@ -715,7 +715,7 @@ pub fn create_difflib_dict() -> HashMap<String, PyObjectRef> {
             }))
         },
     });
-    d.insert("SequenceMatcher".to_string(), seq_matcher);
+    d.insert_str("SequenceMatcher", seq_matcher);
 
     dfl_func!("get_close_matches", |args| {
         let _word = if args.len() > 0 { args[0].str() } else { return Err(PyError::type_error("get_close_matches() requires at least 1 argument")); };
@@ -740,7 +740,7 @@ pub fn create_html_parser_dict() -> HashMap<String, PyObjectRef> {
             let mut dict = AttrMap::new();
 
             // feed(data) — accumulates data
-            dict.insert("feed".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            dict.insert_str("feed", PyObjectRef::new(PyObject::BuiltinFunction {
                 name: "feed".to_string(),
                 func: |fargs| {
                     if !fargs.is_empty() {
@@ -753,7 +753,7 @@ pub fn create_html_parser_dict() -> HashMap<String, PyObjectRef> {
             }));
 
             // close() — returns accumulated data and clears
-            dict.insert("close".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            dict.insert_str("close", PyObjectRef::new(PyObject::BuiltinFunction {
                 name: "close".to_string(),
                 func: |_| {
                     let result = HTML_PARSER_DATA.with(|d| d.borrow().clone());
@@ -763,7 +763,7 @@ pub fn create_html_parser_dict() -> HashMap<String, PyObjectRef> {
             }));
 
             // getpos() — returns (1, 0)
-            dict.insert("getpos".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            dict.insert_str("getpos", PyObjectRef::new(PyObject::BuiltinFunction {
                 name: "getpos".to_string(),
                 func: |_| Ok(py_tuple(vec![py_int(1), py_int(0)])),
             }));
@@ -774,7 +774,7 @@ pub fn create_html_parser_dict() -> HashMap<String, PyObjectRef> {
             }))
         },
     });
-    d.insert("HTMLParser".to_string(), html_parser);
+    d.insert_str("HTMLParser", html_parser);
 
     d
 }

@@ -370,12 +370,13 @@ extern "C" fn jit_import_name(consts: *const PyObjectRef, names_offset: i64, nam
 extern "C" fn jit_import_from(module_ptr: *const PyObjectRef, consts: *const PyObjectRef, names_offset: i64, name_idx: i64, out: *mut PyObjectRef) {
     unsafe {
         use crate::object::ObjectAccess;
+        use crate::object::DictMap;
         let name_obj = &*consts.offset((names_offset + name_idx) as isize);
         let name = name_obj.str();
         let module_ref = &*module_ptr;
         let obj = module_ref.borrow();
         if let crate::object::PyObject::Module { dict, .. } = &*obj {
-            if let Some(val) = dict.get(&name) {
+            if let Some(val) = dict.get_str(&name) {
                 std::ptr::write(out, val.clone());
                 return;
             }
@@ -1249,6 +1250,25 @@ impl JitCompiler {
                 builder.switch_to_block(block);
                 blocks_entered.insert(block);
                 terminated = false;
+            } else if terminated {
+                // Same block as the previous instruction, but that block
+                // was ALREADY given a terminator (RETURN_VALUE/JUMP/
+                // JUMP_BACKWARD/brif) — this instruction is genuinely
+                // unreachable dead code within it. The most common real
+                // trigger: an explicit `return x` inside a loop, followed
+                // by the compiler's own always-appended (whether reachable
+                // or not) implicit `LOAD_CONST None; RETURN_VALUE`
+                // fallback at the very end of every function body — real
+                // CPython bytecode has the exact same trailing
+                // return-None fallback, it's just genuinely unreachable
+                // there too whenever an earlier explicit return already
+                // fired. Cranelift disallows adding MORE instructions to
+                // an already-terminated block ("cannot add an instruction
+                // to a block already filled") — confirmed via a minimal
+                // repro (any JIT-eligible loop in a function with an
+                // explicit `return` crashed the whole process). This
+                // dead code must be skipped entirely, not emitted.
+                continue;
             }
 
             let instr = &code.instructions[i];

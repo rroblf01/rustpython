@@ -7,12 +7,6 @@ use smallvec::SmallVec;
 use crate::bytecode::*;
 use crate::interner::{self, StrId, InternedMap};
 
-/// Convert a HashMap<String, V> to HashMap<StrId, V> by interning all keys.
-fn str_map_to_strid_map<V>(map: HashMap<String, V>) -> HashMap<StrId, V> {
-    map.into_iter().map(|(k, v)| (interner::intern(&k), v)).collect()
-}
-
-
 use crate::modules::*;
 use crate::object::*;
 use crate::parser::Parser;
@@ -406,10 +400,10 @@ impl VirtualMachine {
         ]);
         let globals = Rc::new(RefCell::new(globals_map));
 
-         let mut modules = HashMap::new();
-         modules.insert("builtins".to_string(), create_module("builtins", builtins_to_module(&builtins)));
-         modules.insert("math".to_string(), create_module("math", create_math_dict()));
-         modules.insert("_codecs".to_string(), create_module("_codecs", create_codecs_dict()));
+         let mut modules: HashMap<String, PyObjectRef> = HashMap::new();
+         modules.insert_str("builtins", create_module("builtins", builtins_to_module(&builtins)));
+         modules.insert_str("math", create_module("math", create_math_dict()));
+         modules.insert_str("_codecs", create_module("_codecs", create_codecs_dict()));
 
          let mut sys_dict = create_sys_dict(argv);
          // sys.path is shared (Rc-cloned) across every VirtualMachine
@@ -423,7 +417,7 @@ impl VirtualMachine {
          }
          let reused_shared_path = SHARED_SYS_PATH.with(|c| c.borrow().clone());
          if let Some(shared_path) = reused_shared_path.clone() {
-             sys_dict.insert("path".to_string(), shared_path);
+             sys_dict.insert_str("path", shared_path);
          }
          // sys.meta_path — import hooks
          if !sys_dict.contains_key("meta_path") {
@@ -436,58 +430,58 @@ impl VirtualMachine {
                      },
                  }),
              ]);
-             sys_dict.insert("meta_path".to_string(), meta_path);
+             sys_dict.insert_str("meta_path", meta_path);
          }
          if !sys_dict.contains_key("path_hooks") {
-             sys_dict.insert("path_hooks".to_string(), py_list(vec![]));
+             sys_dict.insert_str("path_hooks", py_list(vec![]));
          }
          if !sys_dict.contains_key("path_importer_cache") {
-             sys_dict.insert("path_importer_cache".to_string(), py_dict());
+             sys_dict.insert_str("path_importer_cache", py_dict());
          }
-          modules.insert("sys".to_string(), create_module("sys", sys_dict.clone()));
+          modules.insert_str("sys", create_module("sys", sys_dict.clone()));
            for (k, v) in sys_dict.clone() { builtins.insert(interner::intern(&k), v); }
 
          // Native os module
          let os_mod = create_module("os", create_os_dict());
-         modules.insert("os".to_string(), os_mod.clone());
+         modules.insert_str("os", os_mod.clone());
          // posix is the C extension behind os — alias it for importlib compatibility
-         modules.insert("posix".to_string(), os_mod.clone());
+         modules.insert_str("posix", os_mod.clone());
 
          // Native os.path submodule (path manipulation functions)
          let os_path_mod = create_module("os.path", create_os_path_dict());
          // Wire path as a submodule attribute of the os parent module
          if let PyObject::Module { dict, .. } = &mut *os_mod.borrow_mut() {
-             dict.insert("path".to_string(), os_path_mod.clone());
+             dict.insert_str("path", os_path_mod.clone());
          }
-         modules.insert("os.path".to_string(), os_path_mod.clone());
+         modules.insert_str("os.path", os_path_mod.clone());
          // posixpath is the real module behind os.path on POSIX (CPython's
          // own os.py does `sys.modules['os.path'] = posixpath`) — code that
          // imports it directly (`import posixpath`, common in stdlib-ish
          // path-handling helpers) expects the same functions os.path has.
-         modules.insert("posixpath".to_string(), os_path_mod);
+         modules.insert_str("posixpath", os_path_mod);
 
          let pathlib_dict = create_pathlib_dict();
-         modules.insert("pathlib".to_string(), create_module("pathlib", pathlib_dict));
+         modules.insert_str("pathlib", create_module("pathlib", pathlib_dict));
 
          // Native urllib package (urllib.request, urllib.parse)
          let urllib_dict = create_urllib_dict();
-         modules.insert("urllib".to_string(), create_module("urllib", urllib_dict));
+         modules.insert_str("urllib", create_module("urllib", urllib_dict));
 
          let json_dict = create_json_dict();
-         modules.insert("json".to_string(), create_module("json", json_dict));
+         modules.insert_str("json", create_module("json", json_dict));
 
          let collections_dict = create_collections_dict();
-          modules.insert("collections".to_string(), create_module("collections", collections_dict));
+          modules.insert_str("collections", create_module("collections", collections_dict));
 
           let functools_dict = create_functools_dict();
-          modules.insert("functools".to_string(), create_module("functools", functools_dict));
+          modules.insert_str("functools", create_module("functools", functools_dict));
 
           let itertools_dict = create_itertools_dict();
-          modules.insert("itertools".to_string(), create_module("itertools", itertools_dict));
+          modules.insert_str("itertools", create_module("itertools", itertools_dict));
 
 
           let datetime_dict = create_datetime_dict();
-          modules.insert("datetime".to_string(), create_module("datetime", datetime_dict));
+          modules.insert_str("datetime", create_module("datetime", datetime_dict));
           // `_datetime` is real CPython's C-accelerated backing module —
           // `datetime.py` itself does `from _datetime import *` when
           // available. This interpreter's `datetime` is already a single,
@@ -496,98 +490,98 @@ impl VirtualMachine {
           // code that imports `_datetime` directly (real trigger: CPython's
           // own `test_module.py`-style introspection, checking that both
           // names resolve) doesn't raise `ImportError`.
-          modules.insert("_datetime".to_string(), create_module("_datetime", create_datetime_dict()));
+          modules.insert_str("_datetime", create_module("_datetime", create_datetime_dict()));
 
           let zoneinfo_dict = create_zoneinfo_dict();
-          modules.insert("zoneinfo".to_string(), create_module("zoneinfo", zoneinfo_dict));
+          modules.insert_str("zoneinfo", create_module("zoneinfo", zoneinfo_dict));
 
           let socket_dict = create_socket_dict();
-          modules.insert("socket".to_string(), create_module("socket", socket_dict.clone()));
-          modules.insert("_socket".to_string(), create_module("_socket", socket_dict));
+          modules.insert_str("socket", create_module("socket", socket_dict.clone()));
+          modules.insert_str("_socket", create_module("_socket", socket_dict));
 
           let select_dict = create_select_dict();
-          modules.insert("select".to_string(), create_module("select", select_dict));
+          modules.insert_str("select", create_module("select", select_dict));
 
           let re_dict = create_re_dict();
-          modules.insert("re".to_string(), create_module("re", re_dict));
+          modules.insert_str("re", create_module("re", re_dict));
 
           let subprocess_dict = create_subprocess_dict();
-          modules.insert("subprocess".to_string(), create_module("subprocess", subprocess_dict));
+          modules.insert_str("subprocess", create_module("subprocess", subprocess_dict));
 
           // Native pickle module (basic stub)
-          modules.insert("_pickle".to_string(), create_module("_pickle", create_pickle_dict()));
+          modules.insert_str("_pickle", create_module("_pickle", create_pickle_dict()));
 
           // Native logging module
-          modules.insert("_logging".to_string(), create_module("_logging", create_logging_dict()));
-          modules.insert("_logging.config".to_string(), create_module("_logging.config", create_logging_config_dict()));
+          modules.insert_str("_logging", create_module("_logging", create_logging_dict()));
+          modules.insert_str("_logging.config", create_module("_logging.config", create_logging_config_dict()));
 
           // Native timeit module
-          modules.insert("timeit".to_string(), create_module("timeit", create_timeit_dict()));
+          modules.insert_str("timeit", create_module("timeit", create_timeit_dict()));
 
           let threading_dict = create_threading_dict();
-          modules.insert("threading".to_string(), create_module("threading", threading_dict));
+          modules.insert_str("threading", create_module("threading", threading_dict));
 
           // Native _thread module (CPython C extension replacement)
-          modules.insert("_thread".to_string(), create_module("_thread", create_thread_module_dict()));
+          modules.insert_str("_thread", create_module("_thread", create_thread_module_dict()));
 
           // Native signal module (CPython C extension replacement)
-          modules.insert("signal".to_string(), create_module("signal", create_signal_dict()));
+          modules.insert_str("signal", create_module("signal", create_signal_dict()));
 
           // Native gc module (CPython C extension replacement)
-          modules.insert("gc".to_string(), create_module("gc", create_gc_dict()));
+          modules.insert_str("gc", create_module("gc", create_gc_dict()));
 
           // Native sysconfig module (CPython stdlib replacement)
-          modules.insert("sysconfig".to_string(), create_module("sysconfig", create_sysconfig_dict()));
+          modules.insert_str("sysconfig", create_module("sysconfig", create_sysconfig_dict()));
 
           // Native linecache module (CPython stdlib replacement)
-          modules.insert("linecache".to_string(), create_module("linecache", create_linecache_dict()));
+          modules.insert_str("linecache", create_module("linecache", create_linecache_dict()));
 
           // Native calendar module
-          modules.insert("calendar".to_string(), create_module("calendar", create_calendar_dict()));
+          modules.insert_str("calendar", create_module("calendar", create_calendar_dict()));
 
           // Native locale module
-          modules.insert("locale".to_string(), create_module("locale", create_locale_dict()));
+          modules.insert_str("locale", create_module("locale", create_locale_dict()));
 
           // gettext module (mostly Python source — see install_source_defined_stdlib below)
-          modules.insert("gettext".to_string(), create_module("gettext", create_gettext_dict()));
+          modules.insert_str("gettext", create_module("gettext", create_gettext_dict()));
 
           // Native ssl module (CPython C extension replacement for urllib3 compatibility)
-          modules.insert("ssl".to_string(), create_module("ssl", create_ssl_dict()));
+          modules.insert_str("ssl", create_module("ssl", create_ssl_dict()));
 
           // Native time module
-          modules.insert("time".to_string(), create_module("time", create_time_dict()));
+          modules.insert_str("time", create_module("time", create_time_dict()));
 
           // Native C extension replacements for CPython stdlib compatibility
           let weakref_dict = create_weakref_dict();
-          modules.insert("_weakref".to_string(), create_module("_weakref", weakref_dict.clone()));
+          modules.insert_str("_weakref", create_module("_weakref", weakref_dict.clone()));
 
           let collections_abc_dict = create_collections_abc_dict();
-          modules.insert("_collections_abc".to_string(), create_module("_collections_abc", collections_abc_dict.clone()));
+          modules.insert_str("_collections_abc", create_module("_collections_abc", collections_abc_dict.clone()));
           // Pre-register collections.abc so the import chain walker finds it without needing __path__
-          modules.insert("collections.abc".to_string(), create_module("collections.abc", collections_abc_dict));
+          modules.insert_str("collections.abc", create_module("collections.abc", collections_abc_dict));
 
           // Native weakref module (replaces CPython weakref.py)
           let mut weakref_mod_dict = weakref_dict; // Start from _weakref
           // Add WeakValueDictionary and WeakKeyDictionary as dict-like stubs
-          weakref_mod_dict.insert("WeakValueDictionary".to_string(), create_weakref_weak_val_dict());
-          weakref_mod_dict.insert("WeakKeyDictionary".to_string(), create_weakref_weak_key_dict());
-          weakref_mod_dict.insert("WeakSet".to_string(), create_weakref_weak_set());
-          modules.insert("weakref".to_string(), create_module("weakref", weakref_mod_dict));
+          weakref_mod_dict.insert_str("WeakValueDictionary", create_weakref_weak_val_dict());
+          weakref_mod_dict.insert_str("WeakKeyDictionary", create_weakref_weak_key_dict());
+          weakref_mod_dict.insert_str("WeakSet", create_weakref_weak_set());
+          modules.insert_str("weakref", create_module("weakref", weakref_mod_dict));
 
           // Native copy module (replaces CPython copy.py which uses unsupported syntax)
-          modules.insert("copy".to_string(), create_module("copy", create_copy_dict()));
+          modules.insert_str("copy", create_module("copy", create_copy_dict()));
 
           // Native types module (replaces CPython types.py)
-          modules.insert("types".to_string(), create_module("types", create_types_dict()));
+          modules.insert_str("types", create_module("types", create_types_dict()));
 
           // Native struct module for binary packing
-          modules.insert("struct".to_string(), create_module("struct", create_struct_dict()));
+          modules.insert_str("struct", create_module("struct", create_struct_dict()));
 
           // Native bisect module for binary search
-          modules.insert("bisect".to_string(), create_module("bisect", create_bisect_dict()));
+          modules.insert_str("bisect", create_module("bisect", create_bisect_dict()));
 
           // Native heapq module for heap queue operations
-          modules.insert("heapq".to_string(), create_module("heapq", create_heapq_dict()));
+          modules.insert_str("heapq", create_module("heapq", create_heapq_dict()));
 
           // enum module — real Enum/IntEnum/StrEnum/EnumType semantics
           // (metaclass, real members, auto/unique) are far easier and more
@@ -596,52 +590,52 @@ impl VirtualMachine {
           // (called below, once builtins/type registry exist) fills this
           // module's dict in. The empty dict here is just a placeholder
           // registration so that call finds an existing module to populate.
-          modules.insert("enum".to_string(), create_module("enum", HashMap::new()));
+          modules.insert_str("enum", create_module("enum", HashMap::new()));
 
           // Native glob module
-          modules.insert("glob".to_string(), create_module("glob", create_glob_dict()));
+          modules.insert_str("glob", create_module("glob", create_glob_dict()));
 
           // Native fnmatch module
-          modules.insert("fnmatch".to_string(), create_module("fnmatch", create_fnmatch_dict()));
+          modules.insert_str("fnmatch", create_module("fnmatch", create_fnmatch_dict()));
 
           // Native textwrap module
-          modules.insert("textwrap".to_string(), create_module("textwrap", create_textwrap_dict()));
+          modules.insert_str("textwrap", create_module("textwrap", create_textwrap_dict()));
 
           // Native pprint module
-          modules.insert("pprint".to_string(), create_module("pprint", create_pprint_dict()));
+          modules.insert_str("pprint", create_module("pprint", create_pprint_dict()));
 
           // Native hashlib module
-          modules.insert("hashlib".to_string(), create_module("hashlib", create_hashlib_dict()));
+          modules.insert_str("hashlib", create_module("hashlib", create_hashlib_dict()));
 
           // Native secrets module
-          modules.insert("secrets".to_string(), create_module("secrets", create_secrets_dict()));
+          modules.insert_str("secrets", create_module("secrets", create_secrets_dict()));
 
           // Native hmac module
-          modules.insert("hmac".to_string(), create_module("hmac", create_hmac_dict()));
+          modules.insert_str("hmac", create_module("hmac", create_hmac_dict()));
 
           // Native base64 module
-          modules.insert("base64".to_string(), create_module("base64", create_base64_dict()));
+          modules.insert_str("base64", create_module("base64", create_base64_dict()));
 
           // Native binascii module
-          modules.insert("binascii".to_string(), create_module("binascii", create_binascii_dict()));
+          modules.insert_str("binascii", create_module("binascii", create_binascii_dict()));
 
           // Native uuid module
-          modules.insert("uuid".to_string(), create_module("uuid", create_uuid_dict()));
+          modules.insert_str("uuid", create_module("uuid", create_uuid_dict()));
 
           // Native string module (with capwords and Formatter)
           let mut string_dict = create_string_dict();
           let string_v2 = create_string_dict_v2();
           for (k, v) in string_v2 { string_dict.insert(k, v); }
-          modules.insert("string".to_string(), create_module("string", string_dict));
+          modules.insert_str("string", create_module("string", string_dict));
 
           // Native colorsys module
-          modules.insert("colorsys".to_string(), create_module("colorsys", create_colorsys_dict()));
+          modules.insert_str("colorsys", create_module("colorsys", create_colorsys_dict()));
 
           // Native wave module
-          modules.insert("wave".to_string(), create_module("wave", create_wave_dict()));
+          modules.insert_str("wave", create_module("wave", create_wave_dict()));
 
           // Native numbers module (Number ABC stubs)
-          modules.insert("numbers".to_string(), create_module("numbers", create_numbers_dict()));
+          modules.insert_str("numbers", create_module("numbers", create_numbers_dict()));
 
           // `ast` now loads from Lib/ast.py — needs real (if minimal, marker-
           // only) node classes for PEP 649 lazy-annotation stringification
@@ -652,166 +646,166 @@ impl VirtualMachine {
           // logic is kept and re-exposed under a private native module name
           // so Lib/ast.py can still delegate to it instead of reimplementing
           // literal parsing in pure Python.
-          modules.insert("_ast_native".to_string(), create_module("_ast_native", create_ast_dict()));
+          modules.insert_str("_ast_native", create_module("_ast_native", create_ast_dict()));
 
           // Native sunau module (Sun AU audio format stubs)
-          modules.insert("sunau".to_string(), create_module("sunau", create_sunau_dict()));
+          modules.insert_str("sunau", create_module("sunau", create_sunau_dict()));
 
           // Native difflib module (with unified_diff)
-          modules.insert("difflib".to_string(), create_module("difflib", create_difflib_dict()));
+          modules.insert_str("difflib", create_module("difflib", create_difflib_dict()));
 
           // Native csv module
-          modules.insert("csv".to_string(), create_module("csv", create_csv_dict()));
+          modules.insert_str("csv", create_module("csv", create_csv_dict()));
 
           // Native io module — DISABLED: CPython io.py is used instead (imports from _io)
-          // modules.insert("io".to_string(), create_module("io", create_io_dict()));
+          // modules.insert_str("io", create_module("io", create_io_dict()));
 
           // Native statistics module
-          modules.insert("statistics".to_string(), create_module("statistics", create_statistics_dict()));
+          modules.insert_str("statistics", create_module("statistics", create_statistics_dict()));
 
           // Native contextlib module — DISABLED: real Lib/contextlib.py is used instead
-          // modules.insert("contextlib".to_string(), create_module("contextlib", create_contextlib_dict()));
+          // modules.insert_str("contextlib", create_module("contextlib", create_contextlib_dict()));
 
           // Native decimal module
-          modules.insert("decimal".to_string(), create_module("decimal", create_decimal_dict()));
+          modules.insert_str("decimal", create_module("decimal", create_decimal_dict()));
 
           // Native fractions module
-          modules.insert("fractions".to_string(), create_module("fractions", create_fractions_dict()));
+          modules.insert_str("fractions", create_module("fractions", create_fractions_dict()));
 
           // Native platform module
-          modules.insert("platform".to_string(), create_module("platform", create_platform_dict()));
+          modules.insert_str("platform", create_module("platform", create_platform_dict()));
 
           // Native getopt module
-          modules.insert("getopt".to_string(), create_module("getopt", create_getopt_dict()));
+          modules.insert_str("getopt", create_module("getopt", create_getopt_dict()));
 
           // Native getpass module
-          modules.insert("getpass".to_string(), create_module("getpass", create_getpass_dict()));
+          modules.insert_str("getpass", create_module("getpass", create_getpass_dict()));
 
           // Native errno module
-          modules.insert("errno".to_string(), create_module("errno", create_errno_dict()));
+          modules.insert_str("errno", create_module("errno", create_errno_dict()));
 
           // Native _random module (C extension stub for CPython's random.py)
-          modules.insert("_random".to_string(), create_module("_random", create_random_cmodule_dict()));
+          modules.insert_str("_random", create_module("_random", create_random_cmodule_dict()));
 
           // Native shutil module
-          modules.insert("shutil".to_string(), create_module("shutil", create_shutil_dict()));
+          modules.insert_str("shutil", create_module("shutil", create_shutil_dict()));
 
           // Native graphlib module
-          modules.insert("graphlib".to_string(), create_module("graphlib", create_graphlib_dict()));
+          modules.insert_str("graphlib", create_module("graphlib", create_graphlib_dict()));
 
           // Native pdb module
-          modules.insert("pdb".to_string(), create_module("pdb", create_pdb_dict()));
+          modules.insert_str("pdb", create_module("pdb", create_pdb_dict()));
 
           // traceback now loads from Lib/traceback.py — the old native stub
           // (`create_traceback_dict`, kept as dead code) had only
           // `format_exc`/`print_exc` as no-ops and no `TracebackException`
           // at all, which real `unittest/result.py` needs to format a
           // failure/error for display.
-          // modules.insert("traceback".to_string(), create_module("traceback", create_traceback_dict()));
+          // modules.insert_str("traceback", create_module("traceback", create_traceback_dict()));
 
           // Native warnings module
-          modules.insert("warnings".to_string(), create_module("warnings", create_warnings_dict()));
+          modules.insert_str("warnings", create_module("warnings", create_warnings_dict()));
 
           // Native abc module
-          modules.insert("abc".to_string(), create_module("abc", create_abc_dict()));
+          modules.insert_str("abc", create_module("abc", create_abc_dict()));
 
           // Native typing module (type annotation stubs)
           // Comment out native typing - use Lib/typing.py instead
-          // modules.insert("typing".to_string(), create_module("typing", create_typing_dict()));
+          // modules.insert_str("typing", create_module("typing", create_typing_dict()));
 
           // Native pickle module
-          modules.insert("_pickle".to_string(), create_module("_pickle", create_pickle_dict()));
+          modules.insert_str("_pickle", create_module("_pickle", create_pickle_dict()));
 
           // Native logging module
-          modules.insert("_logging".to_string(), create_module("_logging", create_logging_dict()));
+          modules.insert_str("_logging", create_module("_logging", create_logging_dict()));
 
           // Native timeit module
-          modules.insert("timeit".to_string(), create_module("timeit", create_timeit_dict()));
+          modules.insert_str("timeit", create_module("timeit", create_timeit_dict()));
 
           // Native json.tool module
-          modules.insert("json.tool".to_string(), create_module("json.tool", create_json_tool_dict()));
+          modules.insert_str("json.tool", create_module("json.tool", create_json_tool_dict()));
 
           // Native cmath module (complex math: sqrt, sin, cos)
-          modules.insert("cmath".to_string(), create_module("cmath", create_cmath_dict()));
+          modules.insert_str("cmath", create_module("cmath", create_cmath_dict()));
 
           // Native gzip module
-          modules.insert("gzip".to_string(), create_module("gzip", create_gzip_dict()));
+          modules.insert_str("gzip", create_module("gzip", create_gzip_dict()));
 
           // Native zlib module
-          modules.insert("zlib".to_string(), create_module("zlib", create_zlib_dict()));
+          modules.insert_str("zlib", create_module("zlib", create_zlib_dict()));
 
           // Native tarfile module
-          modules.insert("tarfile".to_string(), create_module("tarfile", create_tarfile_dict()));
+          modules.insert_str("tarfile", create_module("tarfile", create_tarfile_dict()));
 
           // Native zipfile module (read-only)
-          modules.insert("zipfile".to_string(), create_module("zipfile", create_zipfile_dict()));
+          modules.insert_str("zipfile", create_module("zipfile", create_zipfile_dict()));
 
           // Native hashlib_extra module
-          modules.insert("hashlib_extra".to_string(), create_module("hashlib_extra", create_hashlib_extra_dict()));
+          modules.insert_str("hashlib_extra", create_module("hashlib_extra", create_hashlib_extra_dict()));
 
           // dataclasses now loads from Lib/dataclasses.py (a real, if
           // simplified, implementation — field generation, generated
           // __init__/__repr__/__eq__, __dataclass_fields__, fields(), etc.)
           // instead of this native stub, which only ever tagged classes with
           // a marker attribute and never generated anything.
-          // modules.insert("dataclasses".to_string(), create_module("dataclasses", create_dataclasses_dict()));
+          // modules.insert_str("dataclasses", create_module("dataclasses", create_dataclasses_dict()));
 
           // Native operator module
-          modules.insert("operator".to_string(), create_module("operator", create_operator_dict()));
+          modules.insert_str("operator", create_module("operator", create_operator_dict()));
           // `_operator` — real CPython's C-accelerated backing module for
           // `operator.py` (`from _operator import *`); same alias rationale
           // as `_datetime` above.
-          modules.insert("_operator".to_string(), create_module("_operator", create_operator_dict()));
+          modules.insert_str("_operator", create_module("_operator", create_operator_dict()));
 
           // Native reprlib module
-          modules.insert("reprlib".to_string(), create_module("reprlib", create_reprlib_dict()));
+          modules.insert_str("reprlib", create_module("reprlib", create_reprlib_dict()));
 
           // Native array module
-          modules.insert("array".to_string(), create_module("array", create_array_dict()));
+          modules.insert_str("array", create_module("array", create_array_dict()));
 
           // Native shelve module (persistent dict wrapper)
-          modules.insert("shelve".to_string(), create_module("shelve", create_shelve_dict()));
+          modules.insert_str("shelve", create_module("shelve", create_shelve_dict()));
 
           // Native mimetypes module
-          modules.insert("mimetypes".to_string(), create_module("mimetypes", create_mimetypes_dict()));
+          modules.insert_str("mimetypes", create_module("mimetypes", create_mimetypes_dict()));
 
           // Native dis module for bytecode disassembly
-          modules.insert("dis".to_string(), create_module("dis", create_dis_dict()));
+          modules.insert_str("dis", create_module("dis", create_dis_dict()));
 
           // Native http module (HTTPStatus enum)
           let http_mod = create_module("http", create_http_dict());
-          modules.insert("http".to_string(), http_mod.clone());
+          modules.insert_str("http", http_mod.clone());
 
           // Native http.client submodule (HTTPConnection, HTTPResponse)
           let http_client_mod = create_module("http.client", create_http_client_dict());
           // Wire client as a submodule attribute of the http parent module
           if let PyObject::Module { dict, .. } = &mut *http_mod.borrow_mut() {
-              dict.insert("client".to_string(), http_client_mod.clone());
+              dict.insert_str("client", http_client_mod.clone());
           }
-          modules.insert("http.client".to_string(), http_client_mod);
+          modules.insert_str("http.client", http_client_mod);
 
           // Native smtplib module (SMTP stub)
-          modules.insert("smtplib".to_string(), create_module("smtplib", create_smtplib_dict()));
+          modules.insert_str("smtplib", create_module("smtplib", create_smtplib_dict()));
 
           // Native html module (escape/unescape)
           let html_mod = create_module("html", create_html_dict());
-          modules.insert("html".to_string(), html_mod.clone());
+          modules.insert_str("html", html_mod.clone());
 
           // Native html.entities module (html5 entity map)
           let html_entities_mod = create_module("html.entities", create_html_entities_dict());
           // Wire entities as a submodule attribute of the html parent module
           if let PyObject::Module { dict, .. } = &mut *html_mod.borrow_mut() {
-              dict.insert("entities".to_string(), html_entities_mod.clone());
+              dict.insert_str("entities", html_entities_mod.clone());
           }
-          modules.insert("html.entities".to_string(), html_entities_mod);
+          modules.insert_str("html.entities", html_entities_mod);
 
           // Native html.parser module (HTMLParser stub)
           let html_parser_mod = create_module("html.parser", create_html_parser_dict());
           // Wire parser as a submodule attribute of the html parent module
           if let PyObject::Module { dict, .. } = &mut *html_mod.borrow_mut() {
-              dict.insert("parser".to_string(), html_parser_mod.clone());
+              dict.insert_str("parser", html_parser_mod.clone());
           }
-          modules.insert("html.parser".to_string(), html_parser_mod);
+          modules.insert_str("html.parser", html_parser_mod);
 
           // Native unittest module — DISABLED: was a complete no-op stub
           // (every assertX method silently did nothing, `main()` never
@@ -820,7 +814,7 @@ impl VirtualMachine {
           // CPython/Django test suites are unittest-based; silently
           // no-op'ing every assertion is actively dangerous for a project
           // whose goal is being a genuine CPython replacement.
-          // modules.insert("unittest".to_string(), create_module("unittest", create_unittest_dict()));
+          // modules.insert_str("unittest", create_module("unittest", create_unittest_dict()));
 
           // Native doctest module used to be a hollow stub (testmod/testfile
           // always reported 0 attempted/0 failed regardless of actual
@@ -832,7 +826,7 @@ impl VirtualMachine {
           // implementation at `Lib/doctest.py`, resolved through the normal
           // file-based import path instead — same "vendor/reimplement as a
           // pure-Python Lib/ module" pattern as `unittest`/`email`.
-          // modules.insert("doctest".to_string(), create_module("doctest", create_doctest_dict()));
+          // modules.insert_str("doctest", create_module("doctest", create_doctest_dict()));
 
           // `email` used to be a thin native stub (EmailMessage/MIMEText/
           // header/utils only, no real Message class, no submodule files —
@@ -847,11 +841,11 @@ impl VirtualMachine {
           // kept only in case `Lib/email/` needs to be reverted.
 
           // Native configparser module
-          modules.insert("configparser".to_string(), create_module("configparser", create_configparser_dict()));
+          modules.insert_str("configparser", create_module("configparser", create_configparser_dict()));
 
           // Native xml.etree.ElementTree module
           let xml_etree_mod = create_module("xml.etree.ElementTree", create_xml_etree_dict());
-          modules.insert("xml.etree.ElementTree".to_string(), xml_etree_mod.clone());
+          modules.insert_str("xml.etree.ElementTree", xml_etree_mod.clone());
           // `xml.etree` (the bare PACKAGE, distinct from its
           // `.ElementTree` submodule) previously had no entry of its own in
           // `vm.modules` at all — only the leaf `xml.etree.ElementTree` was
@@ -864,19 +858,19 @@ impl VirtualMachine {
           // existing `xml`-package-wires-`etree` pattern just below).
           let xml_etree_pkg = create_module("xml.etree", HashMap::new());
           if let PyObject::Module { dict: xml_etree_pkg_dict, .. } = &mut *xml_etree_pkg.borrow_mut() {
-              xml_etree_pkg_dict.insert("ElementTree".to_string(), xml_etree_mod.clone());
+              xml_etree_pkg_dict.insert_str("ElementTree", xml_etree_mod.clone());
           }
-          modules.insert("xml.etree".to_string(), xml_etree_pkg.clone());
+          modules.insert_str("xml.etree", xml_etree_pkg.clone());
           // Native xml module (empty package)
           let xml_mod = create_module("xml", create_xml_dict());
           // Wire etree as a submodule of xml
           if let PyObject::Module { dict: xml_el_dict, .. } = &mut *xml_mod.borrow_mut() {
-              xml_el_dict.insert("etree".to_string(), xml_etree_pkg.clone());
+              xml_el_dict.insert_str("etree", xml_etree_pkg.clone());
           }
-          modules.insert("xml".to_string(), xml_mod);
+          modules.insert_str("xml", xml_mod);
 
           // Native this module (Zen of Python)
-          modules.insert("this".to_string(), create_module("this", create_this_dict()));
+          modules.insert_str("this", create_module("this", create_this_dict()));
 
           // argparse now loads from Lib/argparse.py (real CPython source,
           // vendored verbatim) instead of the old native stub — the stub's
@@ -886,22 +880,22 @@ impl VirtualMachine {
           // `TestProgram.parseArgs` and Django's management-command
           // machinery both rely on. See `create_argparse_dict` (kept, now
           // dead code) for the old implementation.
-          // modules.insert("argparse".to_string(), create_module("argparse", create_argparse_dict()));
+          // modules.insert_str("argparse", create_module("argparse", create_argparse_dict()));
 
           // Native _imp module (CPython C extension replacement needed by importlib._bootstrap)
-          modules.insert("_imp".to_string(), create_module("_imp", create_imp_dict()));
+          modules.insert_str("_imp", create_module("_imp", create_imp_dict()));
           // Native _opcode module (needed by test.support)
-          modules.insert("_opcode".to_string(), create_module("_opcode", create_opcode_dict()));
+          modules.insert_str("_opcode", create_module("_opcode", create_opcode_dict()));
           // Native _warnings module (CPython C extension replacement)
-          modules.insert("_warnings".to_string(), create_module("_warnings", create_warnings_c_dict()));
+          modules.insert_str("_warnings", create_module("_warnings", create_warnings_c_dict()));
           // Native marshal module (CPython C extension replacement)
-          modules.insert("marshal".to_string(), create_module("marshal", create_marshal_dict()));
+          modules.insert_str("marshal", create_module("marshal", create_marshal_dict()));
           // Native zipimport module stub
-          modules.insert("zipimport".to_string(), create_module("zipimport", create_zipimport_dict()));
+          modules.insert_str("zipimport", create_module("zipimport", create_zipimport_dict()));
           // Native _io module (CPython C extension replacement needed by importlib._bootstrap_external)
-          modules.insert("_io".to_string(), create_module("_io", create_io_module_dict()));
+          modules.insert_str("_io", create_module("_io", create_io_module_dict()));
           // Native queue module (Queue backed by PyObject::Queue)
-          modules.insert("queue".to_string(), create_module("queue", create_queue_dict()));
+          modules.insert_str("queue", create_module("queue", create_queue_dict()));
 
           // Native importlib stub module
           let importlib_mod = create_module("importlib", create_importlib_dict());
@@ -909,54 +903,54 @@ impl VirtualMachine {
           {
               let resources_mod = create_module("importlib.resources", create_importlib_resources_dict());
               if let PyObject::Module { dict, .. } = &mut *importlib_mod.borrow_mut() {
-                  dict.insert("resources".to_string(), resources_mod.clone());
+                  dict.insert_str("resources", resources_mod.clone());
               }
-              modules.insert("importlib.resources".to_string(), resources_mod);
+              modules.insert_str("importlib.resources", resources_mod);
           }
           // Wire importlib.util as a submodule
           {
               let util_mod = create_module("importlib.util", create_importlib_util_dict());
               if let PyObject::Module { dict, .. } = &mut *importlib_mod.borrow_mut() {
-                  dict.insert("util".to_string(), util_mod.clone());
+                  dict.insert_str("util", util_mod.clone());
               }
-              modules.insert("importlib.util".to_string(), util_mod);
+              modules.insert_str("importlib.util", util_mod);
           }
           // Add __path__ so dotted imports like importlib.machinery can find filesystem submodules
           {
               if let PyObject::Module { dict, .. } = &mut *importlib_mod.borrow_mut() {
-                  dict.insert("__path__".to_string(), py_list(vec![py_str(&format!("{}/importlib", find_lib_dir()))]));
+                  dict.insert_str("__path__", py_list(vec![py_str(&format!("{}/importlib", find_lib_dir()))]));
               }
           }
-          modules.insert("importlib".to_string(), importlib_mod);
+          modules.insert_str("importlib", importlib_mod);
 
-          modules.insert("inspect".to_string(), create_module("inspect", create_inspect_dict()));
+          modules.insert_str("inspect", create_module("inspect", create_inspect_dict()));
 
           // Native __future__ module (needed by requests, etc.)
-          modules.insert("__future__".to_string(), create_module("__future__", create_future_dict()));
+          modules.insert_str("__future__", create_module("__future__", create_future_dict()));
 
           // Native asyncio module (basic event loop)
-          modules.insert("asyncio".to_string(), create_module("asyncio", create_asyncio_dict()));
+          modules.insert_str("asyncio", create_module("asyncio", create_asyncio_dict()));
 
           // Native atexit module (register/unregister exit callbacks)
-          modules.insert("atexit".to_string(), create_module("atexit", create_atexit_dict()));
+          modules.insert_str("atexit", create_module("atexit", create_atexit_dict()));
 
           // Native contextvars module (ContextVar with thread-local storage)
-          modules.insert("contextvars".to_string(), create_module("contextvars", create_contextvars_dict()));
+          modules.insert_str("contextvars", create_module("contextvars", create_contextvars_dict()));
 
           // Native unicodedata module (basic Unicode category/normalize)
-          modules.insert("unicodedata".to_string(), create_module("unicodedata", create_unicodedata_dict()));
+          modules.insert_str("unicodedata", create_module("unicodedata", create_unicodedata_dict()));
 
           // Native profile module
-          modules.insert("profile".to_string(), create_module("profile", create_profile_dict()));
+          modules.insert_str("profile", create_module("profile", create_profile_dict()));
 
           // Native cProfile module
-          modules.insert("cProfile".to_string(), create_module("cProfile", create_cprofile_dict()));
+          modules.insert_str("cProfile", create_module("cProfile", create_cprofile_dict()));
 
           // Native resource module (POSIX resource usage stubs)
-          modules.insert("resource".to_string(), create_module("resource", create_resource_dict()));
+          modules.insert_str("resource", create_module("resource", create_resource_dict()));
 
           // Native trace module (code tracing / coverage stubs)
-          modules.insert("trace".to_string(), create_module("trace", create_trace_dict()));
+          modules.insert_str("trace", create_module("trace", create_trace_dict()));
 
           // Native _concurrent module (concurrent.futures backend)
           let concurrent_futures_mod = create_module("concurrent.futures", create_concurrent_futures_dict());
@@ -965,17 +959,17 @@ impl VirtualMachine {
           {
               let mut conc_mut = concurrent_mod.borrow_mut();
               if let PyObject::Module { dict, .. } = &mut *conc_mut {
-                  dict.insert("futures".to_string(), concurrent_futures_mod.clone());
+                  dict.insert_str("futures", concurrent_futures_mod.clone());
               }
           }
-          modules.insert("concurrent".to_string(), concurrent_mod);
-          modules.insert("concurrent.futures".to_string(), concurrent_futures_mod);
+          modules.insert_str("concurrent", concurrent_mod);
+          modules.insert_str("concurrent.futures", concurrent_futures_mod);
 
           // Native sqlite3 module (requires --features sqlite3)
           #[cfg(feature = "sqlite3")]
           {
               let sqlite3_mod = create_module("sqlite3", create_sqlite3_dict());
-              modules.insert("sqlite3".to_string(), sqlite3_mod.clone());
+              modules.insert_str("sqlite3", sqlite3_mod.clone());
               // sqlite3.dbapi2 — real CPython's sqlite3 package re-exports
               // everything under this name too (the legacy PEP 249 DB-API
               // 2.0 module alias). Real code: Django's own
@@ -983,7 +977,7 @@ impl VirtualMachine {
               // import dbapi2 as Database`. Same module object, not a
               // separate copy — matches how CPython's own `dbapi2.py` is
               // just `from sqlite3.dbapi2 import *`-equivalent re-exports.
-              modules.insert("sqlite3.dbapi2".to_string(), sqlite3_mod);
+              modules.insert_str("sqlite3.dbapi2", sqlite3_mod);
           }
 
           // Populate sys.path with default search paths — ONLY the first
@@ -1209,7 +1203,7 @@ impl VirtualMachine {
             if let Some(module) = self.modules.get(module_name) {
                 if let PyObject::Module { dict, .. } = &mut *module.borrow_mut() {
                     for (name, obj) in cached_extracted.iter() {
-                        dict.insert(name.clone(), obj.clone());
+                        dict.insert_str(name, obj.clone());
                     }
                 }
             }
@@ -1252,7 +1246,7 @@ impl VirtualMachine {
         if let Some(module) = self.modules.get(module_name) {
             if let PyObject::Module { dict, .. } = &mut *module.borrow_mut() {
                 for (name, obj) in extracted {
-                    dict.insert(name, obj);
+                    dict.insert_str(&name, obj);
                 }
             }
         }
@@ -1318,7 +1312,7 @@ impl VirtualMachine {
             .clone();
         if let Some(sys_mod) = self.modules.get("sys") {
             if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
-                if let Some(mod_dict) = dict.get("modules") {
+                if let Some(mod_dict) = dict.get_str("modules") {
                     // `sys.modules` is a real `dict` — `set_attribute` sets
                     // an OBJECT ATTRIBUTE (routed to `PyObject::Dict`'s own
                     // catch-all side-attribute-storage arm for non-Instance
@@ -1390,7 +1384,7 @@ impl VirtualMachine {
         for name in &type_names {
             let type_obj = PyObjectRef::new(PyObject::Type {
                 name: name.to_string(),
-                dict: Box::new(HashMap::new()),
+                dict: Box::new(TypeDict::default()),
                 bases: vec![],
                 mro: vec![],
             });
@@ -1415,7 +1409,7 @@ impl VirtualMachine {
         if std::env::var("RPY_DEBUG_IMPORT").is_ok() {
             eprintln!("{}IMPORT_FILE: {} (self.modules.len()={}, sys.path={:?})", "  ".repeat(depth), name, self.modules.len(),
                 self.modules.get("sys").and_then(|m| if let PyObject::Module { dict, .. } = &*m.borrow() {
-                    dict.get("path").map(|p| p.str())
+                    dict.get_str("path").map(|p| p.str())
                 } else { None }));
         }
         let result = self.import_module_from_file_inner(name);
@@ -1475,7 +1469,7 @@ impl VirtualMachine {
                         if let Some(parent_mod) = self.modules.get(&current_name) {
                             let borrowed = parent_mod.borrow();
                             if let PyObject::Module { dict, .. } = &*borrowed {
-                                let p = dict.get("__path__").and_then(|pl| {
+                                let p = dict.get_str("__path__").and_then(|pl| {
                                     if let PyObject::List(items) = &*pl.borrow() {
                                         items.first().and_then(|i| {
                                             if let PyObject::Str(s) = &*i.borrow() { Some(s.to_string()) } else { None }
@@ -1517,7 +1511,7 @@ impl VirtualMachine {
                                 let sys_modules = self.modules.get("sys").and_then(|m| {
                                     let b = m.borrow();
                                     match &*b {
-                                        PyObject::Module { dict, .. } => dict.get("modules").cloned(),
+                                        PyObject::Module { dict, .. } => dict.get_str("modules").cloned(),
                                         _ => None,
                                     }
                                 });
@@ -1543,7 +1537,7 @@ impl VirtualMachine {
                                     let child_name = full_name[dot_pos+1..].to_string();
                                     if let Some(parent_mod) = self.modules.get(&parent_name).cloned() {
                                         if let PyObject::Module { dict, .. } = &mut *parent_mod.borrow_mut() {
-                                            dict.insert(child_name.clone(), module.clone());
+                                            dict.insert_str(&child_name, module.clone());
                                         }
                                     }
                                 }
@@ -1599,7 +1593,7 @@ impl VirtualMachine {
                 self.modules.insert(name.to_string(), empty_mod.clone());
                 if let Some(sys_mod) = self.modules.get("sys") {
                     if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
-                        if let Some(mod_dict) = dict.get("modules").cloned() {
+                        if let Some(mod_dict) = dict.get_str("modules").cloned() {
                             mod_dict.borrow_mut().set_attribute(name, empty_mod.clone()).ok();
                         }
                     }
@@ -1609,7 +1603,7 @@ impl VirtualMachine {
                 // Wire submodule into parent module namespace and update sys.modules
                 if let Some(sys_mod) = self.modules.get("sys") {
                     if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
-                        if let Some(mod_dict) = dict.get("modules").cloned() {
+                        if let Some(mod_dict) = dict.get_str("modules").cloned() {
                             mod_dict.borrow_mut().set_attribute(name, module.clone()).ok();
                         }
                     }
@@ -1620,7 +1614,7 @@ impl VirtualMachine {
                     let child_name = name[dot_pos+1..].to_string();
                     if let Some(parent_mod) = self.modules.get(&parent_name).cloned() {
                         if let PyObject::Module { dict, .. } = &mut *parent_mod.borrow_mut() {
-                            dict.insert(child_name, module.clone());
+                            dict.insert_str(&child_name, module.clone());
                         }
                     }
                 }
@@ -1636,13 +1630,13 @@ impl VirtualMachine {
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_default();
                 let mut empty_dict = HashMap::new();
-                empty_dict.insert("__path__".to_string(), py_list(vec![py_str(&pkg_dir)]));
-                empty_dict.insert("__package__".to_string(), py_str(name));
+                empty_dict.insert_str("__path__", py_list(vec![py_str(&pkg_dir)]));
+                empty_dict.insert_str("__package__", py_str(name));
                 let empty_mod = create_module(name, empty_dict);
                 self.modules.insert(name.to_string(), empty_mod.clone());
                 if let Some(sys_mod) = self.modules.get("sys") {
                     if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
-                        if let Some(mod_dict) = dict.get("modules").cloned() {
+                        if let Some(mod_dict) = dict.get_str("modules").cloned() {
                             mod_dict.borrow_mut().set_attribute(name, empty_mod.clone()).ok();
                         }
                     }
@@ -1652,7 +1646,7 @@ impl VirtualMachine {
                 // Update sys.modules with the loaded module (overwrites empty stub)
                 if let Some(sys_mod) = self.modules.get("sys") {
                     if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
-                        if let Some(mod_dict) = dict.get("modules").cloned() {
+                        if let Some(mod_dict) = dict.get_str("modules").cloned() {
                             mod_dict.borrow_mut().set_attribute(name, module.clone()).ok();
                         }
                     }
@@ -1696,7 +1690,7 @@ impl VirtualMachine {
     fn get_sys_path(&self) -> Vec<String> {
         if let Some(sys_mod) = self.modules.get("sys") {
             if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
-                if let Some(path_list) = dict.get("path") {
+                if let Some(path_list) = dict.get_str("path") {
                     if let PyObject::List(items) = &*path_list.borrow() {
                         return items.iter().filter_map(|item| {
                             if let PyObject::Str(s) = &*item.borrow() { Some(s.to_string()) } else { None }
@@ -1818,7 +1812,7 @@ impl VirtualMachine {
         // Register module in sys.modules BEFORE executing (needed for sys.modules[__name__] checks)
         if let Some(sys_mod) = self.modules.get("sys") {
             if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
-                if let Some(sm) = dict.get("modules").cloned() {
+                if let Some(sm) = dict.get_str("modules").cloned() {
                     match &sm {
                         PyObjectRef::Mut(rc) => {
                             if let Ok(mut guard) = rc.try_borrow_mut() {
@@ -1845,7 +1839,7 @@ impl VirtualMachine {
         if let Some(lm) = &live_module {
             if let PyObject::Module { dict, .. } = &mut *lm.borrow_mut() {
                 for (k, v) in module_globals.borrow().iter() {
-                    dict.insert(interner::lookup_str(*k).to_string(), v.clone());
+                    dict.insert_str(interner::lookup_str(*k), v.clone());
                 }
             }
         }
@@ -1874,7 +1868,7 @@ impl VirtualMachine {
         // still mid-execution).
         if let Some(existing) = self.modules.get(name).cloned() {
             if let PyObject::Module { dict, .. } = &mut *existing.borrow_mut() {
-                for (k, v) in globals_copy.iter() { dict.insert(interner::lookup_str(*k).to_string(), v.clone()); }
+                for (k, v) in globals_copy.iter() { dict.insert_str(interner::lookup_str(*k), v.clone()); }
             }
             return Ok(existing);
         }
@@ -2236,7 +2230,7 @@ impl VirtualMachine {
                 }
                 if let Some(live_module) = self.frames[fi].live_module.clone() {
                     if let PyObject::Module { dict, .. } = &mut *live_module.borrow_mut() {
-                        dict.insert(name.clone(), val.clone());
+                        dict.insert_str(&name, val.clone());
                     }
                 }
                 self.frames[fi].globals.borrow_mut().insert(interner::intern(&name), val);
@@ -2408,7 +2402,7 @@ impl VirtualMachine {
                 let name = self.frames[fi].code.names[name_idx].to_string();
                 if let Some(live_module) = self.frames[fi].live_module.clone() {
                     if let PyObject::Module { dict, .. } = &mut *live_module.borrow_mut() {
-                        dict.remove(&name);
+                        dict.remove(&interner::intern(&name));
                     }
                 }
                 self.frames[fi].globals.borrow_mut().remove(&interner::intern(&name));
@@ -2792,7 +2786,7 @@ impl VirtualMachine {
                 // Set __code__ and __module__ on the function
                 if let PyObject::Function(ref mut inner_f) = &mut *func.borrow_mut() {
                 let dict = &mut inner_f.dict;
-                    dict.insert("__code__".to_string(), PyObjectRef::imm(PyObject::Code(code_obj)));
+                    dict.insert_str("__code__", PyObjectRef::imm(PyObject::Code(code_obj)));
                 }
                 if let Some(ref mg) = self.frames[fi].module_globals {
                     let mg = mg.borrow();
@@ -2800,7 +2794,7 @@ impl VirtualMachine {
                         if let PyObject::Str(s) = &*module_name.borrow() {
                             if let PyObject::Function(ref mut inner_f) = &mut *func.borrow_mut() {
                 let dict = &mut inner_f.dict;
-                                dict.insert("__module__".to_string(), py_str(s));
+                                dict.insert_str("__module__", py_str(s));
                             }
                         }
                     }
@@ -4566,7 +4560,7 @@ impl VirtualMachine {
                             PyObject::Instance { dict, .. } => {
                                 // Extract error message from the instance
                                 // Python stores exception args in self.args tuple
-                                let args = dict.get("args");
+                                let args = dict.get_str("args");
                                 if let Some(a) = args {
                                     let b = a.borrow();
                                     if let PyObject::Tuple(t) = &*b {
@@ -4736,7 +4730,7 @@ impl VirtualMachine {
                             // Register in sys.modules (safe: module fully loaded)
                             if let Some(sys_mod) = self.modules.get("sys") {
                                 if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
-                                    if let Some(md) = dict.get("modules").cloned() {
+                                    if let Some(md) = dict.get_str("modules").cloned() {
                                         match &md {
                                             PyObjectRef::Mut(rc) => {
                                                 if let Ok(mut guard) = rc.try_borrow_mut() {
@@ -4781,7 +4775,7 @@ impl VirtualMachine {
                     let module_borrowed = module.borrow();
                     if let PyObject::Module { dict, .. } = &*module_borrowed {
                         // Use __all__ if present, otherwise all non-underscore names
-                        let names_to_import: Vec<String> = if let Some(all_val) = dict.get("__all__") {
+                        let names_to_import: Vec<String> = if let Some(all_val) = dict.get_str("__all__") {
                             let all_borrowed = all_val.borrow();
                             match &*all_borrowed {
                                 PyObject::Tuple(items) | PyObject::List(items) => {
@@ -4789,10 +4783,10 @@ impl VirtualMachine {
                                         if let PyObject::Str(s) = &*n.borrow() { Some(s.to_string()) } else { None }
                                     }).collect()
                                 }
-                                _ => dict.keys().filter(|k| !k.starts_with('_')).cloned().collect(),
+                                _ => dict.keys().map(|k| interner::lookup_str(*k)).filter(|k| !k.starts_with('_')).map(|k| k.to_string()).collect(),
                             }
                         } else {
-                            dict.keys().filter(|k| !k.starts_with('_')).cloned().collect()
+                            dict.keys().map(|k| interner::lookup_str(*k)).filter(|k| !k.starts_with('_')).map(|k| k.to_string()).collect()
                         };
                         // Collect name-value pairs before dropping borrow
                         let imports: Vec<(String, PyObjectRef)> = names_to_import.iter()
@@ -4809,7 +4803,7 @@ impl VirtualMachine {
                             }
                             if let Some(lm) = &live_module {
                                 if let PyObject::Module { dict, .. } = &mut *lm.borrow_mut() {
-                                    dict.insert(import_name.clone(), val.clone());
+                                    dict.insert_str(import_name, val.clone());
                                 }
                             }
                             self.frames[fi].globals.borrow_mut().insert(interner::intern(&import_name), val.clone());
@@ -6075,7 +6069,7 @@ impl VirtualMachine {
 
         let type_construct_info = if let PyObject::Type { dict, mro, .. } = &*callable.borrow() {
             let native_kind = dict.get_str(crate::object::NATIVE_BASE_MARKER).map(|v| v.str());
-            let init_func = dict.get("__init__").cloned().or_else(|| {
+            let init_func = dict.get_str("__init__").cloned().or_else(|| {
                 for base in mro.iter().skip(1) {
                     if let PyObject::Type { name: base_name, dict: base_dict, .. } = &*base.borrow() {
                         // Every class implicitly inherits from `object`,
@@ -6144,7 +6138,7 @@ impl VirtualMachine {
                     // instead of the real message whenever it passed through
                     // a `with`/`finally` or propagated uncaught.
                     if let PyObject::Instance { dict, .. } = &mut *instance.borrow_mut() {
-                        dict.insert("args".to_string(), py_tuple(args.clone()));
+                        dict.insert_str("args", py_tuple(args.clone()));
                     }
                 }
             }
@@ -6204,8 +6198,8 @@ impl VirtualMachine {
                 let object_type = self.builtins.get(&interner::intern("object")).cloned()
                     .unwrap_or_else(|| {
                         // Fallback: create a minimal object type
-                        let mut obj_dict = HashMap::new();
-                        obj_dict.insert("__setattr__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                        let mut obj_dict: TypeDict = Default::default();
+                        obj_dict.insert_str("__setattr__", PyObjectRef::new(PyObject::BuiltinFunction {
                             name: "__setattr__".to_string(),
                             func: |args| {
                                 if args.len() < 3 { return Err(PyError::type_error("__setattr__ needs 3 args")); }
@@ -6439,7 +6433,7 @@ impl VirtualMachine {
         }
         PyObjectRef::new(PyObject::Type {
             name,
-            dict: Box::new(HashMap::new()),
+            dict: Box::new(TypeDict::default()),
             bases: vec![],
             mro: vec![],
         })
@@ -6688,7 +6682,7 @@ impl VirtualMachine {
 
         let class = PyObjectRef::new(PyObject::Type {
             name: name_str,
-            dict: Box::new(namespace_dict.clone()),
+            dict: Box::new(str_map_to_typedict(namespace_dict.clone())),
             bases: bases_vec.clone(),
             mro: vec![],
         });

@@ -58,7 +58,7 @@ fn build_struct_time_type() -> PyObjectRef {
     // (`struct_time(x) -> x`), so anything built from it was just a plain
     // tuple with NO attribute access at all (`t.tm_year` raised
     // `AttributeError: 'tuple' object has no attribute 'tm_year'`).
-    type_dict.insert("__getitem__".to_string(), bf!("__getitem__", |args| {
+    type_dict.insert_str("__getitem__", bf!("__getitem__", |args| {
         if args.len() < 2 { return Err(PyError::type_error("__getitem__() takes exactly one argument")); }
         let idx = args[1].as_i64().ok_or_else(|| PyError::type_error("indices must be integers"))?;
         if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
@@ -69,8 +69,8 @@ fn build_struct_time_type() -> PyObjectRef {
             Err(PyError::runtime_error("__getitem__ on non-struct_time"))
         }
     }));
-    type_dict.insert("__len__".to_string(), bf!("__len__", |_args| Ok(py_int(9))));
-    type_dict.insert("__iter__".to_string(), bf!("__iter__", |args| {
+    type_dict.insert_str("__len__", bf!("__len__", |_args| Ok(py_int(9))));
+    type_dict.insert_str("__iter__", bf!("__iter__", |args| {
         if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
             let items: Vec<PyObjectRef> = STRUCT_TIME_FIELDS.iter().map(|f| dict.get(f).cloned().unwrap_or_else(py_none)).collect();
             Ok(PyObjectRef::new(PyObject::ListIter { list: items, index: 0 }))
@@ -78,7 +78,7 @@ fn build_struct_time_type() -> PyObjectRef {
             Err(PyError::runtime_error("__iter__ on non-struct_time"))
         }
     }));
-    type_dict.insert("__repr__".to_string(), bf!("__repr__", |args| {
+    type_dict.insert_str("__repr__", bf!("__repr__", |args| {
         if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
             let body = STRUCT_TIME_FIELDS.iter()
                 .map(|f| format!("{}={}", f, dict.get(f).map(|v| v.repr()).unwrap_or_else(|| "None".to_string())))
@@ -88,7 +88,7 @@ fn build_struct_time_type() -> PyObjectRef {
             Ok(py_str("time.struct_time(...)"))
         }
     }));
-    PyObjectRef::new(PyObject::Type { name: "time.struct_time".to_string(), dict: Box::new(type_dict), bases: vec![], mro: vec![] })
+    PyObjectRef::new(PyObject::Type { name: "time.struct_time".to_string(), dict: Box::new(str_map_to_typedict(type_dict)), bases: vec![], mro: vec![] })
 }
 
 fn get_struct_time_type() -> PyObjectRef {
@@ -102,15 +102,15 @@ fn get_struct_time_type() -> PyObjectRef {
 #[allow(clippy::too_many_arguments)]
 fn make_struct_time(y: i64, mon: i64, mday: i64, h: i64, min: i64, s: i64, wday: i64, yday: i64, isdst: i64) -> PyObjectRef {
     let mut dict = AttrMap::new();
-    dict.insert("tm_year".to_string(), py_int(y));
-    dict.insert("tm_mon".to_string(), py_int(mon));
-    dict.insert("tm_mday".to_string(), py_int(mday));
-    dict.insert("tm_hour".to_string(), py_int(h));
-    dict.insert("tm_min".to_string(), py_int(min));
-    dict.insert("tm_sec".to_string(), py_int(s));
-    dict.insert("tm_wday".to_string(), py_int(wday));
-    dict.insert("tm_yday".to_string(), py_int(yday + 1));
-    dict.insert("tm_isdst".to_string(), py_int(isdst));
+    dict.insert_str("tm_year", py_int(y));
+    dict.insert_str("tm_mon", py_int(mon));
+    dict.insert_str("tm_mday", py_int(mday));
+    dict.insert_str("tm_hour", py_int(h));
+    dict.insert_str("tm_min", py_int(min));
+    dict.insert_str("tm_sec", py_int(s));
+    dict.insert_str("tm_wday", py_int(wday));
+    dict.insert_str("tm_yday", py_int(yday + 1));
+    dict.insert_str("tm_isdst", py_int(isdst));
     PyObjectRef::new(PyObject::Instance { typ: get_struct_time_type(), dict })
 }
 
@@ -349,14 +349,14 @@ pub fn create_time_dict() -> HashMap<String, PyObjectRef> {
             _ => py_str("clock_gettime"),
         };
         let mut dict = AttrMap::new();
-        dict.insert("implementation".to_string(), implementation);
-        dict.insert("monotonic".to_string(), py_bool(name == "monotonic" || name == "perf_counter"));
-        dict.insert("adjustable".to_string(), py_bool(false));
-        dict.insert("resolution".to_string(), py_float(1e-9));
+        dict.insert_str("implementation", implementation);
+        dict.insert_str("monotonic", py_bool(name == "monotonic" || name == "perf_counter"));
+        dict.insert_str("adjustable", py_bool(false));
+        dict.insert_str("resolution", py_float(1e-9));
         Ok(PyObjectRef::new(PyObject::Instance {
             typ: PyObjectRef::new(PyObject::Type {
                 name: "namespace".to_string(),
-                dict: Box::new(HashMap::new()),
+                dict: Box::new(str_map_to_typedict(HashMap::new())),
                 bases: vec![],
                 mro: vec![],
             }),
@@ -432,10 +432,10 @@ pub fn create_time_dict() -> HashMap<String, PyObjectRef> {
     });
 
     // Constants
-    d.insert("altzone".to_string(), py_int(0));
-    d.insert("daylight".to_string(), py_int(0));
-    d.insert("timezone".to_string(), py_int(0));
-    d.insert("tzname".to_string(), py_tuple(vec![py_str("UTC"), py_str("UTC")]));
+    d.insert_str("altzone", py_int(0));
+    d.insert_str("daylight", py_int(0));
+    d.insert_str("timezone", py_int(0));
+    d.insert_str("tzname", py_tuple(vec![py_str("UTC"), py_str("UTC")]));
 
     // `time.struct_time(sequence)` — real CPython accepts any 9+-element
     // sequence and builds a real structseq from it (used directly by real
@@ -443,7 +443,7 @@ pub fn create_time_dict() -> HashMap<String, PyObjectRef> {
     // previous stub just returned its argument completely unchanged (a
     // bare tuple, with none of the named-attribute access a real
     // struct_time provides).
-    d.insert("struct_time".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    d.insert_str("struct_time", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "struct_time".to_string(),
         func: |args| {
             if args.is_empty() { return Err(PyError::type_error("struct_time() takes at least 1 argument")); }
@@ -463,7 +463,7 @@ pub fn create_time_dict() -> HashMap<String, PyObjectRef> {
     // implements the 9 core fields (no `tm_zone`/`tm_gmtoff`), but the
     // constant must still exist and be large enough that the slice
     // `tt[:11]` doesn't silently truncate real fields.
-    d.insert("_STRUCT_TM_ITEMS".to_string(), py_int(11));
+    d.insert_str("_STRUCT_TM_ITEMS", py_int(11));
 
     d
 }
@@ -825,10 +825,10 @@ fn get_tzinfo_type() -> PyObjectRef {
             PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $f })
         };
     }
-    type_dict.insert("utcoffset".to_string(), bf!("utcoffset", |_args| Err(PyError::runtime_error("tzinfo subclasses must override utcoffset()"))));
-    type_dict.insert("dst".to_string(), bf!("dst", |_args| Err(PyError::runtime_error("tzinfo subclasses must override dst()"))));
-    type_dict.insert("tzname".to_string(), bf!("tzname", |_args| Err(PyError::runtime_error("tzinfo subclasses must override tzname()"))));
-    let typ = PyObjectRef::new(PyObject::Type { name: "tzinfo".to_string(), dict: Box::new(type_dict), bases: vec![], mro: vec![] });
+    type_dict.insert_str("utcoffset", bf!("utcoffset", |_args| Err(PyError::runtime_error("tzinfo subclasses must override utcoffset()"))));
+    type_dict.insert_str("dst", bf!("dst", |_args| Err(PyError::runtime_error("tzinfo subclasses must override dst()"))));
+    type_dict.insert_str("tzname", bf!("tzname", |_args| Err(PyError::runtime_error("tzinfo subclasses must override tzname()"))));
+    let typ = PyObjectRef::new(PyObject::Type { name: "tzinfo".to_string(), dict: Box::new(str_map_to_typedict(type_dict)), bases: vec![], mro: vec![] });
     TZINFO_TYPE.with(|c| { *c.borrow_mut() = Some(typ.clone()); });
     typ
 }
@@ -876,7 +876,7 @@ fn build_timedelta_type() -> PyObjectRef {
         };
     }
 
-    type_dict.insert("__init__".to_string(), bf!("__init__", |args| {
+    type_dict.insert_str("__init__", bf!("__init__", |args| {
         let ctor = CtorArgs::parse(&args[1..]);
         let days = ctor.get_i64(0, "days", 0);
         let seconds = ctor.get_i64(1, "seconds", 0);
@@ -890,20 +890,20 @@ fn build_timedelta_type() -> PyObjectRef {
         let total_us = microseconds + milliseconds * 1000;
         let (d, s, us) = normalize_timedelta(total_days, total_seconds, total_us);
         if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
-            dict.insert("days".to_string(), py_int(d));
-            dict.insert("seconds".to_string(), py_int(s));
-            dict.insert("microseconds".to_string(), py_int(us));
+            dict.insert_str("days", py_int(d));
+            dict.insert_str("seconds", py_int(s));
+            dict.insert_str("microseconds", py_int(us));
         }
         Ok(py_none())
     }));
-    type_dict.insert("total_seconds".to_string(), bf!("total_seconds", |args| {
+    type_dict.insert_str("total_seconds", bf!("total_seconds", |args| {
         let d = inst_get_i64(&args[0], "days");
         let s = inst_get_i64(&args[0], "seconds");
         let us = inst_get_i64(&args[0], "microseconds");
         Ok(py_float(d as f64 * 86400.0 + s as f64 + us as f64 / 1_000_000.0))
     }));
-    type_dict.insert("__str__".to_string(), bf!("__str__", |args| Ok(py_str(&timedelta_str(&args[0])))));
-    type_dict.insert("__repr__".to_string(), bf!("__repr__", |args| {
+    type_dict.insert_str("__str__", bf!("__str__", |args| Ok(py_str(&timedelta_str(&args[0])))));
+    type_dict.insert_str("__repr__", bf!("__repr__", |args| {
         let d = inst_get_i64(&args[0], "days");
         let s = inst_get_i64(&args[0], "seconds");
         let us = inst_get_i64(&args[0], "microseconds");
@@ -914,56 +914,56 @@ fn build_timedelta_type() -> PyObjectRef {
         if parts.is_empty() { parts.push("0".to_string()); }
         Ok(py_str(&format!("datetime.timedelta({})", parts.join(", "))))
     }));
-    type_dict.insert("__eq__".to_string(), bf!("__eq__", |args| {
+    type_dict.insert_str("__eq__", bf!("__eq__", |args| {
         if instance_type_name(&args[1]) != "timedelta" { return Ok(py_bool(false)); }
         Ok(py_bool(timedelta_total_us(&args[0]) == timedelta_total_us(&args[1])))
     }));
-    type_dict.insert("__lt__".to_string(), bf!("__lt__", |args| {
+    type_dict.insert_str("__lt__", bf!("__lt__", |args| {
         if instance_type_name(&args[1]) != "timedelta" { return Err(PyError::type_error("'<' not supported between instances of 'timedelta' and other type")); }
         Ok(py_bool(timedelta_total_us(&args[0]) < timedelta_total_us(&args[1])))
     }));
-    type_dict.insert("__le__".to_string(), bf!("__le__", |args| {
+    type_dict.insert_str("__le__", bf!("__le__", |args| {
         if instance_type_name(&args[1]) != "timedelta" { return Err(PyError::type_error("'<=' not supported between instances of 'timedelta' and other type")); }
         Ok(py_bool(timedelta_total_us(&args[0]) <= timedelta_total_us(&args[1])))
     }));
-    type_dict.insert("__gt__".to_string(), bf!("__gt__", |args| {
+    type_dict.insert_str("__gt__", bf!("__gt__", |args| {
         if instance_type_name(&args[1]) != "timedelta" { return Err(PyError::type_error("'>' not supported between instances of 'timedelta' and other type")); }
         Ok(py_bool(timedelta_total_us(&args[0]) > timedelta_total_us(&args[1])))
     }));
-    type_dict.insert("__ge__".to_string(), bf!("__ge__", |args| {
+    type_dict.insert_str("__ge__", bf!("__ge__", |args| {
         if instance_type_name(&args[1]) != "timedelta" { return Err(PyError::type_error("'>=' not supported between instances of 'timedelta' and other type")); }
         Ok(py_bool(timedelta_total_us(&args[0]) >= timedelta_total_us(&args[1])))
     }));
-    type_dict.insert("__hash__".to_string(), bf!("__hash__", |args| Ok(py_int(timedelta_total_us(&args[0]) as i64))));
-    type_dict.insert("__bool__".to_string(), bf!("__bool__", |args| Ok(py_bool(timedelta_total_us(&args[0]) != 0))));
-    type_dict.insert("__add__".to_string(), bf!("__add__", |args| {
+    type_dict.insert_str("__hash__", bf!("__hash__", |args| Ok(py_int(timedelta_total_us(&args[0]) as i64))));
+    type_dict.insert_str("__bool__", bf!("__bool__", |args| Ok(py_bool(timedelta_total_us(&args[0]) != 0))));
+    type_dict.insert_str("__add__", bf!("__add__", |args| {
         if instance_type_name(&args[1]) != "timedelta" { return Err(PyError::type_error("unsupported operand type(s) for +: 'timedelta' and other type")); }
         Ok(make_timedelta_from_us(timedelta_total_us(&args[0]) + timedelta_total_us(&args[1])))
     }));
-    type_dict.insert("__radd__".to_string(), bf!("__radd__", |args| {
+    type_dict.insert_str("__radd__", bf!("__radd__", |args| {
         if instance_type_name(&args[1]) != "timedelta" { return Err(PyError::type_error("unsupported operand type(s) for +: 'timedelta' and other type")); }
         Ok(make_timedelta_from_us(timedelta_total_us(&args[0]) + timedelta_total_us(&args[1])))
     }));
-    type_dict.insert("__sub__".to_string(), bf!("__sub__", |args| {
+    type_dict.insert_str("__sub__", bf!("__sub__", |args| {
         if instance_type_name(&args[1]) != "timedelta" { return Err(PyError::type_error("unsupported operand type(s) for -: 'timedelta' and other type")); }
         Ok(make_timedelta_from_us(timedelta_total_us(&args[0]) - timedelta_total_us(&args[1])))
     }));
-    type_dict.insert("__rsub__".to_string(), bf!("__rsub__", |args| {
+    type_dict.insert_str("__rsub__", bf!("__rsub__", |args| {
         if instance_type_name(&args[1]) != "timedelta" { return Err(PyError::type_error("unsupported operand type(s) for -: 'timedelta' and other type")); }
         Ok(make_timedelta_from_us(timedelta_total_us(&args[1]) - timedelta_total_us(&args[0])))
     }));
-    type_dict.insert("__neg__".to_string(), bf!("__neg__", |args| Ok(make_timedelta_from_us(-timedelta_total_us(&args[0])))));
-    type_dict.insert("__pos__".to_string(), bf!("__pos__", |args| Ok(make_timedelta_from_us(timedelta_total_us(&args[0])))));
-    type_dict.insert("__abs__".to_string(), bf!("__abs__", |args| Ok(make_timedelta_from_us(timedelta_total_us(&args[0]).abs()))));
-    type_dict.insert("__mul__".to_string(), bf!("__mul__", |args| {
+    type_dict.insert_str("__neg__", bf!("__neg__", |args| Ok(make_timedelta_from_us(-timedelta_total_us(&args[0])))));
+    type_dict.insert_str("__pos__", bf!("__pos__", |args| Ok(make_timedelta_from_us(timedelta_total_us(&args[0])))));
+    type_dict.insert_str("__abs__", bf!("__abs__", |args| Ok(make_timedelta_from_us(timedelta_total_us(&args[0]).abs()))));
+    type_dict.insert_str("__mul__", bf!("__mul__", |args| {
         let factor = args[1].as_f64().ok_or_else(|| PyError::type_error("unsupported operand type(s) for *"))?;
         Ok(make_timedelta_from_us((timedelta_total_us(&args[0]) as f64 * factor).round() as i128))
     }));
-    type_dict.insert("__rmul__".to_string(), bf!("__rmul__", |args| {
+    type_dict.insert_str("__rmul__", bf!("__rmul__", |args| {
         let factor = args[1].as_f64().ok_or_else(|| PyError::type_error("unsupported operand type(s) for *"))?;
         Ok(make_timedelta_from_us((timedelta_total_us(&args[0]) as f64 * factor).round() as i128))
     }));
-    type_dict.insert("__truediv__".to_string(), bf!("__truediv__", |args| {
+    type_dict.insert_str("__truediv__", bf!("__truediv__", |args| {
         if instance_type_name(&args[1]) == "timedelta" {
             let a = timedelta_total_us(&args[0]) as f64;
             let b = timedelta_total_us(&args[1]) as f64;
@@ -972,7 +972,7 @@ fn build_timedelta_type() -> PyObjectRef {
         let divisor = args[1].as_f64().ok_or_else(|| PyError::type_error("unsupported operand type(s) for /"))?;
         Ok(make_timedelta_from_us((timedelta_total_us(&args[0]) as f64 / divisor).round() as i128))
     }));
-    type_dict.insert("__floordiv__".to_string(), bf!("__floordiv__", |args| {
+    type_dict.insert_str("__floordiv__", bf!("__floordiv__", |args| {
         if instance_type_name(&args[1]) == "timedelta" {
             let a = timedelta_total_us(&args[0]);
             let b = timedelta_total_us(&args[1]);
@@ -982,14 +982,14 @@ fn build_timedelta_type() -> PyObjectRef {
         Ok(make_timedelta_from_us(timedelta_total_us(&args[0]) / divisor as i128))
     }));
 
-    PyObjectRef::new(PyObject::Type { name: "timedelta".to_string(), dict: Box::new(type_dict), bases: vec![], mro: vec![] })
+    PyObjectRef::new(PyObject::Type { name: "timedelta".to_string(), dict: Box::new(str_map_to_typedict(type_dict)), bases: vec![], mro: vec![] })
 }
 
 fn make_timedelta_with_type(typ: PyObjectRef, days: i64, seconds: i64, microseconds: i64) -> PyObjectRef {
     let mut dict = AttrMap::new();
-    dict.insert("days".to_string(), py_int(days));
-    dict.insert("seconds".to_string(), py_int(seconds));
-    dict.insert("microseconds".to_string(), py_int(microseconds));
+    dict.insert_str("days", py_int(days));
+    dict.insert_str("seconds", py_int(seconds));
+    dict.insert_str("microseconds", py_int(microseconds));
     PyObjectRef::new(PyObject::Instance { typ, dict })
 }
 
@@ -1006,9 +1006,9 @@ fn get_timedelta_type() -> PyObjectRef {
     let max_inst = make_timedelta_with_type(typ.clone(), 999_999_999, 86399, 999_999);
     let res_inst = make_timedelta_with_type(typ.clone(), 0, 0, 1);
     if let PyObject::Type { dict, .. } = &mut *typ.borrow_mut() {
-        dict.insert("min".to_string(), min_inst);
-        dict.insert("max".to_string(), max_inst);
-        dict.insert("resolution".to_string(), res_inst);
+        dict.insert_str("min", min_inst);
+        dict.insert_str("max", max_inst);
+        dict.insert_str("resolution", res_inst);
     }
     TIMEDELTA_TYPE.with(|c| { *c.borrow_mut() = Some(typ.clone()); });
     typ
@@ -1033,7 +1033,7 @@ fn build_date_type() -> PyObjectRef {
         };
     }
 
-    type_dict.insert("__init__".to_string(), bf!("__init__", |args| {
+    type_dict.insert_str("__init__", bf!("__init__", |args| {
         let ctor = CtorArgs::parse(&args[1..]);
         let year = ctor.get_i64(0, "year", 1);
         let month = ctor.get_i64(1, "month", 1);
@@ -1042,25 +1042,25 @@ fn build_date_type() -> PyObjectRef {
         if !(1..=12).contains(&month) { return Err(PyError::value_error("month must be in 1..12")); }
         if !(1..=days_in_month(year, month)).contains(&day) { return Err(PyError::value_error("day is out of range for month")); }
         if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
-            dict.insert("year".to_string(), py_int(year));
-            dict.insert("month".to_string(), py_int(month));
-            dict.insert("day".to_string(), py_int(day));
+            dict.insert_str("year", py_int(year));
+            dict.insert_str("month", py_int(month));
+            dict.insert_str("day", py_int(day));
         }
         Ok(py_none())
     }));
-    type_dict.insert("isoformat".to_string(), bf!("isoformat", |args| {
+    type_dict.insert_str("isoformat", bf!("isoformat", |args| {
         Ok(py_str(&format!("{:04}-{:02}-{:02}", inst_get_i64(&args[0], "year"), inst_get_i64(&args[0], "month"), inst_get_i64(&args[0], "day"))))
     }));
-    type_dict.insert("__str__".to_string(), bf!("__str__", |args| {
+    type_dict.insert_str("__str__", bf!("__str__", |args| {
         Ok(py_str(&format!("{:04}-{:02}-{:02}", inst_get_i64(&args[0], "year"), inst_get_i64(&args[0], "month"), inst_get_i64(&args[0], "day"))))
     }));
-    type_dict.insert("__repr__".to_string(), bf!("__repr__", |args| {
+    type_dict.insert_str("__repr__", bf!("__repr__", |args| {
         Ok(py_str(&format!("datetime.date({}, {}, {})", inst_get_i64(&args[0], "year"), inst_get_i64(&args[0], "month"), inst_get_i64(&args[0], "day"))))
     }));
-    type_dict.insert("weekday".to_string(), bf!("weekday", |args| Ok(py_int(weekday_from_ordinal(date_ordinal(&args[0]))))));
-    type_dict.insert("isoweekday".to_string(), bf!("isoweekday", |args| Ok(py_int(weekday_from_ordinal(date_ordinal(&args[0])) + 1))));
-    type_dict.insert("toordinal".to_string(), bf!("toordinal", |args| Ok(py_int(date_ordinal(&args[0])))));
-    type_dict.insert("timetuple".to_string(), bf!("timetuple", |args| {
+    type_dict.insert_str("weekday", bf!("weekday", |args| Ok(py_int(weekday_from_ordinal(date_ordinal(&args[0]))))));
+    type_dict.insert_str("isoweekday", bf!("isoweekday", |args| Ok(py_int(weekday_from_ordinal(date_ordinal(&args[0])) + 1))));
+    type_dict.insert_str("toordinal", bf!("toordinal", |args| Ok(py_int(date_ordinal(&args[0])))));
+    type_dict.insert_str("timetuple", bf!("timetuple", |args| {
         let ord = date_ordinal(&args[0]);
         let year = inst_get_i64(&args[0], "year");
         let wday = weekday_from_ordinal(ord);
@@ -1070,70 +1070,70 @@ fn build_date_type() -> PyObjectRef {
             py_int(0), py_int(0), py_int(0), py_int(wday), py_int(yday + 1), py_int(-1),
         ]))
     }));
-    type_dict.insert("strftime".to_string(), bf!("strftime", |args| {
+    type_dict.insert_str("strftime", bf!("strftime", |args| {
         let fmt = if args.len() > 1 { args[1].str() } else { "%Y-%m-%d".to_string() };
         let ord = date_ordinal(&args[0]);
         let year = inst_get_i64(&args[0], "year");
         Ok(py_str(&format_strftime(&fmt, year, inst_get_i64(&args[0], "month"), inst_get_i64(&args[0], "day"), 0, 0, 0, weekday_from_ordinal(ord), day_of_year(year, ord))))
     }));
-    type_dict.insert("replace".to_string(), bf!("replace", |args| {
+    type_dict.insert_str("replace", bf!("replace", |args| {
         let ctor = CtorArgs::parse(&args[1..]);
         let year = ctor.get(0, "year").and_then(|v| v.as_i64()).unwrap_or_else(|| inst_get_i64(&args[0], "year"));
         let month = ctor.get(1, "month").and_then(|v| v.as_i64()).unwrap_or_else(|| inst_get_i64(&args[0], "month"));
         let day = ctor.get(2, "day").and_then(|v| v.as_i64()).unwrap_or_else(|| inst_get_i64(&args[0], "day"));
         Ok(make_date(year, month, day))
     }));
-    type_dict.insert("__eq__".to_string(), bf!("__eq__", |args| {
+    type_dict.insert_str("__eq__", bf!("__eq__", |args| {
         if instance_type_name(&args[1]) != "date" { return Ok(py_bool(false)); }
         Ok(py_bool(date_ordinal(&args[0]) == date_ordinal(&args[1])))
     }));
-    type_dict.insert("__lt__".to_string(), bf!("__lt__", |args| {
+    type_dict.insert_str("__lt__", bf!("__lt__", |args| {
         if instance_type_name(&args[1]) != "date" { return Err(PyError::type_error("'<' not supported between instances of 'date' and other type")); }
         Ok(py_bool(date_ordinal(&args[0]) < date_ordinal(&args[1])))
     }));
-    type_dict.insert("__le__".to_string(), bf!("__le__", |args| {
+    type_dict.insert_str("__le__", bf!("__le__", |args| {
         if instance_type_name(&args[1]) != "date" { return Err(PyError::type_error("'<=' not supported between instances of 'date' and other type")); }
         Ok(py_bool(date_ordinal(&args[0]) <= date_ordinal(&args[1])))
     }));
-    type_dict.insert("__gt__".to_string(), bf!("__gt__", |args| {
+    type_dict.insert_str("__gt__", bf!("__gt__", |args| {
         if instance_type_name(&args[1]) != "date" { return Err(PyError::type_error("'>' not supported between instances of 'date' and other type")); }
         Ok(py_bool(date_ordinal(&args[0]) > date_ordinal(&args[1])))
     }));
-    type_dict.insert("__ge__".to_string(), bf!("__ge__", |args| {
+    type_dict.insert_str("__ge__", bf!("__ge__", |args| {
         if instance_type_name(&args[1]) != "date" { return Err(PyError::type_error("'>=' not supported between instances of 'date' and other type")); }
         Ok(py_bool(date_ordinal(&args[0]) >= date_ordinal(&args[1])))
     }));
-    type_dict.insert("__hash__".to_string(), bf!("__hash__", |args| Ok(py_int(date_ordinal(&args[0])))));
-    type_dict.insert("__add__".to_string(), bf!("__add__", |args| {
+    type_dict.insert_str("__hash__", bf!("__hash__", |args| Ok(py_int(date_ordinal(&args[0])))));
+    type_dict.insert_str("__add__", bf!("__add__", |args| {
         if instance_type_name(&args[1]) != "timedelta" { return Err(PyError::type_error("unsupported operand type(s) for +: 'date' and other type")); }
         Ok(make_date_from_ordinal(date_ordinal(&args[0]) + inst_get_i64(&args[1], "days")))
     }));
-    type_dict.insert("__radd__".to_string(), bf!("__radd__", |args| {
+    type_dict.insert_str("__radd__", bf!("__radd__", |args| {
         if instance_type_name(&args[1]) != "timedelta" { return Err(PyError::type_error("unsupported operand type(s) for +: 'date' and other type")); }
         Ok(make_date_from_ordinal(date_ordinal(&args[0]) + inst_get_i64(&args[1], "days")))
     }));
-    type_dict.insert("__sub__".to_string(), bf!("__sub__", |args| {
+    type_dict.insert_str("__sub__", bf!("__sub__", |args| {
         match instance_type_name(&args[1]).as_str() {
             "timedelta" => Ok(make_date_from_ordinal(date_ordinal(&args[0]) - inst_get_i64(&args[1], "days"))),
             "date" => Ok(make_timedelta(date_ordinal(&args[0]) - date_ordinal(&args[1]), 0, 0)),
             _ => Err(PyError::type_error("unsupported operand type(s) for -: 'date' and other type")),
         }
     }));
-    type_dict.insert("today".to_string(), bf!("today", |_args| {
+    type_dict.insert_str("today", bf!("today", |_args| {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
         let (y, m, d, _, _, _, _, _) = epoch_to_ymd(now.as_secs() as i64);
         Ok(make_date(y, m, d))
     }));
-    type_dict.insert("fromordinal".to_string(), bf!("fromordinal", |args| {
+    type_dict.insert_str("fromordinal", bf!("fromordinal", |args| {
         let n = if !args.is_empty() { args[0].as_i64().unwrap_or(1) } else { 1 };
         Ok(make_date_from_ordinal(n))
     }));
-    type_dict.insert("fromtimestamp".to_string(), bf!("fromtimestamp", |args| {
+    type_dict.insert_str("fromtimestamp", bf!("fromtimestamp", |args| {
         let ts = if !args.is_empty() { args[0].as_f64().unwrap_or(0.0) } else { 0.0 };
         let (y, m, d, _, _, _, _, _) = epoch_to_ymd(ts as i64);
         Ok(make_date(y, m, d))
     }));
-    type_dict.insert("fromisoformat".to_string(), bf!("fromisoformat", |args| {
+    type_dict.insert_str("fromisoformat", bf!("fromisoformat", |args| {
         let s = if !args.is_empty() { args[0].str() } else { String::new() };
         let parts: Vec<&str> = s.splitn(3, '-').collect();
         if parts.len() != 3 { return Err(PyError::value_error("Invalid isoformat string")); }
@@ -1143,15 +1143,15 @@ fn build_date_type() -> PyObjectRef {
         Ok(make_date(y, m, d))
     }));
 
-    PyObjectRef::new(PyObject::Type { name: "date".to_string(), dict: Box::new(type_dict), bases: vec![], mro: vec![] })
+    PyObjectRef::new(PyObject::Type { name: "date".to_string(), dict: Box::new(str_map_to_typedict(type_dict)), bases: vec![], mro: vec![] })
 }
 
 fn make_date(year: i64, month: i64, day: i64) -> PyObjectRef {
     let typ = get_date_type();
     let mut dict = AttrMap::new();
-    dict.insert("year".to_string(), py_int(year));
-    dict.insert("month".to_string(), py_int(month));
-    dict.insert("day".to_string(), py_int(day));
+    dict.insert_str("year", py_int(year));
+    dict.insert_str("month", py_int(month));
+    dict.insert_str("day", py_int(day));
     PyObjectRef::new(PyObject::Instance { typ, dict })
 }
 
@@ -1169,9 +1169,9 @@ fn get_date_type() -> PyObjectRef {
     });
     let res_inst = make_timedelta(1, 0, 0);
     if let PyObject::Type { dict, .. } = &mut *typ.borrow_mut() {
-        dict.insert("min".to_string(), min_inst);
-        dict.insert("max".to_string(), max_inst);
-        dict.insert("resolution".to_string(), res_inst);
+        dict.insert_str("min", min_inst);
+        dict.insert_str("max", max_inst);
+        dict.insert_str("resolution", res_inst);
     }
     DATE_TYPE.with(|c| { *c.borrow_mut() = Some(typ.clone()); });
     typ
@@ -1211,7 +1211,7 @@ fn build_time_type() -> PyObjectRef {
         };
     }
 
-    type_dict.insert("__init__".to_string(), bf!("__init__", |args| {
+    type_dict.insert_str("__init__", bf!("__init__", |args| {
         let ctor = CtorArgs::parse(&args[1..]);
         let hour = ctor.get_i64(0, "hour", 0);
         let minute = ctor.get_i64(1, "minute", 0);
@@ -1224,21 +1224,21 @@ fn build_time_type() -> PyObjectRef {
         if !(0..60).contains(&second) { return Err(PyError::value_error("second must be in 0..59")); }
         if !(0..1_000_000).contains(&microsecond) { return Err(PyError::value_error("microsecond must be in 0..999999")); }
         if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
-            dict.insert("hour".to_string(), py_int(hour));
-            dict.insert("minute".to_string(), py_int(minute));
-            dict.insert("second".to_string(), py_int(second));
-            dict.insert("microsecond".to_string(), py_int(microsecond));
-            dict.insert("tzinfo".to_string(), tzinfo);
-            dict.insert("fold".to_string(), py_int(fold));
+            dict.insert_str("hour", py_int(hour));
+            dict.insert_str("minute", py_int(minute));
+            dict.insert_str("second", py_int(second));
+            dict.insert_str("microsecond", py_int(microsecond));
+            dict.insert_str("tzinfo", tzinfo);
+            dict.insert_str("fold", py_int(fold));
         }
         Ok(py_none())
     }));
-    type_dict.insert("isoformat".to_string(), bf!("isoformat", |args| Ok(py_str(&time_isoformat(&args[0])))));
-    type_dict.insert("__str__".to_string(), bf!("__str__", |args| Ok(py_str(&time_isoformat(&args[0])))));
-    type_dict.insert("__repr__".to_string(), bf!("__repr__", |args| {
+    type_dict.insert_str("isoformat", bf!("isoformat", |args| Ok(py_str(&time_isoformat(&args[0])))));
+    type_dict.insert_str("__str__", bf!("__str__", |args| Ok(py_str(&time_isoformat(&args[0])))));
+    type_dict.insert_str("__repr__", bf!("__repr__", |args| {
         Ok(py_str(&format!("datetime.time({}, {}, {})", inst_get_i64(&args[0], "hour"), inst_get_i64(&args[0], "minute"), inst_get_i64(&args[0], "second"))))
     }));
-    type_dict.insert("replace".to_string(), bf!("replace", |args| {
+    type_dict.insert_str("replace", bf!("replace", |args| {
         let ctor = CtorArgs::parse(&args[1..]);
         let hour = ctor.get(0, "hour").and_then(|v| v.as_i64()).unwrap_or_else(|| inst_get_i64(&args[0], "hour"));
         let minute = ctor.get(1, "minute").and_then(|v| v.as_i64()).unwrap_or_else(|| inst_get_i64(&args[0], "minute"));
@@ -1248,35 +1248,35 @@ fn build_time_type() -> PyObjectRef {
         let fold = ctor.get_i64(5, "fold", 0);
         Ok(make_time(hour, minute, second, microsecond, tzinfo, fold))
     }));
-    type_dict.insert("__eq__".to_string(), bf!("__eq__", |args| {
+    type_dict.insert_str("__eq__", bf!("__eq__", |args| {
         if instance_type_name(&args[1]) != "time" { return Ok(py_bool(false)); }
         Ok(py_bool(time_tuple_us(&args[0]) == time_tuple_us(&args[1])))
     }));
-    type_dict.insert("__lt__".to_string(), bf!("__lt__", |args| {
+    type_dict.insert_str("__lt__", bf!("__lt__", |args| {
         if instance_type_name(&args[1]) != "time" { return Err(PyError::type_error("'<' not supported between instances of 'time' and other type")); }
         Ok(py_bool(time_tuple_us(&args[0]) < time_tuple_us(&args[1])))
     }));
-    type_dict.insert("__le__".to_string(), bf!("__le__", |args| {
+    type_dict.insert_str("__le__", bf!("__le__", |args| {
         if instance_type_name(&args[1]) != "time" { return Err(PyError::type_error("'<=' not supported between instances of 'time' and other type")); }
         Ok(py_bool(time_tuple_us(&args[0]) <= time_tuple_us(&args[1])))
     }));
-    type_dict.insert("__gt__".to_string(), bf!("__gt__", |args| {
+    type_dict.insert_str("__gt__", bf!("__gt__", |args| {
         if instance_type_name(&args[1]) != "time" { return Err(PyError::type_error("'>' not supported between instances of 'time' and other type")); }
         Ok(py_bool(time_tuple_us(&args[0]) > time_tuple_us(&args[1])))
     }));
-    type_dict.insert("__ge__".to_string(), bf!("__ge__", |args| {
+    type_dict.insert_str("__ge__", bf!("__ge__", |args| {
         if instance_type_name(&args[1]) != "time" { return Err(PyError::type_error("'>=' not supported between instances of 'time' and other type")); }
         Ok(py_bool(time_tuple_us(&args[0]) >= time_tuple_us(&args[1])))
     }));
-    type_dict.insert("__hash__".to_string(), bf!("__hash__", |args| Ok(py_int(time_tuple_us(&args[0])))));
-    type_dict.insert("utcoffset".to_string(), bf!("utcoffset", |args| {
+    type_dict.insert_str("__hash__", bf!("__hash__", |args| Ok(py_int(time_tuple_us(&args[0])))));
+    type_dict.insert_str("utcoffset", bf!("utcoffset", |args| {
         let tzinfo = inst_get(&args[0], "tzinfo").unwrap_or_else(py_none);
         match get_utcoffset_seconds(&tzinfo, EPOCH_ORDINAL, 0) {
             Some(s) => Ok(make_timedelta(0, s, 0)),
             None => Ok(py_none()),
         }
     }));
-    type_dict.insert("tzname".to_string(), bf!("tzname", |args| {
+    type_dict.insert_str("tzname", bf!("tzname", |args| {
         let tzinfo = inst_get(&args[0], "tzinfo").unwrap_or_else(py_none);
         match tzname_for(&tzinfo, EPOCH_ORDINAL, 0) {
             Some(s) => Ok(py_str(&s)),
@@ -1284,18 +1284,18 @@ fn build_time_type() -> PyObjectRef {
         }
     }));
 
-    PyObjectRef::new(PyObject::Type { name: "time".to_string(), dict: Box::new(type_dict), bases: vec![], mro: vec![] })
+    PyObjectRef::new(PyObject::Type { name: "time".to_string(), dict: Box::new(str_map_to_typedict(type_dict)), bases: vec![], mro: vec![] })
 }
 
 fn make_time(hour: i64, minute: i64, second: i64, microsecond: i64, tzinfo: PyObjectRef, fold: i64) -> PyObjectRef {
     let typ = get_time_type();
     let mut dict = AttrMap::new();
-    dict.insert("hour".to_string(), py_int(hour));
-    dict.insert("minute".to_string(), py_int(minute));
-    dict.insert("second".to_string(), py_int(second));
-    dict.insert("microsecond".to_string(), py_int(microsecond));
-    dict.insert("tzinfo".to_string(), tzinfo);
-    dict.insert("fold".to_string(), py_int(fold));
+    dict.insert_str("hour", py_int(hour));
+    dict.insert_str("minute", py_int(minute));
+    dict.insert_str("second", py_int(second));
+    dict.insert_str("microsecond", py_int(microsecond));
+    dict.insert_str("tzinfo", tzinfo);
+    dict.insert_str("fold", py_int(fold));
     PyObjectRef::new(PyObject::Instance { typ, dict })
 }
 
@@ -1427,7 +1427,7 @@ fn build_datetime_type() -> PyObjectRef {
         };
     }
 
-    type_dict.insert("__init__".to_string(), bf!("__init__", |args| {
+    type_dict.insert_str("__init__", bf!("__init__", |args| {
         let ctor = CtorArgs::parse(&args[1..]);
         let year = ctor.get_i64(0, "year", 1);
         let month = ctor.get_i64(1, "month", 1);
@@ -1446,37 +1446,37 @@ fn build_datetime_type() -> PyObjectRef {
         if !(0..60).contains(&second) { return Err(PyError::value_error("second must be in 0..59")); }
         if !(0..1_000_000).contains(&microsecond) { return Err(PyError::value_error("microsecond must be in 0..999999")); }
         if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
-            dict.insert("year".to_string(), py_int(year));
-            dict.insert("month".to_string(), py_int(month));
-            dict.insert("day".to_string(), py_int(day));
-            dict.insert("hour".to_string(), py_int(hour));
-            dict.insert("minute".to_string(), py_int(minute));
-            dict.insert("second".to_string(), py_int(second));
-            dict.insert("microsecond".to_string(), py_int(microsecond));
-            dict.insert("tzinfo".to_string(), tzinfo);
-            dict.insert("fold".to_string(), py_int(fold));
+            dict.insert_str("year", py_int(year));
+            dict.insert_str("month", py_int(month));
+            dict.insert_str("day", py_int(day));
+            dict.insert_str("hour", py_int(hour));
+            dict.insert_str("minute", py_int(minute));
+            dict.insert_str("second", py_int(second));
+            dict.insert_str("microsecond", py_int(microsecond));
+            dict.insert_str("tzinfo", tzinfo);
+            dict.insert_str("fold", py_int(fold));
         }
         Ok(py_none())
     }));
-    type_dict.insert("isoformat".to_string(), bf!("isoformat", |args| {
+    type_dict.insert_str("isoformat", bf!("isoformat", |args| {
         let sep = if args.len() > 1 { args[1].str().chars().next().unwrap_or('T') } else { 'T' };
         Ok(py_str(&datetime_isoformat(&args[0], sep)))
     }));
-    type_dict.insert("__str__".to_string(), bf!("__str__", |args| Ok(py_str(&datetime_isoformat(&args[0], ' ')))));
-    type_dict.insert("__repr__".to_string(), bf!("__repr__", |args| {
+    type_dict.insert_str("__str__", bf!("__str__", |args| Ok(py_str(&datetime_isoformat(&args[0], ' ')))));
+    type_dict.insert_str("__repr__", bf!("__repr__", |args| {
         Ok(py_str(&format!(
             "datetime.datetime({}, {}, {}, {}, {}, {})",
             inst_get_i64(&args[0], "year"), inst_get_i64(&args[0], "month"), inst_get_i64(&args[0], "day"),
             inst_get_i64(&args[0], "hour"), inst_get_i64(&args[0], "minute"), inst_get_i64(&args[0], "second"),
         )))
     }));
-    type_dict.insert("date".to_string(), bf!("date", |args| Ok(make_date(inst_get_i64(&args[0], "year"), inst_get_i64(&args[0], "month"), inst_get_i64(&args[0], "day")))));
-    type_dict.insert("time".to_string(), bf!("time", |args| Ok(make_time(inst_get_i64(&args[0], "hour"), inst_get_i64(&args[0], "minute"), inst_get_i64(&args[0], "second"), inst_get_i64(&args[0], "microsecond"), py_none(), 0))));
-    type_dict.insert("timetz".to_string(), bf!("timetz", |args| Ok(make_time(inst_get_i64(&args[0], "hour"), inst_get_i64(&args[0], "minute"), inst_get_i64(&args[0], "second"), inst_get_i64(&args[0], "microsecond"), datetime_tzinfo(&args[0]), 0))));
-    type_dict.insert("weekday".to_string(), bf!("weekday", |args| Ok(py_int(weekday_from_ordinal(datetime_ordinal(&args[0]))))));
-    type_dict.insert("isoweekday".to_string(), bf!("isoweekday", |args| Ok(py_int(weekday_from_ordinal(datetime_ordinal(&args[0])) + 1))));
-    type_dict.insert("toordinal".to_string(), bf!("toordinal", |args| Ok(py_int(datetime_ordinal(&args[0])))));
-    type_dict.insert("timestamp".to_string(), bf!("timestamp", |args| {
+    type_dict.insert_str("date", bf!("date", |args| Ok(make_date(inst_get_i64(&args[0], "year"), inst_get_i64(&args[0], "month"), inst_get_i64(&args[0], "day")))));
+    type_dict.insert_str("time", bf!("time", |args| Ok(make_time(inst_get_i64(&args[0], "hour"), inst_get_i64(&args[0], "minute"), inst_get_i64(&args[0], "second"), inst_get_i64(&args[0], "microsecond"), py_none(), 0))));
+    type_dict.insert_str("timetz", bf!("timetz", |args| Ok(make_time(inst_get_i64(&args[0], "hour"), inst_get_i64(&args[0], "minute"), inst_get_i64(&args[0], "second"), inst_get_i64(&args[0], "microsecond"), datetime_tzinfo(&args[0]), 0))));
+    type_dict.insert_str("weekday", bf!("weekday", |args| Ok(py_int(weekday_from_ordinal(datetime_ordinal(&args[0]))))));
+    type_dict.insert_str("isoweekday", bf!("isoweekday", |args| Ok(py_int(weekday_from_ordinal(datetime_ordinal(&args[0])) + 1))));
+    type_dict.insert_str("toordinal", bf!("toordinal", |args| Ok(py_int(datetime_ordinal(&args[0])))));
+    type_dict.insert_str("timestamp", bf!("timestamp", |args| {
         let ord = datetime_ordinal(&args[0]);
         let day_us = datetime_day_us(&args[0]);
         let tz = datetime_tzinfo(&args[0]);
@@ -1484,14 +1484,14 @@ fn build_datetime_type() -> PyObjectRef {
         let unix_us = (ord - EPOCH_ORDINAL) as i128 * 86_400_000_000 + day_us as i128 - (off as i128) * 1_000_000;
         Ok(py_float(unix_us as f64 / 1_000_000.0))
     }));
-    type_dict.insert("utcoffset".to_string(), bf!("utcoffset", |args| {
+    type_dict.insert_str("utcoffset", bf!("utcoffset", |args| {
         let tz = datetime_tzinfo(&args[0]);
         match get_utcoffset_seconds(&tz, datetime_ordinal(&args[0]), datetime_day_us(&args[0]) / 1_000_000) {
             Some(s) => Ok(make_timedelta(0, s, 0)),
             None => Ok(py_none()),
         }
     }));
-    type_dict.insert("dst".to_string(), bf!("dst", |args| {
+    type_dict.insert_str("dst", bf!("dst", |args| {
         let tz = datetime_tzinfo(&args[0]);
         if matches!(tz, PyObjectRef::None) { return Ok(py_none()); }
         if instance_type_name(&tz) == "ZoneInfo" {
@@ -1506,14 +1506,14 @@ fn build_datetime_type() -> PyObjectRef {
         }
         Ok(make_timedelta(0, 0, 0))
     }));
-    type_dict.insert("tzname".to_string(), bf!("tzname", |args| {
+    type_dict.insert_str("tzname", bf!("tzname", |args| {
         let tz = datetime_tzinfo(&args[0]);
         match tzname_for(&tz, datetime_ordinal(&args[0]), datetime_day_us(&args[0]) / 1_000_000) {
             Some(s) => Ok(py_str(&s)),
             None => Ok(py_none()),
         }
     }));
-    type_dict.insert("replace".to_string(), bf!("replace", |args| {
+    type_dict.insert_str("replace", bf!("replace", |args| {
         let ctor = CtorArgs::parse(&args[1..]);
         let year = ctor.get(0, "year").and_then(|v| v.as_i64()).unwrap_or_else(|| inst_get_i64(&args[0], "year"));
         let month = ctor.get(1, "month").and_then(|v| v.as_i64()).unwrap_or_else(|| inst_get_i64(&args[0], "month"));
@@ -1526,7 +1526,7 @@ fn build_datetime_type() -> PyObjectRef {
         let fold = ctor.get_i64(8, "fold", 0);
         Ok(make_datetime(year, month, day, hour, minute, second, microsecond, tzinfo, fold))
     }));
-    type_dict.insert("astimezone".to_string(), bf!("astimezone", |args| {
+    type_dict.insert_str("astimezone", bf!("astimezone", |args| {
         let new_tz = if args.len() > 1 { args[1].clone() } else { py_none() };
         let total_utc = datetime_total_us_utc(&args[0]);
         let ord = total_utc.div_euclid(86_400_000_000);
@@ -1535,7 +1535,7 @@ fn build_datetime_type() -> PyObjectRef {
         let local_total = total_utc + (off as i128) * 1_000_000;
         Ok(make_datetime_from_total_us(local_total, new_tz))
     }));
-    type_dict.insert("strftime".to_string(), bf!("strftime", |args| {
+    type_dict.insert_str("strftime", bf!("strftime", |args| {
         let fmt = if args.len() > 1 { args[1].str() } else { "%Y-%m-%d %H:%M:%S".to_string() };
         let ord = datetime_ordinal(&args[0]);
         let year = inst_get_i64(&args[0], "year");
@@ -1545,33 +1545,33 @@ fn build_datetime_type() -> PyObjectRef {
             weekday_from_ordinal(ord), day_of_year(year, ord),
         )))
     }));
-    type_dict.insert("__eq__".to_string(), bf!("__eq__", |args| {
+    type_dict.insert_str("__eq__", bf!("__eq__", |args| {
         if instance_type_name(&args[1]) != "datetime" { return Ok(py_bool(false)); }
         if datetime_is_aware(&args[0]) != datetime_is_aware(&args[1]) { return Ok(py_bool(false)); }
         Ok(py_bool(datetime_total_us_utc(&args[0]) == datetime_total_us_utc(&args[1])))
     }));
-    type_dict.insert("__lt__".to_string(), bf!("__lt__", |args| {
+    type_dict.insert_str("__lt__", bf!("__lt__", |args| {
         if instance_type_name(&args[1]) != "datetime" { return Err(PyError::type_error("'<' not supported between instances of 'datetime.datetime' and other type")); }
         if datetime_is_aware(&args[0]) != datetime_is_aware(&args[1]) { return Err(PyError::type_error("can't compare offset-naive and offset-aware datetimes")); }
         Ok(py_bool(datetime_total_us_utc(&args[0]) < datetime_total_us_utc(&args[1])))
     }));
-    type_dict.insert("__le__".to_string(), bf!("__le__", |args| {
+    type_dict.insert_str("__le__", bf!("__le__", |args| {
         if instance_type_name(&args[1]) != "datetime" { return Err(PyError::type_error("'<=' not supported between instances of 'datetime.datetime' and other type")); }
         if datetime_is_aware(&args[0]) != datetime_is_aware(&args[1]) { return Err(PyError::type_error("can't compare offset-naive and offset-aware datetimes")); }
         Ok(py_bool(datetime_total_us_utc(&args[0]) <= datetime_total_us_utc(&args[1])))
     }));
-    type_dict.insert("__gt__".to_string(), bf!("__gt__", |args| {
+    type_dict.insert_str("__gt__", bf!("__gt__", |args| {
         if instance_type_name(&args[1]) != "datetime" { return Err(PyError::type_error("'>' not supported between instances of 'datetime.datetime' and other type")); }
         if datetime_is_aware(&args[0]) != datetime_is_aware(&args[1]) { return Err(PyError::type_error("can't compare offset-naive and offset-aware datetimes")); }
         Ok(py_bool(datetime_total_us_utc(&args[0]) > datetime_total_us_utc(&args[1])))
     }));
-    type_dict.insert("__ge__".to_string(), bf!("__ge__", |args| {
+    type_dict.insert_str("__ge__", bf!("__ge__", |args| {
         if instance_type_name(&args[1]) != "datetime" { return Err(PyError::type_error("'>=' not supported between instances of 'datetime.datetime' and other type")); }
         if datetime_is_aware(&args[0]) != datetime_is_aware(&args[1]) { return Err(PyError::type_error("can't compare offset-naive and offset-aware datetimes")); }
         Ok(py_bool(datetime_total_us_utc(&args[0]) >= datetime_total_us_utc(&args[1])))
     }));
-    type_dict.insert("__hash__".to_string(), bf!("__hash__", |args| Ok(py_int(datetime_total_us_utc(&args[0]) as i64))));
-    type_dict.insert("__add__".to_string(), bf!("__add__", |args| {
+    type_dict.insert_str("__hash__", bf!("__hash__", |args| Ok(py_int(datetime_total_us_utc(&args[0]) as i64))));
+    type_dict.insert_str("__add__", bf!("__add__", |args| {
         if instance_type_name(&args[1]) != "timedelta" { return Err(PyError::type_error("unsupported operand type(s) for +: 'datetime.datetime' and other type")); }
         let td_us = timedelta_total_us(&args[1]);
         let ord = datetime_ordinal(&args[0]);
@@ -1579,7 +1579,7 @@ fn build_datetime_type() -> PyObjectRef {
         let total = (ord as i128) * 86_400_000_000 + day_us + td_us;
         Ok(make_datetime_from_total_us(total, datetime_tzinfo(&args[0])))
     }));
-    type_dict.insert("__radd__".to_string(), bf!("__radd__", |args| {
+    type_dict.insert_str("__radd__", bf!("__radd__", |args| {
         if instance_type_name(&args[1]) != "timedelta" { return Err(PyError::type_error("unsupported operand type(s) for +: 'datetime.datetime' and other type")); }
         let td_us = timedelta_total_us(&args[1]);
         let ord = datetime_ordinal(&args[0]);
@@ -1587,7 +1587,7 @@ fn build_datetime_type() -> PyObjectRef {
         let total = (ord as i128) * 86_400_000_000 + day_us + td_us;
         Ok(make_datetime_from_total_us(total, datetime_tzinfo(&args[0])))
     }));
-    type_dict.insert("__sub__".to_string(), bf!("__sub__", |args| {
+    type_dict.insert_str("__sub__", bf!("__sub__", |args| {
         match instance_type_name(&args[1]).as_str() {
             "timedelta" => {
                 let td_us = timedelta_total_us(&args[1]);
@@ -1605,7 +1605,7 @@ fn build_datetime_type() -> PyObjectRef {
             _ => Err(PyError::type_error("unsupported operand type(s) for -: 'datetime.datetime' and other type")),
         }
     }));
-    type_dict.insert("now".to_string(), bf!("now", |args| {
+    type_dict.insert_str("now", bf!("now", |args| {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
         let (y, mo, d, h, mi, s, _, _) = epoch_to_ymd(now.as_secs() as i64);
         let us = (now.subsec_nanos() / 1000) as i64;
@@ -1620,18 +1620,18 @@ fn build_datetime_type() -> PyObjectRef {
             Ok(make_datetime_from_total_us(total, tz))
         }
     }));
-    type_dict.insert("utcnow".to_string(), bf!("utcnow", |_args| {
+    type_dict.insert_str("utcnow", bf!("utcnow", |_args| {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
         let (y, mo, d, h, mi, s, _, _) = epoch_to_ymd(now.as_secs() as i64);
         let us = (now.subsec_nanos() / 1000) as i64;
         Ok(make_datetime(y, mo, d, h, mi, s, us, py_none(), 0))
     }));
-    type_dict.insert("today".to_string(), bf!("today", |_args| {
+    type_dict.insert_str("today", bf!("today", |_args| {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
         let (y, mo, d, h, mi, s, _, _) = epoch_to_ymd(now.as_secs() as i64);
         Ok(make_datetime(y, mo, d, h, mi, s, 0, py_none(), 0))
     }));
-    type_dict.insert("fromtimestamp".to_string(), bf!("fromtimestamp", |args| {
+    type_dict.insert_str("fromtimestamp", bf!("fromtimestamp", |args| {
         let ts = if !args.is_empty() { args[0].as_f64().unwrap_or(0.0) } else { 0.0 };
         let tz = if args.len() > 1 && !matches!(args[1], PyObjectRef::None) { args[1].clone() } else { py_none() };
         let secs = ts.floor() as i64;
@@ -1645,14 +1645,14 @@ fn build_datetime_type() -> PyObjectRef {
             Ok(make_datetime(y, mo, d, h, mi, s, us, tz, 0))
         }
     }));
-    type_dict.insert("utcfromtimestamp".to_string(), bf!("utcfromtimestamp", |args| {
+    type_dict.insert_str("utcfromtimestamp", bf!("utcfromtimestamp", |args| {
         let ts = if !args.is_empty() { args[0].as_f64().unwrap_or(0.0) } else { 0.0 };
         let secs = ts.floor() as i64;
         let us = ((ts - ts.floor()) * 1_000_000.0).round() as i64;
         let (y, mo, d, h, mi, s, _, _) = epoch_to_ymd(secs);
         Ok(make_datetime(y, mo, d, h, mi, s, us, py_none(), 0))
     }));
-    type_dict.insert("combine".to_string(), bf!("combine", |args| {
+    type_dict.insert_str("combine", bf!("combine", |args| {
         if args.len() < 2 { return Err(PyError::type_error("combine() requires date and time arguments")); }
         let d = &args[0];
         let t = &args[1];
@@ -1663,26 +1663,26 @@ fn build_datetime_type() -> PyObjectRef {
             tzinfo, 0,
         ))
     }));
-    type_dict.insert("fromisoformat".to_string(), bf!("fromisoformat", |args| {
+    type_dict.insert_str("fromisoformat", bf!("fromisoformat", |args| {
         let s = if !args.is_empty() { args[0].str() } else { String::new() };
         parse_datetime_isoformat(&s)
     }));
 
-    PyObjectRef::new(PyObject::Type { name: "datetime".to_string(), dict: Box::new(type_dict), bases: vec![], mro: vec![] })
+    PyObjectRef::new(PyObject::Type { name: "datetime".to_string(), dict: Box::new(str_map_to_typedict(type_dict)), bases: vec![], mro: vec![] })
 }
 
 fn make_datetime(year: i64, month: i64, day: i64, hour: i64, minute: i64, second: i64, microsecond: i64, tzinfo: PyObjectRef, fold: i64) -> PyObjectRef {
     let typ = get_datetime_type();
     let mut dict = AttrMap::new();
-    dict.insert("year".to_string(), py_int(year));
-    dict.insert("month".to_string(), py_int(month));
-    dict.insert("day".to_string(), py_int(day));
-    dict.insert("hour".to_string(), py_int(hour));
-    dict.insert("minute".to_string(), py_int(minute));
-    dict.insert("second".to_string(), py_int(second));
-    dict.insert("microsecond".to_string(), py_int(microsecond));
-    dict.insert("tzinfo".to_string(), tzinfo);
-    dict.insert("fold".to_string(), py_int(fold));
+    dict.insert_str("year", py_int(year));
+    dict.insert_str("month", py_int(month));
+    dict.insert_str("day", py_int(day));
+    dict.insert_str("hour", py_int(hour));
+    dict.insert_str("minute", py_int(minute));
+    dict.insert_str("second", py_int(second));
+    dict.insert_str("microsecond", py_int(microsecond));
+    dict.insert_str("tzinfo", tzinfo);
+    dict.insert_str("fold", py_int(fold));
     PyObjectRef::new(PyObject::Instance { typ, dict })
 }
 
@@ -1704,7 +1704,7 @@ fn build_timezone_type() -> PyObjectRef {
         };
     }
 
-    type_dict.insert("__init__".to_string(), bf!("__init__", |args| {
+    type_dict.insert_str("__init__", bf!("__init__", |args| {
         let ctor = CtorArgs::parse(&args[1..]);
         let offset_seconds = match ctor.get(0, "offset") {
             Some(td) if instance_type_name(&td) == "timedelta" => inst_get_i64(&td, "days") * 86400 + inst_get_i64(&td, "seconds"),
@@ -1712,42 +1712,42 @@ fn build_timezone_type() -> PyObjectRef {
         };
         let name = ctor.get(1, "name").map(|v| v.str());
         if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
-            dict.insert("_offset_seconds".to_string(), py_int(offset_seconds));
-            dict.insert("_name".to_string(), name.map(|n| py_str(&n)).unwrap_or_else(py_none));
+            dict.insert_str("_offset_seconds", py_int(offset_seconds));
+            dict.insert_str("_name", name.map(|n| py_str(&n)).unwrap_or_else(py_none));
         }
         Ok(py_none())
     }));
-    type_dict.insert("utcoffset".to_string(), bf!("utcoffset", |args| Ok(make_timedelta(0, inst_get_i64(&args[0], "_offset_seconds"), 0))));
-    type_dict.insert("dst".to_string(), bf!("dst", |_args| Ok(py_none())));
-    type_dict.insert("tzname".to_string(), bf!("tzname", |args| {
+    type_dict.insert_str("utcoffset", bf!("utcoffset", |args| Ok(make_timedelta(0, inst_get_i64(&args[0], "_offset_seconds"), 0))));
+    type_dict.insert_str("dst", bf!("dst", |_args| Ok(py_none())));
+    type_dict.insert_str("tzname", bf!("tzname", |args| {
         match inst_get(&args[0], "_name") {
             Some(v) if !matches!(v, PyObjectRef::None) => Ok(v),
             _ => Ok(py_str(&format_utc_offset_name(inst_get_i64(&args[0], "_offset_seconds")))),
         }
     }));
-    type_dict.insert("__eq__".to_string(), bf!("__eq__", |args| {
+    type_dict.insert_str("__eq__", bf!("__eq__", |args| {
         if instance_type_name(&args[1]) != "timezone" { return Ok(py_bool(false)); }
         Ok(py_bool(inst_get_i64(&args[0], "_offset_seconds") == inst_get_i64(&args[1], "_offset_seconds")))
     }));
-    type_dict.insert("__hash__".to_string(), bf!("__hash__", |args| Ok(py_int(inst_get_i64(&args[0], "_offset_seconds")))));
-    type_dict.insert("__repr__".to_string(), bf!("__repr__", |args| {
+    type_dict.insert_str("__hash__", bf!("__hash__", |args| Ok(py_int(inst_get_i64(&args[0], "_offset_seconds")))));
+    type_dict.insert_str("__repr__", bf!("__repr__", |args| {
         let off = inst_get_i64(&args[0], "_offset_seconds");
         if off == 0 { Ok(py_str("datetime.timezone.utc")) } else { Ok(py_str(&format!("datetime.timezone(datetime.timedelta(seconds={}))", off))) }
     }));
-    type_dict.insert("__str__".to_string(), bf!("__str__", |args| {
+    type_dict.insert_str("__str__", bf!("__str__", |args| {
         match inst_get(&args[0], "_name") {
             Some(v) if !matches!(v, PyObjectRef::None) => Ok(v),
             _ => Ok(py_str(&format_utc_offset_name(inst_get_i64(&args[0], "_offset_seconds")))),
         }
     }));
 
-    PyObjectRef::new(PyObject::Type { name: "timezone".to_string(), dict: Box::new(type_dict), bases: vec![], mro: vec![] })
+    PyObjectRef::new(PyObject::Type { name: "timezone".to_string(), dict: Box::new(str_map_to_typedict(type_dict)), bases: vec![], mro: vec![] })
 }
 
 fn make_timezone_with_type(typ: PyObjectRef, offset_seconds: i64, name: Option<String>) -> PyObjectRef {
     let mut dict = AttrMap::new();
-    dict.insert("_offset_seconds".to_string(), py_int(offset_seconds));
-    dict.insert("_name".to_string(), name.map(|n| py_str(&n)).unwrap_or_else(py_none));
+    dict.insert_str("_offset_seconds", py_int(offset_seconds));
+    dict.insert_str("_name", name.map(|n| py_str(&n)).unwrap_or_else(py_none));
     PyObjectRef::new(PyObject::Instance { typ, dict })
 }
 
@@ -1761,7 +1761,7 @@ fn get_timezone_type() -> PyObjectRef {
     let typ = build_timezone_type();
     let utc_inst = make_timezone_with_type(typ.clone(), 0, None);
     if let PyObject::Type { dict, .. } = &mut *typ.borrow_mut() {
-        dict.insert("utc".to_string(), utc_inst);
+        dict.insert_str("utc", utc_inst);
     }
     TIMEZONE_TYPE.with(|c| { *c.borrow_mut() = Some(typ.clone()); });
     typ
@@ -1777,18 +1777,18 @@ fn build_zoneinfo_type() -> PyObjectRef {
         };
     }
 
-    type_dict.insert("__init__".to_string(), bf!("__init__", |args| {
+    type_dict.insert_str("__init__", bf!("__init__", |args| {
         if args.len() < 2 { return Err(PyError::type_error("ZoneInfo() missing key argument")); }
         let key = args[1].str();
         if load_tz(&key).is_none() {
             return Err(PyError::key_error(format!("No time zone found with key {}", key)));
         }
         if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
-            dict.insert("key".to_string(), py_str(&key));
+            dict.insert_str("key", py_str(&key));
         }
         Ok(py_none())
     }));
-    type_dict.insert("utcoffset".to_string(), bf!("utcoffset", |args| {
+    type_dict.insert_str("utcoffset", bf!("utcoffset", |args| {
         if args.len() < 2 { return Err(PyError::type_error("utcoffset() missing datetime argument")); }
         let key = inst_get(&args[0], "key").map(|v| v.str()).unwrap_or_default();
         let tz = load_tz(&key).ok_or_else(|| PyError::runtime_error("zone data not found"))?;
@@ -1799,7 +1799,7 @@ fn build_zoneinfo_type() -> PyObjectRef {
         let (off, _, _) = tz_offset_for_instant(&tz, unix_instant);
         Ok(make_timedelta(0, off as i64, 0))
     }));
-    type_dict.insert("dst".to_string(), bf!("dst", |args| {
+    type_dict.insert_str("dst", bf!("dst", |args| {
         if args.len() < 2 { return Ok(py_none()); }
         let key = inst_get(&args[0], "key").map(|v| v.str()).unwrap_or_default();
         let tz = load_tz(&key).ok_or_else(|| PyError::runtime_error("zone data not found"))?;
@@ -1810,7 +1810,7 @@ fn build_zoneinfo_type() -> PyObjectRef {
         let (_, isdst, _) = tz_offset_for_instant(&tz, unix_instant);
         Ok(make_timedelta(0, if isdst { 3600 } else { 0 }, 0))
     }));
-    type_dict.insert("tzname".to_string(), bf!("tzname", |args| {
+    type_dict.insert_str("tzname", bf!("tzname", |args| {
         if args.len() < 2 { return Ok(py_none()); }
         let key = inst_get(&args[0], "key").map(|v| v.str()).unwrap_or_default();
         let tz = load_tz(&key).ok_or_else(|| PyError::runtime_error("zone data not found"))?;
@@ -1821,23 +1821,23 @@ fn build_zoneinfo_type() -> PyObjectRef {
         let (_, _, name) = tz_offset_for_instant(&tz, unix_instant);
         Ok(py_str(&name))
     }));
-    type_dict.insert("__repr__".to_string(), bf!("__repr__", |args| {
+    type_dict.insert_str("__repr__", bf!("__repr__", |args| {
         let key = inst_get(&args[0], "key").map(|v| v.str()).unwrap_or_default();
         Ok(py_str(&format!("zoneinfo.ZoneInfo(key='{}')", key)))
     }));
-    type_dict.insert("__str__".to_string(), bf!("__str__", |args| Ok(inst_get(&args[0], "key").unwrap_or_else(|| py_str("")))));
-    type_dict.insert("__eq__".to_string(), bf!("__eq__", |args| {
+    type_dict.insert_str("__str__", bf!("__str__", |args| Ok(inst_get(&args[0], "key").unwrap_or_else(|| py_str("")))));
+    type_dict.insert_str("__eq__", bf!("__eq__", |args| {
         if instance_type_name(&args[1]) != "ZoneInfo" { return Ok(py_bool(false)); }
         let a = inst_get(&args[0], "key").map(|v| v.str()).unwrap_or_default();
         let b = inst_get(&args[1], "key").map(|v| v.str()).unwrap_or_default();
         Ok(py_bool(a == b))
     }));
-    type_dict.insert("__hash__".to_string(), bf!("__hash__", |args| {
+    type_dict.insert_str("__hash__", bf!("__hash__", |args| {
         let key = inst_get(&args[0], "key").map(|v| v.str()).unwrap_or_default();
         builtin_hash(&[py_str(&key)])
     }));
 
-    PyObjectRef::new(PyObject::Type { name: "ZoneInfo".to_string(), dict: Box::new(type_dict), bases: vec![], mro: vec![] })
+    PyObjectRef::new(PyObject::Type { name: "ZoneInfo".to_string(), dict: Box::new(str_map_to_typedict(type_dict)), bases: vec![], mro: vec![] })
 }
 
 fn get_zoneinfo_type() -> PyObjectRef {
@@ -1850,29 +1850,29 @@ fn get_zoneinfo_type() -> PyObjectRef {
 
 pub fn create_datetime_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
-    d.insert("date".to_string(), get_date_type());
-    d.insert("time".to_string(), get_time_type());
-    d.insert("datetime".to_string(), get_datetime_type());
-    d.insert("timedelta".to_string(), get_timedelta_type());
+    d.insert_str("date", get_date_type());
+    d.insert_str("time", get_time_type());
+    d.insert_str("datetime", get_datetime_type());
+    d.insert_str("timedelta", get_timedelta_type());
     let timezone_type = get_timezone_type();
     let utc_singleton = if let PyObject::Type { dict, .. } = &*timezone_type.borrow() {
-        dict.get("utc").cloned().unwrap_or_else(|| make_timezone(0, None))
+        dict.get_str("utc").cloned().unwrap_or_else(|| make_timezone(0, None))
     } else {
         make_timezone(0, None)
     };
-    d.insert("timezone".to_string(), timezone_type);
+    d.insert_str("timezone", timezone_type);
     // `datetime.UTC` (3.11+) is the exact same object as `timezone.utc`.
-    d.insert("UTC".to_string(), utc_singleton);
-    d.insert("tzinfo".to_string(), get_tzinfo_type());
-    d.insert("MINYEAR".to_string(), py_int(1));
-    d.insert("MAXYEAR".to_string(), py_int(9999));
+    d.insert_str("UTC", utc_singleton);
+    d.insert_str("tzinfo", get_tzinfo_type());
+    d.insert_str("MINYEAR", py_int(1));
+    d.insert_str("MAXYEAR", py_int(9999));
     d
 }
 
 pub fn create_zoneinfo_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
-    d.insert("ZoneInfo".to_string(), get_zoneinfo_type());
-    d.insert("available_timezones".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    d.insert_str("ZoneInfo", get_zoneinfo_type());
+    d.insert_str("available_timezones", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "available_timezones".to_string(),
         func: |_args| {
             let mut set = crate::object::PySet::new();

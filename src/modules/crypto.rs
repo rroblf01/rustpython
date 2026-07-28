@@ -483,7 +483,7 @@ pub fn create_hmac_dict() -> HashMap<String, PyObjectRef> {
         // Store hash values in instance dict; methods read from self
         let mut type_dict = HashMap::new();
 
-        type_dict.insert("digest".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        type_dict.insert_str("digest", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "digest".to_string(),
             func: |args| {
                 if args.is_empty() {
@@ -499,7 +499,7 @@ pub fn create_hmac_dict() -> HashMap<String, PyObjectRef> {
             },
         }));
 
-        type_dict.insert("hexdigest".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        type_dict.insert_str("hexdigest", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "hexdigest".to_string(),
             func: |args| {
                 if args.is_empty() {
@@ -512,13 +512,13 @@ pub fn create_hmac_dict() -> HashMap<String, PyObjectRef> {
         }));
 
         let mut instance_dict = AttrMap::new();
-        instance_dict.insert("_digest".to_string(), PyObjectRef::imm(PyObject::Bytes(hash_bytes)));
-        instance_dict.insert("_hexdigest".to_string(), py_str(&hash_hex));
+        instance_dict.insert_str("_digest", PyObjectRef::imm(PyObject::Bytes(hash_bytes)));
+        instance_dict.insert_str("_hexdigest", py_str(&hash_hex));
 
         Ok(PyObjectRef::new(PyObject::Instance {
             typ: PyObjectRef::new(PyObject::Type {
                 name: "hmac".to_string(),
-                dict: Box::new(type_dict),
+                dict: Box::new(str_map_to_typedict(type_dict)),
                 bases: vec![],
                 mro: vec![],
             }),
@@ -528,7 +528,7 @@ pub fn create_hmac_dict() -> HashMap<String, PyObjectRef> {
 
     // HMAC alias — same as new()
     if let Some(func) = d.get("new") {
-        d.insert("HMAC".to_string(), func.clone());
+        d.insert_str("HMAC", func.clone());
     }
 
     d

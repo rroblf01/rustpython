@@ -56,13 +56,13 @@ pub fn create_socket_dict() -> HashMap<String, PyObjectRef> {
     // socket_helper`'s own `_is_ipv6_enabled()` try `socket.socket(AF_INET6,
     // ...)`, which raises `RuntimeError` (not `OSError`, the only thing it
     // catches), crashing instead of cleanly falling back to "no IPv6".
-    d.insert("has_ipv6".to_string(), py_bool(false));
-    d.insert("AF_INET".to_string(), py_int(2));
-    d.insert("AF_INET6".to_string(), py_int(10));
-    d.insert("SOCK_STREAM".to_string(), py_int(1));
-    d.insert("SOCK_DGRAM".to_string(), py_int(2));
-    d.insert("SOL_SOCKET".to_string(), py_int(1));
-    d.insert("SO_REUSEADDR".to_string(), py_int(2));
+    d.insert_str("has_ipv6", py_bool(false));
+    d.insert_str("AF_INET", py_int(2));
+    d.insert_str("AF_INET6", py_int(10));
+    d.insert_str("SOCK_STREAM", py_int(1));
+    d.insert_str("SOCK_DGRAM", py_int(2));
+    d.insert_str("SOL_SOCKET", py_int(1));
+    d.insert_str("SO_REUSEADDR", py_int(2));
 
     sock_func!("gethostname", |_| {
         match std::process::Command::new("hostname").output() {
@@ -113,12 +113,12 @@ fn get_called_process_error_type() -> PyObjectRef {
     let existing = CALLED_PROCESS_ERROR_TYPE.with(|c| c.borrow().clone());
     if let Some(t) = existing { return t; }
     let mut type_dict: HashMap<String, PyObjectRef> = HashMap::new();
-    type_dict.insert("__str__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    type_dict.insert_str("__str__", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "__str__".to_string(),
         func: |args| {
             if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
-                let rc = dict.get("returncode").and_then(|v| v.as_i64()).unwrap_or(-1);
-                let cmd = dict.get("cmd").map(|v| v.str()).unwrap_or_default();
+                let rc = dict.get_str("returncode").and_then(|v| v.as_i64()).unwrap_or(-1);
+                let cmd = dict.get_str("cmd").map(|v| v.str()).unwrap_or_default();
                 Ok(py_str(&format!("Command '{}' returned non-zero exit status {}.", cmd, rc)))
             } else { Ok(py_str("")) }
         },
@@ -129,7 +129,7 @@ fn get_called_process_error_type() -> PyObjectRef {
     // matches by exact class identity via the normal Instance/Type MRO
     // walk regardless, so this is enough for the common case, just not
     // also catchable via a bare `except Exception:`.
-    let typ = PyObjectRef::new(PyObject::Type { name: "CalledProcessError".to_string(), dict: Box::new(type_dict), bases: vec![], mro: vec![] });
+    let typ = PyObjectRef::new(PyObject::Type { name: "CalledProcessError".to_string(), dict: Box::new(str_map_to_typedict(type_dict)), bases: vec![], mro: vec![] });
     // A class's own `mro` must include ITSELF (real Python: `C.__mro__[0]
     // is C`) — `except CalledProcessError as e:`'s matching walks
     // `instance.typ`'s `mro` looking for the `except` clause's referenced
@@ -145,11 +145,11 @@ fn get_called_process_error_type() -> PyObjectRef {
 
 fn make_called_process_error(returncode: i64, cmd: &str, output: Vec<u8>, stderr: Vec<u8>) -> PyObjectRef {
     let mut dict = crate::object::AttrMap::new();
-    dict.insert("returncode".to_string(), py_int(returncode));
-    dict.insert("cmd".to_string(), py_str(cmd));
-    dict.insert("output".to_string(), PyObjectRef::imm(PyObject::Bytes(output.clone())));
-    dict.insert("stdout".to_string(), PyObjectRef::imm(PyObject::Bytes(output)));
-    dict.insert("stderr".to_string(), PyObjectRef::imm(PyObject::Bytes(stderr)));
+    dict.insert_str("returncode", py_int(returncode));
+    dict.insert_str("cmd", py_str(cmd));
+    dict.insert_str("output", PyObjectRef::imm(PyObject::Bytes(output.clone())));
+    dict.insert_str("stdout", PyObjectRef::imm(PyObject::Bytes(output)));
+    dict.insert_str("stderr", PyObjectRef::imm(PyObject::Bytes(stderr)));
     PyObjectRef::new(PyObject::Instance { typ: get_called_process_error_type(), dict })
 }
 
@@ -160,7 +160,7 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
             d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
         };
     }
-    d.insert("CalledProcessError".to_string(), get_called_process_error_type());
+    d.insert_str("CalledProcessError", get_called_process_error_type());
 
     sub_func!("run", |args| {
         if args.is_empty() {
@@ -272,9 +272,9 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
     });
 
     // Constants
-    d.insert("PIPE".to_string(), py_int(-1));
-    d.insert("STDOUT".to_string(), py_int(-2));
-    d.insert("DEVNULL".to_string(), py_int(-3));
+    d.insert_str("PIPE", py_int(-1));
+    d.insert_str("STDOUT", py_int(-2));
+    d.insert_str("DEVNULL", py_int(-3));
 
     // `subprocess.Popen` — was missing ENTIRELY (only the higher-level
     // `run`/`check_output` convenience wrappers existed, both of which
@@ -361,18 +361,18 @@ pub fn create_http_dict() -> HashMap<String, PyObjectRef> {
 
     // Create HTTPStatus type with string status constants
     let mut status_dict = HashMap::new();
-    status_dict.insert("OK".to_string(), py_str("200 OK"));
-    status_dict.insert("NOT_FOUND".to_string(), py_str("404 NOT_FOUND"));
-    status_dict.insert("SERVER_ERROR".to_string(), py_str("500 Internal Server Error"));
+    status_dict.insert_str("OK", py_str("200 OK"));
+    status_dict.insert_str("NOT_FOUND", py_str("404 NOT_FOUND"));
+    status_dict.insert_str("SERVER_ERROR", py_str("500 Internal Server Error"));
 
     let http_status_type = PyObjectRef::new(PyObject::Type {
         name: "HTTPStatus".to_string(),
-        dict: Box::new(status_dict),
+        dict: Box::new(str_map_to_typedict(status_dict)),
         bases: vec![],
         mro: vec![],
     });
 
-    d.insert("HTTPStatus".to_string(), http_status_type);
+    d.insert_str("HTTPStatus", http_status_type);
     d
 }
 
@@ -531,14 +531,14 @@ pub fn create_html_entities_dict() -> HashMap<String, PyObjectRef> {
         }
     }
 
-    d.insert("html5".to_string(), py_dict_obj);
+    d.insert_str("html5", py_dict_obj);
     d
 }
 
 pub fn create_urllib_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
-    d.insert("request".to_string(), create_module("urllib.request", create_urllib_request_dict()));
-    d.insert("parse".to_string(), create_module("urllib.parse", create_urllib_parse_dict()));
+    d.insert_str("request", create_module("urllib.request", create_urllib_request_dict()));
+    d.insert_str("parse", create_module("urllib.parse", create_urllib_parse_dict()));
     d
 }
 
@@ -557,7 +557,7 @@ fn http_response_read(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
     let borrowed = args[0].borrow();
     if let PyObject::Instance { dict, .. } = &*borrowed {
-        if let Some(body) = dict.get("_body") {
+        if let Some(body) = dict.get_str("_body") {
             return Ok(body.clone());
         }
     }
@@ -570,8 +570,8 @@ pub fn create_http_client_dict() -> HashMap<String, PyObjectRef> {
     // Real CPython's `http.client.HTTP_PORT`/`HTTPS_PORT` — plain integer
     // constants, missing entirely. Real trigger: CPython's own
     // `http/cookiejar.py`, `from http.client import HTTP_PORT`.
-    d.insert("HTTP_PORT".to_string(), py_int(80));
-    d.insert("HTTPS_PORT".to_string(), py_int(443));
+    d.insert_str("HTTP_PORT", py_int(80));
+    d.insert_str("HTTPS_PORT", py_int(443));
 
     // Minimal exception hierarchy — real code commonly catches
     // `http.client.HTTPException` (or a specific subclass) around request
@@ -580,11 +580,11 @@ pub fn create_http_client_dict() -> HashMap<String, PyObjectRef> {
     fn make_http_exc(name: &str, base: Option<PyObjectRef>) -> PyObjectRef {
         let bases = base.map(|b| vec![b]).unwrap_or_default();
         PyObjectRef::new(crate::object::PyObject::Type {
-            name: name.to_string(), dict: Box::new(HashMap::new()), bases: bases.clone(), mro: bases,
+            name: name.to_string(), dict: Box::new(str_map_to_typedict(HashMap::new())), bases: bases.clone(), mro: bases,
         })
     }
     let http_exception = make_http_exc("HTTPException", None);
-    d.insert("HTTPException".to_string(), http_exception.clone());
+    d.insert_str("HTTPException", http_exception.clone());
     for name in ["NotConnected", "InvalidURL", "UnknownProtocol", "UnknownTransferEncoding",
                  "UnimplementedFileMode", "IncompleteRead", "ImproperConnectionState",
                  "CannotSendRequest", "CannotSendHeader", "ResponseNotReady",
@@ -611,7 +611,7 @@ pub fn create_http_client_dict() -> HashMap<String, PyObjectRef> {
             let _ = resp_dict.set(crate::object::py_int(*code), crate::object::py_str(phrase));
         }
     }
-    d.insert("responses".to_string(), responses);
+    d.insert_str("responses", responses);
 
     // ---- HTTPResponse type ----
     let mut resp_dict = HashMap::new();
@@ -624,11 +624,11 @@ pub fn create_http_client_dict() -> HashMap<String, PyObjectRef> {
     );
     let http_resp_type = PyObjectRef::new(PyObject::Type {
         name: "HTTPResponse".to_string(),
-        dict: Box::new(resp_dict),
+        dict: Box::new(str_map_to_typedict(resp_dict)),
         bases: vec![],
         mro: vec![],
     });
-    d.insert("HTTPResponse".to_string(), http_resp_type.clone());
+    d.insert_str("HTTPResponse", http_resp_type.clone());
 
     // ---- HTTPConnection class ----
     let mut conn_dict = HashMap::new();
@@ -652,8 +652,8 @@ pub fn create_http_client_dict() -> HashMap<String, PyObjectRef> {
                     80u16
                 };
                 if let PyObject::Instance { dict, .. } = &mut *self_obj.borrow_mut() {
-                    dict.insert("_host".to_string(), py_str(&host));
-                    dict.insert("_port".to_string(), py_int(port as i64));
+                    dict.insert_str("_host", py_str(&host));
+                    dict.insert_str("_port", py_int(port as i64));
                 }
                 Ok(py_none())
             },
@@ -798,7 +798,7 @@ pub fn create_http_client_dict() -> HashMap<String, PyObjectRef> {
                     inner: Rc::new(RefCell::new(SocketInner::TcpStream(stream))),
                 });
                 if let PyObject::Instance { dict, .. } = &mut *self_obj.borrow_mut() {
-                    dict.insert("_stream".to_string(), sock);
+                    dict.insert_str("_stream", sock);
                 }
 
                 Ok(py_none())
@@ -912,7 +912,7 @@ pub fn create_http_client_dict() -> HashMap<String, PyObjectRef> {
                                 func: http_response_read,
                             }),
                         );
-                        Box::new(rd)
+                        Box::new(str_map_to_typedict(rd))
                     },
                     bases: vec![],
                     mro: vec![],
@@ -920,8 +920,8 @@ pub fn create_http_client_dict() -> HashMap<String, PyObjectRef> {
 
                 // Build HTTPResponse instance
                 let mut inst_dict = AttrMap::new();
-                inst_dict.insert("status".to_string(), py_int(status_code));
-                inst_dict.insert("_body".to_string(), PyObjectRef::imm(PyObject::Bytes(body)));
+                inst_dict.insert_str("status", py_int(status_code));
+                inst_dict.insert_str("_body", PyObjectRef::imm(PyObject::Bytes(body)));
 
                 Ok(PyObjectRef::new(PyObject::Instance {
                     typ: local_resp_type,
@@ -948,11 +948,11 @@ pub fn create_http_client_dict() -> HashMap<String, PyObjectRef> {
 
     let http_conn_type = PyObjectRef::new(PyObject::Type {
         name: "HTTPConnection".to_string(),
-        dict: Box::new(conn_dict),
+        dict: Box::new(str_map_to_typedict(conn_dict)),
         bases: vec![],
         mro: vec![],
     });
-    d.insert("HTTPConnection".to_string(), http_conn_type);
+    d.insert_str("HTTPConnection", http_conn_type);
 
     d
 }
@@ -985,8 +985,8 @@ pub fn create_smtplib_dict() -> HashMap<String, PyObjectRef> {
                     25u16
                 };
                 if let PyObject::Instance { dict, .. } = &mut *self_obj.borrow_mut() {
-                    dict.insert("_host".to_string(), py_str(&host));
-                    dict.insert("_port".to_string(), py_int(port as i64));
+                    dict.insert_str("_host", py_str(&host));
+                    dict.insert_str("_port", py_int(port as i64));
                 }
                 Ok(py_none())
             },
@@ -1013,11 +1013,11 @@ pub fn create_smtplib_dict() -> HashMap<String, PyObjectRef> {
 
     let smtp_type = PyObjectRef::new(PyObject::Type {
         name: "SMTP".to_string(),
-        dict: Box::new(smtp_dict),
+        dict: Box::new(str_map_to_typedict(smtp_dict)),
         bases: vec![],
         mro: vec![],
     });
-    d.insert("SMTP".to_string(), smtp_type);
+    d.insert_str("SMTP", smtp_type);
 
     d
 }

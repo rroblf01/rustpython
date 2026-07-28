@@ -122,13 +122,13 @@ pub fn create_collections_dict() -> HashMap<String, PyObjectRef> {
         };
         let init_obj = PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(init_fn)));
         let mut type_dict = HashMap::new();
-        type_dict.insert("__init__".to_string(), init_obj);
+        type_dict.insert_str("__init__", init_obj);
         // Add field names as class-level attributes (for __doc__ setting support)
         for f in &fields {
             type_dict.insert(f.clone(), PyObjectRef::new(PyObject::Instance {
                 typ: PyObjectRef::new(PyObject::Type {
                     name: "member_descriptor".to_string(),
-                    dict: Box::new(HashMap::new()),
+                    dict: Box::new(str_map_to_typedict(HashMap::new())),
                     bases: vec![],
                     mro: vec![],
                 }),
@@ -137,14 +137,14 @@ pub fn create_collections_dict() -> HashMap<String, PyObjectRef> {
         }
         Ok(PyObjectRef::new(PyObject::Type {
             name: typename,
-            dict: Box::new(type_dict),
+            dict: Box::new(str_map_to_typedict(type_dict)),
             bases: vec![],
             mro: vec![],
         }))
     });
 
     // collections.abc submodule (Iterable, Hashable, etc.)
-    d.insert("abc".to_string(), create_module("collections.abc", create_collections_abc_dict()));
+    d.insert_str("abc", create_module("collections.abc", create_collections_abc_dict()));
 
     d
 }
@@ -304,7 +304,7 @@ pub fn create_functools_dict() -> HashMap<String, PyObjectRef> {
         ));
         {
             let mut reg = registry.borrow_mut();
-            reg.insert("object".to_string(), func.clone());
+            reg.insert_str("object", func.clone());
         }
         let func_name = func.borrow().get_attribute("__name__").ok();
         let registry_clone = registry.clone();
@@ -324,13 +324,13 @@ pub fn create_functools_dict() -> HashMap<String, PyObjectRef> {
         // Use Instance with __call__ so set_attribute works (Closure doesn't support attribute setting)
         let mut call_type_dict = HashMap::new();
         let dispatch_rc = Rc::new(dispatch_func);
-        call_type_dict.insert("__call__".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+        call_type_dict.insert_str("__call__", PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
             dispatch_rc(args)
         }))));
         let dispatcher = PyObjectRef::new(PyObject::Instance {
             typ: PyObjectRef::new(PyObject::Type {
                 name: "singledispatch".to_string(),
-                dict: Box::new(call_type_dict),
+                dict: Box::new(str_map_to_typedict(call_type_dict)),
                 bases: vec![],
                 mro: vec![],
             }),
@@ -473,18 +473,18 @@ pub fn create_functools_dict() -> HashMap<String, PyObjectRef> {
             };
 
             let mut type_dict = std::collections::HashMap::new();
-            type_dict.insert("__lt__".to_string(), PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(lt))));
-            type_dict.insert("__le__".to_string(), PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(le))));
-            type_dict.insert("__gt__".to_string(), PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(gt))));
-            type_dict.insert("__ge__".to_string(), PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(ge))));
-            type_dict.insert("__eq__".to_string(), PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(eq))));
-            type_dict.insert("__ne__".to_string(), PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(ne))));
-            type_dict.insert("__hash__".to_string(), PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(hash_err))));
+            type_dict.insert_str("__lt__", PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(lt))));
+            type_dict.insert_str("__le__", PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(le))));
+            type_dict.insert_str("__gt__", PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(gt))));
+            type_dict.insert_str("__ge__", PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(ge))));
+            type_dict.insert_str("__eq__", PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(eq))));
+            type_dict.insert_str("__ne__", PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(ne))));
+            type_dict.insert_str("__hash__", PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(hash_err))));
 
             let key_obj = PyObjectRef::new(PyObject::Instance {
                 typ: PyObjectRef::new(PyObject::Type {
                     name: "cmp_to_key".to_string(),
-                    dict: Box::new(type_dict),
+                    dict: Box::new(str_map_to_typedict(type_dict)),
                     bases: vec![],
                     mro: vec![],
                 }),
@@ -514,7 +514,7 @@ pub fn create_itertools_dict() -> HashMap<String, PyObjectRef> {
     // sibling method the way real itertools.chain does.
     {
         let mut chain_type_dict = HashMap::new();
-        chain_type_dict.insert("__call__".to_string(), PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(|args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+        chain_type_dict.insert_str("__call__", PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(|args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
             // vm.call_function's `__call__` dispatch always prepends self
             // (matching a real Python `__call__(self, *args)` method) before
             // calling whatever `__call__` resolves to — unlike attribute
@@ -534,7 +534,7 @@ pub fn create_itertools_dict() -> HashMap<String, PyObjectRef> {
             }
             Ok(py_list(items))
         }))));
-        chain_type_dict.insert("from_iterable".to_string(), PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(|args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+        chain_type_dict.insert_str("from_iterable", PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(|args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
             if args.is_empty() { return Err(PyError::type_error("from_iterable() missing argument")); }
             let mut items = Vec::new();
             if let Ok(outer_it) = builtin_iter(&[args[0].clone()]) {
@@ -558,8 +558,8 @@ pub fn create_itertools_dict() -> HashMap<String, PyObjectRef> {
             }
             Ok(py_list(items))
         }))));
-        let chain_type = PyObjectRef::new(PyObject::Type { name: "chain".to_string(), dict: Box::new(chain_type_dict), bases: vec![], mro: vec![] });
-        d.insert("chain".to_string(), PyObjectRef::new(PyObject::Instance { typ: chain_type, dict: AttrMap::new() }));
+        let chain_type = PyObjectRef::new(PyObject::Type { name: "chain".to_string(), dict: Box::new(str_map_to_typedict(chain_type_dict)), bases: vec![], mro: vec![] });
+        d.insert_str("chain", PyObjectRef::new(PyObject::Instance { typ: chain_type, dict: AttrMap::new() }));
     }
 
     it_func!("count", |args| {
@@ -1573,7 +1573,7 @@ fn build_decimal_type() -> PyObjectRef {
         };
     }
 
-    type_dict.insert("__init__".to_string(), bf!("__init__", |args| {
+    type_dict.insert_str("__init__", bf!("__init__", |args| {
         let v = if args.len() > 1 { decval_from_pyobject(&args[1])? } else { DecValue::zero() };
         if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
             dict.insert(DEC_SIGN_KEY.to_string(), py_bool(v.sign));
@@ -1583,29 +1583,29 @@ fn build_decimal_type() -> PyObjectRef {
         }
         Ok(py_none())
     }));
-    type_dict.insert("__repr__".to_string(), bf!("__repr__", |args| {
+    type_dict.insert_str("__repr__", bf!("__repr__", |args| {
         let v = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
         Ok(py_str(&format!("Decimal('{}')", format_decvalue(&v))))
     }));
-    type_dict.insert("__str__".to_string(), bf!("__str__", |args| {
+    type_dict.insert_str("__str__", bf!("__str__", |args| {
         let v = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
         Ok(py_str(&format_decvalue(&v)))
     }));
-    type_dict.insert("__int__".to_string(), bf!("__int__", |args| {
+    type_dict.insert_str("__int__", bf!("__int__", |args| {
         let v = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
         if v.special != DecSpecial::Finite { return Err(PyError::value_error("cannot convert NaN/Infinity to int")); }
         let truncated = if v.exp >= 0 { &v.coeff * ten_pow(v.exp) } else { &v.coeff / ten_pow(-v.exp) };
         Ok(py_int(if v.sign { -truncated } else { truncated }))
     }));
-    type_dict.insert("__float__".to_string(), bf!("__float__", |args| {
+    type_dict.insert_str("__float__", bf!("__float__", |args| {
         let v = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
         Ok(py_float(decval_to_f64(&v)))
     }));
-    type_dict.insert("__bool__".to_string(), bf!("__bool__", |args| {
+    type_dict.insert_str("__bool__", bf!("__bool__", |args| {
         let v = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
         Ok(py_bool(!v.is_zero()))
     }));
-    type_dict.insert("__hash__".to_string(), bf!("__hash__", |args| {
+    type_dict.insert_str("__hash__", bf!("__hash__", |args| {
         let v = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
         if v.special != DecSpecial::Finite { return Ok(py_int(0)); }
         // Normalize (strip trailing zeros) so numerically-equal Decimals
@@ -1615,7 +1615,7 @@ fn build_decimal_type() -> PyObjectRef {
         let s = format!("{}{}{}", n.sign, n.coeff, n.exp);
         builtin_hash(&[py_str(&s)])
     }));
-    type_dict.insert("__eq__".to_string(), bf!("__eq__", |args| {
+    type_dict.insert_str("__eq__", bf!("__eq__", |args| {
         let a = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
         let b = match decval_from_pyobject(&args[1]) { Ok(v) => v, Err(_) => return Ok(py_bool(false)) };
         Ok(py_bool(decimal_compare(&a, &b) == Some(std::cmp::Ordering::Equal)))
@@ -1635,7 +1635,7 @@ fn build_decimal_type() -> PyObjectRef {
     }
     dec_cmp!("__lt__", std::cmp::Ordering::Less);
     dec_cmp!("__gt__", std::cmp::Ordering::Greater);
-    type_dict.insert("__le__".to_string(), bf!("__le__", |args| {
+    type_dict.insert_str("__le__", bf!("__le__", |args| {
         let a = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
         let b = decval_from_pyobject(&args[1])?;
         match decimal_compare(&a, &b) {
@@ -1644,7 +1644,7 @@ fn build_decimal_type() -> PyObjectRef {
             None => Err(PyError::type_error("cannot compare NaN with Decimal")),
         }
     }));
-    type_dict.insert("__ge__".to_string(), bf!("__ge__", |args| {
+    type_dict.insert_str("__ge__", bf!("__ge__", |args| {
         let a = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
         let b = decval_from_pyobject(&args[1])?;
         match decimal_compare(&a, &b) {
@@ -1670,7 +1670,7 @@ fn build_decimal_type() -> PyObjectRef {
     dec_binop!("__rmul__", |a, b| decimal_mul(b, a));
     dec_binop!("__truediv__", decimal_div);
     dec_binop!("__rtruediv__", |a, b| decimal_div(b, a));
-    type_dict.insert("__floordiv__".to_string(), bf!("__floordiv__", |args| {
+    type_dict.insert_str("__floordiv__", bf!("__floordiv__", |args| {
         let a = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
         let b = decval_from_pyobject(&args[1])?;
         let q = decimal_div(&a, &b)?;
@@ -1678,7 +1678,7 @@ fn build_decimal_type() -> PyObjectRef {
         let truncated = if q.exp >= 0 { &q.coeff * ten_pow(q.exp) } else { &q.coeff / ten_pow(-q.exp) };
         Ok(decval_to_instance(&DecValue { special: DecSpecial::Finite, sign: q.sign, coeff: truncated, exp: 0 }))
     }));
-    type_dict.insert("__mod__".to_string(), bf!("__mod__", |args| {
+    type_dict.insert_str("__mod__", bf!("__mod__", |args| {
         let a = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
         let b = decval_from_pyobject(&args[1])?;
         if b.is_zero() { return Err(decimal_invalid_op("0 modulo")); }
@@ -1688,7 +1688,7 @@ fn build_decimal_type() -> PyObjectRef {
         let prod = decimal_mul(&trunc_dec, &b)?;
         Ok(decval_to_instance(&decimal_sub(&a, &prod)?))
     }));
-    type_dict.insert("__pow__".to_string(), bf!("__pow__", |args| {
+    type_dict.insert_str("__pow__", bf!("__pow__", |args| {
         let a = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
         let b = decval_from_pyobject(&args[1])?;
         if b.special != DecSpecial::Finite || b.exp < 0 { return Err(PyError::runtime_error("Decimal ** non-integer exponent is not supported")); }
@@ -1699,55 +1699,55 @@ fn build_decimal_type() -> PyObjectRef {
         for _ in 0..n { result = decimal_mul(&result, &a)?; }
         Ok(decval_to_instance(&result))
     }));
-    type_dict.insert("__neg__".to_string(), bf!("__neg__", |args| {
+    type_dict.insert_str("__neg__", bf!("__neg__", |args| {
         let v = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
         Ok(decval_to_instance(&decimal_negate(&v)))
     }));
-    type_dict.insert("__pos__".to_string(), bf!("__pos__", |args| {
+    type_dict.insert_str("__pos__", bf!("__pos__", |args| {
         let v = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
         Ok(decval_to_instance(&round_to_context(v)))
     }));
-    type_dict.insert("__abs__".to_string(), bf!("__abs__", |args| {
+    type_dict.insert_str("__abs__", bf!("__abs__", |args| {
         let mut v = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
         v.sign = false;
         Ok(decval_to_instance(&v))
     }));
-    type_dict.insert("is_nan".to_string(), bf!("is_nan", |args| {
+    type_dict.insert_str("is_nan", bf!("is_nan", |args| {
         let v = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
         Ok(py_bool(v.is_nan()))
     }));
-    type_dict.insert("is_infinite".to_string(), bf!("is_infinite", |args| {
+    type_dict.insert_str("is_infinite", bf!("is_infinite", |args| {
         let v = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
         Ok(py_bool(v.special == DecSpecial::Infinity))
     }));
-    type_dict.insert("is_finite".to_string(), bf!("is_finite", |args| {
+    type_dict.insert_str("is_finite", bf!("is_finite", |args| {
         let v = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
         Ok(py_bool(v.special == DecSpecial::Finite))
     }));
-    type_dict.insert("is_zero".to_string(), bf!("is_zero", |args| {
+    type_dict.insert_str("is_zero", bf!("is_zero", |args| {
         let v = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
         Ok(py_bool(v.is_zero()))
     }));
-    type_dict.insert("is_signed".to_string(), bf!("is_signed", |args| {
+    type_dict.insert_str("is_signed", bf!("is_signed", |args| {
         let v = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
         Ok(py_bool(v.sign))
     }));
-    type_dict.insert("copy_sign".to_string(), bf!("copy_sign", |args| {
+    type_dict.insert_str("copy_sign", bf!("copy_sign", |args| {
         let mut v = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
         let other = decval_from_pyobject(&args[1])?;
         v.sign = other.sign;
         Ok(decval_to_instance(&v))
     }));
-    type_dict.insert("copy_abs".to_string(), bf!("copy_abs", |args| {
+    type_dict.insert_str("copy_abs", bf!("copy_abs", |args| {
         let mut v = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
         v.sign = false;
         Ok(decval_to_instance(&v))
     }));
-    type_dict.insert("copy_negate".to_string(), bf!("copy_negate", |args| {
+    type_dict.insert_str("copy_negate", bf!("copy_negate", |args| {
         let v = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
         Ok(decval_to_instance(&decimal_negate(&v)))
     }));
-    type_dict.insert("as_tuple".to_string(), bf!("as_tuple", |args| {
+    type_dict.insert_str("as_tuple", bf!("as_tuple", |args| {
         let v = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
         let sign_val = py_int(if v.sign { 1 } else { 0 });
         let digits_str = if num_traits::Zero::is_zero(&v.coeff) { "0".to_string() } else { v.coeff.to_string() };
@@ -1760,11 +1760,11 @@ fn build_decimal_type() -> PyObjectRef {
         };
         Ok(py_tuple(vec![sign_val, py_tuple(digits), exp_val]))
     }));
-    type_dict.insert("normalize".to_string(), bf!("normalize", |args| {
+    type_dict.insert_str("normalize", bf!("normalize", |args| {
         let v = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
         Ok(decval_to_instance(&normalize_decval(&round_to_context(v))))
     }));
-    type_dict.insert("quantize".to_string(), bf!("quantize", |args| {
+    type_dict.insert_str("quantize", bf!("quantize", |args| {
         let v = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
         if args.len() < 2 { return Err(PyError::type_error("quantize() missing exponent argument")); }
         let target = decval_from_pyobject(&args[1])?;
@@ -1782,14 +1782,14 @@ fn build_decimal_type() -> PyObjectRef {
         };
         Ok(decval_to_instance(&DecValue { exp: target_exp, ..result }))
     }));
-    type_dict.insert("to_integral_value".to_string(), bf!("to_integral_value", |args| {
+    type_dict.insert_str("to_integral_value", bf!("to_integral_value", |args| {
         let v = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
         if v.special != DecSpecial::Finite || v.exp >= 0 { return Ok(decval_to_instance(&v)); }
         let (_, rounding) = current_decimal_context();
         let rounded = round_decvalue(&v, digit_count(&v.coeff).saturating_sub((-v.exp) as usize).max(1), &rounding);
         Ok(decval_to_instance(&DecValue { exp: 0, coeff: &rounded.coeff * ten_pow(rounded.exp), ..rounded }))
     }));
-    type_dict.insert("compare".to_string(), bf!("compare", |args| {
+    type_dict.insert_str("compare", bf!("compare", |args| {
         let a = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
         let b = decval_from_pyobject(&args[1])?;
         let n: i64 = match decimal_compare(&a, &b) {
@@ -1801,7 +1801,7 @@ fn build_decimal_type() -> PyObjectRef {
         Ok(decval_to_instance(&DecValue { special: DecSpecial::Finite, sign: n < 0, coeff: num_bigint::BigInt::from(n.abs()), exp: 0 }))
     }));
 
-    PyObjectRef::new(PyObject::Type { name: "Decimal".to_string(), dict: Box::new(type_dict), bases: vec![], mro: vec![] })
+    PyObjectRef::new(PyObject::Type { name: "Decimal".to_string(), dict: Box::new(str_map_to_typedict(type_dict)), bases: vec![], mro: vec![] })
 }
 
 fn build_context_type() -> PyObjectRef {
@@ -1811,23 +1811,23 @@ fn build_context_type() -> PyObjectRef {
             PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $f })
         };
     }
-    type_dict.insert("__init__".to_string(), bf!("__init__", |args| {
+    type_dict.insert_str("__init__", bf!("__init__", |args| {
         let ctor_args = args[1..].to_vec();
         let kw: Option<PyDict> = ctor_args.last().and_then(|a| if let PyObject::Dict(d) = &*a.borrow() { Some((**d).clone()) } else { None });
         let get_kw = |name: &str| kw.as_ref().and_then(|d| d.get(&py_str(name)).ok().flatten());
         let precision = get_kw("prec").and_then(|v| v.as_i64()).unwrap_or(28) as usize;
         let rounding = get_kw("rounding").map(|v| v.str()).unwrap_or_else(|| "ROUND_HALF_EVEN".to_string());
         if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
-            dict.insert("prec".to_string(), py_int(precision as i64));
-            dict.insert("rounding".to_string(), py_str(&rounding));
+            dict.insert_str("prec", py_int(precision as i64));
+            dict.insert_str("rounding", py_str(&rounding));
         }
         Ok(py_none())
     }));
-    type_dict.insert("__repr__".to_string(), bf!("__repr__", |args| {
-        let prec = if let PyObject::Instance { dict, .. } = &*args[0].borrow() { dict.get("prec").and_then(|v| v.as_i64()).unwrap_or(28) } else { 28 };
+    type_dict.insert_str("__repr__", bf!("__repr__", |args| {
+        let prec = if let PyObject::Instance { dict, .. } = &*args[0].borrow() { dict.get_str("prec").and_then(|v| v.as_i64()).unwrap_or(28) } else { 28 };
         Ok(py_str(&format!("Context(prec={})", prec)))
     }));
-    PyObjectRef::new(PyObject::Type { name: "Context".to_string(), dict: Box::new(type_dict), bases: vec![], mro: vec![] })
+    PyObjectRef::new(PyObject::Type { name: "Context".to_string(), dict: Box::new(str_map_to_typedict(type_dict)), bases: vec![], mro: vec![] })
 }
 
 fn get_context_type() -> PyObjectRef {
@@ -1841,8 +1841,8 @@ fn get_context_type() -> PyObjectRef {
 fn make_context_instance(precision: usize, rounding: &str) -> PyObjectRef {
     let typ = get_context_type();
     let mut dict = AttrMap::new();
-    dict.insert("prec".to_string(), py_int(precision as i64));
-    dict.insert("rounding".to_string(), py_str(rounding));
+    dict.insert_str("prec", py_int(precision as i64));
+    dict.insert_str("rounding", py_str(rounding));
     PyObjectRef::new(PyObject::Instance { typ, dict })
 }
 
@@ -1853,8 +1853,8 @@ pub fn create_decimal_dict() -> HashMap<String, PyObjectRef> {
             d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
         };
     }
-    d.insert("Decimal".to_string(), get_decimal_type());
-    d.insert("Context".to_string(), get_context_type());
+    d.insert_str("Decimal", get_decimal_type());
+    d.insert_str("Context", get_context_type());
     dec_func!("getcontext", |_args| {
         let (precision, rounding) = current_decimal_context();
         Ok(make_context_instance(precision, &rounding))
@@ -1862,8 +1862,8 @@ pub fn create_decimal_dict() -> HashMap<String, PyObjectRef> {
     dec_func!("setcontext", |args| {
         if args.is_empty() { return Err(PyError::type_error("setcontext() missing context argument")); }
         if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
-            let precision = dict.get("prec").and_then(|v| v.as_i64()).unwrap_or(28) as usize;
-            let rounding = dict.get("rounding").map(|v| v.str()).unwrap_or_else(|| "ROUND_HALF_EVEN".to_string());
+            let precision = dict.get_str("prec").and_then(|v| v.as_i64()).unwrap_or(28) as usize;
+            let rounding = dict.get_str("rounding").map(|v| v.str()).unwrap_or_else(|| "ROUND_HALF_EVEN".to_string());
             DECIMAL_CURRENT_CONTEXT.with(|c| { *c.borrow_mut() = (precision, rounding); });
         }
         Ok(py_none())
@@ -1875,43 +1875,43 @@ pub fn create_decimal_dict() -> HashMap<String, PyObjectRef> {
     dec_func!("localcontext", |args| {
         let (precision, rounding) = if !args.is_empty() {
             if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
-                (dict.get("prec").and_then(|v| v.as_i64()).unwrap_or(28) as usize, dict.get("rounding").map(|v| v.str()).unwrap_or_else(|| "ROUND_HALF_EVEN".to_string()))
+                (dict.get_str("prec").and_then(|v| v.as_i64()).unwrap_or(28) as usize, dict.get_str("rounding").map(|v| v.str()).unwrap_or_else(|| "ROUND_HALF_EVEN".to_string()))
             } else { current_decimal_context() }
         } else { current_decimal_context() };
         let ctx = make_context_instance(precision, &rounding);
         let mut cm_dict = HashMap::new();
-        cm_dict.insert("__enter__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        cm_dict.insert_str("__enter__", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "__enter__".to_string(),
             func: |args| {
                 if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
-                    let precision = dict.get("prec").and_then(|v| v.as_i64()).unwrap_or(28) as usize;
-                    let rounding = dict.get("rounding").map(|v| v.str()).unwrap_or_else(|| "ROUND_HALF_EVEN".to_string());
+                    let precision = dict.get_str("prec").and_then(|v| v.as_i64()).unwrap_or(28) as usize;
+                    let rounding = dict.get_str("rounding").map(|v| v.str()).unwrap_or_else(|| "ROUND_HALF_EVEN".to_string());
                     DECIMAL_CURRENT_CONTEXT.with(|c| { *c.borrow_mut() = (precision, rounding); });
                 }
                 Ok(args[0].clone())
             },
         }));
-        cm_dict.insert("__exit__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        cm_dict.insert_str("__exit__", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "__exit__".to_string(),
             func: |_args| { DECIMAL_CURRENT_CONTEXT.with(|c| { *c.borrow_mut() = (28, "ROUND_HALF_EVEN".to_string()); }); Ok(py_bool(false)) },
         }));
-        let cm_typ = PyObjectRef::new(PyObject::Type { name: "_ContextManager".to_string(), dict: Box::new(cm_dict), bases: vec![], mro: vec![] });
+        let cm_typ = PyObjectRef::new(PyObject::Type { name: "_ContextManager".to_string(), dict: Box::new(str_map_to_typedict(cm_dict)), bases: vec![], mro: vec![] });
         let mut inst_dict = AttrMap::new();
-        inst_dict.insert("prec".to_string(), py_int(precision as i64));
-        inst_dict.insert("rounding".to_string(), py_str(&rounding));
+        inst_dict.insert_str("prec", py_int(precision as i64));
+        inst_dict.insert_str("rounding", py_str(&rounding));
         let _ = ctx;
         Ok(PyObjectRef::new(PyObject::Instance { typ: cm_typ, dict: inst_dict }))
     });
     // Exception types
-    d.insert("DecimalException".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "DecimalException".to_string(), func: crate::object::builtin_make_exception_decimalexception }));
-    d.insert("InvalidOperation".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "InvalidOperation".to_string(), func: crate::object::builtin_make_exception_invalidoperation }));
-    d.insert("DivisionByZero".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "DivisionByZero".to_string(), func: crate::object::builtin_make_exception_decimaldivisionbyzero }));
-    d.insert("Inexact".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "Inexact".to_string(), func: crate::object::builtin_make_exception_inexact }));
-    d.insert("Rounded".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "Rounded".to_string(), func: crate::object::builtin_make_exception_rounded }));
-    d.insert("Clamped".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "Clamped".to_string(), func: crate::object::builtin_make_exception_clamped }));
-    d.insert("Overflow".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "Overflow".to_string(), func: crate::object::builtin_make_exception_decimaloverflow }));
-    d.insert("Underflow".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "Underflow".to_string(), func: crate::object::builtin_make_exception_decimalunderflow }));
-    d.insert("FloatOperation".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "FloatOperation".to_string(), func: crate::object::builtin_make_exception_floatoperation }));
+    d.insert_str("DecimalException", PyObjectRef::new(PyObject::BuiltinFunction { name: "DecimalException".to_string(), func: crate::object::builtin_make_exception_decimalexception }));
+    d.insert_str("InvalidOperation", PyObjectRef::new(PyObject::BuiltinFunction { name: "InvalidOperation".to_string(), func: crate::object::builtin_make_exception_invalidoperation }));
+    d.insert_str("DivisionByZero", PyObjectRef::new(PyObject::BuiltinFunction { name: "DivisionByZero".to_string(), func: crate::object::builtin_make_exception_decimaldivisionbyzero }));
+    d.insert_str("Inexact", PyObjectRef::new(PyObject::BuiltinFunction { name: "Inexact".to_string(), func: crate::object::builtin_make_exception_inexact }));
+    d.insert_str("Rounded", PyObjectRef::new(PyObject::BuiltinFunction { name: "Rounded".to_string(), func: crate::object::builtin_make_exception_rounded }));
+    d.insert_str("Clamped", PyObjectRef::new(PyObject::BuiltinFunction { name: "Clamped".to_string(), func: crate::object::builtin_make_exception_clamped }));
+    d.insert_str("Overflow", PyObjectRef::new(PyObject::BuiltinFunction { name: "Overflow".to_string(), func: crate::object::builtin_make_exception_decimaloverflow }));
+    d.insert_str("Underflow", PyObjectRef::new(PyObject::BuiltinFunction { name: "Underflow".to_string(), func: crate::object::builtin_make_exception_decimalunderflow }));
+    d.insert_str("FloatOperation", PyObjectRef::new(PyObject::BuiltinFunction { name: "FloatOperation".to_string(), func: crate::object::builtin_make_exception_floatoperation }));
     // Rounding mode constants — their real string values (that's what
     // CPython's decimal.ROUND_* constants actually are), so equality checks
     // and passing them to quantize()-style calls behave as real code expects.
@@ -1919,9 +1919,9 @@ pub fn create_decimal_dict() -> HashMap<String, PyObjectRef> {
                  "ROUND_HALF_EVEN", "ROUND_HALF_UP", "ROUND_UP", "ROUND_05UP"] {
         d.insert(name.to_string(), py_str(name));
     }
-    d.insert("MAX_PREC".to_string(), py_int(999999999999999999i64));
-    d.insert("MAX_EMAX".to_string(), py_int(999999999999999999i64));
-    d.insert("MIN_EMIN".to_string(), py_int(-999999999999999999i64));
+    d.insert_str("MAX_PREC", py_int(999999999999999999i64));
+    d.insert_str("MAX_EMAX", py_int(999999999999999999i64));
+    d.insert_str("MIN_EMIN", py_int(-999999999999999999i64));
     d
 }
 
@@ -1972,37 +1972,37 @@ pub fn create_calendar_dict() -> HashMap<String, PyObjectRef> {
     // in range(13)]` (deliberately ranging through 13 to include the
     // placeholder) raising `IndexError` outright once vendored, since the
     // 12-element list had no index 12 at all.
-    d.insert("month_name".to_string(), py_list(vec![
+    d.insert_str("month_name", py_list(vec![
         py_str(""),
         py_str("January"), py_str("February"), py_str("March"),
         py_str("April"), py_str("May"), py_str("June"),
         py_str("July"), py_str("August"), py_str("September"),
         py_str("October"), py_str("November"), py_str("December"),
     ]));
-    d.insert("month_abbr".to_string(), py_list(vec![
+    d.insert_str("month_abbr", py_list(vec![
         py_str(""),
         py_str("Jan"), py_str("Feb"), py_str("Mar"), py_str("Apr"),
         py_str("May"), py_str("Jun"), py_str("Jul"), py_str("Aug"),
         py_str("Sep"), py_str("Oct"), py_str("Nov"), py_str("Dec"),
     ]));
-    d.insert("day_name".to_string(), py_list(vec![
+    d.insert_str("day_name", py_list(vec![
         py_str("Monday"), py_str("Tuesday"), py_str("Wednesday"),
         py_str("Thursday"), py_str("Friday"), py_str("Saturday"),
         py_str("Sunday"),
     ]));
-    d.insert("day_abbr".to_string(), py_list(vec![
+    d.insert_str("day_abbr", py_list(vec![
         py_str("Mon"), py_str("Tue"), py_str("Wed"), py_str("Thu"),
         py_str("Fri"), py_str("Sat"), py_str("Sun"),
     ]));
     // Weekday constants (0=Monday..6=Sunday, matching `calendar.weekday()`'s
     // own return convention) — were missing entirely.
-    d.insert("MONDAY".to_string(), py_int(0));
-    d.insert("TUESDAY".to_string(), py_int(1));
-    d.insert("WEDNESDAY".to_string(), py_int(2));
-    d.insert("THURSDAY".to_string(), py_int(3));
-    d.insert("FRIDAY".to_string(), py_int(4));
-    d.insert("SATURDAY".to_string(), py_int(5));
-    d.insert("SUNDAY".to_string(), py_int(6));
+    d.insert_str("MONDAY", py_int(0));
+    d.insert_str("TUESDAY", py_int(1));
+    d.insert_str("WEDNESDAY", py_int(2));
+    d.insert_str("THURSDAY", py_int(3));
+    d.insert_str("FRIDAY", py_int(4));
+    d.insert_str("SATURDAY", py_int(5));
+    d.insert_str("SUNDAY", py_int(6));
 
     // Calendar helper functions (inner fn items are not captured by closures)
     fn is_leap(y: i64) -> bool {
@@ -2040,7 +2040,7 @@ pub fn create_calendar_dict() -> HashMap<String, PyObjectRef> {
 
         // formatmonth method
         let mut type_dict = HashMap::new();
-        type_dict.insert("formatmonth".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        type_dict.insert_str("formatmonth", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "formatmonth".to_string(),
             func: |args| {
                 if args.len() < 3 {
@@ -2085,7 +2085,7 @@ pub fn create_calendar_dict() -> HashMap<String, PyObjectRef> {
         }));
 
         // formatyear method
-        type_dict.insert("formatyear".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        type_dict.insert_str("formatyear", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "formatyear".to_string(),
             func: |args| {
                 if args.len() < 2 {
@@ -2142,7 +2142,7 @@ pub fn create_calendar_dict() -> HashMap<String, PyObjectRef> {
         Ok(PyObjectRef::new(PyObject::Instance {
             typ: PyObjectRef::new(PyObject::Type {
                 name: "HTMLCalendar".to_string(),
-                dict: Box::new(type_dict),
+                dict: Box::new(str_map_to_typedict(type_dict)),
                 bases: vec![],
                 mro: vec![],
             }),
@@ -2154,7 +2154,7 @@ pub fn create_calendar_dict() -> HashMap<String, PyObjectRef> {
     cal_func!("TextCalendar", |args| {
         let _ = args;
         let mut type_dict = HashMap::new();
-        type_dict.insert("formatmonth".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        type_dict.insert_str("formatmonth", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "formatmonth".to_string(),
             func: |args| {
                 if args.len() < 3 {
@@ -2195,7 +2195,7 @@ pub fn create_calendar_dict() -> HashMap<String, PyObjectRef> {
         Ok(PyObjectRef::new(PyObject::Instance {
             typ: PyObjectRef::new(PyObject::Type {
                 name: "TextCalendar".to_string(),
-                dict: Box::new(type_dict),
+                dict: Box::new(str_map_to_typedict(type_dict)),
                 bases: vec![],
                 mro: vec![],
             }),
@@ -2365,7 +2365,7 @@ pub fn create_random_cmodule_dict() -> HashMap<String, PyObjectRef> {
     fn write_seed(obj: &PyObjectRef, seed: u64) {
         let mut dict = obj.borrow_mut();
         if let PyObject::Instance { dict: inst_dict, .. } = &mut *dict {
-            inst_dict.insert("_seed".to_string(), py_int(seed as i64));
+            inst_dict.insert_str("_seed", py_int(seed as i64));
         }
     }
 
@@ -2380,7 +2380,7 @@ pub fn create_random_cmodule_dict() -> HashMap<String, PyObjectRef> {
     let mut type_dict = HashMap::new();
 
     // __init__(self, x=None)
-    type_dict.insert("__init__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    type_dict.insert_str("__init__", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "__init__".to_string(),
         func: |args| {
             if args.len() < 1 {
@@ -2407,7 +2407,7 @@ pub fn create_random_cmodule_dict() -> HashMap<String, PyObjectRef> {
     }));
 
     // random(self) -> float in [0.0, 1.0)
-    type_dict.insert("random".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    type_dict.insert_str("random", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "random".to_string(),
         func: |args| {
             if args.len() < 1 {
@@ -2421,7 +2421,7 @@ pub fn create_random_cmodule_dict() -> HashMap<String, PyObjectRef> {
     }));
 
     // seed(self, n=None)
-    type_dict.insert("seed".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    type_dict.insert_str("seed", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "seed".to_string(),
         func: |args| {
             if args.len() < 2 {
@@ -2443,7 +2443,7 @@ pub fn create_random_cmodule_dict() -> HashMap<String, PyObjectRef> {
     }));
 
     // getrandbits(self, k) -> int with k random bits
-    type_dict.insert("getrandbits".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    type_dict.insert_str("getrandbits", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "getrandbits".to_string(),
         func: |args| {
             if args.len() < 2 {
@@ -2491,7 +2491,7 @@ pub fn create_random_cmodule_dict() -> HashMap<String, PyObjectRef> {
     }));
 
     // getstate(self) -> tuple (version, state) for pickling
-    type_dict.insert("getstate".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    type_dict.insert_str("getstate", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "getstate".to_string(),
         func: |args| {
             if args.len() < 1 {
@@ -2504,7 +2504,7 @@ pub fn create_random_cmodule_dict() -> HashMap<String, PyObjectRef> {
     }));
 
     // setstate(self, state) -> None for pickling
-    type_dict.insert("setstate".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    type_dict.insert_str("setstate", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "setstate".to_string(),
         func: |args| {
             if args.len() < 2 {
@@ -2526,12 +2526,12 @@ pub fn create_random_cmodule_dict() -> HashMap<String, PyObjectRef> {
 
     let random_type = PyObjectRef::new(PyObject::Type {
         name: "Random".to_string(),
-        dict: Box::new(type_dict),
+        dict: Box::new(str_map_to_typedict(type_dict)),
         bases: vec![],
         mro: vec![],
     });
 
-    d.insert("Random".to_string(), random_type);
+    d.insert_str("Random", random_type);
     d
 }
 

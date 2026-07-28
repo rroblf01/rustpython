@@ -187,10 +187,10 @@ pub fn create_shutil_dict() -> HashMap<String, PyObjectRef> {
         } else { (80, 24) };
         let columns = std::env::var("COLUMNS").ok().and_then(|s| s.parse::<i64>().ok()).unwrap_or(fallback_cols);
         let lines = std::env::var("LINES").ok().and_then(|s| s.parse::<i64>().ok()).unwrap_or(fallback_lines);
-        let typ = PyObjectRef::new(PyObject::Type { name: "os.terminal_size".to_string(), dict: Box::new(HashMap::new()), bases: vec![], mro: vec![] });
+        let typ = PyObjectRef::new(PyObject::Type { name: "os.terminal_size".to_string(), dict: Box::new(str_map_to_typedict(HashMap::new())), bases: vec![], mro: vec![] });
         let mut dict = AttrMap::new();
-        dict.insert("columns".to_string(), py_int(columns));
-        dict.insert("lines".to_string(), py_int(lines));
+        dict.insert_str("columns", py_int(columns));
+        dict.insert_str("lines", py_int(lines));
         Ok(PyObjectRef::new(PyObject::Instance { typ, dict }))
     });
 
@@ -296,11 +296,11 @@ fn build_gzip_file(filename: &str, mode: &str, compresslevel: u32, mtime: Option
     let writing = mode.contains('w') || mode.contains('a') || mode.contains('x');
     let mut type_dict: HashMap<String, PyObjectRef> = HashMap::new();
 
-    type_dict.insert("__init__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    type_dict.insert_str("__init__", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "__init__".to_string(), func: |_: &[PyObjectRef]| Ok(py_none()),
     }));
-    type_dict.insert("mode".to_string(), py_str(mode));
-    type_dict.insert("name".to_string(), py_str(filename));
+    type_dict.insert_str("mode", py_str(mode));
+    type_dict.insert_str("name", py_str(filename));
 
     if writing {
         let file = std::fs::File::options()
@@ -317,7 +317,7 @@ fn build_gzip_file(filename: &str, mode: &str, compresslevel: u32, mtime: Option
 
         let enc_write = enc_rc.clone();
         let encoding_owned = encoding.to_string();
-        type_dict.insert("write".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| {
+        type_dict.insert_str("write", PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| {
             if args.is_empty() { return Err(PyError::type_error("write() takes exactly one argument")); }
             let bytes = if text {
                 args[0].str().into_bytes()
@@ -332,7 +332,7 @@ fn build_gzip_file(filename: &str, mode: &str, compresslevel: u32, mtime: Option
         }))));
 
         let enc_flush = enc_rc.clone();
-        type_dict.insert("flush".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
+        type_dict.insert_str("flush", PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
             if let Some(enc) = enc_flush.borrow_mut().as_mut() {
                 enc.flush().map_err(|e| PyError::OsError(format!("{}", e)))?;
             }
@@ -340,7 +340,7 @@ fn build_gzip_file(filename: &str, mode: &str, compresslevel: u32, mtime: Option
         }))));
 
         let enc_close = enc_rc.clone();
-        type_dict.insert("close".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
+        type_dict.insert_str("close", PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
             if let Some(enc) = enc_close.borrow_mut().take() {
                 enc.finish().map_err(|e| PyError::OsError(format!("{}", e)))?;
             }
@@ -358,7 +358,7 @@ fn build_gzip_file(filename: &str, mode: &str, compresslevel: u32, mtime: Option
         let b_read = buf_rc.clone();
         let p_read = pos_rc.clone();
         let enc_read = encoding_owned.clone();
-        type_dict.insert("read".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| {
+        type_dict.insert_str("read", PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| {
             let data = b_read.borrow();
             let pos = (*p_read.borrow()).min(data.len());
             let end = if !args.is_empty() {
@@ -378,7 +378,7 @@ fn build_gzip_file(filename: &str, mode: &str, compresslevel: u32, mtime: Option
         let b_readline = buf_rc.clone();
         let p_readline = pos_rc.clone();
         let enc_readline = encoding_owned.clone();
-        type_dict.insert("readline".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
+        type_dict.insert_str("readline", PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
             let data = b_readline.borrow();
             let pos = (*p_readline.borrow()).min(data.len());
             let remaining = &data[pos..];
@@ -395,7 +395,7 @@ fn build_gzip_file(filename: &str, mode: &str, compresslevel: u32, mtime: Option
         let b_readlines = buf_rc.clone();
         let p_readlines = pos_rc.clone();
         let enc_readlines = encoding_owned.clone();
-        type_dict.insert("readlines".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
+        type_dict.insert_str("readlines", PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
             let data = b_readlines.borrow();
             let pos = (*p_readlines.borrow()).min(data.len());
             let remaining = &data[pos..];
@@ -409,14 +409,14 @@ fn build_gzip_file(filename: &str, mode: &str, compresslevel: u32, mtime: Option
         let b_iter = buf_rc.clone();
         let p_iter = pos_rc.clone();
         let enc_iter = encoding_owned.clone();
-        type_dict.insert("__iter__".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |self_args: &[PyObjectRef]| {
+        type_dict.insert_str("__iter__", PyObjectRef::new(PyObject::Closure(Rc::new(move |self_args: &[PyObjectRef]| {
             let _ = (&b_iter, &p_iter, &enc_iter);
             Ok(self_args.first().cloned().unwrap_or_else(py_none))
         }))));
         let b_next = buf_rc.clone();
         let p_next = pos_rc.clone();
         let enc_next = encoding_owned.clone();
-        type_dict.insert("__next__".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
+        type_dict.insert_str("__next__", PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
             let data = b_next.borrow();
             let pos = (*p_next.borrow()).min(data.len());
             if pos >= data.len() { return Err(PyError::StopIteration); }
@@ -431,22 +431,22 @@ fn build_gzip_file(filename: &str, mode: &str, compresslevel: u32, mtime: Option
             }
         }))));
 
-        type_dict.insert("close".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| Ok(py_none())))));
+        type_dict.insert_str("close", PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| Ok(py_none())))));
     }
 
-    type_dict.insert("__enter__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    type_dict.insert_str("__enter__", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "__enter__".to_string(), func: |args: &[PyObjectRef]| Ok(args[0].clone()),
     }));
-    let close_for_exit = type_dict.get("close").cloned();
+    let close_for_exit = type_dict.get_str("close").cloned();
     if let Some(close_fn) = close_for_exit {
-        type_dict.insert("__exit__".to_string(), PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
+        type_dict.insert_str("__exit__", PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
             call_function(&close_fn, vec![])?;
             Ok(py_bool(false))
         }))));
     }
 
     Ok(PyObjectRef::new(PyObject::Instance {
-        typ: PyObjectRef::new(PyObject::Type { name: "GzipFile".to_string(), dict: Box::new(type_dict), bases: vec![], mro: vec![] }),
+        typ: PyObjectRef::new(PyObject::Type { name: "GzipFile".to_string(), dict: Box::new(str_map_to_typedict(type_dict)), bases: vec![], mro: vec![] }),
         dict: AttrMap::new(),
     }))
 }
@@ -467,11 +467,11 @@ pub fn create_gzip_dict() -> HashMap<String, PyObjectRef> {
     }
 
     // gzip header FLG bits (see RFC 1952)
-    d.insert("FTEXT".to_string(), py_int(1));
-    d.insert("FHCRC".to_string(), py_int(2));
-    d.insert("FEXTRA".to_string(), py_int(4));
-    d.insert("FNAME".to_string(), py_int(8));
-    d.insert("FCOMMENT".to_string(), py_int(16));
+    d.insert_str("FTEXT", py_int(1));
+    d.insert_str("FHCRC", py_int(2));
+    d.insert_str("FEXTRA", py_int(4));
+    d.insert_str("FNAME", py_int(8));
+    d.insert_str("FCOMMENT", py_int(16));
 
     gz_func!("open", |args| {
         if args.is_empty() {
@@ -560,19 +560,19 @@ pub fn create_tarfile_dict() -> HashMap<String, PyObjectRef> {
         let _name = args[0].borrow().str();
         // Return an Instance with getnames() and extractall() methods
         let mut inst_dict = AttrMap::new();
-        inst_dict.insert("name".to_string(), py_str(&_name));
-        inst_dict.insert("getnames".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        inst_dict.insert_str("name", py_str(&_name));
+        inst_dict.insert_str("getnames", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "getnames".to_string(),
             func: |_args| Ok(py_list(vec![])),
         }));
-        inst_dict.insert("extractall".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        inst_dict.insert_str("extractall", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "extractall".to_string(),
             func: |_args| Ok(py_none()),
         }));
         Ok(PyObjectRef::new(PyObject::Instance {
             typ: PyObjectRef::new(PyObject::Module {
                 name: "tarfile.TarFile".to_string(),
-                dict: Box::new(HashMap::new()),
+                dict: Box::new(str_map_to_typedict(HashMap::new())),
             }),
             dict: inst_dict,
         }))
@@ -621,7 +621,7 @@ pub fn create_pathlib_dict() -> HashMap<String, PyObjectRef> {
             py_str(".")
         };
         if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
-            dict.insert("_path".to_string(), path_val);
+            dict.insert_str("_path", path_val);
         }
         Ok(py_none())
     });
@@ -641,7 +641,7 @@ pub fn create_pathlib_dict() -> HashMap<String, PyObjectRef> {
                 Ok(py_str(&parent))
             },
         });
-        path_type_dict.insert("parent".to_string(), PyObjectRef::new(PyObject::Property(Box::new(PropertyData {
+        path_type_dict.insert_str("parent", PyObjectRef::new(PyObject::Property(Box::new(PropertyData {
             getter: Some(getter),
             setter: None,
             deleter: None,
@@ -664,7 +664,7 @@ pub fn create_pathlib_dict() -> HashMap<String, PyObjectRef> {
                 Ok(py_str(&name))
             },
         });
-        path_type_dict.insert("name".to_string(), PyObjectRef::new(PyObject::Property(Box::new(PropertyData {
+        path_type_dict.insert_str("name", PyObjectRef::new(PyObject::Property(Box::new(PropertyData {
             getter: Some(getter),
             setter: None,
             deleter: None,
@@ -687,7 +687,7 @@ pub fn create_pathlib_dict() -> HashMap<String, PyObjectRef> {
                 Ok(py_str(&suffix))
             },
         });
-        path_type_dict.insert("suffix".to_string(), PyObjectRef::new(PyObject::Property(Box::new(PropertyData {
+        path_type_dict.insert_str("suffix", PyObjectRef::new(PyObject::Property(Box::new(PropertyData {
             getter: Some(getter),
             setter: None,
             deleter: None,
@@ -710,7 +710,7 @@ pub fn create_pathlib_dict() -> HashMap<String, PyObjectRef> {
                 Ok(py_str(&stem))
             },
         });
-        path_type_dict.insert("stem".to_string(), PyObjectRef::new(PyObject::Property(Box::new(PropertyData {
+        path_type_dict.insert_str("stem", PyObjectRef::new(PyObject::Property(Box::new(PropertyData {
             getter: Some(getter),
             setter: None,
             deleter: None,
@@ -760,7 +760,7 @@ pub fn create_pathlib_dict() -> HashMap<String, PyObjectRef> {
             cell.borrow().clone()
         }).ok_or_else(|| PyError::runtime_error("Path type not initialized".to_string()))?;
         let mut instance_dict = AttrMap::new();
-        instance_dict.insert("_path".to_string(), py_str(&result));
+        instance_dict.insert_str("_path", py_str(&result));
         Ok(PyObjectRef::new(PyObject::Instance {
             typ: path_type,
             dict: instance_dict,
@@ -789,7 +789,7 @@ pub fn create_pathlib_dict() -> HashMap<String, PyObjectRef> {
             cell.borrow().clone()
         }).ok_or_else(|| PyError::runtime_error("Path type not initialized".to_string()))?;
         let mut instance_dict = AttrMap::new();
-        instance_dict.insert("_path".to_string(), py_str(&result));
+        instance_dict.insert_str("_path", py_str(&result));
         Ok(PyObjectRef::new(PyObject::Instance {
             typ: path_type,
             dict: instance_dict,
@@ -799,7 +799,7 @@ pub fn create_pathlib_dict() -> HashMap<String, PyObjectRef> {
     // Create the Path Type object
     let path_type = PyObjectRef::new(PyObject::Type {
         name: "Path".to_string(),
-        dict: Box::new(path_type_dict),
+        dict: Box::new(str_map_to_typedict(path_type_dict)),
         bases: vec![],
         mro: vec![],
     });
@@ -810,13 +810,13 @@ pub fn create_pathlib_dict() -> HashMap<String, PyObjectRef> {
     });
 
     let mut d = HashMap::new();
-    d.insert("Path".to_string(), path_type);
+    d.insert_str("Path", path_type);
     d
 }
 
 pub fn create_zipfile_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
-    d.insert("ZipFile".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    d.insert_str("ZipFile", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "ZipFile".to_string(),
         func: zipfile_constructor,
     }));
@@ -825,8 +825,8 @@ pub fn create_zipfile_dict() -> HashMap<String, PyObjectRef> {
 
 pub fn create_shelve_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
-    d.insert("open".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "open".to_string(), func: shelf_open }));
-    d.insert("Shelf".to_string(), py_str("Shelf"));
+    d.insert_str("open", PyObjectRef::new(PyObject::BuiltinFunction { name: "open".to_string(), func: shelf_open }));
+    d.insert_str("Shelf", py_str("Shelf"));
     d
 }
 

@@ -63,31 +63,31 @@ fn dup_std_fd(fd: i32) -> std::io::Result<std::fs::File> {
 
 pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     let mut builtins = HashMap::new();
-    builtins.insert("None".to_string(), py_none());
-    builtins.insert("True".to_string(), py_bool(true));
-    builtins.insert("False".to_string(), py_bool(false));
+    builtins.insert_str("None", py_none());
+    builtins.insert_str("True", py_bool(true));
+    builtins.insert_str("False", py_bool(false));
     // `__debug__` — always True here (no `-O` optimize-flag equivalent to
     // turn it off), used by real code as `if __debug__: assert ...`-style
     // guards and by the `assert` statement's own real-CPython semantics.
-    builtins.insert("__debug__".to_string(), py_bool(true));
-    builtins.insert("Ellipsis".to_string(), PyObjectRef::imm(PyObject::Str(compact_str::CompactString::from("..."))));
+    builtins.insert_str("__debug__", py_bool(true));
+    builtins.insert_str("Ellipsis", PyObjectRef::imm(PyObject::Str(compact_str::CompactString::from("..."))));
     // NotImplemented: the singleton rich-comparison/binary-op dunders return
     // to signal "try the other operand's reflected method instead" — needed
     // by any `__eq__`/`__lt__`/etc. that follows the standard pattern of
     // `if not isinstance(other, X): return NotImplemented`.
     {
         let mut nie_dict = HashMap::new();
-        nie_dict.insert("__repr__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        nie_dict.insert_str("__repr__", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "__repr__".to_string(),
             func: |_args| Ok(py_str("NotImplemented")),
         }));
-        nie_dict.insert("__bool__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        nie_dict.insert_str("__bool__", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "__bool__".to_string(),
             func: |_args| Ok(py_bool(true)),
         }));
-        let nie_type = PyObjectRef::new(PyObject::Type { name: "NotImplementedType".to_string(), dict: Box::new(nie_dict), bases: vec![], mro: vec![] });
+        let nie_type = PyObjectRef::new(PyObject::Type { name: "NotImplementedType".to_string(), dict: Box::new(str_map_to_typedict(nie_dict)), bases: vec![], mro: vec![] });
         let not_implemented = PyObjectRef::imm(PyObject::Instance { typ: nie_type, dict: AttrMap::new() });
-        builtins.insert("NotImplemented".to_string(), not_implemented);
+        builtins.insert_str("NotImplemented", not_implemented);
     }
 
     macro_rules! add_func {
@@ -250,29 +250,29 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
 
     let math_module = PyObjectRef::new(PyObject::Module {
         name: "math".to_string(),
-        dict: Box::new(create_math_dict()),
+        dict: Box::new(str_map_to_typedict(create_math_dict())),
     });
-    builtins.insert("math".to_string(), math_module.clone());
+    builtins.insert_str("math", math_module.clone());
 
     // ── _codecs (needed by encodings module) ────────────────────────────────
     let codecs_module = PyObjectRef::new(PyObject::Module {
         name: "_codecs".to_string(),
-        dict: Box::new(create_codecs_dict()),
+        dict: Box::new(str_map_to_typedict(create_codecs_dict())),
     });
-    builtins.insert("_codecs".to_string(), codecs_module.clone());
+    builtins.insert_str("_codecs", codecs_module.clone());
 
     // ── _abc (needed by abc.py for ABCMeta, used by io/__init__.py) ────────
     let abc_module = PyObjectRef::new(PyObject::Module {
         name: "_abc".to_string(),
-        dict: Box::new(create_abc_builtins_dict()),
+        dict: Box::new(str_map_to_typedict(create_abc_builtins_dict())),
     });
-    builtins.insert("_abc".to_string(), abc_module.clone());
+    builtins.insert_str("_abc", abc_module.clone());
 
     // Create a proper object TYPE with basic dunder methods.
     // This is used as the implicit base class for all classes without explicit bases.
     let mut object_dict = HashMap::new();
     // __setattr__(self, name, value): sets an attribute on the instance
-    object_dict.insert("__setattr__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    object_dict.insert_str("__setattr__", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "__setattr__".to_string(),
         func: |args| {
             if args.len() < 3 {
@@ -284,7 +284,7 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
         },
     }));
     // __getattribute__(self, name): gets an attribute from the instance
-    object_dict.insert("__getattribute__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    object_dict.insert_str("__getattribute__", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "__getattribute__".to_string(),
         func: |args| {
             if args.len() < 2 {
@@ -295,12 +295,12 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
         },
     }));
     // __init__(self): no-op
-    object_dict.insert("__init__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    object_dict.insert_str("__init__", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "__init__".to_string(),
         func: |_args| Ok(py_none()),
     }));
     // __repr__(self): <object at 0x...>
-    object_dict.insert("__repr__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    object_dict.insert_str("__repr__", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "__repr__".to_string(),
         func: |args| {
             if args.is_empty() {
@@ -327,7 +327,7 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     // worked fine via this interpreter's own internal generic fallback
     // (that fallback was never reified as a real, gettable attribute on
     // the `object` type itself).
-    object_dict.insert("__str__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    object_dict.insert_str("__str__", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "__str__".to_string(),
         func: |args| {
             if args.is_empty() {
@@ -343,7 +343,7 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     // `self is other`) and surfaced very visibly once enum members relied
     // on it: `Color.RED == Color.GREEN` was `True` since both are just
     // "instances of Color".
-    object_dict.insert("__eq__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    object_dict.insert_str("__eq__", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "__eq__".to_string(),
         func: |args| {
             if args.len() < 2 {
@@ -353,7 +353,7 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
         },
     }));
     // __ne__(self, other): inverse of __eq__
-    object_dict.insert("__ne__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    object_dict.insert_str("__ne__", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "__ne__".to_string(),
         func: |args| {
             if args.len() < 2 {
@@ -363,7 +363,7 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
         },
     }));
     // __hash__(self): hash based on pointer
-    object_dict.insert("__hash__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    object_dict.insert_str("__hash__", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "__hash__".to_string(),
         func: |args| {
             if args.is_empty() {
@@ -384,7 +384,7 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     // path for value-carrying members (`object.__new__(cls, value)` used
     // instead of `cls(value)`, since `cls(...)` is overridden by
     // EnumType.__call__ to mean value lookup, not construction).
-    object_dict.insert("__new__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    object_dict.insert_str("__new__", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "__new__".to_string(),
         func: |args| {
             if args.is_empty() {
@@ -408,14 +408,14 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
         },
     }));
     // __init_subclass__(cls, **kwargs): no-op (PEP 487)
-    object_dict.insert("__init_subclass__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    object_dict.insert_str("__init_subclass__", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "__init_subclass__".to_string(),
         func: |_args| {
             Ok(py_none())
         },
     }));
     // __class_getitem__(cls, item): for generic types like List[int] (PEP 560)
-    object_dict.insert("__class_getitem__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    object_dict.insert_str("__class_getitem__", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "__class_getitem__".to_string(),
         func: |args| {
             if args.len() < 2 {
@@ -425,7 +425,7 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
         },
     }));
     // __format__(self, format_spec): basic format support
-    object_dict.insert("__format__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    object_dict.insert_str("__format__", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "__format__".to_string(),
         func: |args| {
             if args.is_empty() {
@@ -441,7 +441,7 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
         },
     }));
     // __reduce__(self): basic pickle support
-    object_dict.insert("__reduce__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    object_dict.insert_str("__reduce__", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "__reduce__".to_string(),
         func: |_args| {
             Ok(py_none())
@@ -449,7 +449,7 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     }));
     let object_type = PyObjectRef::new(PyObject::Type {
         name: "object".to_string(),
-        dict: Box::new(object_dict),
+        dict: Box::new(str_map_to_typedict(object_dict)),
         bases: vec![],
         mro: vec![],
     });
@@ -458,9 +458,9 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
         *mro = vec![object_type.clone()];
     }
     // Register in builtins both as a type (for __build_class__) and as a callable (for object())
-    builtins.insert("object".to_string(), object_type.clone());
+    builtins.insert_str("object", object_type.clone());
     // Also keep the function for direct use
-    builtins.insert("_object_func".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    builtins.insert_str("_object_func", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "object".to_string(),
         func: builtin_object,
     }));
@@ -478,7 +478,7 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     // before the generic "call a Type to instantiate it" path would
     // otherwise try to build a plain Instance instead.
     let mut type_dict = HashMap::new();
-    type_dict.insert("__new__".to_string(), PyObjectRef::new(PyObject::StaticMethod {
+    type_dict.insert_str("__new__", PyObjectRef::new(PyObject::StaticMethod {
         func: PyObjectRef::new(PyObject::BuiltinFunction {
             name: "__new__".to_string(),
             func: crate::object::type_new_builtin,
@@ -486,15 +486,15 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     }));
     let type_type = PyObjectRef::new(PyObject::Type {
         name: "type".to_string(),
-        dict: Box::new(type_dict),
+        dict: Box::new(str_map_to_typedict(type_dict)),
         bases: vec![object_type.clone()],
         mro: vec![],
     });
     if let PyObject::Type { mro, .. } = &mut *type_type.borrow_mut() {
         *mro = vec![type_type.clone(), object_type];
     }
-    builtins.insert("type".to_string(), type_type);
-    builtins.insert("_type_func".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    builtins.insert_str("type", type_type);
+    builtins.insert_str("_type_func", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "type".to_string(),
         func: builtin_type_of,
     }));
@@ -647,23 +647,23 @@ fn _codecs_decode_func(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 /// Create the `_codecs` module dictionary.
 pub fn create_codecs_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
-    d.insert("lookup_error".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    d.insert_str("lookup_error", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "lookup_error".to_string(),
         func: _codecs_lookup_error,
     }));
-    d.insert("lookup".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    d.insert_str("lookup", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "lookup".to_string(),
         func: _codecs_lookup,
     }));
-    d.insert("encode".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    d.insert_str("encode", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "encode".to_string(),
         func: _codecs_encode_func,
     }));
-    d.insert("decode".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    d.insert_str("decode", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "decode".to_string(),
         func: _codecs_decode_func,
     }));
-    d.insert("register".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    d.insert_str("register", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "register".to_string(),
         func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
             if args.len() < 1 {
@@ -675,7 +675,7 @@ pub fn create_codecs_dict() -> HashMap<String, PyObjectRef> {
             Ok(py_none())
         },
     }));
-    d.insert("unregister".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    d.insert_str("unregister", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "unregister".to_string(),
         func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
             if args.len() < 1 {
@@ -712,7 +712,7 @@ fn _abc_init(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let needs_impl = {
         let b = cls.borrow();
         match &*b {
-            PyObject::Type { dict, .. } => !dict.contains_key("_abc_impl"),
+            PyObject::Type { dict, .. } => !dict.contains_key_str("_abc_impl"),
             _ => return Err(PyError::type_error("_abc_init() argument must be a type")),
         }
     };
@@ -866,7 +866,7 @@ fn _abc_abcmeta(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     };
     let class = PyObjectRef::new(PyObject::Type {
         name: name_str,
-        dict: Box::new(namespace_dict),
+        dict: Box::new(str_map_to_typedict(namespace_dict)),
         bases: bases_vec.clone(),
         mro: vec![],
     });
@@ -886,39 +886,39 @@ fn _abc_abcmeta(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 /// Create the `_abc` module dictionary.
 pub fn create_abc_builtins_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
-    d.insert("ABCMeta".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    d.insert_str("ABCMeta", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "ABCMeta".to_string(),
         func: _abc_abcmeta,
     }));
-    d.insert("get_cache_token".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    d.insert_str("get_cache_token", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "get_cache_token".to_string(),
         func: _abc_get_cache_token,
     }));
-    d.insert("_abc_init".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    d.insert_str("_abc_init", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "_abc_init".to_string(),
         func: _abc_init,
     }));
-    d.insert("_abc_register".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    d.insert_str("_abc_register", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "_abc_register".to_string(),
         func: _abc_register,
     }));
-    d.insert("_abc_instancecheck".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    d.insert_str("_abc_instancecheck", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "_abc_instancecheck".to_string(),
         func: _abc_instancecheck,
     }));
-    d.insert("_abc_subclasscheck".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    d.insert_str("_abc_subclasscheck", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "_abc_subclasscheck".to_string(),
         func: _abc_subclasscheck,
     }));
-    d.insert("_get_dump".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    d.insert_str("_get_dump", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "_get_dump".to_string(),
         func: _abc_get_dump,
     }));
-    d.insert("_reset_registry".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    d.insert_str("_reset_registry", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "_reset_registry".to_string(),
         func: _abc_reset_registry,
     }));
-    d.insert("_reset_caches".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    d.insert_str("_reset_caches", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "_reset_caches".to_string(),
         func: _abc_reset_caches,
     }));
@@ -1247,11 +1247,11 @@ pub fn create_math_dict() -> HashMap<String, PyObjectRef> {
     });
 
     // ── Constants ─────────────────────────────────────────────────────────
-    d.insert("pi".to_string(), py_float(std::f64::consts::PI));
-    d.insert("e".to_string(), py_float(std::f64::consts::E));
-    d.insert("tau".to_string(), py_float(std::f64::consts::TAU));
-    d.insert("inf".to_string(), py_float(f64::INFINITY));
-    d.insert("nan".to_string(), py_float(f64::NAN));
+    d.insert_str("pi", py_float(std::f64::consts::PI));
+    d.insert_str("e", py_float(std::f64::consts::E));
+    d.insert_str("tau", py_float(std::f64::consts::TAU));
+    d.insert_str("inf", py_float(f64::INFINITY));
+    d.insert_str("nan", py_float(f64::NAN));
     d
 }
 
@@ -1316,14 +1316,14 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
         println!("{}", val.repr());
         Ok(py_none())
     });
-    d.insert("argv".to_string(), py_list(argv.into_iter().map(|s| py_str(&s)).collect()));
-    d.insert("path".to_string(), py_list(vec![]));
-    d.insert("modules".to_string(), py_dict());
-    d.insert("warnoptions".to_string(), py_list(vec![]));
-    d.insert("version".to_string(), py_str("3.12.0 (RustPython 0.1.0)"));
-    d.insert("version_info".to_string(), py_tuple(vec![py_int(3), py_int(12), py_int(0)]));
-    d.insert("float_repr_style".to_string(), py_str("short"));
-    d.insert("hexversion".to_string(), py_int(0x030c0000));
+    d.insert_str("argv", py_list(argv.into_iter().map(|s| py_str(&s)).collect()));
+    d.insert_str("path", py_list(vec![]));
+    d.insert_str("modules", py_dict());
+    d.insert_str("warnoptions", py_list(vec![]));
+    d.insert_str("version", py_str("3.12.0 (RustPython 0.1.0)"));
+    d.insert_str("version_info", py_tuple(vec![py_int(3), py_int(12), py_int(0)]));
+    d.insert_str("float_repr_style", py_str("short"));
+    d.insert_str("hexversion", py_int(0x030c0000));
     // sys.flags — real CPython exposes this as a structseq (tuple +
     // attribute access). A plain Instance with these as attributes is
     // enough for real code that reads specific flags by name (e.g.
@@ -1339,11 +1339,11 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
         ] {
             flags_dict.insert(flag.to_string(), py_int(0));
         }
-        flags_dict.insert("int_max_str_digits".to_string(), py_int(4300));
-        d.insert("flags".to_string(), PyObjectRef::new(PyObject::Instance {
+        flags_dict.insert_str("int_max_str_digits", py_int(4300));
+        d.insert_str("flags", PyObjectRef::new(PyObject::Instance {
             typ: PyObjectRef::new(PyObject::Type {
                 name: "flags".to_string(),
-                dict: Box::new(HashMap::new()),
+                dict: Box::new(str_map_to_typedict(HashMap::new())),
                 bases: vec![],
                 mro: vec![],
             }),
@@ -1360,19 +1360,19 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
         // structural parity with real CPython rather than because
         // anything here depends on them being exact.
         let mut hash_info_dict = AttrMap::new();
-        hash_info_dict.insert("width".to_string(), py_int(64));
-        hash_info_dict.insert("modulus".to_string(), py_int((1i64 << 61) - 1));
-        hash_info_dict.insert("inf".to_string(), py_int(314159));
-        hash_info_dict.insert("nan".to_string(), py_int(0));
-        hash_info_dict.insert("imag".to_string(), py_int(1000003));
-        hash_info_dict.insert("algorithm".to_string(), py_str("fnv"));
-        hash_info_dict.insert("hash_bits".to_string(), py_int(64));
-        hash_info_dict.insert("seed_bits".to_string(), py_int(128));
-        hash_info_dict.insert("cutoff".to_string(), py_int(0));
-        d.insert("hash_info".to_string(), PyObjectRef::new(PyObject::Instance {
+        hash_info_dict.insert_str("width", py_int(64));
+        hash_info_dict.insert_str("modulus", py_int((1i64 << 61) - 1));
+        hash_info_dict.insert_str("inf", py_int(314159));
+        hash_info_dict.insert_str("nan", py_int(0));
+        hash_info_dict.insert_str("imag", py_int(1000003));
+        hash_info_dict.insert_str("algorithm", py_str("fnv"));
+        hash_info_dict.insert_str("hash_bits", py_int(64));
+        hash_info_dict.insert_str("seed_bits", py_int(128));
+        hash_info_dict.insert_str("cutoff", py_int(0));
+        d.insert_str("hash_info", PyObjectRef::new(PyObject::Instance {
             typ: PyObjectRef::new(PyObject::Type {
                 name: "hash_info".to_string(),
-                dict: Box::new(HashMap::new()),
+                dict: Box::new(str_map_to_typedict(HashMap::new())),
                 bases: vec![],
                 mro: vec![],
             }),
@@ -1389,14 +1389,14 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
         // without depending on this interpreter's actual internal
         // representation matching bit-for-bit.
         let mut int_info_dict = AttrMap::new();
-        int_info_dict.insert("bits_per_digit".to_string(), py_int(30));
-        int_info_dict.insert("sizeof_digit".to_string(), py_int(4));
-        int_info_dict.insert("default_max_str_digits".to_string(), py_int(4300));
-        int_info_dict.insert("str_digits_check_threshold".to_string(), py_int(640));
-        d.insert("int_info".to_string(), PyObjectRef::new(PyObject::Instance {
+        int_info_dict.insert_str("bits_per_digit", py_int(30));
+        int_info_dict.insert_str("sizeof_digit", py_int(4));
+        int_info_dict.insert_str("default_max_str_digits", py_int(4300));
+        int_info_dict.insert_str("str_digits_check_threshold", py_int(640));
+        d.insert_str("int_info", PyObjectRef::new(PyObject::Instance {
             typ: PyObjectRef::new(PyObject::Type {
                 name: "int_info".to_string(),
-                dict: Box::new(HashMap::new()),
+                dict: Box::new(str_map_to_typedict(HashMap::new())),
                 bases: vec![],
                 mro: vec![],
             }),
@@ -1409,13 +1409,13 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
         // threads (`std::thread`), which is exactly what CPython's own
         // "pthread" report describes on any POSIX platform.
         let mut thread_info_dict = AttrMap::new();
-        thread_info_dict.insert("name".to_string(), py_str("pthread"));
-        thread_info_dict.insert("lock".to_string(), py_str("mutex+cond"));
-        thread_info_dict.insert("version".to_string(), py_none());
-        d.insert("thread_info".to_string(), PyObjectRef::new(PyObject::Instance {
+        thread_info_dict.insert_str("name", py_str("pthread"));
+        thread_info_dict.insert_str("lock", py_str("mutex+cond"));
+        thread_info_dict.insert_str("version", py_none());
+        d.insert_str("thread_info", PyObjectRef::new(PyObject::Instance {
             typ: PyObjectRef::new(PyObject::Type {
                 name: "thread_info".to_string(),
-                dict: Box::new(HashMap::new()),
+                dict: Box::new(str_map_to_typedict(HashMap::new())),
                 bases: vec![],
                 mro: vec![],
             }),
@@ -1428,21 +1428,21 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
         // real CPython reports on any IEEE-754 platform, which is
         // effectively all of them).
         let mut float_info_dict = AttrMap::new();
-        float_info_dict.insert("max".to_string(), py_float(f64::MAX));
-        float_info_dict.insert("max_exp".to_string(), py_int(1024));
-        float_info_dict.insert("max_10_exp".to_string(), py_int(308));
-        float_info_dict.insert("min".to_string(), py_float(f64::MIN_POSITIVE));
-        float_info_dict.insert("min_exp".to_string(), py_int(-1021));
-        float_info_dict.insert("min_10_exp".to_string(), py_int(-307));
-        float_info_dict.insert("dig".to_string(), py_int(15));
-        float_info_dict.insert("mant_dig".to_string(), py_int(53));
-        float_info_dict.insert("epsilon".to_string(), py_float(f64::EPSILON));
-        float_info_dict.insert("radix".to_string(), py_int(2));
-        float_info_dict.insert("rounds".to_string(), py_int(1));
-        d.insert("float_info".to_string(), PyObjectRef::new(PyObject::Instance {
+        float_info_dict.insert_str("max", py_float(f64::MAX));
+        float_info_dict.insert_str("max_exp", py_int(1024));
+        float_info_dict.insert_str("max_10_exp", py_int(308));
+        float_info_dict.insert_str("min", py_float(f64::MIN_POSITIVE));
+        float_info_dict.insert_str("min_exp", py_int(-1021));
+        float_info_dict.insert_str("min_10_exp", py_int(-307));
+        float_info_dict.insert_str("dig", py_int(15));
+        float_info_dict.insert_str("mant_dig", py_int(53));
+        float_info_dict.insert_str("epsilon", py_float(f64::EPSILON));
+        float_info_dict.insert_str("radix", py_int(2));
+        float_info_dict.insert_str("rounds", py_int(1));
+        d.insert_str("float_info", PyObjectRef::new(PyObject::Instance {
             typ: PyObjectRef::new(PyObject::Type {
                 name: "float_info".to_string(),
-                dict: Box::new(HashMap::new()),
+                dict: Box::new(str_map_to_typedict(HashMap::new())),
                 bases: vec![],
                 mro: vec![],
             }),
@@ -1457,57 +1457,57 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
         // is "not enabled". Real trigger: `test.support`'s own
         // `_JIT_ENABLED = sys._jit.is_enabled()`.
         let mut jit_dict = AttrMap::new();
-        jit_dict.insert("is_enabled".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        jit_dict.insert_str("is_enabled", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "is_enabled".to_string(),
             func: |_args| Ok(py_bool(false)),
         }));
-        jit_dict.insert("is_active".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        jit_dict.insert_str("is_active", PyObjectRef::new(PyObject::BuiltinFunction {
             name: "is_active".to_string(),
             func: |_args| Ok(py_bool(false)),
         }));
-        d.insert("_jit".to_string(), PyObjectRef::new(PyObject::Instance {
+        d.insert_str("_jit", PyObjectRef::new(PyObject::Instance {
             typ: PyObjectRef::new(PyObject::Type {
                 name: "_jit".to_string(),
-                dict: Box::new(HashMap::new()),
+                dict: Box::new(str_map_to_typedict(HashMap::new())),
                 bases: vec![],
                 mro: vec![],
             }),
             dict: jit_dict,
         }));
     }
-    d.insert("stdin".to_string(), PyObjectRef::new(PyObject::File {
+    d.insert_str("stdin", PyObjectRef::new(PyObject::File {
         file: std::rc::Rc::new(std::cell::RefCell::new(dup_std_fd(0).unwrap_or_else(|_| {
             std::fs::File::open("/dev/null").unwrap()
         }))),
         name: "<stdin>".to_string(),
     }));
-    d.insert("stdout".to_string(), PyObjectRef::new(PyObject::File {
+    d.insert_str("stdout", PyObjectRef::new(PyObject::File {
         file: std::rc::Rc::new(std::cell::RefCell::new(dup_std_fd(1).unwrap_or_else(|_| {
             std::fs::File::create("/dev/null").unwrap()
         }))),
         name: "<stdout>".to_string(),
     }));
-    d.insert("stderr".to_string(), PyObjectRef::new(PyObject::File {
+    d.insert_str("stderr", PyObjectRef::new(PyObject::File {
         file: std::rc::Rc::new(std::cell::RefCell::new(dup_std_fd(2).unwrap_or_else(|_| {
             std::fs::File::create("/dev/null").unwrap()
         }))),
         name: "<stderr>".to_string(),
     }));
-    d.insert("platform".to_string(), py_str(std::env::consts::OS));
+    d.insert_str("platform", py_str(std::env::consts::OS));
     // sys.implementation — CPython returns a namespace with name, cache_tag, etc.
     {
         let mut imp_dict = HashMap::new();
-        imp_dict.insert("name".to_string(), py_str("cpython"));
-        imp_dict.insert("cache_tag".to_string(), py_str("cpython-314"));
-        imp_dict.insert("hexversion".to_string(), py_int(50987248)); // 0x030A0000
-        imp_dict.insert("_multi_threaded".to_string(), py_bool(true));
-        d.insert("implementation".to_string(), create_module("implementation", imp_dict));
+        imp_dict.insert_str("name", py_str("cpython"));
+        imp_dict.insert_str("cache_tag", py_str("cpython-314"));
+        imp_dict.insert_str("hexversion", py_int(50987248)); // 0x030A0000
+        imp_dict.insert_str("_multi_threaded", py_bool(true));
+        d.insert_str("implementation", create_module("implementation", imp_dict));
     }
-    d.insert("byteorder".to_string(), py_str(if cfg!(target_endian = "little") { "little" } else { "big" }));
-    d.insert("maxsize".to_string(), py_int(i64::MAX));
-    d.insert("maxunicode".to_string(), py_int(1114111));
-    d.insert("api_version".to_string(), py_int(1013));
-    d.insert("executable".to_string(), py_str(&std::env::current_exe().map(|p| p.to_string_lossy().to_string()).unwrap_or_default()));
+    d.insert_str("byteorder", py_str(if cfg!(target_endian = "little") { "little" } else { "big" }));
+    d.insert_str("maxsize", py_int(i64::MAX));
+    d.insert_str("maxunicode", py_int(1114111));
+    d.insert_str("api_version", py_int(1013));
+    d.insert_str("executable", py_str(&std::env::current_exe().map(|p| p.to_string_lossy().to_string()).unwrap_or_default()));
     // Detect virtual environment (uv, venv, virtualenv, conda, poetry, pixi)
     let venv_path = std::env::var("VIRTUAL_ENV").ok()
         .or_else(|| std::env::var("CONDA_PREFIX").ok())
@@ -1535,8 +1535,8 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
     } else {
         ("/usr".to_string(), "/usr".to_string())
     };
-    d.insert("prefix".to_string(), py_str(&prefix));
-    d.insert("exec_prefix".to_string(), py_str(&exec_prefix));
+    d.insert_str("prefix", py_str(&prefix));
+    d.insert_str("exec_prefix", py_str(&exec_prefix));
     // `sys.base_prefix`/`base_exec_prefix` — real CPython's own venv-
     // detection idiom (`sys.prefix != sys.base_prefix`) needs these to be
     // the REAL, non-venv installation prefix regardless of whether a venv
@@ -1545,9 +1545,9 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
     // any code doing this exact "am I in a venv" check (a common pattern
     // — `pip`, `venv` itself, build tooling) raised `AttributeError`
     // instead of getting a straight answer.
-    d.insert("base_prefix".to_string(), py_str("/usr"));
-    d.insert("base_exec_prefix".to_string(), py_str("/usr"));
-    d.insert("winver".to_string(), py_str("3.12"));
+    d.insert_str("base_prefix", py_str("/usr"));
+    d.insert_str("base_exec_prefix", py_str("/usr"));
+    d.insert_str("winver", py_str("3.12"));
     // sys.exc_info() — returns current exception info from VM. Real logic
     // lives in `sys_exc_info_builtin` (a real top-level fn, not inlined
     // here) so `vm.rs`'s `call_function` can recognize and special-case it
@@ -1653,7 +1653,7 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
                     // Also sync to sys.modules
                     if let Some(sys_mod) = vm.modules.get("sys") {
                         if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
-                            if let Some(mod_dict) = dict.get("modules") {
+                            if let Some(mod_dict) = dict.get_str("modules") {
                                 mod_dict.borrow_mut().set_attribute(&current, module).ok();
                             }
                         }
@@ -1670,7 +1670,7 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
         vm.modules.insert(name.to_string(), module.clone());
         if let Some(sys_mod) = vm.modules.get("sys") {
             if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
-                if let Some(mod_dict) = dict.get("modules") {
+                if let Some(mod_dict) = dict.get_str("modules") {
                     mod_dict.borrow_mut().set_attribute(name, module.clone()).ok();
                 }
             }
@@ -1723,9 +1723,9 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
 /// Native importlib stub module providing import_module().
 pub fn create_importlib_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
-    d.insert("import_module".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "import_module".to_string(), func: import_module_builtin }));
+    d.insert_str("import_module", PyObjectRef::new(PyObject::BuiltinFunction { name: "import_module".to_string(), func: import_module_builtin }));
     // __version__ — indicates importlib metadata
-    d.insert("__version__".to_string(), py_str("1.0.0"));
+    d.insert_str("__version__", py_str("1.0.0"));
     d
 }
 
@@ -1824,7 +1824,7 @@ pub(crate) fn find_spec_with_vm(vm: &mut crate::vm::VirtualMachine, name: &str, 
     let mut search_paths: Vec<String> = Vec::new();
     if let Some(sys_mod) = vm.modules.get("sys") {
         if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
-            if let Some(path_list) = dict.get("path") {
+            if let Some(path_list) = dict.get_str("path") {
                 if let PyObject::List(items) = &*path_list.borrow() {
                     for item in items {
                         if let PyObject::Str(s) = &*item.borrow() {
@@ -1889,7 +1889,7 @@ pub fn create_importlib_resources_dict() -> HashMap<String, PyObjectRef> {
     fn mod_name(obj: &PyObjectRef) -> String {
         let b = obj.borrow();
         if let PyObject::Module { dict, .. } = &*b {
-            if let Some(name) = dict.get("name") {
+            if let Some(name) = dict.get_str("name") {
                 if let PyObject::Str(s) = &*name.borrow() {
                     return s.to_string();
                 }
@@ -1920,7 +1920,7 @@ pub fn create_importlib_resources_dict() -> HashMap<String, PyObjectRef> {
         ]));
         // Add joinpath as BuiltinMethod with self_obj = trav
         if let PyObject::Module { dict, .. } = &mut *trav.borrow_mut() {
-            dict.insert("joinpath".to_string(), PyObjectRef::new(PyObject::BuiltinMethod {
+            dict.insert_str("joinpath", PyObjectRef::new(PyObject::BuiltinMethod {
                 name: "joinpath".to_string(),
                 func: trav_joinpath,
                 self_obj: trav.clone(),
@@ -1930,7 +1930,7 @@ pub fn create_importlib_resources_dict() -> HashMap<String, PyObjectRef> {
     }
 
     // as_file(traversable) -> context manager wrapping the path
-    d.insert("as_file".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    d.insert_str("as_file", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "as_file".to_string(),
         func: |args| {
             if args.is_empty() {
@@ -1947,12 +1947,12 @@ pub fn create_importlib_resources_dict() -> HashMap<String, PyObjectRef> {
             // so that when called via module.__enter__(), the function receives
             // the module itself as args[0] (via BuiltinMethod self-binding).
             if let PyObject::Module { dict, .. } = &mut *cm.borrow_mut() {
-                dict.insert("__enter__".to_string(), PyObjectRef::new(PyObject::BuiltinMethod {
+                dict.insert_str("__enter__", PyObjectRef::new(PyObject::BuiltinMethod {
                     name: "__enter__".to_string(),
                     func: enter_cm,
                     self_obj: cm.clone(),
                 }));
-                dict.insert("__exit__".to_string(), PyObjectRef::new(PyObject::BuiltinMethod {
+                dict.insert_str("__exit__", PyObjectRef::new(PyObject::BuiltinMethod {
                     name: "__exit__".to_string(),
                     func: exit_cm,
                     self_obj: cm.clone(),
@@ -1963,7 +1963,7 @@ pub fn create_importlib_resources_dict() -> HashMap<String, PyObjectRef> {
     }));
 
     // files(package) -> traversable with joinpath()
-    d.insert("files".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    d.insert_str("files", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "files".to_string(),
         func: |args| {
             if args.is_empty() {
@@ -1976,7 +1976,7 @@ pub fn create_importlib_resources_dict() -> HashMap<String, PyObjectRef> {
                     Some(mod_obj) => {
                         let borrowed = mod_obj.borrow();
                         if let PyObject::Module { dict, .. } = &*borrowed {
-                            if let Some(path_list) = dict.get("__path__") {
+                            if let Some(path_list) = dict.get_str("__path__") {
                                 if let PyObject::List(items) = &*path_list.borrow() {
                                     if let Some(first) = items.first() {
                                         if let PyObject::Str(s) = &*first.borrow() {
@@ -1998,7 +1998,7 @@ pub fn create_importlib_resources_dict() -> HashMap<String, PyObjectRef> {
             // so that when called via traversable.joinpath(...), the function receives
             // the traversable itself as args[0] (via BuiltinMethod self-binding).
             if let PyObject::Module { dict, .. } = &mut *trav.borrow_mut() {
-                dict.insert("joinpath".to_string(), PyObjectRef::new(PyObject::BuiltinMethod {
+                dict.insert_str("joinpath", PyObjectRef::new(PyObject::BuiltinMethod {
                     name: "joinpath".to_string(),
                     func: trav_joinpath,
                     self_obj: trav.clone(),
@@ -2019,15 +2019,15 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
             d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
         };
     }
-    d.insert("curdir".to_string(), py_str("."));
-    d.insert("pardir".to_string(), py_str(".."));
-    d.insert("sep".to_string(), py_str(if cfg!(windows) { "\\" } else { "/" }));
-    d.insert("altsep".to_string(), if cfg!(windows) { py_str("/") } else { py_none() });
-    d.insert("extsep".to_string(), py_str("."));
-    d.insert("pathsep".to_string(), py_str(if cfg!(windows) { ";" } else { ":" }));
-    d.insert("linesep".to_string(), py_str(if cfg!(windows) { "\r\n" } else { "\n" }));
-    d.insert("defpath".to_string(), py_str(if cfg!(windows) { "." } else { ":/bin:/usr/bin" }));
-    d.insert("devnull".to_string(), py_str(if cfg!(windows) { "nul" } else { "/dev/null" }));
+    d.insert_str("curdir", py_str("."));
+    d.insert_str("pardir", py_str(".."));
+    d.insert_str("sep", py_str(if cfg!(windows) { "\\" } else { "/" }));
+    d.insert_str("altsep", if cfg!(windows) { py_str("/") } else { py_none() });
+    d.insert_str("extsep", py_str("."));
+    d.insert_str("pathsep", py_str(if cfg!(windows) { ";" } else { ":" }));
+    d.insert_str("linesep", py_str(if cfg!(windows) { "\r\n" } else { "\n" }));
+    d.insert_str("defpath", py_str(if cfg!(windows) { "." } else { ":/bin:/usr/bin" }));
+    d.insert_str("devnull", py_str(if cfg!(windows) { "nul" } else { "/dev/null" }));
     os_func!("fspath", |args| {
         if args.is_empty() { return Err(PyError::type_error("fspath() missing required argument: 'path'")); }
         let obj = args[0].clone();
@@ -2238,13 +2238,13 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
     });
 
     // OS flags for open()
-    d.insert("O_RDONLY".to_string(), py_int(0));
-    d.insert("O_WRONLY".to_string(), py_int(1));
-    d.insert("O_RDWR".to_string(), py_int(2));
-    d.insert("O_CREAT".to_string(), py_int(64));
-    d.insert("O_EXCL".to_string(), py_int(128));
-    d.insert("O_TRUNC".to_string(), py_int(512));
-    d.insert("O_APPEND".to_string(), py_int(1024));
+    d.insert_str("O_RDONLY", py_int(0));
+    d.insert_str("O_WRONLY", py_int(1));
+    d.insert_str("O_RDWR", py_int(2));
+    d.insert_str("O_CREAT", py_int(64));
+    d.insert_str("O_EXCL", py_int(128));
+    d.insert_str("O_TRUNC", py_int(512));
+    d.insert_str("O_APPEND", py_int(1024));
 
     // environ dict — use a proper PyDict instead of Module so methods like
     // .setdefault(), .get(), .keys(), 'x in environ', etc. all work (Django req.)
@@ -2252,7 +2252,7 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
     for (key, val) in std::env::vars() {
         environ_pydict.set(py_str(&key), py_str(&val)).ok();
     }
-    d.insert("environ".to_string(), PyObjectRef::new(PyObject::Dict(Box::new(environ_pydict))));
+    d.insert_str("environ", PyObjectRef::new(PyObject::Dict(Box::new(environ_pydict))));
 
     // --- os.getpid() ---
     os_func!("getpid", |_| {
@@ -2308,24 +2308,24 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
     fn stat_to_dict(meta: &std::fs::Metadata) -> HashMap<String, PyObjectRef> {
         use std::os::unix::fs::MetadataExt;
         let mut d = HashMap::new();
-        d.insert("st_mode".to_string(), py_int(meta.mode() as i64));
-        d.insert("st_ino".to_string(), py_int(meta.ino() as i64));
-        d.insert("st_dev".to_string(), py_int(meta.dev() as i64));
-        d.insert("st_nlink".to_string(), py_int(meta.nlink() as i64));
-        d.insert("st_uid".to_string(), py_int(meta.uid() as i64));
-        d.insert("st_gid".to_string(), py_int(meta.gid() as i64));
-        d.insert("st_size".to_string(), py_int(meta.size() as i64));
+        d.insert_str("st_mode", py_int(meta.mode() as i64));
+        d.insert_str("st_ino", py_int(meta.ino() as i64));
+        d.insert_str("st_dev", py_int(meta.dev() as i64));
+        d.insert_str("st_nlink", py_int(meta.nlink() as i64));
+        d.insert_str("st_uid", py_int(meta.uid() as i64));
+        d.insert_str("st_gid", py_int(meta.gid() as i64));
+        d.insert_str("st_size", py_int(meta.size() as i64));
         if let Ok(t) = meta.modified() {
             let dur = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-            d.insert("st_mtime".to_string(), py_float(dur.as_secs_f64()));
+            d.insert_str("st_mtime", py_float(dur.as_secs_f64()));
         }
         if let Ok(t) = meta.accessed() {
             let dur = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-            d.insert("st_atime".to_string(), py_float(dur.as_secs_f64()));
+            d.insert_str("st_atime", py_float(dur.as_secs_f64()));
         }
         if let Ok(t) = meta.created() {
             let dur = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-            d.insert("st_ctime".to_string(), py_float(dur.as_secs_f64()));
+            d.insert_str("st_ctime", py_float(dur.as_secs_f64()));
         }
         d
     }
@@ -2351,20 +2351,20 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
     // --- stat_result module with field index constants ---
     {
         let mut sr = HashMap::new();
-        sr.insert("ST_MODE".to_string(), py_int(0));
-        sr.insert("ST_INO".to_string(), py_int(1));
-        sr.insert("ST_DEV".to_string(), py_int(2));
-        sr.insert("ST_NLINK".to_string(), py_int(3));
-        sr.insert("ST_UID".to_string(), py_int(4));
-        sr.insert("ST_GID".to_string(), py_int(5));
-        sr.insert("ST_SIZE".to_string(), py_int(6));
-        sr.insert("ST_ATIME".to_string(), py_int(7));
-        sr.insert("ST_MTIME".to_string(), py_int(8));
-        sr.insert("ST_CTIME".to_string(), py_int(9));
-        sr.insert("n_fields".to_string(), py_int(10));
-        sr.insert("n_sequence_fields".to_string(), py_int(10));
-        sr.insert("__doc__".to_string(), py_str("stat_result: stat results as a module with named field indices"));
-        d.insert("stat_result".to_string(), create_module("stat_result", sr));
+        sr.insert_str("ST_MODE", py_int(0));
+        sr.insert_str("ST_INO", py_int(1));
+        sr.insert_str("ST_DEV", py_int(2));
+        sr.insert_str("ST_NLINK", py_int(3));
+        sr.insert_str("ST_UID", py_int(4));
+        sr.insert_str("ST_GID", py_int(5));
+        sr.insert_str("ST_SIZE", py_int(6));
+        sr.insert_str("ST_ATIME", py_int(7));
+        sr.insert_str("ST_MTIME", py_int(8));
+        sr.insert_str("ST_CTIME", py_int(9));
+        sr.insert_str("n_fields", py_int(10));
+        sr.insert_str("n_sequence_fields", py_int(10));
+        sr.insert_str("__doc__", py_str("stat_result: stat results as a module with named field indices"));
+        d.insert_str("stat_result", create_module("stat_result", sr));
     }
 
     // --- os.chmod(path, mode) ---
@@ -2490,35 +2490,35 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
     });
 
     // --- File mode constants (from <sys/stat.h>) ---
-    d.insert("S_IFMT".to_string(), py_int(0o170000));
-    d.insert("S_IFSOCK".to_string(), py_int(0o140000));
-    d.insert("S_IFLNK".to_string(), py_int(0o120000));
-    d.insert("S_IFREG".to_string(), py_int(0o100000));
-    d.insert("S_IFBLK".to_string(), py_int(0o060000));
-    d.insert("S_IFDIR".to_string(), py_int(0o040000));
-    d.insert("S_IFCHR".to_string(), py_int(0o020000));
-    d.insert("S_IFIFO".to_string(), py_int(0o010000));
-    d.insert("S_ISUID".to_string(), py_int(0o4000));
-    d.insert("S_ISGID".to_string(), py_int(0o2000));
-    d.insert("S_ISVTX".to_string(), py_int(0o1000));
-    d.insert("S_IRWXU".to_string(), py_int(0o700));
-    d.insert("S_IRUSR".to_string(), py_int(0o400));
-    d.insert("S_IWUSR".to_string(), py_int(0o200));
-    d.insert("S_IXUSR".to_string(), py_int(0o100));
-    d.insert("S_IRWXG".to_string(), py_int(0o070));
-    d.insert("S_IRGRP".to_string(), py_int(0o040));
-    d.insert("S_IWGRP".to_string(), py_int(0o020));
-    d.insert("S_IXGRP".to_string(), py_int(0o010));
-    d.insert("S_IRWXO".to_string(), py_int(0o007));
-    d.insert("S_IROTH".to_string(), py_int(0o004));
-    d.insert("S_IWOTH".to_string(), py_int(0o002));
-    d.insert("S_IXOTH".to_string(), py_int(0o001));
+    d.insert_str("S_IFMT", py_int(0o170000));
+    d.insert_str("S_IFSOCK", py_int(0o140000));
+    d.insert_str("S_IFLNK", py_int(0o120000));
+    d.insert_str("S_IFREG", py_int(0o100000));
+    d.insert_str("S_IFBLK", py_int(0o060000));
+    d.insert_str("S_IFDIR", py_int(0o040000));
+    d.insert_str("S_IFCHR", py_int(0o020000));
+    d.insert_str("S_IFIFO", py_int(0o010000));
+    d.insert_str("S_ISUID", py_int(0o4000));
+    d.insert_str("S_ISGID", py_int(0o2000));
+    d.insert_str("S_ISVTX", py_int(0o1000));
+    d.insert_str("S_IRWXU", py_int(0o700));
+    d.insert_str("S_IRUSR", py_int(0o400));
+    d.insert_str("S_IWUSR", py_int(0o200));
+    d.insert_str("S_IXUSR", py_int(0o100));
+    d.insert_str("S_IRWXG", py_int(0o070));
+    d.insert_str("S_IRGRP", py_int(0o040));
+    d.insert_str("S_IWGRP", py_int(0o020));
+    d.insert_str("S_IXGRP", py_int(0o010));
+    d.insert_str("S_IRWXO", py_int(0o007));
+    d.insert_str("S_IROTH", py_int(0o004));
+    d.insert_str("S_IWOTH", py_int(0o002));
+    d.insert_str("S_IXOTH", py_int(0o001));
 
     // OS constants needed by stdlib code
-    d.insert("name".to_string(), py_str("posix"));
-    d.insert("sep".to_string(), py_str("/"));
-    d.insert("linesep".to_string(), py_str("\n"));
-    d.insert("pathsep".to_string(), py_str(":"));
+    d.insert_str("name", py_str("posix"));
+    d.insert_str("sep", py_str("/"));
+    d.insert_str("linesep", py_str("\n"));
+    d.insert_str("pathsep", py_str(":"));
 
     // os.path sub-module will be wired as a proper submodule in vm.rs
     // The path attribute is set there (not inline) to allow proper os.path import
@@ -2531,21 +2531,21 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
 /// splitext, split, getsize, getmtime, islink, expanduser, normpath, normcase
 pub fn create_os_path_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
-    d.insert("supports_unicode_filenames".to_string(), py_bool(!cfg!(windows)));
+    d.insert_str("supports_unicode_filenames", py_bool(!cfg!(windows)));
     macro_rules! path_func {
         ($name:expr, $func:expr) => {
             d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
         };
     }
 
-    d.insert("curdir".to_string(), py_str("."));
-    d.insert("pardir".to_string(), py_str(".."));
-    d.insert("sep".to_string(), py_str(if cfg!(windows) { "\\" } else { "/" }));
-    d.insert("altsep".to_string(), if cfg!(windows) { py_str("/") } else { py_none() });
-    d.insert("extsep".to_string(), py_str("."));
-    d.insert("pathsep".to_string(), py_str(if cfg!(windows) { ";" } else { ":" }));
-    d.insert("defpath".to_string(), py_str(if cfg!(windows) { "." } else { ":/bin:/usr/bin" }));
-    d.insert("devnull".to_string(), py_str(if cfg!(windows) { "nul" } else { "/dev/null" }));
+    d.insert_str("curdir", py_str("."));
+    d.insert_str("pardir", py_str(".."));
+    d.insert_str("sep", py_str(if cfg!(windows) { "\\" } else { "/" }));
+    d.insert_str("altsep", if cfg!(windows) { py_str("/") } else { py_none() });
+    d.insert_str("extsep", py_str("."));
+    d.insert_str("pathsep", py_str(if cfg!(windows) { ";" } else { ":" }));
+    d.insert_str("defpath", py_str(if cfg!(windows) { "." } else { ":/bin:/usr/bin" }));
+    d.insert_str("devnull", py_str(if cfg!(windows) { "nul" } else { "/dev/null" }));
 
     // --- String-based path manipulation functions ---
 
@@ -2977,7 +2977,7 @@ pub fn create_operator_dict() -> HashMap<String, PyObjectRef> {
     op_func!("__setitem__", |args| { if args.len() < 3 { return Err(PyError::type_error("__setitem__ requires 3 arguments")); } py_setitem(&args[0], &args[1], args[2].clone())?; Ok(py_none()) });
 
     // itemgetter factory
-    d.insert("itemgetter".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    d.insert_str("itemgetter", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "itemgetter".to_string(),
         func: |args| {
             if args.is_empty() { return Err(PyError::type_error("itemgetter requires at least 1 argument")); }
@@ -3001,7 +3001,7 @@ pub fn create_operator_dict() -> HashMap<String, PyObjectRef> {
     }));
 
     // attrgetter factory
-    d.insert("attrgetter".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    d.insert_str("attrgetter", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "attrgetter".to_string(),
         func: |args| {
             if args.is_empty() { return Err(PyError::type_error("attrgetter requires at least 1 argument")); }
@@ -3042,27 +3042,27 @@ pub fn create_future_dict() -> HashMap<String, PyObjectRef> {
         ]))
     };
 
-    d.insert("nested_scopes".to_string(), feature(0x01, "nested_scopes", "2.1.0", "2.2.0"));
-    d.insert("generators".to_string(), feature(0x02, "generators", "2.2.0", "2.3.0"));
-    d.insert("division".to_string(), feature(0x04, "division", "2.2.0", "3.0.0"));
-    d.insert("absolute_import".to_string(), feature(0x08, "absolute_import", "2.5.0", "3.0.0"));
-    d.insert("with_statement".to_string(), feature(0x10, "with_statement", "2.5.0", "2.6.0"));
-    d.insert("print_function".to_string(), feature(0x20, "print_function", "2.6.0", "3.0.0"));
-    d.insert("unicode_literals".to_string(), feature(0x40, "unicode_literals", "2.6.0", "3.0.0"));
-    d.insert("barry_as_FLUFL".to_string(), feature(0x80, "barry_as_FLUFL", "3.1.0", "4.0.0"));
-    d.insert("generator_stop".to_string(), feature(0x100, "generator_stop", "3.5.0", "3.7.0"));
-    d.insert("annotations".to_string(), feature(0x200, "annotations", "3.7.0", "3.11.0"));
+    d.insert_str("nested_scopes", feature(0x01, "nested_scopes", "2.1.0", "2.2.0"));
+    d.insert_str("generators", feature(0x02, "generators", "2.2.0", "2.3.0"));
+    d.insert_str("division", feature(0x04, "division", "2.2.0", "3.0.0"));
+    d.insert_str("absolute_import", feature(0x08, "absolute_import", "2.5.0", "3.0.0"));
+    d.insert_str("with_statement", feature(0x10, "with_statement", "2.5.0", "2.6.0"));
+    d.insert_str("print_function", feature(0x20, "print_function", "2.6.0", "3.0.0"));
+    d.insert_str("unicode_literals", feature(0x40, "unicode_literals", "2.6.0", "3.0.0"));
+    d.insert_str("barry_as_FLUFL", feature(0x80, "barry_as_FLUFL", "3.1.0", "4.0.0"));
+    d.insert_str("generator_stop", feature(0x100, "generator_stop", "3.5.0", "3.7.0"));
+    d.insert_str("annotations", feature(0x200, "annotations", "3.7.0", "3.11.0"));
 
-    d.insert("all_feature_names".to_string(), py_list(vec![
+    d.insert_str("all_feature_names", py_list(vec![
         py_str("nested_scopes"), py_str("generators"), py_str("division"),
         py_str("absolute_import"), py_str("with_statement"), py_str("print_function"),
         py_str("unicode_literals"), py_str("barry_as_FLUFL"), py_str("generator_stop"),
         py_str("annotations"),
     ]));
 
-    d.insert("__doc__".to_string(), py_str("Future feature statements (from __future__)"));
-    d.insert("__name__".to_string(), py_str("__future__"));
-    d.insert("__package__".to_string(), py_str(""));
+    d.insert_str("__doc__", py_str("Future feature statements (from __future__)"));
+    d.insert_str("__name__", py_str("__future__"));
+    d.insert_str("__package__", py_str(""));
     d
 }
 
@@ -3070,42 +3070,42 @@ pub fn create_future_dict() -> HashMap<String, PyObjectRef> {
 pub fn create_errno_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     // Standard POSIX errno codes used by tempfile and os modules
-    d.insert("EPERM".to_string(), py_int(1));
-    d.insert("ENOENT".to_string(), py_int(2));
-    d.insert("ESRCH".to_string(), py_int(3));
-    d.insert("EINTR".to_string(), py_int(4));
-    d.insert("EIO".to_string(), py_int(5));
-    d.insert("ENXIO".to_string(), py_int(6));
-    d.insert("E2BIG".to_string(), py_int(7));
-    d.insert("ENOEXEC".to_string(), py_int(8));
-    d.insert("EBADF".to_string(), py_int(9));
-    d.insert("ECHILD".to_string(), py_int(10));
-    d.insert("EAGAIN".to_string(), py_int(11));
-    d.insert("ENOMEM".to_string(), py_int(12));
-    d.insert("EACCES".to_string(), py_int(13));
-    d.insert("EFAULT".to_string(), py_int(14));
-    d.insert("ENOTBLK".to_string(), py_int(15));
-    d.insert("EBUSY".to_string(), py_int(16));
-    d.insert("EEXIST".to_string(), py_int(17));
-    d.insert("EXDEV".to_string(), py_int(18));
-    d.insert("ENODEV".to_string(), py_int(19));
-    d.insert("ENOTDIR".to_string(), py_int(20));
-    d.insert("EISDIR".to_string(), py_int(21));
-    d.insert("EINVAL".to_string(), py_int(22));
-    d.insert("ENFILE".to_string(), py_int(23));
-    d.insert("EMFILE".to_string(), py_int(24));
-    d.insert("ENOTTY".to_string(), py_int(25));
-    d.insert("ETXTBSY".to_string(), py_int(26));
-    d.insert("EFBIG".to_string(), py_int(27));
-    d.insert("ENOSPC".to_string(), py_int(28));
-    d.insert("ESPIPE".to_string(), py_int(29));
-    d.insert("EROFS".to_string(), py_int(30));
-    d.insert("EMLINK".to_string(), py_int(31));
-    d.insert("EPIPE".to_string(), py_int(32));
-    d.insert("EDOM".to_string(), py_int(33));
-    d.insert("ERANGE".to_string(), py_int(34));
-    d.insert("ENOSYS".to_string(), py_int(38));
-    d.insert("EOPNOTSUPP".to_string(), py_int(95));
-    d.insert("__name__".to_string(), py_str("errno"));
+    d.insert_str("EPERM", py_int(1));
+    d.insert_str("ENOENT", py_int(2));
+    d.insert_str("ESRCH", py_int(3));
+    d.insert_str("EINTR", py_int(4));
+    d.insert_str("EIO", py_int(5));
+    d.insert_str("ENXIO", py_int(6));
+    d.insert_str("E2BIG", py_int(7));
+    d.insert_str("ENOEXEC", py_int(8));
+    d.insert_str("EBADF", py_int(9));
+    d.insert_str("ECHILD", py_int(10));
+    d.insert_str("EAGAIN", py_int(11));
+    d.insert_str("ENOMEM", py_int(12));
+    d.insert_str("EACCES", py_int(13));
+    d.insert_str("EFAULT", py_int(14));
+    d.insert_str("ENOTBLK", py_int(15));
+    d.insert_str("EBUSY", py_int(16));
+    d.insert_str("EEXIST", py_int(17));
+    d.insert_str("EXDEV", py_int(18));
+    d.insert_str("ENODEV", py_int(19));
+    d.insert_str("ENOTDIR", py_int(20));
+    d.insert_str("EISDIR", py_int(21));
+    d.insert_str("EINVAL", py_int(22));
+    d.insert_str("ENFILE", py_int(23));
+    d.insert_str("EMFILE", py_int(24));
+    d.insert_str("ENOTTY", py_int(25));
+    d.insert_str("ETXTBSY", py_int(26));
+    d.insert_str("EFBIG", py_int(27));
+    d.insert_str("ENOSPC", py_int(28));
+    d.insert_str("ESPIPE", py_int(29));
+    d.insert_str("EROFS", py_int(30));
+    d.insert_str("EMLINK", py_int(31));
+    d.insert_str("EPIPE", py_int(32));
+    d.insert_str("EDOM", py_int(33));
+    d.insert_str("ERANGE", py_int(34));
+    d.insert_str("ENOSYS", py_int(38));
+    d.insert_str("EOPNOTSUPP", py_int(95));
+    d.insert_str("__name__", py_str("errno"));
     d
 }

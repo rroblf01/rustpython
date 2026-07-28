@@ -5,11 +5,11 @@ use std::rc::Rc;
 pub fn create_sqlite3_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
 
-    d.insert("connect".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    d.insert_str("connect", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "connect".to_string(),
         func: sqlite3_connect,
     }));
-    d.insert("OperationalError".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+    d.insert_str("OperationalError", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "OperationalError".to_string(),
         func: |args| {
             let msg = if args.is_empty() { "".to_string() } else { args[0].str() };
@@ -49,7 +49,7 @@ fn create_connection(conn: Rc<std::cell::RefCell<rusqlite::Connection>>) -> PyOb
     PyObjectRef::new(PyObject::Instance {
         typ: PyObjectRef::new(PyObject::Type {
             name: "sqlite3.Connection".to_string(),
-            dict: Box::new(HashMap::from([
+            dict: Box::new(str_map_to_typedict(HashMap::from([
                 ("cursor".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
                     name: "cursor".to_string(),
                     func: |_args| {
@@ -59,7 +59,7 @@ fn create_connection(conn: Rc<std::cell::RefCell<rusqlite::Connection>>) -> PyOb
                         Ok(PyObjectRef::new(PyObject::Instance {
                             typ: PyObjectRef::new(PyObject::Type {
                                 name: "sqlite3.Cursor".to_string(),
-                                dict: Box::new(HashMap::from([
+                                dict: Box::new(str_map_to_typedict(HashMap::from([
                                     ("__iter__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
                                         name: "__iter__".to_string(),
                                         func: |args| Ok(args[0].clone()),
@@ -68,7 +68,7 @@ fn create_connection(conn: Rc<std::cell::RefCell<rusqlite::Connection>>) -> PyOb
                                         name: "__next__".to_string(),
                                         func: |_args| Err(PyError::StopIteration),
                                     })),
-                                ])),
+                                ]))),
                                 bases: vec![],
                                 mro: vec![],
                             }),
@@ -98,7 +98,7 @@ fn create_connection(conn: Rc<std::cell::RefCell<rusqlite::Connection>>) -> PyOb
                     name: "close".to_string(),
                     func: |_args| Ok(py_none()),
                 })),
-            ])),
+            ]))),
             bases: vec![],
             mro: vec![],
         }),
