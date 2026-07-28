@@ -4157,6 +4157,20 @@ impl VirtualMachine {
                         }
                     }
                 }
+                // `.borrow_mut()` panics unconditionally for anything that
+                // ISN'T `PyObjectRef::Mut` — every inline variant plus any
+                // `Imm`-wrapped value (boxed Int, Range, Tuple, Str, ...).
+                // `del some_immutable_value.attr` (real trigger: CPython's
+                // own `test_range.py`, `del rangeobj.start` — a `range`
+                // object's `start`/`stop`/`step` are read-only, expected to
+                // raise a clean `AttributeError`) previously panicked the
+                // whole process instead. Same fix shape as `builtin_setattr`
+                // already applies for `setattr()`.
+                if !matches!(obj, PyObjectRef::Mut(_)) {
+                    return Err(PyError::attribute_error(format!(
+                        "'{}' object attribute '{}' is read-only", obj.borrow().type_name(), name
+                    )));
+                }
                 obj.borrow_mut().del_attribute(&name)?;
             }
 
@@ -6259,6 +6273,25 @@ impl VirtualMachine {
             }
         }
 
+        // A real native value type (`int`, and eventually more — see
+        // `NATIVE_VALUE_CTOR_KEY`'s doc comment) called DIRECTLY (`int(5)`,
+        // as opposed to a user subclass like `class MyInt(int): ...`,
+        // which still needs the Instance-building path below) dispatches
+        // straight to its original native constructor and returns that
+        // raw, UNWRAPPED result — never a `PyObject::Instance`. Checked
+        // before `type_construct_info` so it takes priority over the
+        // generic construction convention entirely.
+        {
+            let native_ctor = if let PyObject::Type { dict, .. } = &*callable.borrow() {
+                dict.get_str(crate::object::NATIVE_VALUE_CTOR_KEY).cloned()
+            } else {
+                None
+            };
+            if let Some(ctor) = native_ctor {
+                return self.call_function(ctor, args, keywords);
+            }
+        }
+
         let type_construct_info = if let PyObject::Type { dict, mro, .. } = &*callable.borrow() {
             let native_kind = dict.get_str(crate::object::NATIVE_BASE_MARKER).map(|v| v.str());
             let init_func = dict.get_str("__init__").cloned().or_else(|| {
@@ -6860,6 +6893,14 @@ impl VirtualMachine {
         for base in &bases_vec {
             let native_name = match &*base.borrow() {
                 PyObject::BuiltinFunction { name, .. } if crate::object::is_recognized_native_base_name(name) => Some(name.clone()),
+                // A native value type that's been migrated to a real
+                // `PyObject::Type` (see `NATIVE_VALUE_CTOR_KEY`'s doc
+                // comment — `int` as of this writing) is a second
+                // recognized shape of "direct native base", alongside the
+                // `BuiltinFunction` case above — `class MyInt(int): ...`
+                // must keep working through this exact same
+                // `NATIVE_BASE_MARKER`/native-backing machinery, unchanged.
+                PyObject::Type { name, dict, .. } if dict.contains_key_str(crate::object::NATIVE_VALUE_CTOR_KEY) => Some(name.clone()),
                 _ => crate::object::native_base_of_type(base),
             };
             if let Some(native_name) = native_name {

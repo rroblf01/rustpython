@@ -103,8 +103,9 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     add_func!("len", builtin_len);
     add_func!("range", builtin_range);
     // "type" is registered further down as a real, subclassable Type object
-    // once `object_type` exists — see the comment there.
-    add_func!("int", builtin_int);
+    // once `object_type` exists — see the comment there. "int" is likewise
+    // registered further down (once `object_type` exists) as a real Type —
+    // see the comment there.
     add_func!("float", builtin_float);
     add_func!("complex", builtin_complex);
     add_func!("str", builtin_str);
@@ -464,6 +465,40 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
         name: "object".to_string(),
         func: builtin_object,
     }));
+
+    // `int` — the first of the "native value" types (int/str/list/dict/...)
+    // migrated from a plain `PyObject::BuiltinFunction` constructor to a
+    // real, subclassable `PyObject::Type`, closing the long-standing
+    // "native types aren't real Type objects" gap for this one type (see
+    // `NATIVE_VALUE_CTOR_KEY`'s doc comment in object.rs for the full
+    // mechanism). `int_dict`'s `NATIVE_VALUE_CTOR_KEY` entry points at the
+    // ORIGINAL native constructor closure (`builtin_int`) — `call_function`
+    // dispatches through it and returns the raw, unwrapped `PyObject::Int`
+    // result, so `int(5)` still produces a plain int, never an
+    // instance-of-int wrapper. `from_bytes` is the one method that
+    // genuinely needs to live in this dict now (every other int method
+    // like `bit_length` keeps resolving via native-backing delegation on a
+    // `class MyInt(int)` instance, unaffected by this change).
+    let mut int_dict: HashMap<String, PyObjectRef> = HashMap::new();
+    int_dict.insert_str(crate::object::NATIVE_VALUE_CTOR_KEY, PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "int".to_string(),
+        func: builtin_int,
+    }));
+    int_dict.insert_str("from_bytes", PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "from_bytes".to_string(),
+        func: crate::object::builtin_int_from_bytes,
+    }));
+    let int_type = PyObjectRef::new(PyObject::Type {
+        name: "int".to_string(),
+        dict: Box::new(str_map_to_typedict(int_dict)),
+        bases: vec![object_type.clone()],
+        mro: vec![],
+    });
+    if let PyObject::Type { mro, .. } = &mut *int_type.borrow_mut() {
+        *mro = vec![int_type.clone(), object_type.clone()];
+    }
+    builtins.insert_str("int", int_type.clone());
+    crate::object::seed_primitive_type_cache("int", int_type);
 
     // `type` — a real, subclassable Type object (not just the `type(x)`
     // introspection/`type(name,bases,ns)` construction BuiltinFunction that

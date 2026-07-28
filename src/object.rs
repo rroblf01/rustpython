@@ -4007,15 +4007,25 @@ thread_local! {
     // total-ordering-style guards, `type(x) == int` checks) — confirmed via
     // CPython's own `test_math.testIsqrt`'s `self.assertIs(type(s), int)`.
     // Caching one canonical Type object per builtin type NAME here fixes
-    // same-kind identity comparisons. NOTE this does NOT make `type(5) is
-    // int` true — `int`/`str`/etc. are registered in builtins as plain
-    // `PyObject::BuiltinFunction` constructors, not as real Type objects
-    // (a separate, much larger architectural gap: making them real,
-    // subclassable/callable Type objects would touch every one of this
-    // file's many `PyObject::BuiltinFunction { name: "int", .. }`-style
-    // special cases). `isinstance()` already works around this with its own
-    // name-based comparison; `type(x) is int` remains unsupported.
+    // same-kind identity comparisons. For a type that has been migrated to
+    // a REAL `PyObject::Type` registered in `builtins` (see
+    // `NATIVE_VALUE_CTOR_KEY`'s doc comment — `int` as of this writing),
+    // `seed_primitive_type_cache` below pre-populates this cache with that
+    // SAME canonical object at `create_builtins()` time, so `type(5) is
+    // int` is genuinely `True` — not just `type(5) is type(5)`. For any
+    // type NOT yet migrated, this cache still falls back to lazily
+    // building a fresh placeholder `Type` per name on first use, exactly
+    // as before.
     static PRIMITIVE_TYPE_CACHE: std::cell::RefCell<HashMap<String, PyObjectRef>> = std::cell::RefCell::new(HashMap::new());
+}
+
+/// Pre-seed `PRIMITIVE_TYPE_CACHE` with the canonical, already-constructed
+/// `Type` object for a native value type (called once from
+/// `create_builtins()` right after building e.g. `int_type`) — so
+/// `builtin_type_of`/`type(x)` returns this SAME object instead of lazily
+/// building an unrelated placeholder the first time `type(5)` is called.
+pub(crate) fn seed_primitive_type_cache(name: &str, ty: PyObjectRef) {
+    PRIMITIVE_TYPE_CACHE.with(|c| { c.borrow_mut().insert(name.to_string(), ty); });
 }
 
 pub fn builtin_type_of(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
@@ -7706,6 +7716,23 @@ pub(crate) const NATIVE_BACKING_KEY: &str = "__native__";
 /// *inheritance* (a subclass with no explicit `metaclass=` must still use its
 /// base's custom metaclass) all recover "which metaclass built this".
 pub(crate) const METATYPE_KEY: &str = "__metatype__";
+/// Internal bookkeeping key (same treatment as the other markers above)
+/// marking a `PyObject::Type` as a REAL native value type (`int`, and
+/// eventually `str`/`list`/`dict`/`float`/etc.) rather than an ordinary
+/// Python-defined class — the codebase's long-standing "native types
+/// aren't real Type objects" architecture gap, being closed one type at a
+/// time. Points at the type's original native constructor
+/// `PyObject::BuiltinFunction` (e.g. `builtin_int`). `call_function`'s
+/// generic `Type`-construction path checks for this key FIRST: if present,
+/// it calls the constructor directly and returns its raw, UNWRAPPED result
+/// (a plain `PyObject::Int`, never a `PyObject::Instance`) — `int(5)` must
+/// return a raw int, not an instance-of-int wrapper. A user subclass
+/// (`class MyInt(int): ...`) is unaffected: `default_build_class`'s
+/// native-base detection recognizes this key as an alternative shape of
+/// "native base" alongside the existing `BuiltinFunction`-based check, and
+/// routes subclass construction through the existing, unchanged
+/// `NATIVE_BASE_MARKER`/`NATIVE_BACKING_KEY` machinery instead.
+pub(crate) const NATIVE_VALUE_CTOR_KEY: &str = "__native_value_ctor__";
 
 /// The metaclass that built `typ`, if it's something other than plain
 /// `type` — checked on the class's own dict only, exactly like
@@ -8082,7 +8109,7 @@ impl PyObject {
                     let mut pd = PyDict::new();
                     for (k, v) in dict.iter() {
                         let k_str = interner::lookup_str(*k);
-                        if k_str == NATIVE_BASE_MARKER || k_str == METATYPE_KEY { continue; }
+                        if k_str == NATIVE_BASE_MARKER || k_str == METATYPE_KEY || k_str == NATIVE_VALUE_CTOR_KEY { continue; }
                         let _ = pd.set(py_str(k_str), v.clone());
                     }
                     return Ok(PyObjectRef::new(PyObject::Dict(Box::new(pd))));
