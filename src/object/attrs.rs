@@ -2392,15 +2392,15 @@ impl PyObject {
                         func: |args| {
                             if args.len() < 2 { return Err(PyError::type_error("setdefault() takes at least 1 argument")); }
                             let key = args[1].clone();
-                            if let PyObject::Dict(d) = &mut *args[0].borrow_mut() {
-                                match d.get(&key)? {
-                                    Some(val) => Ok(val.clone()),
-                                    None => {
-                                        let val = if args.len() > 2 { args[2].clone() } else { py_none() };
-                                        d.set(key, val.clone())?; Ok(val)
-                                    }
-                                }
-                            } else { Err(PyError::runtime_error("setdefault on non-dict")) }
+                            let default = if args.len() > 2 { args[2].clone() } else { py_none() };
+                            // Routed through `pydict_safe_get_or_insert` — see
+                            // `pydict_safe_set`'s doc comment (subscript.rs)
+                            // for why this must never hold `args[0]`'s own
+                            // mutable borrow across a colliding key's
+                            // `.equals()` call (real CPython test:
+                            // `test_dict.py`'s `test_clear_at_lookup`, which
+                            // exercises this exact method).
+                            pydict_safe_get_or_insert(&args[0], key, default)
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),

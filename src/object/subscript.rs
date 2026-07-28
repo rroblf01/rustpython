@@ -556,18 +556,14 @@ pub fn py_setitem(obj: &PyObjectRef, index: &PyObjectRef, value: PyObjectRef) ->
         }
     }
 
-    // Dict assignment: compute the key's hash BEFORE taking `obj`'s own
-    // mutable borrow (see `PyDict::set_with_hash`'s doc comment) — a key
-    // with a custom `__hash__` can run arbitrary Python, including code
-    // that mutates this very dict (real CPython test: gh-97591), which
-    // would re-enter `borrow_mut()` on the same RefCell and panic if the
-    // hash were computed while already mutably borrowed.
+    // Dict assignment: routed through `pydict_safe_set`, which never holds
+    // `obj`'s own mutable borrow across a colliding key's `.equals()` call
+    // (a key with a custom `__hash__`/`__eq__` can run arbitrary Python,
+    // including code that mutates this very dict — real CPython tests:
+    // gh-97591, gh-140551 — which would re-enter `borrow_mut()` on the same
+    // RefCell and panic if such a borrow were held at the time).
     if matches!(&*obj.borrow(), PyObject::Dict(_)) {
-        let h = index.hash()?;
-        let mut o = obj.borrow_mut();
-        if let PyObject::Dict(d) = &mut *o {
-            return d.set_with_hash(index.clone(), value, h);
-        }
+        return pydict_safe_set(obj, index.clone(), value);
     }
 
     let mut o = obj.borrow_mut();

@@ -27,15 +27,28 @@ pub struct PyDict {
     indices: Vec<u32>,
     size: usize,
     pub instance_ref: Option<PyObjectRef>,
+    /// Bumped on every structural mutation (insert/update/remove/clear/
+    /// rehash). Used by the reentrancy-safe wrappers below (`pydict_safe_set`/
+    /// `pydict_safe_get_or_insert`) to detect whether a probed slot/entry
+    /// index computed against an earlier snapshot is still valid, or must be
+    /// recomputed because a reentrant callback (e.g. a key's `__eq__`
+    /// calling `d.clear()`) mutated the dict in the meantime.
+    version: u64,
 }
 
 impl PyDict {
     pub fn new() -> Self {
-        PyDict { entries: Vec::new(), indices: Vec::new(), size: 0, instance_ref: None }
+        PyDict { entries: Vec::new(), indices: Vec::new(), size: 0, instance_ref: None, version: 0 }
     }
     pub fn is_empty(&self) -> bool { self.size == 0 }
     pub fn len(&self) -> usize { self.size }
-    pub fn clear(&mut self) { self.entries.clear(); self.indices.clear(); self.size = 0; }
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.indices.clear();
+        self.size = 0;
+        self.version = self.version.wrapping_add(1);
+    }
+    pub(crate) fn version(&self) -> u64 { self.version }
 
     fn mask(&self) -> usize { self.indices.len() - 1 }
 
@@ -85,6 +98,45 @@ impl PyDict {
         }
     }
 
+    /// Like `probe`, but bails out with `Err(())` instead of ever calling
+    /// `.equals()` against an `Instance`-typed key — comparing two
+    /// natively-typed keys (int/str/etc.) can never run Python code, so
+    /// probing to completion is always safe for those; only an `Instance`
+    /// key (either the new key or an existing colliding one) can hide an
+    /// arbitrary, possibly dict-reentrant `__eq__`. Lets callers take a fast,
+    /// single-borrow path for the overwhelmingly common case (native keys)
+    /// and fall back to the slower reentrancy-safe snapshot path (see
+    /// `pydict_safe_set`) only when genuinely necessary.
+    fn probe_no_reentry_risk(&self, key: &PyObjectRef, h: usize) -> Result<(usize, Option<usize>), ()> {
+        if self.indices.is_empty() { return Ok((0, None)); }
+        let mask = self.mask();
+        let start = h & mask;
+        let mut first_tomb = None;
+        let mut i = start;
+        loop {
+            let idx_val = self.indices[i];
+            if idx_val == 0 {
+                return Ok((first_tomb.unwrap_or(i), None));
+            }
+            let entry_idx = (idx_val - 1) as usize;
+            if self.entries[entry_idx].is_none() {
+                if first_tomb.is_none() { first_tomb = Some(i); }
+            } else if let Some((k, _)) = &self.entries[entry_idx] {
+                if k.is(key) {
+                    return Ok((i, Some(entry_idx)));
+                }
+                if matches!(&*k.borrow(), PyObject::Instance { .. }) || matches!(&*key.borrow(), PyObject::Instance { .. }) {
+                    return Err(());
+                }
+                if k.equals(key).unwrap_or(false) {
+                    return Ok((i, Some(entry_idx)));
+                }
+            }
+            i = (i + 1) & mask;
+            if i == start { return Ok((first_tomb.unwrap_or(i), None)); }
+        }
+    }
+
     fn ensure_capacity(&mut self, additional: usize) {
         let needed = self.size + additional;
         if self.indices.is_empty() {
@@ -107,6 +159,7 @@ impl PyDict {
             }
         }
         self.indices = new_idx;
+        self.version = self.version.wrapping_add(1);
     }
     pub fn contains(&self, key: &PyObjectRef) -> PyResult<bool> {
         let h = key.hash()?;
@@ -143,6 +196,17 @@ impl PyDict {
     pub fn set_with_hash(&mut self, key: PyObjectRef, value: PyObjectRef, h: usize) -> PyResult<()> {
         self.ensure_capacity(1);
         let (slot, existing) = self.probe(&key, h);
+        self.apply_probed_set(slot, existing, key, value);
+        Ok(())
+    }
+
+    /// Commits a slot/entry-index pair already computed by `probe`/
+    /// `probe_no_reentry_risk` (against either `self` directly or a
+    /// consistent snapshot of it — see `pydict_safe_set`'s doc comment).
+    /// Never calls `.equals()`/`.hash()` itself, so it's always safe to run
+    /// under a live borrow.
+    pub(crate) fn apply_probed_set(&mut self, slot: usize, existing: Option<usize>, key: PyObjectRef, value: PyObjectRef) {
+        self.version = self.version.wrapping_add(1);
         let val_for_instance = value.clone();
         if let Some(entry_idx) = existing {
             self.entries[entry_idx].as_mut().unwrap().1 = value;
@@ -158,7 +222,6 @@ impl PyDict {
                 dict.insert(key.str(), val_for_instance);
             }
         }
-        Ok(())
     }
     pub fn remove(&mut self, key: &PyObjectRef) -> PyResult<PyObjectRef> {
         let h = key.hash()?;
@@ -171,6 +234,7 @@ impl PyDict {
         let existing = self.find(key, h).ok_or_else(|| PyError::key_error(key.str()))?;
         let removed = self.entries[existing].take().unwrap().1;
         self.size -= 1;
+        self.version = self.version.wrapping_add(1);
         Ok(removed)
     }
     pub fn iter(&self) -> impl Iterator<Item = (&PyObjectRef, &PyObjectRef)> {
@@ -232,6 +296,121 @@ impl PyDict {
         self.size += 1;
     }
 }
+/// Safely insert/overwrite `key` -> `value` into a live `PyObject::Dict`
+/// referenced by `target`, WITHOUT ever holding `target`'s own
+/// `borrow_mut()` across a `.equals()` call against another key. Probing
+/// for an existing colliding key can run arbitrary Python (a custom
+/// `__eq__`) that mutates THIS SAME dict — real, deliberate CPython
+/// regression test: `test_dict.py`'s `test_clear_at_lookup` (gh-140551),
+/// where a key's `__hash__` always returns `1` and its `__eq__` calls
+/// `d.clear()` unconditionally. Holding a live borrow across that used to
+/// panic with "RefCell already borrowed" the instant the reentrant call
+/// made its own borrow. Mirrors `pyset_safe_add` (`pyset.rs`): take the fast
+/// single-borrow path whenever no `Instance`-typed key is involved (the
+/// overwhelming common case — native keys can never run Python code during
+/// comparison, so there's no O(n) snapshot cost for ordinary str/int-keyed
+/// dicts), and fall back to a snapshot-probe-verify retry loop otherwise —
+/// verified via a `version` counter that nothing changed underneath before
+/// committing, retrying against fresh state if it did (matching CPython's
+/// own fix for this same bug: restart the lookup rather than trusting
+/// now-stale indices).
+pub(crate) fn pydict_safe_set(target: &PyObjectRef, key: PyObjectRef, value: PyObjectRef) -> PyResult<()> {
+    let h = key.hash()?;
+    {
+        let mut obj = target.borrow_mut();
+        match &mut *obj {
+            PyObject::Dict(d) => {
+                d.ensure_capacity(1);
+                if let Ok((slot, existing)) = d.probe_no_reentry_risk(&key, h) {
+                    d.apply_probed_set(slot, existing, key, value);
+                    return Ok(());
+                }
+            }
+            _ => return Err(PyError::runtime_error("setitem on non-dict")),
+        }
+    }
+    loop {
+        let snap_version = {
+            let mut obj = target.borrow_mut();
+            match &mut *obj {
+                PyObject::Dict(d) => { d.ensure_capacity(1); d.version() }
+                _ => return Err(PyError::runtime_error("setitem on non-dict")),
+            }
+        };
+        let snapshot = {
+            let obj = target.borrow();
+            match &*obj {
+                PyObject::Dict(d) => (**d).clone(),
+                _ => return Err(PyError::runtime_error("setitem on non-dict")),
+            }
+        };
+        let (slot, existing) = snapshot.probe(&key, h);
+        let mut obj = target.borrow_mut();
+        match &mut *obj {
+            PyObject::Dict(d) if d.version() == snap_version => {
+                d.apply_probed_set(slot, existing, key, value);
+                return Ok(());
+            }
+            PyObject::Dict(_) => { drop(obj); continue; }
+            _ => return Err(PyError::runtime_error("setitem on non-dict")),
+        }
+    }
+}
+
+/// Safely implement `dict.setdefault(key, default)` on a live `PyObject::Dict`
+/// referenced by `target` — same reentrancy hazard and technique as
+/// `pydict_safe_set` (probing can run an existing key's `__eq__`, which may
+/// reentrantly mutate this same dict), just returning the found-or-inserted
+/// value instead of `()`.
+pub(crate) fn pydict_safe_get_or_insert(target: &PyObjectRef, key: PyObjectRef, default: PyObjectRef) -> PyResult<PyObjectRef> {
+    let h = key.hash()?;
+    {
+        let mut obj = target.borrow_mut();
+        match &mut *obj {
+            PyObject::Dict(d) => {
+                d.ensure_capacity(1);
+                if let Ok((slot, existing)) = d.probe_no_reentry_risk(&key, h) {
+                    if let Some(entry_idx) = existing {
+                        return Ok(d.entries[entry_idx].as_ref().unwrap().1.clone());
+                    }
+                    d.apply_probed_set(slot, None, key, default.clone());
+                    return Ok(default);
+                }
+            }
+            _ => return Err(PyError::runtime_error("setdefault on non-dict")),
+        }
+    }
+    loop {
+        let snap_version = {
+            let mut obj = target.borrow_mut();
+            match &mut *obj {
+                PyObject::Dict(d) => { d.ensure_capacity(1); d.version() }
+                _ => return Err(PyError::runtime_error("setdefault on non-dict")),
+            }
+        };
+        let snapshot = {
+            let obj = target.borrow();
+            match &*obj {
+                PyObject::Dict(d) => (**d).clone(),
+                _ => return Err(PyError::runtime_error("setdefault on non-dict")),
+            }
+        };
+        let (slot, existing) = snapshot.probe(&key, h);
+        let mut obj = target.borrow_mut();
+        match &mut *obj {
+            PyObject::Dict(d) if d.version() == snap_version => {
+                if let Some(entry_idx) = existing {
+                    return Ok(d.entries[entry_idx].as_ref().unwrap().1.clone());
+                }
+                d.apply_probed_set(slot, None, key, default.clone());
+                return Ok(default);
+            }
+            PyObject::Dict(_) => { drop(obj); continue; }
+            _ => return Err(PyError::runtime_error("setdefault on non-dict")),
+        }
+    }
+}
+
 /// Helper: provide dict methods (items, keys, values, __iter__) for Instance objects
 /// that inherit from dict but can't access the built-in dict methods.
 pub(crate) fn instance_builtin_dict_method(name: &str, dict_snapshot: Vec<(String, PyObjectRef)>) -> Option<PyObjectRef> {
