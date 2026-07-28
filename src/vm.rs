@@ -2285,6 +2285,25 @@ impl VirtualMachine {
                     f.fast_locals.get(var_idx).and_then(|v| v.clone())
                 };
                 match val {
+                    // Mirror LOAD_DEREF's own unwrapping: if this slot has
+                    // been converted into a cell (MAKE_CELL ran for it, or
+                    // a same-slot STORE_FAST landed on an existing cell —
+                    // see STORE_FAST's own comment on why that can happen),
+                    // push the cell's inner value, not the cell object
+                    // itself. Falls through to pushing the raw value
+                    // unchanged for the overwhelmingly common non-cell case.
+                    Some(v) if matches!(&*v.borrow(), PyObject::Cell { .. }) => {
+                        let inner = match &*v.borrow() {
+                            PyObject::Cell { value: Some(inner) } => Some(inner.clone()),
+                            PyObject::Cell { value: None } => None,
+                            _ => unreachable!(),
+                        };
+                        match inner {
+                            Some(inner) => self.frames[fi].push(inner),
+                            None => return Err(PyError::name_error(format!("local variable '{}' referenced before assignment",
+                                self.frames[fi].code.varnames.get(var_idx).map_or("?", |&s| crate::interner::lookup_str(s))))),
+                        }
+                    }
                     Some(v) => self.frames[fi].push(v),
                     None => {
                         if std::env::var("RPY_DEBUG_NAMEERROR").is_ok() {
@@ -2304,7 +2323,29 @@ impl VirtualMachine {
                 let val = self.frames[fi].pop()?;
                 let frame = &mut self.frames[fi];
                 if var_idx < frame.fast_locals.len() {
-                    frame.fast_locals[var_idx] = Some(val.clone());
+                    // If this slot has already been converted into a cell
+                    // (MAKE_CELL ran for it, e.g. because a nested
+                    // scope/lambda captures the same name — real trigger:
+                    // CPython's own `test_listcomps.py`, a comprehension's
+                    // iteration variable ending up cellvar-classified),
+                    // update the cell's VALUE in place rather than
+                    // clobbering the slot with the raw value directly.
+                    // Overwriting it outright previously corrupted the
+                    // slot's cell-ness, so a LATER `STORE_DEREF`/`LOAD_DEREF`
+                    // for the same variable would try to `.borrow_mut()` a
+                    // plain (non-Mut) value instead of the expected Cell —
+                    // an unconditional hard panic ("borrow_mut called on
+                    // non-Mut value"), not just a semantic mismatch.
+                    let is_existing_cell = matches!(&frame.fast_locals[var_idx], Some(existing) if matches!(&*existing.borrow(), PyObject::Cell { .. }));
+                    if is_existing_cell {
+                        if let Some(existing) = frame.fast_locals[var_idx].clone() {
+                            if let PyObject::Cell { value } = &mut *existing.borrow_mut() {
+                                *value = Some(val.clone());
+                            }
+                        }
+                    } else {
+                        frame.fast_locals[var_idx] = Some(val.clone());
+                    }
                 }
                 let name = crate::interner::lookup_str(frame.code.varnames[var_idx]);
                 frame.insert_local(name, val);
@@ -2404,7 +2445,17 @@ impl VirtualMachine {
                     let var_idx = self.frames[fi].code.varnames.iter().position(|&n| crate::interner::intern_eq(n, name))
                         .ok_or_else(|| PyError::runtime_error("variable not found"))?;
                     if var_idx < self.frames[fi].fast_locals.len() {
-                        if let Some(cell) = self.frames[fi].fast_locals[var_idx].clone() {
+                        // Defensive: only treat the existing slot value as
+                        // a real cell if it actually is one. A same-slot
+                        // plain `STORE_FAST` landing here first (see that
+                        // opcode's own comment) is now handled there, but
+                        // this guards against any OTHER way the slot could
+                        // end up non-cell — safe fallback (build a fresh
+                        // cell) instead of `.borrow_mut()` unconditionally
+                        // panicking on a non-`Mut` value.
+                        let existing_is_cell = matches!(&self.frames[fi].fast_locals[var_idx], Some(c) if matches!(&*c.borrow(), PyObject::Cell { .. }));
+                        if existing_is_cell {
+                            let cell = self.frames[fi].fast_locals[var_idx].clone().unwrap();
                             let mut cell_val = cell.borrow_mut();
                             if let PyObject::Cell { value } = &mut *cell_val {
                                 *value = Some(val);
@@ -2419,7 +2470,9 @@ impl VirtualMachine {
                     }
                 } else {
                     let fv_idx = idx - self.frames[fi].code.cellvars.len();
-                    if let Some(cell) = self.frames[fi].closure.get(fv_idx).cloned() {
+                    let existing_is_cell = matches!(self.frames[fi].closure.get(fv_idx), Some(c) if matches!(&*c.borrow(), PyObject::Cell { .. }));
+                    if existing_is_cell {
+                        let cell = self.frames[fi].closure[fv_idx].clone();
                         let mut cell_val = cell.borrow_mut();
                         if let PyObject::Cell { value } = &mut *cell_val {
                             *value = Some(val);

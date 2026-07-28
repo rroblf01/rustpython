@@ -2183,6 +2183,19 @@ impl PyObject {
                 return Ok(a_parts == b_parts);
             }
         }
+        // `bytes`/`bytearray` compare equal across the two variants by
+        // content — real Python's `bytes.__eq__`/`bytearray.__eq__` both
+        // accept either type on the other side (`bytearray(b'abcd') ==
+        // b'abcd'` is `True`). Checked before the discriminant short-circuit
+        // below, which otherwise always returned `False` for any two
+        // differently-tagged variants regardless of content — confirmed via
+        // CPython's own `test_base64.py`.
+        match (self, &*other) {
+            (PyObject::Bytes(a), PyObject::ByteArray(b)) | (PyObject::ByteArray(b), PyObject::Bytes(a)) => {
+                return Ok(a.as_slice() == b.as_slice());
+            }
+            _ => {}
+        }
         if std::mem::discriminant(self) != std::mem::discriminant(&*other) {
             return Ok(false);
         }
@@ -7634,7 +7647,18 @@ pub(crate) fn is_builtin_exception_class_name(name: &str) -> bool {
         "UnicodeWarning" | "BytesWarning" | "ResourceWarning" | "ReferenceError" |
         "BufferError" | "MemoryError" | "NotADirectoryError" | "IsADirectoryError" |
         "FileExistsError" | "ConnectionAbortedError" | "ConnectionResetError" |
-        "ProcessLookupError" | "UnicodeTranslateError" | "IndentationError" | "TabError"
+        "ProcessLookupError" | "UnicodeTranslateError" | "IndentationError" | "TabError" |
+        // Module-specific exception classes (each defined the same way —
+        // a bare `PyObject::BuiltinFunction` whose closure builds a
+        // `PyObject::Exception` — but registered on their OWN module's dict
+        // rather than via `add_exc_type!`/`create_builtins`, so they need
+        // separate entries here). Real trigger: `binascii.Error` failing
+        // `isinstance(binascii.Error, type)` (found via CPython's own
+        // `test_base64.py`, whose `self.assertRaises(binascii.Error, ...)`
+        // calls unittest's `_is_subtype`, which requires this to be True —
+        // same root gap as the core-builtin case documented above, just for
+        // a name outside that fixed core list).
+        "Error" | "InvalidStateError" | "CertificateError" | "SSLError" | "OperationalError"
     )
 }
 
@@ -9478,10 +9502,30 @@ impl PyObject {
                         func: |args| {
                             if args.is_empty() { return Err(PyError::type_error("format() takes at least 1 argument")); }
                             let fmt = args[0].str();
+                            // Keyword arguments arrive packed into a trailing
+                            // dict (this project's established calling
+                            // convention for native methods — see
+                            // `call_function`'s `BuiltinMethod` arm in
+                            // vm.rs). If the last arg is a Dict, treat it as
+                            // the kwargs pack for named fields and exclude
+                            // it from positional indexing — previously
+                            // named fields (`'{name}'.format(name=...)`)
+                            // were entirely unimplemented and silently
+                            // printed the field NAME itself instead of its
+                            // value (confirmed via CPython's own
+                            // `test_listcomps.py`, which builds source code
+                            // via `"...{code}...".format(code=code)`).
+                            let rest = &args[1..];
+                            let kwargs_dict: Option<PyObjectRef> = match rest.last() {
+                                Some(a) if matches!(&*a.borrow(), PyObject::Dict(_)) => Some(a.clone()),
+                                _ => None,
+                            };
+                            let pos_args: &[PyObjectRef] = if kwargs_dict.is_some() { &rest[..rest.len()-1] } else { rest };
                             let mut result = String::new();
                             let mut chars = fmt.chars();
-                            let _pos = 0usize;
                             let mut next_auto = 0usize;
+                            let mut used_manual_numbering = false;
+                            let mut used_auto_numbering = false;
                             while let Some(c) = chars.next() {
                                 if c == '{' {
                                     // Check for {{ escape
@@ -9490,7 +9534,7 @@ impl PyObject {
                                         chars.next();
                                         continue;
                                     }
-                                    // Parse field name: {name} or {0} or {}
+                                    // Parse field text up to the matching `}`.
                                     let mut field = String::new();
                                     loop {
                                         match chars.next() {
@@ -9499,23 +9543,54 @@ impl PyObject {
                                             None => return Err(PyError::value_error("unterminated format field")),
                                         }
                                     }
-                                    // Determine the value
-                                    let val = if field.is_empty() {
-                                        // Auto-numbering: {}
+                                    // Split off an optional `!conversion` and
+                                    // `:spec` suffix — previously not parsed
+                                    // at all, so even POSITIONAL fields with
+                                    // a spec (`{0:>10}`) printed the raw
+                                    // field text instead of applying it.
+                                    let (name_part, spec) = match field.find(':') {
+                                        Some(idx) => (&field[..idx], &field[idx+1..]),
+                                        None => (field.as_str(), ""),
+                                    };
+                                    let (name_part, conversion) = match name_part.find('!') {
+                                        Some(idx) => (&name_part[..idx], Some(&name_part[idx+1..])),
+                                        None => (name_part, None),
+                                    };
+                                    // Resolve the field's value: auto `{}`,
+                                    // positional `{0}`, or named `{key}`
+                                    // (looked up in the trailing kwargs dict).
+                                    let val: PyResult<PyObjectRef> = if name_part.is_empty() {
+                                        if used_manual_numbering {
+                                            return Err(PyError::value_error("cannot switch from manual field specification to automatic field numbering"));
+                                        }
+                                        used_auto_numbering = true;
                                         let idx = next_auto;
                                         next_auto += 1;
-                                        if idx + 1 < args.len() { Some(args[idx + 1].clone()) } else { None }
-                                    } else if let Ok(n) = field.parse::<usize>() {
-                                        // Positional: {0}, {1}
-                                        if n + 1 < args.len() { Some(args[n + 1].clone()) } else { None }
+                                        pos_args.get(idx).cloned()
+                                            .ok_or_else(|| PyError::index_error("Replacement index out of range for positional args tuple"))
+                                    } else if let Ok(n) = name_part.parse::<usize>() {
+                                        if used_auto_numbering {
+                                            return Err(PyError::value_error("cannot switch from automatic field numbering to manual field specification"));
+                                        }
+                                        used_manual_numbering = true;
+                                        pos_args.get(n).cloned()
+                                            .ok_or_else(|| PyError::index_error("Replacement index out of range for positional args tuple"))
                                     } else {
-                                        // Named: {name}
-                                        None  // Named args not supported in this simplified version
+                                        // Named field — bare name only (no
+                                        // `.attr`/`[index]` sub-access in
+                                        // this simplified implementation).
+                                        kwargs_dict.as_ref()
+                                            .and_then(|d| if let PyObject::Dict(dd) = &*d.borrow() { dd.get(&py_str(name_part)).ok().flatten() } else { None })
+                                            .ok_or_else(|| PyError::key_error(format!("'{}'", name_part)))
                                     };
-                                    match val {
-                                        Some(v) => result.push_str(&v.str()),
-                                        None => result.push_str(&field),
-                                    }
+                                    let val = val?;
+                                    // Apply `!conversion` (repr/str/ascii).
+                                    let val = match conversion {
+                                        Some("r") | Some("a") => py_str(&val.borrow().repr()),
+                                        Some("s") => py_str(&val.str()),
+                                        _ => val,
+                                    };
+                                    result.push_str(&crate::vm::format_with_spec(&val, spec)?);
                                 } else if c == '}' {
                                     if chars.as_str().starts_with('}') {
                                         result.push('}');

@@ -1018,7 +1018,31 @@ impl Lexer {
                 _ => break,
             }
         }
-        if self.peek().is_none() || self.peek() == Some('\n') {
+        if self.peek().is_none() {
+            // True EOF: any whitespace counted on this final, never-
+            // newline-terminated "line" is NOT a real indented line — real
+            // Python's tokenizer treats trailing whitespace before EOF as
+            // completely insignificant, regardless of how it compares to
+            // the current indent stack. The `indent > current` branch that
+            // used to run here (shared with the blank-line case below) was
+            // a real bug: a source string ending in trailing whitespace but
+            // no final newline (extremely common for anything built via
+            // string concatenation/`.format()`/`textwrap.indent`, e.g.
+            // `exec()`'d generated code) would spuriously emit a `Token::
+            // Indent` for that whitespace, which the parser then choked on
+            // ("Expected expression, got Indent") since there was no actual
+            // statement there. Confirmed via CPython's own `test_listcomps.
+            // py`, whose `_check_in_scopes` helper builds exec'd source via
+            // `.format()` that ends in exactly this shape. Fix: at true
+            // EOF, unconditionally close every remaining open indent level
+            // (down to 0) via Dedent — never push a new Indent.
+            while self.indent_stack.len() > 1 {
+                self.indent_stack.pop();
+                self.pending.insert(0, Token::Dedent);
+            }
+            return;
+        }
+        if self.peek() == Some('\n') {
             // Still need to handle indent/dedent for comment-only lines
             // followed by blank lines (the # handler consumes the \n but
             // the indent check is skipped due to early return)
