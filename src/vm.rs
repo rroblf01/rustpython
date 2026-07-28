@@ -672,7 +672,26 @@ impl VirtualMachine {
           // Native io module — DISABLED: CPython io.py is used instead (imports from _io)
           // modules.insert_str("io", create_module("io", create_io_dict()));
 
-          // Native statistics module
+          // Native statistics module. Tried vendoring the real CPython
+          // `Lib/statistics.py` (same pattern as `html`/`numbers`/etc.) —
+          // reverted: it hits the same unresolved "native types aren't real
+          // Type objects" architecture gap as `decimal` (`type(5) is int`
+          // is `False` here, breaking `_coerce`'s `T is S`/`T is int`
+          // identity checks throughout `_sum`/`variance`/etc.), AND
+          // `test_statistics.py` timed out (60s+) rather than completing —
+          // an operational risk not worth taking for a module that would
+          // still fail most of its own tests anyway. Several genuinely
+          // general bugs found chasing this ARE kept (not reverted):
+          // `functools.reduce`'s dropped-initial-value bug, `math.fsum`
+          // only handling List/Tuple, `itertools.groupby` (was missing
+          // entirely), `int.as_integer_ratio`/`numerator`/`denominator`/
+          // `real`/`imag`, `call_bound_method` supporting `type` as a
+          // plain callable, and — the most impactful one — `WITH_EXIT`
+          // never recognizing a user-defined exception CLASS instance
+          // (only the native `PyObject::Exception` shape), which broke
+          // `with`-statement `__exit__(exc_type, exc_value, tb)` for any
+          // custom exception (`unittest.assertRaises` reported ANY custom
+          // exception as "not raised" even when it genuinely was).
           modules.insert_str("statistics", create_module("statistics", create_statistics_dict()));
 
           // Native contextlib module — DISABLED: real Lib/contextlib.py is used instead
@@ -3236,7 +3255,8 @@ impl VirtualMachine {
                     // iterating the original iterable directly.
                     PyObject::ListIter { .. } | PyObject::RangeIter { .. }
                     | PyObject::MapIterator { .. } | PyObject::FilterIterator { .. }
-                    | PyObject::ZipIterator { .. } | PyObject::CycleIter { .. } => {
+                    | PyObject::ZipIterator { .. } | PyObject::CycleIter { .. }
+                    | PyObject::GroupByIter { .. } => {
                         drop(obj);
                         self.frames[fi].push(val);
                     }
@@ -3345,7 +3365,7 @@ impl VirtualMachine {
                         // holds a materialized `items`/`len()` to compare
                         // against now that it's a lazy wrapper around a
                         // `source` iterator (see its own doc comment).
-                        PyObject::ZipIterator { .. } | PyObject::MapIterator { .. } | PyObject::FilterIterator { .. } | PyObject::CycleIter { .. } | PyObject::EnumerateIter { .. } => {
+                        PyObject::ZipIterator { .. } | PyObject::MapIterator { .. } | PyObject::FilterIterator { .. } | PyObject::CycleIter { .. } | PyObject::EnumerateIter { .. } | PyObject::GroupByIter { .. } => {
                             drop(obj);
                             match crate::object::builtin_next(&[iter_val.clone()]) {
                                 Ok(val) => {
@@ -3673,6 +3693,40 @@ impl VirtualMachine {
                                         func,
                                         self_obj: obj.clone(),
                                     }))
+                                } else {
+                                    None
+                                }
+                            });
+                            // PEP 3134 traceback/chaining protocol methods
+                            // for a user-defined exception class that
+                            // doesn't override them — same fix, same
+                            // rationale, as the `get_attribute_impl` copy of
+                            // this logic (`object.rs`); this is LOAD_ATTR's
+                            // own separate, inline copy of instance
+                            // attribute resolution (kept for its attribute
+                            // cache), which needs the identical fallback.
+                            let attr = attr.or_else(|| {
+                                if matches!(name.as_str(), "with_traceback" | "add_note" | "__traceback__" | "__context__" | "__suppress_context__" | "__notes__")
+                                    && crate::object::find_exception_base_name(typ).is_some() {
+                                    Some(match name.as_str() {
+                                        "with_traceback" => PyObjectRef::imm(PyObject::BuiltinMethod {
+                                            name: "with_traceback".to_string(),
+                                            func: |args| {
+                                                if args.is_empty() { return Err(PyError::type_error("with_traceback() takes exactly one argument")); }
+                                                Ok(args[0].clone())
+                                            },
+                                            self_obj: obj.clone(),
+                                        }),
+                                        "add_note" => PyObjectRef::imm(PyObject::BuiltinMethod {
+                                            name: "add_note".to_string(),
+                                            func: |_args| Ok(py_none()),
+                                            self_obj: obj.clone(),
+                                        }),
+                                        "__context__" | "__traceback__" => py_none(),
+                                        "__suppress_context__" => py_bool(false),
+                                        "__notes__" => py_list(vec![]),
+                                        _ => unreachable!(),
+                                    })
                                 } else {
                                     None
                                 }
@@ -5120,6 +5174,26 @@ impl VirtualMachine {
                                 .unwrap_or_else(|| py_str(typ));
                             (typ_obj, exc.clone())
                         }
+                        // A user-defined exception CLASS instance (`class
+                        // MyError(Exception): ...`, `raise MyError(...)`)
+                        // only ever matched the native `PyObject::Exception`
+                        // arm above, silently falling through to `(None,
+                        // None)` here — meaning `__exit__(exc_type,
+                        // exc_value, tb)` was ALWAYS called as if no
+                        // exception had occurred whenever the `with` body
+                        // raised a custom exception class, not just the
+                        // handful of natively-represented ones. Same root
+                        // gap as `CHECK_EXC_MATCH`/`isinstance`/`issubclass`
+                        // (already fixed elsewhere this session for their
+                        // own call sites) — this is the `with`-statement's
+                        // own, previously-unfixed instance of it. Real
+                        // trigger: `unittest`'s own `assertRaises`, whose
+                        // `_AssertRaisesBaseContext.__exit__` checks `if
+                        // exc_type is None: <fail: "X not raised">` — ANY
+                        // `assertRaises(CustomExceptionClass, ...)` call
+                        // spuriously reported the exception as never having
+                        // been raised at all, even though it genuinely was.
+                        PyObject::Instance { typ, .. } => (typ.clone(), exc.clone()),
                         _ => (py_none(), py_none()),
                     }
                 };

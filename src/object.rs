@@ -1522,6 +1522,28 @@ pub enum PyObject {
         items: Vec<PyObjectRef>,
         index: usize,
     },
+    /// Backing for `itertools.groupby(iterable, key=None)` — must be a
+    /// REAL lazy iterator (one `(key, group)` pair produced per `__next__`
+    /// call), unlike this file's usual "eagerly materialize into a list"
+    /// itertools convention: real CPython's own regression suite
+    /// (`test_groupby_reentrant_eq_does_not_crash`, gh-143543) exercises a
+    /// key comparison whose `__eq__` reentrantly calls `next()` on the
+    /// SAME groupby object being constructed — an eager, single-pass
+    /// implementation processes every element before ever returning,
+    /// so that reentrant `next()` targets an object that doesn't exist yet
+    /// (confirmed: this crashed with a `RefCell`-adjacent panic the first
+    /// time an eager `groupby` was tried here). `pending` carries the
+    /// (key, value) of the first item of the NEXT group, read one item
+    /// ahead while scanning the CURRENT group to its boundary — each
+    /// individual group is still eagerly collected into a plain `list`
+    /// once its boundary is found (that simplification remains valid; only
+    /// the OUTER key/group-pair production needed to become lazy).
+    GroupByIter {
+        source: PyObjectRef,
+        key_func: Option<PyObjectRef>,
+        pending: Option<(PyObjectRef, PyObjectRef)>,
+        exhausted: bool,
+    },
     /// Backing for `enumerate(iterable, start=0)` — `source` is the
     /// underlying iterator (already passed through `builtin_iter`), pulled
     /// from lazily one item per `__next__` call. Used to hold a fully
@@ -1784,6 +1806,7 @@ impl PyObject {
             PyObject::FutureAwaitIterator { .. } => "future_await_iterator",
             PyObject::Process { .. } => "Popen",
             PyObject::CycleIter { .. } => "itertools.cycle",
+            PyObject::GroupByIter { .. } => "itertools.groupby",
         }.to_string()
     }
 
@@ -1930,6 +1953,7 @@ impl PyObject {
                 format!("<Popen: returncode: {} args: [pid {}]>", returncode.borrow().map(|r| r.to_string()).unwrap_or_else(|| "None".to_string()), pid)
             }
             PyObject::CycleIter { .. } => "<itertools.cycle object>".to_string(),
+            PyObject::GroupByIter { .. } => "<itertools.groupby object>".to_string(),
         }
     }
 
@@ -5515,6 +5539,25 @@ pub fn call_bound_method(func: PyObjectRef, self_obj: PyObjectRef, args: Vec<PyO
             all_args.extend(args);
             call_bound_method(func.clone(), self_obj, all_args)
         }
+        // The single-argument form of the `type` builtin itself (`type(x)`
+        // — get x's real type) reaching this path as a plain callable
+        // value, e.g. passed as a `key=` function to a native higher-order
+        // builtin (`itertools.groupby(data, type)` — real trigger:
+        // CPython's own `Lib/statistics.py`). `type` is represented as a
+        // real `PyObject::Type{name:"type",..}` here (not a
+        // `BuiltinFunction`, unlike most other native callables), so it
+        // fell through to the generic "object is not callable" error
+        // otherwise. Delegates to the same `builtin_type_of` helper the
+        // real CALL-opcode path and `.__class__` both already use — not a
+        // new implementation. Other `PyObject::Type` calls (constructing an
+        // actual instance, or `type(name, bases, dict)`) still aren't
+        // supported through THIS path — only real Python code going
+        // through the live VM's own `call_function` gets that; this is
+        // scoped to the one case that's actually reachable from a native
+        // higher-order builtin's disposable-VM-free call convention.
+        PyObject::Type { name, .. } if name == "type" && args.is_empty() => {
+            builtin_type_of(&[self_obj])
+        }
         _ => Err(PyError::type_error("object is not callable")),
     }
 }
@@ -5650,7 +5693,7 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         // just returns it unchanged, matching real Python.
         PyObject::ListIter { .. } | PyObject::RangeIter { .. } | PyObject::CycleIter { .. }
         | PyObject::EnumerateIter { .. } | PyObject::MapIterator { .. } | PyObject::FilterIterator { .. }
-        | PyObject::ZipIterator { .. } | PyObject::FutureAwaitIterator { .. } => Ok(args[0].clone()),
+        | PyObject::ZipIterator { .. } | PyObject::FutureAwaitIterator { .. } | PyObject::GroupByIter { .. } => Ok(args[0].clone()),
         // Anything else (plain functions, ints, ...) is genuinely not
         // iterable. The previous fallback (`Ok(args[0].clone())`)
         // silently treated ANY object as if it were already a valid
@@ -5718,6 +5761,77 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             return Err(PyError::type_error(format!("'{}' object is not an iterator", args[0].get_type_name())));
         }
         _ => {}
+    }
+    // `GroupByIter` handled as its own, separate pre-check (not inside the
+    // `match &mut *obj` below) because its advance logic must call
+    // arbitrary Python code (the key function, `equals()` on keys) WITHOUT
+    // holding this object's own `borrow_mut()` — otherwise a reentrant
+    // `next()` on this SAME groupby object from within that callback
+    // (real, deliberately adversarial CPython regression test:
+    // `test_groupby_reentrant_eq_does_not_crash`, gh-143543) hits the exact
+    // same double-borrow panic this restructuring exists to avoid. Extract
+    // the state under a SHORT borrow, do all the scanning/calling with NO
+    // borrow held at all, then a second SHORT borrow to write the result
+    // back.
+    let is_groupby = matches!(&*args[0].borrow(), PyObject::GroupByIter { .. });
+    if is_groupby {
+        let (source, key_func, mut pending, exhausted) = {
+            let mut obj = args[0].borrow_mut();
+            if let PyObject::GroupByIter { source, key_func, pending, exhausted } = &mut *obj {
+                (source.clone(), key_func.clone(), pending.take(), *exhausted)
+            } else { unreachable!() }
+        };
+        if exhausted {
+            return if args.len() >= 2 { Ok(args[1].clone()) } else { Err(PyError::stop_iteration()) };
+        }
+        let compute_key = |v: &PyObjectRef| -> PyResult<PyObjectRef> {
+            match &key_func {
+                Some(f) => call_bound_method(f.clone(), v.clone(), vec![]),
+                None => Ok(v.clone()),
+            }
+        };
+        // First item of this group: either carried over from the previous
+        // call's lookahead, or freshly read from the source.
+        let (this_key, first_val) = match pending.take() {
+            Some((k, v)) => (k, v),
+            None => {
+                match builtin_next(&[source.clone()]) {
+                    Ok(v) => { let k = compute_key(&v)?; (k, v) }
+                    Err(PyError::StopIteration) => {
+                        let mut obj = args[0].borrow_mut();
+                        if let PyObject::GroupByIter { exhausted, .. } = &mut *obj { *exhausted = true; }
+                        return if args.len() >= 2 { Ok(args[1].clone()) } else { Err(PyError::stop_iteration()) };
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        };
+        let mut group = vec![first_val];
+        let mut new_pending = None;
+        let mut new_exhausted = false;
+        loop {
+            match builtin_next(&[source.clone()]) {
+                Ok(v) => {
+                    let k = compute_key(&v)?;
+                    if this_key.equals(&k)? {
+                        group.push(v);
+                    } else {
+                        new_pending = Some((k, v));
+                        break;
+                    }
+                }
+                Err(PyError::StopIteration) => { new_exhausted = true; break; }
+                Err(e) => return Err(e),
+            }
+        }
+        {
+            let mut obj = args[0].borrow_mut();
+            if let PyObject::GroupByIter { pending, exhausted, .. } = &mut *obj {
+                *pending = new_pending;
+                *exhausted = new_exhausted;
+            }
+        }
+        return Ok(py_tuple(vec![this_key, PyObjectRef::new(PyObject::ListIter { list: group, index: 0 })]));
     }
     let mut obj = args[0].borrow_mut();
     match &mut *obj {
@@ -8200,6 +8314,45 @@ impl PyObject {
                                 let dict_snapshot: Vec<(String, PyObjectRef)> = dict.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
                                 let result = instance_builtin_dict_method(name, dict_snapshot);
                                 return result;
+                            }
+                            // PEP 3134 traceback/chaining protocol methods and
+                            // attributes for a USER-DEFINED exception class
+                            // (`class MyError(Exception): ...`) that doesn't
+                            // override them itself — the native
+                            // `PyObject::Exception` representation already
+                            // has these (see its own `get_attribute_impl`
+                            // arm), but a custom subclass is a plain
+                            // `PyObject::Instance` and fell straight through
+                            // to `AttributeError` for all of them. Real
+                            // trigger: `unittest`'s own `assertRaises`
+                            // (`_AssertRaisesBaseContext.__exit__`) calling
+                            // `exc_value.with_traceback(None)` on WHATEVER
+                            // exception it caught — this raised
+                            // `AttributeError` for literally any
+                            // user-defined exception class, only working by
+                            // accident for the handful of natively-
+                            // represented ones.
+                            if matches!(name, "with_traceback" | "add_note" | "__traceback__" | "__context__" | "__suppress_context__" | "__notes__")
+                                && find_exception_base_name(typ).is_some() {
+                                return Some(match name {
+                                    "with_traceback" => PyObjectRef::imm(PyObject::BuiltinMethod {
+                                        name: "with_traceback".to_string(),
+                                        func: |args| {
+                                            if args.len() < 2 { return Err(PyError::type_error("with_traceback() takes exactly one argument")); }
+                                            Ok(args[0].clone())
+                                        },
+                                        self_obj: PyObjectRef::new(PyObject::None),
+                                    }),
+                                    "add_note" => PyObjectRef::imm(PyObject::BuiltinMethod {
+                                        name: "add_note".to_string(),
+                                        func: |_args| Ok(py_none()),
+                                        self_obj: PyObjectRef::new(PyObject::None),
+                                    }),
+                                    "__context__" | "__traceback__" => py_none(),
+                                    "__suppress_context__" => py_bool(false),
+                                    "__notes__" => py_list(vec![]),
+                                    _ => unreachable!(),
+                                });
                             }
                             None
                         })
@@ -11642,6 +11795,30 @@ impl PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
+                    // `int`'s share of the `numbers.Rational`/`Integral` ABC
+                    // protocol (`as_integer_ratio`/`numerator`/`denominator`
+                    // /`real`/`imag`) — an int IS its own numerator with
+                    // denominator 1, and its own real part with a zero
+                    // imaginary part, matching real CPython exactly. Needed
+                    // by any code walking the numeric tower generically
+                    // (real trigger: CPython's own `Lib/statistics.py`'s
+                    // `_exact_ratio`, which tries `x.as_integer_ratio()`
+                    // then falls back to `(x.numerator, x.denominator)` —
+                    // both raised `AttributeError` before this, since only
+                    // `float`/`Fraction` had `as_integer_ratio` and nothing
+                    // implemented the ABC-style numerator/denominator pair).
+                    "as_integer_ratio" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "as_integer_ratio".to_string(),
+                        func: |args| {
+                            if let PyObject::Int(v) = &*args[0].borrow() {
+                                Ok(py_tuple(vec![py_int(v.clone()), py_int(1)]))
+                            } else { Err(PyError::runtime_error("as_integer_ratio on non-int")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "numerator" | "real" => Ok(py_int(_i.clone())),
+                    "denominator" => Ok(py_int(1)),
+                    "imag" => Ok(py_int(0)),
                     "to_bytes" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "to_bytes".to_string(),
                         func: |args| {

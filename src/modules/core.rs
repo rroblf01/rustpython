@@ -1157,19 +1157,38 @@ pub fn create_math_dict() -> HashMap<String, PyObjectRef> {
     });
     math_func!("fsum", |args| {
         if args.is_empty() { return Err(PyError::type_error("fsum() requires an argument")); }
-        let iterable = args[0].clone();
+        // Previously only List/Tuple were handled directly — ANY other
+        // iterable (a generator, `map()`/`filter()` object, custom
+        // `__iter__`, ...) matched neither branch and silently returned
+        // 0.0 WITHOUT ever iterating it at all. Real trigger: CPython's
+        // own `Lib/statistics.py`, `fsum(map(log, count_positive(data)))`.
+        // Fixed via the standard `collect_iterable` materialization (same
+        // general fix already applied elsewhere for `set()`/`tuple()`).
+        let items = collect_iterable(&args[0])?;
         let mut total = 0.0_f64;
-        let mut partials: Vec<f64> = Vec::new();
-        // Simple summation
-        let obj = iterable.borrow();
-        if let PyObject::List(items) = &*obj {
-            for item in items {
-                total += item.as_f64().unwrap_or(0.0);
-            }
-        } else if let PyObject::Tuple(items) = &*obj {
-            for item in items {
-                total += item.as_f64().unwrap_or(0.0);
-            }
+        for item in &items {
+            total += item.as_f64().ok_or_else(|| PyError::type_error(format!("must be real number, not {}", item.borrow().type_name())))?;
+        }
+        Ok(py_float(total))
+    });
+    // sumprod(p, q) — dot product of two equal-length iterables (added to
+    // CPython 3.12). Needed by real CPython's own `Lib/statistics.py`
+    // (`_sum`/`variance`'s exact-precision path). Simple f64 accumulation,
+    // not CPython's exact-precision (Neumaier-summation) implementation —
+    // matches this file's existing `fsum`'s own "simple summation" quality
+    // bar rather than a from-scratch arbitrary-precision reimplementation.
+    math_func!("sumprod", |args| {
+        if args.len() < 2 { return Err(PyError::type_error("sumprod() requires 2 arguments")); }
+        let p = collect_iterable(&args[0])?;
+        let q = collect_iterable(&args[1])?;
+        if p.len() != q.len() {
+            return Err(PyError::value_error("inputs are not the same length"));
+        }
+        let mut total = 0.0_f64;
+        for (a, b) in p.iter().zip(q.iter()) {
+            let av = a.as_f64().ok_or_else(|| PyError::type_error("sumprod() arguments must be numbers"))?;
+            let bv = b.as_f64().ok_or_else(|| PyError::type_error("sumprod() arguments must be numbers"))?;
+            total += av * bv;
         }
         Ok(py_float(total))
     });

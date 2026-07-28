@@ -174,13 +174,27 @@ pub fn create_functools_dict() -> HashMap<String, PyObjectRef> {
         let func = args[0].clone();
         let iterable = &args[1];
         let it = builtin_iter(&[iterable.clone()])?;
-        let mut acc = match builtin_next(&[it.clone()]) {
-            Ok(v) => v,
-            Err(PyError::StopIteration) => {
-                if args.len() >= 3 { return Ok(args[2].clone()); }
-                return Err(PyError::type_error("reduce() of empty sequence with no initial value"));
+        // With an explicit `initial` (3rd positional arg), that value is
+        // the starting accumulator and EVERY element of the iterable gets
+        // folded in — the previous implementation always pulled the first
+        // element via `next()` as `acc` regardless of whether `initial` was
+        // given, silently DROPPING the initial value (and the first real
+        // element never got a chance to be folded against it) whenever the
+        // iterable was non-empty. Only fell back to `initial` for a truly
+        // EMPTY iterable, which is a much narrower case than real Python's
+        // `reduce(func, iterable, initial)` semantics. Real trigger:
+        // CPython's own `Lib/statistics.py`, `reduce(_coerce, types, int)`.
+        let has_initial = args.len() >= 3;
+        let mut acc = if has_initial {
+            args[2].clone()
+        } else {
+            match builtin_next(&[it.clone()]) {
+                Ok(v) => v,
+                Err(PyError::StopIteration) => {
+                    return Err(PyError::type_error("reduce() of empty sequence with no initial value"));
+                }
+                Err(e) => return Err(e),
             }
-            Err(e) => return Err(e),
         };
         loop {
             match builtin_next(&[it.clone()]) {
@@ -923,6 +937,33 @@ pub fn create_itertools_dict() -> HashMap<String, PyObjectRef> {
             }
         }
         Ok(py_list(items))
+    });
+
+    // groupby(iterable, key=None) — groups consecutive elements sharing the
+    // same key. Constructs a real, lazy `PyObject::GroupByIter` (see its
+    // own doc comment in `object.rs` for why this MUST be lazy — an
+    // earlier eager version crashed on CPython's own
+    // `test_groupby_reentrant_eq_does_not_crash`, gh-143543); the actual
+    // per-`next()` state machine lives in `builtin_next`'s dedicated
+    // `GroupByIter` handling.
+    it_func!("groupby", |args| {
+        if args.is_empty() { return Err(PyError::type_error("groupby() missing argument")); }
+        // The key function may arrive positionally (args[1]) or as a
+        // trailing kwargs dict (`key=...`) per this project's established
+        // calling convention (see e.g. `str.format`'s own doc comment).
+        let mut key_func: Option<PyObjectRef> = None;
+        if args.len() > 1 {
+            let last = &args[args.len() - 1];
+            if let PyObject::Dict(d) = &*last.borrow() {
+                if let Ok(Some(k)) = d.get(&py_str("key")) {
+                    if !matches!(&*k.borrow(), PyObject::None) { key_func = Some(k); }
+                }
+            } else if !matches!(&*last.borrow(), PyObject::None) {
+                key_func = Some(last.clone());
+            }
+        }
+        let source = builtin_iter(&[args[0].clone()])?;
+        Ok(PyObjectRef::new(PyObject::GroupByIter { source, key_func, pending: None, exhausted: false }))
     });
 
     // filterfalse(func, iterable) — filter elements where func is False
