@@ -248,7 +248,7 @@ fn formal_param_index(varnames: &[crate::interner::StrId], arg_count: usize, kwo
 /// `CodeObject` (see `CodeObject::const_cache`'s doc comment) — this
 /// function itself is unaware of caching, it's just the (moderately
 /// expensive, for `Int`/`Float`/`Complex`) one-time parse.
-fn eval_const_value(const_val: ConstValue) -> PyResult<PyObjectRef> {
+pub(crate) fn eval_const_value(const_val: ConstValue) -> PyResult<PyObjectRef> {
     Ok(match const_val {
         ConstValue::None => py_none(),
         ConstValue::Bool(b) => py_bool(b),

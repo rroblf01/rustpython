@@ -1165,7 +1165,28 @@ impl Compiler {
                     // Multiple targets: a = b = c
                     self.compile_expr(value)?;
                     for target in targets {
-                        self.emit(Opcode::COPY, 1);
+                        // COPY's arg is a 0-indexed depth from TOS (COPY(0)
+                        // duplicates TOS itself — see the Subscript
+                        // augmented-assignment codegen above, which uses
+                        // COPY(0) for exactly that). This used to emit
+                        // COPY(1) ("duplicate one item below TOS"), which
+                        // only ever produced the right value by accident:
+                        // with nothing else on the stack beneath `value`,
+                        // "one below TOS" doesn't exist yet on the first
+                        // iteration (vm.rs's own COPY falls back to a
+                        // plain TOS-duplicate when `depth >= stack.len()`),
+                        // and every later iteration duplicates a value
+                        // that's identical to TOS anyway — but the instant
+                        // something ELSE sits beneath `value` on the real
+                        // stack (e.g. a `for` loop's iterator, which stays
+                        // on the stack for the loop's whole duration), "one
+                        // below TOS" pointed at THAT instead, so `a = b = c
+                        // = i` inside a `for i in ...:` silently bound
+                        // every target after the first to the loop's
+                        // iterator object instead of `i`. Confirmed via
+                        // `python -c` with a for-loop wrapping a chained
+                        // assignment followed by using the extra targets.
+                        self.emit(Opcode::COPY, 0);
                         self.compile_assign_target(target)?;
                     }
                     self.emit(Opcode::POP_TOP, 0);

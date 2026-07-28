@@ -161,6 +161,57 @@ extern "C" fn jit_py_bit_xor(a: *const PyObjectRef, b: *const PyObjectRef, out: 
 extern "C" fn jit_py_compare(a: *const PyObjectRef, b: *const PyObjectRef, op: i64, out: *mut PyObjectRef) {
     unsafe { std::ptr::write(out, crate::object::py_compare(&*a, &*b, op as u32).unwrap_or_else(|_| crate::object::py_bool(false))); }
 }
+/// Mirrors `vm.rs`'s `BINARY_OP` handler for `arg >= 100` (the in-place
+/// variant emitted by `AugAssign`, e.g. `x += y`): try `__iadd__`/`__isub__`/
+/// etc. first, but ONLY when `left` is a `PyObject::Instance` (a native
+/// type falling into this helper has no such dunder, and the interpreter
+/// itself never checks for one on natives either — see vm.rs's own
+/// `matches!(&*left.borrow(), PyObject::Instance { .. })` guard), then fall
+/// back to the exact same op dispatch as the plain (non-augmented) operator.
+/// `op` uses the same 0..=12 encoding as `BINARY_OP`'s non-in-place arg.
+extern "C" fn jit_py_inplace_binop(a: *const PyObjectRef, b: *const PyObjectRef, op: i64, out: *mut PyObjectRef) {
+    unsafe {
+        let left = &*a;
+        let right = &*b;
+        let idunder = match op {
+            0 => Some("__iadd__"), 1 => Some("__isub__"), 2 => Some("__imul__"),
+            3 => Some("__itruediv__"), 4 => Some("__ifloordiv__"), 5 => Some("__imod__"),
+            6 => Some("__ipow__"), 7 => Some("__ilshift__"), 8 => Some("__irshift__"),
+            9 => Some("__ior__"), 10 => Some("__ixor__"), 11 => Some("__iand__"),
+            12 => Some("__imatmul__"), _ => None,
+        };
+        if let Some(name) = idunder {
+            if matches!(&*left.borrow(), crate::object::PyObject::Instance { .. }) {
+                if let Ok(Some(r)) = crate::object::try_dunder_binop(left, right, name) {
+                    std::ptr::write(out, r);
+                    return;
+                }
+            }
+        }
+        let result = match op {
+            0 => crate::object::py_add(left, right),
+            1 => crate::object::py_sub(left, right),
+            2 => crate::object::py_mul(left, right),
+            3 => crate::object::py_div(left, right),
+            4 => crate::object::py_floor_div(left, right),
+            5 => crate::object::py_mod(left, right),
+            6 => crate::object::py_pow(left, right),
+            7 => crate::object::py_lshift(left, right),
+            8 => crate::object::py_rshift(left, right),
+            9 => crate::object::py_bit_or(left, right),
+            10 => crate::object::py_bit_xor(left, right),
+            11 => crate::object::py_bit_and(left, right),
+            12 => crate::object::try_dunder_binop(left, right, "__matmul__").and_then(|r| match r {
+                Some(v) => Ok(v),
+                None => crate::object::try_dunder_binop(right, left, "__rmatmul__").and_then(|r2| {
+                    r2.ok_or_else(|| crate::object::PyError::type_error("unsupported operand type(s) for @"))
+                }),
+            }),
+            _ => Err(crate::object::PyError::runtime_error("unknown binary op")),
+        };
+        std::ptr::write(out, result.unwrap_or_else(|_| crate::object::py_none()));
+    }
+}
 extern "C" fn jit_is_true(val: *const PyObjectRef) -> i64 {
     unsafe { (*val).truthy() as i64 }
 }
@@ -679,6 +730,8 @@ pub struct JitCompiler {
     bit_and_func: cranelift_module::FuncId,
     bit_or_func: cranelift_module::FuncId,
     bit_xor_func: cranelift_module::FuncId,
+    inplace_binop_func: cranelift_module::FuncId,
+    getitem_func: cranelift_module::FuncId,
     cmp_func: cranelift_module::FuncId,
     truthy_func: cranelift_module::FuncId,
     neg_func: cranelift_module::FuncId,
@@ -729,6 +782,8 @@ impl JitCompiler {
         builder.symbol("jit_py_bit_and", jit_py_bit_and as *const u8);
         builder.symbol("jit_py_bit_or", jit_py_bit_or as *const u8);
         builder.symbol("jit_py_bit_xor", jit_py_bit_xor as *const u8);
+        builder.symbol("jit_py_inplace_binop", jit_py_inplace_binop as *const u8);
+        builder.symbol("jit_getitem", jit_getitem as *const u8);
         builder.symbol("jit_py_compare", jit_py_compare as *const u8);
         builder.symbol("jit_is_true", jit_is_true as *const u8);
         builder.symbol("jit_neg", jit_neg as *const u8);
@@ -783,6 +838,8 @@ impl JitCompiler {
         let bit_and_func = module.declare_function("jit_py_bit_and", Linkage::Import, &binop_sig).unwrap();
         let bit_or_func = module.declare_function("jit_py_bit_or", Linkage::Import, &binop_sig).unwrap();
         let bit_xor_func = module.declare_function("jit_py_bit_xor", Linkage::Import, &binop_sig).unwrap();
+        let inplace_binop_func = module.declare_function("jit_py_inplace_binop", Linkage::Import, &cmp_sig).unwrap();
+        let getitem_func = module.declare_function("jit_getitem", Linkage::Import, &binop_sig).unwrap();
         let cmp_func = module.declare_function("jit_py_compare", Linkage::Import, &cmp_sig).unwrap();
         let truthy_func = module.declare_function("jit_is_true", Linkage::Import, &truthy_sig).unwrap();
         let neg_func = module.declare_function("jit_neg", Linkage::Import, &unary_sig).unwrap();
@@ -826,6 +883,8 @@ impl JitCompiler {
             bit_and_func,
             bit_or_func,
             bit_xor_func,
+            inplace_binop_func,
+            getitem_func,
             cmp_func,
             truthy_func,
             neg_func,
@@ -979,28 +1038,18 @@ impl JitCompiler {
     pub fn is_enabled() -> bool { true }
 
     pub fn precompute_consts(code: &CodeObject) -> Vec<PyObjectRef> {
-        code.consts.iter().map(|cv| match cv {
-            ConstValue::None => crate::object::py_none(),
-            ConstValue::Bool(b) => crate::object::py_bool(*b),
-            ConstValue::Int(s) => {
-                if let Ok(n) = s.parse::<i64>() { crate::object::py_int(n) }
-                else { crate::object::PyObjectRef::new(crate::object::PyObject::Int(s.parse().unwrap())) }
-            }
-            ConstValue::Float(f) => crate::object::py_float(f.parse().unwrap_or(0.0)),
-            ConstValue::String(s) => crate::object::py_str(s),
-            ConstValue::Bytes(b) => crate::object::PyObjectRef::new(crate::object::PyObject::Bytes(b.clone())),
-            ConstValue::Complex { real, imag } => {
-                let s = if imag.starts_with('-') {
-                    format!("({}{}j)", real, imag)
-                } else {
-                    format!("({}+{}j)", real, imag)
-                };
-                crate::object::py_str(&s)
-            }
-            ConstValue::Code(_) => crate::object::py_none(),
-            ConstValue::Tuple(items) => crate::object::PyObjectRef::imm(crate::object::PyObject::Tuple(
-                items.iter().map(|s| crate::object::py_str(s)).collect()
-            )),
+        // Delegates to `vm::eval_const_value` — the interpreter's own,
+        // already-correct textual-constant parser (handles `0x`/`0o`/`0b`
+        // prefixes and `_` digit separators for `ConstValue::Int`, real
+        // `Complex` construction, etc.) — rather than a second, ad hoc
+        // copy. This file's own previous copy only ever tried plain
+        // base-10 parsing, so ANY int literal written in hex/octal/binary
+        // (`0xFFFF`, `0o17`, `0b101`) inside a JIT-eligible (loop-
+        // containing) function panicked via `.unwrap()` on the fallback
+        // BigInt parse — dormant until a loop happened to also contain
+        // such a literal.
+        code.consts.iter().map(|cv| {
+            crate::vm::eval_const_value(cv.clone()).unwrap_or_else(|_| crate::object::py_none())
         }).collect()
     }
 
@@ -1076,11 +1125,28 @@ impl JitCompiler {
             Opcode::IMPORT_NAME, Opcode::IMPORT_FROM, Opcode::UNPACK_EX,
             Opcode::SETUP_WITH, Opcode::WITH_EXIT,
             Opcode::MAKE_FUNCTION,
+            Opcode::END_FOR,
+            Opcode::MAP_ADD,
         ];
         for instr in &code.instructions {
             if !supported.contains(&instr.op) { eprintln!("JIT: unsupported opcode {:?} in '{}'", instr.op, code.name); return None; }
-            // BINARY_OP with arg > 11 (e.g. BINARY_SUBSCR = 13) is not JIT-compilable
-            if instr.op == Opcode::BINARY_OP && instr.arg > 11 { eprintln!("JIT: unsupported BINARY_OP arg {} in '{}'", instr.arg, code.name); return None; }
+            // BINARY_OP's arg encodes: 0..=12 a plain operator (see
+            // compile_expr's Expr::BinOp), 13 = BINARY_SUBSCR (see
+            // compiler.rs's `self.emit(Opcode::BINARY_OP, 13)` call sites),
+            // and 100..=112 the in-place variant of operator `arg - 100`
+            // (AugAssign's codegen — the only emitter of that range). Any
+            // other value isn't reachable from this compiler's own codegen.
+            if instr.op == Opcode::BINARY_OP {
+                let arg = instr.arg;
+                // 12 (plain matmul) is deliberately excluded: no native
+                // numeric type implements `@`, so there's no fast-path
+                // func_ref for it below (only the in-place variant, 112,
+                // is handled — via jit_py_inplace_binop's own dunder
+                // dispatch — since AugAssign is the only realistic emitter
+                // of `@` in JIT-eligible hot loops).
+                let valid = arg <= 11 || arg == 13 || (100..=112).contains(&arg);
+                if !valid { eprintln!("JIT: unsupported BINARY_OP arg {} in '{}'", arg, code.name); return None; }
+            }
         }
 
         let _consts = Self::precompute_with_names(code);
@@ -1107,6 +1173,8 @@ impl JitCompiler {
         let bit_and_func_ref = self.module.declare_func_in_func(self.bit_and_func, &mut ctx.func);
         let bit_or_func_ref = self.module.declare_func_in_func(self.bit_or_func, &mut ctx.func);
         let bit_xor_func_ref = self.module.declare_func_in_func(self.bit_xor_func, &mut ctx.func);
+        let inplace_binop_func_ref = self.module.declare_func_in_func(self.inplace_binop_func, &mut ctx.func);
+        let getitem_func_ref = self.module.declare_func_in_func(self.getitem_func, &mut ctx.func);
         let cmp_func_ref = self.module.declare_func_in_func(self.cmp_func, &mut ctx.func);
         let truthy_func_ref = self.module.declare_func_in_func(self.truthy_func, &mut ctx.func);
         let neg_func_ref = self.module.declare_func_in_func(self.neg_func, &mut ctx.func);
@@ -1163,6 +1231,22 @@ impl JitCompiler {
                         targets.insert(instr.arg as usize);
                     }
                     targets.insert(i + 1);
+                }
+                Opcode::JUMP_FORWARD | Opcode::JUMP => {
+                    // Unconditional jump — its target must be a block
+                    // boundary too (the actual codegen below, at the
+                    // `Opcode::JUMP_FORWARD | Opcode::JUMP` arm, looks it
+                    // up via `block_of[&target]`; omitting it here left
+                    // that lookup panicking with "no entry found for key"
+                    // whenever a jump's target wasn't ALREADY a block
+                    // boundary for some unrelated reason, e.g. an `if/else`
+                    // whose `else` arm ends in a plain unconditional jump
+                    // past it). No fallthrough entry needed here, unlike
+                    // the conditional jumps above: an unconditional jump
+                    // always terminates its block, so `i + 1` is dead code
+                    // and not a real predecessor.
+                    let target = i + instr.arg as usize;
+                    targets.insert(target);
                 }
                 _ => {}
             }
@@ -1319,14 +1403,28 @@ impl JitCompiler {
                     builder.ins().store(memflags, a[1], a_addr, 8);
                     builder.ins().store(memflags, b[0], b_addr, 0);
                     builder.ins().store(memflags, b[1], b_addr, 8);
-                    let func_ref = match instr.arg {
-                        0 => add_func_ref, 1 => sub_func_ref, 2 => mul_func_ref,
-                        3 => div_func_ref, 4 => floor_div_func_ref, 5 => mod_func_ref,
-                        6 => pow_func_ref, 7 => lshift_func_ref, 8 => rshift_func_ref,
-                        9 => bit_or_func_ref, 10 => bit_and_func_ref, 11 => bit_xor_func_ref,
-                        _ => unreachable!(),
-                    };
-                    builder.ins().call(func_ref, &[a_addr, b_addr, out_addr]);
+                    // arg encoding (must match compiler.rs's `bin_op` tables
+                    // exactly): 0=add 1=sub 2=mul 3=div 4=floordiv 5=mod
+                    // 6=pow 7=lshift 8=rshift 9=bitor 10=bitxor 11=bitand,
+                    // 13=SUBSCR (no in-place form), 100+n=in-place variant
+                    // of operator n. `12` (matmul) has no JIT fast path (no
+                    // native numeric type implements `@`) and is excluded
+                    // from the `supported` gate's arg range on purpose.
+                    if instr.arg == 13 {
+                        builder.ins().call(getitem_func_ref, &[a_addr, b_addr, out_addr]);
+                    } else if instr.arg >= 100 {
+                        let op_val = builder.ins().iconst(types::I64, (instr.arg - 100) as i64);
+                        builder.ins().call(inplace_binop_func_ref, &[a_addr, b_addr, op_val, out_addr]);
+                    } else {
+                        let func_ref = match instr.arg {
+                            0 => add_func_ref, 1 => sub_func_ref, 2 => mul_func_ref,
+                            3 => div_func_ref, 4 => floor_div_func_ref, 5 => mod_func_ref,
+                            6 => pow_func_ref, 7 => lshift_func_ref, 8 => rshift_func_ref,
+                            9 => bit_or_func_ref, 10 => bit_xor_func_ref, 11 => bit_and_func_ref,
+                            _ => unreachable!(),
+                        };
+                        builder.ins().call(func_ref, &[a_addr, b_addr, out_addr]);
+                    }
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
                     eval_stack.push([res_lo, res_hi]);
@@ -1379,7 +1477,11 @@ impl JitCompiler {
                     let val = eval_stack.last().unwrap();
                     eval_stack.push([val[0], val[1]]);
                 }
-                Opcode::POP_TOP => {
+                Opcode::POP_TOP | Opcode::END_FOR => {
+                    // END_FOR just pops the for-loop iterator on natural
+                    // exhaustion (see compiler.rs's `LoopInfo::is_for` doc
+                    // comment) — an unconditional stack pop, same as
+                    // POP_TOP, with no dependent codegen of its own.
                     eval_stack.pop();
                 }
                 Opcode::POP_JUMP_IF_FALSE => {
@@ -1695,7 +1797,18 @@ impl JitCompiler {
                     terminated = true;
                 }
                 Opcode::FOR_ITER => {
-                    let iter = eval_stack.pop().unwrap();
+                    // PEEK, not pop: vm.rs's own FOR_ITER does
+                    // `self.frames[fi].peek(0)` — the iterator stays on the
+                    // stack for every subsequent pass (this same
+                    // instruction runs again next iteration via
+                    // JUMP_BACKWARD) and is only ever popped once, by
+                    // END_FOR, on natural exhaustion. Popping it here
+                    // desynced this codegen's simulated `eval_stack` from
+                    // the real bytecode stack shape by one slot for the
+                    // rest of the loop body — never caught before because
+                    // END_FOR wasn't JIT-supported until now, so no
+                    // real-world for-loop ever reached this path.
+                    let iter = *eval_stack.last().unwrap();
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let tmp_iter = builder.create_sized_stack_slot(StackSlotData::new(
                         cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
@@ -1715,7 +1828,18 @@ impl JitCompiler {
                     let target_block = block_of[&target];
                     let next_block = block_of[&(i + 1)];
                     builder.ins().brif(has_value, next_block, &[], target_block, &[]);
-                    // Load result — always valid in the reachable block
+                    // `brif` terminates the CURRENT block — the loads below
+                    // belong to the "has a value" continuation, which is a
+                    // SEPARATE block (`next_block`) that must be switched
+                    // into before appending anything else. Emitting them
+                    // without switching first tried to add instructions to
+                    // the block `brif` had just filled, panicking with
+                    // "cannot add an instruction to a block already
+                    // filled" — dormant until END_FOR made real for-loops
+                    // reach the JIT at all (see FOR_ITER's peek/pop note
+                    // above, same root cause class).
+                    builder.switch_to_block(next_block);
+                    blocks_entered.insert(next_block);
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
                     eval_stack.push([res_lo, res_hi]);
@@ -1839,15 +1963,35 @@ impl JitCompiler {
                     eval_stack.push([res_lo, res_hi]);
                 }
                 Opcode::COPY => {
+                    // Mirrors vm.rs's own graceful fallback: when `depth`
+                    // reaches or exceeds the stack depth (e.g. `a = b = 1`'s
+                    // COPY(1) called with only the just-pushed constant on
+                    // the stack — see `Stmt::Assign`'s multi-target
+                    // codegen), vm.rs treats it as a plain DUP_TOP instead
+                    // of indexing out of bounds. Indexing unconditionally
+                    // here underflowed (`eval_stack.len() - 1 - depth`)
+                    // and panicked with "attempt to subtract with
+                    // overflow" — dormant until BINARY_OP's in-place range
+                    // (100+) started letting loop-containing functions
+                    // that also happen to chain-assign (`inner = outer =
+                    // 1`) reach the JIT at all.
                     let depth = instr.arg as usize;
-                    let idx = eval_stack.len() - 1 - depth;
-                    let val = eval_stack[idx];
-                    eval_stack.push([val[0], val[1]]);
+                    let val = if depth >= eval_stack.len() {
+                        *eval_stack.last().unwrap()
+                    } else {
+                        eval_stack[eval_stack.len() - 1 - depth]
+                    };
+                    eval_stack.push(val);
                 }
                 Opcode::SWAP => {
-                    let idx = eval_stack.len() - 1;
-                    let idx2 = idx - instr.arg as usize;
-                    eval_stack.swap(idx, idx2);
+                    // Mirror vm.rs's own bounds guard (`if i > 0 && i <
+                    // len`, silently a no-op otherwise) rather than
+                    // indexing unconditionally.
+                    let len = eval_stack.len();
+                    let i = instr.arg as usize;
+                    if i > 0 && i < len {
+                        eval_stack.swap(len - 1, len - 1 - i);
+                    }
                 }
                 Opcode::POP_JUMP_IF_TRUE => {
                     let val = eval_stack.pop().unwrap();
@@ -2017,6 +2161,47 @@ impl JitCompiler {
                     builder.ins().store(memflags, val[0], val_addr, 0);
                     builder.ins().store(memflags, val[1], val_addr, 8);
                     builder.ins().call(store_subscr_func_ref, &[obj_addr, idx_addr, val_addr, out_addr]);
+                }
+                Opcode::MAP_ADD => {
+                    // vm.rs's MAP_ADD: pop val, pop key, PEEK (not pop) the
+                    // dict `arg` slots down (it stays on the stack — either
+                    // for the next comprehension iteration, or as the
+                    // literal dict's own final expression value once the
+                    // compiler's trailing POP_TOPs clean up the DUP_TOP
+                    // copies underneath — see compiler.rs's `Expr::Dict`
+                    // codegen). `jit_store_subscr` already implements
+                    // exactly `py_setitem(map, key, val)`, identical to
+                    // MAP_ADD's own `PyObject::Dict::set` for a bare dict
+                    // (no user `__setitem__` override is reachable on a
+                    // just-`BUILD_MAP`-created object), so it's reused
+                    // as-is rather than adding a near-duplicate helper.
+                    let val = eval_stack.pop().unwrap();
+                    let key = eval_stack.pop().unwrap();
+                    let map = eval_stack[eval_stack.len() - 1 - instr.arg as usize];
+                    let memflags = cranelift::codegen::ir::MemFlags::new();
+                    let tmp_map = builder.create_sized_stack_slot(StackSlotData::new(
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                    ));
+                    let tmp_key = builder.create_sized_stack_slot(StackSlotData::new(
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                    ));
+                    let tmp_val = builder.create_sized_stack_slot(StackSlotData::new(
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                    ));
+                    let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                    ));
+                    let map_addr = builder.ins().stack_addr(types::I64, tmp_map, 0);
+                    let key_addr = builder.ins().stack_addr(types::I64, tmp_key, 0);
+                    let val_addr = builder.ins().stack_addr(types::I64, tmp_val, 0);
+                    let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
+                    builder.ins().store(memflags, map[0], map_addr, 0);
+                    builder.ins().store(memflags, map[1], map_addr, 8);
+                    builder.ins().store(memflags, key[0], key_addr, 0);
+                    builder.ins().store(memflags, key[1], key_addr, 8);
+                    builder.ins().store(memflags, val[0], val_addr, 0);
+                    builder.ins().store(memflags, val[1], val_addr, 8);
+                    builder.ins().call(store_subscr_func_ref, &[map_addr, key_addr, val_addr, out_addr]);
                 }
                 Opcode::IS_OP => {
                     let invert = instr.arg as i64;
