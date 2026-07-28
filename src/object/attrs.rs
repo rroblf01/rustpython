@@ -1,0 +1,5144 @@
+// Split out of the former monolithic object.rs (see the file-splitting
+// refactor's memory entry for context) — this file holds attribute
+// access: `get_attribute_impl` (the giant dispatcher backing
+// `LOAD_ATTR`/`getattr`/method lookup across every builtin type and
+// user-defined class) and its supporting helpers. NOT further broken up
+// internally in this pass — see the plan's own note on scope.
+use super::*;
+
+// ---- Attribute access ----
+
+pub trait ObjectAccess {
+    fn get_attribute(&self, name: &str) -> PyResult<PyObjectRef>;
+    fn set_attribute(&mut self, name: &str, value: PyObjectRef) -> PyResult<()>;
+    fn del_attribute(&mut self, name: &str) -> PyResult<()>;
+}
+
+impl PyObject {
+    /// Every real Python object has `__doc__` (defaulting to `None` if not
+    /// otherwise set — `bool`/`int`/etc. all inherit it from `object`).
+    /// The per-variant match below (a few thousand lines, one arm per
+    /// builtin type, each with its own "no such attribute" catch-all) has
+    /// no single place to add a universal fallback without touching every
+    /// arm — so it stays untouched as `get_attribute_impl`, and the real
+    /// `get_attribute` (the trait method below) just catches this one
+    /// specific case on error instead. Real code doing generic attribute
+    /// introspection over arbitrary values (e.g. something in the stdlib
+    /// `email`/`dataclasses` machinery checking `.__doc__` while walking a
+    /// structure that isn't guaranteed to be a function/class) hit this.
+    fn get_attribute_impl(&self, name: &str) -> PyResult<PyObjectRef> {
+        // `.__class__` (equivalent to `type(x)`) universally, for every
+        // variant — this was entirely missing from `get_attribute_impl`
+        // (used by the `getattr()` builtin and any other generic
+        // attribute-access call site), even for a plain `class Foo: ...`
+        // instance, even though `x.__class__` (direct dot-syntax) already
+        // worked via a separate, hardcoded special case in `vm.rs`'s
+        // LOAD_ATTR opcode handler. So `getattr(x, "__class__")` — a common
+        // proxy/introspection idiom real code uses interchangeably with
+        // `type(x)` — raised `AttributeError` for literally every object,
+        // real trigger: CPython 3.14's own `unittest/case.py`
+        // (`self.__class__` reached via a code path that goes through
+        // `get_attribute_impl` rather than LOAD_ATTR). Mirrors
+        // `builtin_type_of`'s own logic (Instance → its real type;
+        // Type → itself; anything else → a freshly-built placeholder Type
+        // sharing just the name, same as `type(x)` already does for
+        // natives).
+        if name == "__class__" {
+            match self {
+                PyObject::Instance { typ, .. } => return Ok(typ.clone()),
+                // A class's own `__class__` is its metaclass — usually
+                // plain `type`. `metatype_of()` (used elsewhere for the
+                // real, `METATYPE_KEY`-tracked custom-metaclass case) needs
+                // a `PyObjectRef`, not the bare `&PyObject` available here;
+                // falling back to plain `"type"` is correct for the
+                // overwhelmingly common no-custom-metaclass case.
+                PyObject::Type { dict, .. } if dict.contains_key_str(METATYPE_KEY) => {
+                    return Ok(dict.get_str(METATYPE_KEY).unwrap().clone());
+                }
+                PyObject::Type { .. } => {
+                    return Ok(PyObjectRef::new(PyObject::Type {
+                        name: "type".to_string(),
+                        dict: Box::new(TypeDict::default()),
+                        bases: vec![],
+                        mro: vec![],
+                    }));
+                }
+                _ => {
+                    return Ok(PyObjectRef::new(PyObject::Type {
+                        name: self.type_name().to_string(),
+                        dict: Box::new(TypeDict::default()),
+                        bases: vec![],
+                        mro: vec![],
+                    }));
+                }
+            }
+        }
+        // `.__dir__` — `dir()` itself (`builtin_dir`) already introspects
+        // every variant directly and doesn't need this, but `dir()`'s own
+        // listing always advertises a synthetic `"__dir__"` name (matching
+        // real CPython, where every object inherits `object.__dir__`), and
+        // code that walks that listing generically (`getattr(obj, name) for
+        // name in dir(obj)` — real trigger: CPython 3.14's own
+        // `unittest/loader.py`'s `loadTestsFromModule`) then does
+        // `getattr(module, "__dir__")`, which raised `AttributeError` since
+        // no variant actually exposed it as a real bindable attribute.
+        // Doesn't check for a user-overridden `__dir__` first (unlike a
+        // real per-type dict lookup) — a rare enough case in practice that
+        // matching the `.__class__` fix's pragmatic same-shape precedent
+        // (a universal fallback) is the right tradeoff here.
+        if name == "__dir__" {
+            return Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                name: "__dir__".to_string(),
+                func: builtin_dir,
+                self_obj: py_none(),
+            }));
+        }
+        match self {
+             PyObject::Complex(re, im) => {
+                match name {
+                    "real" => Ok(py_float(*re)),
+                    "imag" => Ok(py_float(*im)),
+                    "conjugate" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                        name: "conjugate".to_string(),
+                        func: |args| {
+                            let obj = args[0].borrow();
+                            match &*obj {
+                                PyObject::Complex(re, im) => Ok(PyObjectRef::imm(PyObject::Complex(*re, -im))),
+                                _ => Err(PyError::type_error("conjugate() requires a complex self")),
+                            }
+                        },
+                        self_obj: PyObjectRef::imm(PyObject::Complex(*re, *im)),
+                    })),
+                    "__complex__" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                        name: "__complex__".to_string(),
+                        func: |args| {
+                            let obj = args[0].borrow();
+                            match &*obj {
+                                PyObject::Complex(re, im) => Ok(PyObjectRef::imm(PyObject::Complex(*re, *im))),
+                                _ => Err(PyError::type_error("__complex__() requires a complex self")),
+                            }
+                        },
+                        self_obj: PyObjectRef::imm(PyObject::Complex(*re, *im)),
+                    })),
+                    "__float__" => Err(PyError::type_error("can't convert complex to float")),
+                    "__int__" => Err(PyError::type_error("can't convert complex to int")),
+                    _ => Err(PyError::attribute_error(format!("'complex' object has no attribute '{}'", name))),
+                }
+            }
+            PyObject::Module { dict, name: mod_name } => {
+                if name == "__dict__" {
+                    // Convert module's HashMap to a PyDict
+
+                    let mut pd = PyDict::new();
+                    for (k, v) in dict.iter() {
+                        let _ = pd.set(py_str(interner::lookup_str(*k)), v.clone());
+                    }
+                    return Ok(PyObjectRef::new(PyObject::Dict(Box::new(pd))));
+                }
+                if name == "__name__" {
+                    return Ok(py_str(mod_name));
+                }
+                dict.get_str(&name).cloned().ok_or_else(|| {
+                    if std::env::var("RPY_DEBUG_ATTR").is_ok() {
+                        eprintln!("MODULE_ATTR_FAIL: module={} attr={} keys={:?}", mod_name, name, {
+                            let mut ks: Vec<&str> = dict.keys().map(|k| interner::lookup_str(*k)).collect();
+                            ks.sort();
+                            ks
+                        });
+                    }
+                    PyError::attribute_error(format!(
+                        "'module' object has no attribute '{}'", name
+                    ))
+                })
+            }
+            PyObject::Type { dict, mro, bases, name: type_name } => {
+                if name == "__dict__" {
+                    // Return type's dict as a PyDict — NATIVE_BASE_MARKER is
+                    // an internal bookkeeping entry (see native_base_of_type)
+                    // and must not leak into user-visible introspection.
+                    let mut pd = PyDict::new();
+                    for (k, v) in dict.iter() {
+                        let k_str = interner::lookup_str(*k);
+                        if k_str == NATIVE_BASE_MARKER || k_str == METATYPE_KEY || k_str == NATIVE_VALUE_CTOR_KEY { continue; }
+                        let _ = pd.set(py_str(k_str), v.clone());
+                    }
+                    return Ok(PyObjectRef::new(PyObject::Dict(Box::new(pd))));
+                }
+                if name == "__mro__" {
+                    return Ok(PyObjectRef::new(PyObject::Tuple(mro.clone())));
+                }
+                if name == "__bases__" {
+                    return Ok(PyObjectRef::new(PyObject::Tuple(bases.clone())));
+                }
+                if name == "__name__" {
+                    return Ok(py_str(type_name));
+                }
+                if name == "__qualname__" {
+                    return Ok(py_str(type_name));
+                }
+                // `ABCMeta.register(subclass)` — real CPython's `abc.py`
+                // wraps a native `_abc_register` primitive that this
+                // project already implements (`modules/core.rs`) but never
+                // actually wires up: `class Foo(metaclass=ABCMeta): ...`
+                // doesn't go through a real `class ABCMeta(type):` (this
+                // project's own `ABCMeta` is a plain `BuiltinFunction`, not
+                // a `type` subclass — real per-metaclass method lookup
+                // falling back from `SomeClass.register` to `type
+                // (SomeClass).register` is a deeper, unimplemented
+                // architecture piece), so `SomeClass.register` never
+                // resolved to anything at all. Providing `.register` as a
+                // generic fallback on EVERY class (not gated on "was this
+                // built via ABCMeta") is pragmatic rather than fully
+                // correct — but calling `.register()` on a non-ABC class
+                // isn't something real code does unintentionally, so
+                // there's no real-world downside. Records the virtual
+                // subclass in a `_abc_registry` frozenset attribute on the
+                // class; `isinstance`/`issubclass` consult it (see
+                // `builtin_isinstance`/`builtin_issubclass`). Real trigger:
+                // `numbers.Number.register(Decimal)` — needed by real
+                // CPython's own (vendored) `_pydecimal.py`.
+                if name == "register" && !dict.contains_key_str("register") {
+                    return Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "register".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("register() takes exactly one argument")); }
+                            let cls = &args[0];
+                            let subclass = args[1].clone();
+                            // Read the registry from `cls`'s OWN dict only
+                            // — NOT via `get_attribute` (which walks the
+                            // MRO). `Real.register(float)` must not see
+                            // (and then re-save as ITS OWN registry,
+                            // permanently merging the two) whatever
+                            // `Complex.register(complex)` already stored,
+                            // just because `Real` is a subclass of
+                            // `Complex` and doesn't have its own registry
+                            // entry yet. Confirmed via `numbers.py`'s own
+                            // `Complex.register(complex)`/`Real.register
+                            // (float)`/`Integral.register(int)`: without
+                            // this, `Integral._abc_registry` ended up
+                            // accumulating `{complex, float, int}` (all
+                            // three merged in), making `issubclass(complex,
+                            // Integral)` wrongly `True`.
+                            let existing: Vec<PyObjectRef> = if let PyObject::Type { dict, .. } = &*cls.borrow() {
+                                dict.get_str("_abc_registry").and_then(|r| {
+                                    if let PyObject::FrozenSet(items) = &*r.borrow() { Some(items.to_vec()) } else { None }
+                                }).unwrap_or_default()
+                            } else {
+                                Vec::new()
+                            };
+                            if !existing.iter().any(|r| r.is(&subclass)) {
+                                let mut set = PySet::new();
+                                for item in &existing { set.add(item.clone())?; }
+                                set.add(subclass.clone())?;
+                                cls.borrow_mut().set_attribute("_abc_registry", PyObjectRef::imm(PyObject::FrozenSet(set)))?;
+                            }
+                            Ok(subclass)
+                        },
+                        self_obj: py_none(),
+                    }));
+                }
+                if name == "__subclasses__" && !dict.contains_key_str("__subclasses__") {
+                    // NOTE: self_obj here is a placeholder — LOAD_ATTR's fast
+                    // path always rebinds it to the actual accessed object
+                    // (`Foo`, for `Foo.__subclasses__`) before calling, so the
+                    // real class must be read back out of args[0] at call time
+                    // (matching the `mro` method right below).
+                    return Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__subclasses__".to_string(),
+                        func: |args| Ok(py_list(direct_subclasses_of(&args[0]))),
+                        self_obj: py_none(),
+                    }));
+                }
+                if name == "mro" && !dict.contains_key_str("mro") {
+                    // NOTE: self_obj here is a placeholder — LOAD_ATTR's fast
+                    // path always rebinds it to the actual accessed object
+                    // (`Foo`, for `Foo.mro`) before calling, so the real mro
+                    // must be read back out of args[0] at call time.
+                    return Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "mro".to_string(),
+                        func: |args| {
+                            if let PyObject::Type { mro, .. } = &*args[0].borrow() {
+                                Ok(py_list(mro.clone()))
+                            } else {
+                                Err(PyError::type_error("mro() requires a type object"))
+                            }
+                        },
+                        self_obj: py_none(),
+                    }));
+                }
+                // Check own dict first
+                if let Some(val) = dict.get_str(&name).cloned() {
+                    // Unwrap staticmethod descriptor so type access returns the function directly
+                    let b = val.borrow();
+                    if let PyObject::StaticMethod { func } = &*b {
+                        return Ok(func.clone());
+                    }
+                    drop(b);
+                    return Ok(val);
+                }
+                // Check MRO (skip self)
+                for base in mro.iter().skip(1) {
+                    if let PyObject::Type { dict: base_dict, .. } = &*base.borrow() {
+                        if let Some(val) = base_dict.get_str(&name) {
+                            // Unwrap staticmethod descriptor from MRO bases
+                            let b = val.borrow();
+                            if let PyObject::StaticMethod { func } = &*b {
+                                return Ok(func.clone());
+                            }
+                            drop(b);
+                            return Ok(val.clone());
+                        }
+                    }
+                }
+                // Fallback: for dict-derived types, provide common dict methods
+                if name == "__iter__" || name == "items" || name == "keys" || name == "values"
+                {
+                    static DICT_METHODS: std::sync::OnceLock<std::collections::HashMap<String, BuiltinFunc>> = std::sync::OnceLock::new();
+                    let methods = DICT_METHODS.get_or_init(|| {
+                        let mut m = std::collections::HashMap::new();
+                        m.insert("__iter__".to_string(), dict_method_iter as BuiltinFunc);
+                        m.insert("items".to_string(), dict_method_items as BuiltinFunc);
+                        m.insert("keys".to_string(), dict_method_keys as BuiltinFunc);
+                        m.insert("values".to_string(), dict_method_values as BuiltinFunc);
+                        m
+                    });
+                    if let Some(func) = methods.get(name) {
+                        let func = *func;
+                        return Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                            name: name.to_string(),
+                            func,
+                            self_obj: py_none(),
+                        }));
+                    }
+                }
+                Err(PyError::attribute_error(format!("type has no attribute '{}'", name)))
+            }
+            PyObject::Instance { dict, typ } => {
+                if name == "__dict__" {
+                    // Return a copy of the instance's HashMap as a PyDict (no
+                    // live view from here) — NATIVE_BACKING_KEY is internal
+                    // bookkeeping (see native_backing_of) and must not leak
+                    // into user-visible introspection.
+                    let mut pd = PyDict::new();
+                    for (k, v) in dict.iter() {
+                        if k == NATIVE_BACKING_KEY { continue; }
+                        let _ = pd.set(py_str(k), v.clone());
+                    }
+                    return Ok(PyObjectRef::new(PyObject::Dict(Box::new(pd))));
+                }
+                if name == "__weakref__" {
+                    // __weakref__ slot exists but returns None by default
+                    // A full implementation would return a WeakRef object if one exists
+                    return Ok(py_none());
+                }
+                // If __slots__ is defined, verify the attribute is allowed
+                if let Some(slots) = get_instance_slots(typ) {
+                    if !slots.iter().any(|s| s == name) {
+                        // Check if it's a class-level attribute (method, etc.) — those are always allowed
+                        let typ_ref = typ.borrow();
+                        let is_in_type = if let PyObject::Type { dict: type_dict, mro, .. } = &*typ_ref {
+                            type_dict.contains_key_str(&name) || mro.iter().skip(1).any(|base| {
+                                if let PyObject::Type { dict: base_dict, .. } = &*base.borrow() {
+                                    base_dict.contains_key_str(&name)
+                                } else { false }
+                            })
+                        } else { false };
+                        if !is_in_type {
+                            let type_name = get_type_name_for_instance(typ);
+                            return Err(PyError::attribute_error(
+                                format!("'{}' object has no attribute '{}'", type_name, name)
+                            ));
+                        }
+                    }
+                }
+                dict.get_str(&name).cloned().or_else(|| {
+                    let typ_ref = typ.borrow();
+                    if let PyObject::Type { dict: type_dict, mro, .. } = &*typ_ref {
+                        type_dict.get_str(&name).cloned().or_else(|| {
+                            for base in mro.iter().skip(1) {
+                                if let PyObject::Type { dict: base_dict, .. } = &*base.borrow() {
+                                    if let Some(val) = base_dict.get_str(&name) {
+                                        return Some(val.clone());
+                                    }
+                                }
+                            }
+                            // Not overridden anywhere in the mro: for a class
+                            // that transparently subclasses list/dict/str
+                            // (`class Foo(list): ...`), delegate to the real
+                            // native value's own attribute resolution. Its
+                            // get_attribute returns a placeholder self_obj
+                            // (the real binding normally happens wherever
+                            // LOAD_ATTR was invoked, rebinding to whatever it
+                            // was accessed on) — here that must be rebound to
+                            // the native backing itself, not this instance,
+                            // or mutations would target the placeholder. This
+                            // must run BEFORE the generic dict-like fallback
+                            // below, which would otherwise misinterpret the
+                            // native backing's own dict entry as plain
+                            // instance-attribute data.
+                            if let Some(native) = dict.get(NATIVE_BACKING_KEY) {
+                                if let Ok(val) = native.borrow().get_attribute(name) {
+                                    let rebound = if let PyObject::BuiltinMethod { name: n, func, .. } = &*val.borrow() {
+                                        PyObjectRef::imm(PyObject::BuiltinMethod { name: n.clone(), func: *func, self_obj: native.clone() })
+                                    } else {
+                                        val.clone()
+                                    };
+                                    return Some(rebound);
+                                }
+                            }
+                            // Fallback: provide common dict methods for dict-like instances
+                            if name == "__iter__" || name == "items" || name == "keys" || name == "values" {
+                                let dict_snapshot: Vec<(String, PyObjectRef)> = dict.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
+                                let result = instance_builtin_dict_method(name, dict_snapshot);
+                                return result;
+                            }
+                            // PEP 3134 traceback/chaining protocol methods and
+                            // attributes for a USER-DEFINED exception class
+                            // (`class MyError(Exception): ...`) that doesn't
+                            // override them itself — the native
+                            // `PyObject::Exception` representation already
+                            // has these (see its own `get_attribute_impl`
+                            // arm), but a custom subclass is a plain
+                            // `PyObject::Instance` and fell straight through
+                            // to `AttributeError` for all of them. Real
+                            // trigger: `unittest`'s own `assertRaises`
+                            // (`_AssertRaisesBaseContext.__exit__`) calling
+                            // `exc_value.with_traceback(None)` on WHATEVER
+                            // exception it caught — this raised
+                            // `AttributeError` for literally any
+                            // user-defined exception class, only working by
+                            // accident for the handful of natively-
+                            // represented ones.
+                            if matches!(name, "with_traceback" | "add_note" | "__traceback__" | "__context__" | "__suppress_context__" | "__notes__")
+                                && find_exception_base_name(typ).is_some() {
+                                return Some(match name {
+                                    "with_traceback" => PyObjectRef::imm(PyObject::BuiltinMethod {
+                                        name: "with_traceback".to_string(),
+                                        func: |args| {
+                                            if args.len() < 2 { return Err(PyError::type_error("with_traceback() takes exactly one argument")); }
+                                            Ok(args[0].clone())
+                                        },
+                                        self_obj: PyObjectRef::new(PyObject::None),
+                                    }),
+                                    "add_note" => PyObjectRef::imm(PyObject::BuiltinMethod {
+                                        name: "add_note".to_string(),
+                                        func: |_args| Ok(py_none()),
+                                        self_obj: PyObjectRef::new(PyObject::None),
+                                    }),
+                                    "__context__" | "__traceback__" => py_none(),
+                                    "__suppress_context__" => py_bool(false),
+                                    "__notes__" => py_list(vec![]),
+                                    _ => unreachable!(),
+                                });
+                            }
+                            None
+                        })
+                    } else {
+                        None
+                    }
+                }).ok_or_else(|| PyError::attribute_error(format!("'{}' object has no attribute '{}'", get_type_name_for_instance(typ), name)))
+            }
+            PyObject::Property(ref d) => { let getter = &d.getter; let setter = &d.setter; let deleter = &d.deleter; let doc = &d.doc;
+                match name {
+                    "fget" => getter.clone().ok_or_else(|| PyError::attribute_error("property has no getter".to_string())),
+                    "fset" => setter.clone().ok_or_else(|| PyError::attribute_error("property has no setter".to_string())),
+                    "fdel" => deleter.clone().ok_or_else(|| PyError::attribute_error("property has no deleter".to_string())),
+                    "doc" => Ok(doc.clone().map_or_else(py_none, |d| py_str(&d))),
+                    "__get__" => {
+                        if let Some(_) = getter {
+                            Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                                name: "__get__".to_string(),
+                                func: |args| {
+                                    if args.len() < 4 { return Err(PyError::type_error("__get__() takes 2 positional arguments")); }
+                                    // args: [self_obj, descriptor, instance, owner]
+                                    let g = args[1].borrow();
+                                    if let PyObject::Property(ref data) = &*g {
+                                        if let Some(ref getter_fn) = data.getter {
+                                            call_bound_method(getter_fn.clone(), args[2].clone(), vec![])
+                                        } else { Err(PyError::runtime_error("property has no getter")) }
+                                    } else { Err(PyError::runtime_error("property has no getter")) }
+                                },
+                                self_obj: PyObjectRef::new(PyObject::None),
+                            }))
+                        } else { Err(PyError::attribute_error("property has no getter".to_string())) }
+                    }
+                    "__set__" => {
+                        if let Some(_) = setter {
+                            Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                                name: "__set__".to_string(),
+                                func: |args| {
+                                    if args.len() < 4 { return Err(PyError::type_error("__set__() takes 2 positional arguments")); }
+                                    // args: [self_obj, descriptor, instance, value]
+                                    let s = args[1].borrow();
+                                    if let PyObject::Property(ref data) = &*s {
+                                        if let Some(ref setter_fn) = data.setter {
+                                            call_bound_method(setter_fn.clone(), args[2].clone(), vec![args[3].clone()])
+                                        } else { Err(PyError::runtime_error("property has no setter")) }
+                                    } else { Err(PyError::runtime_error("property has no setter")) }
+                                },
+                                self_obj: PyObjectRef::new(PyObject::None),
+                            }))
+                        } else { Err(PyError::attribute_error("property has no setter".to_string())) }
+                    }
+                    "setter" | "deleter" | "getter" => {
+                        let is_setter = name == "setter";
+                        let prop_obj = PyObjectRef::new(match self {
+                            PyObject::Property(ref d) => PyObject::Property(Box::new(PropertyData {
+                                getter: d.getter.clone(),
+                                setter: d.setter.clone(),
+                                deleter: d.deleter.clone(),
+                                doc: d.doc.clone(),
+                            })),
+                            _ => unreachable!(),
+                        });
+                        Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                            name: name.to_string(),
+                            func: if is_setter { builtin_property_setter_fn } else { builtin_property_deleter_fn },
+                            self_obj: prop_obj,
+                        }))
+                    }
+                    _ => Err(PyError::attribute_error(format!("'property' object has no attribute '{}'", name))),
+                }
+            }
+            PyObject::Exception { typ, args, cause } => {
+                match name {
+                    "__name__" => Ok(py_str(typ)),
+                    "args" => Ok(py_tuple(args.clone())),
+                    "__cause__" => {
+                        match cause {
+                            Some(cause_exc) => Ok(cause_exc.clone()),
+                            None => Ok(py_none()),
+                        }
+                    }
+                    // PEP 3134 implicit exception chaining/traceback
+                    // attributes every real exception instance carries
+                    // (defaulting to `None`/`False`) — this interpreter
+                    // doesn't implement implicit `__context__` capture (an
+                    // exception raised while another is being handled)
+                    // or a real traceback OBJECT, but code that merely
+                    // checks these are present/None (real trigger:
+                    // `unittest`'s own `TestResult._clean_tracebacks`,
+                    // `for c in (value.__cause__, value.__context__): if c
+                    // is not None: ...`) previously raised AttributeError
+                    // just from the attribute not existing at all.
+                    "__context__" | "__traceback__" => Ok(py_none()),
+                    "__suppress_context__" => Ok(py_bool(false)),
+                    "__notes__" => Ok(py_list(vec![])),
+                    "add_note" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "add_note".to_string(),
+                        func: |_args| Ok(py_none()),
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "with_traceback" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "with_traceback".to_string(),
+                        func: |args| {
+                            if args.len() < 2 {
+                                return Err(PyError::type_error("with_traceback() takes exactly one argument"));
+                            }
+                            Ok(args[0].clone())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    _ => Err(PyError::attribute_error(format!("'Exception' object has no attribute '{}'", name))),
+                }
+            }
+            PyObject::List(_v) => {
+                match name {
+                    "append" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "append".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("append() takes exactly one argument")); }
+                            if let PyObject::List(list) = &mut *args[0].borrow_mut() { list.push(args[1].clone()); Ok(py_none()) }
+                            else { Err(PyError::runtime_error("append on non-list")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "pop" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "pop".to_string(),
+                        func: |args| {
+                            if let PyObject::List(list) = &mut *args[0].borrow_mut() {
+                                if args.len() > 1 {
+                                    let idx = args[1].as_i64().ok_or_else(|| PyError::type_error("pop index must be an integer"))?;
+                                    let len = list.len() as i64;
+                                    let idx = if idx < 0 { len + idx } else { idx };
+                                    if idx < 0 || idx >= len {
+                                        return Err(PyError::index_error("pop index out of range"));
+                                    }
+                                    Ok(list.remove(idx as usize))
+                                } else {
+                                    list.pop().ok_or_else(|| PyError::runtime_error("pop from empty list"))
+                                }
+                            } else { Err(PyError::runtime_error("pop on non-list")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "extend" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "extend".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("extend() takes exactly one argument")); }
+                            // Materialize the iterable BEFORE taking the
+                            // mutable borrow below — `args[1]` may alias
+                            // `args[0]` (`d.extend(d)`, a real CPython test
+                            // pattern, `test_deque.py`'s `test_extend`),
+                            // which would otherwise try to `.borrow()` the
+                            // same RefCell while it's already mutably
+                            // borrowed by `list.push(...)`'s own
+                            // `borrow_mut()`, panicking instead of
+                            // completing (matches real CPython's
+                            // `list.extend`, which safe-copies a
+                            // self-referential source first).
+                            let it = builtin_iter(&[args[1].clone()])?;
+                            let mut items = Vec::new();
+                            loop {
+                                match builtin_next(&[it.clone()]) {
+                                    Ok(v) => items.push(v),
+                                    Err(PyError::StopIteration) => break,
+                                    Err(e) => return Err(e),
+                                }
+                            }
+                            if let PyObject::List(list) = &mut *args[0].borrow_mut() {
+                                list.extend(items);
+                                Ok(py_none())
+                            } else { Err(PyError::runtime_error("extend on non-list")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "clear" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "clear".to_string(),
+                        func: |args| {
+                            if let PyObject::List(list) = &mut *args[0].borrow_mut() { list.clear(); Ok(py_none()) }
+                            else { Err(PyError::runtime_error("clear on non-list")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "reverse" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "reverse".to_string(),
+                        func: |args| {
+                            if let PyObject::List(list) = &mut *args[0].borrow_mut() { list.reverse(); Ok(py_none()) }
+                            else { Err(PyError::runtime_error("reverse on non-list")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "remove" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "remove".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("remove() takes exactly one argument")); }
+                            let items = if let PyObject::List(list) = &*args[0].borrow() {
+                                list.clone()
+                            } else { return Err(PyError::runtime_error("remove on non-list")) };
+                            let pos = items.iter().position(|item| item.equals(&args[1]).unwrap_or(false))
+                                .ok_or_else(|| PyError::value_error(format!("{} is not in list", args[1].str())))?;
+                            if let PyObject::List(list) = &mut *args[0].borrow_mut() {
+                                list.remove(pos);
+                                Ok(py_none())
+                            } else { Err(PyError::runtime_error("remove on non-list")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "index" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "index".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("index() takes at least 1 argument")); }
+                            let items = if let PyObject::List(list) = &*args[0].borrow() {
+                                list.clone()
+                            } else { return Err(PyError::runtime_error("index on non-list")) };
+                            for (i, item) in items.iter().enumerate() {
+                                if item.equals(&args[1])? { return Ok(py_int(i as i64)); }
+                            }
+                            Err(PyError::value_error(format!("{} is not in list", args[1].str())))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "count" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "count".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("count() takes at least 1 argument")); }
+                            let items = if let PyObject::List(list) = &*args[0].borrow() {
+                                list.clone()
+                            } else { return Err(PyError::runtime_error("count on non-list")) };
+                            let c = items.iter().filter(|item| item.equals(&args[1]).unwrap_or(false)).count();
+                            Ok(py_int(c as i64))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "sort" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "sort".to_string(),
+                        func: |args| {
+                            // Snapshot the list's items into a DETACHED `Vec`
+                            // and sort THAT, rather than holding
+                            // `args[0].borrow_mut()` for the whole
+                            // `sort_by()` call — `py_compare` can invoke a
+                            // user-defined `__lt__`/`__gt__` that mutates
+                            // THIS SAME list mid-sort (real CPython handles
+                            // this by sorting a detached internal copy too,
+                            // then writing the result back — see
+                            // `list.sort`'s own docs on "the list … is not
+                            // guaranteed to be in any particular state"
+                            // during a comparison that mutates it). Holding
+                            // a live borrow across that used to panic with
+                            // "RefCell already borrowed" the instant the
+                            // reentrant comparator tried its own borrow —
+                            // confirmed via CPython's own `test_sort.py`.
+                            let items: Vec<PyObjectRef> = {
+                                let obj = args[0].borrow();
+                                match &*obj {
+                                    PyObject::List(list) => list.clone(),
+                                    _ => return Err(PyError::runtime_error("sort on non-list")),
+                                }
+                            };
+                            // Route through py_compare so user-defined
+                            // classes' __lt__/__gt__ are consulted —
+                            // this used to only compare ints/floats
+                            // correctly and fall back to comparing
+                            // str() reprs for everything else. Uses the
+                            // panic-tolerant `py_stable_sort_by` (see its
+                            // own doc comment) rather than `Vec::sort_by`,
+                            // since a deliberately-inconsistent comparator
+                            // (real CPython test: `test_bug453523`) makes
+                            // the standard library's sort abort the whole
+                            // process.
+                            let items = py_stable_sort_by(items, &|a, b| {
+                                py_compare(a, b, 0).map(|r| r.truthy()).unwrap_or(false)
+                            });
+                            if let PyObject::List(list) = &mut *args[0].borrow_mut() {
+                                *list = items;
+                            }
+                            Ok(py_none())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "insert" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "insert".to_string(),
+                        func: |args| {
+                            if args.len() < 3 { return Err(PyError::type_error("insert() takes exactly 2 arguments")); }
+                            if let PyObject::List(list) = &mut *args[0].borrow_mut() {
+                                let idx = args[1].as_i64().unwrap_or(0) as usize;
+                                let idx = idx.min(list.len());
+                                list.insert(idx, args[2].clone());
+                                Ok(py_none())
+                            } else { Err(PyError::runtime_error("insert on non-list")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "copy" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "copy".to_string(),
+                        func: |args| {
+                            if let PyObject::List(list) = &*args[0].borrow() { Ok(py_list(list.clone())) }
+                            else { Err(PyError::runtime_error("copy on non-list")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__reversed__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__reversed__".to_string(),
+                        func: |args| {
+                            if let PyObject::List(list) = &*args[0].borrow() {
+                                let mut rev = list.clone();
+                                rev.reverse();
+                                Ok(PyObjectRef::new(PyObject::List(rev)))
+                            } else { Err(PyError::runtime_error("__reversed__ on non-list")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__sizeof__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__sizeof__".to_string(),
+                        func: |args| {
+                            if let PyObject::List(list) = &*args[0].borrow() {
+                                Ok(py_int(56 + (list.len() as i64) * 8))
+                            } else { Err(PyError::runtime_error("__sizeof__ on non-list")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__contains__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__contains__".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("__contains__() takes exactly one argument")); }
+                            let items = if let PyObject::List(list) = &*args[0].borrow() {
+                                list.clone()
+                            } else { return Err(PyError::runtime_error("__contains__ on non-list")) };
+                            for item in items.iter() {
+                                if item.equals(&args[1])? { return Ok(py_bool(true)); }
+                            }
+                            Ok(py_bool(false))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    _ => Err(PyError::attribute_error(format!("'list' object has no attribute '{}'", name))),
+            }
+            }
+            PyObject::Tuple(_v) => {
+                match name {
+                    "__reversed__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__reversed__".to_string(),
+                        func: |args| {
+                            if let PyObject::Tuple(tuple) = &*args[0].borrow() {
+                                let mut rev = tuple.clone();
+                                rev.reverse();
+                                Ok(PyObjectRef::imm(PyObject::Tuple(rev)))
+                            } else { Err(PyError::runtime_error("__reversed__ on non-tuple")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__sizeof__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__sizeof__".to_string(),
+                        func: |args| {
+                            if let PyObject::Tuple(tuple) = &*args[0].borrow() {
+                                Ok(py_int(40 + (tuple.len() as i64) * 8))
+                            } else { Err(PyError::runtime_error("__sizeof__ on non-tuple")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    _ => Err(PyError::attribute_error(format!("'tuple' object has no attribute '{}'", name))),
+                }
+            }
+            PyObject::Bytes(_v) => {
+                match name {
+                    "__sizeof__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__sizeof__".to_string(),
+                        func: |args| {
+                            if let PyObject::Bytes(bytes) = &*args[0].borrow() {
+                                Ok(py_int(33 + bytes.len() as i64))
+                            } else { Err(PyError::runtime_error("__sizeof__ on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__repr__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__repr__".to_string(),
+                        func: |args| {
+                            Ok(py_str(&args[0].repr()))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__str__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__str__".to_string(),
+                        func: |args| {
+                            Ok(py_str(&args[0].str()))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__len__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__len__".to_string(),
+                        func: |args| {
+                            let b = args[0].borrow();
+                            if let PyObject::Bytes(bytes) = &*b {
+                                Ok(py_int(bytes.len() as i64))
+                            } else { Err(PyError::runtime_error("__len__ on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "hex" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "hex".to_string(),
+                        func: |args| {
+                            if let PyObject::Bytes(bytes) = &*args[0].borrow() {
+                                let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+                                Ok(py_str(&hex))
+                            } else { Err(PyError::runtime_error("hex on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "decode" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "decode".to_string(),
+                        func: |args| {
+                            if let PyObject::Bytes(bytes) = &*args[0].borrow() {
+                                let encoding = if args.len() > 1 { args[1].str() } else { "utf-8".to_string() };
+                                let errors = if args.len() > 2 { args[2].str() } else { "strict".to_string() };
+                                if encoding == "utf-8" || encoding == "utf8" {
+                                    match String::from_utf8(bytes.clone()) {
+                                        Ok(s) => Ok(py_str(&s)),
+                                        Err(e) if errors == "strict" => {
+                                            // A real `UnicodeDecodeError` (not a
+                                            // bare `ValueError`, its ancestor —
+                                            // real code commonly catches the
+                                            // specific subclass, e.g. CPython's
+                                            // own `test.support.os_helper`
+                                            // probing filesystem-encoding
+                                            // behavior via `except
+                                            // UnicodeDecodeError:`) so real
+                                            // CPython-idiomatic error handling
+                                            // around `.decode()` actually works.
+                                            let pos = e.utf8_error().valid_up_to();
+                                            Err(PyError::Exception("UnicodeDecodeError".to_string(), PyObjectRef::new(PyObject::Exception {
+                                                typ: "UnicodeDecodeError".to_string(),
+                                                args: vec![
+                                                    py_str(&encoding),
+                                                    PyObjectRef::imm(PyObject::Bytes(bytes.clone())),
+                                                    py_int(pos as i64),
+                                                    py_int(pos as i64 + 1),
+                                                    py_str("invalid start byte"),
+                                                ],
+                                                cause: None,
+                                            })))
+                                        }
+                                        Err(_) => {
+                                            // 'ignore'/'replace'/'surrogateescape'/etc:
+                                            // this interpreter's `PyObject::Str` is
+                                            // backed by a real Rust `String`
+                                            // (always valid UTF-8), so it can't
+                                            // represent lone surrogates the way
+                                            // real `surrogateescape` round-trips
+                                            // require — lossy replacement is the
+                                            // closest approximation available.
+                                            Ok(py_str(&String::from_utf8_lossy(bytes)))
+                                        }
+                                    }
+                                } else {
+                                    let s = String::from_utf8_lossy(bytes).to_string();
+                                    Ok(py_str(&s))
+                                }
+                            } else { Err(PyError::runtime_error("decode on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "removeprefix" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "removeprefix".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("removeprefix() takes exactly 1 argument")); }
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let prefix = args[1].borrow();
+                                if let PyObject::Bytes(p) = &*prefix {
+                                    if b.starts_with(p.as_slice()) {
+                                        Ok(PyObjectRef::imm(PyObject::Bytes(b[p.len()..].to_vec())))
+                                    } else {
+                                        Ok(PyObjectRef::imm(PyObject::Bytes(b.clone())))
+                                    }
+                                } else { Err(PyError::type_error("removeprefix() argument must be bytes")) }
+                            } else { Err(PyError::runtime_error("removeprefix on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "removesuffix" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "removesuffix".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("removesuffix() takes exactly 1 argument")); }
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let suffix = args[1].borrow();
+                                if let PyObject::Bytes(s) = &*suffix {
+                                    if b.ends_with(s.as_slice()) {
+                                        Ok(PyObjectRef::imm(PyObject::Bytes(b[..b.len()-s.len()].to_vec())))
+                                    } else {
+                                        Ok(PyObjectRef::imm(PyObject::Bytes(b.clone())))
+                                    }
+                                } else { Err(PyError::type_error("removesuffix() argument must be bytes")) }
+                            } else { Err(PyError::runtime_error("removesuffix on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "startswith" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "startswith".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("startswith() takes at least 1 argument")); }
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let start = opt_i64_arg(args.get(2));
+                                let end = opt_i64_arg(args.get(3));
+                                let (st, en) = resolve_str_slice_bounds(b.len(), start, end);
+                                let sub = &b[st..en];
+                                let prefixes = extract_bytes_or_tuple(&args[1]);
+                                Ok(py_bool(prefixes.iter().any(|p| sub.starts_with(p.as_slice()))))
+                            } else { Err(PyError::runtime_error("startswith on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "endswith" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "endswith".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("endswith() takes at least 1 argument")); }
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let start = opt_i64_arg(args.get(2));
+                                let end = opt_i64_arg(args.get(3));
+                                let (st, en) = resolve_str_slice_bounds(b.len(), start, end);
+                                let sub = &b[st..en];
+                                let suffixes = extract_bytes_or_tuple(&args[1]);
+                                Ok(py_bool(suffixes.iter().any(|p| sub.ends_with(p.as_slice()))))
+                            } else { Err(PyError::runtime_error("endswith on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "find" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "find".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("find() takes at least 1 argument")); }
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let needle = arg_bytes(&args[1]).ok_or_else(|| PyError::type_error("argument should be a bytes-like object"))?;
+                                let start = opt_i64_arg(args.get(2));
+                                let end = opt_i64_arg(args.get(3));
+                                Ok(py_int(bytes_find_impl(b, &needle, start, end, false).map(|i| i as i64).unwrap_or(-1)))
+                            } else { Err(PyError::runtime_error("find on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "rfind" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "rfind".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("rfind() takes at least 1 argument")); }
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let needle = arg_bytes(&args[1]).ok_or_else(|| PyError::type_error("argument should be a bytes-like object"))?;
+                                let start = opt_i64_arg(args.get(2));
+                                let end = opt_i64_arg(args.get(3));
+                                Ok(py_int(bytes_find_impl(b, &needle, start, end, true).map(|i| i as i64).unwrap_or(-1)))
+                            } else { Err(PyError::runtime_error("rfind on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "index" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "index".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("index() takes at least 1 argument")); }
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let needle = arg_bytes(&args[1]).ok_or_else(|| PyError::type_error("argument should be a bytes-like object"))?;
+                                let start = opt_i64_arg(args.get(2));
+                                let end = opt_i64_arg(args.get(3));
+                                bytes_find_impl(b, &needle, start, end, false)
+                                    .map(|i| py_int(i as i64))
+                                    .ok_or_else(|| PyError::value_error("subsection not found"))
+                            } else { Err(PyError::runtime_error("index on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "rindex" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "rindex".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("rindex() takes at least 1 argument")); }
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let needle = arg_bytes(&args[1]).ok_or_else(|| PyError::type_error("argument should be a bytes-like object"))?;
+                                let start = opt_i64_arg(args.get(2));
+                                let end = opt_i64_arg(args.get(3));
+                                bytes_find_impl(b, &needle, start, end, true)
+                                    .map(|i| py_int(i as i64))
+                                    .ok_or_else(|| PyError::value_error("subsection not found"))
+                            } else { Err(PyError::runtime_error("rindex on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "count" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "count".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("count() takes at least 1 argument")); }
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let needle = arg_bytes(&args[1]).ok_or_else(|| PyError::type_error("argument should be a bytes-like object"))?;
+                                let start = opt_i64_arg(args.get(2));
+                                let end = opt_i64_arg(args.get(3));
+                                let (st, en) = resolve_str_slice_bounds(b.len(), start, end);
+                                let sub = &b[st..en];
+                                let c = if needle.is_empty() {
+                                    sub.len() + 1
+                                } else {
+                                    sub.windows(needle.len()).filter(|w| *w == needle.as_slice()).count()
+                                };
+                                Ok(py_int(c as i64))
+                            } else { Err(PyError::runtime_error("count on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "replace" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "replace".to_string(),
+                        func: |args| {
+                            if args.len() < 3 { return Err(PyError::type_error("replace() takes at least 2 arguments")); }
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let old = arg_bytes(&args[1]).ok_or_else(|| PyError::type_error("argument should be a bytes-like object"))?;
+                                let new = arg_bytes(&args[2]).ok_or_else(|| PyError::type_error("argument should be a bytes-like object"))?;
+                                let maxcount = if args.len() > 3 { args[3].as_i64().unwrap_or(-1) } else { -1 };
+                                if old.is_empty() {
+                                    let mut result = new.clone();
+                                    for (i, byte) in b.iter().enumerate() {
+                                        if maxcount >= 0 && (i as i64) >= maxcount {
+                                            result.extend_from_slice(&b[i..]);
+                                            return Ok(PyObjectRef::imm(PyObject::Bytes(result)));
+                                        }
+                                        result.push(*byte);
+                                        result.extend_from_slice(&new);
+                                    }
+                                    return Ok(PyObjectRef::imm(PyObject::Bytes(result)));
+                                }
+                                let mut result = Vec::new();
+                                let mut rest = &b[..];
+                                let mut count = 0i64;
+                                loop {
+                                    if maxcount >= 0 && count >= maxcount { break; }
+                                    match rest.windows(old.len()).position(|w| w == old.as_slice()) {
+                                        Some(idx) => {
+                                            result.extend_from_slice(&rest[..idx]);
+                                            result.extend_from_slice(&new);
+                                            rest = &rest[idx + old.len()..];
+                                            count += 1;
+                                        }
+                                        None => break,
+                                    }
+                                }
+                                result.extend_from_slice(rest);
+                                Ok(PyObjectRef::imm(PyObject::Bytes(result)))
+                            } else { Err(PyError::runtime_error("replace on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "split" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "split".to_string(),
+                        func: |args| {
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let sep = if args.len() > 1 && !matches!(&*args[1].borrow(), PyObject::None) {
+                                    Some(arg_bytes(&args[1]).ok_or_else(|| PyError::type_error("argument should be a bytes-like object"))?)
+                                } else { None };
+                                let maxsplit = if args.len() > 2 { args[2].as_i64().unwrap_or(-1) } else { -1 };
+                                let parts: Vec<Vec<u8>> = match &sep {
+                                    Some(sep) => {
+                                        if sep.is_empty() { return Err(PyError::value_error("empty separator")); }
+                                        let mut parts = Vec::new();
+                                        let mut rest = &b[..];
+                                        let mut count = 0i64;
+                                        loop {
+                                            if maxsplit >= 0 && count >= maxsplit { break; }
+                                            match rest.windows(sep.len()).position(|w| w == sep.as_slice()) {
+                                                Some(idx) => { parts.push(rest[..idx].to_vec()); rest = &rest[idx + sep.len()..]; count += 1; }
+                                                None => break,
+                                            }
+                                        }
+                                        parts.push(rest.to_vec());
+                                        parts
+                                    }
+                                    None => {
+                                        let mut parts: Vec<Vec<u8>> = Vec::new();
+                                        let mut rest = &b[..];
+                                        loop {
+                                            if maxsplit >= 0 && parts.len() >= maxsplit as usize { break; }
+                                            let ws_start = rest.iter().position(|c| !c.is_ascii_whitespace()).unwrap_or(rest.len());
+                                            rest = &rest[ws_start..];
+                                            if rest.is_empty() { break; }
+                                            let idx = rest.iter().position(|c| c.is_ascii_whitespace()).unwrap_or(rest.len());
+                                            parts.push(rest[..idx].to_vec());
+                                            rest = &rest[idx..];
+                                        }
+                                        let tail_start = rest.iter().position(|c| !c.is_ascii_whitespace()).unwrap_or(rest.len());
+                                        let tail_end = rest.iter().rposition(|c| !c.is_ascii_whitespace()).map(|i| i + 1).unwrap_or(tail_start);
+                                        if tail_start < tail_end { parts.push(rest[tail_start..tail_end].to_vec()); }
+                                        parts
+                                    }
+                                };
+                                Ok(py_list(parts.into_iter().map(|v| PyObjectRef::imm(PyObject::Bytes(v))).collect()))
+                            } else { Err(PyError::runtime_error("split on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "rsplit" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "rsplit".to_string(),
+                        func: |args| {
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let sep = if args.len() > 1 && !matches!(&*args[1].borrow(), PyObject::None) {
+                                    Some(arg_bytes(&args[1]).ok_or_else(|| PyError::type_error("argument should be a bytes-like object"))?)
+                                } else { None };
+                                let maxsplit = if args.len() > 2 { args[2].as_i64().unwrap_or(-1) } else { -1 };
+                                let parts: Vec<Vec<u8>> = match &sep {
+                                    Some(sep) => {
+                                        if sep.is_empty() { return Err(PyError::value_error("empty separator")); }
+                                        let mut parts = Vec::new();
+                                        let mut rest = &b[..];
+                                        let mut count = 0i64;
+                                        loop {
+                                            if maxsplit >= 0 && count >= maxsplit { break; }
+                                            match rest.windows(sep.len()).rposition(|w| w == sep.as_slice()) {
+                                                Some(idx) => { parts.push(rest[idx + sep.len()..].to_vec()); rest = &rest[..idx]; count += 1; }
+                                                None => break,
+                                            }
+                                        }
+                                        parts.push(rest.to_vec());
+                                        parts.reverse();
+                                        parts
+                                    }
+                                    None => {
+                                        let mut parts: Vec<Vec<u8>> = Vec::new();
+                                        let mut rest = &b[..];
+                                        loop {
+                                            if maxsplit >= 0 && parts.len() >= maxsplit as usize { break; }
+                                            let ws_end = rest.iter().rposition(|c| !c.is_ascii_whitespace()).map(|i| i + 1).unwrap_or(0);
+                                            rest = &rest[..ws_end];
+                                            if rest.is_empty() { break; }
+                                            let idx = rest.iter().rposition(|c| c.is_ascii_whitespace()).map(|i| i + 1).unwrap_or(0);
+                                            parts.push(rest[idx..].to_vec());
+                                            rest = &rest[..idx];
+                                        }
+                                        let head_start = rest.iter().position(|c| !c.is_ascii_whitespace()).unwrap_or(rest.len());
+                                        let head_end = rest.iter().rposition(|c| !c.is_ascii_whitespace()).map(|i| i + 1).unwrap_or(head_start);
+                                        if head_start < head_end { parts.push(rest[head_start..head_end].to_vec()); }
+                                        parts.reverse();
+                                        parts
+                                    }
+                                };
+                                Ok(py_list(parts.into_iter().map(|v| PyObjectRef::imm(PyObject::Bytes(v))).collect()))
+                            } else { Err(PyError::runtime_error("rsplit on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "strip" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "strip".to_string(),
+                        func: |args| {
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let chars = if args.len() > 1 && !matches!(&*args[1].borrow(), PyObject::None) { arg_bytes(&args[1]) } else { None };
+                                let is_strip = |c: &u8| match &chars { Some(cs) => cs.contains(c), None => c.is_ascii_whitespace() };
+                                let start = b.iter().position(|c| !is_strip(c)).unwrap_or(b.len());
+                                let end = b.iter().rposition(|c| !is_strip(c)).map(|i| i + 1).unwrap_or(start);
+                                Ok(PyObjectRef::imm(PyObject::Bytes(b[start..end.max(start)].to_vec())))
+                            } else { Err(PyError::runtime_error("strip on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "lstrip" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "lstrip".to_string(),
+                        func: |args| {
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let chars = if args.len() > 1 && !matches!(&*args[1].borrow(), PyObject::None) { arg_bytes(&args[1]) } else { None };
+                                let is_strip = |c: &u8| match &chars { Some(cs) => cs.contains(c), None => c.is_ascii_whitespace() };
+                                let start = b.iter().position(|c| !is_strip(c)).unwrap_or(b.len());
+                                Ok(PyObjectRef::imm(PyObject::Bytes(b[start..].to_vec())))
+                            } else { Err(PyError::runtime_error("lstrip on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "rstrip" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "rstrip".to_string(),
+                        func: |args| {
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let chars = if args.len() > 1 && !matches!(&*args[1].borrow(), PyObject::None) { arg_bytes(&args[1]) } else { None };
+                                let is_strip = |c: &u8| match &chars { Some(cs) => cs.contains(c), None => c.is_ascii_whitespace() };
+                                let end = b.iter().rposition(|c| !is_strip(c)).map(|i| i + 1).unwrap_or(0);
+                                Ok(PyObjectRef::imm(PyObject::Bytes(b[..end].to_vec())))
+                            } else { Err(PyError::runtime_error("rstrip on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "join" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "join".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("join() takes exactly one argument")); }
+                            let sep = if let PyObject::Bytes(b) = &*args[0].borrow() { b.clone() } else { return Err(PyError::runtime_error("join on non-bytes")); };
+                            let iterator = crate::object::builtin_iter(&[args[1].clone()])?;
+                            let mut parts: Vec<Vec<u8>> = Vec::new();
+                            loop {
+                                match crate::object::builtin_next(&[iterator.clone()]) {
+                                    Ok(v) => parts.push(arg_bytes(&v).ok_or_else(|| PyError::type_error("sequence item: expected a bytes-like object"))?),
+                                    Err(PyError::StopIteration) => break,
+                                    Err(e) => return Err(e),
+                                }
+                            }
+                            Ok(PyObjectRef::imm(PyObject::Bytes(parts.join(sep.as_slice()))))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "upper" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "upper".to_string(),
+                        func: |args| if let PyObject::Bytes(b) = &*args[0].borrow() { Ok(PyObjectRef::imm(PyObject::Bytes(b.iter().map(|c| c.to_ascii_uppercase()).collect()))) } else { Err(PyError::runtime_error("upper on non-bytes")) },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "lower" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "lower".to_string(),
+                        func: |args| if let PyObject::Bytes(b) = &*args[0].borrow() { Ok(PyObjectRef::imm(PyObject::Bytes(b.iter().map(|c| c.to_ascii_lowercase()).collect()))) } else { Err(PyError::runtime_error("lower on non-bytes")) },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "swapcase" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "swapcase".to_string(),
+                        func: |args| if let PyObject::Bytes(b) = &*args[0].borrow() {
+                            Ok(PyObjectRef::imm(PyObject::Bytes(b.iter().map(|c| {
+                                if c.is_ascii_uppercase() { c.to_ascii_lowercase() } else if c.is_ascii_lowercase() { c.to_ascii_uppercase() } else { *c }
+                            }).collect())))
+                        } else { Err(PyError::runtime_error("swapcase on non-bytes")) },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "capitalize" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "capitalize".to_string(),
+                        func: |args| if let PyObject::Bytes(b) = &*args[0].borrow() {
+                            let mut result: Vec<u8> = b.iter().map(|c| c.to_ascii_lowercase()).collect();
+                            if let Some(first) = result.first_mut() { *first = first.to_ascii_uppercase(); }
+                            Ok(PyObjectRef::imm(PyObject::Bytes(result)))
+                        } else { Err(PyError::runtime_error("capitalize on non-bytes")) },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "title" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "title".to_string(),
+                        func: |args| if let PyObject::Bytes(b) = &*args[0].borrow() {
+                            let mut result = Vec::with_capacity(b.len());
+                            let mut prev_cased = false;
+                            for &c in b.iter() {
+                                if c.is_ascii_alphabetic() {
+                                    result.push(if prev_cased { c.to_ascii_lowercase() } else { c.to_ascii_uppercase() });
+                                    prev_cased = true;
+                                } else {
+                                    result.push(c);
+                                    prev_cased = false;
+                                }
+                            }
+                            Ok(PyObjectRef::imm(PyObject::Bytes(result)))
+                        } else { Err(PyError::runtime_error("title on non-bytes")) },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "isalpha" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "isalpha".to_string(), func: |args| if let PyObject::Bytes(b) = &*args[0].borrow() { Ok(py_bool(!b.is_empty() && b.iter().all(|c| c.is_ascii_alphabetic()))) } else { Err(PyError::runtime_error("isalpha on non-bytes")) }, self_obj: PyObjectRef::new(PyObject::None) })),
+                    "isdigit" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "isdigit".to_string(), func: |args| if let PyObject::Bytes(b) = &*args[0].borrow() { Ok(py_bool(!b.is_empty() && b.iter().all(|c| c.is_ascii_digit()))) } else { Err(PyError::runtime_error("isdigit on non-bytes")) }, self_obj: PyObjectRef::new(PyObject::None) })),
+                    "isalnum" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "isalnum".to_string(), func: |args| if let PyObject::Bytes(b) = &*args[0].borrow() { Ok(py_bool(!b.is_empty() && b.iter().all(|c| c.is_ascii_alphanumeric()))) } else { Err(PyError::runtime_error("isalnum on non-bytes")) }, self_obj: PyObjectRef::new(PyObject::None) })),
+                    "isspace" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "isspace".to_string(), func: |args| if let PyObject::Bytes(b) = &*args[0].borrow() { Ok(py_bool(!b.is_empty() && b.iter().all(|c| c.is_ascii_whitespace()))) } else { Err(PyError::runtime_error("isspace on non-bytes")) }, self_obj: PyObjectRef::new(PyObject::None) })),
+                    "isupper" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "isupper".to_string(), func: |args| if let PyObject::Bytes(b) = &*args[0].borrow() { Ok(py_bool(b.iter().any(|c| c.is_ascii_alphabetic()) && b.iter().all(|c| !c.is_ascii_lowercase()))) } else { Err(PyError::runtime_error("isupper on non-bytes")) }, self_obj: PyObjectRef::new(PyObject::None) })),
+                    "islower" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "islower".to_string(), func: |args| if let PyObject::Bytes(b) = &*args[0].borrow() { Ok(py_bool(b.iter().any(|c| c.is_ascii_alphabetic()) && b.iter().all(|c| !c.is_ascii_uppercase()))) } else { Err(PyError::runtime_error("islower on non-bytes")) }, self_obj: PyObjectRef::new(PyObject::None) })),
+                    "istitle" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "istitle".to_string(),
+                        func: |args| if let PyObject::Bytes(b) = &*args[0].borrow() {
+                            let mut prev_cased = false;
+                            let mut is_title = true;
+                            let mut saw_alpha = false;
+                            for &c in b.iter() {
+                                if c.is_ascii_uppercase() {
+                                    saw_alpha = true;
+                                    if prev_cased { is_title = false; break; }
+                                    prev_cased = true;
+                                } else if c.is_ascii_lowercase() {
+                                    saw_alpha = true;
+                                    if !prev_cased { is_title = false; break; }
+                                    prev_cased = true;
+                                } else {
+                                    prev_cased = false;
+                                }
+                            }
+                            Ok(py_bool(is_title && saw_alpha))
+                        } else { Err(PyError::runtime_error("istitle on non-bytes")) },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "partition" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "partition".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("partition() takes exactly one argument")); }
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let sep = arg_bytes(&args[1]).ok_or_else(|| PyError::type_error("argument should be a bytes-like object"))?;
+                                if sep.is_empty() { return Err(PyError::value_error("empty separator")); }
+                                match b.windows(sep.len()).position(|w| w == sep.as_slice()) {
+                                    Some(idx) => Ok(py_tuple(vec![
+                                        PyObjectRef::imm(PyObject::Bytes(b[..idx].to_vec())),
+                                        PyObjectRef::imm(PyObject::Bytes(sep.clone())),
+                                        PyObjectRef::imm(PyObject::Bytes(b[idx + sep.len()..].to_vec())),
+                                    ])),
+                                    None => Ok(py_tuple(vec![
+                                        PyObjectRef::imm(PyObject::Bytes(b.clone())),
+                                        PyObjectRef::imm(PyObject::Bytes(Vec::new())),
+                                        PyObjectRef::imm(PyObject::Bytes(Vec::new())),
+                                    ])),
+                                }
+                            } else { Err(PyError::runtime_error("partition on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "rpartition" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "rpartition".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("rpartition() takes exactly one argument")); }
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let sep = arg_bytes(&args[1]).ok_or_else(|| PyError::type_error("argument should be a bytes-like object"))?;
+                                if sep.is_empty() { return Err(PyError::value_error("empty separator")); }
+                                match b.windows(sep.len()).rposition(|w| w == sep.as_slice()) {
+                                    Some(idx) => Ok(py_tuple(vec![
+                                        PyObjectRef::imm(PyObject::Bytes(b[..idx].to_vec())),
+                                        PyObjectRef::imm(PyObject::Bytes(sep.clone())),
+                                        PyObjectRef::imm(PyObject::Bytes(b[idx + sep.len()..].to_vec())),
+                                    ])),
+                                    None => Ok(py_tuple(vec![
+                                        PyObjectRef::imm(PyObject::Bytes(Vec::new())),
+                                        PyObjectRef::imm(PyObject::Bytes(Vec::new())),
+                                        PyObjectRef::imm(PyObject::Bytes(b.clone())),
+                                    ])),
+                                }
+                            } else { Err(PyError::runtime_error("rpartition on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "splitlines" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "splitlines".to_string(),
+                        func: |args| {
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let keepends = args.get(1).map(|v| v.truthy()).unwrap_or(false);
+                                let mut lines = Vec::new();
+                                let mut start = 0;
+                                let mut i = 0;
+                                while i < b.len() {
+                                    if b[i] == b'\n' || b[i] == b'\r' {
+                                        let end = if b[i] == b'\r' && i + 1 < b.len() && b[i + 1] == b'\n' { i + 2 } else { i + 1 };
+                                        lines.push(if keepends { b[start..end].to_vec() } else { b[start..i].to_vec() });
+                                        start = end;
+                                        i = end;
+                                    } else {
+                                        i += 1;
+                                    }
+                                }
+                                if start < b.len() { lines.push(b[start..].to_vec()); }
+                                Ok(py_list(lines.into_iter().map(|v| PyObjectRef::imm(PyObject::Bytes(v))).collect()))
+                            } else { Err(PyError::runtime_error("splitlines on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "expandtabs" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "expandtabs".to_string(),
+                        func: |args| {
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let tabsize = if args.len() > 1 { args[1].as_i64().unwrap_or(8).max(0) as usize } else { 8 };
+                                let mut result = Vec::with_capacity(b.len());
+                                let mut col = 0usize;
+                                for &c in b.iter() {
+                                    if c == b'\t' {
+                                        if tabsize > 0 {
+                                            let spaces = tabsize - (col % tabsize);
+                                            result.extend(std::iter::repeat(b' ').take(spaces));
+                                            col += spaces;
+                                        }
+                                    } else if c == b'\n' || c == b'\r' {
+                                        result.push(c);
+                                        col = 0;
+                                    } else {
+                                        result.push(c);
+                                        col += 1;
+                                    }
+                                }
+                                Ok(PyObjectRef::imm(PyObject::Bytes(result)))
+                            } else { Err(PyError::runtime_error("expandtabs on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "zfill" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "zfill".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("zfill() takes exactly 1 argument")); }
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let w = args[1].as_i64().unwrap_or(0).max(0) as usize;
+                                if w <= b.len() { return Ok(PyObjectRef::imm(PyObject::Bytes(b.clone()))); }
+                                let has_sign = matches!(b.first(), Some(b'+') | Some(b'-'));
+                                let (sign, rest): (&[u8], &[u8]) = if has_sign { (&b[..1], &b[1..]) } else { (&b[..0], &b[..]) };
+                                let pad = w - b.len();
+                                let mut result = sign.to_vec();
+                                result.extend(std::iter::repeat(b'0').take(pad));
+                                result.extend_from_slice(rest);
+                                Ok(PyObjectRef::imm(PyObject::Bytes(result)))
+                            } else { Err(PyError::runtime_error("zfill on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "ljust" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "ljust".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("ljust() takes at least 1 argument")); }
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let w = args[1].as_i64().unwrap_or(0).max(0) as usize;
+                                let fill = if args.len() > 2 { arg_bytes(&args[2]).and_then(|v| v.first().copied()).unwrap_or(b' ') } else { b' ' };
+                                let mut result = b.clone();
+                                if w > b.len() { result.extend(std::iter::repeat(fill).take(w - b.len())); }
+                                Ok(PyObjectRef::imm(PyObject::Bytes(result)))
+                            } else { Err(PyError::runtime_error("ljust on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "rjust" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "rjust".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("rjust() takes at least 1 argument")); }
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let w = args[1].as_i64().unwrap_or(0).max(0) as usize;
+                                let fill = if args.len() > 2 { arg_bytes(&args[2]).and_then(|v| v.first().copied()).unwrap_or(b' ') } else { b' ' };
+                                if w <= b.len() { return Ok(PyObjectRef::imm(PyObject::Bytes(b.clone()))); }
+                                let mut result: Vec<u8> = std::iter::repeat(fill).take(w - b.len()).collect();
+                                result.extend_from_slice(b);
+                                Ok(PyObjectRef::imm(PyObject::Bytes(result)))
+                            } else { Err(PyError::runtime_error("rjust on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "center" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "center".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("center() takes at least 1 argument")); }
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let w = args[1].as_i64().unwrap_or(0).max(0) as usize;
+                                let fill = if args.len() > 2 { arg_bytes(&args[2]).and_then(|v| v.first().copied()).unwrap_or(b' ') } else { b' ' };
+                                if w <= b.len() { return Ok(PyObjectRef::imm(PyObject::Bytes(b.clone()))); }
+                                let pad = w - b.len();
+                                let left = pad / 2;
+                                let right = pad - left;
+                                let mut result: Vec<u8> = std::iter::repeat(fill).take(left).collect();
+                                result.extend_from_slice(b);
+                                result.extend(std::iter::repeat(fill).take(right));
+                                Ok(PyObjectRef::imm(PyObject::Bytes(result)))
+                            } else { Err(PyError::runtime_error("center on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "translate" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "translate".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("translate() takes at least 1 argument")); }
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let table = if matches!(&*args[1].borrow(), PyObject::None) { None } else { arg_bytes(&args[1]) };
+                                let delete = if args.len() > 2 { arg_bytes(&args[2]).unwrap_or_default() } else { Vec::new() };
+                                let mut result = Vec::with_capacity(b.len());
+                                for &c in b.iter() {
+                                    if delete.contains(&c) { continue; }
+                                    match &table {
+                                        Some(t) if t.len() == 256 => result.push(t[c as usize]),
+                                        _ => result.push(c),
+                                    }
+                                }
+                                Ok(PyObjectRef::imm(PyObject::Bytes(result)))
+                            } else { Err(PyError::runtime_error("translate on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    _ => Err(PyError::attribute_error(format!("'bytes' object has no attribute '{}'", name))),
+                }
+            }
+            PyObject::ByteArray(_b) => {
+                match name {
+                    "append" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "append".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("append() takes exactly one argument")); }
+                            let val = args[1].borrow();
+                            if let PyObject::Int(i) = &*val {
+                                let n = i.to_i64().ok_or_else(|| PyError::value_error("byte value out of range"))?;
+                                if n < 0 || n > 255 { return Err(PyError::value_error("byte must be in range(0, 256)")); }
+                                if let PyObject::ByteArray(bytes) = &mut *args[0].borrow_mut() {
+                                    bytes.push(n as u8);
+                                    Ok(py_none())
+                                } else { Err(PyError::runtime_error("append on non-bytearray")) }
+                            } else { Err(PyError::type_error("argument must be an integer")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "extend" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "extend".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("extend() takes exactly one argument")); }
+                            let it = builtin_iter(&[args[1].clone()])?;
+                            loop {
+                                match builtin_next(&[it.clone()]) {
+                                    Ok(v) => {
+                                        let vv = v.borrow();
+                                        if let PyObject::Int(i) = &*vv {
+                                            let n = i.to_i64().ok_or_else(|| PyError::value_error("byte value out of range"))?;
+                                            if n < 0 || n > 255 { return Err(PyError::value_error("byte must be in range(0, 256)")); }
+                                            if let PyObject::ByteArray(bytes) = &mut *args[0].borrow_mut() {
+                                                bytes.push(n as u8);
+                                            } else { return Err(PyError::runtime_error("extend on non-bytearray")); }
+                                        } else { return Err(PyError::type_error("argument must be iterable of integers")); }
+                                    }
+                                    Err(PyError::StopIteration) => return Ok(py_none()),
+                                    Err(e) => return Err(e),
+                                }
+                            }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "insert" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "insert".to_string(),
+                        func: |args| {
+                            if args.len() < 3 { return Err(PyError::type_error("insert() takes exactly 2 arguments")); }
+                            let idx = args[1].as_i64().unwrap_or(0) as usize;
+                            let val = args[2].borrow();
+                            if let PyObject::Int(i) = &*val {
+                                let n = i.to_i64().ok_or_else(|| PyError::value_error("byte value out of range"))?;
+                                if n < 0 || n > 255 { return Err(PyError::value_error("byte must be in range(0, 256)")); }
+                                if let PyObject::ByteArray(bytes) = &mut *args[0].borrow_mut() {
+                                    let idx = idx.min(bytes.len());
+                                    bytes.insert(idx, n as u8);
+                                    Ok(py_none())
+                                } else { Err(PyError::runtime_error("insert on non-bytearray")) }
+                            } else { Err(PyError::type_error("argument must be an integer")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "remove" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "remove".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("remove() takes exactly one argument")); }
+                            let val = args[1].borrow();
+                            if let PyObject::Int(i) = &*val {
+                                let n = i.to_i64().ok_or_else(|| PyError::value_error("byte value out of range"))? as u8;
+                                if let PyObject::ByteArray(bytes) = &mut *args[0].borrow_mut() {
+                                    let pos = bytes.iter().position(|&x| x == n)
+                                        .ok_or_else(|| PyError::value_error(format!("value {} not found in bytearray", n)))?;
+                                    bytes.remove(pos);
+                                    Ok(py_none())
+                                } else { Err(PyError::runtime_error("remove on non-bytearray")) }
+                            } else { Err(PyError::type_error("argument must be an integer")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "pop" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "pop".to_string(),
+                        func: |args| {
+                            if let PyObject::ByteArray(bytes) = &mut *args[0].borrow_mut() {
+                                let idx = if args.len() > 1 {
+                                    let i = args[1].as_i64().ok_or_else(|| PyError::type_error("pop index must be an integer"))?;
+                                    let len = bytes.len() as i64;
+                                    if i < 0 { len + i } else { i }
+                                } else {
+                                    bytes.len() as i64 - 1
+                                };
+                                if idx < 0 || idx >= bytes.len() as i64 {
+                                    return Err(PyError::index_error("pop index out of range"));
+                                }
+                                let val = bytes.remove(idx as usize);
+                                Ok(PyObjectRef::imm(PyObject::Int(BigInt::from(val))))
+                            } else { Err(PyError::runtime_error("pop on non-bytearray")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__getitem__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__getitem__".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("__getitem__() requires an index")); }
+                            py_getitem(&args[0], &args[1])
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__setitem__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__setitem__".to_string(),
+                        func: |args| {
+                            if args.len() < 3 { return Err(PyError::type_error("__setitem__() requires an index and value")); }
+                            py_setitem(&args[0], &args[1], args[2].clone())?;
+                            Ok(py_none())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__len__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__len__".to_string(),
+                        func: |args| {
+                            let b = args[0].borrow();
+                            if let PyObject::ByteArray(bytes) = &*b {
+                                Ok(py_int(bytes.len() as i64))
+                            } else { Err(PyError::runtime_error("__len__ on non-bytearray")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__str__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__str__".to_string(),
+                        func: |args| {
+                            if let PyObject::ByteArray(bytes) = &*args[0].borrow() {
+                                let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+                                Ok(py_str(&hex))
+                            } else { Err(PyError::runtime_error("__str__ on non-bytearray")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__sizeof__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__sizeof__".to_string(),
+                        func: |args| {
+                            if let PyObject::ByteArray(bytes) = &*args[0].borrow() {
+                                Ok(py_int(33 + bytes.len() as i64))
+                            } else { Err(PyError::runtime_error("__sizeof__ on non-bytearray")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "removeprefix" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "removeprefix".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("removeprefix() takes exactly 1 argument")); }
+                            if let PyObject::ByteArray(b) = &*args[0].borrow() {
+                                let prefix = args[1].borrow();
+                                if let PyObject::Bytes(p) = &*prefix {
+                                    if b.starts_with(p.as_slice()) {
+                                        Ok(PyObjectRef::imm(PyObject::ByteArray(b[p.len()..].to_vec())))
+                                    } else {
+                                        Ok(PyObjectRef::imm(PyObject::ByteArray(b.clone())))
+                                    }
+                                } else if let PyObject::ByteArray(p) = &*prefix {
+                                    if b.starts_with(p.as_slice()) {
+                                        Ok(PyObjectRef::imm(PyObject::ByteArray(b[p.len()..].to_vec())))
+                                    } else {
+                                        Ok(PyObjectRef::imm(PyObject::ByteArray(b.clone())))
+                                    }
+                                } else { Err(PyError::type_error("removeprefix() argument must be bytes-like")) }
+                            } else { Err(PyError::runtime_error("removeprefix on non-bytearray")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "removesuffix" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "removesuffix".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("removesuffix() takes exactly 1 argument")); }
+                            if let PyObject::ByteArray(b) = &*args[0].borrow() {
+                                let suffix = args[1].borrow();
+                                if let PyObject::Bytes(s) = &*suffix {
+                                    if b.ends_with(s.as_slice()) {
+                                        Ok(PyObjectRef::imm(PyObject::ByteArray(b[..b.len()-s.len()].to_vec())))
+                                    } else {
+                                        Ok(PyObjectRef::imm(PyObject::ByteArray(b.clone())))
+                                    }
+                                } else if let PyObject::ByteArray(s) = &*suffix {
+                                    if b.ends_with(s.as_slice()) {
+                                        Ok(PyObjectRef::imm(PyObject::ByteArray(b[..b.len()-s.len()].to_vec())))
+                                    } else {
+                                        Ok(PyObjectRef::imm(PyObject::ByteArray(b.clone())))
+                                    }
+                                } else { Err(PyError::type_error("removesuffix() argument must be bytes-like")) }
+                            } else { Err(PyError::runtime_error("removesuffix on non-bytearray")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    // Delegate to `bytes`'s implementation — see
+                    // `bytearray_delegate`'s doc comment above.
+                    "startswith" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "startswith".to_string(), func: |args| bytearray_delegate("startswith", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "endswith" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "endswith".to_string(), func: |args| bytearray_delegate("endswith", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "find" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "find".to_string(), func: |args| bytearray_delegate("find", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "rfind" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "rfind".to_string(), func: |args| bytearray_delegate("rfind", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "index" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "index".to_string(), func: |args| bytearray_delegate("index", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "rindex" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "rindex".to_string(), func: |args| bytearray_delegate("rindex", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "count" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "count".to_string(), func: |args| bytearray_delegate("count", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "replace" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "replace".to_string(), func: |args| bytearray_delegate("replace", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "split" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "split".to_string(), func: |args| bytearray_delegate("split", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "rsplit" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "rsplit".to_string(), func: |args| bytearray_delegate("rsplit", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "strip" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "strip".to_string(), func: |args| bytearray_delegate("strip", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "lstrip" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "lstrip".to_string(), func: |args| bytearray_delegate("lstrip", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "rstrip" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "rstrip".to_string(), func: |args| bytearray_delegate("rstrip", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "join" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "join".to_string(), func: |args| bytearray_delegate("join", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "upper" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "upper".to_string(), func: |args| bytearray_delegate("upper", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "lower" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "lower".to_string(), func: |args| bytearray_delegate("lower", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "title" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "title".to_string(), func: |args| bytearray_delegate("title", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "capitalize" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "capitalize".to_string(), func: |args| bytearray_delegate("capitalize", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "swapcase" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "swapcase".to_string(), func: |args| bytearray_delegate("swapcase", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "isalpha" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "isalpha".to_string(), func: |args| bytearray_delegate("isalpha", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "isdigit" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "isdigit".to_string(), func: |args| bytearray_delegate("isdigit", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "isalnum" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "isalnum".to_string(), func: |args| bytearray_delegate("isalnum", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "isspace" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "isspace".to_string(), func: |args| bytearray_delegate("isspace", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "isupper" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "isupper".to_string(), func: |args| bytearray_delegate("isupper", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "islower" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "islower".to_string(), func: |args| bytearray_delegate("islower", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "istitle" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "istitle".to_string(), func: |args| bytearray_delegate("istitle", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "partition" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "partition".to_string(), func: |args| bytearray_delegate("partition", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "rpartition" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "rpartition".to_string(), func: |args| bytearray_delegate("rpartition", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "splitlines" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "splitlines".to_string(), func: |args| bytearray_delegate("splitlines", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "expandtabs" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "expandtabs".to_string(), func: |args| bytearray_delegate("expandtabs", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "zfill" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "zfill".to_string(), func: |args| bytearray_delegate("zfill", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "ljust" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "ljust".to_string(), func: |args| bytearray_delegate("ljust", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "rjust" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "rjust".to_string(), func: |args| bytearray_delegate("rjust", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "center" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "center".to_string(), func: |args| bytearray_delegate("center", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "translate" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "translate".to_string(), func: |args| bytearray_delegate("translate", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "decode" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "decode".to_string(), func: |args| bytearray_delegate("decode", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "hex" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "hex".to_string(), func: |args| bytearray_delegate("hex", args), self_obj: PyObjectRef::new(PyObject::None) })),
+                    _ => Err(PyError::attribute_error(format!("'bytearray' object has no attribute '{}'", name))),
+                }
+            }
+            PyObject::Str(_s) => {
+                match name {
+                    // Gettable `__hash__` — needed so `super().__hash__()`
+                    // works for a `class K(str): def __hash__(self): ...
+                    // return super().__hash__()` override (the `super()`
+                    // proxy's own attribute resolution falls back to the
+                    // native backing's `get_attribute`, which previously had
+                    // no `__hash__` case at all here — real trigger:
+                    // CPython's own `test_baseexception.py::
+                    // test_setstate_refcount_no_crash`, gh-97591).
+                    "__hash__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__hash__".to_string(),
+                        func: |args| Ok(py_int(args[0].hash()? as i64)),
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "format" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "format".to_string(),
+                        func: |args| {
+                            if args.is_empty() { return Err(PyError::type_error("format() takes at least 1 argument")); }
+                            let fmt = args[0].str();
+                            // Keyword arguments arrive packed into a trailing
+                            // dict (this project's established calling
+                            // convention for native methods — see
+                            // `call_function`'s `BuiltinMethod` arm in
+                            // vm.rs). If the last arg is a Dict, treat it as
+                            // the kwargs pack for named fields and exclude
+                            // it from positional indexing — previously
+                            // named fields (`'{name}'.format(name=...)`)
+                            // were entirely unimplemented and silently
+                            // printed the field NAME itself instead of its
+                            // value (confirmed via CPython's own
+                            // `test_listcomps.py`, which builds source code
+                            // via `"...{code}...".format(code=code)`).
+                            let rest = &args[1..];
+                            let kwargs_dict: Option<PyObjectRef> = match rest.last() {
+                                Some(a) if matches!(&*a.borrow(), PyObject::Dict(_)) => Some(a.clone()),
+                                _ => None,
+                            };
+                            let pos_args: &[PyObjectRef] = if kwargs_dict.is_some() { &rest[..rest.len()-1] } else { rest };
+                            let mut result = String::new();
+                            let mut chars = fmt.chars();
+                            let mut next_auto = 0usize;
+                            let mut used_manual_numbering = false;
+                            let mut used_auto_numbering = false;
+                            while let Some(c) = chars.next() {
+                                if c == '{' {
+                                    // Check for {{ escape
+                                    if chars.as_str().starts_with('{') {
+                                        result.push('{');
+                                        chars.next();
+                                        continue;
+                                    }
+                                    // Parse field text up to the matching `}`.
+                                    let mut field = String::new();
+                                    loop {
+                                        match chars.next() {
+                                            Some('}') => break,
+                                            Some(c) => field.push(c),
+                                            None => return Err(PyError::value_error("unterminated format field")),
+                                        }
+                                    }
+                                    // Split off an optional `!conversion` and
+                                    // `:spec` suffix — previously not parsed
+                                    // at all, so even POSITIONAL fields with
+                                    // a spec (`{0:>10}`) printed the raw
+                                    // field text instead of applying it.
+                                    let (name_part, spec) = match field.find(':') {
+                                        Some(idx) => (&field[..idx], &field[idx+1..]),
+                                        None => (field.as_str(), ""),
+                                    };
+                                    let (name_part, conversion) = match name_part.find('!') {
+                                        Some(idx) => (&name_part[..idx], Some(&name_part[idx+1..])),
+                                        None => (name_part, None),
+                                    };
+                                    // Resolve the field's value: auto `{}`,
+                                    // positional `{0}`, or named `{key}`
+                                    // (looked up in the trailing kwargs dict).
+                                    let val: PyResult<PyObjectRef> = if name_part.is_empty() {
+                                        if used_manual_numbering {
+                                            return Err(PyError::value_error("cannot switch from manual field specification to automatic field numbering"));
+                                        }
+                                        used_auto_numbering = true;
+                                        let idx = next_auto;
+                                        next_auto += 1;
+                                        pos_args.get(idx).cloned()
+                                            .ok_or_else(|| PyError::index_error("Replacement index out of range for positional args tuple"))
+                                    } else if let Ok(n) = name_part.parse::<usize>() {
+                                        if used_auto_numbering {
+                                            return Err(PyError::value_error("cannot switch from automatic field numbering to manual field specification"));
+                                        }
+                                        used_manual_numbering = true;
+                                        pos_args.get(n).cloned()
+                                            .ok_or_else(|| PyError::index_error("Replacement index out of range for positional args tuple"))
+                                    } else {
+                                        // Named field — bare name only (no
+                                        // `.attr`/`[index]` sub-access in
+                                        // this simplified implementation).
+                                        kwargs_dict.as_ref()
+                                            .and_then(|d| if let PyObject::Dict(dd) = &*d.borrow() { dd.get(&py_str(name_part)).ok().flatten() } else { None })
+                                            .ok_or_else(|| PyError::key_error(format!("'{}'", name_part)))
+                                    };
+                                    let val = val?;
+                                    // Apply `!conversion` (repr/str/ascii).
+                                    let val = match conversion {
+                                        Some("r") | Some("a") => py_str(&val.borrow().repr()),
+                                        Some("s") => py_str(&val.str()),
+                                        _ => val,
+                                    };
+                                    result.push_str(&crate::vm::format_with_spec(&val, spec)?);
+                                } else if c == '}' {
+                                    if chars.as_str().starts_with('}') {
+                                        result.push('}');
+                                        chars.next();
+                                    }
+                                } else {
+                                    result.push(c);
+                                }
+                            }
+                            Ok(py_str(&result))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "split" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "split".to_string(),
+                        func: |args| {
+                            let s = args[0].str();
+                            let sep = if args.len() > 1 && !matches!(&*args[1].borrow(), PyObject::None) { Some(args[1].str()) } else { None };
+                            let maxsplit = if args.len() > 2 { args[2].as_i64().unwrap_or(-1) } else { -1 };
+                            let parts: Vec<PyObjectRef> = match (sep, maxsplit) {
+                                (Some(sep), n) if n >= 0 => s.splitn(n as usize + 1, &sep).map(py_str).collect(),
+                                (Some(sep), _) => s.split(&sep).map(py_str).collect(),
+                                (None, n) if n >= 0 => {
+                                    let mut parts: Vec<&str> = Vec::new();
+                                    let mut rest = s.as_str();
+                                    while parts.len() < n as usize {
+                                        let trimmed = rest.trim_start();
+                                        if trimmed.is_empty() { rest = trimmed; break; }
+                                        match trimmed.find(char::is_whitespace) {
+                                            Some(idx) => { parts.push(&trimmed[..idx]); rest = &trimmed[idx..]; }
+                                            None => { rest = trimmed; break; }
+                                        }
+                                    }
+                                    let tail = rest.trim();
+                                    if !tail.is_empty() { parts.push(tail); }
+                                    parts.into_iter().map(py_str).collect()
+                                }
+                                (None, _) => s.split_whitespace().map(py_str).collect(),
+                            };
+                            Ok(py_list(parts))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "rsplit" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "rsplit".to_string(),
+                        func: |args| {
+                            let s = args[0].str();
+                            let sep = if args.len() > 1 && !matches!(&*args[1].borrow(), PyObject::None) { Some(args[1].str()) } else { None };
+                            let maxsplit = if args.len() > 2 { args[2].as_i64().unwrap_or(-1) } else { -1 };
+                            let parts: Vec<PyObjectRef> = match (sep, maxsplit) {
+                                (Some(sep), n) if n >= 0 => {
+                                    let mut parts: Vec<&str> = s.rsplitn(n as usize + 1, &sep).collect();
+                                    parts.reverse();
+                                    parts.into_iter().map(py_str).collect()
+                                }
+                                (Some(sep), _) => s.split(&sep).map(py_str).collect(),
+                                (None, n) if n >= 0 => {
+                                    let mut parts: Vec<&str> = Vec::new();
+                                    let mut rest = s.as_str();
+                                    while parts.len() < n as usize {
+                                        let trimmed = rest.trim_end();
+                                        if trimmed.is_empty() { rest = trimmed; break; }
+                                        match trimmed.rfind(char::is_whitespace) {
+                                            Some(idx) => { parts.push(&trimmed[idx+1..]); rest = &trimmed[..idx]; }
+                                            None => { parts.push(trimmed); rest = ""; break; }
+                                        }
+                                    }
+                                    let head = rest.trim();
+                                    if !head.is_empty() { parts.push(head); }
+                                    parts.reverse();
+                                    parts.into_iter().map(py_str).collect()
+                                }
+                                (None, _) => s.split_whitespace().map(py_str).collect(),
+                            };
+                            Ok(py_list(parts))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "join" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "join".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("join() takes exactly one argument")); }
+                            let sep = args[0].str();
+                            // Real `str.join` accepts any iterable, not just a
+                            // list (tuples/generators/dict_keys/etc. are all
+                            // common in real code, e.g. `''.join(chunk for
+                            // chunk in parts)`), so materialize through the
+                            // normal iterator protocol instead of only
+                            // recognizing a literal `PyObject::List`.
+                            let iterator = crate::object::builtin_iter(&[args[1].clone()])?;
+                            let mut parts: Vec<String> = Vec::new();
+                            loop {
+                                match crate::object::builtin_next(&[iterator.clone()]) {
+                                    Ok(v) => parts.push(v.str()),
+                                    Err(PyError::StopIteration) => break,
+                                    Err(e) => return Err(e),
+                                }
+                            }
+                            Ok(py_str(&parts.join(&sep)))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "upper" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "upper".to_string(),
+                        func: |args| Ok(py_str(&args[0].str().to_uppercase())),
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "lower" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "lower".to_string(),
+                        func: |args| Ok(py_str(&args[0].str().to_lowercase())),
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "strip" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "strip".to_string(),
+                        func: |args| {
+                            let chars = if args.len() > 1 { args[1].str() } else { " \t\n\r".to_string() };
+                            Ok(py_str(args[0].str().trim_matches(|c: char| chars.contains(c))))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "lstrip" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "lstrip".to_string(),
+                        func: |args| {
+                            let chars = if args.len() > 1 { args[1].str() } else { " \t\n\r".to_string() };
+                            Ok(py_str(args[0].str().trim_start_matches(|c: char| chars.contains(c))))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "rstrip" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "rstrip".to_string(),
+                        func: |args| {
+                            let chars = if args.len() > 1 { args[1].str() } else { " \t\n\r".to_string() };
+                            Ok(py_str(args[0].str().trim_end_matches(|c: char| chars.contains(c))))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "startswith" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "startswith".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("startswith() takes at least 1 argument")); }
+                            let s = args[0].str();
+                            let chars: Vec<char> = s.chars().collect();
+                            let start = opt_i64_arg(args.get(2));
+                            let end = opt_i64_arg(args.get(3));
+                            let (st, en) = resolve_str_slice_bounds(chars.len(), start, end);
+                            let sub: String = chars[st..en].iter().collect();
+                            let prefixes: Vec<String> = match &*args[1].borrow() {
+                                PyObject::Tuple(items) => items.iter().map(|x| x.str()).collect(),
+                                _ => vec![args[1].str()],
+                            };
+                            Ok(py_bool(prefixes.iter().any(|p| sub.starts_with(p.as_str()))))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "endswith" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "endswith".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("endswith() takes at least 1 argument")); }
+                            let s = args[0].str();
+                            let chars: Vec<char> = s.chars().collect();
+                            let start = opt_i64_arg(args.get(2));
+                            let end = opt_i64_arg(args.get(3));
+                            let (st, en) = resolve_str_slice_bounds(chars.len(), start, end);
+                            let sub: String = chars[st..en].iter().collect();
+                            let suffixes: Vec<String> = match &*args[1].borrow() {
+                                PyObject::Tuple(items) => items.iter().map(|x| x.str()).collect(),
+                                _ => vec![args[1].str()],
+                            };
+                            Ok(py_bool(suffixes.iter().any(|p| sub.ends_with(p.as_str()))))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "find" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "find".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("find() takes at least 1 argument")); }
+                            let s = args[0].str();
+                            let needle = args[1].str();
+                            let start = opt_i64_arg(args.get(2));
+                            let end = opt_i64_arg(args.get(3));
+                            Ok(py_int(str_find_impl(&s, &needle, start, end, false).map(|i| i as i64).unwrap_or(-1)))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "rfind" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "rfind".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("rfind() takes at least 1 argument")); }
+                            let s = args[0].str();
+                            let needle = args[1].str();
+                            let start = opt_i64_arg(args.get(2));
+                            let end = opt_i64_arg(args.get(3));
+                            Ok(py_int(str_find_impl(&s, &needle, start, end, true).map(|i| i as i64).unwrap_or(-1)))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "index" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "index".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("index() takes at least 1 argument")); }
+                            let s = args[0].str();
+                            let needle = args[1].str();
+                            let start = opt_i64_arg(args.get(2));
+                            let end = opt_i64_arg(args.get(3));
+                            str_find_impl(&s, &needle, start, end, false)
+                                .map(|i| py_int(i as i64))
+                                .ok_or_else(|| PyError::value_error("substring not found"))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "rindex" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "rindex".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("rindex() takes at least 1 argument")); }
+                            let s = args[0].str();
+                            let needle = args[1].str();
+                            let start = opt_i64_arg(args.get(2));
+                            let end = opt_i64_arg(args.get(3));
+                            str_find_impl(&s, &needle, start, end, true)
+                                .map(|i| py_int(i as i64))
+                                .ok_or_else(|| PyError::value_error("substring not found"))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "count" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "count".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("count() takes at least 1 argument")); }
+                            let s = args[0].str();
+                            let needle = args[1].str();
+                            let start = opt_i64_arg(args.get(2));
+                            let end = opt_i64_arg(args.get(3));
+                            let chars: Vec<char> = s.chars().collect();
+                            let (st, en) = resolve_str_slice_bounds(chars.len(), start, end);
+                            let sub: String = chars[st..en].iter().collect();
+                            let c = if needle.is_empty() { sub.chars().count() + 1 } else { sub.matches(needle.as_str()).count() };
+                            Ok(py_int(c as i64))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "replace" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "replace".to_string(),
+                        func: |args| {
+                            if args.len() < 3 { return Err(PyError::type_error("replace() takes exactly 2 arguments")); }
+                            Ok(py_str(&args[0].str().replace(&args[1].str(), &args[2].str())))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "isdecimal" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "isdecimal".to_string(), func: |a| Ok(py_bool(!a[0].str().is_empty() && a[0].str().chars().all(|c| c.is_ascii_digit() && !c.is_ascii_control()))), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "isnumeric" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "isnumeric".to_string(), func: |a| Ok(py_bool(!a[0].str().is_empty() && a[0].str().chars().any(|c| c.is_numeric()))), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "isascii" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "isascii".to_string(), func: |a| Ok(py_bool(a[0].str().is_ascii())), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "isprintable" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "isprintable".to_string(), func: |a| Ok(py_bool(!a[0].str().is_empty() && a[0].str().chars().all(|c| c.is_ascii_graphic() || c == ' '))), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "casefold" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "casefold".to_string(), func: |a| Ok(py_str(&a[0].str().to_lowercase())), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "isdigit" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "isdigit".to_string(), func: |a| Ok(py_bool(a[0].str().chars().all(|c| c.is_ascii_digit()))), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "isalpha" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "isalpha".to_string(), func: |a| Ok(py_bool(a[0].str().chars().all(|c| c.is_ascii_alphabetic()))), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "isalnum" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "isalnum".to_string(), func: |a| Ok(py_bool(a[0].str().chars().all(|c| c.is_ascii_alphanumeric()))), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "isspace" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "isspace".to_string(), func: |a| Ok(py_bool(a[0].str().chars().all(|c| c.is_ascii_whitespace()))), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "islower" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "islower".to_string(), func: |a| Ok(py_bool(a[0].str() == a[0].str().to_lowercase())), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "isupper" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "isupper".to_string(), func: |a| Ok(py_bool(a[0].str() == a[0].str().to_uppercase())), self_obj: PyObjectRef::new(PyObject::None) })),
+                    "istitle" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "istitle".to_string(), func: |a| { let s = a[0].str(); let mut prev_is_letter = false; let mut is_title = true; for c in s.chars() { if c.is_ascii_uppercase() { if prev_is_letter { is_title = false; break; } prev_is_letter = true; } else if c.is_ascii_lowercase() { if !prev_is_letter { is_title = false; break; } prev_is_letter = true; } else { prev_is_letter = false; } } Ok(py_bool(is_title && !s.is_empty())) }, self_obj: PyObjectRef::new(PyObject::None) })),
+                    "title" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "title".to_string(), func: |a| { let s = a[0].str(); let mut result = String::with_capacity(s.len()); let mut prev_cased = false; for c in s.chars() { if c.is_uppercase() || c.is_lowercase() { if !prev_cased { result.extend(c.to_uppercase()); } else { result.extend(c.to_lowercase()); } prev_cased = true; } else { result.push(c); prev_cased = false; } } Ok(py_str(&result)) }, self_obj: PyObjectRef::new(PyObject::None) })),
+                    "capitalize" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "capitalize".to_string(), func: |a| { let s = a[0].str(); let mut c = s.chars(); Ok(py_str(&match c.next() { Some(f) => f.to_uppercase().collect::<String>() + &c.as_str().to_lowercase(), None => String::new() })) }, self_obj: PyObjectRef::new(PyObject::None) })),
+                    "swapcase" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "swapcase".to_string(), func: |a| { let s = a[0].str(); let mut result = String::with_capacity(s.len()); for c in s.chars() { if c.is_uppercase() { result.extend(c.to_lowercase()); } else if c.is_lowercase() { result.extend(c.to_uppercase()); } else { result.push(c); } } Ok(py_str(&result)) }, self_obj: PyObjectRef::new(PyObject::None) })),
+                    "zfill" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "zfill".to_string(), func: |a| { if a.len() < 2 { return Err(PyError::type_error("zfill() takes exactly 1 argument")); } let w = a[1].as_i64().unwrap_or(0) as usize; let s = a[0].str(); if w <= s.len() { return Ok(py_str(&s)); } let (sign, rest) = if let Some(stripped) = s.strip_prefix('+').or_else(|| s.strip_prefix('-')) { (&s[..1], stripped) } else { ("", s.as_str()) }; let padded = format!("{}{:0>width$}", sign, rest, width = w - sign.len()); Ok(py_str(&padded)) }, self_obj: PyObjectRef::new(PyObject::None) })),
+                    "ljust" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "ljust".to_string(), func: |a| if a.len() < 2 { return Err(PyError::type_error("ljust() takes exactly 1 argument")); } else { let w = a[1].as_i64().unwrap_or(0) as usize; let fill = if a.len() > 2 { let f = a[2].str(); f.chars().next().unwrap_or(' ') } else { ' ' }; let s = a[0].str(); let padding = if w > s.len() { fill.to_string().repeat(w - s.len()) } else { String::new() }; Ok(py_str(&(s.to_string() + &padding))) }, self_obj: PyObjectRef::new(PyObject::None) })),
+                    "rjust" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "rjust".to_string(), func: |a| { if a.len() < 2 { return Err(PyError::type_error("rjust() takes exactly 1 argument")); } let w = a[1].as_i64().unwrap_or(0) as usize; let fill = if a.len() > 2 { a[2].str().chars().next().unwrap_or(' ') } else { ' ' }; let s = a[0].str(); if w <= s.len() { Ok(py_str(&s)) } else { Ok(py_str(&(fill.to_string().repeat(w - s.len()) + &s))) } }, self_obj: PyObjectRef::new(PyObject::None) })),
+                    "center" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "center".to_string(), func: |a| { if a.len() < 2 { return Err(PyError::type_error("center() takes exactly 1 argument")); } let w = a[1].as_i64().unwrap_or(0) as usize; let fill = if a.len() > 2 { a[2].str().chars().next().unwrap_or(' ') } else { ' ' }; let s = a[0].str(); if w <= s.len() { Ok(py_str(&s)) } else { let pad = w - s.len(); let left = pad / 2; let right = pad - left; let fill_s = fill.to_string(); Ok(py_str(&(fill_s.repeat(left) + &s + &fill_s.repeat(right)))) } }, self_obj: PyObjectRef::new(PyObject::None) })),
+                    "removeprefix" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "removeprefix".to_string(), func: |a| if a.len() < 2 { return Err(PyError::type_error("removeprefix() takes exactly 1 argument")); } else { let s = a[0].str(); let p = a[1].str(); Ok(py_str(if s.starts_with(&p) { &s[p.len()..] } else { &s })) }, self_obj: PyObjectRef::new(PyObject::None) })),
+                    "removesuffix" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "removesuffix".to_string(), func: |a| if a.len() < 2 { return Err(PyError::type_error("removesuffix() takes exactly 1 argument")); } else { let s = a[0].str(); let p = a[1].str(); Ok(py_str(if s.ends_with(&p) { &s[..s.len()-p.len()] } else { &s })) }, self_obj: PyObjectRef::new(PyObject::None) })),
+                    "__mod__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__mod__".to_string(),
+                        func: |args| {
+                            // args[0] = self_obj (py_none), args[1] = format string, args[2] = value
+                            if args.len() < 3 { return Err(PyError::type_error("__mod__() too few args")); }
+                            let fmt = args[1].str();
+                            // Real CPython's `%`-formatting errors (bad
+                            // conversion char, huge width/precision,
+                            // mismatched mapping key, ...) are all
+                            // `ValueError`, not `RuntimeError` — confirmed by
+                            // `test_str.py`'s own `assertRaises(ValueError)`
+                            // around several of these.
+                            let result = string_interpolate(&fmt, &args[2]).map_err(PyError::value_error)?;
+                            Ok(py_str(&result))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "partition" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "partition".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("partition() takes exactly one argument")); }
+                            let s = args[0].str();
+                            let sep = args[1].str();
+                            if let Some(pos) = s.find(&sep) {
+                                Ok(py_tuple(vec![
+                                    py_str(&s[..pos]),
+                                    py_str(&sep),
+                                    py_str(&s[pos + sep.len()..]),
+                                ]))
+                            } else {
+                                Ok(py_tuple(vec![py_str(&s), py_str(""), py_str("")]))
+                            }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "rpartition" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "rpartition".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("rpartition() takes exactly one argument")); }
+                            let s = args[0].str();
+                            let sep = args[1].str();
+                            if let Some(pos) = s.rfind(&sep) {
+                                Ok(py_tuple(vec![
+                                    py_str(&s[..pos]),
+                                    py_str(&sep),
+                                    py_str(&s[pos + sep.len()..]),
+                                ]))
+                            } else {
+                                Ok(py_tuple(vec![py_str(""), py_str(""), py_str(&s)]))
+                            }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "splitlines" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "splitlines".to_string(),
+                        func: |args| {
+                            let s = args[0].str();
+                            let keepends = if args.len() > 1 { args[1].truthy() } else { false };
+                            let mut lines: Vec<PyObjectRef> = Vec::new();
+                            let mut start = 0;
+                            let chars: Vec<char> = s.chars().collect();
+                            let len = chars.len();
+                            let mut i = 0;
+                            while i < len {
+                                let end;
+                                let line_end;
+                                if chars[i] == '\r' {
+                                    if i + 1 < len && chars[i + 1] == '\n' {
+                                        line_end = i + 2;
+                                    } else {
+                                        line_end = i + 1;
+                                    }
+                                } else if chars[i] == '\n' {
+                                    line_end = i + 1;
+                                } else {
+                                    i += 1;
+                                    continue;
+                                }
+                                if keepends {
+                                    end = line_end;
+                                } else {
+                                    end = i;
+                                }
+                                let line: String = chars[start..end].iter().collect();
+                                lines.push(py_str(&line));
+                                i = line_end;
+                                start = i;
+                            }
+                            if start < len || s.ends_with('\n') || s.is_empty() || lines.is_empty() {
+                                let line: String = chars[start..].iter().collect();
+                                if !line.is_empty() || s.ends_with('\n') || (s.is_empty() && lines.is_empty()) {
+                                    lines.push(py_str(&line));
+                                }
+                            }
+                            Ok(py_list(lines))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "expandtabs" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "expandtabs".to_string(),
+                        func: |args| {
+                            let s = args[0].str();
+                            let tabsize = if args.len() > 1 { args[1].as_i64().unwrap_or(8) as usize } else { 8 };
+                            let mut result = String::with_capacity(s.len());
+                            let mut col = 0;
+                            for c in s.chars() {
+                                if c == '\t' {
+                                    let spaces = tabsize - (col % tabsize);
+                                    result.push_str(&" ".repeat(spaces));
+                                    col += spaces;
+                                } else if c == '\n' || c == '\r' {
+                                    result.push(c);
+                                    col = 0;
+                                } else {
+                                    result.push(c);
+                                    col += 1;
+                                }
+                            }
+                            Ok(py_str(&result))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "translate" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "translate".to_string(), func: |a| { let s = a[0].str(); if a.len() > 1 { let _table = &a[1]; } Ok(py_str(&s)) }, self_obj: PyObjectRef::new(PyObject::None) })),
+                    "encode" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "encode".to_string(), func: |a| { let s = a[0].str(); if a.len() > 1 { let _encoding = a[1].str(); } Ok(PyObjectRef::imm(PyObject::Bytes(s.as_bytes().to_vec()))) }, self_obj: PyObjectRef::new(PyObject::None) })),
+                    "isidentifier" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "isidentifier".to_string(),
+                        func: |a| {
+                            let s = a[0].str();
+                            if s.is_empty() { return Ok(py_bool(false)); }
+                            let mut chars = s.chars();
+                            let first = chars.next().unwrap();
+                            let valid = (first == '_') || first.is_ascii_alphabetic();
+                            if !valid { return Ok(py_bool(false)); }
+                            Ok(py_bool(chars.all(|c| c == '_' || c.is_ascii_alphanumeric())))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__sizeof__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__sizeof__".to_string(),
+                        func: |a| {
+                            let s = a[0].str();
+                            Ok(py_int(49 + s.len() as i64))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    _ => Err(PyError::attribute_error(format!("'str' object has no attribute '{}'", name))),
+                }
+            }
+            PyObject::Dict(_d) => {
+                match name {
+                    "keys" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "keys".to_string(),
+                        func: |args| {
+                            let d = args[0].borrow();
+                            if let PyObject::Dict(dict) = &*d { Ok(py_list(dict.keys())) }
+                            else { Err(PyError::runtime_error("keys on non-dict")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "values" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "values".to_string(),
+                        func: |args| {
+                            let d = args[0].borrow();
+                            if let PyObject::Dict(dict) = &*d { Ok(py_list(dict.values())) }
+                            else { Err(PyError::runtime_error("values on non-dict")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "items" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "items".to_string(),
+                        func: |args| {
+                            let d = args[0].borrow();
+                            if let PyObject::Dict(dict) = &*d {
+                                let items: Vec<PyObjectRef> = dict.items().iter().map(|(k, v)| py_tuple(vec![k.clone(), v.clone()])).collect();
+                                Ok(py_list(items))
+                            } else { Err(PyError::runtime_error("items on non-dict")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "get" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "get".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("get() takes at least 1 argument")); }
+                            let dict = &*args[0].borrow();
+                            if let PyObject::Dict(d) = dict {
+                                Ok(d.get(&args[1])?.unwrap_or_else(|| if args.len() > 2 { args[2].clone() } else { py_none() }))
+                            } else { Err(PyError::runtime_error("get on non-dict")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "pop" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "pop".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("pop() takes at least 1 argument")); }
+                            if let PyObject::Dict(d) = &mut *args[0].borrow_mut() {
+                                match d.remove(&args[1]) {
+                                    Ok(val) => Ok(val),
+                                    Err(_) if args.len() > 2 => Ok(args[2].clone()),
+                                    Err(e) => Err(e),
+                                }
+                            } else { Err(PyError::runtime_error("pop on non-dict")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "popitem" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "popitem".to_string(),
+                        func: |args| {
+                            if let PyObject::Dict(d) = &mut *args[0].borrow_mut() {
+                                let items = d.items();
+                                if items.is_empty() { return Err(PyError::key_error("popitem(): dictionary is empty")); }
+                                let last = args.len() <= 2 || args[1].truthy();
+                                let (k, v) = if last { items.into_iter().last().unwrap() }
+                                    else { items.into_iter().next().unwrap() };
+                                d.remove(&k)?;
+                                Ok(py_tuple(vec![k, v]))
+                            } else { Err(PyError::runtime_error("popitem on non-dict")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "clear" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "clear".to_string(),
+                        func: |args| {
+                            if let PyObject::Dict(d) = &mut *args[0].borrow_mut() { d.clear(); Ok(py_none()) }
+                            else { Err(PyError::runtime_error("clear on non-dict")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "update" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "update".to_string(),
+                        func: |args| {
+                            if args.is_empty() { return Err(PyError::type_error("update() takes at least 1 argument")); }
+                            let self_obj = args[0].clone();
+                            // Matches CPython's real dict.update(): accepts another
+                            // dict, any mapping-protocol object (has .keys()), or an
+                            // iterable of (key, value) pairs. A trailing kwargs dict
+                            // (from `d.update(x, k=v)`) is just another entry here.
+                            for other in &args[1..] {
+                                let is_dict = matches!(&*other.borrow(), PyObject::Dict(_));
+                                if is_dict {
+                                    let items = if let PyObject::Dict(other_dict) = &*other.borrow() { other_dict.items() } else { unreachable!() };
+                                    if let PyObject::Dict(d) = &mut *self_obj.borrow_mut() {
+                                        for (k, v) in items { d.set(k, v)?; }
+                                    }
+                                    continue;
+                                }
+                                // A native-backed dict subclass (Counter, defaultdict,
+                                // or any `class Foo(dict): ...`) — read straight off
+                                // the native backing rather than resolving `keys`.
+                                if let Some(native) = native_backing_of(other) {
+                                    if let PyObject::Dict(other_dict) = &*native.borrow() {
+                                        let items = other_dict.items();
+                                        if let PyObject::Dict(d) = &mut *self_obj.borrow_mut() {
+                                            for (k, v) in items { d.set(k, v)?; }
+                                        }
+                                        continue;
+                                    }
+                                }
+                                let keys_fn = match &*other.borrow() {
+                                    PyObject::Instance { typ, .. } => lookup_dunder_via_mro(typ, "keys"),
+                                    _ => None,
+                                };
+                                if let Some(keys_fn) = keys_fn {
+                                    let keys_obj = call_bound_method(keys_fn, other.clone(), vec![])?;
+                                    let it = builtin_iter(&[keys_obj])?;
+                                    loop {
+                                        match builtin_next(&[it.clone()]) {
+                                            Ok(k) => {
+                                                let v = py_getitem(other, &k)?;
+                                                if let PyObject::Dict(d) = &mut *self_obj.borrow_mut() { d.set(k, v)?; }
+                                            }
+                                            Err(PyError::StopIteration) => break,
+                                            Err(e) => return Err(e),
+                                        }
+                                    }
+                                } else {
+                                    let it = builtin_iter(&[other.clone()])?;
+                                    loop {
+                                        match builtin_next(&[it.clone()]) {
+                                            Ok(pair) => {
+                                                let (k, v) = match &*pair.borrow() {
+                                                    PyObject::Tuple(items) | PyObject::List(items) if items.len() == 2 => {
+                                                        (items[0].clone(), items[1].clone())
+                                                    }
+                                                    _ => return Err(PyError::type_error("cannot convert update sequence element to a sequence")),
+                                                };
+                                                if let PyObject::Dict(d) = &mut *self_obj.borrow_mut() { d.set(k, v)?; }
+                                            }
+                                            Err(PyError::StopIteration) => break,
+                                            Err(e) => return Err(e),
+                                        }
+                                    }
+                                }
+                            }
+                            Ok(py_none())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "setdefault" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "setdefault".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("setdefault() takes at least 1 argument")); }
+                            let key = args[1].clone();
+                            if let PyObject::Dict(d) = &mut *args[0].borrow_mut() {
+                                match d.get(&key)? {
+                                    Some(val) => Ok(val.clone()),
+                                    None => {
+                                        let val = if args.len() > 2 { args[2].clone() } else { py_none() };
+                                        d.set(key, val.clone())?; Ok(val)
+                                    }
+                                }
+                            } else { Err(PyError::runtime_error("setdefault on non-dict")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "copy" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "copy".to_string(),
+                        func: |args| {
+                            let d = args[0].borrow();
+                            if let PyObject::Dict(dict) = &*d {
+                                let mut new_dict = PyDict::new();
+                                for (k, v) in dict.items() { new_dict.set(k, v)?; }
+                                Ok(PyObjectRef::new(PyObject::Dict(Box::new(new_dict))))
+                            } else { Err(PyError::runtime_error("copy on non-dict")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "fromkeys" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "fromkeys".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("fromkeys() takes at least 1 argument")); }
+                            let mut new_dict = PyDict::new();
+                            let val = if args.len() > 2 { args[2].clone() } else { py_none() };
+                            let it = builtin_iter(&[args[1].clone()])?;
+                            loop {
+                                match builtin_next(&[it.clone()]) {
+                                    Ok(k) => { new_dict.set(k, val.clone())?; }
+                                    Err(PyError::StopIteration) => break,
+                                    Err(e) => return Err(e),
+                                }
+                            }
+                            Ok(PyObjectRef::new(PyObject::Dict(Box::new(new_dict))))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__sizeof__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__sizeof__".to_string(),
+                        func: |args| {
+                            if let PyObject::Dict(d) = &*args[0].borrow() {
+                                Ok(py_int(72 + (d.len() as i64) * 16))
+                            } else { Err(PyError::runtime_error("__sizeof__ on non-dict")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__contains__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__contains__".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("__contains__() takes exactly one argument")); }
+                            if let PyObject::Dict(d) = &*args[0].borrow() {
+                                Ok(py_bool(d.contains(&args[1])?))
+                            } else { Err(PyError::runtime_error("__contains__ on non-dict")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    // `some_dict.__getitem__`/`__setitem__`/`__delitem__` as
+                    // a bound-method REFERENCE (not called directly) — real
+                    // code uses this idiom to grab a fast lookup callable
+                    // (real trigger: CPython 3.14's own `_colorize.py`,
+                    // `super().__setattr__('_name_to_value',
+                    // name_to_value.__getitem__)`), same class of gap as
+                    // `frozenset.__contains__` found earlier this session.
+                    "__getitem__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__getitem__".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("__getitem__() takes exactly one argument")); }
+                            py_getitem(&args[0], &args[1])
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__setitem__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__setitem__".to_string(),
+                        func: |args| {
+                            if args.len() < 3 { return Err(PyError::type_error("__setitem__() takes exactly 2 arguments")); }
+                            py_setitem(&args[0], &args[1], args[2].clone())?;
+                            Ok(py_none())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__delitem__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__delitem__".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("__delitem__() takes exactly one argument")); }
+                            if let PyObject::Dict(d) = &mut *args[0].borrow_mut() {
+                                d.remove(&args[1])?;
+                                Ok(py_none())
+                            } else { Err(PyError::runtime_error("__delitem__ on non-dict")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "move_to_end" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "move_to_end".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("move_to_end() needs a key argument")); }
+                            Ok(py_none())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__or__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__or__".to_string(),
+                        func: |args| {
+                            // Reachable two ways with two different argument
+                            // shapes: a normal bound call (`d.__or__(x)`,
+                            // rebound to `[self, other]` by the usual
+                            // attribute-access path) and `py_bit_or`'s
+                            // `try_dunder_binop` (`{} | d2`), which — like
+                            // every other native dunder called that way —
+                            // goes through `call_bound_method`'s
+                            // placeholder-prepending `BuiltinMethod` arm,
+                            // delivering `[None, self, other]` instead. This
+                            // used to only handle the 2-arg shape, so `dict |
+                            // dict` (real PEP 584 syntax) misread the
+                            // placeholder as `self`, failing with a
+                            // nonsensical "non-dict" error despite both
+                            // operands being genuine dicts.
+                            let (self_idx, other_idx) = if args.len() >= 3 { (1, 2) } else if args.len() == 2 { (0, 1) } else {
+                                return Err(PyError::type_error("__or__() takes exactly one argument"));
+                            };
+                            let other = args[other_idx].borrow();
+                            if let PyObject::Dict(other_dict) = &*other {
+                                let d = args[self_idx].borrow();
+                                if let PyObject::Dict(dict) = &*d {
+                                    let mut new_dict = PyDict::new();
+                                    for (k, v) in dict.items() { new_dict.set(k, v)?; }
+                                    for (k, v) in other_dict.items() { new_dict.set(k, v)?; }
+                                    Ok(PyObjectRef::new(PyObject::Dict(Box::new(new_dict))))
+                                } else { Err(PyError::runtime_error("__or__ on non-dict")) }
+                            } else { Err(PyError::type_error("__or__() argument must be a dict")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    _ => Err(PyError::attribute_error(format!("'dict' object has no attribute '{}'", name))),
+                }
+            }
+            PyObject::Set(_s) => {
+                match name {
+                    "add" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "add".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("add() takes exactly one argument")); }
+                            pyset_safe_add(&args[0], args[1].clone())?;
+                            Ok(py_none())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "remove" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "remove".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("remove() takes exactly one argument")); }
+                            if let PyObject::Set(set) = &mut *args[0].borrow_mut() { set.remove(&args[1]) }
+                            else { Err(PyError::runtime_error("remove on non-set")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "discard" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "discard".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("discard() takes exactly one argument")); }
+                            if let PyObject::Set(set) = &mut *args[0].borrow_mut() {
+                                let _ = set.remove(&args[1]); Ok(py_none())
+                            } else { Err(PyError::runtime_error("discard on non-set")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "pop" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "pop".to_string(),
+                        func: |args| {
+                            if let PyObject::Set(set) = &mut *args[0].borrow_mut() { set.pop().ok_or_else(|| PyError::key_error("pop from an empty set")) }
+                            else { Err(PyError::runtime_error("pop on non-set")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "clear" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "clear".to_string(),
+                        func: |args| {
+                            if let PyObject::Set(set) = &mut *args[0].borrow_mut() { set.clear(); Ok(py_none()) }
+                            else { Err(PyError::runtime_error("clear on non-set")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "copy" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "copy".to_string(),
+                        func: |args| {
+                            let s = args[0].borrow();
+                            if let PyObject::Set(set) = &*s { Ok(PyObjectRef::new(PyObject::Set(set.clone()))) }
+                            else { Err(PyError::runtime_error("copy on non-set")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__sizeof__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__sizeof__".to_string(),
+                        func: |args| {
+                            if let PyObject::Set(set) = &*args[0].borrow() {
+                                Ok(py_int(72 + (set.len() as i64) * 8))
+                            } else { Err(PyError::runtime_error("__sizeof__ on non-set")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "union" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "union".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("union() takes at least 1 argument")); }
+                            let s = args[0].borrow();
+                            if let PyObject::Set(set) = &*s {
+                                let mut result = set.clone();
+                                for other_arg in &args[1..] {
+                                    let other = other_arg.borrow();
+                                    if let PyObject::Set(other_set) = &*other {
+                                        for item in other_set.to_vec() { result.add(item)?; }
+                                    }
+                                }
+                                Ok(PyObjectRef::new(PyObject::Set(result)))
+                            } else { Err(PyError::runtime_error("union on non-set")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "intersection" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "intersection".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("intersection() takes at least 1 argument")); }
+                            let s = args[0].borrow();
+                            if let PyObject::Set(set) = &*s {
+                                let mut result = PySet::new();
+                                for item in set.to_vec() {
+                                    let in_all = args[1..].iter().all(|other_arg| {
+                                        let other = other_arg.borrow();
+                                        if let PyObject::Set(other_set) = &*other { other_set.contains(&item).unwrap_or(false) }
+                                        else { false }
+                                    });
+                                    if in_all { result.add(item)?; }
+                                }
+                                Ok(PyObjectRef::new(PyObject::Set(result)))
+                            } else { Err(PyError::runtime_error("intersection on non-set")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "difference" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "difference".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("difference() takes at least 1 argument")); }
+                            let s = args[0].borrow();
+                            if let PyObject::Set(set) = &*s {
+                                let mut result = PySet::new();
+                                for item in set.to_vec() {
+                                    let in_any = args[1..].iter().any(|other_arg| {
+                                        let other = other_arg.borrow();
+                                        if let PyObject::Set(other_set) = &*other { other_set.contains(&item).unwrap_or(false) }
+                                        else { false }
+                                    });
+                                    if !in_any { result.add(item)?; }
+                                }
+                                Ok(PyObjectRef::new(PyObject::Set(result)))
+                            } else { Err(PyError::runtime_error("difference on non-set")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "symmetric_difference" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "symmetric_difference".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("symmetric_difference() takes exactly one argument")); }
+                            let s = args[0].borrow();
+                            if let PyObject::Set(set) = &*s {
+                                let other = args[1].borrow();
+                                if let PyObject::Set(other_set) = &*other {
+                                    let mut result = PySet::new();
+                                    for item in set.to_vec() { if !other_set.contains(&item).unwrap_or(false) { result.add(item)?; } }
+                                    for item in other_set.to_vec() { if !set.contains(&item).unwrap_or(false) { result.add(item)?; } }
+                                    Ok(PyObjectRef::new(PyObject::Set(result)))
+                                } else { Err(PyError::type_error("symmetric_difference() argument must be a set")) }
+                            } else { Err(PyError::runtime_error("symmetric_difference on non-set")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "issubset" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "issubset".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("issubset() takes exactly one argument")); }
+                            let s = args[0].borrow();
+                            if let PyObject::Set(set) = &*s {
+                                let other_set = convert_to_set(&args[1])?;
+                                Ok(py_bool(set.to_vec().iter().all(|item| other_set.contains(item).unwrap_or(false))))
+                            } else { Err(PyError::runtime_error("issubset on non-set")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "issuperset" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "issuperset".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("issuperset() takes exactly one argument")); }
+                            let s = args[0].borrow();
+                            if let PyObject::Set(set) = &*s {
+                                let other_set = convert_to_set(&args[1])?;
+                                Ok(py_bool(other_set.to_vec().iter().all(|item| set.contains(item).unwrap_or(false))))
+                            } else { Err(PyError::runtime_error("issuperset on non-set")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "isdisjoint" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "isdisjoint".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("isdisjoint() takes exactly one argument")); }
+                            let s = args[0].borrow();
+                            if let PyObject::Set(set) = &*s {
+                                let other = args[1].borrow();
+                                if let PyObject::Set(other_set) = &*other {
+                                    Ok(py_bool(!set.to_vec().iter().any(|item| other_set.contains(item).unwrap_or(false))))
+                                } else { Err(PyError::type_error("isdisjoint() argument must be a set")) }
+                            } else { Err(PyError::runtime_error("isdisjoint on non-set")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "update" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "update".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("update() takes at least 1 argument")); }
+                            if !matches!(&*args[0].borrow(), PyObject::Set(_)) {
+                                return Err(PyError::runtime_error("update on non-set"));
+                            }
+                            // Each item is added via `pyset_safe_add`, which never
+                            // holds `args[0]`'s own borrow across an `.equals()`
+                            // call (unlike the old `args[0].borrow_mut()`-for-the-
+                            // whole-loop version) — see its doc comment for why.
+                            for other_arg in &args[1..] {
+                                let items: Vec<PyObjectRef> = {
+                                    let other = other_arg.borrow();
+                                    match &*other {
+                                        PyObject::Set(other_set) => other_set.to_vec(),
+                                        _ => Vec::new(),
+                                    }
+                                };
+                                for item in items { pyset_safe_add(&args[0], item)?; }
+                            }
+                            Ok(py_none())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "intersection_update" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "intersection_update".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("intersection_update() takes at least 1 argument")); }
+                            if let PyObject::Set(set) = &mut *args[0].borrow_mut() {
+                                let items: Vec<PyObjectRef> = set.to_vec().iter().filter(|item| {
+                                    args[1..].iter().all(|other_arg| {
+                                        let other = other_arg.borrow();
+                                        if let PyObject::Set(other_set) = &*other { other_set.contains(item).unwrap_or(false) }
+                                        else { false }
+                                    })
+                                }).cloned().collect();
+                                set.clear();
+                                for item in items { set.add(item)?; }
+                                Ok(py_none())
+                            } else { Err(PyError::runtime_error("intersection_update on non-set")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "difference_update" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "difference_update".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("difference_update() takes at least 1 argument")); }
+                            if let PyObject::Set(set) = &mut *args[0].borrow_mut() {
+                                let items: Vec<PyObjectRef> = set.to_vec().iter().filter(|item| {
+                                    !args[1..].iter().any(|other_arg| {
+                                        let other = other_arg.borrow();
+                                        if let PyObject::Set(other_set) = &*other { other_set.contains(item).unwrap_or(false) }
+                                        else { false }
+                                    })
+                                }).cloned().collect();
+                                set.clear();
+                                for item in items { set.add(item)?; }
+                                Ok(py_none())
+                            } else { Err(PyError::runtime_error("difference_update on non-set")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "symmetric_difference_update" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "symmetric_difference_update".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("symmetric_difference_update() takes exactly one argument")); }
+                            if let PyObject::Set(set) = &mut *args[0].borrow_mut() {
+                                let other = args[1].borrow();
+                                if let PyObject::Set(other_set) = &*other {
+                                    for item in other_set.to_vec() {
+                                        if set.contains(&item).unwrap_or(false) { set.remove(&item)?; }
+                                        else { set.add(item)?; }
+                                    }
+                                    Ok(py_none())
+                                } else { Err(PyError::type_error("symmetric_difference_update() argument must be a set")) }
+                            } else { Err(PyError::runtime_error("symmetric_difference_update on non-set")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    _ => Err(PyError::attribute_error(format!("'set' object has no attribute '{}'", name))),
+                }
+            }
+            PyObject::Function(ref f) => {
+                let func_name = &f.code.name;
+                let dict = &f.dict;
+                match name {
+                    "__name__" => Ok(dict.get("__name__").cloned().unwrap_or(py_str(crate::interner::lookup_str(*func_name)))),
+                    "__qualname__" => Ok(dict.get("__qualname__").cloned().unwrap_or(py_str(crate::interner::lookup_str(*func_name)))),
+                    "name" => Ok(dict.get("name").cloned().unwrap_or(py_str(crate::interner::lookup_str(*func_name)))),
+                    "__doc__" => Ok(dict.get("__doc__").cloned().unwrap_or(py_none())),
+                    "__code__" => Ok(dict.get("__code__").cloned().unwrap_or(py_none())),
+                    "__globals__" => Ok(dict.get("__globals__").cloned().unwrap_or(py_none())),
+                    "__defaults__" => Ok(dict.get("__defaults__").cloned().unwrap_or(py_none())),
+                    "__closure__" => Ok(dict.get("__closure__").cloned().unwrap_or(py_none())),
+                    "__module__" => Ok(dict.get("__module__").cloned().unwrap_or(py_none())),
+                    "__annotations__" => Ok(dict.get("__annotations__").cloned().unwrap_or(py_none())),
+                    _ => dict.get_str(&name).cloned().ok_or_else(|| PyError::attribute_error(format!(
+                        "'function' object has no attribute '{}'", name
+                    ))),
+                }
+            }
+            PyObject::BoundMethod { func, self_obj } => {
+                match name {
+                    "__func__" => Ok(func.clone()),
+                    "__self__" => Ok(self_obj.clone()),
+                    // A real Python bound method proxies any attribute not
+                    // found on the method object itself through to the
+                    // underlying function (`__func__`) — this is how e.g.
+                    // `SomeClass.some_classmethod.cache_clear()` reaches the
+                    // functools.cache wrapper underneath the classmethod
+                    // descriptor. Without this fallback, BoundMethod had no
+                    // get_attribute arm at all and every such access raised
+                    // "'method' object has no attribute ...".
+                    //
+                    // `func.get_attribute` alone (the ObjectAccess impl) does
+                    // raw, unbound retrieval — it doesn't replicate LOAD_ATTR's
+                    // self-binding for the result. Redo that binding here so
+                    // e.g. `.cache_clear` comes back as a real bound call
+                    // (self = func, the underlying cache-wrapper instance),
+                    // not a plain unbound Function that would immediately hit
+                    // "local variable 'self' referenced before assignment".
+                    _ => {
+                        let raw = func.borrow().get_attribute(name).map_err(|_| {
+                            if std::env::var("RPY_DEBUG_ATTR").is_ok() {
+                                let (fn_name, fn_file) = if let PyObject::Function(ref inner_f) = &*func.borrow() {
+                                    let code = &inner_f.code;
+                                    (code.name.to_string(), code.filename.to_string())
+                                } else { ("?".to_string(), "?".to_string()) };
+                                let self_kind = match &*self_obj.borrow() {
+                                    PyObject::Type { name, .. } => format!("Type({})", name),
+                                    other => format!("{}", other.type_name()),
+                                };
+                                eprintln!("BOUNDMETHOD_ATTR_FAIL: name={} func_kind={:?} fn_name={} fn_file={} self_kind={}", name, func.borrow().type_name(), fn_name, fn_file, self_kind);
+                            }
+                            PyError::attribute_error(format!(
+                            "'method' object has no attribute '{}'", name
+                        ))})?;
+                        let is_instance_self = matches!(&*func.borrow(), PyObject::Instance { .. });
+                        let raw_kind = {
+                            let b = raw.borrow();
+                            match &*b {
+                                PyObject::Function { .. } if is_instance_self => 1,
+                                PyObject::BuiltinFunction { .. } => 2,
+                                PyObject::BuiltinMethod { .. } => 3,
+                                _ => 0,
+                            }
+                        };
+                        match raw_kind {
+                            1 => Ok(PyObjectRef::imm(PyObject::BoundMethod { func: raw, self_obj: func.clone() })),
+                            2 => {
+                                let (n, f) = if let PyObject::BuiltinFunction { name: n, func: f } = &*raw.borrow() { (n.clone(), *f) } else { unreachable!() };
+                                Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: n, func: f, self_obj: func.clone() }))
+                            }
+                            3 => {
+                                let (n, f) = if let PyObject::BuiltinMethod { name: n, func: f, .. } = &*raw.borrow() { (n.clone(), *f) } else { unreachable!() };
+                                Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: n, func: f, self_obj: func.clone() }))
+                            }
+                            _ => Ok(raw),
+                        }
+                    }
+                }
+            }
+            PyObject::Generator { frame: _gen_frame } => {
+                match name {
+                    "__next__" | "send" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: name.to_string(),
+                        func: generator_next_fallback,
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "throw" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "throw".to_string(),
+                        func: generator_throw_fallback,
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "close" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "close".to_string(),
+                        func: |args| {
+                            let gen = args[0].borrow();
+                            if let PyObject::Generator { frame } = &*gen {
+                                if let Ok(mut frame_opt) = frame.try_borrow_mut() {
+                                    *frame_opt = None;
+                                }
+                            }
+                            Ok(py_none())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__iter__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__iter__".to_string(),
+                        func: |args| Ok(args[0].clone()),
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__await__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__await__".to_string(),
+                        func: |args| Ok(args[0].clone()),
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    _ => Err(PyError::attribute_error(format!("'generator' object has no attribute '{}'", name))),
+                }
+            }
+            PyObject::Coroutine { frame: _coro_frame } => {
+                match name {
+                    "send" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "send".to_string(),
+                        func: coroutine_send_fallback,
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "throw" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "throw".to_string(),
+                        func: coroutine_throw_fallback,
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "close" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "close".to_string(),
+                        func: |args| {
+                            let gen = args[0].borrow();
+                            if let PyObject::Coroutine { frame } = &*gen {
+                                if let Ok(mut frame_opt) = frame.try_borrow_mut() {
+                                    *frame_opt = None;
+                                }
+                            }
+                            Ok(py_none())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__await__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__await__".to_string(),
+                        func: |args| Ok(args[0].clone()),
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__iter__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__iter__".to_string(),
+                        func: |args| Ok(args[0].clone()),
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__await__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__await__".to_string(),
+                        func: |args| Ok(args[0].clone()),
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__anext__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__anext__".to_string(),
+                        func: |args| {
+                            if let PyObject::Coroutine { .. } = &*args[0].borrow() {
+                                let send_method = args[0].borrow().get_attribute("send")?;
+                                let (n, f) = {
+                                    let b = send_method.borrow();
+                                    if let PyObject::BuiltinMethod { name, func, .. } = &*b {
+                                        (name.clone(), *func)
+                                    } else { return Err(PyError::runtime_error("expected send method")) }
+                                };
+                                let fixed = PyObjectRef::imm(PyObject::BuiltinMethod {
+                                    name: n, func: f,
+                                    self_obj: args[0].clone(),
+                                });
+                                let mut vm = crate::vm::VirtualMachine::new();
+                                vm.call_function(fixed, vec![crate::object::py_none()], vec![])
+                            } else { Err(PyError::runtime_error("__anext__ on non-coroutine")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__aiter__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__aiter__".to_string(),
+                        func: |args| Ok(args[0].clone()),
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "asend" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "asend".to_string(),
+                        func: |args| {
+                            if let PyObject::Coroutine { .. } = &*args[0].borrow() {
+                                let send_method = args[0].borrow().get_attribute("send")?;
+                                let (n, f) = {
+                                    let b = send_method.borrow();
+                                    if let PyObject::BuiltinMethod { name, func, .. } = &*b {
+                                        (name.clone(), *func)
+                                    } else { return Err(PyError::runtime_error("expected send method")) }
+                                };
+                                let fixed = PyObjectRef::imm(PyObject::BuiltinMethod {
+                                    name: n, func: f,
+                                    self_obj: args[0].clone(),
+                                });
+                                let val = if args.len() > 1 { args[1].clone() } else { crate::object::py_none() };
+                                let mut vm = crate::vm::VirtualMachine::new();
+                                vm.call_function(fixed, vec![val], vec![])
+                            } else { Err(PyError::runtime_error("asend on non-coroutine")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "athrow" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "athrow".to_string(),
+                        func: |args| {
+                            if let PyObject::Coroutine { .. } = &*args[0].borrow() {
+                                let throw_method = args[0].borrow().get_attribute("throw")?;
+                                let (n, f) = {
+                                    let b = throw_method.borrow();
+                                    if let PyObject::BuiltinMethod { name, func, .. } = &*b {
+                                        (name.clone(), *func)
+                                    } else { return Err(PyError::runtime_error("expected throw method")) }
+                                };
+                                let fixed = PyObjectRef::imm(PyObject::BuiltinMethod {
+                                    name: n, func: f,
+                                    self_obj: args[0].clone(),
+                                });
+                                let exc = if args.len() > 1 { args[1].clone() } else { crate::object::py_none() };
+                                let mut vm = crate::vm::VirtualMachine::new();
+                                vm.call_function(fixed, vec![exc], vec![])
+                            } else { Err(PyError::runtime_error("athrow on non-coroutine")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "aclose" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "aclose".to_string(),
+                        func: |args| {
+                            if let PyObject::Coroutine { frame } = &*args[0].borrow() {
+                                let mut frame_opt = frame.borrow_mut();
+                                *frame_opt = None;
+                                Ok(crate::object::py_none())
+                            } else { Err(PyError::runtime_error("aclose on non-coroutine")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    _ => Err(PyError::attribute_error(format!("'coroutine' object has no attribute '{}'", name))),
+                }
+            }
+            PyObject::Process { pid, returncode, .. } => {
+                match name {
+                    "pid" => Ok(py_int(*pid)),
+                    "returncode" => Ok(returncode.borrow().map(py_int).unwrap_or_else(py_none)),
+                    "poll" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "poll".to_string(),
+                        func: |args| {
+                            if let PyObject::Process { child, returncode, .. } = &*args[0].borrow() {
+                                if let Some(rc) = *returncode.borrow() { return Ok(py_int(rc)); }
+                                let mut child_opt = child.borrow_mut();
+                                match child_opt.as_mut() {
+                                    Some(c) => match c.try_wait() {
+                                        Ok(Some(status)) => {
+                                            let rc = status.code().unwrap_or(-1) as i64;
+                                            *returncode.borrow_mut() = Some(rc);
+                                            Ok(py_int(rc))
+                                        }
+                                        Ok(None) => Ok(py_none()),
+                                        Err(e) => Err(PyError::OsError(format!("{}", e))),
+                                    },
+                                    None => Ok(py_none()),
+                                }
+                            } else { Err(PyError::runtime_error("poll on non-process")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "wait" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "wait".to_string(),
+                        func: |args| {
+                            if let PyObject::Process { child, returncode, .. } = &*args[0].borrow() {
+                                if let Some(rc) = *returncode.borrow() { return Ok(py_int(rc)); }
+                                let mut child_opt = child.borrow_mut();
+                                match child_opt.as_mut() {
+                                    Some(c) => match c.wait() {
+                                        Ok(status) => {
+                                            let rc = status.code().unwrap_or(-1) as i64;
+                                            *returncode.borrow_mut() = Some(rc);
+                                            Ok(py_int(rc))
+                                        }
+                                        Err(e) => Err(PyError::OsError(format!("{}", e))),
+                                    },
+                                    None => Ok(py_none()),
+                                }
+                            } else { Err(PyError::runtime_error("wait on non-process")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    // `communicate(input=None, timeout=None)` — writes
+                    // `input` (if given and stdin was piped) then reads
+                    // stdout/stderr to completion via `Child::
+                    // wait_with_output` (which internally spawns reader
+                    // threads for both streams concurrently, avoiding the
+                    // classic "write blocks because the child's stdout
+                    // pipe filled up while nobody's reading it yet"
+                    // deadlock). Consumes the stored `Child` — a second
+                    // `communicate()` call after the first sees `None` and
+                    // returns empty output, matching real Python's own
+                    // "communicate() should only be called once" contract
+                    // closely enough for real-world usage.
+                    "communicate" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "communicate".to_string(),
+                        func: |args| {
+                            if let PyObject::Process { child, returncode, .. } = &*args[0].borrow() {
+                                let input = args.get(1).filter(|v| !matches!(&*v.borrow(), PyObject::None));
+                                let taken = child.borrow_mut().take();
+                                match taken {
+                                    Some(mut c) => {
+                                        if let Some(inp) = input {
+                                            if let Some(mut stdin) = c.stdin.take() {
+                                                use std::io::Write;
+                                                let bytes = match &*inp.borrow() {
+                                                    PyObject::Bytes(b) => b.clone(),
+                                                    other => other.str().into_bytes(),
+                                                };
+                                                let _ = stdin.write_all(&bytes);
+                                            }
+                                        }
+                                        match c.wait_with_output() {
+                                            Ok(output) => {
+                                                *returncode.borrow_mut() = Some(output.status.code().unwrap_or(-1) as i64);
+                                                Ok(py_tuple(vec![
+                                                    PyObjectRef::imm(PyObject::Bytes(output.stdout)),
+                                                    PyObjectRef::imm(PyObject::Bytes(output.stderr)),
+                                                ]))
+                                            }
+                                            Err(e) => Err(PyError::OsError(format!("{}", e))),
+                                        }
+                                    }
+                                    None => Ok(py_tuple(vec![
+                                        PyObjectRef::imm(PyObject::Bytes(Vec::new())),
+                                        PyObjectRef::imm(PyObject::Bytes(Vec::new())),
+                                    ])),
+                                }
+                            } else { Err(PyError::runtime_error("communicate on non-process")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    // Rust's `std::process::Child` doesn't distinguish a
+                    // graceful SIGTERM from a hard SIGKILL the way real
+                    // `Popen.terminate()`/`.kill()` do (POSIX-specific) —
+                    // both map to `Child::kill()` here, good enough for the
+                    // overwhelming majority of real usage (which just wants
+                    // "make the child stop").
+                    "terminate" | "kill" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: name.to_string(),
+                        func: |args| {
+                            if let PyObject::Process { child, .. } = &*args[0].borrow() {
+                                if let Some(c) = child.borrow_mut().as_mut() {
+                                    let _ = c.kill();
+                                }
+                                Ok(py_none())
+                            } else { Err(PyError::runtime_error("terminate/kill on non-process")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "send_signal" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "send_signal".to_string(),
+                        func: |args| {
+                            // No portable "send arbitrary signal" in std;
+                            // treat any signal as a kill request (correct
+                            // for the extremely common SIGTERM/SIGKILL
+                            // case, not for exotic signal numbers).
+                            if let PyObject::Process { child, .. } = &*args[0].borrow() {
+                                if let Some(c) = child.borrow_mut().as_mut() {
+                                    let _ = c.kill();
+                                }
+                                Ok(py_none())
+                            } else { Err(PyError::runtime_error("send_signal on non-process")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__enter__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__enter__".to_string(),
+                        func: |args| Ok(args[0].clone()),
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__exit__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__exit__".to_string(),
+                        func: |args| {
+                            if let PyObject::Process { child, returncode, .. } = &*args[0].borrow() {
+                                if returncode.borrow().is_none() {
+                                    if let Some(c) = child.borrow_mut().as_mut() {
+                                        if let Ok(status) = c.wait() {
+                                            *returncode.borrow_mut() = Some(status.code().unwrap_or(-1) as i64);
+                                        }
+                                    }
+                                }
+                            }
+                            Ok(py_bool(false))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    _ => Err(PyError::attribute_error(format!("'Popen' object has no attribute '{}'", name))),
+                }
+            }
+            PyObject::File { file: _, .. } => {
+                match name {
+                    "name" => {
+                        if let PyObject::File { name: fname, .. } = &*self {
+                            Ok(py_str(fname))
+                        } else {
+                            Err(PyError::runtime_error("name access on non-file"))
+                        }
+                    }
+                    "read" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "read".to_string(),
+                        func: |args| {
+                            use std::io::Read;
+                            if let PyObject::File { file, .. } = &*args[0].borrow() {
+                                let mut buf = String::new();
+                                file.borrow_mut().read_to_string(&mut buf).map_err(|e| PyError::OsError(format!("{}", e)))?;
+                                Ok(py_str(&buf))
+                            } else { Err(PyError::runtime_error("read on non-file")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "write" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "write".to_string(),
+                        func: |args| {
+                            use std::io::Write;
+                            if args.len() < 2 { return Err(PyError::type_error("write() takes exactly one argument")); }
+                            if let PyObject::File { file, .. } = &*args[0].borrow() {
+                                let text = args[1].str();
+                                file.borrow_mut().write_all(text.as_bytes()).map_err(|e| PyError::OsError(format!("{}", e)))?;
+                                Ok(py_int(text.len() as i64))
+                            } else { Err(PyError::runtime_error("write on non-file")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "flush" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "flush".to_string(),
+                        func: |args| {
+                            use std::io::Write;
+                            if let PyObject::File { file, .. } = &*args[0].borrow() {
+                                file.borrow_mut().flush().map_err(|e| PyError::OsError(format!("{}", e)))?;
+                                Ok(py_none())
+                            } else { Err(PyError::runtime_error("flush on non-file")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "close" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "close".to_string(),
+                        func: |args| {
+                            if let PyObject::File { file, .. } = &mut *args[0].borrow_mut() {
+                                // Flush and drop by replacing with a closed file
+                                let _ = std::mem::replace(&mut *file.borrow_mut(), std::fs::File::create("/dev/null").unwrap_or(std::fs::File::open("/dev/null").unwrap_or_else(|_| panic!())));
+                                Ok(py_none())
+                            } else { Err(PyError::runtime_error("close on non-file")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__enter__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__enter__".to_string(),
+                        func: |args| Ok(args[0].clone()),
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__exit__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__exit__".to_string(),
+                        func: |args| {
+                            // args[0] = file_obj (normal path via LOAD_ATTR) or py_none (exception path via WITH_EXIT)
+                            // args[1] = exc_type (normal) or file_obj (exception via BoundMethod wrapper)
+                            // Find the file object: check args[0], then args[1]
+                            let file_obj_idx = if args.len() > 0 && matches!(&*args[0].borrow(), PyObject::File { .. }) { 0 }
+                                              else if args.len() > 1 && matches!(&*args[1].borrow(), PyObject::File { .. }) { 1 }
+                                              else { return Ok(py_none()) };
+                            // Sync and flush data to disk
+                            if let PyObject::File { file, .. } = &*args[file_obj_idx].borrow() {
+                                let _ = file.borrow().sync_all();
+                            }
+                            // Replace with /dev/null to close the actual file descriptor
+                            if let PyObject::File { file, .. } = &mut *args[file_obj_idx].borrow_mut() {
+                                let _ = std::mem::replace(&mut *file.borrow_mut(), std::fs::File::open("/dev/null").unwrap_or_else(|_| {
+                                    std::fs::File::create("/dev/null").unwrap()
+                                }));
+                            }
+                            Ok(py_none())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "seek" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "seek".to_string(),
+                        func: |args| {
+                            use std::io::SeekFrom;
+                            if args.len() < 2 { return Err(PyError::type_error("seek() requires at least 1 argument")); }
+                            if let PyObject::File { file, .. } = &*args[0].borrow() {
+                                use std::io::Seek;
+                                let offset = args[1].as_i64().unwrap_or(0);
+                                let whence = if args.len() > 2 { args[2].as_i64().unwrap_or(0) as i32 } else { 0 };
+                                let pos = file.borrow_mut().seek(match whence {
+                                    1 => SeekFrom::Current(offset),
+                                    2 => SeekFrom::End(offset),
+                                    _ => SeekFrom::Start(offset as u64),
+                                }).map_err(|e| PyError::OsError(format!("{}", e)))?;
+                                Ok(py_int(pos as i64))
+                            } else { Err(PyError::runtime_error("seek on non-file")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "tell" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "tell".to_string(),
+                        func: |args| {
+                            use std::io::Seek;
+                            if let PyObject::File { file, .. } = &*args[0].borrow() {
+                                let pos = file.borrow_mut().stream_position().map_err(|e| PyError::OsError(format!("{}", e)))?;
+                                Ok(py_int(pos as i64))
+                            } else { Err(PyError::runtime_error("tell on non-file")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "isatty" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "isatty".to_string(),
+                        func: |args| {
+                            if let PyObject::File { file, .. } = &*args[0].borrow() {
+                                let fd = {
+                                    use std::os::unix::io::AsRawFd;
+                                    file.borrow().as_raw_fd()
+                                };
+                                extern "C" { fn isatty(fd: i32) -> i32; }
+                                let is_tty = unsafe { isatty(fd) } != 0;
+                                Ok(py_bool(is_tty))
+                            } else { Err(PyError::runtime_error("isatty on non-file")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "readable" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "readable".to_string(),
+                        func: |_| Ok(py_bool(true)),
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "writable" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "writable".to_string(),
+                        func: |_| Ok(py_bool(true)),
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "seekable" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "seekable".to_string(),
+                        func: |_| Ok(py_bool(true)),
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    _ => Err(PyError::attribute_error(format!("'file' object has no attribute '{}'", name))),
+                }
+            }
+            PyObject::Socket { inner: _ } => {
+                match name {
+                    "bind" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "bind".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("bind() takes exactly 1 argument")); }
+                            let addr = socket_addr_to_string(&args[1])?;
+                            let socket = &*args[0].borrow();
+                            if let PyObject::Socket { inner } = socket {
+                                let mut inner = inner.borrow_mut();
+                                match &*inner {
+                                    SocketInner::Uninitialized => {
+                                        let listener = std::net::TcpListener::bind(&addr)
+                                            .map_err(|e| PyError::OsError(format!("{}", e)))?;
+                                        listener.set_nonblocking(true).ok();
+                                        *inner = SocketInner::TcpListener(listener);
+                                        Ok(py_none())
+                                    }
+                                    _ => Err(PyError::runtime_error("socket already bound or connected")),
+                                }
+                            } else { Err(PyError::runtime_error("bind on non-socket")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "listen" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "listen".to_string(),
+                        func: |args| {
+                            let backlog = if args.len() > 1 { args[1].as_i64().unwrap_or(5) as i32 } else { 5 };
+                            let _ = backlog;
+                            let socket = &*args[0].borrow();
+                            if let PyObject::Socket { inner } = socket {
+                                let inner = inner.borrow();
+                                match &*inner {
+                                    SocketInner::TcpListener(_listener) => {
+                                        Ok(py_none())
+                                    }
+                                    _ => Err(PyError::runtime_error("listen on non-listener")),
+                                }
+                            } else { Err(PyError::runtime_error("listen on non-socket")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "accept" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "accept".to_string(),
+                        func: |args| {
+                            let socket = &*args[0].borrow();
+                            if let PyObject::Socket { inner } = socket {
+                                let mut inner = inner.borrow_mut();
+                                let old = std::mem::replace(&mut *inner, SocketInner::Uninitialized);
+                                match old {
+                                    SocketInner::TcpListener(listener) => {
+                                        match listener.accept() {
+                                            Ok((stream, addr)) => {
+                                                *inner = SocketInner::TcpListener(listener);
+                                                let client = PyObjectRef::new(PyObject::Socket {
+                                                    inner: std::rc::Rc::new(std::cell::RefCell::new(SocketInner::TcpStream(stream))),
+                                                });
+                                                Ok(py_tuple(vec![client, py_str(&addr.to_string())]))
+                                            }
+                                            Err(e) => {
+                                                *inner = SocketInner::TcpListener(listener);
+                                                Err(PyError::OsError(format!("{}", e)))
+                                            }
+                                        }
+                                    }
+                                    other => {
+                                        *inner = other;
+                                        Err(PyError::runtime_error("accept on non-listener"))
+                                    }
+                                }
+                            } else { Err(PyError::runtime_error("accept on non-socket")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "connect" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "connect".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("connect() takes exactly 1 argument")); }
+                            let addr = socket_addr_to_string(&args[1])?;
+                            let socket = &*args[0].borrow();
+                            if let PyObject::Socket { inner } = socket {
+                                let mut inner = inner.borrow_mut();
+                                match &*inner {
+                                    SocketInner::Uninitialized => {
+                                        match std::net::TcpStream::connect(&addr) {
+                                            Ok(stream) => {
+                                                stream.set_nonblocking(true).ok();
+                                                *inner = SocketInner::TcpStream(stream);
+                                                Ok(py_none())
+                                            }
+                                            Err(e) => Err(PyError::OsError(format!("{}", e))),
+                                        }
+                                    }
+                                    _ => Err(PyError::runtime_error("socket already connected or listening")),
+                                }
+                            } else { Err(PyError::runtime_error("connect on non-socket")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "send" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "send".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("send() takes exactly 1 argument")); }
+                            let data = args[1].str();
+                            let socket = &*args[0].borrow();
+                            if let PyObject::Socket { inner } = socket {
+                                let mut inner = inner.borrow_mut();
+                                match &mut *inner {
+                                    SocketInner::TcpStream(stream) => {
+                                        use std::io::Write;
+                                        match stream.write_all(data.as_bytes()) {
+                                            Ok(()) => Ok(py_int(data.len() as i64)),
+                                            Err(e) => Err(PyError::OsError(format!("{}", e))),
+                                        }
+                                    }
+                                    _ => Err(PyError::runtime_error("send on non-stream")),
+                                }
+                            } else { Err(PyError::runtime_error("send on non-socket")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "recv" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "recv".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("recv() takes exactly 1 argument")); }
+                            let bufsize = args[1].as_i64().unwrap_or(4096) as usize;
+                            let socket = &*args[0].borrow();
+                            if let PyObject::Socket { inner } = socket {
+                                let mut inner = inner.borrow_mut();
+                                match &mut *inner {
+                                    SocketInner::TcpStream(stream) => {
+                                        use std::io::Read;
+                                        let mut buf = vec![0u8; bufsize.min(65536)];
+                                        match stream.read(&mut buf) {
+                                            Ok(0) => Ok(py_str("")),
+                                            Ok(n) => {
+                                                buf.truncate(n);
+                                                match String::from_utf8(buf) {
+                                                    Ok(s) => Ok(py_str(&s)),
+                                                    Err(_) => Ok(py_str("<binary>")),
+                                                }
+                                            }
+                                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                                Ok(py_none())
+                                            }
+                                            Err(e) => Err(PyError::OsError(format!("{}", e))),
+                                        }
+                                    }
+                                    _ => Err(PyError::runtime_error("recv on non-stream")),
+                                }
+                            } else { Err(PyError::runtime_error("recv on non-socket")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "close" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "close".to_string(),
+                        func: |args| {
+                            let socket = &*args[0].borrow();
+                            if let PyObject::Socket { inner } = socket {
+                                let mut inner = inner.borrow_mut();
+                                let old = std::mem::replace(&mut *inner, SocketInner::Uninitialized);
+                                drop(old);
+                                Ok(py_none())
+                            } else { Err(PyError::runtime_error("close on non-socket")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "setsockopt" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "setsockopt".to_string(),
+                        func: |_| Ok(py_none()),
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    _ => Err(PyError::attribute_error(format!("'socket' object has no attribute '{}'", name))),
+                }
+            }
+            PyObject::Thread(inner_arc) => {
+                let _inner_arc = inner_arc.clone();
+                match name {
+                    "start" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "start".to_string(),
+                        func: |args| {
+                            let obj = args[0].borrow();
+                            if let PyObject::Thread(inner_arc) = &*obj {
+                                let locked = inner_arc.lock().unwrap();
+                                if locked.handle.is_some() {
+                                    return Err(PyError::runtime_error("thread already started"));
+                                }
+                                let target = locked.target.clone();
+                                let thread_args = locked.args.clone();
+                                // Don't create a real thread (PyObjectRef is !Send)
+                                // Thread runs synchronously instead
+                                let result = locked.result.clone();
+                                let call_result = crate::object::builtin_call(&target, &thread_args);
+                                match call_result {
+                                    Ok(val) => {
+                                        *result.lock().unwrap() = Some(val);
+                                    }
+                                    Err(e) => {
+                                        eprintln!("Thread raised: {}", e);
+                                    }
+                                }
+                            }
+                            Ok(py_none())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "join" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "join".to_string(),
+                        func: |args| {
+                            let obj = args[0].borrow();
+                            if let PyObject::Thread(inner_arc) = &*obj {
+                                let mut locked = inner_arc.lock().unwrap();
+                                if let Some(handle) = locked.handle.take() {
+                                    handle.join().map_err(|_| PyError::runtime_error("thread panicked"))?;
+                                    return Ok(locked.result.lock().unwrap().clone().unwrap_or_else(|| py_none()));
+                                }
+                            }
+                            Err(PyError::runtime_error("thread not started"))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "is_alive" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "is_alive".to_string(),
+                        func: |args| {
+                            let obj = args[0].borrow();
+                            if let PyObject::Thread(inner_arc) = &*obj {
+                                let locked = inner_arc.lock().unwrap();
+                                return Ok(py_bool(locked.handle.is_some()));
+                            }
+                            Ok(py_bool(false))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    _ => Err(PyError::attribute_error(format!("'Thread' object has no attribute '{}'", name))),
+                }
+            }
+            PyObject::Lock(inner_arc) => {
+                let _inner_arc = inner_arc.clone();
+                match name {
+                    "__enter__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__enter__".to_string(),
+                        func: |args| {
+                            let obj = args[0].borrow();
+                            if let PyObject::Lock(inner_arc) = &*obj {
+                                let locked = inner_arc.lock().unwrap();
+                                while locked.lock.load(std::sync::atomic::Ordering::SeqCst) {
+                                    std::thread::yield_now();
+                                }
+                                locked.lock.store(true, std::sync::atomic::Ordering::SeqCst);
+                            }
+                            Ok(args[0].clone())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__exit__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__exit__".to_string(),
+                        func: |args| {
+                            let obj = args[0].borrow();
+                            if let PyObject::Lock(inner_arc) = &*obj {
+                                let locked = inner_arc.lock().unwrap();
+                                locked.lock.store(false, std::sync::atomic::Ordering::SeqCst);
+                            }
+                            Ok(py_none())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "acquire" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "acquire".to_string(),
+                        func: |args| {
+                            let obj = args[0].borrow();
+                            if let PyObject::Lock(inner_arc) = &*obj {
+                                let locked = inner_arc.lock().unwrap();
+                                while locked.lock.load(std::sync::atomic::Ordering::SeqCst) {
+                                    std::thread::yield_now();
+                                }
+                                locked.lock.store(true, std::sync::atomic::Ordering::SeqCst);
+                            }
+                            Ok(py_bool(true))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "release" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "release".to_string(),
+                        func: |args| {
+                            let obj = args[0].borrow();
+                            if let PyObject::Lock(inner_arc) = &*obj {
+                                let locked = inner_arc.lock().unwrap();
+                                locked.lock.store(false, std::sync::atomic::Ordering::SeqCst);
+                            }
+                            Ok(py_none())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    _ => Err(PyError::attribute_error(format!("'lock' object has no attribute '{}'", name))),
+                }
+            }
+            PyObject::RLock(inner_arc) => {
+                let _inner_arc = inner_arc.clone();
+                match name {
+                    "acquire" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "acquire".to_string(),
+                        func: |args| {
+                            let obj = args[0].borrow();
+                            if let PyObject::RLock(inner_arc) = &*obj {
+                                let mut inner = inner_arc.lock().unwrap();
+                                let current_id = std::thread::current().id();
+                                if let Some(owner) = inner.owner {
+                                    if owner == current_id {
+                                        inner.count += 1;
+                                        return Ok(py_bool(true));
+                                    }
+                                }
+                                // Spin waiting for lock
+                                while inner.owner.is_some() {
+                                    drop(inner);
+                                    std::thread::yield_now();
+                                    inner = inner_arc.lock().unwrap();
+                                }
+                                inner.owner = Some(current_id);
+                                inner.count = 1;
+                            }
+                            Ok(py_bool(true))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "release" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "release".to_string(),
+                        func: |args| {
+                            let obj = args[0].borrow();
+                            if let PyObject::RLock(inner_arc) = &*obj {
+                                let mut inner = inner_arc.lock().unwrap();
+                                let current_id = std::thread::current().id();
+                                if inner.owner != Some(current_id) {
+                                    return Err(PyError::runtime_error("cannot release un-acquired lock"));
+                                }
+                                inner.count -= 1;
+                                if inner.count == 0 {
+                                    inner.owner = None;
+                                }
+                            }
+                            Ok(py_none())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__enter__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__enter__".to_string(),
+                        func: |args| {
+                            let obj = args[0].borrow();
+                            if let PyObject::RLock(inner_arc) = &*obj {
+                                let mut inner = inner_arc.lock().unwrap();
+                                let current_id = std::thread::current().id();
+                                if let Some(owner) = inner.owner {
+                                    if owner == current_id {
+                                        inner.count += 1;
+                                        return Ok(args[0].clone());
+                                    }
+                                }
+                                while inner.owner.is_some() {
+                                    drop(inner);
+                                    std::thread::yield_now();
+                                    inner = inner_arc.lock().unwrap();
+                                }
+                                inner.owner = Some(current_id);
+                                inner.count = 1;
+                            }
+                            Ok(args[0].clone())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__exit__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__exit__".to_string(),
+                        func: |args| {
+                            let obj = args[0].borrow();
+                            if let PyObject::RLock(inner_arc) = &*obj {
+                                let mut inner = inner_arc.lock().unwrap();
+                                let current_id = std::thread::current().id();
+                                if inner.owner != Some(current_id) {
+                                    return Err(PyError::runtime_error("cannot release un-acquired lock"));
+                                }
+                                inner.count -= 1;
+                                if inner.count == 0 {
+                                    inner.owner = None;
+                                }
+                            }
+                            Ok(py_none())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    _ => Err(PyError::attribute_error(format!("'RLock' object has no attribute '{}'", name))),
+                }
+            }
+            PyObject::Event(inner_arc) => {
+                let _inner_arc = inner_arc.clone();
+                match name {
+                    "is_set" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "is_set".to_string(),
+                        func: |args| {
+                            let obj = args[0].borrow();
+                            if let PyObject::Event(inner_arc) = &*obj {
+                                let flag = inner_arc.flag.lock().unwrap();
+                                return Ok(py_bool(*flag));
+                            }
+                            Ok(py_bool(false))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "set" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "set".to_string(),
+                        func: |args| {
+                            let obj = args[0].borrow();
+                            if let PyObject::Event(inner_arc) = &*obj {
+                                let mut flag = inner_arc.flag.lock().unwrap();
+                                *flag = true;
+                                inner_arc.condvar.notify_all();
+                            }
+                            Ok(py_none())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "clear" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "clear".to_string(),
+                        func: |args| {
+                            let obj = args[0].borrow();
+                            if let PyObject::Event(inner_arc) = &*obj {
+                                let mut flag = inner_arc.flag.lock().unwrap();
+                                *flag = false;
+                            }
+                            Ok(py_none())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "wait" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "wait".to_string(),
+                        func: |args| {
+                            let obj = args[0].borrow();
+                            if let PyObject::Event(inner_arc) = &*obj {
+                                let mut flag = inner_arc.flag.lock().unwrap();
+                                while !*flag {
+                                    flag = inner_arc.condvar.wait(flag).unwrap();
+                                }
+                                return Ok(py_bool(true));
+                            }
+                            Ok(py_bool(true))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    _ => Err(PyError::attribute_error(format!("'Event' object has no attribute '{}'", name))),
+                }
+            }
+            PyObject::Queue(inner_arc) => {
+                let _inner_arc = inner_arc.clone();
+                match name {
+                    "put" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "put".to_string(),
+                        func: |args| {
+                            let obj = args[0].borrow();
+                            if let PyObject::Queue(inner_arc) = &*obj {
+                                let item = args.get(1).cloned().ok_or_else(|| PyError::type_error("put() missing argument"))?;
+                                let mut q = inner_arc.lock().unwrap();
+                                q.queue.push_back(item);
+                            }
+                            Ok(py_none())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "get" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "get".to_string(),
+                        func: |args| {
+                            let obj = args[0].borrow();
+                            if let PyObject::Queue(inner_arc) = &*obj {
+                                let mut q = inner_arc.lock().unwrap();
+                                return q.queue.pop_front().ok_or_else(|| PyError::runtime_error("empty queue"));
+                            }
+                            Err(PyError::runtime_error("not a Queue"))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "qsize" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "qsize".to_string(),
+                        func: |args| {
+                            let obj = args[0].borrow();
+                            if let PyObject::Queue(inner_arc) = &*obj {
+                                let q = inner_arc.lock().unwrap();
+                                return Ok(py_int(q.queue.len() as i64));
+                            }
+                            Ok(py_int(0))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    _ => Err(PyError::attribute_error(format!("'Queue' object has no attribute '{}'", name))),
+                }
+            }
+            PyObject::Int(_i) => {
+                match name {
+                    "__bool__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__bool__".to_string(),
+                        func: |args| {
+                            if let PyObject::Int(v) = &*args[0].borrow() {
+                                Ok(py_bool(!v.is_zero()))
+                            } else { Err(PyError::runtime_error("__bool__ on non-int")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__float__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__float__".to_string(),
+                        func: |args| {
+                            if let PyObject::Int(v) = &*args[0].borrow() {
+                                Ok(py_float(v.to_f64().unwrap_or(0.0)))
+                            } else { Err(PyError::runtime_error("__float__ on non-int")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "bit_length" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "bit_length".to_string(),
+                        func: |args| {
+                            if let PyObject::Int(v) = &*args[0].borrow() {
+                                Ok(py_int(v.bits() as i64))
+                            } else { Err(PyError::runtime_error("bit_length on non-int")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "bit_count" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "bit_count".to_string(),
+                        func: |args| {
+                            if let PyObject::Int(v) = &*args[0].borrow() {
+                                let count: u32 = if *v < num_bigint::BigInt::from(0) {
+                                    let neg = -(v + 1i32);
+                                    neg.to_bytes_le().1.iter().map(|b| b.count_ones()).sum()
+                                } else {
+                                    v.to_bytes_le().1.iter().map(|b| b.count_ones()).sum()
+                                };
+                                Ok(py_int(count as i64))
+                            } else { Err(PyError::runtime_error("bit_count on non-int")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    // `int`'s share of the `numbers.Rational`/`Integral` ABC
+                    // protocol (`as_integer_ratio`/`numerator`/`denominator`
+                    // /`real`/`imag`) — an int IS its own numerator with
+                    // denominator 1, and its own real part with a zero
+                    // imaginary part, matching real CPython exactly. Needed
+                    // by any code walking the numeric tower generically
+                    // (real trigger: CPython's own `Lib/statistics.py`'s
+                    // `_exact_ratio`, which tries `x.as_integer_ratio()`
+                    // then falls back to `(x.numerator, x.denominator)` —
+                    // both raised `AttributeError` before this, since only
+                    // `float`/`Fraction` had `as_integer_ratio` and nothing
+                    // implemented the ABC-style numerator/denominator pair).
+                    "as_integer_ratio" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "as_integer_ratio".to_string(),
+                        func: |args| {
+                            if let PyObject::Int(v) = &*args[0].borrow() {
+                                Ok(py_tuple(vec![py_int(v.clone()), py_int(1)]))
+                            } else { Err(PyError::runtime_error("as_integer_ratio on non-int")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "numerator" | "real" => Ok(py_int(_i.clone())),
+                    "denominator" => Ok(py_int(1)),
+                    "imag" => Ok(py_int(0)),
+                    "to_bytes" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "to_bytes".to_string(),
+                        func: |args| {
+                            if args.len() < 3 { return Err(PyError::type_error("to_bytes() takes at least 2 arguments (1 given)")); }
+                            if let PyObject::Int(val) = &*args[0].borrow() {
+                                let length = args[1].as_i64().ok_or_else(|| PyError::type_error("length must be int"))?;
+                                let byteorder = args[2].str();
+                                let signed = if args.len() > 3 { args[3].truthy() } else { false };
+                                if length <= 0 {
+                                    return Err(PyError::type_error("length must be positive"));
+                                }
+                                let len = length as usize;
+                                let (_, bytes) = if byteorder == "little" {
+                                    val.to_bytes_le()
+                                } else {
+                                    val.to_bytes_be()
+                                };
+                                // Handle negative numbers for signed=True
+                                if signed && val.sign() == Sign::Minus {
+                                    // For signed negative, compute two's complement
+                                    let abs_val = -val.clone();
+                                    let (_, abs_bytes) = if byteorder == "little" {
+                                        abs_val.to_bytes_le()
+                                    } else {
+                                        abs_val.to_bytes_be()
+                                    };
+                                    // Create two's complement
+                                    let mut result = vec![0u8; len];
+                                    for i in 0..abs_bytes.len().min(len) {
+                                        result[if byteorder == "little" { i } else { len - 1 - i }] = abs_bytes[i];
+                                    }
+                                    // Two's complement: invert bits and add 1
+                                    for b in result.iter_mut() {
+                                        *b = !*b;
+                                    }
+                                    // Add 1
+                                    let mut carry = 1u16;
+                                    if byteorder == "little" {
+                                        for b in result.iter_mut() {
+                                            let v = *b as u16 + carry;
+                                            *b = v as u8;
+                                            carry = v >> 8;
+                                        }
+                                    } else {
+                                        for b in result.iter_mut().rev() {
+                                            let v = *b as u16 + carry;
+                                            *b = v as u8;
+                                            carry = v >> 8;
+                                        }
+                                    }
+                                    Ok(PyObjectRef::imm(PyObject::Bytes(result)))
+                                } else {
+                                    // Pad or truncate to fit length
+                                    if bytes.len() > len {
+                                        return Err(PyError::type_error("int too big to convert"));
+                                    }
+                                    let mut result = vec![0u8; len];
+                                    if byteorder == "little" {
+                                        for i in 0..bytes.len() {
+                                            result[i] = bytes[i];
+                                        }
+                                    } else {
+                                        let offset = len - bytes.len();
+                                        for i in 0..bytes.len() {
+                                            result[offset + i] = bytes[i];
+                                        }
+                                    }
+                                    Ok(PyObjectRef::imm(PyObject::Bytes(result)))
+                                }
+                            } else { Err(PyError::runtime_error("to_bytes on non-int")) }
+                        },
+                            self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__index__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__index__".to_string(),
+                        func: |args| {
+                            if let PyObject::Int(v) = &*args[0].borrow() {
+                                Ok(py_int(v.clone()))
+                            } else { Err(PyError::runtime_error("__index__ on non-int")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    _ => Err(PyError::attribute_error(format!("'int' object has no attribute '{}'", name))),
+                }
+            }
+            PyObject::Float(_f) => {
+                match name {
+                    "__int__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__int__".to_string(),
+                        func: |args| {
+                            if let PyObject::Float(v) = &*args[0].borrow() {
+                                Ok(py_int(*v as i64))
+                            } else { Err(PyError::runtime_error("__int__ on non-float")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "as_integer_ratio" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "as_integer_ratio".to_string(),
+                        func: |args| {
+                            if let PyObject::Float(v) = &*args[0].borrow() {
+                                let f = *v;
+                                if f.is_nan() || f.is_infinite() {
+                                    return Err(PyError::value_error(format!("cannot convert {:?} to integer ratio", f)));
+                                }
+                                // Decompose f64 into a reduced fraction
+                                fn float_to_ratio(x: f64) -> (BigInt, BigInt) {
+                                    if x == 0.0 { return (BigInt::from(0), BigInt::from(1)); }
+                                    let bits = x.to_bits();
+                                    let sign = if (bits >> 63) == 0 { 1i64 } else { -1i64 };
+                                    let biased_exp = ((bits >> 52) & 0x7ff) as i64;
+                                    let mantissa = bits & 0x000f_ffff_ffff_ffff;
+                                    if biased_exp == 0 {
+                                        if mantissa == 0 { return (BigInt::from(0), BigInt::from(1)); }
+                                        // Subnormal: value = mantissa * 2^(-1074)
+                                        let num = BigInt::from(sign) * BigInt::from(mantissa);
+                                        let den = BigInt::from(1i64) << 1074;
+                                        let g = gcd_bigint(&num, &den);
+                                        (num / &g, den / g)
+                                    } else {
+                                        // Normal: add implicit leading 1
+                                        let full_mantissa = 0x0010_0000_0000_0000 | mantissa;
+                                        let exp = biased_exp - 1023 - 52;
+                                        if exp >= 0 {
+                                            (BigInt::from(sign) * BigInt::from(full_mantissa) * (BigInt::from(1i64) << (exp as u32)), BigInt::from(1))
+                                        } else {
+                                            let num = BigInt::from(sign) * BigInt::from(full_mantissa);
+                                            let den = BigInt::from(1i64) << ((-exp) as u32);
+                                            let g = gcd_bigint(&num, &den);
+                                            (num / &g, den / g)
+                                        }
+                                    }
+                                }
+                                fn gcd_bigint(a: &BigInt, b: &BigInt) -> BigInt {
+                                    let mut a = a.clone();
+                                    let mut b = b.clone();
+                                    while !b.is_zero() {
+                                        let t = b.clone();
+                                        b = a % &t;
+                                        a = t;
+                                    }
+                                    a.abs()
+                                }
+                                let (num, den) = float_to_ratio(f);
+                                Ok(py_tuple(vec![py_int(num), py_int(den)]))
+                            } else { Err(PyError::runtime_error("as_integer_ratio on non-float")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "hex" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "hex".to_string(),
+                        func: |args| {
+                            if let PyObject::Float(v) = &*args[0].borrow() {
+                                let bits = v.to_bits();
+                                let sign = if (bits >> 63) != 0 { "-" } else { "" };
+                                let biased_exp = ((bits >> 52) & 0x7ff) as i64;
+                                let mantissa = bits & 0x000f_ffff_ffff_ffff;
+                                if biased_exp == 0x7ff {
+                                    if mantissa == 0 {
+                                        Ok(py_str(&format!("{}inf", sign)))
+                                    } else {
+                                        Ok(py_str(&format!("{}nan", sign)))
+                                    }
+                                } else if *v == 0.0 {
+                                    Ok(py_str(&format!("{}0x0.0p+0", sign)))
+                                } else {
+                                    let exp = biased_exp - 1023;
+                                    let hex_mantissa = format!("{:013x}", mantissa);
+                                    let hex_mantissa = hex_mantissa.trim_end_matches('0');
+                                    Ok(py_str(&format!("{}0x1.{}p{:+}", sign, if hex_mantissa.is_empty() { "0" } else { hex_mantissa }, exp)))
+                                }
+                            } else { Err(PyError::runtime_error("hex on non-float")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "is_integer" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "is_integer".to_string(),
+                        func: |args| {
+                            if let PyObject::Float(v) = &*args[0].borrow() {
+                                Ok(py_bool(v.fract() == 0.0))
+                            } else { Err(PyError::runtime_error("is_integer on non-float")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__ceil__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__ceil__".to_string(),
+                        func: |args| {
+                            if let PyObject::Float(v) = &*args[0].borrow() {
+                                Ok(py_int(v.ceil() as i64))
+                            } else { Err(PyError::runtime_error("__ceil__ on non-float")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__floor__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__floor__".to_string(),
+                        func: |args| {
+                            if let PyObject::Float(v) = &*args[0].borrow() {
+                                Ok(py_int(v.floor() as i64))
+                            } else { Err(PyError::runtime_error("__floor__ on non-float")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__trunc__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__trunc__".to_string(),
+                        func: |args| {
+                            if let PyObject::Float(v) = &*args[0].borrow() {
+                                Ok(py_int(v.trunc() as i64))
+                            } else { Err(PyError::runtime_error("__trunc__ on non-float")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    _ => Err(PyError::attribute_error(format!("'float' object has no attribute '{}'", name))),
+                }
+            }
+            PyObject::CompiledRegex { regex, pattern, flags } => {
+                let re = (*regex).clone();
+                let pat = pattern.clone();
+                let fl = *flags;
+                match name {
+                    "pattern" => Ok(py_str(&pat)),
+                    "flags" => Ok(py_int(fl as i64)),
+                    // `match`/`search`/`fullmatch` used to return a bare
+                    // `(start, end, matched_text)` tuple instead of a real
+                    // `Match` object — no `.group(n)`/`.groups()`/etc. at
+                    // all, so any code capturing groups via `Pattern.
+                    // match(...).group(1)` (extremely common — this is
+                    // exactly how `html.parser`/`_markupbase`'s tokenizer
+                    // works throughout) got `AttributeError: 'tuple' object
+                    // has no attribute 'group'`. Delegates to
+                    // `crate::modules::make_match_object` — the same
+                    // capture-group-aware Match object the free `re.match`/
+                    // `re.search`/etc. functions build (see that function's
+                    // own doc comment for the fuller history).
+                    // Both accept an optional `pos` 2nd argument (`Pattern.
+                    // match(string, pos)`/`Pattern.search(string, pos)` —
+                    // start searching from `pos` rather than the start of
+                    // the string, WITHOUT losing context before `pos` for
+                    // lookbehind-style constructs (unlike naively slicing
+                    // the string at `pos` and matching against that).
+                    // `_markupbase`/`html.parser`'s tokenizer calls this
+                    // constantly (`locatetagend.match(rawdata, i+1)`) to
+                    // resume scanning from wherever the last token ended.
+                    "match" => Ok(PyObjectRef::imm(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                        if args.len() < 1 {
+                            return Err(PyError::type_error("match() takes at least 1 argument"));
+                        }
+                        let string = args[0].str();
+                        let pos = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0).max(0) as usize;
+                        let caps = re.captures_from_pos(&string, pos.min(string.len())).unwrap_or(None);
+                        let result = match caps {
+                            Some(c) if c.get(0).map(|m| m.start()) == Some(pos) => Some(c),
+                            _ => None,
+                        };
+                        Ok(crate::modules::make_match_object(&re, result))
+                    })))),
+                    "search" => Ok(PyObjectRef::imm(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                        if args.len() < 1 {
+                            return Err(PyError::type_error("search() takes at least 1 argument"));
+                        }
+                        let string = args[0].str();
+                        let pos = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0).max(0) as usize;
+                        let caps = re.captures_from_pos(&string, pos.min(string.len())).unwrap_or(None);
+                        Ok(crate::modules::make_match_object(&re, caps))
+                    })))),
+                    "findall" => Ok(PyObjectRef::imm(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                        if args.len() < 1 {
+                            return Err(PyError::type_error("findall() takes at least 1 argument"));
+                        }
+                        let string = args[0].str();
+                        let results: Vec<PyObjectRef> = re.find_iter(&string)
+                            .filter_map(|r| r.ok())
+                            .map(|m| py_str(m.as_str()))
+                            .collect();
+                        Ok(py_list(results))
+                    })))),
+                    "finditer" => Ok(PyObjectRef::imm(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                        if args.len() < 1 {
+                            return Err(PyError::type_error("finditer() takes at least 1 argument"));
+                        }
+                        let string = args[0].str();
+                        let matches: Vec<PyObjectRef> = re.captures_iter(&string)
+                            .filter_map(|r| r.ok())
+                            .map(|c| crate::modules::make_match_object(&re, Some(c)))
+                            .collect();
+                        Ok(py_list(matches))
+                    })))),
+                    // Real `re.Pattern.sub` accepts either a string template
+                    // OR a callable — see the free `re.sub` function's own
+                    // doc comment (`modules/misc.rs`) for the fuller
+                    // history; this mirrors that fix (and adds real `count`
+                    // support) for the compiled-`Pattern` method form.
+                    "sub" => Ok(PyObjectRef::imm(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                        if args.len() < 2 {
+                            return Err(PyError::type_error("sub() takes at least 2 arguments"));
+                        }
+                        let is_callable_repl = !matches!(&*args[0].borrow(), PyObject::Str(_));
+                        let repl_template = if is_callable_repl { String::new() } else { crate::modules::translate_python_replacement(&args[0].str()) };
+                        let string = args[1].str();
+                        let count = if args.len() > 2 { args[2].as_i64().unwrap_or(0) } else { 0 };
+                        let mut result = String::new();
+                        let mut last_end = 0usize;
+                        let mut n = 0i64;
+                        for caps in re.captures_iter(&string) {
+                            let caps = match caps { Ok(c) => c, Err(_) => break };
+                            if count > 0 && n >= count { break; }
+                            let (m_start, m_end) = { let m = caps.get(0).unwrap(); (m.start(), m.end()) };
+                            if m_start < last_end { continue; }
+                            result.push_str(&string[last_end..m_start]);
+                            if is_callable_repl {
+                                let match_obj = crate::modules::make_match_object(&re, Some(caps));
+                                let replaced = call_bound_method(args[0].clone(), match_obj, vec![])?;
+                                result.push_str(&replaced.str());
+                            } else {
+                                let mut expanded = String::new();
+                                caps.expand(&repl_template, &mut expanded);
+                                result.push_str(&expanded);
+                            }
+                            last_end = m_end;
+                            n += 1;
+                        }
+                        result.push_str(&string[last_end..]);
+                        Ok(py_str(&result))
+                    })))),
+                    "split" => Ok(PyObjectRef::imm(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                        if args.len() < 1 {
+                            return Err(PyError::type_error("split() takes at least 1 argument"));
+                        }
+                        let string = args[0].str();
+                        let limit = if args.len() > 1 { args[1].as_i64().unwrap_or(0) as usize } else { 0 };
+                        let parts: Vec<PyObjectRef> = if limit > 0 {
+                            re.splitn(&string, limit).filter_map(|r| r.ok()).map(|s| py_str(s)).collect()
+                        } else {
+                            re.split(&string).filter_map(|r| r.ok()).map(|s| py_str(s)).collect()
+                        };
+                        Ok(py_list(parts))
+                    })))),
+                    "fullmatch" => Ok(PyObjectRef::imm(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                        if args.len() < 1 {
+                            return Err(PyError::type_error("fullmatch() takes at least 1 argument"));
+                        }
+                        let string = args[0].str();
+                        let caps = re.captures(&string).unwrap_or(None)
+                            .filter(|c| c.get(0).map(|m| m.start() == 0 && m.end() == string.len()).unwrap_or(false));
+                        Ok(crate::modules::make_match_object(&re, caps))
+                    })))),
+                    _ => Err(PyError::attribute_error(format!("'re.Pattern' object has no attribute '{}'", name))),
+                }
+            }
+            PyObject::Super { cls, obj } => {
+                // super(cls, obj).attr: walk MRO of obj's type, starting after cls.
+                // When `obj` is itself a class/type — the "classmethod-style"
+                // form real Python uses for metaclass methods, e.g. inside a
+                // metaclass's `def __new__(metacls, name, bases, ns):`, where
+                // bare `super()` binds obj=metacls — the relevant mro is
+                // `obj`'s own (e.g. a metaclass's own mro), not some further
+                // "type of obj" (which would just be `type`/whatever built
+                // it, an unrelated chain). Without this, `super().__new__(...)`
+                // inside a metaclass's `__new__` couldn't resolve `__new__`
+                // at all (AttributeError), since `obj` isn't a plain Instance
+                // and has no meaningful `__class__` for this purpose either.
+                let obj_type = if let PyObject::Instance { typ, .. } = &*obj.borrow() {
+                    Some(typ.clone())
+                } else if matches!(&*obj.borrow(), PyObject::Type { .. }) {
+                    Some(obj.clone())
+                } else {
+                    obj.borrow().get_attribute("__class__").ok()
+                };
+                if let Some(obj_type) = obj_type {
+                    if let PyObject::Type { mro, .. } = &*obj_type.borrow() {
+                        // Find cls in MRO, start search from the next class.
+                        // If `cls` isn't in `obj`'s MRO at all — e.g. a
+                        // zero-arg `super()`'s compiled-in `LOAD_GLOBAL
+                        // <ClassName>` (see compile_expr's PEP 3135 handling)
+                        // picked up a DIFFERENT object than the class this
+                        // method actually belongs to, because that global
+                        // name got rebound/re-imported to something else in
+                        // the meantime — `unwrap_or(0) + 1` used to silently
+                        // treat "not found" as "found at position 0", i.e.
+                        // start the search at `mro[1]`. For a method whose
+                        // own class IS in `obj`'s real MRO (the overwhelmingly
+                        // common case, just not reachable via this wrong
+                        // `cls`), `mro[1]` is often that SAME class again —
+                        // so `super().method()` calls itself again as if it
+                        // were the next-in-MRO implementation, forever.
+                        // Confirmed via a general, Django-free repro
+                        // (rebinding a class's own name inside its
+                        // `__init_subclass__` before the trailing
+                        // `super().__init_subclass__()` call reproduces
+                        // unbounded recursion). Real CPython raises
+                        // `TypeError: super(type, obj): obj must be an
+                        // instance or subtype of type` here instead — treat
+                        // it as "not found via this MRO" and fall through to
+                        // the native-backing/error handling below, which is
+                        // at least a clean, immediate failure rather than a
+                        // silent infinite loop.
+                        let start_idx = mro.iter().position(|m| {
+                            if let (PyObjectRef::Mut(a), PyObjectRef::Mut(b)) = (cls, m) {
+                                std::ptr::eq(a.as_ptr(), b.as_ptr())
+                            } else {
+                                false
+                            }
+                        }).map(|p| p + 1);
+                        if let Some(start_idx) = start_idx {
+                        if start_idx < mro.len() {
+                            let mut found = None;
+                            for base in mro.iter().skip(start_idx) {
+                                // A builtin exception base (`class MyError
+                                // (OSError): ...`) is a `PyObject::
+                                // BuiltinFunction` (the exception's own
+                                // constructor), never a real `PyObject::
+                                // Type` — invisible to the dict-lookup
+                                // walk just below, so `super().__init__
+                                // (...)` inside such a subclass's own
+                                // `__init__` always raised `AttributeError:
+                                // 'super' object has no attribute
+                                // '__init__'` instead of reaching real
+                                // `BaseException.__init__`'s behavior
+                                // (store the given args as `self.args`).
+                                // Extremely common idiom — any custom
+                                // exception hierarchy that calls
+                                // `super().__init__(...)` (real trigger:
+                                // `urllib.error.URLError(OSError)`).
+                                if name == "__init__" {
+                                    if let PyObject::BuiltinFunction { name: bname, .. } = &*base.borrow() {
+                                        if is_builtin_exception_class_name(bname) {
+                                            let target = obj.clone();
+                                            found = Some(PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                                                if let PyObject::Instance { dict, .. } = &mut *target.borrow_mut() {
+                                                    dict.insert("args".to_string(), py_tuple(args.to_vec()));
+                                                }
+                                                Ok(py_none())
+                                            }))));
+                                            break;
+                                        }
+                                    }
+                                }
+                                if let PyObject::Type { dict, .. } = &*base.borrow() {
+                                    if let Some(val) = dict.get_str(&name) {
+                                        let val_borrowed = val.borrow();
+                                        match &*val_borrowed {
+                                            // `__new__` is *always* implicitly
+                                            // a staticmethod in real Python —
+                                            // never auto-bound — regardless of
+                                            // whether it's explicitly wrapped
+                                            // in `staticmethod(...)`. Only the
+                                            // explicit-wrapper case was
+                                            // unwrapped below; a plain `def
+                                            // __new__(mcs, ...):` (which is
+                                            // how virtually every real
+                                            // metaclass, including Django's,
+                                            // writes it — nobody bothers with
+                                            // `@staticmethod` there) still hit
+                                            // the auto-bind arm just below,
+                                            // producing a BoundMethod that
+                                            // prepended `obj` as an EXTRA,
+                                            // duplicate leading argument on
+                                            // top of the one already passed
+                                            // explicitly (`super().__new__(mcs,
+                                            // name, bases, attrs)` always
+                                            // passes `mcs` itself) — shifting
+                                            // every subsequent positional arg
+                                            // by one.
+                                            PyObject::Function(_) | PyObject::BuiltinFunction { .. } if name == "__new__" => {
+                                                found = Some(val.clone());
+                                                break;
+                                            }
+                                            PyObject::Function(_) | PyObject::BuiltinFunction { .. } => {
+                                                found = Some(PyObjectRef::new(PyObject::BoundMethod {
+                                                    func: val.clone(),
+                                                    self_obj: obj.clone(),
+                                                }));
+                                                break;
+                                            }
+                                            PyObject::Property(ref d) if d.getter.is_some() => {
+                                                let g = d.getter.as_ref().unwrap();
+                                                found = Some(builtin_call(g, &[obj.clone()]).unwrap_or_else(|_| val.clone()));
+                                                break;
+                                            }
+                                            // Staticmethods (explicit, or
+                                            // implicit like `__new__`) are
+                                            // never bound to `obj` — unwrap
+                                            // directly, matching how plain
+                                            // class-attribute access already
+                                            // treats StaticMethod.
+                                            PyObject::StaticMethod { func } => {
+                                                found = Some(func.clone());
+                                                break;
+                                            }
+                                            _ => {
+                                                found = Some(val.clone());
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if let Some(found) = found {
+                                return Ok(found);
+                            }
+                        }
+                        }
+                    }
+                }
+                // Not found via any Type in the mro: for a class that
+                // transparently subclasses list/dict/str, `super().append(x)`
+                // etc. must still reach the native backing (list/dict/str
+                // themselves aren't PyObject::Type, so they're invisible to
+                // the mro walk above).
+                if name == "__init__" {
+                    if let Some(kind) = native_base_of_type(&{
+                        if let PyObject::Instance { typ, .. } = &*obj.borrow() { typ.clone() } else { return Err(PyError::attribute_error("'super' object has no attribute '__init__'".to_string())); }
+                    }) {
+                        let target = obj.clone();
+                        return Ok(PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                            let native = synthesize_native_init(&kind, args)?;
+                            if let PyObject::Instance { dict, .. } = &mut *target.borrow_mut() {
+                                dict.insert(NATIVE_BACKING_KEY.to_string(), native);
+                            }
+                            Ok(py_none())
+                        }))));
+                    }
+                }
+                // `super().__setattr__(name, value)`/`__delattr__(name)` —
+                // the real `object.__setattr__`/`__delattr__` (a plain
+                // generic attribute set/delete) isn't exposed as a gettable
+                // attribute anywhere either (same class of gap as
+                // `__init__` just above), needed by real code that
+                // deliberately bypasses an overridden `__setattr__` this
+                // way (a frozen-dataclass-style pattern — real trigger:
+                // CPython 3.14's own `Lib/_colorize.py`'s
+                // `ThemeSection.__post_init__`).
+                if name == "__setattr__" || name == "__delattr__" {
+                    let target = obj.clone();
+                    let is_delete = name == "__delattr__";
+                    return Ok(PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                        if args.is_empty() { return Err(PyError::type_error("missing required argument: name")); }
+                        let attr_name = args[0].str();
+                        if is_delete {
+                            target.borrow_mut().del_attribute(&attr_name)?;
+                        } else {
+                            if args.len() < 2 { return Err(PyError::type_error("__setattr__() takes exactly 2 arguments")); }
+                            target.borrow_mut().set_attribute(&attr_name, args[1].clone())?;
+                        }
+                        Ok(py_none())
+                    }))));
+                }
+                // Same story for the operator-level dunders — list/dict
+                // don't expose __setitem__/__getitem__/etc. as a plain
+                // get_attribute entry either (subscripting/len/iteration go
+                // through their own opcode-level dispatch functions
+                // instead), so synthesize a callable that invokes those
+                // functions directly against the real native backing.
+                if let Some(native) = native_backing_of(obj) {
+                    let target = native.clone();
+                    match name {
+                        "__setitem__" => {
+                            return Ok(PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                                if args.len() < 2 { return Err(PyError::type_error("__setitem__() takes exactly 2 arguments")); }
+                                py_setitem(&target, &args[0], args[1].clone())?;
+                                Ok(py_none())
+                            }))));
+                        }
+                        "__getitem__" => {
+                            return Ok(PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                                if args.is_empty() { return Err(PyError::type_error("__getitem__() takes exactly 1 argument")); }
+                                py_getitem(&target, &args[0])
+                            }))));
+                        }
+                        "__delitem__" => {
+                            return Ok(PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                                if args.is_empty() { return Err(PyError::type_error("__delitem__() takes exactly 1 argument")); }
+                                py_delitem(&target, &args[0])?;
+                                Ok(py_none())
+                            }))));
+                        }
+                        "__contains__" => {
+                            return Ok(PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                                if args.is_empty() { return Err(PyError::type_error("__contains__() takes exactly 1 argument")); }
+                                Ok(py_bool(contains_op(&target, &args[0])?))
+                            }))));
+                        }
+                        "__len__" => {
+                            return Ok(PyObjectRef::new(PyObject::Closure(Rc::new(move |_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                                builtin_len(&[target.clone()])
+                            }))));
+                        }
+                        "__iter__" => {
+                            return Ok(PyObjectRef::new(PyObject::Closure(Rc::new(move |_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                                builtin_iter(&[target.clone()])
+                            }))));
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some(native) = native_backing_of(obj) {
+                    if let Ok(val) = native.borrow().get_attribute(&name) {
+                        let rebound = if let PyObject::BuiltinMethod { name: n, func, .. } = &*val.borrow() {
+                            PyObjectRef::imm(PyObject::BuiltinMethod { name: n.clone(), func: *func, self_obj: native.clone() })
+                        } else {
+                            val.clone()
+                        };
+                        return Ok(rebound);
+                    }
+                }
+                Err(PyError::attribute_error(
+                    format!("'super' object has no attribute '{}'", name)
+                ))
+            }
+            PyObject::FutureAwaitIterator { future: _, yielded: _ } => {
+                match name {
+                    "__iter__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__iter__".to_string(),
+                        func: |args| Ok(args[0].clone()),
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__next__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__next__".to_string(),
+                        func: |args| {
+                            if args.is_empty() { return Err(PyError::type_error("__next__ needs self")); }
+                            let self_ref = args[0].borrow();
+                            let (done, result) = match &*self_ref {
+                                PyObject::FutureAwaitIterator { future, yielded } => {
+                                    if *yielded {
+                                        let done = future.borrow().get_attribute("_done")
+                                            .ok().map(|d| d.truthy()).unwrap_or(false);
+                                        let result = future.borrow().get_attribute("_result")
+                                            .unwrap_or_else(|_| py_none());
+                                        (Some(done), Some(result))
+                                    } else {
+                                        let f = future.clone();
+                                        drop(self_ref);
+                                        return Ok(f);
+                                    }
+                                }
+                                _ => return Err(PyError::runtime_error("__next__ on non-FutureAwaitIterator")),
+                            };
+                            drop(self_ref);
+                            if let Some(true) = done {
+                                Err(PyError::Exception("StopIteration".to_string(), result.unwrap_or_else(|| py_none())))
+                            } else {
+                                Ok(py_none())
+                            }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "send" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "send".to_string(),
+                        func: |args| {
+                            if args.is_empty() { return Err(PyError::type_error("send needs self")); }
+                            let (is_first, future_clone) = match &*args[0].borrow() {
+                                PyObject::FutureAwaitIterator { future, yielded } => {
+                                    (!*yielded, future.clone())
+                                }
+                                _ => return Err(PyError::runtime_error("send on non-FutureAwaitIterator")),
+                            };
+                            if is_first {
+                                let mut obj = args[0].borrow_mut();
+                                if let PyObject::FutureAwaitIterator { yielded, .. } = &mut *obj {
+                                    *yielded = true;
+                                }
+                                drop(obj);
+                                // Return the future as the yielded value
+                                Ok(future_clone)
+                            } else {
+                                // Second send: check if future is done
+                                let done = future_clone.borrow().get_attribute("_done")
+                                    .ok().map(|d| d.truthy()).unwrap_or(false);
+                                let result = future_clone.borrow().get_attribute("_result")
+                                    .unwrap_or_else(|_| py_none());
+                                if done {
+                                    Err(PyError::Exception("StopIteration".to_string(), result))
+                                } else {
+                                    Ok(future_clone)
+                                }
+                            }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    _ => Err(PyError::attribute_error(format!("'future_await_iterator' object has no attribute '{}'", name))),
+                }
+            }
+            PyObject::BuiltinFunction { name: bf_name, func } => {
+                if bf_name == "bytes" && name == "fromhex" {
+                    return Ok(PyObjectRef::imm(PyObject::BuiltinFunction {
+                        name: "fromhex".to_string(),
+                        func: builtin_bytes_fromhex,
+                    }));
+                }
+                if bf_name == "complex" && name == "from_number" {
+                    return Ok(PyObjectRef::imm(PyObject::BuiltinFunction {
+                        name: "from_number".to_string(),
+                        func: |args| {
+                            if args.is_empty() { return Err(PyError::type_error("complex.from_number() takes exactly 1 argument")); }
+                            let n = args[0].as_f64().unwrap_or(0.0);
+                            Ok(PyObjectRef::imm(PyObject::Complex(n, 0.0)))
+                        },
+                    }));
+                }
+                if bf_name == "float" && name == "__getformat__" {
+                    // `float.__getformat__("double"/"float")` — real CPython
+                    // queries the platform's actual float representation;
+                    // this interpreter's floats are always IEEE 754 doubles
+                    // (Rust `f64`), so always answer accordingly. Real
+                    // trigger: CPython's own `test.support.requires_IEEE_754`
+                    // module-level constant, `float.__getformat__("double").
+                    // startswith("IEEE")`.
+                    return Ok(PyObjectRef::imm(PyObject::BuiltinFunction {
+                        name: "__getformat__".to_string(),
+                        func: |_args| Ok(py_str("IEEE, little-endian")),
+                    }));
+                }
+                if bf_name == "float" && name == "fromhex" {
+                    return Ok(PyObjectRef::imm(PyObject::BuiltinFunction {
+                        name: "fromhex".to_string(),
+                        func: |args| {
+                            if args.is_empty() { return Err(PyError::type_error("float.fromhex() requires exactly 1 argument")); }
+                            let s = args[0].str();
+                            let s = s.trim();
+                            let lower = s.to_lowercase();
+                            if lower == "nan" { return Ok(py_float(f64::NAN)); }
+                            if lower == "inf" || lower == "+inf" || lower == "-inf" || lower == "infinity" || lower == "+infinity" || lower == "-infinity" {
+                                let sign = if lower.starts_with('-') { -1.0 } else { 1.0 };
+                                return Ok(py_float(sign * f64::INFINITY));
+                            }
+                            let s = s.strip_prefix("+").unwrap_or(s);
+                            let sign = if s.starts_with('-') { -1.0 } else { 1.0 };
+                            let s = s.strip_prefix('-').unwrap_or(s.strip_prefix('+').unwrap_or(s));
+                            let s = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"))
+                                .ok_or_else(|| PyError::value_error(format!("invalid hex float literal: {}", s)))?;
+                            let (int_part, rest) = s.split_once('.').unwrap_or((s, ""));
+                            let (frac_part, exp_part) = rest.split_once('p').or_else(|| rest.split_once('P'))
+                                .unwrap_or((rest, ""));
+                            let int_val = i64::from_str_radix(int_part, 16).unwrap_or(0);
+                            let frac_val = if !frac_part.is_empty() {
+                                let frac_bits = i64::from_str_radix(frac_part, 16).unwrap_or(0);
+                                let frac_len = frac_part.len() as u32;
+                                frac_bits as f64 / (16u64.pow(frac_len) as f64)
+                            } else { 0.0 };
+                            let exp: i32 = if !exp_part.is_empty() {
+                                exp_part.parse().map_err(|_| PyError::value_error(format!("invalid hex float exponent: {}", exp_part)))?
+                            } else { 0 };
+                            let significand = int_val as f64 + frac_val;
+                            let result = sign * significand * (2.0f64).powi(exp);
+                            Ok(py_float(result))
+                        },
+                    }));
+                }
+                if bf_name == "float" && name == "hex" {
+                    return Ok(PyObjectRef::imm(PyObject::BuiltinFunction {
+                        name: "hex".to_string(),
+                        func: |args| {
+                            if args.is_empty() { return Err(PyError::type_error("hex() takes exactly 1 argument")); }
+                            let obj = args[0].borrow();
+                            if let PyObject::Float(v) = &*obj {
+                                let bits = v.to_bits();
+                                let sign = if (bits >> 63) != 0 { "-" } else { "" };
+                                let biased_exp = ((bits >> 52) & 0x7ff) as i64;
+                                let mantissa = bits & 0x000f_ffff_ffff_ffff;
+                                if biased_exp == 0x7ff {
+                                    if mantissa == 0 { Ok(py_str(&format!("{}inf", sign))) }
+                                    else { Ok(py_str(&format!("{}nan", sign))) }
+                                } else if *v == 0.0 { Ok(py_str(&format!("{}0x0.0p+0", sign))) }
+                                else {
+                                    let exp = biased_exp - 1023;
+                                    let hex_mantissa = format!("{:013x}", mantissa);
+                                    let hex_mantissa = hex_mantissa.trim_end_matches('0');
+                                    Ok(py_str(&format!("{}0x1.{}p{:+}", sign, if hex_mantissa.is_empty() { "0" } else { hex_mantissa }, exp)))
+                                }
+                            } else { Err(PyError::type_error("hex() argument must be float")) }
+                        },
+                    }));
+                }
+                if bf_name == "float" && name == "from_number" {
+                    return Ok(PyObjectRef::imm(PyObject::BuiltinFunction {
+                        name: "from_number".to_string(),
+                        func: |args| {
+                            if args.is_empty() { return Err(PyError::type_error("float.from_number() takes exactly 1 argument")); }
+                            Ok(py_float(args[0].as_f64().unwrap_or(f64::NAN)))
+                        },
+                    }));
+                }
+                if bf_name == "int" && name == "from_bytes" {
+                    return Ok(PyObjectRef::imm(PyObject::BuiltinFunction {
+                        name: "from_bytes".to_string(),
+                        func: builtin_int_from_bytes,
+                    }));
+                }
+                if bf_name == "dict" && name == "fromkeys" {
+                    // dict.fromkeys(iterable, value=None) — a real classmethod
+                    // in CPython, called both as `dict.fromkeys(...)` and via
+                    // `cls.fromkeys(...)` inside a dict-subclass's own
+                    // methods (real code: `collections.ChainMap.__iter__`
+                    // does `dict.fromkeys(mapping)`). Missing entirely before
+                    // — `dict` has no attribute dict of its own to answer
+                    // this from, being a plain BuiltinFunction constructor
+                    // rather than a real Type.
+                    return Ok(PyObjectRef::imm(PyObject::BuiltinFunction {
+                        name: "fromkeys".to_string(),
+                        func: |args| {
+                            if args.is_empty() { return Err(PyError::type_error("fromkeys() takes at least 1 argument")); }
+                            let keys = crate::object::collect_iterable(&args[0])?;
+                            let value = args.get(1).cloned().unwrap_or_else(py_none);
+                            let mut d = PyDict::new();
+                            for k in keys {
+                                d.set(k, value.clone())?;
+                            }
+                            Ok(PyObjectRef::new(PyObject::Dict(Box::new(d))))
+                        },
+                    }));
+                }
+                if bf_name == "dict" && (name == "__setitem__" || name == "__getitem__") {
+                    let method_name = name.to_string();
+                    return Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: method_name.clone(),
+                        func: if method_name == "__setitem__" {
+                            builtin_dict_setitem as BuiltinFunc
+                        } else {
+                            builtin_dict_getitem as BuiltinFunc
+                        },
+                        self_obj: py_none(),
+                    }));
+                }
+                // Built-in types (int, str, list, dict, ...) are represented
+                // as a plain callable BuiltinFunction here, not a real class
+                // object with its own bases/mro — so `int.mro()`-style
+                // introspection (used e.g. by Django's lazy() for wrapping
+                // arbitrary result types) has nothing real to walk. Returning
+                // just [self] is not a correct ancestor chain (misses
+                // `object`, and any real base for exception types etc.), but
+                // it lets that code iterate something instead of crashing.
+                if name == "mro" {
+                    return Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "mro".to_string(),
+                        func: |args| Ok(py_list(vec![args[0].clone()])),
+                        self_obj: py_none(),
+                    }));
+                }
+                if name == "__name__" {
+                    return Ok(py_str(bf_name));
+                }
+                if name == "__qualname__" {
+                    return Ok(py_str(bf_name));
+                }
+                if name == "__mro__" || name == "__bases__" {
+                    return Ok(PyObjectRef::new(PyObject::Tuple(vec![])));
+                }
+                if name == "__dict__" {
+                    return Ok(PyObjectRef::new(PyObject::Dict(Box::new(PyDict::new()))));
+                }
+                if bf_name == "bool" && name == "__new__" {
+                    return Ok(PyObjectRef::imm(PyObject::BuiltinFunction {
+                        name: "__new__".to_string(),
+                        func: |args| {
+                            if args.is_empty() { return Ok(py_bool(false)); }
+                            if args.len() >= 2 { return Ok(py_bool(args[1].truthy())); }
+                            Ok(py_bool(false))
+                        },
+                    }));
+                }
+                // A handful of generic dunders every real builtin function/
+                // type has in CPython, regardless of which specific one —
+                // were missing across the board (not one-off gaps), so
+                // adding them here (rather than per-name like `fromhex`/
+                // `__getformat__` above) covers `int`/`str`/`list`/`dict`/
+                // any other native constructor uniformly. Real trigger:
+                // CPython's own `test_heapq.py` (`__module__`), `test_call.py`/
+                // `test_structseq.py` (`__new__`/`__init__` — common
+                // "is this constructible via type.__new__" introspection),
+                // `test_complex.py` (`__hash__` — checking hashability).
+                if name == "__module__" {
+                    return Ok(py_str("builtins"));
+                }
+                if name == "__hash__" {
+                    return Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__hash__".to_string(),
+                        func: |args| Ok(py_int(args[0].hash()? as i64)),
+                        self_obj: py_none(),
+                    }));
+                }
+                if name == "__new__" || name == "__init__" {
+                    // Pragmatic stand-in: real CPython's builtin `__new__`/
+                    // `__init__` slots are the actual C-level allocators/
+                    // initializers, not separately-callable Python-visible
+                    // functions with independent behavior worth
+                    // reimplementing here — returning the constructor
+                    // itself is "good enough" for introspection code that
+                    // just checks these exist/are callable (real trigger:
+                    // `test_structseq.py`'s `SomeStructType.__new__`-based
+                    // construction pattern) without claiming to model the
+                    // real two-phase alloc/init protocol.
+                    return Ok(PyObjectRef::imm(PyObject::BuiltinFunction { name: bf_name.clone(), func: *func }));
+                }
+                Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", self.type_name(), name)))
+            }
+            PyObject::FrozenSet(_items) => {
+                match name {
+                    "issuperset" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "issuperset".to_string(),
+                        func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                            let self_set = if let PyObject::FrozenSet(s) = &*args[0].borrow() { s.clone() }
+                                else if let PyObject::Set(s) = &*args[0].borrow() { s.clone() }
+                                else { return Err(PyError::type_error("issuperset requires a set/frozenset")) };
+                            let other = if args.len() < 2 { return Err(PyError::type_error("issuperset requires 1 argument")) }
+                                else { &args[1] };
+                            let other_set = convert_to_set(other)?;
+                            Ok(py_bool(self_set.is_superset(&other_set)))
+                        },
+                        self_obj: py_none(),
+                    })),
+                    "issubset" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "issubset".to_string(),
+                        func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                            let self_set = if let PyObject::FrozenSet(s) = &*args[0].borrow() { s.clone() }
+                                else if let PyObject::Set(s) = &*args[0].borrow() { s.clone() }
+                                else { return Err(PyError::type_error("issubset requires a set/frozenset")) };
+                            let other = if args.len() < 2 { return Err(PyError::type_error("issubset requires 1 argument")) }
+                                else { &args[1] };
+                            let other_set = convert_to_set(other)?;
+                            Ok(py_bool(self_set.is_subset(&other_set)))
+                        },
+                        self_obj: py_none(),
+                    })),
+                    // Needed for the extremely common `frozenset(x).__contains__`
+                    // idiom (a bound method used as a first-class predicate
+                    // value, not called directly) — real CPython's own
+                    // `Lib/keyword.py` does exactly this for `iskeyword`.
+                    "__contains__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__contains__".to_string(),
+                        func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                            if args.len() < 2 { return Err(PyError::type_error("__contains__() takes exactly one argument")); }
+                            if let PyObject::FrozenSet(set) = &*args[0].borrow() { Ok(py_bool(set.contains(&args[1])?)) }
+                            else { Err(PyError::runtime_error("__contains__ on non-frozenset")) }
+                        },
+                        self_obj: py_none(),
+                    })),
+                    _ => Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", self.type_name(), name))),
+                }
+            }
+            PyObject::Slice { start, stop, step } => {
+                match name {
+                    "start" => Ok(match &*start.borrow() { PyObject::None => py_none(), _ => py_int(start.as_i64().unwrap_or(0)) }),
+                    "stop" => Ok(match &*stop.borrow() { PyObject::None => py_none(), _ => py_int(stop.as_i64().unwrap_or(0)) }),
+                    "step" => Ok(match &*step.borrow() { PyObject::None => py_none(), _ => py_int(step.as_i64().unwrap_or(1)) }),
+                    "indices" => {
+                        let is_start_none = matches!(&*start.borrow(), PyObject::None);
+                        let is_stop_none = matches!(&*stop.borrow(), PyObject::None);
+                        let is_step_none = matches!(&*step.borrow(), PyObject::None);
+                        let s_start_raw = start.as_i64().unwrap_or(0);
+                        let s_stop_raw = stop.as_i64().unwrap_or(0);
+                        let s_step_raw = step.as_i64().unwrap_or(1);
+                        Ok(PyObjectRef::imm(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                            if args.is_empty() { return Err(PyError::type_error("indices() takes exactly 1 argument")); }
+                            let length = args[0].as_i64().ok_or_else(|| PyError::type_error("indices() argument must be an int"))?;
+                            if length < 0 { return Err(PyError::value_error("length should not be negative")); }
+                            let step = if is_step_none || s_step_raw == 0 { 1 } else { s_step_raw };
+                            if step == 0 { return Err(PyError::value_error("slice step cannot be zero")); }
+                            let start = if is_start_none { if step > 0 { 0 } else { length - 1 } }
+                                else { s_start_raw };
+                            let stop = if is_stop_none { if step > 0 { length } else { -length - 1 } }
+                                else { s_stop_raw };
+                            let (res_start, res_stop) = if step > 0 {
+                                let start_val = if start < 0 { (length + start).max(0) } else { start.min(length) };
+                                let stop_val = if stop < 0 { (length + stop).max(0) } else { stop.min(length) };
+                                (start_val, stop_val)
+                            } else {
+                                let start_val = if start < 0 { (length + start).max(-1) } else { start.min(length - 1) };
+                                let stop_val = if stop < 0 { (length + stop).max(-1) } else { stop.min(length - 1) };
+                                (start_val, stop_val)
+                            };
+                            Ok(py_tuple(vec![py_int(res_start as i64), py_int(res_stop as i64), py_int(step as i64)]))
+                        }))))
+                    }
+                    "__hash__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__hash__".to_string(),
+                        func: |args| {
+                            if let PyObject::Slice { start, stop, step } = &*args[0].borrow() {
+                                let h = args[0].hash()?;
+                                Ok(py_int(h as i64))
+                            } else { Err(PyError::runtime_error("__hash__ on non-slice")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__reduce__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__reduce__".to_string(),
+                        func: |args| {
+                            if let PyObject::Slice { start, stop, step } = &*args[0].borrow() {
+                                Ok(py_tuple(vec![
+                                    PyObjectRef::imm(PyObject::BuiltinFunction {
+                                        name: "slice".to_string(),
+                                        func: builtin_slice,
+                                    }),
+                                    py_tuple(vec![start.clone(), stop.clone(), step.clone()]),
+                                ]))
+                            } else { Err(PyError::runtime_error("__reduce__ on non-slice")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    _ => Err(PyError::attribute_error(format!("'slice' object has no attribute '{}'", name))),
+                }
+            }
+            PyObject::Code(c) => {
+                match name {
+                    "co_filename" => Ok(py_str(crate::interner::lookup_str(c.filename))),
+                    "co_name" => Ok(py_str(crate::interner::lookup_str(c.name))),
+                    "co_argcount" => Ok(py_int(c.arg_count as i64)),
+                    "co_nlocals" => Ok(py_int(c.nlocals as i64)),
+                    "co_varnames" => Ok(py_tuple(c.varnames.iter().map(|&v| py_str(crate::interner::lookup_str(v))).collect())),
+                    "co_flags" => Ok(py_int(c.flags as i64)),
+                    _ => Err(PyError::attribute_error(format!("'code' object has no attribute '{}'", name))),
+                }
+            }
+            PyObject::Range { start, stop, step } => {
+                match name {
+                    "start" => Ok(py_int(*start)),
+                    "stop" => Ok(py_int(*stop)),
+                    "step" => Ok(py_int(*step)),
+                    "__reduce__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__reduce__".to_string(),
+                        func: |args| {
+                            let s: &PyObjectRef = &args[0];
+                            if let PyObject::Range { start, stop, step } = &*s.borrow() {
+                                Ok(py_tuple(vec![
+                                    PyObjectRef::imm(PyObject::BuiltinFunction {
+                                        name: "range".to_string(),
+                                        func: builtin_range,
+                                    }),
+                                    py_tuple(vec![py_int(*start), py_int(*stop), py_int(*step)]),
+                                ]))
+                            } else { Err(PyError::runtime_error("__reduce__ on non-range")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__iter__" => Ok(PyObjectRef::new(PyObject::RangeIter { current: *start, stop: *stop, step: *step })),
+                    "__contains__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__contains__".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("__contains__() takes exactly one argument")); }
+                            let val = &args[1];
+                            if let PyObject::Range { start, stop, step } = &*args[0].borrow() {
+                                let mut current = *start;
+                                while if *step > 0 { current < *stop } else { current > *stop } {
+                                    let item = PyObjectRef::imm(PyObject::Int(num_bigint::BigInt::from(current)));
+                                    if py_compare(&item, val, 2).unwrap_or(py_bool(false)).truthy() { return Ok(py_bool(true)); }
+                                    current += step;
+                                }
+                            }
+                            Ok(py_bool(false))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__len__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__len__".to_string(),
+                        func: |args| {
+                            if args.is_empty() { return Err(PyError::type_error("__len__() takes exactly one argument")); }
+                            let obj = args[0].borrow();
+                            if let PyObject::Range { start, stop, step } = &*obj {
+                                if *step > 0 && *start >= *stop { return Ok(py_int(0)); }
+                                if *step < 0 && *start <= *stop { return Ok(py_int(0)); }
+                                let raw_len = stop.checked_sub(*start).unwrap_or(i64::MAX);
+                                let len = raw_len.checked_div(*step).unwrap_or(0) as i64;
+                                if raw_len % *step != 0 { Ok(py_int(len.abs() + 1)) } else { Ok(py_int(len.abs())) }
+                            } else { Err(PyError::runtime_error("__len__ on non-range")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "count" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "count".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("count() takes exactly 1 argument")); }
+                            let val = &args[1];
+                            let mut count = 0i64;
+                            if let PyObject::Range { start, stop, step } = &*args[0].borrow() {
+                                let mut current = *start;
+                                while if *step > 0 { current < *stop } else { current > *stop } {
+                                    let item = PyObjectRef::imm(PyObject::Int(num_bigint::BigInt::from(current)));
+                                    if py_compare(&item, val, 2).unwrap_or(py_bool(false)).truthy() { count += 1; }
+                                    current += step;
+                                }
+                            }
+                            Ok(py_int(count))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "index" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "index".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("index() takes at least 1 argument")); }
+                            let val = &args[1];
+                            if let PyObject::Range { start, stop, step } = &*args[0].borrow() {
+                                let mut current = *start;
+                                let mut idx = 0i64;
+                                while if *step > 0 { current < *stop } else { current > *stop } {
+                                    let item = PyObjectRef::imm(PyObject::Int(num_bigint::BigInt::from(current)));
+                                    if py_compare(&item, val, 2).unwrap_or(py_bool(false)).truthy() { return Ok(py_int(idx)); }
+                                    current += step;
+                                    idx += 1;
+                                }
+                            }
+                            Err(PyError::value_error("value not in range"))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__getitem__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__getitem__".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("__getitem__() takes exactly 1 argument")); }
+                            if let PyObject::Range { start, stop, step } = &*args[0].borrow() {
+                                let idx = &args[1];
+                                let length = {
+                                    if *step > 0 && *start >= *stop { 0 }
+                                    else if *step < 0 && *start <= *stop { 0 }
+                                    else {
+                                        let raw_len = stop.checked_sub(*start).unwrap_or(i64::MAX);
+                                        let len = raw_len.checked_div(*step).unwrap_or(0);
+                                        if raw_len % *step != 0 { len.abs() + 1 } else { len.abs() }
+                                    }
+                                };
+                                if let PyObject::Slice { start: s, stop: e, step: p } = &*idx.borrow() {
+                                    let sp = p.as_i64().unwrap_or(1);
+                                    let s_start = match &*s.borrow() { PyObject::None => if sp > 0 { 0 } else { length - 1 }, _ => s.as_i64().unwrap_or(0) };
+                                    let s_stop = match &*e.borrow() { PyObject::None => if sp > 0 { length } else { -length - 1 }, _ => e.as_i64().unwrap_or(0) };
+                                    let s_step = if sp == 0 { 1 } else { sp };
+                                    let norm_start = if s_start < 0 { (length + s_start).max(0) } else { s_start.min(length) };
+                                    let norm_stop = if s_stop < 0 { (length + s_stop).max(0) } else { s_stop.min(length) };
+                                    let new_start = *start + norm_start * *step;
+                                    let new_step = *step * s_step;
+                                    let new_stop = *start + norm_stop * *step;
+                                    Ok(PyObjectRef::imm(PyObject::Range { start: new_start, stop: new_stop, step: new_step }))
+                                } else {
+                                    let i = idx.as_i64().ok_or_else(|| PyError::type_error("range indices must be integers or slices"))?;
+                                    let pos = if i < 0 { length + i } else { i };
+                                    if pos < 0 || pos >= length { return Err(PyError::IndexError("range object index out of range".to_string())); }
+                                    Ok(py_int(*start + *step * pos))
+                                }
+                            } else { Err(PyError::runtime_error("__getitem__ on non-range")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    _ => Err(PyError::attribute_error(format!("'range' object has no attribute '{}'", name))),
+                }
+            }
+            PyObject::RangeIter { current, stop, step } => {
+                match name {
+                    "__length_hint__" => {
+                        let remaining = if *step > 0 { stop.saturating_sub(*current).max(0) as i64 } else { current.saturating_sub(*stop).max(0) as i64 };
+                        Ok(py_int(remaining / step.abs() as i64))
+                    }
+                    _ => Err(PyError::attribute_error(format!("'range_iterator' object has no attribute '{}'", name))),
+                }
+            }
+            _ => Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", self.type_name(), name))),
+        }
+    }
+}
+
+impl ObjectAccess for PyObject {
+    fn get_attribute(&self, name: &str) -> PyResult<PyObjectRef> {
+        match self.get_attribute_impl(name) {
+            Err(_) if name == "__doc__" => Ok(py_none()),
+            other => other,
+        }
+    }
+
+    fn set_attribute(&mut self, name: &str, value: PyObjectRef) -> PyResult<()> {
+        match self {
+            PyObject::Instance { dict, typ } => {
+                // Check __slots__ restriction if defined on the type or its MRO
+                if let Some(slots) = get_instance_slots(typ) {
+                    if !slots.iter().any(|s| s == name) {
+                        let type_name = get_type_name_for_instance(typ);
+                        return Err(PyError::attribute_error(
+                            format!("'{}' object has no attribute '{}'", type_name, name)
+                        ));
+                    }
+                }
+                dict.insert_str(&name, value);
+                Ok(())
+            }
+            PyObject::Module { dict, .. } => {
+                dict.insert_str(&name, value);
+                Ok(())
+            }
+            PyObject::Type { dict, .. } => {
+                dict.insert_str(&name, value);
+                Ok(())
+            }
+            PyObject::Function(ref mut f) => {
+                f.dict.insert_str(&name, value);
+                Ok(())
+            }
+            PyObject::Dict(_) | PyObject::List(_) | PyObject::Tuple(_) | PyObject::Set(_) | PyObject::FrozenSet(_) => {
+                // Store attributes in a side dict (instance-like) for these built-in types
+                let _pd = match self {
+                    PyObject::Dict(d) => Some(d.clone()),
+                    _ => None,
+                };
+                Err(PyError::attribute_error(format!("cannot set attribute '{}' on '{}'", name, self.type_name())))
+            }
+            PyObject::Exception { cause, .. } if name == "__cause__" => {
+                *cause = Some(value);
+                Ok(())
+            }
+            PyObject::Exception { .. } | PyObject::ExceptionGroup { .. } => {
+                // No backing dict on these variants for __traceback__,
+                // __context__, __suppress_context__, __notes__, or custom
+                // attributes — but `except E as e: e.__traceback__ = tb` (and
+                // similar) is an extremely common idiom (contextlib,
+                // unittest, ...) that must not hard-crash just because we
+                // don't track those fields anywhere.
+                Ok(())
+            }
+            _ => Err(PyError::attribute_error(format!("cannot set attribute '{}' on '{}'", name, self.type_name()))),
+        }
+    }
+
+    fn del_attribute(&mut self, name: &str) -> PyResult<()> {
+        match self {
+            PyObject::Instance { dict, typ } => {
+                // Check __slots__ restriction if defined on the type or its MRO
+                if let Some(slots) = get_instance_slots(typ) {
+                    if !slots.iter().any(|s| s == name) {
+                        let type_name = get_type_name_for_instance(typ);
+                        return Err(PyError::attribute_error(
+                            format!("'{}' object has no attribute '{}'", type_name, name)
+                        ));
+                    }
+                }
+                dict.remove(name).ok_or_else(|| PyError::attribute_error(format!(
+                    "'{}' object has no attribute '{}'", self.type_name(), name
+                )))?;
+                Ok(())
+            }
+            PyObject::Module { dict, .. } => {
+                dict.remove(&interner::intern(name)).ok_or_else(|| PyError::attribute_error(format!("module has no attribute '{}'", name)))?;
+                Ok(())
+            }
+            PyObject::Type { dict, .. } => {
+                dict.remove(&interner::intern(name)).ok_or_else(|| PyError::attribute_error(format!("type has no attribute '{}'", name)))?;
+                Ok(())
+            }
+            _ => Err(PyError::attribute_error(format!(
+                "'{}' object has no attribute '{}'", self.type_name(), name
+            ))),
+        }
+    }
+}
+

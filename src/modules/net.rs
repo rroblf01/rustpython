@@ -535,6 +535,356 @@ pub fn create_html_entities_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
+// Moved here from object.rs (was under a "---- urllib module ----" banner
+// in the monolithic object.rs — see the file-splitting refactor's memory
+// entry for context).
+/// Create a response object for urlopen with a read() method.
+/// The response body bytes are stored in the instance dict under "_body".
+fn create_urlopen_response(body: Vec<u8>) -> PyObjectRef {
+    use std::collections::HashMap;
+
+    // Create the response type with a read() method
+    let mut type_dict = HashMap::new();
+    type_dict.insert("read".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "read".to_string(),
+        func: |args| {
+            if args.is_empty() {
+                return Err(PyError::type_error("read() missing argument"));
+            }
+            let body = args[0].borrow();
+            if let PyObject::Instance { dict, .. } = &*body {
+                if let Some(body_val) = dict.get("_body") {
+                    return Ok(body_val.clone());
+                }
+            }
+            Ok(PyObjectRef::imm(PyObject::Bytes(Vec::new())))
+        },
+    }));
+
+    let resp_type = PyObjectRef::new(PyObject::Type {
+        name: "HTTPResponse".to_string(),
+        dict: Box::new(str_map_to_typedict(type_dict)),
+        bases: vec![],
+        mro: vec![],
+    });
+
+    let mut instance_dict = AttrMap::new();
+    instance_dict.insert("_body".to_string(), PyObjectRef::imm(PyObject::Bytes(body)));
+    PyObjectRef::new(PyObject::Instance {
+        typ: resp_type,
+        dict: instance_dict,
+    })
+}
+
+pub fn create_urllib_request_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! request_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    request_func!("urlopen", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("urlopen() missing required argument 'url'"));
+        }
+        let url_str = args[0].str();
+
+        // Only support http:// URLs with a simple GET
+        if !url_str.starts_with("http://") {
+            return Err(PyError::type_error(format!("urlopen() only supports http:// URLs, got: {}", url_str)));
+        }
+
+        let rest = url_str.trim_start_matches("http://");
+        let (host_port, path) = match rest.find('/') {
+            Some(pos) => (&rest[..pos], &rest[pos..]),
+            None => (rest, "/"),
+        };
+
+        let (host, port) = if let Some(colon_pos) = host_port.find(':') {
+            (&host_port[..colon_pos], host_port[colon_pos+1..].parse::<u16>().unwrap_or(80))
+        } else {
+            (host_port, 80u16)
+        };
+
+        if host.is_empty() {
+            return Err(PyError::type_error("urlopen() invalid URL: empty host"));
+        }
+
+        // Connect via TcpStream
+        let addr = format!("{}:{}", host, port);
+        let stream = match std::net::TcpStream::connect(&addr) {
+            Ok(s) => s,
+            Err(e) => return Err(PyError::runtime_error(format!("urlopen() failed to connect: {}", e))),
+        };
+
+        // Send HTTP GET request
+        let request = format!("GET {} HTTP/1.0\r\nHost: {}\r\nConnection: close\r\n\r\n", path, host);
+        {
+            use std::io::Write;
+            if let Err(e) = (&stream).write_all(request.as_bytes()) {
+                return Err(PyError::runtime_error(format!("urlopen() write error: {}", e)));
+            }
+        }
+
+        // Read response
+        let mut response = Vec::new();
+        {
+            use std::io::Read;
+            if let Err(e) = (&stream).read_to_end(&mut response) {
+                return Err(PyError::runtime_error(format!("urlopen() read error: {}", e)));
+            }
+        }
+
+        // Parse HTTP response
+        let response_str = String::from_utf8_lossy(&response);
+        let body = if let Some(body_start) = response_str.find("\r\n\r\n") {
+            let header_end = body_start + 4;
+            if header_end < response.len() {
+                response[header_end..].to_vec()
+            } else {
+                Vec::new()
+            }
+        } else {
+            // No headers found, return raw response as body
+            response.clone()
+        };
+
+        Ok(create_urlopen_response(body))
+    });
+
+    d
+}
+
+/// Percent-encode a character (for quote)
+fn percent_encode_byte(byte: u8) -> String {
+    format!("%{:02X}", byte)
+}
+
+/// Percent-decode a string (for unquote). Routes through
+/// [`percent_decode_to_bytes`] and re-decodes as UTF-8 — decoding a char at
+/// a time (the previous approach) mangled multi-byte percent sequences:
+/// `%C3%A9` must become the single character 'é', not two mojibake chars
+/// from pushing each raw byte value as its own `char`.
+fn percent_decode(s: &str) -> String {
+    String::from_utf8_lossy(&percent_decode_to_bytes(s)).into_owned()
+}
+
+/// Check if a byte should be encoded in URL (for quote)
+fn needs_percent_encode(byte: u8, safe: &str) -> bool {
+    // Always safe: unreserved characters per RFC 3986
+    if byte.is_ascii_alphanumeric() {
+        return false;
+    }
+    // Also safe: these unreserved chars
+    if matches!(byte, b'_' | b'-' | b'.' | b'~') {
+        return false;
+    }
+    // Check user-provided safe chars
+    if safe.as_bytes().contains(&byte) {
+        return false;
+    }
+    true
+}
+
+/// Percent-decode into raw bytes (the primitive both `unquote`'s
+/// str-returning form and `unquote_to_bytes` build on) — decoding straight
+/// to `Vec<u8>` instead of `String` avoids mangling non-ASCII percent
+/// sequences a char at a time (e.g. `%C3%A9` must become the single
+/// UTF-8-decoded character 'é', not two separate mojibake chars).
+fn percent_decode_to_bytes(s: &str) -> Vec<u8> {
+    let bytes = s.as_bytes();
+    let mut result = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(hex) = std::str::from_utf8(&bytes[i + 1..i + 3]) {
+                if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                    result.push(byte);
+                    i += 3;
+                    continue;
+                }
+            }
+        }
+        result.push(bytes[i]);
+        i += 1;
+    }
+    result
+}
+
+pub fn create_urllib_parse_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! parse_func {
+        ($name:expr, $func:expr) => {
+            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+        };
+    }
+
+    // urlparse(url, scheme='', allow_fragments=True)
+    parse_func!("urlparse", |args| {
+        let url = if args.len() > 0 { args[0].str() } else { return Err(PyError::type_error("urlparse() missing required argument 'url'")); };
+        let scheme_default = if args.len() > 1 { args[1].str() } else { String::new() };
+
+        let mut scheme = scheme_default;
+        let mut netloc = String::new();
+        let mut params = String::new();
+        let mut query = String::new();
+        let mut fragment = String::new();
+        let mut path = String::new();
+
+        // Split fragment (allow_fragments defaults to true)
+        let allow_fragments = if args.len() > 2 { args[2].truthy() } else { true };
+        let remaining = if allow_fragments {
+            if let Some(pos) = url.find('#') {
+                fragment = url[pos+1..].to_string();
+                url[..pos].to_string()
+            } else {
+                url.clone()
+            }
+        } else {
+            url.clone()
+        };
+
+        // Split query
+        let remaining = if let Some(pos) = remaining.find('?') {
+            query = remaining[pos+1..].to_string();
+            remaining[..pos].to_string()
+        } else {
+            remaining
+        };
+
+        // Extract scheme
+        if let Some(pos) = remaining.find("://") {
+            scheme = remaining[..pos].to_string();
+            let after_scheme = &remaining[pos+3..];
+            // Extract netloc (host:port or host)
+            if let Some(slash_pos) = after_scheme.find('/') {
+                netloc = after_scheme[..slash_pos].to_string();
+                path = after_scheme[slash_pos..].to_string();
+            } else {
+                netloc = after_scheme.to_string();
+            }
+        } else {
+            path = remaining;
+        }
+
+        // Split params from path (last semicolon in path segment)
+        if let Some(pos) = path.rfind(';') {
+            params = path[pos+1..].to_string();
+            path = path[..pos].to_string();
+        }
+
+        // Create result type with scheme, netloc, path, params, query, fragment attributes
+        let type_dict = HashMap::new();
+        let parse_type = PyObjectRef::new(PyObject::Type {
+            name: "ParseResult".to_string(),
+            dict: Box::new(str_map_to_typedict(type_dict)),
+            bases: vec![],
+            mro: vec![],
+        });
+
+        let mut instance_dict = AttrMap::new();
+        instance_dict.insert("scheme".to_string(), py_str(&scheme));
+        instance_dict.insert("netloc".to_string(), py_str(&netloc));
+        instance_dict.insert("path".to_string(), py_str(&path));
+        instance_dict.insert("params".to_string(), py_str(&params));
+        instance_dict.insert("query".to_string(), py_str(&query));
+        instance_dict.insert("fragment".to_string(), py_str(&fragment));
+        Ok(PyObjectRef::new(PyObject::Instance {
+            typ: parse_type,
+            dict: instance_dict,
+        }))
+    });
+
+    // urlencode(query, doseq=False)
+    parse_func!("urlencode", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("urlencode() missing required argument 'query'"));
+        }
+        let _doseq = if args.len() > 1 { args[1].truthy() } else { false };
+
+        let obj = args[0].borrow();
+        let mut pairs: Vec<(String, String)> = Vec::new();
+
+        match &*obj {
+            PyObject::Dict(dict) => {
+                for (k, v) in dict.items() {
+                    let key = k.str();
+                    let val = v.str();
+                    pairs.push((key, val));
+                }
+            }
+            PyObject::List(items) | PyObject::Tuple(items) => {
+                for item in items {
+                    let item_ref = item.borrow();
+                    if let PyObject::Tuple(pair) = &*item_ref {
+                        if pair.len() >= 2 {
+                            let key = pair[0].str();
+                            let val = pair[1].str();
+                            pairs.push((key, val));
+                        }
+                    } else if let PyObject::List(pair) = &*item_ref {
+                        if pair.len() >= 2 {
+                            let key = pair[0].str();
+                            let val = pair[1].str();
+                            pairs.push((key, val));
+                        }
+                    } else {
+                        // Try to iterate
+                        let key = item.str();
+                        pairs.push((key, String::new()));
+                    }
+                }
+            }
+            _ => {
+                return Err(PyError::type_error("urlencode() argument must be dict, list of tuples, or list of lists"));
+            }
+        }
+
+        // Percent-encode both keys and values
+        let encoded: Vec<String> = pairs.into_iter().map(|(k, v)| {
+            let enc_key: String = k.bytes().map(|b| {
+                if needs_percent_encode(b, "") { percent_encode_byte(b) }
+                else { (b as char).to_string() }
+            }).collect::<Vec<_>>().concat();
+            let enc_val: String = v.bytes().map(|b| {
+                if needs_percent_encode(b, "") { percent_encode_byte(b) }
+                else { (b as char).to_string() }
+            }).collect::<Vec<_>>().concat();
+            format!("{}={}", enc_key, enc_val)
+        }).collect();
+
+        Ok(py_str(&encoded.join("&")))
+    });
+
+    // quote(string, safe='/')
+    parse_func!("quote", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("quote() missing required argument 'string'"));
+        }
+        let s = args[0].str();
+        let safe = if args.len() > 1 { args[1].str() } else { "/".to_string() };
+
+        let encoded: String = s.bytes().map(|b| {
+            if needs_percent_encode(b, &safe) { percent_encode_byte(b) }
+            else { (b as char).to_string() }
+        }).collect::<Vec<_>>().concat();
+
+        Ok(py_str(&encoded))
+    });
+
+    // unquote(string, encoding='utf-8', errors='replace')
+    parse_func!("unquote", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("unquote() missing required argument 'string'"));
+        }
+        let s = args[0].str();
+        Ok(py_str(&percent_decode(&s)))
+    });
+
+    d
+}
+
 pub fn create_urllib_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     d.insert_str("request", create_module("urllib.request", create_urllib_request_dict()));

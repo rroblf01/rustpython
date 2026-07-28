@@ -1,6 +1,90 @@
 use crate::object::*;
 use std::collections::HashMap;
 
+// ---- logging module ----
+// basicConfig(level) stores level; getLogger(name) returns dict-like with
+// .info/.debug/.warning/.error methods. Moved here from object.rs (was
+// under a "---- logging module ----" banner in the monolithic object.rs —
+// see the file-splitting refactor's memory entry for context).
+thread_local! {
+    pub static LOG_LEVEL: std::cell::RefCell<String> = std::cell::RefCell::new("WARNING".to_string());
+}
+
+pub fn logging_debug(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() < 2 { return Ok(py_none()); }
+    let level = LOG_LEVEL.with(|l| l.borrow().clone());
+    if level != "DEBUG" && level != "INFO" && level != "WARNING" && level != "ERROR" && level != "CRITICAL" {
+        return Ok(py_none());
+    }
+    let _msg = args[1].str();
+    let _logger_name = {
+        let borrowed = args[0].borrow();
+        if let PyObject::Instance { dict, .. } = &*borrowed {
+            dict.get("name").map(|n| n.str()).unwrap_or_default()
+        } else {
+            String::new()
+        }
+    };
+    Ok(py_none())
+}
+
+pub fn logging_info(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() < 2 { return Ok(py_none()); }
+    let level = LOG_LEVEL.with(|l| l.borrow().clone());
+    if level != "INFO" && level != "WARNING" && level != "ERROR" && level != "CRITICAL" {
+        return Ok(py_none());
+    }
+    let msg = args[1].str();
+    let logger_name = {
+        let borrowed = args[0].borrow();
+        if let PyObject::Instance { dict, .. } = &*borrowed {
+            dict.get("name").map(|n| n.str()).unwrap_or_default()
+        } else {
+            String::new()
+        }
+    };
+    eprintln!("INFO:{}:{}", logger_name, msg);
+    Ok(py_none())
+}
+
+pub fn logging_warning(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() < 2 { return Ok(py_none()); }
+    let level = LOG_LEVEL.with(|l| l.borrow().clone());
+    if level != "WARNING" && level != "ERROR" && level != "CRITICAL" {
+        return Ok(py_none());
+    }
+    let msg = args[1].str();
+    let logger_name = {
+        let borrowed = args[0].borrow();
+        if let PyObject::Instance { dict, .. } = &*borrowed {
+            dict.get("name").map(|n| n.str()).unwrap_or_default()
+        } else {
+            String::new()
+        }
+    };
+    eprintln!("WARNING:{}:{}", logger_name, msg);
+    Ok(py_none())
+}
+
+pub fn logging_error(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() < 2 { return Ok(py_none()); }
+    let level = LOG_LEVEL.with(|l| l.borrow().clone());
+    if level != "ERROR" && level != "CRITICAL" {
+        return Ok(py_none());
+    }
+    let msg = args[1].str();
+    let logger_name = {
+        let borrowed = args[0].borrow();
+        if let PyObject::Instance { dict, .. } = &*borrowed {
+            dict.get("name").map(|n| n.str()).unwrap_or_default()
+        } else {
+            String::new()
+        }
+    };
+    eprintln!("ERROR:{}:{}", logger_name, msg);
+    Ok(py_none())
+}
+
 /// Python's `re` treats a `{` that doesn't form a valid `{n}`/`{n,}`/`{n,m}`
 /// counted-repetition quantifier as a literal character; Rust's `regex`
 /// crate instead rejects it as a parse error ("repetition operator missing

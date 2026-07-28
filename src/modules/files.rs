@@ -5,6 +5,13 @@ use std::rc::Rc;
 use std::cell::RefCell;
 use num_traits::ToPrimitive;
 
+// Moved here from object.rs (was under a "---- pathlib module ----" banner in
+// the monolithic object.rs, alongside other misplaced stdlib-module code —
+// see the file-splitting refactor's memory entry for context).
+thread_local! {
+    pub static PATH_TYPE: std::cell::RefCell<Option<PyObjectRef>> = std::cell::RefCell::new(None);
+}
+
 pub fn create_glob_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! glob_func {
@@ -814,6 +821,229 @@ pub fn create_pathlib_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
+// Moved here from object.rs (was under a "---- zipfile module ----" banner
+// in the monolithic object.rs — see the file-splitting refactor's memory
+// entry for context).
+// Helper: extract ZIP entry data from an Instance's dict
+fn zipfile_get_entry(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    let self_obj = &args[0];
+    let name = args[1].borrow().str();
+    let (entries, data) = match &*self_obj.borrow() {
+        PyObject::Instance { dict, .. } => {
+            let entries = dict.get("_entries").ok_or_else(|| PyError::runtime_error("ZipFile instance corrupted: missing _entries"))?.clone();
+            let data = dict.get("_data").ok_or_else(|| PyError::runtime_error("ZipFile instance corrupted: missing _data"))?.clone();
+            (entries, data)
+        }
+        _ => return Err(PyError::runtime_error("ZipFile method called on non-instance")),
+    };
+
+    let entries_list = match &*entries.borrow() {
+        PyObject::List(items) => items.clone(),
+        _ => return Err(PyError::runtime_error("ZipFile entries corrupted")),
+    };
+
+    let data_bytes = match &*data.borrow() {
+        PyObject::Bytes(b) => b.clone(),
+        _ => return Err(PyError::runtime_error("ZipFile data corrupted")),
+    };
+
+    for entry in &entries_list {
+        let entry_borrow = entry.borrow();
+        let entry_list = match &*entry_borrow {
+            PyObject::List(items) => items,
+            _ => continue,
+        };
+        if entry_list.len() < 5 { continue; }
+        let entry_name = entry_list[0].borrow().str();
+        if entry_name != name {
+            continue;
+        }
+        let data_offset = match entry_list[1].as_i64() { Some(n) => n as usize, None => continue };
+        let compressed_size = match entry_list[2].as_i64() { Some(n) => n as usize, None => continue };
+        if data_offset + compressed_size > data_bytes.len() {
+            return Err(PyError::runtime_error("ZipFile: data truncated in archive"));
+        }
+        let raw = data_bytes[data_offset..data_offset + compressed_size].to_vec();
+        return Ok(PyObjectRef::new(PyObject::Bytes(raw)));
+    }
+
+    Err(PyError::key_error(format!("File not found in zip: '{}'", name)))
+}
+
+fn zipfile_namelist(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() {
+        return Err(PyError::type_error("namelist() requires self"));
+    }
+    match &*args[0].borrow() {
+        PyObject::Instance { dict, .. } => {
+            if let Some(names) = dict.get("_names") {
+                return Ok(names.clone());
+            }
+            Err(PyError::runtime_error("ZipFile instance corrupted: missing _names"))
+        }
+        _ => Err(PyError::runtime_error("namelist() called on non-instance")),
+    }
+}
+
+fn zipfile_read(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() < 2 {
+        return Err(PyError::type_error("read() takes exactly one argument (name)"));
+    }
+    zipfile_get_entry(args)
+}
+
+fn zipfile_extract(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() < 2 {
+        return Err(PyError::type_error("extract() takes exactly one argument (name)"));
+    }
+    zipfile_get_entry(args)
+}
+
+fn zipfile_infolist(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    let self_obj = &args[0];
+    let entries = match &*self_obj.borrow() {
+        PyObject::Instance { dict, .. } => {
+            dict.get("_entries").ok_or_else(|| PyError::runtime_error("ZipFile instance corrupted"))?.clone()
+        }
+        _ => return Err(PyError::runtime_error("infolist() called on non-instance")),
+    };
+
+    let entries_list = match &*entries.borrow() {
+        PyObject::List(items) => items.clone(),
+        _ => return Err(PyError::runtime_error("ZipFile entries corrupted")),
+    };
+
+    let infos: Vec<PyObjectRef> = entries_list.iter().map(|entry| {
+        let entry_borrow = entry.borrow();
+        let entry_list = match &*entry_borrow {
+            PyObject::List(items) => items,
+            _ => return py_none(),
+        };
+        let mut info_dict = AttrMap::new();
+        if entry_list.len() >= 1 {
+            info_dict.insert("filename".to_string(), entry_list[0].clone());
+        }
+        if entry_list.len() >= 4 {
+            info_dict.insert("file_size".to_string(), entry_list[3].clone());
+        }
+        if entry_list.len() >= 3 {
+            info_dict.insert("compress_size".to_string(), entry_list[2].clone());
+        }
+        PyObjectRef::new(PyObject::Instance {
+            typ: PyObjectRef::new(PyObject::Module {
+                name: "zipfile.ZipInfo".to_string(),
+                dict: Box::new(TypeDict::default()),
+            }),
+            dict: info_dict,
+        })
+    }).collect();
+
+    Ok(py_list(infos))
+}
+
+pub fn zipfile_constructor(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() < 1 || args.len() > 2 {
+        return Err(PyError::type_error("ZipFile() takes 1-2 arguments (filename, [mode])"));
+    }
+    let filename = args[0].borrow().str();
+    let mode = if args.len() > 1 { args[1].borrow().str() } else { "r".to_string() };
+    if mode != "r" {
+        return Err(PyError::value_error("ZipFile only supports mode='r'"));
+    }
+
+    // Read entire file into memory
+    let archive = match std::fs::read(&filename) {
+        Ok(d) => d,
+        Err(e) => return Err(PyError::runtime_error(format!("Cannot open zip file '{}': {}", filename, e))),
+    };
+
+    // Scan for local file headers (signature 0x04034b50)
+    let archive_len = archive.len();
+    let mut offset = 0usize;
+    // entries stored as Vec of Python lists: [name, data_offset, compressed_size, uncompressed_size, compress_method]
+    let mut names: Vec<PyObjectRef> = Vec::new();
+    let mut entries: Vec<PyObjectRef> = Vec::new();
+
+    loop {
+        if offset + 30 > archive_len {
+            break;
+        }
+        let sig = u32::from_le_bytes([
+            archive[offset],
+            archive[offset + 1],
+            archive[offset + 2],
+            archive[offset + 3],
+        ]);
+        if sig != 0x04034b50 {
+            // Not a local file header — reached central directory or end
+            break;
+        }
+
+        let compressed_size = u32::from_le_bytes([
+            archive[offset + 18], archive[offset + 19],
+            archive[offset + 20], archive[offset + 21],
+        ]) as usize;
+        let uncompressed_size = u32::from_le_bytes([
+            archive[offset + 22], archive[offset + 23],
+            archive[offset + 24], archive[offset + 25],
+        ]) as usize;
+        let filename_length = u16::from_le_bytes([archive[offset + 26], archive[offset + 27]]) as usize;
+        let extra_field_length = u16::from_le_bytes([archive[offset + 28], archive[offset + 29]]) as usize;
+
+        let name_start = offset + 30;
+        let data_start = name_start + filename_length + extra_field_length;
+
+        let name = if filename_length > 0 && name_start + filename_length <= archive_len {
+            String::from_utf8_lossy(&archive[name_start..name_start + filename_length]).to_string()
+        } else {
+            String::new()
+        };
+
+        names.push(py_str(&name));
+        entries.push(PyObjectRef::new(PyObject::List(vec![
+            py_str(&name),
+            py_int(data_start as i64),
+            py_int(compressed_size as i64),
+            py_int(uncompressed_size as i64),
+            // compress_method stored separately in entries_meta if needed
+        ])));
+
+        offset = data_start + compressed_size;
+    }
+
+    let mut inst_dict = AttrMap::new();
+    inst_dict.insert("filename".to_string(), py_str(&filename));
+    inst_dict.insert("_data".to_string(), PyObjectRef::new(PyObject::Bytes(archive)));
+    inst_dict.insert("_names".to_string(), py_list(names));
+    inst_dict.insert("_entries".to_string(), py_list(entries));
+
+    // Attach methods as BuiltinFunctions (will be wrapped as BuiltinMethod with self_obj)
+    inst_dict.insert("namelist".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "namelist".to_string(),
+        func: zipfile_namelist,
+    }));
+    inst_dict.insert("read".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "read".to_string(),
+        func: zipfile_read,
+    }));
+    inst_dict.insert("extract".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "extract".to_string(),
+        func: zipfile_extract,
+    }));
+    inst_dict.insert("infolist".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "infolist".to_string(),
+        func: zipfile_infolist,
+    }));
+
+    Ok(PyObjectRef::new(PyObject::Instance {
+        typ: PyObjectRef::new(PyObject::Module {
+            name: "zipfile.ZipFile".to_string(),
+            dict: Box::new(TypeDict::default()),
+        }),
+        dict: inst_dict,
+    }))
+}
+
 pub fn create_zipfile_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     d.insert_str("ZipFile", PyObjectRef::new(PyObject::BuiltinFunction {
@@ -821,6 +1051,234 @@ pub fn create_zipfile_dict() -> HashMap<String, PyObjectRef> {
         func: zipfile_constructor,
     }));
     d
+}
+
+// Moved here from object.rs (was under a "=== SHELVE MODULE ===" banner in
+// the monolithic object.rs — see the file-splitting refactor's memory
+// entry for context).
+// Shelf class backed by a dict. open(filename) -> Shelf instance.
+
+/// Extract the _data dict from a Shelf Instance (args[0]).
+fn shelf_get_data(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() {
+        return Err(PyError::type_error("method requires self"));
+    }
+    match &*args[0].borrow() {
+        PyObject::Instance { dict, .. } => {
+            match dict.get("_data") {
+                Some(data) => Ok(data.clone()),
+                None => Err(PyError::runtime_error("Shelf instance corrupted: missing _data")),
+            }
+        }
+        _ => Err(PyError::type_error("expected Shelf instance")),
+    }
+}
+
+fn shelf_close(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    let _ = args;
+    Ok(py_none())
+}
+
+fn shelf_sync(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    let _ = args;
+    Ok(py_none())
+}
+
+fn shelf_get(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    // args[0] = self, args[1] = key, args[2] = default (optional)
+    if args.len() < 2 {
+        return Err(PyError::type_error("get() takes at least 2 arguments (self, key)"));
+    }
+    let data = shelf_get_data(args)?;
+    let key = args[1].str();
+    let data_ref = data.borrow();
+    if let PyObject::Dict(ref d) = &*data_ref {
+        let py_key = py_str(&key);
+        match d.get(&py_key)? {
+            Some(val) => Ok(val),
+            None => {
+                if args.len() > 2 {
+                    Ok(args[2].clone())
+                } else {
+                    Ok(py_none())
+                }
+            }
+        }
+    } else {
+        Ok(py_none())
+    }
+}
+
+fn shelf_keys(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    let data = shelf_get_data(args)?;
+    let data_ref = data.borrow();
+    if let PyObject::Dict(ref d) = &*data_ref {
+        let ks = d.keys();
+        Ok(PyObjectRef::new(PyObject::List(ks)))
+    } else {
+        Ok(PyObjectRef::new(PyObject::List(vec![])))
+    }
+}
+
+fn shelf_values(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    let data = shelf_get_data(args)?;
+    let data_ref = data.borrow();
+    if let PyObject::Dict(ref d) = &*data_ref {
+        let vs = d.values();
+        Ok(PyObjectRef::new(PyObject::List(vs)))
+    } else {
+        Ok(PyObjectRef::new(PyObject::List(vec![])))
+    }
+}
+
+fn shelf_items(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    let data = shelf_get_data(args)?;
+    let data_ref = data.borrow();
+    if let PyObject::Dict(ref d) = &*data_ref {
+        let pairs: Vec<PyObjectRef> = d.items().into_iter().map(|(k, v)| {
+            PyObjectRef::new(PyObject::Tuple(vec![k, v]))
+        }).collect();
+        Ok(PyObjectRef::new(PyObject::List(pairs)))
+    } else {
+        Ok(PyObjectRef::new(PyObject::List(vec![])))
+    }
+}
+
+// __len__(self) -> int (for len())
+fn shelf_len(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    let data = shelf_get_data(args)?;
+    let data_ref = data.borrow();
+    if let PyObject::Dict(ref d) = &*data_ref {
+        Ok(py_int(d.len() as i64))
+    } else {
+        Ok(py_int(0))
+    }
+}
+
+// __contains__(self, key) -> bool (for 'key in shelf')
+fn shelf_contains(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() < 2 {
+        return Err(PyError::type_error("__contains__() takes at least 2 arguments (self, key)"));
+    }
+    let data = shelf_get_data(args)?;
+    let key = args[1].str();
+    let data_ref = data.borrow();
+    if let PyObject::Dict(ref d) = &*data_ref {
+        let py_key = py_str(&key);
+        Ok(py_bool(d.contains(&py_key)?))
+    } else {
+        Ok(py_bool(false))
+    }
+}
+
+// __repr__(self) -> str
+fn shelf_repr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    let data = shelf_get_data(args)?;
+    let data_ref = data.borrow();
+    if let PyObject::Dict(ref d) = &*data_ref {
+        Ok(py_str(&format!("Shelf({} items)", d.len())))
+    } else {
+        Ok(py_str("Shelf(0 items)"))
+    }
+}
+
+// __getitem__(self, key) -> value (for shelf[key])
+fn shelf_getitem(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() < 2 {
+        return Err(PyError::type_error("__getitem__() takes at least 2 arguments (self, key)"));
+    }
+    let data = shelf_get_data(args)?;
+    let key = args[1].str();
+    let data_ref = data.borrow();
+    if let PyObject::Dict(ref d) = &*data_ref {
+        let py_key = py_str(&key);
+        match d.get(&py_key)? {
+            Some(val) => Ok(val),
+            None => Err(PyError::key_error(format!("'{}'", key))),
+        }
+    } else {
+        Err(PyError::key_error(format!("'{}'", key)))
+    }
+}
+
+// __setitem__(self, key, value) (for shelf[key] = value)
+fn shelf_setitem(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() < 3 {
+        return Err(PyError::type_error("__setitem__() takes at least 3 arguments (self, key, value)"));
+    }
+    let data = shelf_get_data(args)?;
+    let key = args[1].str();
+    {
+        let mut data_mut = data.borrow_mut();
+        if let PyObject::Dict(ref mut d) = &mut *data_mut {
+            d.set(py_str(&key), args[2].clone())?;
+        }
+    }
+    Ok(py_none())
+}
+
+// __delitem__(self, key) (for del shelf[key])
+fn shelf_delitem(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() < 2 {
+        return Err(PyError::type_error("__delitem__() takes at least 2 arguments (self, key)"));
+    }
+    let data = shelf_get_data(args)?;
+    let key = args[1].str();
+    {
+        let mut data_mut = data.borrow_mut();
+        if let PyObject::Dict(ref mut d) = &mut *data_mut {
+            let py_key = py_str(&key);
+            d.remove(&py_key)?;
+        }
+    }
+    Ok(py_none())
+}
+
+pub fn shelf_open(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() {
+        return Err(PyError::type_error("open() takes at least 1 argument (filename)"));
+    }
+    let filename = args[0].str();
+
+    // Internal data dict
+    let data_dict = py_dict();
+
+    // Instance dict with field and methods
+    let mut inst_dict = AttrMap::new();
+    inst_dict.insert("_data".to_string(), data_dict);
+    inst_dict.insert("filename".to_string(), py_str(&filename));
+
+    inst_dict.insert("close".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "close".to_string(), func: shelf_close }));
+    inst_dict.insert("sync".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "sync".to_string(), func: shelf_sync }));
+    inst_dict.insert("get".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "get".to_string(), func: shelf_get }));
+    inst_dict.insert("keys".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "keys".to_string(), func: shelf_keys }));
+    inst_dict.insert("values".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "values".to_string(), func: shelf_values }));
+    inst_dict.insert("items".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "items".to_string(), func: shelf_items }));
+
+    // Type dict with dunder methods (used by py_getitem/py_setitem dispatch)
+    let mut type_dict = HashMap::new();
+    type_dict.insert("__getitem__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "__getitem__".to_string(), func: shelf_getitem }));
+    type_dict.insert("__setitem__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "__setitem__".to_string(), func: shelf_setitem }));
+    type_dict.insert("__delitem__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "__delitem__".to_string(), func: shelf_delitem }));
+    type_dict.insert("__len__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "__len__".to_string(), func: shelf_len }));
+    type_dict.insert("__contains__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "__contains__".to_string(), func: shelf_contains }));
+    type_dict.insert("__repr__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: "__repr__".to_string(), func: shelf_repr }));
+
+    // Build Shelf type
+    let shelf_type = PyObjectRef::new(PyObject::Type {
+        name: "Shelf".to_string(),
+        dict: Box::new(str_map_to_typedict(type_dict)),
+        bases: vec![],
+        // MRO includes self so __getitem__ lookup works
+        mro: vec![],
+    });
+
+    let instance = PyObjectRef::new(PyObject::Instance {
+        typ: shelf_type,
+        dict: inst_dict,
+    });
+
+    Ok(instance)
 }
 
 pub fn create_shelve_dict() -> HashMap<String, PyObjectRef> {
