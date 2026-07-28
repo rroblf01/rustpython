@@ -787,25 +787,41 @@ impl VirtualMachine {
           // Native smtplib module (SMTP stub)
           modules.insert_str("smtplib", create_module("smtplib", create_smtplib_dict()));
 
-          // Native html module (escape/unescape)
-          let html_mod = create_module("html", create_html_dict());
-          modules.insert_str("html", html_mod.clone());
-
-          // Native html.entities module (html5 entity map)
-          let html_entities_mod = create_module("html.entities", create_html_entities_dict());
-          // Wire entities as a submodule attribute of the html parent module
-          if let PyObject::Module { dict, .. } = &mut *html_mod.borrow_mut() {
-              dict.insert_str("entities", html_entities_mod.clone());
-          }
-          modules.insert_str("html.entities", html_entities_mod);
-
-          // Native html.parser module (HTMLParser stub)
-          let html_parser_mod = create_module("html.parser", create_html_parser_dict());
-          // Wire parser as a submodule attribute of the html parent module
-          if let PyObject::Module { dict, .. } = &mut *html_mod.borrow_mut() {
-              dict.insert_str("parser", html_parser_mod.clone());
-          }
-          modules.insert_str("html.parser", html_parser_mod);
+          // Native html/html.entities/html.parser — DISABLED: `html.parser`
+          // was a near-empty stub (no real tokenizer at all — `feed()` just
+          // accumulated raw text verbatim, none of `handle_starttag`/
+          // `handle_endtag`/`handle_data`/etc. were ever called), and built
+          // as a `PyObject::BuiltinFunction` rather than a real
+          // `PyObject::Type`, so `class EventCollector(html.parser.
+          // HTMLParser): ...` (real subclassing, overriding those handler
+          // methods — CPython's own `test_htmlparser.py`'s entire approach)
+          // couldn't inherit anything from it at all (`AttributeError:
+          // 'EventCollector' object has no attribute 'feed'`). Real
+          // CPython's `html`/`html.entities`/`html.parser` are pure Python
+          // (plus `_markupbase`, `html.parser`'s shared tokenizer-support
+          // base) — vendored verbatim from a real CPython 3.14 install
+          // rather than reimplemented, same "vendor as pure-Python Lib/
+          // module" pattern as `unittest`/`doctest`/`email` above. Resolved
+          // through the normal file-based import path instead —
+          // `Lib/html/__init__.py` (escape/unescape), `Lib/html/
+          // entities.py` (html5/name2codepoint/codepoint2name data),
+          // `Lib/html/parser.py` (the real HTMLParser), `Lib/
+          // _markupbase.py`. `create_html_dict`/`create_html_entities_dict`/
+          // `create_html_parser_dict` (modules/net.rs, modules/text.rs) are
+          // now dead code, kept only in case `Lib/html/` needs to be
+          // reverted.
+          // let html_mod = create_module("html", create_html_dict());
+          // modules.insert_str("html", html_mod.clone());
+          // let html_entities_mod = create_module("html.entities", create_html_entities_dict());
+          // if let PyObject::Module { dict, .. } = &mut *html_mod.borrow_mut() {
+          //     dict.insert_str("entities", html_entities_mod.clone());
+          // }
+          // modules.insert_str("html.entities", html_entities_mod);
+          // let html_parser_mod = create_module("html.parser", create_html_parser_dict());
+          // if let PyObject::Module { dict, .. } = &mut *html_mod.borrow_mut() {
+          //     dict.insert_str("parser", html_parser_mod.clone());
+          // }
+          // modules.insert_str("html.parser", html_parser_mod);
 
           // Native unittest module — DISABLED: was a complete no-op stub
           // (every assertX method silently did nothing, `main()` never

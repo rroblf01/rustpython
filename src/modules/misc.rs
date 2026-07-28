@@ -200,89 +200,245 @@ pub(crate) fn translate_python_replacement(repl: &str) -> String {
 }
 
 fn compile_python_regex(pattern: &str) -> Result<fancy_regex::Regex, fancy_regex::Error> {
+    compile_python_regex_flags(pattern, 0)
+}
+
+/// Same as `compile_python_regex`, but applies `re.compile(pattern, flags)`'s
+/// `flags` argument — previously accepted and stored on `CompiledRegex` (for
+/// `.flags` attribute introspection) but never actually influenced
+/// compilation at all, so e.g. `re.IGNORECASE`/`re.VERBOSE`/`re.MULTILINE`/
+/// `re.DOTALL` were all silently no-ops. Real trigger: `html.parser`'s own
+/// `locatetagend = re.compile(r"""...""", re.VERBOSE)` — a pattern that's
+/// entirely unparseable as-is without VERBOSE's whitespace/comment
+/// stripping (every space and `# comment` in the triple-quoted pattern is
+/// otherwise literal regex syntax). Translated to the regex engine's own
+/// inline flag group (`(?ismx)...`) prepended to the pattern — `regex`/
+/// `fancy_regex`'s own flag semantics for `i`/`s`/`m`/`x` match Python's
+/// IGNORECASE/DOTALL/MULTILINE/VERBOSE closely enough for real-world use.
+fn compile_python_regex_flags(pattern: &str, flags: i32) -> Result<fancy_regex::Regex, fancy_regex::Error> {
     let pattern = escape_loose_braces(pattern);
     let pattern = escape_leading_bracket_in_class(&pattern);
+    let mut inline = String::new();
+    if flags & 2 != 0 { inline.push('i'); }   // IGNORECASE
+    if flags & 16 != 0 { inline.push('s'); }  // DOTALL
+    if flags & 8 != 0 { inline.push('m'); }   // MULTILINE
+    if flags & 64 != 0 { inline.push('x'); }  // VERBOSE
+    let pattern = if inline.is_empty() { pattern } else { format!("(?{}){}", inline, pattern) };
     fancy_regex::Regex::new(&pattern)
 }
 
-/// Build a re.Match object with group(), groups(), start(), end(), span() methods.
-/// Returns None if the regex didn't match.
-fn make_match_object(re_match: Option<fancy_regex::Match<'_>>, _num_groups: usize) -> PyObjectRef {
-    match re_match {
-        Some(m) => {
-            let start_pos = m.start();
-            let end_pos = m.end();
-            let text = m.as_str().to_string();
+/// Resolve a `group()`/`start()`/`end()` group argument (an int index, OR a
+/// string/name — real `re.Match` accepts both) against the match's stored
+/// `_group_names` dict (name -> 1-based index), returning a 0-based index
+/// into `_starts`/`_ends`/`_groups_text` (0 = whole match). Returns `None`
+/// for a name that doesn't exist (caller raises `IndexError`, matching
+/// real CPython's `no such group`).
+fn resolve_group_arg(obj: &PyObjectRef, arg: Option<&PyObjectRef>) -> Option<usize> {
+    match arg {
+        None => Some(0),
+        Some(a) => {
+            let b = a.borrow();
+            match &*b {
+                PyObject::Str(name) => {
+                    let name = name.clone();
+                    drop(b);
+                    let names = obj.borrow().get_attribute("_group_names").ok()?;
+                    let names_b = names.borrow();
+                    if let PyObject::Dict(d) = &*names_b {
+                        d.get(&py_str(&name)).ok().flatten().and_then(|v| v.as_i64()).map(|i| i as usize)
+                    } else {
+                        None
+                    }
+                }
+                _ => {
+                    drop(b);
+                    a.as_i64().map(|i| i as usize)
+                }
+            }
+        }
+    }
+}
+
+/// Build a re.Match object with group(), groups(), groupdict(), start(),
+/// end(), span() methods — `caps` carries ALL capture groups (not just the
+/// whole match), so `m.group(1)`/`m.group('name')` etc. work: previously
+/// this only ever stored the whole-match text (`_groups` was hardcoded to
+/// an empty tuple, `group()` ignored any index/name argument entirely and
+/// always returned the whole match) — real trigger: `html.unescape`'s own
+/// `_replace_charref(m)` calling `m.group(1)`, and more broadly
+/// `html.parser`/`_markupbase`'s tokenizer, which relies on named/indexed
+/// groups throughout (`tagfind_tolerant`, `attrfind_tolerant`, etc.).
+/// Returns `py_none()` if the regex didn't match.
+pub(crate) fn make_match_object(re: &fancy_regex::Regex, caps: Option<fancy_regex::Captures<'_>>) -> PyObjectRef {
+    match caps {
+        Some(caps) => {
+            let whole = caps.get(0).unwrap();
+            let start_pos = whole.start();
+            let end_pos = whole.end();
+            let text = whole.as_str().to_string();
+
+            // Per-group text/start/end (index 0 = whole match, matching
+            // `_starts`/`_ends`/`_groups_text`'s indexing below) plus a
+            // name->index map for `capture_names()`'s named groups.
+            let n_groups = caps.len();
+            let mut groups_text: Vec<PyObjectRef> = Vec::with_capacity(n_groups);
+            let mut starts: Vec<PyObjectRef> = Vec::with_capacity(n_groups);
+            let mut ends: Vec<PyObjectRef> = Vec::with_capacity(n_groups);
+            for i in 0..n_groups {
+                match caps.get(i) {
+                    Some(g) => {
+                        groups_text.push(py_str(g.as_str()));
+                        starts.push(py_int(g.start() as i64));
+                        ends.push(py_int(g.end() as i64));
+                    }
+                    None => {
+                        groups_text.push(py_none());
+                        starts.push(py_int(-1));
+                        ends.push(py_int(-1));
+                    }
+                }
+            }
+            let mut name_to_index = crate::object::PyDict::new();
+            for (i, name) in re.capture_names().enumerate() {
+                if let Some(name) = name {
+                    let _ = name_to_index.set(py_str(name), py_int(i as i64));
+                }
+            }
 
             let mut type_dict = HashMap::new();
 
-            // group() — returns the matched text
+            // group([n_or_name, ...]) — with no args, the whole match; with
+            // one arg, that group's text (`None` if the group didn't
+            // participate, matching real `re.Match.group`); with multiple
+            // args, a tuple of each. Raises IndexError for an out-of-range
+            // index or unknown name, matching real CPython.
             type_dict.insert_str("group", PyObjectRef::new(PyObject::BuiltinFunction {
                 name: "group".to_string(),
                 func: |args| {
-                    let text_attr = args[0].borrow().get_attribute("_text").unwrap_or_else(|_| py_str(""));
-                    Ok(text_attr)
+                    let self_obj = &args[0];
+                    let group_texts = self_obj.borrow().get_attribute("_groups_text").unwrap_or_else(|_| py_tuple(vec![]));
+                    let fetch_one = |arg: Option<&PyObjectRef>| -> PyResult<PyObjectRef> {
+                        let idx = resolve_group_arg(self_obj, arg)
+                            .ok_or_else(|| PyError::IndexError("no such group".to_string()))?;
+                        if let PyObject::Tuple(items) = &*group_texts.borrow() {
+                            items.get(idx).cloned().ok_or_else(|| PyError::IndexError("no such group".to_string()))
+                        } else {
+                            Err(PyError::IndexError("no such group".to_string()))
+                        }
+                    };
+                    if args.len() <= 1 {
+                        fetch_one(None)
+                    } else if args.len() == 2 {
+                        fetch_one(Some(&args[1]))
+                    } else {
+                        let results: PyResult<Vec<PyObjectRef>> = args[1..].iter().map(|a| fetch_one(Some(a))).collect();
+                        Ok(py_tuple(results?))
+                    }
                 },
             }));
 
-            // groups() — returns tuple of captured groups (empty tuple for no captures)
+            // groups(default=None) — tuple of ALL captured groups (1..N,
+            // excluding the whole match at index 0), substituting `default`
+            // for any group that didn't participate (None otherwise).
             type_dict.insert_str("groups", PyObjectRef::new(PyObject::BuiltinFunction {
                 name: "groups".to_string(),
                 func: |args| {
-                    let groups_attr = args[0].borrow().get_attribute("_groups").unwrap_or_else(|_| py_tuple(vec![]));
-                    Ok(groups_attr)
+                    let default = args.get(1).cloned().unwrap_or_else(py_none);
+                    let group_texts = args[0].borrow().get_attribute("_groups_text").unwrap_or_else(|_| py_tuple(vec![]));
+                    let result = if let PyObject::Tuple(items) = &*group_texts.borrow() {
+                        let rest: Vec<PyObjectRef> = items.iter().skip(1).map(|v| {
+                            if matches!(&*v.borrow(), PyObject::None) { default.clone() } else { v.clone() }
+                        }).collect();
+                        Ok(py_tuple(rest))
+                    } else {
+                        Ok(py_tuple(vec![]))
+                    };
+                    result
                 },
             }));
 
-            // start() — returns start position
+            // groupdict(default=None) — {name: value} for every NAMED group.
+            type_dict.insert_str("groupdict", PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "groupdict".to_string(),
+                func: |args| {
+                    let default = args.get(1).cloned().unwrap_or_else(py_none);
+                    let names = args[0].borrow().get_attribute("_group_names").unwrap_or_else(|_| PyObjectRef::new(PyObject::Dict(Box::new(crate::object::PyDict::new()))));
+                    let group_texts = args[0].borrow().get_attribute("_groups_text").unwrap_or_else(|_| py_tuple(vec![]));
+                    let mut result = crate::object::PyDict::new();
+                    if let (PyObject::Dict(names_d), PyObject::Tuple(items)) = (&*names.borrow(), &*group_texts.borrow()) {
+                        for (k, v) in names_d.iter() {
+                            let idx = v.as_i64().unwrap_or(0) as usize;
+                            let val = items.get(idx).cloned().unwrap_or_else(py_none);
+                            let val = if matches!(&*val.borrow(), PyObject::None) { default.clone() } else { val };
+                            let _ = result.set(k.clone(), val);
+                        }
+                    }
+                    Ok(PyObjectRef::new(PyObject::Dict(Box::new(result))))
+                },
+            }));
+
+            // start([n_or_name]) — start position of the whole match or a
+            // specific group (-1 if that group didn't participate).
             type_dict.insert_str("start", PyObjectRef::new(PyObject::BuiltinFunction {
                 name: "start".to_string(),
                 func: |args| {
-                    let start_attr = args[0].borrow().get_attribute("_start").unwrap_or(py_int(0));
-                    Ok(start_attr)
+                    let self_obj = &args[0];
+                    let idx = resolve_group_arg(self_obj, args.get(1)).ok_or_else(|| PyError::IndexError("no such group".to_string()))?;
+                    let starts = self_obj.borrow().get_attribute("_starts").unwrap_or_else(|_| py_tuple(vec![]));
+                    let result = if let PyObject::Tuple(items) = &*starts.borrow() {
+                        items.get(idx).cloned().ok_or_else(|| PyError::IndexError("no such group".to_string()))
+                    } else { Ok(py_int(-1)) };
+                    result
                 },
             }));
 
-            // end() — returns end position
+            // end([n_or_name]) — end position of the whole match or a
+            // specific group (-1 if that group didn't participate).
             type_dict.insert_str("end", PyObjectRef::new(PyObject::BuiltinFunction {
                 name: "end".to_string(),
                 func: |args| {
-                    let end_attr = args[0].borrow().get_attribute("_end").unwrap_or(py_int(0));
-                    Ok(end_attr)
+                    let self_obj = &args[0];
+                    let idx = resolve_group_arg(self_obj, args.get(1)).ok_or_else(|| PyError::IndexError("no such group".to_string()))?;
+                    let ends = self_obj.borrow().get_attribute("_ends").unwrap_or_else(|_| py_tuple(vec![]));
+                    let result = if let PyObject::Tuple(items) = &*ends.borrow() {
+                        items.get(idx).cloned().ok_or_else(|| PyError::IndexError("no such group".to_string()))
+                    } else { Ok(py_int(-1)) };
+                    result
                 },
             }));
 
-            // span() — returns (start, end) tuple
+            // span([n_or_name]) — (start, end) tuple, whole match or a group.
             type_dict.insert_str("span", PyObjectRef::new(PyObject::BuiltinFunction {
                 name: "span".to_string(),
                 func: |args| {
-                    let start_attr = args[0].borrow().get_attribute("_start").unwrap_or(py_int(0));
-                    let end_attr = args[0].borrow().get_attribute("_end").unwrap_or(py_int(0));
-                    Ok(py_tuple(vec![start_attr, end_attr]))
+                    let self_obj = &args[0];
+                    let idx = resolve_group_arg(self_obj, args.get(1)).ok_or_else(|| PyError::IndexError("no such group".to_string()))?;
+                    let starts = self_obj.borrow().get_attribute("_starts").unwrap_or_else(|_| py_tuple(vec![]));
+                    let ends = self_obj.borrow().get_attribute("_ends").unwrap_or_else(|_| py_tuple(vec![]));
+                    let s = if let PyObject::Tuple(items) = &*starts.borrow() { items.get(idx).cloned() } else { None };
+                    let e = if let PyObject::Tuple(items) = &*ends.borrow() { items.get(idx).cloned() } else { None };
+                    match (s, e) {
+                        (Some(s), Some(e)) => Ok(py_tuple(vec![s, e])),
+                        _ => Err(PyError::IndexError("no such group".to_string())),
+                    }
                 },
             }));
 
-            // __getitem__ — match[0] returns full match, match[n] returns group
+            // __getitem__ — match[0] returns full match (== group(0)),
+            // match[n_or_name] same as group(n_or_name) for n/name >= 1.
             type_dict.insert_str("__getitem__", PyObjectRef::new(PyObject::BuiltinFunction {
                 name: "__getitem__".to_string(),
                 func: |args| {
                     if args.len() < 2 { return Err(PyError::type_error("__getitem__ requires index")); }
-                    let idx = args[1].as_i64().unwrap_or(0) as usize;
-                    if idx == 0 {
-                        let text_attr = args[0].borrow().get_attribute("_text").unwrap_or_else(|_| py_str(""));
-                        Ok(text_attr)
+                    let self_obj = &args[0];
+                    let idx = resolve_group_arg(self_obj, Some(&args[1])).ok_or_else(|| PyError::IndexError("no such group".to_string()))?;
+                    let group_texts = self_obj.borrow().get_attribute("_groups_text").unwrap_or_else(|_| py_tuple(vec![]));
+                    let result = if let PyObject::Tuple(items) = &*group_texts.borrow() {
+                        items.get(idx).cloned().ok_or_else(|| PyError::IndexError("no such group".to_string()))
                     } else {
-                        let obj = args[0].borrow();
-                        let groups_attr = obj.get_attribute("_groups").unwrap_or_else(|_| py_tuple(vec![]));
-                        let groups_borrowed = groups_attr.borrow();
-                        match &*groups_borrowed {
-                            PyObject::Tuple(items) => {
-                                if idx - 1 < items.len() { Ok(items[idx - 1].clone()) }
-                                else { Ok(py_none()) }
-                            }
-                            _ => Ok(py_none()),
-                        }
-                    }
+                        Err(PyError::IndexError("no such group".to_string()))
+                    };
+                    result
                 },
             }));
 
@@ -303,7 +459,14 @@ fn make_match_object(re_match: Option<fancy_regex::Match<'_>>, _num_groups: usiz
             instance_dict.insert_str("_text", py_str(&text));
             instance_dict.insert_str("_start", py_int(start_pos as i64));
             instance_dict.insert_str("_end", py_int(end_pos as i64));
-            instance_dict.insert_str("_groups", py_tuple(vec![])); // No capture groups for now
+            // `_groups_text`/`_starts`/`_ends` are 0-indexed with index 0 =
+            // the whole match (matching real `re.Match`'s own `group(0)`/
+            // `[0]` convention) — `groups()` skips index 0 when building its
+            // 1..N tuple.
+            instance_dict.insert_str("_groups_text", py_tuple(groups_text));
+            instance_dict.insert_str("_starts", py_tuple(starts));
+            instance_dict.insert_str("_ends", py_tuple(ends));
+            instance_dict.insert_str("_group_names", PyObjectRef::new(PyObject::Dict(Box::new(name_to_index))));
 
             PyObjectRef::new(PyObject::Instance {
                 typ,
@@ -330,8 +493,8 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         let string = args[1].str();
         match compile_python_regex(&pattern) {
             Ok(re) => {
-                let matched = re.find(&string).unwrap_or(None);
-                Ok(make_match_object(matched, 0))
+                let caps = re.captures(&string).unwrap_or(None);
+                Ok(make_match_object(&re, caps))
             }
             Err(e) => Err(PyError::ValueError(format!("invalid regex: {}", e))),
         }
@@ -345,13 +508,13 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         let string = args[1].str();
         match compile_python_regex(&pattern) {
             Ok(re) => {
-                let matched = re.find(&string).unwrap_or(None);
+                let caps = re.captures(&string).unwrap_or(None);
                 // Only succeed if match starts at position 0
-                let result = match matched {
-                    Some(m) if m.start() == 0 => Some(m),
+                let result = match caps {
+                    Some(c) if c.get(0).map(|m| m.start()) == Some(0) => Some(c),
                     _ => None,
                 };
-                Ok(make_match_object(result, 0))
+                Ok(make_match_object(&re, result))
             }
             Err(e) => Err(PyError::ValueError(format!("invalid regex: {}", e))),
         }
@@ -365,9 +528,9 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         let string = args[1].str();
         match compile_python_regex(&pattern) {
             Ok(re) => {
-                let result = re.find(&string).unwrap_or(None)
-                    .filter(|m| m.start() == 0 && m.end() == string.len());
-                Ok(make_match_object(result, 0))
+                let caps = re.captures(&string).unwrap_or(None)
+                    .filter(|c| c.get(0).map(|m| m.start() == 0 && m.end() == string.len()).unwrap_or(false));
+                Ok(make_match_object(&re, caps))
             }
             Err(e) => Err(PyError::ValueError(format!("invalid regex: {}", e))),
         }
@@ -395,13 +558,72 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         if args.len() < 3 {
             return Err(PyError::type_error("sub() takes at least 3 arguments"));
         }
+        // Real `re.sub` accepts EITHER a string template (`\1`/`\g<name>`
+        // backreferences) OR a callable taking the `Match` and returning
+        // the replacement string — previously `repl` was unconditionally
+        // stringified via `.str()`, so a callable replacement (a very
+        // common idiom — e.g. `html.unescape`'s own `_charref.sub
+        // (_replace_charref, s)`) was never actually CALLED: its `str()`
+        // (something like `<function _replace_charref>`) was substituted
+        // in literally instead. Both branches now share one manual
+        // match-iteration loop (rather than `replace_all`, which can't
+        // invoke a callback) — this also adds real `count` support (the
+        // 4th positional arg), which the previous `replace_all`-based
+        // version silently ignored entirely.
         let pattern = args[0].str();
-        let repl = args[1].str();
+        let is_callable_repl = !matches!(&*args[1].borrow(), PyObject::Str(_));
+        let repl_template = if is_callable_repl { String::new() } else { translate_python_replacement(&args[1].str()) };
         let string = args[2].str();
+        // `count`/`flags` may arrive positionally (args[3]) OR as a trailing
+        // kwargs dict (`re.sub(p, r, s, count=1)` — a real, common call
+        // shape; this project's calling convention appends a `{"count":
+        // ..., "flags": ...}` dict as the final positional arg for keyword
+        // calls, same as `sorted`'s own `key=`/`reverse=` handling).
+        let count = if args.len() > 3 {
+            if let PyObject::Dict(kwargs) = &*args[3].borrow() {
+                kwargs.get(&py_str("count")).ok().flatten().and_then(|v| v.as_i64()).unwrap_or(0)
+            } else {
+                args[3].as_i64().unwrap_or(0)
+            }
+        } else { 0 };
         match compile_python_regex(&pattern) {
             Ok(re) => {
-                let translated = translate_python_replacement(&repl);
-                let result = re.replace_all(&string, translated.as_str());
+                let mut result = String::new();
+                let mut last_end = 0usize;
+                let mut n = 0i64;
+                for caps in re.captures_iter(&string) {
+                    let caps = match caps { Ok(c) => c, Err(_) => break };
+                    if count > 0 && n >= count { break; }
+                    let (m_start, m_end) = { let m = caps.get(0).unwrap(); (m.start(), m.end()) };
+                    if m_start < last_end { continue; }
+                    result.push_str(&string[last_end..m_start]);
+                    if is_callable_repl {
+                        // Calling an arbitrary Python callable (not just a
+                        // native `BuiltinFunction`) from within a native
+                        // function's own body needs `call_bound_method`'s
+                        // "disposable VM" path (for a plain `PyObject::
+                        // Function`) — reentering `vm.call_function` on the
+                        // SAME live `VirtualMachine` via `with_vm_mut`
+                        // (tried first) corrupted execution state instead:
+                        // the callback itself ran and returned correctly,
+                        // but control never made it back to the `sub()`
+                        // caller afterward (confirmed via a minimal repro —
+                        // `print()` calls placed after the `re.sub(...)`
+                        // call simply never ran, no error, exit code 0).
+                        // Matches the same pattern `sorted(key=...)` already
+                        // uses for its own key-function callback.
+                        let match_obj = make_match_object(&re, Some(caps));
+                        let replaced = call_bound_method(args[1].clone(), match_obj, vec![])?;
+                        result.push_str(&replaced.str());
+                    } else {
+                        let mut expanded = String::new();
+                        caps.expand(&repl_template, &mut expanded);
+                        result.push_str(&expanded);
+                    }
+                    last_end = m_end;
+                    n += 1;
+                }
+                result.push_str(&string[last_end..]);
                 Ok(py_str(&result))
             }
             Err(e) => Err(PyError::ValueError(format!("invalid regex: {}", e))),
@@ -434,7 +656,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         }
         let pattern = args[0].str();
         let flags = if args.len() > 1 { args[1].as_i64().unwrap_or(0) as i32 } else { 0 };
-        match compile_python_regex(&pattern) {
+        match compile_python_regex_flags(&pattern, flags) {
             Ok(re) => {
                 Ok(PyObjectRef::new(PyObject::CompiledRegex {
                     regex: Box::new(re),
@@ -455,9 +677,9 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         let string = args[1].str();
         match compile_python_regex(&pattern) {
             Ok(re) => {
-                let matches: Vec<PyObjectRef> = re.find_iter(&string)
+                let matches: Vec<PyObjectRef> = re.captures_iter(&string)
                     .filter_map(|r| r.ok())
-                    .map(|m| make_match_object(Some(m), 0))
+                    .map(|c| make_match_object(&re, Some(c)))
                     .collect();
                 // Return a list that can be iterated over
                 Ok(py_list(matches))
