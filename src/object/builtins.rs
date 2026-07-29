@@ -2519,6 +2519,23 @@ pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             // `isinstance(other, Field)`-style guard in real code (Django's
             // `Field.__lt__`/`__eq__`, used by `@total_ordering` and
             // `bisect`-based field ordering during model construction).
+            // Direct identity check FIRST, independent of `mro` — a
+            // properly-built class (via `default_build_class`) always has
+            // itself as `mro[0]`, so this was previously redundant with
+            // the mro walk below and easy to miss. But several ad-hoc
+            // native `PyObject::Type`s built directly in Rust (this
+            // session's own `Fraction`, `namedtuple`-generated classes,
+            // `HTTPConnection`, ...) set `mro: vec![]` (empty) since they
+            // aren't constructed through the real class-creation
+            // machinery — for those, `isinstance(instance, ExactOwnType)`
+            // was ALWAYS `False`, even for the most basic possible check,
+            // since the type never appeared in its own (empty) mro at
+            // all. Confirmed via `isinstance(Fraction(1,2), Fraction)` and
+            // `isinstance(a_namedtuple_instance, ThatNamedtupleType)`,
+            // both `False` before this fix.
+            if typ.is(&args[1]) {
+                return Ok(py_bool(true));
+            }
             let typ_ref = typ.borrow();
             if let PyObject::Type { mro, .. } = &*typ_ref {
                 for c in mro {
@@ -2926,6 +2943,15 @@ pub fn builtin_issubclass(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let base = args[1].borrow();
     match (&*cls, &*base) {
         (PyObject::Type { mro: cls_mro, .. }, PyObject::Type { .. }) => {
+            // Direct identity check first — same fix, same reason, as
+            // `builtin_isinstance`'s matching arm just above: several
+            // ad-hoc native `PyObject::Type`s (`Fraction`, `namedtuple`-
+            // generated classes, ...) have an empty `mro`, so
+            // `issubclass(X, X)` was `False` even for the most basic
+            // possible check.
+            if args[0].is(&args[1]) {
+                return Ok(py_bool(true));
+            }
             let base_tn = base.type_name();
             for c in cls_mro {
                 if c.borrow().type_name() == base_tn {

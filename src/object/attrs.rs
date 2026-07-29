@@ -4484,13 +4484,22 @@ impl PyObject {
                         // the native-backing/error handling below, which is
                         // at least a clean, immediate failure rather than a
                         // silent infinite loop.
-                        let start_idx = mro.iter().position(|m| {
-                            if let (PyObjectRef::Mut(a), PyObjectRef::Mut(b)) = (cls, m) {
-                                std::ptr::eq(a.as_ptr(), b.as_ptr())
-                            } else {
-                                false
-                            }
-                        }).map(|p| p + 1);
+                        // Real identity check via `.is()` — the previous
+                        // hand-rolled match only ever compared two `Mut`
+                        // variants (`Rc::ptr_eq`), silently returning
+                        // `false` for anything else. Class/`Type` objects
+                        // in this codebase are NOT guaranteed to be `Mut`
+                        // (several are `Imm`), so `super(C, e)` — the
+                        // EXPLICIT two-argument form, as opposed to the
+                        // compiler-synthesized zero-arg one, which happened
+                        // to always deal with `Mut` classes in whatever
+                        // cases exercised it before — could never find
+                        // `cls` in `obj`'s mro at all, making EVERY
+                        // attribute lookup through such a `super()` object
+                        // fail with `AttributeError`. Confirmed via
+                        // CPython's own `test_super.py::test_pickling`
+                        // (`s = super(C, e); s.f()`).
+                        let start_idx = mro.iter().position(|m| cls.is(m)).map(|p| p + 1);
                         if let Some(start_idx) = start_idx {
                         if start_idx < mro.len() {
                             let mut found = None;
