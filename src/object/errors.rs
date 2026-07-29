@@ -88,6 +88,18 @@ impl PyError {
             cause: None,
         }))
     }
+    /// Same `PyError::Exception(name, obj)` pattern as `syntax_error`/
+    /// `memory_error` above — `OverflowError` has no dedicated `PyError`
+    /// enum variant, so this is how any native function raises it directly
+    /// (e.g. `math.pow`'s own genuine-overflow case).
+    pub fn overflow_error(msg: impl Into<String>) -> Self {
+        let msg = msg.into();
+        PyError::Exception("OverflowError".to_string(), PyObjectRef::new(PyObject::Exception {
+            typ: "OverflowError".to_string(),
+            args: vec![py_str(&msg)],
+            cause: None,
+        }))
+    }
     pub fn runtime_error(msg: impl Into<String>) -> Self {
         PyError::RuntimeError(msg.into())
     }

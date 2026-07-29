@@ -422,9 +422,31 @@ fn py_float_mod(a: f64, b: f64) -> PyResult<PyObjectRef> {
     }
 }
 
+/// Shared `float ** float` (also used for the mixed int/float cases)
+/// helper for the `**` operator / `pow()` builtin — matches real CPython's
+/// `float.__pow__`: `0.0 ** negative` raises `ZeroDivisionError` (NOT
+/// `math.pow`'s own `ValueError: math domain error` — the two raise
+/// DIFFERENT exception types for the same mathematical case), and a
+/// genuine overflow (both operands finite, result isn't) raises
+/// `OverflowError` instead of silently returning `inf`. Found via
+/// CPython's own `test_math.py`/operator-level `pow()` overflow checks.
+fn py_pow_float(x: f64, y: f64) -> PyResult<PyObjectRef> {
+    // Only a FINITE negative exponent is an error — `0.0 ** -inf`
+    // legitimately diverges to `inf` (same IEEE-754 `pow()` semantics as
+    // `math.pow`'s analogous domain-error check).
+    if x == 0.0 && y < 0.0 && y.is_finite() {
+        return Err(PyError::ZeroDivisionError("0.0 cannot be raised to a negative power".to_string()));
+    }
+    let result = x.powf(y);
+    if result.is_infinite() && x.is_finite() && y.is_finite() {
+        return Err(PyError::overflow_error("(34, 'Numerical result out of range')"));
+    }
+    Ok(py_float(result))
+}
+
 pub fn py_pow(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
-        if bi < 0 { return Ok(py_float((ai as f64).powi(bi as i32))); }
+        if bi < 0 { return py_pow_float(ai as f64, bi as f64); }
         if bi == 0 { return Ok(py_int(1)); }
         if bi == 1 { return Ok(py_int(ai)); }
         // Real CPython promotes to an arbitrary-precision int the instant
@@ -469,9 +491,9 @@ pub fn py_pow(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
                 Err(PyError::value_error("int too large to convert to int"))
             }
         }
-        (PyObject::Float(a), PyObject::Float(b)) => Ok(py_float(a.powf(*b))),
-        (PyObject::Int(a), PyObject::Float(b)) => Ok(py_float(a.to_f64().unwrap().powf(*b))),
-        (PyObject::Float(a), PyObject::Int(b)) => Ok(py_float(a.powf(b.to_f64().unwrap()))),
+        (PyObject::Float(a), PyObject::Float(b)) => py_pow_float(*a, *b),
+        (PyObject::Int(a), PyObject::Float(b)) => py_pow_float(a.to_f64().unwrap(), *b),
+        (PyObject::Float(a), PyObject::Int(b)) => py_pow_float(*a, b.to_f64().unwrap()),
         // `complex ** (int|float|complex)` and `(int|float) ** complex` were
         // entirely unhandled — found via CPython's own `test_complex.py`.
         // Uses exact repeated-squaring for a real integer exponent (matching

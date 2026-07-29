@@ -1356,13 +1356,40 @@ pub fn create_math_dict() -> HashMap<String, PyObjectRef> {
         if args.len() != 2 { return Err(PyError::type_error("pow() takes exactly two arguments")); }
         let a = args[0].borrow();
         let b = args[1].borrow();
-        match (&*a, &*b) {
-            (PyObject::Int(i), PyObject::Int(j)) => Ok(py_float(i.to_f64().unwrap_or(0.0).powf(j.to_f64().unwrap_or(0.0)))),
-            (PyObject::Int(i), PyObject::Float(f)) => Ok(py_float(i.to_f64().unwrap_or(0.0).powf(*f))),
-            (PyObject::Float(f), PyObject::Int(i)) => Ok(py_float(f.powf(i.to_f64().unwrap_or(0.0)))),
-            (PyObject::Float(a), PyObject::Float(b)) => Ok(py_float(a.powf(*b))),
-            _ => Err(PyError::type_error("pow() argument must be a number")),
+        let (x, y) = match (&*a, &*b) {
+            (PyObject::Int(i), PyObject::Int(j)) => (i.to_f64().unwrap_or(0.0), j.to_f64().unwrap_or(0.0)),
+            (PyObject::Int(i), PyObject::Float(f)) => (i.to_f64().unwrap_or(0.0), *f),
+            (PyObject::Float(f), PyObject::Int(i)) => (*f, i.to_f64().unwrap_or(0.0)),
+            (PyObject::Float(a), PyObject::Float(b)) => (*a, *b),
+            _ => return Err(PyError::type_error("pow() argument must be a number")),
+        };
+        // `0 ** negative` is a real domain error (division by zero), not a
+        // silent `inf`/`nan` — matches real CPython's own `math.pow`
+        // (`ValueError: math domain error`).
+        // Only a FINITE negative exponent is a domain error — `0.0 **
+        // -inf` legitimately diverges to `inf` (matches the underlying
+        // C `pow()` and real CPython's own `math.pow(0., NINF) == INF`).
+        if x == 0.0 && y < 0.0 && y.is_finite() {
+            return Err(PyError::value_error("math domain error"));
         }
+        // A negative base raised to a finite, non-integer exponent has no
+        // real result (it's genuinely complex) — real CPython's `math.pow`
+        // raises `ValueError: math domain error` here too, rather than the
+        // `NaN` plain `f64::powf` produces.
+        if x < 0.0 && x.is_finite() && y.is_finite() && y.fract() != 0.0 {
+            return Err(PyError::value_error("math domain error"));
+        }
+        let result = x.powf(y);
+        // A genuine overflow (both inputs finite, result isn't) must raise
+        // `OverflowError`, not silently return `inf` — legitimate infinite
+        // results (`pow(INF, 1)`, `pow(x, INF)`, etc.) are unaffected since
+        // at least one input is already infinite in those cases. Found via
+        // CPython's own `test_math.py::testPow` (`math.pow(1e+100,
+        // 1e+100)`).
+        if result.is_infinite() && x.is_finite() && y.is_finite() {
+            return Err(PyError::overflow_error("math range error"));
+        }
+        Ok(py_float(result))
     });
     math_func!("fma", |args| {
         if args.len() != 3 { return Err(PyError::type_error("fma() takes exactly three arguments")); }
