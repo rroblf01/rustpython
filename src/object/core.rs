@@ -340,6 +340,105 @@ impl SmallStr {
 
 }
 
+// ---- id() infrastructure ----
+//
+// `get_id()` (backing the `id()` builtin) used to just return the raw
+// pointer address for `Mut`/`Imm` (`Rc::as_ptr`), and the address of
+// whatever local/temporary `PyObjectRef` binding happened to hold an inline
+// value (`SmallInt`/`SmallBool`/`SmallFloat`/`None`) for everything else.
+// Both were broken in ways real Python code (including CPython's own test
+// suite) actively relies on NOT being broken:
+// - `id(5) == id(5)` was `False` — TWO SEPARATE calls to `id()` on the same
+//   int VALUE gave different results, since each call's `args[0]` lived at
+//   a different stack address. This directly contradicts `PyObjectRef::is`,
+//   which already (deliberately, predating this fix) treats ALL
+//   `SmallInt`/`SmallBool`/`SmallFloat`/`None` values as identity-equal by
+//   VALUE (i.e. `1000 is 1000` is already `True` here, unlike real
+//   CPython's -5..256-only small-int cache) — `id()` must agree with `is()`
+//   for the exact same reason CPython's own docs promise it does
+//   (`a is b` if and only if `id(a) == id(b)`).
+// - Heap-allocated (`Mut`/`Imm`) object ids were raw allocator addresses,
+//   which are NOT guaranteed to increase monotonically with allocation
+//   order (confirmed: `sorted([Foo() for _ in range(5)], key=id)` does not
+//   reproduce creation order) — real CPython's own default allocator
+//   happens to correlate address with allocation order closely enough in
+//   practice that a non-trivial slice of CPython's OWN test suite relies on
+//   it incidentally (real trigger: `test_compare.py`'s
+//   `create_sorted_instances` helper, which does exactly this sort-by-id).
+//
+// Fixed with two matching pieces:
+// 1. Inline values get a DETERMINISTIC, value-derived id (a tagged
+//    encoding, distinguishing None/bool/int/float from each other and from
+//    real heap addresses) — same value now always yields the same id,
+//    matching `is()` exactly, with no allocation involved at all.
+// 2. Heap (`Mut`/`Imm`) objects get a per-thread MONOTONICALLY INCREASING
+//    counter value, assigned the first time `get_id()` is actually called
+//    on a given allocation (looked up/cached in a side table keyed by the
+//    Rc's raw address, since there's nowhere on `PyObject` itself to stash
+//    an id without growing every single object in the interpreter — this
+//    project has spent real effort shrinking that enum). This makes id()
+//    monotonic with first-QUERY order rather than true allocation order,
+//    but for the extremely common "sort a just-built list by id() to
+//    recover creation order" idiom (what CPython's own test suite does),
+//    the first query for each element happens during that very sort's
+//    key-computation pass, in original (creation) list order — so the two
+//    orders coincide for exactly the cases that matter in practice.
+//    Known, accepted limitation: if the SAME address is reused for a NEW
+//    allocation after the OLD occupant was dropped (ordinary allocator
+//    behavior), the new object inherits the old occupant's cached id
+//    instead of getting a fresh, later one — harmless for identity
+//    (the old occupant is dead, so no live collision), but the new object's
+//    id may not reflect ITS true creation order relative to other objects
+//    allocated in between. Not fixed: would need a `Drop` hook to evict
+//    stale entries, a larger change to how `PyObjectRef::Mut`/`Imm` wrap
+//    `Rc`, not attempted here. The side table itself also grows without
+//    bound for the lifetime of the process (same accepted tradeoff already
+//    made for `PRIMITIVE_TYPE_CACHE`).
+mod object_id {
+    use std::cell::{Cell, RefCell};
+    use std::collections::HashMap;
+
+    // Tag bits occupy the top byte of the id space, keeping the remaining
+    // 56 bits free for the actual payload/counter — real heap pointers on
+    // every platform this targets don't set bits this high, so inline-value
+    // ids can't collide with heap-object ids (collisions BETWEEN the four
+    // inline-value tags are impossible by construction; a same-value
+    // collision WITHIN one tag is exactly the point, not a bug).
+    const TAG_NONE: usize = 0x10 << 56;
+    const TAG_BOOL: usize = 0x11 << 56;
+    const TAG_INT: usize = 0x12 << 56;
+    const TAG_FLOAT: usize = 0x13 << 56;
+
+    pub(super) fn none_id() -> usize { TAG_NONE }
+    pub(super) fn bool_id(b: bool) -> usize { TAG_BOOL | (b as usize) }
+    pub(super) fn int_id(n: i64) -> usize { TAG_INT | ((n as u64 as usize) & 0x00ff_ffff_ffff_ffff) }
+    pub(super) fn float_id(bits: u64) -> usize { TAG_FLOAT | ((bits as usize) & 0x00ff_ffff_ffff_ffff) }
+
+    thread_local! {
+        static NEXT_HEAP_ID: Cell<usize> = const { Cell::new(1) };
+        static HEAP_ID_TABLE: RefCell<HashMap<usize, usize>> = RefCell::new(HashMap::new());
+    }
+
+    /// Stable, monotonically-increasing (in first-query order) id for a
+    /// heap allocation, keyed by its raw address — see this module's own
+    /// doc comment (above, on the `object_id` module) for the full
+    /// rationale and accepted limitations.
+    pub(super) fn heap_id(addr: usize) -> usize {
+        HEAP_ID_TABLE.with(|t| {
+            if let Some(&id) = t.borrow().get(&addr) {
+                return id;
+            }
+            let id = NEXT_HEAP_ID.with(|c| {
+                let v = c.get();
+                c.set(v + 1);
+                v
+            });
+            t.borrow_mut().insert(addr, id);
+            id
+        })
+    }
+}
+
 #[derive(Clone)]
 #[repr(C)]
 pub enum PyObjectRef {
@@ -815,9 +914,24 @@ impl PyObjectRef {
 
     pub fn get_id(&self) -> usize {
         match self {
-            PyObjectRef::Mut(rc) => Rc::as_ptr(rc) as *const PyObject as usize,
-            PyObjectRef::Imm(rc) => &*rc as *const _ as usize,
-            inline => inline as *const PyObjectRef as usize,
+            PyObjectRef::None => object_id::none_id(),
+            PyObjectRef::SmallBool(b) => object_id::bool_id(*b),
+            PyObjectRef::SmallInt(n) => object_id::int_id(*n),
+            PyObjectRef::SmallFloat(f) => object_id::float_id(f.to_bits()),
+            // `SmallStr` keeps the OLD (already-broken, unstable) behavior
+            // deliberately — unlike None/bool/int/float, `PyObjectRef::is`
+            // does NOT treat two equal-content `SmallStr`s as identity-equal
+            // (falls to the catch-all `_ => false`), so giving them a
+            // value-derived id here would make `id(a) == id(b)` disagree
+            // with `a is b` in the OTHER direction. Fixing this properly
+            // needs a decision about `SmallStr` identity semantics first,
+            // not just an `id()` patch — left as a known, separate,
+            // lower-priority gap (real CPython doesn't guarantee string
+            // interning either, so this is a quirk, not a correctness bug
+            // against the language spec).
+            PyObjectRef::SmallStr(_) => self as *const PyObjectRef as usize,
+            PyObjectRef::Mut(rc) => object_id::heap_id(Rc::as_ptr(rc) as usize),
+            PyObjectRef::Imm(rc) => object_id::heap_id(Rc::as_ptr(rc) as usize),
         }
     }
 }

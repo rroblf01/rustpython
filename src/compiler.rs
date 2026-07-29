@@ -3198,7 +3198,7 @@ impl Compiler {
                 self.compile_expr(operand)?;
                 match op {
                     UnaryOp::Not => self.emit(Opcode::UNARY_NOT, 0),
-                    UnaryOp::UAdd => self.emit(Opcode::UNARY_NEGATIVE, 0),
+                    UnaryOp::UAdd => self.emit(Opcode::UNARY_POSITIVE, 0),
                     UnaryOp::USub => self.emit(Opcode::UNARY_NEGATIVE, 0),
                     UnaryOp::Invert => self.emit(Opcode::UNARY_INVERT, 0),
                 }

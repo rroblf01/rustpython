@@ -70,3 +70,17 @@ pub fn py_neg(val: &PyObjectRef) -> PyResult<PyObjectRef> {
 pub fn py_not(val: &PyObjectRef) -> PyObjectRef {
     py_bool(!val.truthy())
 }
+
+pub fn py_pos(val: &PyObjectRef) -> PyResult<PyObjectRef> {
+    if val.as_i64().is_some() || val.as_f64().is_some() {
+        return Ok(val.clone());
+    }
+    let obj = val.borrow();
+    match &*obj {
+        PyObject::Int(_) | PyObject::Float(_) | PyObject::Complex(_, _) => {
+            drop(obj);
+            Ok(val.clone())
+        }
+        _ => Err(PyError::type_error(format!("bad operand type for unary +: '{}'", obj.type_name()))),
+    }
+}

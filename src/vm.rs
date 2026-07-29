@@ -3085,6 +3085,21 @@ impl VirtualMachine {
                 self.frames[fi].push(result);
             }
 
+            Opcode::UNARY_POSITIVE => {
+                let val = self.frames[fi].pop()?;
+                let pos_method = if let PyObject::Instance { typ, .. } = &*val.borrow() {
+                    crate::object::lookup_dunder_via_mro(typ, "__pos__")
+                } else {
+                    None
+                };
+                let result = if let Some(f) = pos_method {
+                    call_bound_method(f, val.clone(), vec![])?
+                } else {
+                    py_pos(&val)?
+                };
+                self.frames[fi].push(result);
+            }
+
             Opcode::UNARY_NOT => {
                 let val = self.frames[fi].pop()?;
                 self.frames[fi].push(py_bool(!val.truthy()));
