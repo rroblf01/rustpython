@@ -1,15 +1,19 @@
 # RustPython — Architecture & Roadmap v2
 
+This is a **forward-looking performance/architecture roadmap** — a different axis from the
+language/stdlib *correctness* tracking in `GAP_ANALYSIS.md`. Phases 1-5 below are done; 6-10
+are still aspirational future work, not yet started unless individually noted otherwise.
+
 ## Status: Phases 1-5 Implemented
 
 | Phase | Component | Status | Benchmark Impact |
 |-------|-----------|--------|------------------|
 | 1 | String interning + InternedMap | ✅ `src/interner.rs` | Reduces name lookup allocs |
-| 2 | JIT extended (3→11 ops) | ✅ `src/jit.rs` | Bitwise ops native, div/mod/pow via FFI |
+| 2 | JIT extended (3→~35 ops as of 2026-07) | ✅ `src/jit.rs` | Covers most hot-path arithmetic/control-flow/call opcodes; falls back to the bytecode interpreter otherwise |
 | 3 | Inline cache (LOAD_GLOBAL) | ✅ `src/vm.rs` | Cache global lookups per instruction offset |
 | 4 | SmallVec stack | ✅ `src/vm.rs` | ~7% faster (0.136→0.127s) |
-| 5 | Tagged pointers (SmallFloat, SmallStr) | ✅ `src/object.rs` | Avoids Rc+heap for floats + short strings |
-| **Current total** | | | **~3.2× slower than CPython** (was 6-18×) |
+| 5 | Tagged pointers (SmallFloat, SmallStr) | ✅ `src/object/core.rs` (`object.rs` was split into a `src/object/` directory module, 2026-07-29) | Avoids Rc+heap for floats + short strings |
+| **Current total** | | | **~3.2× slower than CPython** (was 6-18×) — not independently re-measured since the object-model migration work; the object shape itself hasn't changed, so this should still roughly hold |
 
 ---
 
@@ -163,6 +167,12 @@ impl CAPIBridge {
 `Rc` is not `Send`/`Sync`. `RefCell` is not `Sync`. This means RustPython
 cannot run multiple threads sharing objects — a hard requirement for WSGI/ASGI
 servers and Django.
+
+**Confirmed, not just theoretical** (2026-07-28): CPython's own `test_itertools.py::
+test_count_threading` spawns 10 real OS threads calling `next()` concurrently on one shared
+`itertools.count()` object and reliably panics this interpreter — as of this writing it is the
+ONE remaining known panic in the entire 398-file CPython test corpus. This is the single
+highest-value remaining architectural gap by that measure.
 
 ### Migration path
 

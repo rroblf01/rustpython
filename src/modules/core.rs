@@ -87,6 +87,7 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
         }));
         let nie_type = PyObjectRef::new(PyObject::Type { name: "NotImplementedType".to_string(), dict: Box::new(str_map_to_typedict(nie_dict)), bases: vec![], mro: vec![] });
         let not_implemented = PyObjectRef::imm(PyObject::Instance { typ: nie_type, dict: AttrMap::new() });
+        crate::object::seed_not_implemented(not_implemented.clone());
         builtins.insert_str("NotImplemented", not_implemented);
     }
 
@@ -327,30 +328,63 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
             Ok(py_str(&args[0].repr()))
         },
     }));
-    // __eq__(self, other): identity comparison. This previously compared
-    // type NAMES instead of identity — i.e. any two *distinct* instances of
-    // the same plain class (no custom __eq__ override) compared equal to
-    // each other, which is wrong (real Python's default `object.__eq__` is
-    // `self is other`) and surfaced very visibly once enum members relied
-    // on it: `Color.RED == Color.GREEN` was `True` since both are just
-    // "instances of Color".
+    // __eq__(self, other): identity comparison, deferring to the other
+    // side (via `NotImplemented`, NOT a hard `False`) when not identical —
+    // matches real CPython's actual `object.__eq__` exactly. Returning a
+    // definite `False` here (the previous behavior) meant this NEVER
+    // deferred to a reflected `__eq__`/allowed `py_compare`'s rich-compare
+    // dispatch (`ops_compare.rs`) to even consider the other operand,
+    // since "not NotImplemented" always short-circuited as final. Also
+    // fixed an even older bug: this used to compare type NAMES instead of
+    // identity — i.e. any two *distinct* instances of the same plain class
+    // (no custom __eq__ override) compared equal to each other, which
+    // surfaced very visibly once enum members relied on it: `Color.RED ==
+    // Color.GREEN` was `True` since both are just "instances of Color".
     object_dict.insert_str("__eq__", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "__eq__".to_string(),
         func: |args| {
             if args.len() < 2 {
                 return Err(PyError::type_error("__eq__ requires 2 arguments"));
             }
-            Ok(py_bool(args[0].is(&args[1])))
+            if args[0].is(&args[1]) { Ok(py_bool(true)) } else { Ok(crate::object::py_not_implemented()) }
         },
     }));
-    // __ne__(self, other): inverse of __eq__
+    // __ne__(self, other): real CPython's default doesn't do its own
+    // identity check — it delegates to `self.__eq__(other)` (whatever
+    // `__eq__` is ACTUALLY bound to `self`'s real class, which may be a
+    // subclass override) and inverts, propagating `NotImplemented`
+    // unchanged if `__eq__` itself couldn't decide. The previous
+    // hard-identity implementation bypassed any custom `__eq__` entirely
+    // — real trigger: CPython's own `test_compare.py`'s
+    // `test_ne_high_priority`/`test_ne_low_priority`, which rely on
+    // `object.__ne__` consulting `self.__eq__` (and nothing else) to
+    // determine `calls` ordering.
     object_dict.insert_str("__ne__", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "__ne__".to_string(),
         func: |args| {
             if args.len() < 2 {
                 return Err(PyError::type_error("__ne__ requires 2 arguments"));
             }
-            Ok(py_bool(!args[0].is(&args[1])))
+            let self_obj = args[0].clone();
+            let eq_method = if let PyObject::Instance { typ, .. } = &*self_obj.borrow() {
+                crate::object::lookup_dunder_via_mro(typ, "__eq__")
+            } else {
+                None
+            };
+            match eq_method {
+                Some(f) => {
+                    let result = crate::object::call_bound_method(f, self_obj, vec![args[1].clone()])?;
+                    if crate::object::is_not_implemented(&result) {
+                        Ok(result)
+                    } else {
+                        Ok(py_bool(!result.truthy()))
+                    }
+                }
+                // Shouldn't normally happen (every Instance's mro includes
+                // `object`, which always provides `__eq__`) — kept as a
+                // safe, identity-based fallback rather than panicking.
+                None => Ok(py_bool(!args[0].is(&args[1]))),
+            }
         },
     }));
     // __hash__(self): hash based on pointer

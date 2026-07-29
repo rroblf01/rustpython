@@ -93,6 +93,28 @@ pub fn py_none() -> PyObjectRef {
     PyObjectRef::None
 }
 
+thread_local! {
+    // The canonical `NotImplemented` singleton — seeded once from
+    // `create_builtins()` (the same object bound to the `NotImplemented`
+    // global name), so callers elsewhere (e.g. `object.__eq__`/`__ne__`'s
+    // own native implementations, which are bare `fn` pointers with no way
+    // to capture it from the enclosing scope) can return the SAME object,
+    // preserving `result is NotImplemented`-style identity checks in
+    // Python code. Mirrors `PRIMITIVE_TYPE_CACHE`'s seed-once-use-everywhere
+    // pattern.
+    static NOT_IMPLEMENTED_SINGLETON: std::cell::RefCell<Option<PyObjectRef>> = std::cell::RefCell::new(None);
+}
+
+pub(crate) fn seed_not_implemented(v: PyObjectRef) {
+    NOT_IMPLEMENTED_SINGLETON.with(|c| *c.borrow_mut() = Some(v));
+}
+
+/// The `NotImplemented` singleton — panics if called before
+/// `create_builtins()` has seeded it (i.e. before any VM exists at all).
+pub fn py_not_implemented() -> PyObjectRef {
+    NOT_IMPLEMENTED_SINGLETON.with(|c| c.borrow().clone().expect("NotImplemented singleton not yet seeded"))
+}
+
 /// Convert a Python object to a PySet by checking common iterable types.
 /// Used as a replacement for the non-existent `py_set_from_iter`.
 pub fn convert_to_set(obj: &PyObjectRef) -> PyResult<PySet> {

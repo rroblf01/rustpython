@@ -24,22 +24,28 @@ pub fn py_compare(a: &PyObjectRef, b: &PyObjectRef, op: u32) -> PyResult<PyObjec
     // without this, no user-defined class's comparison operators work at
     // all (only equality was ever wired up here; ordering silently fell
     // through to the builtin Compare impl, which doesn't know Instance).
-    let method_name = match op {
-        0 => Some("__lt__"),
-        1 => Some("__le__"),
-        2 => Some("__eq__"),
-        3 => Some("__ge__"),
-        4 => Some("__gt__"),
-        5 => Some("__ne__"),
-        _ => None,
-    };
-    if let Some(method_name) = method_name {
+    // `try_rich_compare` implements real CPython's actual dispatch
+    // algorithm (subclass-reflected-priority, each dunder called at most
+    // once, `NotImplemented` on both sides falls back to identity for
+    // eq/ne or `TypeError` for ordering) — see its own doc comment.
+    if matches!(op, 0..=5) {
         let is_a_instance = matches!(&*a.borrow(), PyObject::Instance { .. });
         let is_b_instance = matches!(&*b.borrow(), PyObject::Instance { .. });
         if is_a_instance || is_b_instance {
-            if let Some(result) = try_dunder_comparison(a, b, method_name)? {
+            if let Some(result) = try_rich_compare(a, b, op)? {
                 return Ok(py_bool(result));
             }
+            return Ok(py_bool(match op {
+                2 => a.is(b),
+                5 => !a.is(b),
+                _ => {
+                    let op_sym = match op { 0 => "<", 1 => "<=", 3 => ">=", 4 => ">", _ => unreachable!() };
+                    return Err(PyError::type_error(format!(
+                        "'{}' not supported between instances of '{}' and '{}'",
+                        op_sym, a.get_type_name(), b.get_type_name()
+                    )));
+                }
+            }));
         }
     }
     // Set/FrozenSet comparisons (subset/superset/equality relations) are
@@ -129,40 +135,72 @@ pub fn is_stop_iteration_error(e: &PyError) -> bool {
     }
 }
 
-fn try_dunder_comparison(a: &PyObjectRef, b: &PyObjectRef, method: &str) -> PyResult<Option<bool>> {
-    // Try a.__eq__(b) first
-    let f_a = try_get_method(a, method);
-    if let Some(f) = f_a {
-        let result = call_bound_method(f, a.clone(), vec![b.clone()])?;
-        if !is_not_implemented(&result) {
-            return Ok(Some(result.truthy()));
-        }
-    }
-    // Try b.__eq__(a) if different type, or if a's method punted
-    if a.get_type_name() != b.get_type_name() {
-        let f_b = try_get_method(b, method);
-        if let Some(f) = f_b {
-            let result = call_bound_method(f, b.clone(), vec![a.clone()])?;
-            if !is_not_implemented(&result) {
-                return Ok(Some(result.truthy()));
+/// Implements real CPython's actual rich-comparison dispatch algorithm
+/// (`do_richcompare` in `object.c`) for a comparison involving at least one
+/// `Instance` operand: each side's dunder is called AT MOST ONCE, with the
+/// "subclass reflected priority" rule — if `b`'s type is a PROPER subclass
+/// of `a`'s type (and different from it), `b`'s reflected method is tried
+/// FIRST, before `a`'s own. Returns `None` if neither side's dunder ever
+/// produced a definite (non-`NotImplemented`) answer, leaving the identity-
+/// based eq/ne fallback (or `TypeError` for ordering) to the caller.
+///
+/// This REPLACES the previous `try_dunder_comparison`, which called
+/// `a`'s method, and on `NotImplemented` fell through to a SEPARATE,
+/// independent dispatch path (`Compare`/`equals`) that redundantly
+/// re-walked the mro and re-called the SAME dunder a second (sometimes
+/// third) time — confirmed via a direct repro: a custom `__eq__` returning
+/// `NotImplemented` was invoked 2-3 times for a single `==` instead of
+/// once, and `object`'s own default `__eq__`/`__ne__` (identity-based, no
+/// `NotImplemented` support at the time) meant a subclass's real override
+/// was sometimes never even reached — real trigger: CPython's own
+/// `test_compare.py` (`test_ne_high_priority`/`test_ne_low_priority`/
+/// `test_other_delegation`, which assert the EXACT sequence and count of
+/// dunder calls made).
+fn try_rich_compare(a: &PyObjectRef, b: &PyObjectRef, op: u32) -> PyResult<Option<bool>> {
+    let (own_name, refl_name) = match op {
+        0 => ("__lt__", "__gt__"),
+        1 => ("__le__", "__ge__"),
+        2 => ("__eq__", "__eq__"),
+        3 => ("__ge__", "__le__"),
+        4 => ("__gt__", "__lt__"),
+        5 => ("__ne__", "__ne__"),
+        _ => return Ok(None),
+    };
+
+    let instance_type_of = |v: &PyObjectRef| -> Option<PyObjectRef> {
+        if let PyObject::Instance { typ, .. } = &*v.borrow() { Some(typ.clone()) } else { None }
+    };
+    let is_proper_subclass = |sub: &PyObjectRef, base: &PyObjectRef| -> bool {
+        if sub.is(base) { return false; }
+        if let PyObject::Type { mro, .. } = &*sub.borrow() { mro.iter().any(|c| c.is(base)) } else { false }
+    };
+    let try_side = |self_ref: &PyObjectRef, other_ref: &PyObjectRef, method: &str| -> PyResult<Option<bool>> {
+        if let PyObject::Instance { typ, .. } = &*self_ref.borrow() {
+            if let Some(f) = lookup_dunder_via_mro(typ, method) {
+                let result = call_bound_method(f, self_ref.clone(), vec![other_ref.clone()])?;
+                if !is_not_implemented(&result) {
+                    return Ok(Some(result.truthy()));
+                }
             }
         }
+        Ok(None)
+    };
+
+    let a_type = instance_type_of(a);
+    let b_type = instance_type_of(b);
+    let b_first = match (&a_type, &b_type) {
+        (Some(at), Some(bt)) => is_proper_subclass(bt, at),
+        _ => false,
+    };
+
+    if b_first {
+        if let Some(r) = try_side(b, a, refl_name)? { return Ok(Some(r)); }
+        if let Some(r) = try_side(a, b, own_name)? { return Ok(Some(r)); }
+    } else {
+        if let Some(r) = try_side(a, b, own_name)? { return Ok(Some(r)); }
+        if let Some(r) = try_side(b, a, refl_name)? { return Ok(Some(r)); }
     }
     Ok(None)
-}
-
-fn try_get_method(obj: &PyObjectRef, name: &str) -> Option<PyObjectRef> {
-    let typ = if let PyObject::Instance { typ, .. } = &*obj.borrow() { Some(typ.clone()) } else { None };
-    // Walk the full mro (not just the instance's own exact type's dict) —
-    // this is what comparison dunders (__eq__/__lt__/etc.) need to find one
-    // *inherited* from a base rather than redefined on the exact class, e.g.
-    // any plain class relying on `object`'s default (identity-based)
-    // __eq__: without this, `try_get_method` came back None for it, so
-    // comparisons fell through this function's caller entirely and hit a
-    // different, separately-broken direct-identity-reconstruction path
-    // instead (see PyObjectRef::equals's doc comment) — surfaced by two
-    // enum members with equal `is()` identity still comparing `==` False.
-    typ.and_then(|t| lookup_dunder_via_mro(&t, name))
 }
 
 pub trait Compare {
