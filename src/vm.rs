@@ -3676,6 +3676,26 @@ impl VirtualMachine {
                                                     self_obj: obj.clone(),
                                                 }));
                                             }
+                                            // A `PyObject::Closure` found via the class's own
+                                            // dict (as opposed to one already self-bound at
+                                            // construction time, e.g. the regex-method
+                                            // closures elsewhere in this file) needs the SAME
+                                            // auto-binding `Function`/`BuiltinFunction` get
+                                            // just above — this is this opcode's own separate
+                                            // copy of the identical gap already fixed in
+                                            // `resolve_descriptor_attr`. Real trigger:
+                                            // `namedtuple`'s own `_asdict`/`_replace`
+                                            // (non-dunder methods implemented as a `Closure`
+                                            // shared across every instance of the generated
+                                            // type), called as `instance._asdict()` — without
+                                            // this, the closure ran with `self` missing from
+                                            // its arguments entirely (`args[0]` out-of-bounds).
+                                            PyObject::Closure(_) => {
+                                                return Some(PyObjectRef::imm(PyObject::BoundMethod {
+                                                    func: val.clone(),
+                                                    self_obj: obj.clone(),
+                                                }));
+                                            }
                                             _ => {
                                                 // Generic descriptor protocol: if value has __get__, call it
                                                 drop(val_borrowed);
@@ -5501,6 +5521,22 @@ impl VirtualMachine {
             PyObject::Function(_) => {
                 Some(PyObjectRef::imm(PyObject::BoundMethod { func: found.clone(), self_obj: obj.clone() }))
             }
+            // A `PyObject::Closure` found via the class's own dict (as
+            // opposed to one constructed fresh, already self-bound, during
+            // attribute access itself — e.g. the regex-method closures
+            // elsewhere in this file) needs the SAME auto-binding
+            // `Function`/`BuiltinFunction` get just above. Without this, a
+            // non-dunder method implemented as a shared `Closure` (real
+            // trigger: `namedtuple`'s own `_asdict`/`_replace`, called as
+            // `instance._asdict()`) was returned completely UNBOUND — the
+            // call then ran with `self` missing from `args` entirely
+            // (dunder methods stored the same way, e.g. `__eq__`, never
+            // hit this bug since they're invoked via a separate protocol
+            // dispatch path — `lookup_dunder_via_mro` + `call_bound_method`
+            // — that already binds correctly regardless of callable kind).
+            PyObject::Closure(_) => {
+                Some(PyObjectRef::imm(PyObject::BoundMethod { func: found.clone(), self_obj: obj.clone() }))
+            }
             PyObject::BuiltinFunction { name: n, .. } if crate::object::is_builtin_exception_class_name(n) => {
                 // Don't auto-bind a builtin exception "class" — see the
                 // matching LOAD_ATTR fix's own (much longer) comment.
@@ -6660,6 +6696,21 @@ impl VirtualMachine {
         }
 
         if let PyObject::Closure(c) = &*callable.borrow() {
+            // Same "pack keywords into a trailing dict" convention as
+            // `BuiltinFunction` just above — this early-return skipped it
+            // entirely, so a `Closure`-implemented method called with
+            // keyword arguments (real trigger: `namedtuple`'s own
+            // `_replace(field=val)`) silently ran as if NO keywords were
+            // passed at all (the override never took effect).
+            if !keywords.is_empty() {
+                let mut dict = crate::object::PyDict::new();
+                for (k, v) in &keywords {
+                    let _ = dict.set(crate::object::py_str(k), v.clone());
+                }
+                let mut new_args = args;
+                new_args.push(crate::object::PyObjectRef::new(crate::object::PyObject::Dict(Box::new(dict))));
+                return c(&new_args);
+            }
             return c(&args);
         }
 

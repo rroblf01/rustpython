@@ -123,6 +123,111 @@ pub fn create_collections_dict() -> HashMap<String, PyObjectRef> {
         let init_obj = PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(init_fn)));
         let mut type_dict = HashMap::new();
         type_dict.insert_str("__init__", init_obj);
+
+        // A real `namedtuple` instance IS a tuple (subclasses `tuple` in
+        // real CPython) — comparing/hashing/iterating/indexing it must
+        // behave exactly like the equivalent plain tuple of field values,
+        // and `repr()` must show `TypeName(field=val, ...)`, not the
+        // generic `<TypeName object>` fallback. All of this was missing
+        // entirely (fields were stored as plain instance attributes with
+        // no tuple-like behavior at all) — found via CPython's own
+        // `urllib/robotparser.py`, whose `RequestRate = namedtuple(...)`
+        // instances need to compare equal by value.
+        fn field_values(self_obj: &PyObjectRef, fields: &[String]) -> PyResult<Vec<PyObjectRef>> {
+            fields.iter().map(|f| self_obj.borrow().get_attribute(f)).collect()
+        }
+
+        let f2 = fields.clone();
+        let repr_fn = move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+            let typename = if let PyObject::Instance { typ, .. } = &*args[0].borrow() {
+                if let PyObject::Type { name, .. } = &*typ.borrow() { name.clone() } else { "namedtuple".to_string() }
+            } else { "namedtuple".to_string() };
+            let vals = field_values(&args[0], &f2)?;
+            let parts: Vec<String> = f2.iter().zip(vals.iter()).map(|(f, v)| format!("{}={}", f, v.repr())).collect();
+            Ok(py_str(&format!("{}({})", typename, parts.join(", "))))
+        };
+        let f2 = fields.clone();
+        let eq_fn = move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+            if args.len() < 2 { return Ok(py_bool(false)); }
+            let a = field_values(&args[0], &f2)?;
+            let b_tuple = match &*args[1].borrow() {
+                PyObject::Tuple(t) => Some(t.clone()),
+                PyObject::Instance { dict, .. } if dict.get_str("_fields").is_some() => {
+                    Some(field_values(&args[1], &f2)?)
+                }
+                _ => None,
+            };
+            match b_tuple {
+                Some(b) if b.len() == a.len() => {
+                    for (x, y) in a.iter().zip(b.iter()) {
+                        if !x.equals(y)? { return Ok(py_bool(false)); }
+                    }
+                    Ok(py_bool(true))
+                }
+                _ => Ok(py_not_implemented()),
+            }
+        };
+        let f2 = fields.clone();
+        let iter_fn = move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+            let vals = field_values(&args[0], &f2)?;
+            builtin_iter(&[py_tuple(vals)])
+        };
+        let f2 = fields.clone();
+        let getitem_fn = move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+            if args.len() < 2 { return Err(PyError::type_error("expected an index")); }
+            let vals = field_values(&args[0], &f2)?;
+            py_getitem(&py_tuple(vals), &args[1])
+        };
+        let f2 = fields.clone();
+        let len_fn = move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+            let _ = &args[0];
+            Ok(py_int(f2.len() as i64))
+        };
+        let f2 = fields.clone();
+        let hash_fn = move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+            let vals = field_values(&args[0], &f2)?;
+            Ok(py_int(py_tuple(vals).hash()? as i64))
+        };
+        let f2 = fields.clone();
+        let asdict_fn = move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+            let vals = field_values(&args[0], &f2)?;
+            let mut d = crate::object::PyDict::new();
+            for (f, v) in f2.iter().zip(vals.into_iter()) {
+                d.set(py_str(f), v)?;
+            }
+            Ok(PyObjectRef::new(PyObject::Dict(Box::new(d))))
+        };
+        let f2 = fields.clone();
+        let replace_fn = move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+            let self_obj = &args[0];
+            let typ = if let PyObject::Instance { typ, .. } = &*self_obj.borrow() { typ.clone() } else {
+                return Err(PyError::type_error("_replace on non-namedtuple"));
+            };
+            let overrides = if args.len() > 1 {
+                match &*args[1].borrow() {
+                    PyObject::Dict(d) => d.items().into_iter().map(|(k, v)| (k.str(), v)).collect(),
+                    _ => Vec::new(),
+                }
+            } else { Vec::new() };
+            let mut new_dict = AttrMap::new();
+            for f in &f2 {
+                let v = overrides.iter().find(|(k, _)| k == f).map(|(_, v)| v.clone())
+                    .unwrap_or(self_obj.borrow().get_attribute(f)?);
+                new_dict.insert_str(f, v);
+            }
+            new_dict.insert_str("_fields", PyObjectRef::new(PyObject::List(f2.iter().map(|f| py_str(f)).collect())));
+            Ok(PyObjectRef::new(PyObject::Instance { typ, dict: new_dict }))
+        };
+
+        type_dict.insert_str("__repr__", PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(repr_fn))));
+        type_dict.insert_str("__eq__", PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(eq_fn))));
+        type_dict.insert_str("__iter__", PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(iter_fn))));
+        type_dict.insert_str("__getitem__", PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(getitem_fn))));
+        type_dict.insert_str("__len__", PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(len_fn))));
+        type_dict.insert_str("__hash__", PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(hash_fn))));
+        type_dict.insert_str("_asdict", PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(asdict_fn))));
+        type_dict.insert_str("_replace", PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(replace_fn))));
+
         // Add field names as class-level attributes (for __doc__ setting support)
         for f in &fields {
             type_dict.insert(f.clone(), PyObjectRef::new(PyObject::Instance {
