@@ -1517,8 +1517,31 @@ pub fn create_math_dict() -> HashMap<String, PyObjectRef> {
         if args.len() < 2 { return Err(PyError::type_error("isclose() takes at least two arguments")); }
         let a = math_arg_f64(&args[0]).ok_or_else(|| PyError::type_error("isclose() argument must be a number"))?;
         let b = math_arg_f64(&args[1]).ok_or_else(|| PyError::type_error("isclose() argument must be a number"))?;
-        let rel_tol = 1e-9;
-        let abs_tol = 0.0;
+        // `rel_tol`/`abs_tol` (real `math.isclose`'s signature: `isclose(a,
+        // b, *, rel_tol=1e-09, abs_tol=0.0)`, keyword-only) were hardcoded
+        // to their defaults, completely ignoring whatever the caller
+        // actually passed — `math.isclose(1.0, 1.0000001, rel_tol=1e-5)`
+        // silently used `1e-9` instead, returning `False` for a
+        // comparison that should clearly be `True`. Keyword args arrive
+        // packed into a trailing dict per this codebase's own
+        // `BuiltinFunction` calling convention.
+        let mut rel_tol = 1e-9;
+        let mut abs_tol = 0.0;
+        if let Some(last) = args.last() {
+            if let PyObject::Dict(kwargs) = &*last.borrow() {
+                if let Ok(Some(v)) = kwargs.get(&py_str("rel_tol")) {
+                    rel_tol = math_arg_f64(&v).ok_or_else(|| PyError::type_error("isclose() argument must be a number"))?;
+                }
+                if let Ok(Some(v)) = kwargs.get(&py_str("abs_tol")) {
+                    abs_tol = math_arg_f64(&v).ok_or_else(|| PyError::type_error("isclose() argument must be a number"))?;
+                }
+            }
+        }
+        if rel_tol < 0.0 || abs_tol < 0.0 {
+            return Err(PyError::value_error("tolerances must be non-negative"));
+        }
+        if a == b { return Ok(py_bool(true)); }
+        if a.is_infinite() || b.is_infinite() { return Ok(py_bool(false)); }
         Ok(py_bool((a - b).abs() <= (rel_tol * a.abs().max(b.abs())).max(abs_tol)))
     });
     math_func!("gcd", |args| {

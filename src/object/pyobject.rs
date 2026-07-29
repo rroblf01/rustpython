@@ -748,9 +748,39 @@ impl PyObject {
             // address is stable across calls as long as callers don't
             // reconstruct a throwaway clone first (unlike the Instance case
             // above, which needed its own fix for exactly that reason).
+            // Iterator objects (and anything else with no sensible
+            // structural equality of its own) are hashable BY IDENTITY in
+            // real Python — hashability is opt-OUT (only mutable
+            // containers like `list`/`dict`/`set` explicitly disable it),
+            // not opt-in. These previously fell to the generic `_`
+            // catch-all below, making every one of them unhashable —
+            // found via CPython's own `test_hash.py::test_hashes`, whose
+            // `hashes_to_check` list includes `enumerate(...)`, `iter(an_
+            // object_with_only___getitem__)` (this interpreter's own
+            // `GetItemIter`), and `iter(callable, sentinel)` (`
+            // CallSentinelIter`).
             PyObject::Function(_) | PyObject::BuiltinFunction { .. } | PyObject::BuiltinMethod { .. }
-            | PyObject::Type { .. } | PyObject::Module { .. } | PyObject::BoundMethod { .. } => {
+            | PyObject::Type { .. } | PyObject::Module { .. } | PyObject::BoundMethod { .. }
+            | PyObject::EnumerateIter { .. } | PyObject::GetItemIter { .. } | PyObject::CallSentinelIter { .. }
+            | PyObject::ListIter { .. } | PyObject::RangeIter { .. } | PyObject::MapIterator { .. }
+            | PyObject::FilterIterator { .. } | PyObject::ZipIterator { .. } | PyObject::CycleIter { .. }
+            | PyObject::GroupByIter { .. } => {
                 Ok(self as *const PyObject as usize)
+            }
+            // A READ-ONLY `memoryview` (over `bytes`) IS hashable in real
+            // Python, hashing exactly like the equivalent `bytes` content
+            // (`hash(memoryview(b'x')) == hash(b'x')`) — a WRITABLE one
+            // (over `bytearray`) is NOT, matching `bytearray`'s own
+            // unhashability. Previously fell to the generic `_` catch-all,
+            // making EVERY memoryview unhashable regardless of
+            // readonly-ness. Found via CPython's own `test_hash.py`.
+            PyObject::MemoryView { readonly, .. } => {
+                if !readonly {
+                    return Err(PyError::type_error("unhashable type: 'memoryview'"));
+                }
+                let self_ref = PyObjectRef::new(self.clone());
+                let bytes = mv_tobytes(&self_ref)?;
+                PyObject::Bytes(bytes).hash()
             }
             PyObject::Closure(_) => Err(PyError::type_error(format!("unhashable type: '{}'", self.type_name()))),
             _ => Err(PyError::type_error(format!("unhashable type: '{}'", self.type_name()))),

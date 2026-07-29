@@ -1942,6 +1942,15 @@ impl VirtualMachine {
         if code.vararg_name.is_some() || code.kwarg_name.is_some() || code.num_defaults > 0 {
             return None;
         }
+        // A wrong argument count must raise `TypeError` (see the slow path's
+        // own validation just below in `call_function`) — this fast path
+        // has no such check of its own, so falling through to the slow path
+        // whenever the count doesn't match exactly is what makes that
+        // validation actually apply to every call, not just the ones that
+        // happen to miss this "simple function" fast path.
+        if args.len() != code.arg_count {
+            return None;
+        }
         let instrs = &code.instructions;
         if instrs.is_empty() || instrs.len() > 12 {
             return None;
@@ -3676,26 +3685,25 @@ impl VirtualMachine {
                                                     self_obj: obj.clone(),
                                                 }));
                                             }
-                                            // A `PyObject::Closure` found via the class's own
-                                            // dict (as opposed to one already self-bound at
-                                            // construction time, e.g. the regex-method
-                                            // closures elsewhere in this file) needs the SAME
-                                            // auto-binding `Function`/`BuiltinFunction` get
-                                            // just above — this is this opcode's own separate
-                                            // copy of the identical gap already fixed in
-                                            // `resolve_descriptor_attr`. Real trigger:
-                                            // `namedtuple`'s own `_asdict`/`_replace`
-                                            // (non-dunder methods implemented as a `Closure`
-                                            // shared across every instance of the generated
-                                            // type), called as `instance._asdict()` — without
-                                            // this, the closure ran with `self` missing from
-                                            // its arguments entirely (`args[0]` out-of-bounds).
-                                            PyObject::Closure(_) => {
-                                                return Some(PyObjectRef::imm(PyObject::BoundMethod {
-                                                    func: val.clone(),
-                                                    self_obj: obj.clone(),
-                                                }));
-                                            }
+                                            // NOTE: deliberately NOT auto-binding a bare
+                                            // `PyObject::Closure` found via the class dict here
+                                            // — unlike `Function`/`BuiltinFunction` just above,
+                                            // `Closure` is ALSO used pervasively for the
+                                            // opposite convention: a closure built FRESH per
+                                            // instance (e.g. `io.BytesIO`'s `read`/`write`/
+                                            // `seek`, `dev.rs`), capturing that instance's own
+                                            // state directly and expecting NO `self` prepended
+                                            // at all. Auto-binding unconditionally here broke
+                                            // those (their first REAL argument became `self`
+                                            // instead) — confirmed via `io.BytesIO().write(b"x")`
+                                            // regressing to `TypeError: a bytes-like object is
+                                            // required, not str`. A shared, TYPE-level `Closure`
+                                            // needing `self` (e.g. `namedtuple`'s own
+                                            // `_asdict`/`_replace`) should instead be
+                                            // implemented as a plain `BuiltinFunction` reading
+                                            // whatever state it needs off `self` at call time —
+                                            // that convention already auto-binds correctly via
+                                            // the arm above, with no ambiguity.
                                             _ => {
                                                 // Generic descriptor protocol: if value has __get__, call it
                                                 drop(val_borrowed);
@@ -5521,22 +5529,15 @@ impl VirtualMachine {
             PyObject::Function(_) => {
                 Some(PyObjectRef::imm(PyObject::BoundMethod { func: found.clone(), self_obj: obj.clone() }))
             }
-            // A `PyObject::Closure` found via the class's own dict (as
-            // opposed to one constructed fresh, already self-bound, during
-            // attribute access itself — e.g. the regex-method closures
-            // elsewhere in this file) needs the SAME auto-binding
-            // `Function`/`BuiltinFunction` get just above. Without this, a
-            // non-dunder method implemented as a shared `Closure` (real
-            // trigger: `namedtuple`'s own `_asdict`/`_replace`, called as
-            // `instance._asdict()`) was returned completely UNBOUND — the
-            // call then ran with `self` missing from `args` entirely
-            // (dunder methods stored the same way, e.g. `__eq__`, never
-            // hit this bug since they're invoked via a separate protocol
-            // dispatch path — `lookup_dunder_via_mro` + `call_bound_method`
-            // — that already binds correctly regardless of callable kind).
-            PyObject::Closure(_) => {
-                Some(PyObjectRef::imm(PyObject::BoundMethod { func: found.clone(), self_obj: obj.clone() }))
-            }
+            // NOTE: deliberately NOT auto-binding a bare `PyObject::Closure`
+            // here — see the matching (much longer) comment on this same
+            // decision at the `LOAD_ATTR` opcode's own copy of this logic.
+            // `Closure` is used both for shared, TYPE-level methods needing
+            // `self` bound (which should use `BuiltinFunction` instead —
+            // that already auto-binds correctly) AND for per-instance
+            // closures capturing their own state directly and expecting NO
+            // `self` prepended (`io.BytesIO`'s `read`/`write`/`seek`, ...) —
+            // auto-binding unconditionally broke the latter.
             PyObject::BuiltinFunction { name: n, .. } if crate::object::is_builtin_exception_class_name(n) => {
                 // Don't auto-bind a builtin exception "class" — see the
                 // matching LOAD_ATTR fix's own (much longer) comment.
@@ -6179,6 +6180,50 @@ impl VirtualMachine {
 
             let npos = args.len();
             let named_params = code.arg_count;
+            let fname = interner::lookup_str(code.name).to_string();
+
+            fn format_missing_names(names: &[String]) -> String {
+                match names.len() {
+                    0 => String::new(),
+                    1 => format!("'{}'", names[0]),
+                    2 => format!("'{}' and '{}'", names[0], names[1]),
+                    _ => {
+                        let (last, rest) = names.split_last().unwrap();
+                        let joined = rest.iter().map(|n| format!("'{}'", n)).collect::<Vec<_>>().join(", ");
+                        format!("{}, and '{}'", joined, last)
+                    }
+                }
+            }
+
+            // Real Python raises `TypeError` immediately when more positional
+            // arguments are given than the function accepts (and it has no
+            // `*args` to absorb the excess) — this whole argument-binding
+            // block had NO validation of any kind before this fix: too many
+            // positional args were silently dropped, missing required args
+            // were never detected (the function body would just hit
+            // `LOAD_FAST unbound` chaos or read `None`), unexpected keyword
+            // arguments were silently inserted as a throwaway local name,
+            // and a keyword colliding with an already-positionally-filled
+            // parameter silently overwrote it instead of raising. Found via
+            // CPython's own `test_call.py`
+            // (`TestErrorMessagesUseQualifiedName`/`CFunctionCallsErrorMessages`),
+            // whose whole point is exercising exactly these error paths —
+            // every single one of them was a real, silent correctness bug
+            // affecting EVERY user-defined function call in the interpreter.
+            if npos > named_params && code.vararg_name.is_none() {
+                self.release_frame(new_frame);
+                let num_defaults = code.num_defaults;
+                let min_required = named_params.saturating_sub(num_defaults);
+                let msg = if num_defaults == 0 {
+                    format!("{}() takes {} positional argument{} but {} {} given",
+                        fname, named_params, if named_params == 1 { "" } else { "s" },
+                        npos, if npos == 1 { "was" } else { "were" })
+                } else {
+                    format!("{}() takes from {} to {} positional arguments but {} {} given",
+                        fname, min_required, named_params, npos, if npos == 1 { "was" } else { "were" })
+                };
+                return Err(PyError::type_error(msg));
+            }
 
             // Assign positional args to named parameters
             for i in 0..npos.min(named_params) {
@@ -6230,10 +6275,19 @@ impl VirtualMachine {
 
             // Handle **kwargs
             let kwonly_start = code.arg_count + if code.vararg_name.is_some() { 1 } else { 0 };
+            let positional_filled = npos.min(named_params);
             if let Some(kwarg_name) = &code.kwarg_name {
                 let kw_dict = py_dict();
                 for (key, value) in &keywords {
                     if let Some(idx) = formal_param_index(&new_frame.code.varnames, code.arg_count, code.kwonlyarg_count, kwonly_start, key) {
+                        // A keyword targeting a formal parameter that ALREADY
+                        // received a positional value — real Python's
+                        // `TypeError: ...() got multiple values for argument
+                        // '...'`, previously silently overwritten.
+                        if idx < positional_filled {
+                            self.release_frame(new_frame);
+                            return Err(PyError::type_error(format!("{}() got multiple values for argument '{}'", fname, key)));
+                        }
                         new_frame.insert_local(&key, value.clone());
                         if idx < new_frame.fast_locals.len() {
                             new_frame.fast_locals[idx] = Some(value.clone());
@@ -6257,14 +6311,28 @@ impl VirtualMachine {
                 // meant `f(1, somekw=True)` left `somekw` as None in
                 // fast_locals, raising "referenced before assignment" the
                 // moment the function body read it), matching the
-                // **kwargs branch above.
+                // **kwargs branch above. A keyword matching no formal
+                // parameter, or one that already got a positional value,
+                // must raise `TypeError` — previously silently accepted as
+                // either a no-op or a throwaway local-name insertion the
+                // function body never referenced.
                 for (key, value) in &keywords {
-                    if let Some(idx) = formal_param_index(&new_frame.code.varnames, code.arg_count, code.kwonlyarg_count, kwonly_start, key) {
-                        if idx < new_frame.fast_locals.len() {
-                            new_frame.fast_locals[idx] = Some(value.clone());
+                    match formal_param_index(&new_frame.code.varnames, code.arg_count, code.kwonlyarg_count, kwonly_start, key) {
+                        Some(idx) if idx < positional_filled => {
+                            self.release_frame(new_frame);
+                            return Err(PyError::type_error(format!("{}() got multiple values for argument '{}'", fname, key)));
+                        }
+                        Some(idx) => {
+                            if idx < new_frame.fast_locals.len() {
+                                new_frame.fast_locals[idx] = Some(value.clone());
+                            }
+                            new_frame.insert_local(&key, value.clone());
+                        }
+                        None => {
+                            self.release_frame(new_frame);
+                            return Err(PyError::type_error(format!("{}() got an unexpected keyword argument '{}'", fname, key)));
                         }
                     }
-                    new_frame.insert_local(&key, value.clone());
                 }
             }
 
@@ -6290,6 +6358,31 @@ impl VirtualMachine {
                         }
                     }
                 }
+            }
+
+            // Any formal positional/keyword-only parameter still unbound at
+            // this point has no value at all — real Python's `TypeError:
+            // ...() missing N required positional/keyword-only argument(s):
+            // '...'`, previously never checked.
+            let missing_positional: Vec<String> = (0..named_params)
+                .filter(|&i| i >= new_frame.fast_locals.len() || new_frame.fast_locals[i].is_none())
+                .map(|i| interner::lookup_str(new_frame.code.varnames[i]).to_string())
+                .collect();
+            if !missing_positional.is_empty() {
+                self.release_frame(new_frame);
+                let n = missing_positional.len();
+                return Err(PyError::type_error(format!("{}() missing {} required positional argument{}: {}",
+                    fname, n, if n == 1 { "" } else { "s" }, format_missing_names(&missing_positional))));
+            }
+            let missing_kwonly: Vec<String> = (kwonly_start..kwonly_start + code.kwonlyarg_count)
+                .filter(|&i| i >= new_frame.fast_locals.len() || new_frame.fast_locals[i].is_none())
+                .map(|i| interner::lookup_str(new_frame.code.varnames[i]).to_string())
+                .collect();
+            if !missing_kwonly.is_empty() {
+                self.release_frame(new_frame);
+                let n = missing_kwonly.len();
+                return Err(PyError::type_error(format!("{}() missing {} required keyword-only argument{}: {}",
+                    fname, n, if n == 1 { "" } else { "s" }, format_missing_names(&missing_kwonly))));
             }
 
             self.frames.push(new_frame);

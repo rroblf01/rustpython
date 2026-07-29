@@ -123,8 +123,33 @@ pub fn builtin_len(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             drop(obj);
             Ok(py_int(mv_len(&args[0])? as i64))
         }
+        // Real Python's `list_iterator`/`range_iterator`/etc. all support
+        // `len()` — it reports the number of REMAINING elements, not the
+        // original sequence's length (used by `operator.length_hint`, and
+        // directly by real code — real trigger: CPython's own
+        // `test_iterlen.py`, whose whole purpose is exercising this exact
+        // protocol across iterator types).
+        PyObject::ListIter { list, index } => Ok(py_int(list.len().saturating_sub(*index))),
+        PyObject::RangeIter { current, stop, step } => {
+            let remaining = if *step > 0 && *current < *stop {
+                (*stop - *current + *step - 1) / *step
+            } else if *step < 0 && *current > *stop {
+                (*current - *stop - *step - 1) / (-*step)
+            } else {
+                0
+            };
+            Ok(py_int(remaining.max(0)))
+        }
         PyObject::Instance { typ, dict } => {
             let f = lookup_dunder_via_mro(typ, "__len__");
+            let native = dict.get(NATIVE_BACKING_KEY).cloned();
+            let type_name = obj.type_name();
+            // Drop the borrow on args[0] before calling into `__len__` —
+            // holding it across the call panics with "RefCell already
+            // borrowed" the moment `__len__` mutates `self` (real trigger:
+            // CPython's own `test_enumerate.py`'s `SeqWithWeirdLen.__len__`,
+            // which does `self.called = True`).
+            drop(obj);
             if let Some(f) = f {
                 let result = call_bound_method(f, args[0].clone(), vec![])?;
                 let n = result.borrow();
@@ -144,16 +169,18 @@ pub fn builtin_len(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 }
                 return Err(PyError::type_error("__len__() should return an int"))
             }
-            if let Some(native) = dict.get(NATIVE_BACKING_KEY) {
-                return builtin_len(&[native.clone()]);
+            if let Some(native) = native {
+                return builtin_len(&[native]);
             }
-            Err(PyError::type_error(format!("object of type '{}' has no len()", obj.type_name())))
+            Err(PyError::type_error(format!("object of type '{}' has no len()", type_name)))
         }
         // A class object itself, via its metaclass's `__len__` (e.g.
         // `len(SomeEnum)` — see the matching GET_ITER/builtin_iter handling
         // for why this needs metatype_of rather than ordinary lookup).
         PyObject::Type { .. } => {
             let f = metatype_of(&args[0]).and_then(|mt| lookup_dunder_via_mro(&mt, "__len__"));
+            let type_name = obj.type_name();
+            drop(obj);
             if let Some(f) = f {
                 let result = call_bound_method(f, args[0].clone(), vec![])?;
                 let n = result.borrow();
@@ -165,7 +192,7 @@ pub fn builtin_len(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 }
                 return Err(PyError::type_error("__len__() should return an int"));
             }
-            Err(PyError::type_error(format!("object of type '{}' has no len()", obj.type_name())))
+            Err(PyError::type_error(format!("object of type '{}' has no len()", type_name)))
         }
         _ => Err(PyError::type_error(format!("object of type '{}' has no len()", obj.type_name()))),
     }
@@ -2866,7 +2893,12 @@ pub fn builtin_reversed(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // — this only started hanging once `builtin_iter`'s own new `__getitem__`
     // fallback (see `GetItemIter`) made `iter()` succeed on such objects at
     // all, where it previously raised a quick (if wrong) `TypeError`.
-    if let PyObject::Instance { typ, .. } = &*args[0].borrow() {
+    let instance_typ = if let PyObject::Instance { typ, .. } = &*args[0].borrow() {
+        Some(typ.clone())
+    } else {
+        None
+    };
+    if let Some(typ) = &instance_typ {
         if let Some(f) = lookup_dunder_via_mro(typ, "__reversed__") {
             // `__reversed__ = None` is real Python's documented way to
             // explicitly DISABLE reversal on a class that would otherwise
