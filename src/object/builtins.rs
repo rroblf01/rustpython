@@ -187,41 +187,32 @@ fn iterable_length_hint(obj: &PyObjectRef) -> Option<usize> {
     }
 }
 
+// real `range()` accepts anything implementing `__index__`, not just a
+// literal `int` (`crate::object::subscript::to_index` already implements
+// that same "native int, or call `__index__` via mro" protocol for
+// slicing) — found via CPython's own `test_range.py`, which constructs
+// `range()` bounds from custom `__index__`-only objects.
+fn range_index_arg(obj: &PyObjectRef) -> PyResult<i64> {
+    to_index(obj)?.to_i64().ok_or_else(|| PyError::type_error("range() expects int arguments"))
+}
+
 pub fn builtin_range(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     match args.len() {
         1 => {
-            let stop = args[0].borrow();
-            if let PyObject::Int(n) = &*stop {
-                let stop = n.to_i64().ok_or_else(|| PyError::type_error("range() expects int arguments"))?;
-                Ok(PyObjectRef::imm(PyObject::Range { start: 0, stop, step: 1 }))
-            } else {
-                Err(PyError::type_error("range() expects int arguments"))
-            }
+            let stop = range_index_arg(&args[0])?;
+            Ok(PyObjectRef::imm(PyObject::Range { start: 0, stop, step: 1 }))
         }
         2 => {
-            let start = args[0].borrow();
-            let stop = args[1].borrow();
-            if let (PyObject::Int(a), PyObject::Int(b)) = (&*start, &*stop) {
-                let a = a.to_i64().ok_or_else(|| PyError::type_error("range() expects int arguments"))?;
-                let b = b.to_i64().ok_or_else(|| PyError::type_error("range() expects int arguments"))?;
-                Ok(PyObjectRef::imm(PyObject::Range { start: a, stop: b, step: 1 }))
-            } else {
-                Err(PyError::type_error("range() expects int arguments"))
-            }
+            let a = range_index_arg(&args[0])?;
+            let b = range_index_arg(&args[1])?;
+            Ok(PyObjectRef::imm(PyObject::Range { start: a, stop: b, step: 1 }))
         }
         3 => {
-            let start = args[0].borrow();
-            let stop = args[1].borrow();
-            let step = args[2].borrow();
-            if let (PyObject::Int(a), PyObject::Int(b), PyObject::Int(s)) = (&*start, &*stop, &*step) {
-                let a = a.to_i64().ok_or_else(|| PyError::type_error("range() expects int arguments"))?;
-                let b = b.to_i64().ok_or_else(|| PyError::type_error("range() expects int arguments"))?;
-                let s = s.to_i64().ok_or_else(|| PyError::type_error("range() expects int arguments"))?;
-                if s == 0 { return Err(PyError::value_error("range() arg 3 must not be zero")); }
-                Ok(PyObjectRef::imm(PyObject::Range { start: a, stop: b, step: s }))
-            } else {
-                Err(PyError::type_error("range() expects int arguments"))
-            }
+            let a = range_index_arg(&args[0])?;
+            let b = range_index_arg(&args[1])?;
+            let s = range_index_arg(&args[2])?;
+            if s == 0 { return Err(PyError::value_error("range() arg 3 must not be zero")); }
+            Ok(PyObjectRef::imm(PyObject::Range { start: a, stop: b, step: s }))
         }
         _ => Err(PyError::type_error("range() takes at most 3 arguments")),
     }
@@ -2861,6 +2852,33 @@ pub fn builtin_issubclass(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 }
             }
             Ok(py_bool(false))
+        }
+        // `Opcode::WITH_EXIT` (`vm.rs`) resolves a raised `PyObject::Exception`'s
+        // `exc_type` argument to `__exit__` by looking its `typ` name up in the
+        // CURRENT frame's builtins — which only ever holds the ~70 core
+        // exception names (`add_exc_type!` in `create_builtins`), never a
+        // module-scoped custom exception like `struct.error`/`pickle.PickleError`
+        // (those live only in their own module's dict, not global builtins).
+        // When that lookup misses, it falls back to a bare `PyObject::Str`
+        // holding just the name, as a last-resort placeholder — so
+        // `issubclass(exc_type, struct.error)` inside `unittest`'s own
+        // `_AssertRaisesBaseContext.__exit__` reached here with a plain string
+        // for `cls`. This codebase already treats built-in/module exception
+        // "classes" as interchangeable by name everywhere else (the
+        // `BuiltinFunction`/`Type`/`Str` arms just above), so extending that
+        // same name-based comparison to a bare string `cls` here is consistent,
+        // not a new kind of laxness — a real user never passes a plain string
+        // as `issubclass`'s first argument, this only arises from the internal
+        // exc_type fallback. Real trigger: `test_struct.py`'s own
+        // `assertRaisesRegex(struct.error, ...)`.
+        (PyObject::Str(cls_name), _) => {
+            let base_name = match &*base {
+                PyObject::BuiltinFunction { name, .. } => name.clone(),
+                PyObject::Str(s) => s.to_string(),
+                PyObject::Type { name, .. } => name.clone(),
+                _ => base.str(),
+            };
+            Ok(py_bool(crate::vm::is_exception_subclass(cls_name, &base_name)))
         }
         _ => {
             if std::env::var("RPY_DEBUG_ISSUBCLASS").is_ok() {

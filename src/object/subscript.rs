@@ -20,8 +20,15 @@ pub fn to_index(obj: &PyObjectRef) -> PyResult<BigInt> {
         if let Some(f) = f {
             let result = call_bound_method(f, obj.clone(), vec![])?;
             let r = result.borrow();
-            if let PyObject::Int(i) = &*r { Ok(i.clone()) }
-            else { Err(PyError::type_error("__index__ must return int")) }
+            match &*r {
+                PyObject::Int(i) => Ok(i.clone()),
+                // `bool` is a genuine `int` subclass in real Python, so a
+                // `__index__` returning `True`/`False` is valid (if
+                // deprecated in modern CPython) — matches the native-`bool`
+                // arm added just below for the same reason.
+                PyObject::Bool(b) => Ok(BigInt::from(*b as i64)),
+                _ => Err(PyError::type_error("__index__ must return int")),
+            }
         } else {
             Err(PyError::type_error(format!("'{}' object cannot be interpreted as an integer", type_name)))
         }
@@ -29,6 +36,10 @@ pub fn to_index(obj: &PyObjectRef) -> PyResult<BigInt> {
         let o = obj.borrow();
         match &*o {
             PyObject::Int(i) => Ok(i.clone()),
+            // `bool` is a subtype of `int` in real Python (`range(True) ==
+            // range(1)`, `[10, 20][False]`, etc.) — found via `range()`'s
+            // own `__index__`-protocol fix above surfacing this same gap.
+            PyObject::Bool(b) => Ok(BigInt::from(*b as i64)),
             _ => Err(PyError::type_error(format!("'{}' object cannot be interpreted as an integer", type_name))),
         }
     }

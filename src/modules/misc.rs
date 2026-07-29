@@ -1504,8 +1504,7 @@ pub fn create_struct_dict() -> HashMap<String, PyObjectRef> {
     d.insert_str("error", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "error".to_string(),
         func: |args| {
-            let msg = if !args.is_empty() { args[0].str() } else { "struct error".to_string() };
-            Err(PyError::Exception(msg, py_none()))
+            Ok(PyObjectRef::new(PyObject::Exception { typ: "error".to_string(), args: args.to_vec(), cause: None }))
         },
     }));
 

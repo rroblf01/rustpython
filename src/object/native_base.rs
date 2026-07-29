@@ -105,6 +105,11 @@ pub(crate) fn is_builtin_exception_class_name(name: &str) -> bool {
         "BufferError" | "MemoryError" | "NotADirectoryError" | "IsADirectoryError" |
         "FileExistsError" | "ConnectionAbortedError" | "ConnectionResetError" |
         "ProcessLookupError" | "UnicodeTranslateError" | "IndentationError" | "TabError" |
+        // `UnicodeError` itself (as opposed to its `UnicodeDecodeError`/
+        // `UnicodeEncodeError` subclasses, both already listed above) was
+        // missing despite being registered the same way via `add_exc_type!`
+        // — found via the same struct/decimal/pickle audit below.
+        "UnicodeError" |
         // Module-specific exception classes (each defined the same way —
         // a bare `PyObject::BuiltinFunction` whose closure builds a
         // `PyObject::Exception` — but registered on their OWN module's dict
@@ -115,7 +120,21 @@ pub(crate) fn is_builtin_exception_class_name(name: &str) -> bool {
         // calls unittest's `_is_subtype`, which requires this to be True —
         // same root gap as the core-builtin case documented above, just for
         // a name outside that fixed core list).
-        "Error" | "InvalidStateError" | "CertificateError" | "SSLError" | "OperationalError"
+        "Error" | "InvalidStateError" | "CertificateError" | "SSLError" | "OperationalError" |
+        // `struct.error` — lowercase, matching real CPython's `struct.error`
+        // attribute name exactly (unlike most other module exceptions here,
+        // which use a capitalized class name). Found via `test_struct.py`'s
+        // own `assertRaisesRegex(struct.error, ...)` calls.
+        "error" |
+        // `pickle` module exceptions (`pickle.PickleError`/`PicklingError`/
+        // `UnpicklingError`) and `graphlib.CycleError` — same audit pass.
+        "CycleError" | "PickleError" | "PicklingError" | "UnpicklingError" |
+        // `decimal` module's signal/exception classes (`decimal.DecimalException`
+        // and its subclasses) — same audit pass, found by cross-referencing
+        // every `builtin_make_exception_*` constructor registered anywhere
+        // in `src/modules/` against this list.
+        "DecimalException" | "InvalidOperation" | "DivisionByZero" | "Inexact" | "Rounded" |
+        "Clamped" | "Overflow" | "Underflow" | "FloatOperation"
     )
 }
 
