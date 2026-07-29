@@ -1251,75 +1251,21 @@ pub fn builtin_hash(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() != 1 {
         return Err(PyError::type_error("hash() takes exactly one argument"));
     }
-    let obj = args[0].borrow();
-    match &*obj {
-        PyObject::Int(i) => {
-            // Hash of int is the int itself (CPython behavior for small ints)
-            let i64_val = i.to_i64().unwrap_or(0);
-            Ok(py_int(i64_val))
-        }
-        PyObject::Float(f) => Ok(py_int(f.to_bits() as i64)),
-        PyObject::Bool(b) => Ok(py_int(if *b { 1 } else { 0 })),
-        PyObject::Str(s) => {
-            // Simple FNV-1a hash
-            let mut hash: u64 = 14695981039346656037;
-            for byte in s.bytes() {
-                hash ^= byte as u64;
-                hash = hash.wrapping_mul(1099511628211);
-            }
-            Ok(py_int(hash as i64))
-        }
-        PyObject::Bytes(b) => {
-            let mut hash: u64 = 14695981039346656037;
-            for byte in b {
-                hash ^= *byte as u64;
-                hash = hash.wrapping_mul(1099511628211);
-            }
-            Ok(py_int(hash as i64))
-        }
-        PyObject::ByteArray(b) => {
-            let mut hash: u64 = 14695981039346656037;
-            for byte in b {
-                hash ^= *byte as u64;
-                hash = hash.wrapping_mul(1099511628211);
-            }
-            Ok(py_int(hash as i64))
-        }
-        PyObject::Tuple(v) => {
-            let mut hash: u64 = 14695981039346656037;
-            for item in v {
-                let item_hash = builtin_hash(&[item.clone()])?;
-                let h = item_hash.borrow().clone();
-                if let PyObject::Int(i) = &h {
-                    let i64_val = i.to_i64().unwrap_or(0);
-                    hash ^= i64_val as u64;
-                    hash = hash.wrapping_mul(1099511628211);
-                }
-            }
-            Ok(py_int(hash as i64))
-        }
-        PyObject::Slice { start, stop, step } => {
-            let h = args[0].hash()?;
-            Ok(py_int(h as i64))
-        }
-        PyObject::None => Ok(py_int(123456789)),
-        PyObject::Instance { .. } => {
-            // Delegate to PyObjectRef::hash(), which (unlike reconstructing
-            // a throwaway Instance clone here) calls __hash__ with the real
-            // self — a fresh clone has a different address on every call,
-            // making the default identity-based object.__hash__() (and
-            // hence this instance's hash) different every time it's asked,
-            // which breaks it as a dict/set key or inside a tuple used as
-            // one.
-            drop(obj);
-            Ok(py_int(args[0].hash()? as i64))
-        }
-        _ => {
-            // For objects without a hash, use the pointer as hash
-            let ptr = &*obj as *const PyObject as usize;
-            Ok(py_int(ptr as i64))
-        }
-    }
+    // Delegate entirely to `PyObjectRef::hash()` — the SAME method
+    // `PyDict`/`PySet` call internally to hash a key. This used to
+    // reimplement a SEPARATE algorithm per type here (FNV-1a for
+    // str/bytes/bytearray/tuple, vs. the byte-multiplier/char-multiplier
+    // algorithms `PyObjectRef::hash()`/`PyObject::hash()` actually use for
+    // dict/set storage) — meaning `hash(x)` as seen by Python code could
+    // disagree with the hash ACTUALLY used when `x` is placed in a dict/set,
+    // a correctness invariant `hash()` exists specifically to uphold.
+    // Confirmed via `hash("hello")` returning a completely different value
+    // depending on whether "hello" happened to be represented as an inline
+    // `SmallStr` or a boxed `PyObject::Str` — both must, and now do, agree.
+    // This also fixes a second bug: the old `_` catch-all silently hashed
+    // genuinely unhashable types (`list`, `dict`, `set`) by pointer instead
+    // of raising `TypeError: unhashable type: '...'` like real Python.
+    Ok(py_int(args[0].hash()? as i64))
 }
 
 pub fn builtin_slice(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {

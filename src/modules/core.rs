@@ -103,12 +103,11 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     add_func!("len", builtin_len);
     add_func!("range", builtin_range);
     // "type" is registered further down as a real, subclassable Type object
-    // once `object_type` exists — see the comment there. "int" is likewise
-    // registered further down (once `object_type` exists) as a real Type —
-    // see the comment there.
+    // once `object_type` exists — see the comment there. "int"/"str" are
+    // likewise registered further down (once `object_type` exists) as real
+    // Types — see the comments there.
     add_func!("float", builtin_float);
     add_func!("complex", builtin_complex);
-    add_func!("str", builtin_str);
     add_func!("bool", builtin_bool);
     add_func!("list", builtin_list);
     add_func!("tuple", builtin_tuple);
@@ -499,6 +498,30 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     }
     builtins.insert_str("int", int_type.clone());
     crate::object::seed_primitive_type_cache("int", int_type);
+
+    // `str` — the second type migrated to the `NATIVE_VALUE_CTOR_KEY`
+    // mechanism, same shape as `int` above. Unlike `int` (which needed
+    // `from_bytes` as a genuine class-level method), `str` has no method
+    // that's reached ONLY at the class level — every instance method
+    // (`.upper()`, `.join()`, etc.) keeps resolving via native-backing
+    // delegation on `class MyStr(str)` instances, unaffected by this change
+    // — so `str_dict` needs just the ctor marker.
+    let mut str_dict: HashMap<String, PyObjectRef> = HashMap::new();
+    str_dict.insert_str(crate::object::NATIVE_VALUE_CTOR_KEY, PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "str".to_string(),
+        func: builtin_str,
+    }));
+    let str_type = PyObjectRef::new(PyObject::Type {
+        name: "str".to_string(),
+        dict: Box::new(str_map_to_typedict(str_dict)),
+        bases: vec![object_type.clone()],
+        mro: vec![],
+    });
+    if let PyObject::Type { mro, .. } = &mut *str_type.borrow_mut() {
+        *mro = vec![str_type.clone(), object_type.clone()];
+    }
+    builtins.insert_str("str", str_type.clone());
+    crate::object::seed_primitive_type_cache("str", str_type);
 
     // `type` — a real, subclassable Type object (not just the `type(x)`
     // introspection/`type(name,bases,ns)` construction BuiltinFunction that

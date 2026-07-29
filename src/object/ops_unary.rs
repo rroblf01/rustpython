@@ -11,6 +11,24 @@ use super::*;
 /// from that float, guaranteeing `hash(1) == hash(1.0)` without changing
 /// Int's own existing hash values at all.
 pub(crate) fn hash_bigint(i: &BigInt) -> usize {
+    // Matches real CPython's `hash(n) == n` for any int that fits in a
+    // machine word (the overwhelming common case for dict/set keys and for
+    // the `hash()` builtin) — including negative values, which the
+    // byte-XOR-scan fallback below gets wrong for: it reads
+    // `to_signed_bytes_le()`'s two's-complement bytes WITHOUT sign-
+    // extending them into the `usize` accumulator, so e.g. `hash(-5)`
+    // produced `251` instead of `-5`'s own bit pattern. `-1` is remapped to
+    // `-2`, matching CPython's own special case (C-level code reserves -1
+    // as an internal "hash computation failed" sentinel, so a real hash
+    // that happens to compute to -1 is bumped to -2 instead).
+    if let Some(n) = i.to_i64() {
+        return if n == -1 { (-2i64) as usize } else { n as usize };
+    }
+    // Fall back to a stable, self-consistent (not CPython-bit-exact) scan
+    // for magnitudes beyond i64 — doesn't match CPython's real
+    // mod-(2**61-1) big-int hash algorithm, but keeps the dict/set
+    // invariant (equal values hash equal) for values sharing this
+    // representation.
     let bytes = i.to_signed_bytes_le();
     let mut h: usize = 0;
     for (j, &b) in bytes.iter().enumerate() {
