@@ -411,6 +411,13 @@ pub(crate) fn socket_addr_to_string(addr: &PyObjectRef) -> PyResult<String> {
     }
 }
 
+/// Real `socket.getsockname()`/`getpeername()`/`accept()`'s address element
+/// return a `(host, port)` tuple for AF_INET/AF_INET6, matching CPython —
+/// the inverse of `socket_addr_to_string` above.
+pub(crate) fn socket_addr_to_py_tuple(addr: std::net::SocketAddr) -> PyObjectRef {
+    py_tuple(vec![py_str(&addr.ip().to_string()), py_int(addr.port() as i64)])
+}
+
 pub struct ThreadInner {
     pub handle: Option<std::thread::JoinHandle<()>>,
     pub result: std::sync::Arc<std::sync::Mutex<Option<PyObjectRef>>>,

@@ -77,7 +77,19 @@ incremental patch:
   with known bugs — see `cpython_test_suite_compat` memory notes on why vendoring real
   CPython's `tokenize.py` doesn't work directly for 3.12+), `ast` (only `literal_eval`),
   `compileall`/`py_compile`, `contextvars.Context` (isolated per-context storage; the current
-  `ContextVar` uses one global thread-local stack), a real event-loop-backed `asyncio`.
+  `ContextVar` uses one global thread-local stack), a real event-loop-backed `asyncio`,
+  **`selectors`** (`Lib/selectors.py` is explicitly a no-op stub — `register`/`select`/etc. do
+  nothing; needs a real `select()`/`poll()`-backed implementation), and **`io.BufferedReader`/
+  `BufferedWriter`/`BufferedRandom`** (empty classes inheriting from `BufferedIOBase` with no
+  actual buffering/read/write logic at all). Found 2026-07-29 chasing `test_selectors.py`.
+- **`range()`'s internal representation (`PyObject::Range { start, stop, step }`) uses plain
+  `i64`, not arbitrary precision.** Real CPython's `range` supports bignum-scale bounds (even
+  though iterating that many times is impractical); `test_range.py` deliberately exercises
+  `range(10 * sys.maxsize)`-scale values and fails regardless of any indexing/construction fix
+  since they overflow `i64` outright. Fixing this needs `Range` redefined over `BigInt`
+  throughout (construction, `len()`, indexing, slicing, iteration) — a large, cross-cutting
+  change for a narrow real-world benefit (this is almost entirely a CPython-test-suite-only
+  concern, not something real code relies on). Found/assessed 2026-07-29, deliberately deferred.
 
 ## Opcodes
 

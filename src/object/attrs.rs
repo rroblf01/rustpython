@@ -3380,13 +3380,44 @@ impl PyObject {
                                 let old = std::mem::replace(&mut *inner, SocketInner::Uninitialized);
                                 match old {
                                     SocketInner::TcpListener(listener) => {
-                                        match listener.accept() {
+                                        // Every native socket here is created
+                                        // non-blocking (see `bind`), but real
+                                        // Python sockets default to BLOCKING
+                                        // — there's no `setblocking`/`settimeout`
+                                        // exposed at all yet, so nothing ever
+                                        // legitimately wants `accept()` to
+                                        // return `WouldBlock` immediately.
+                                        // Retry with a short sleep (bounded,
+                                        // to avoid a truly-never-connecting
+                                        // test hanging forever) to emulate
+                                        // blocking `accept()` faithfully.
+                                        // Real trigger: `test_selectors.py`'s
+                                        // own `socketpair()` fallback, whose
+                                        // `l.accept()` call right after a
+                                        // same-process `connect()` otherwise
+                                        // raced the kernel's backlog queue.
+                                        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                                        let result = loop {
+                                            match listener.accept() {
+                                                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock
+                                                    && std::time::Instant::now() < deadline => {
+                                                    std::thread::sleep(std::time::Duration::from_millis(1));
+                                                    continue;
+                                                }
+                                                other => break other,
+                                            }
+                                        };
+                                        match result {
                                             Ok((stream, addr)) => {
                                                 *inner = SocketInner::TcpListener(listener);
                                                 let client = PyObjectRef::new(PyObject::Socket {
                                                     inner: std::rc::Rc::new(std::cell::RefCell::new(SocketInner::TcpStream(stream))),
                                                 });
-                                                Ok(py_tuple(vec![client, py_str(&addr.to_string())]))
+                                                // Real `accept()` returns
+                                                // `(host, port)`, not a
+                                                // string — same fix as
+                                                // `getsockname`/`getpeername`.
+                                                Ok(py_tuple(vec![client, socket_addr_to_py_tuple(addr)]))
                                             }
                                             Err(e) => {
                                                 *inner = SocketInner::TcpListener(listener);
@@ -3499,6 +3530,72 @@ impl PyObject {
                     "setsockopt" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "setsockopt".to_string(),
                         func: |_| Ok(py_none()),
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    // Real `socket.socket` objects are context managers
+                    // (`__enter__` returns `self`, `__exit__` closes the
+                    // socket unconditionally) — this was entirely missing,
+                    // so `with socket.socket(...) as s:` raised
+                    // `AttributeError: 'socket' object has no attribute
+                    // '__exit__'` for every native socket use anywhere.
+                    // Real trigger: `test_selectors.py`'s own `socketpair()`
+                    // fallback helper, which every selector test transitively
+                    // calls via `self.make_socketpair()`.
+                    "__enter__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__enter__".to_string(),
+                        func: |args| Ok(args[0].clone()),
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__exit__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__exit__".to_string(),
+                        func: |args| {
+                            let socket = &*args[0].borrow();
+                            if let PyObject::Socket { inner } = socket {
+                                let mut inner = inner.borrow_mut();
+                                let old = std::mem::replace(&mut *inner, SocketInner::Uninitialized);
+                                drop(old);
+                            }
+                            Ok(py_bool(false))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    // Real `socket.getsockname()`/`getpeername()` return a
+                    // `(host, port)` tuple, not a string — missing entirely
+                    // before, breaking any test helper that binds/connects
+                    // then inspects the resulting address (e.g.
+                    // `test_selectors.py`'s own `socketpair()` fallback,
+                    // whose `l.getsockname()` call is on the hot path for
+                    // every selector test transitively via
+                    // `self.make_socketpair()`).
+                    "getsockname" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "getsockname".to_string(),
+                        func: |args| {
+                            let socket = &*args[0].borrow();
+                            if let PyObject::Socket { inner } = socket {
+                                let inner = inner.borrow();
+                                let addr = match &*inner {
+                                    SocketInner::TcpListener(l) => l.local_addr(),
+                                    SocketInner::TcpStream(s) => s.local_addr(),
+                                    SocketInner::Uninitialized => return Err(PyError::OsError("Bad file descriptor".to_string())),
+                                }.map_err(|e| PyError::OsError(format!("{}", e)))?;
+                                Ok(socket_addr_to_py_tuple(addr))
+                            } else { Err(PyError::runtime_error("getsockname on non-socket")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "getpeername" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "getpeername".to_string(),
+                        func: |args| {
+                            let socket = &*args[0].borrow();
+                            if let PyObject::Socket { inner } = socket {
+                                let inner = inner.borrow();
+                                let addr = match &*inner {
+                                    SocketInner::TcpStream(s) => s.peer_addr(),
+                                    _ => return Err(PyError::OsError("Socket is not connected".to_string())),
+                                }.map_err(|e| PyError::OsError(format!("{}", e)))?;
+                                Ok(socket_addr_to_py_tuple(addr))
+                            } else { Err(PyError::runtime_error("getpeername on non-socket")) }
+                        },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
                     _ => Err(PyError::attribute_error(format!("'socket' object has no attribute '{}'", name))),

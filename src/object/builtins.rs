@@ -1068,12 +1068,15 @@ pub fn builtin_bytes(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     else {
         let obj = args[0].borrow();
         match &*obj {
+            // Same fix as `bytearray(n)` above: `bytes(n)` zero-fills a
+            // buffer of length `n`, it doesn't wrap `n` as a single byte
+            // value.
             PyObject::Int(i) => {
-                let n = i.to_i64().ok_or_else(|| PyError::value_error("bytes() requires int in range 0-255"))?;
-                if n < 0 || n > 255 {
-                    return Err(PyError::value_error("bytes() requires int in range 0-255"));
+                let n = i.to_i64().ok_or_else(|| PyError::value_error("bytes() argument must be non-negative"))?;
+                if n < 0 {
+                    return Err(PyError::value_error("bytes() argument must be non-negative"));
                 }
-                Ok(PyObjectRef::imm(PyObject::Bytes(vec![n as u8])))
+                Ok(PyObjectRef::imm(PyObject::Bytes(vec![0u8; n as usize])))
             }
             PyObject::Bytes(b) => Ok(PyObjectRef::imm(PyObject::Bytes(b.clone()))),
             PyObject::ByteArray(b) => Ok(PyObjectRef::imm(PyObject::Bytes(b.clone()))),
@@ -1188,12 +1191,20 @@ pub fn builtin_bytearray(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     else {
         let obj = args[0].borrow();
         match &*obj {
+            // Real `bytearray(n)` (a single non-negative int argument)
+            // creates a zero-filled buffer of length `n` — NOT a
+            // single-element buffer holding the byte value `n` (that's
+            // `bytes([n])`, a completely different construction). This
+            // matched the length-1 anti-pattern instead, silently breaking
+            // the extremely common "pre-allocate an I/O buffer"
+            // idiom — found via `struct.pack_into`'s own doctest-style
+            // idiom `bytearray(10)`.
             PyObject::Int(i) => {
-                let n = i.to_i64().ok_or_else(|| PyError::value_error("bytearray() requires int in range 0-255"))?;
-                if n < 0 || n > 255 {
-                    return Err(PyError::value_error("bytearray() requires int in range 0-255"));
+                let n = i.to_i64().ok_or_else(|| PyError::value_error("bytearray() argument must be non-negative"))?;
+                if n < 0 {
+                    return Err(PyError::value_error("bytearray() argument must be non-negative"));
                 }
-                Ok(PyObjectRef::new(PyObject::ByteArray(vec![n as u8])))
+                Ok(PyObjectRef::new(PyObject::ByteArray(vec![0u8; n as usize])))
             }
             PyObject::Bytes(b) => Ok(PyObjectRef::new(PyObject::ByteArray(b.clone()))),
             PyObject::ByteArray(b) => Ok(PyObjectRef::new(PyObject::ByteArray(b.clone()))),
