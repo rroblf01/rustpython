@@ -162,15 +162,20 @@ pub(crate) fn str_find_impl(haystack: &str, needle: &str, start: Option<i64>, en
     found.map(|byte_idx| s + sub[..byte_idx].chars().count())
 }
 
-/// Extract a raw byte slice out of a bytes-like `PyObjectRef` (`bytes` or
-/// `bytearray` — the two realistic cases the `bytes` method table below
-/// needs to accept, matching real CPython's "bytes-like object" argument
-/// convention for e.g. `b"x".startswith(bytearray(b"x"))`). Returns `None`
-/// for anything else (str, int, etc.), which callers turn into a TypeError.
+/// Extract a raw byte slice out of a bytes-like `PyObjectRef` (`bytes`,
+/// `bytearray`, or a `'B'`-typecode `array.array` — all three implement
+/// real Python's buffer protocol as a flat byte sequence, matching e.g.
+/// `b"x".startswith(bytearray(b"x"))` and `base64.b64encode(array.array
+/// ('B', b"x"))`, both real, non-hypothetical idioms CPython's own test
+/// suite exercises). Returns `None` for anything else (str, int, a
+/// non-byte-typecode array, ...), which callers turn into a TypeError.
 pub(crate) fn arg_bytes(v: &PyObjectRef) -> Option<Vec<u8>> {
     match &*v.borrow() {
         PyObject::Bytes(b) => Some(b.clone()),
         PyObject::ByteArray(b) => Some(b.clone()),
+        PyObject::Array(arr) if arr.typecode == 'B' || arr.typecode == 'b' || arr.typecode == 'c' => {
+            Some(arr.data.iter().map(|&f| f as u8).collect())
+        }
         _ => None,
     }
 }

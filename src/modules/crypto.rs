@@ -173,12 +173,11 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
     // there was already a `str` where a real `bytes` was expected.
     b64_func!("b64encode", |args| {
         if args.len() != 1 { return Err(PyError::type_error("b64encode() takes exactly one argument")); }
-        let data = args[0].borrow();
-        let bytes = match &*data {
-            PyObject::Bytes(b) => b.clone(),
-            PyObject::ByteArray(b) => b.clone(),
-            _ => return Err(PyError::type_error("b64encode() argument must be bytes")),
-        };
+        // Accepts any bytes-like buffer (`bytes`/`bytearray`/a `'B'`-typecode
+        // `array.array`) — matching real Python's buffer-protocol argument
+        // convention (found via `test_base64.py`'s own `check_other_types`
+        // helper, which exercises exactly this with `array.array('B', ...)`).
+        let bytes = arg_bytes(&args[0]).ok_or_else(|| PyError::type_error("b64encode() argument must be bytes"))?;
         Ok(PyObjectRef::imm(PyObject::Bytes(b64_encode(&bytes).into_bytes())))
     });
 
@@ -191,12 +190,7 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
     // email-specific about the encoding itself.
     b64_func!("encodebytes", |args| {
         if args.len() != 1 { return Err(PyError::type_error("encodebytes() takes exactly one argument")); }
-        let data = args[0].borrow();
-        let bytes = match &*data {
-            PyObject::Bytes(b) => b.clone(),
-            PyObject::ByteArray(b) => b.clone(),
-            _ => return Err(PyError::type_error("encodebytes() argument must be bytes")),
-        };
+        let bytes = arg_bytes(&args[0]).ok_or_else(|| PyError::type_error("encodebytes() argument must be bytes"))?;
         let mut out = String::new();
         for chunk in bytes.chunks(57) {
             out.push_str(&b64_encode(chunk));
@@ -230,6 +224,7 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
         let s = match &*data {
             PyObject::Str(s) => s.to_string(),
             PyObject::Bytes(b) => String::from_utf8_lossy(b).to_string(),
+            PyObject::ByteArray(b) => String::from_utf8_lossy(b).to_string(),
             _ => return Err(PyError::type_error("b64decode() argument must be a string or bytes")),
         };
         match b64_decode(&s) {
@@ -243,7 +238,14 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
     // codec just above, reused rather than pulling in a new dependency.
     const B32_ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
-    fn b32_encode(data: &[u8]) -> String {
+    // RFC 4648 §7's "Extended Hex" base32 alphabet — sorts identically to
+    // the input bytes (useful for filesystems / DNS labels), used by
+    // `base64.b32hexencode`/`b32hexdecode`. Same algorithm as standard
+    // base32, just a different 32-character alphabet — parameterized
+    // rather than duplicating `b32_encode`/`b32_decode`.
+    const B32HEX_ALPHABET: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUV";
+
+    fn b32_encode_with(data: &[u8], alphabet: &[u8]) -> String {
         let mut out = String::new();
         for chunk in data.chunks(5) {
             let mut buf = [0u8; 5];
@@ -256,7 +258,7 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
                 if i < out_chars {
                     let shift = 35 - i * 5;
                     let idx = ((n >> shift) & 0x1F) as usize;
-                    out.push(B32_ALPHABET[idx] as char);
+                    out.push(alphabet[idx] as char);
                 } else {
                     out.push('=');
                 }
@@ -264,10 +266,11 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
         }
         out
     }
+    fn b32_encode(data: &[u8]) -> String { b32_encode_with(data, B32_ALPHABET) }
 
-    fn b32_decode(s: &str) -> Result<Vec<u8>, String> {
+    fn b32_decode_with(s: &str, alphabet: &[u8]) -> Result<Vec<u8>, String> {
         let mut rev = [255u8; 256];
-        for (i, &c) in B32_ALPHABET.iter().enumerate() {
+        for (i, &c) in alphabet.iter().enumerate() {
             rev[c as usize] = i as u8;
         }
         let s = s.trim_end_matches('=');
@@ -291,14 +294,11 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
         }
         Ok(out)
     }
+    fn b32_decode(s: &str) -> Result<Vec<u8>, String> { b32_decode_with(s, B32_ALPHABET) }
 
     b64_func!("b32encode", |args| {
         if args.len() != 1 { return Err(PyError::type_error("b32encode() takes exactly one argument")); }
-        let data = match &*args[0].borrow() {
-            PyObject::Bytes(b) => b.clone(),
-            PyObject::ByteArray(b) => b.clone(),
-            _ => return Err(PyError::type_error("b32encode() argument must be bytes")),
-        };
+        let data = arg_bytes(&args[0]).ok_or_else(|| PyError::type_error("b32encode() argument must be bytes"))?;
         Ok(PyObjectRef::imm(PyObject::Bytes(b32_encode(&data).into_bytes())))
     });
 
@@ -313,6 +313,92 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
             Ok(bytes) => Ok(PyObjectRef::imm(PyObject::Bytes(bytes))),
             Err(e) => Err(PyError::value_error(e)),
         }
+    });
+
+    // The rest of `base64`'s real public API was missing entirely —
+    // `standard_b64*`/`urlsafe_b64*` (RFC 4648 §5, same alphabet as
+    // `b64encode`/`b64decode` with `-`/`_` swapped in for `+`/`/`),
+    // `b16encode`/`b16decode` (plain uppercase hex), and `b32hexencode`/
+    // `b32hexdecode` (base32 with the "Extended Hex" alphabet, RFC 4648
+    // §7). Found via CPython's own `test_base64.py`, which exercises all
+    // of these directly.
+    b64_func!("standard_b64encode", |args| {
+        if args.len() != 1 { return Err(PyError::type_error("standard_b64encode() takes exactly one argument")); }
+        let bytes = arg_bytes(&args[0]).ok_or_else(|| PyError::type_error("standard_b64encode() argument must be bytes"))?;
+        Ok(PyObjectRef::imm(PyObject::Bytes(b64_encode(&bytes).into_bytes())))
+    });
+    b64_func!("standard_b64decode", |args| {
+        if args.len() != 1 { return Err(PyError::type_error("standard_b64decode() takes exactly one argument")); }
+        let s = match &*args[0].borrow() {
+            PyObject::Str(s) => s.to_string(),
+            PyObject::Bytes(b) => String::from_utf8_lossy(b).to_string(),
+            PyObject::ByteArray(b) => String::from_utf8_lossy(b).to_string(),
+            _ => return Err(PyError::type_error("standard_b64decode() argument must be a string or bytes")),
+        };
+        b64_decode(&s).map(|b| PyObjectRef::imm(PyObject::Bytes(b))).map_err(PyError::value_error)
+    });
+    b64_func!("urlsafe_b64encode", |args| {
+        if args.len() != 1 { return Err(PyError::type_error("urlsafe_b64encode() takes exactly one argument")); }
+        let bytes = arg_bytes(&args[0]).ok_or_else(|| PyError::type_error("urlsafe_b64encode() argument must be bytes"))?;
+        let s = b64_encode(&bytes).replace('+', "-").replace('/', "_");
+        Ok(PyObjectRef::imm(PyObject::Bytes(s.into_bytes())))
+    });
+    b64_func!("urlsafe_b64decode", |args| {
+        if args.len() != 1 { return Err(PyError::type_error("urlsafe_b64decode() takes exactly one argument")); }
+        let s = match &*args[0].borrow() {
+            PyObject::Str(s) => s.to_string(),
+            PyObject::Bytes(b) => String::from_utf8_lossy(b).to_string(),
+            PyObject::ByteArray(b) => String::from_utf8_lossy(b).to_string(),
+            _ => return Err(PyError::type_error("urlsafe_b64decode() argument must be a string or bytes")),
+        };
+        let s = s.replace('-', "+").replace('_', "/");
+        b64_decode(&s).map(|b| PyObjectRef::imm(PyObject::Bytes(b))).map_err(PyError::value_error)
+    });
+    b64_func!("b16encode", |args| {
+        if args.len() != 1 { return Err(PyError::type_error("b16encode() takes exactly one argument")); }
+        let bytes = arg_bytes(&args[0]).ok_or_else(|| PyError::type_error("b16encode() argument must be bytes"))?;
+        let mut out = String::with_capacity(bytes.len() * 2);
+        for b in &bytes { out.push_str(&format!("{:02X}", b)); }
+        Ok(PyObjectRef::imm(PyObject::Bytes(out.into_bytes())))
+    });
+    b64_func!("b16decode", |args| {
+        if args.is_empty() { return Err(PyError::type_error("b16decode() takes at least one argument")); }
+        let s = match &*args[0].borrow() {
+            PyObject::Str(s) => s.to_string(),
+            PyObject::Bytes(b) => String::from_utf8_lossy(b).to_string(),
+            PyObject::ByteArray(b) => String::from_utf8_lossy(b).to_string(),
+            _ => return Err(PyError::type_error("b16decode() argument must be a string or bytes")),
+        };
+        let casefold = args.get(1).map(|v| v.truthy()).unwrap_or(false);
+        let s = if casefold { s.to_uppercase() } else { s };
+        if s.len() % 2 != 0 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(PyError::value_error("Non-base16 digit found"));
+        }
+        if s.bytes().any(|b| b.is_ascii_lowercase()) && !casefold {
+            return Err(PyError::value_error("Non-base16 digit found"));
+        }
+        let mut out = Vec::with_capacity(s.len() / 2);
+        let bytes = s.as_bytes();
+        for chunk in bytes.chunks(2) {
+            let hex = std::str::from_utf8(chunk).unwrap();
+            out.push(u8::from_str_radix(hex, 16).map_err(|_| PyError::value_error("Non-base16 digit found"))?);
+        }
+        Ok(PyObjectRef::imm(PyObject::Bytes(out)))
+    });
+    b64_func!("b32hexencode", |args| {
+        if args.len() != 1 { return Err(PyError::type_error("b32hexencode() takes exactly one argument")); }
+        let data = arg_bytes(&args[0]).ok_or_else(|| PyError::type_error("b32hexencode() argument must be bytes"))?;
+        Ok(PyObjectRef::imm(PyObject::Bytes(b32_encode_with(&data, B32HEX_ALPHABET).into_bytes())))
+    });
+    b64_func!("b32hexdecode", |args| {
+        if args.is_empty() { return Err(PyError::type_error("b32hexdecode() takes at least one argument")); }
+        let s = match &*args[0].borrow() {
+            PyObject::Str(s) => s.to_string(),
+            PyObject::Bytes(b) => String::from_utf8_lossy(b).to_string(),
+            PyObject::ByteArray(b) => String::from_utf8_lossy(b).to_string(),
+            _ => return Err(PyError::type_error("b32hexdecode() argument must be a string or bytes")),
+        };
+        b32_decode_with(&s, B32HEX_ALPHABET).map(|b| PyObjectRef::imm(PyObject::Bytes(b))).map_err(PyError::value_error)
     });
 
     d
