@@ -2265,6 +2265,24 @@ impl VirtualMachine {
                 let val = {
                     let f = &self.frames[self.frames.len() - 1];
                     f.get_local(name).cloned()
+                        .or_else(|| {
+                            // A class body's own namespace (checked via get_local
+                            // above) takes priority, but if the name isn't defined
+                            // there, it may still be a free variable closed over
+                            // from an enclosing function — matching CPython's
+                            // LOAD_CLASSDEREF fallback (class bodies skip enclosing
+                            // *function* scopes when resolving names normally, but
+                            // methods defined inside still need to close over them,
+                            // so this frame's own code object carries them as
+                            // freevars/a closure exactly like a nested function).
+                            let fv_idx = f.code.freevars.iter().position(|n| n == name)?;
+                            let cell = f.closure.get(fv_idx)?;
+                            match &*cell.borrow() {
+                                PyObject::Cell { value: Some(inner) } => Some(inner.clone()),
+                                PyObject::Cell { value: None } => None,
+                                _ => Some(cell.clone()),
+                            }
+                        })
                         .or_else(|| f.globals.borrow().get(&interner::intern(name)).cloned())
                         .or_else(|| {
                             // Check module_globals (enclosing module scope for class bodies)

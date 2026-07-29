@@ -65,16 +65,6 @@ incremental patch:
   (very common in real Python — e.g. any doubly-linked structure, many ORM-style object graphs).
   `src/gc.rs` has an experimental generational/tracing GC design, but it is **not wired in** as
   the default allocation strategy.
-- **Class bodies nested inside a function can't resolve the enclosing function's locals as free
-  variables** — `def f(): x = 1; class C: attr = x` raises `NameError: name 'x' is not defined`
-  when it should find `x` via the enclosing scope (real CPython uses a `LOAD_CLASSDEREF`-style
-  opcode for this; no equivalent exists here). Found 2026-07-29 while fixing the rich-comparison
-  protocol against CPython's own `test_compare.py`.
-- **`id()` is not monotonic with object creation/allocation order.** Real CPython's `id()`
-  happens to correlate with allocation order in practice (simple bump-style address reuse),
-  and a non-trivial slice of CPython's own test suite relies on that correlation incidentally
-  (e.g. sorting objects `by id()` to get creation order). This interpreter's `id()` values do
-  not preserve that ordering. Found 2026-07-29 chasing `test_compare.py::test_comp_classes_same`.
 - **C extension loading is effectively non-functional.** `src/ffi_bridge.rs` (feature `ffi`)
   attempts `.so` loading via `libloading`, but has no `PyArg_ParseTuple`/`Py_BuildValue`
   equivalent, only understands one specific `.so` naming convention, and will very likely crash
