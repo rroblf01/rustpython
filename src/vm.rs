@@ -3285,6 +3285,11 @@ impl VirtualMachine {
                         let items: Vec<PyObjectRef> = b.iter().map(|byte| py_int(*byte as i64)).collect();
                         self.frames[fi].push(PyObjectRef::new(PyObject::ListIter { list: items, index: 0 }));
                     }
+                    PyObject::MemoryView { .. } => {
+                        drop(obj);
+                        let iterator = crate::object::builtin_iter(&[val.clone()])?;
+                        self.frames[fi].push(iterator);
+                    }
                     PyObject::Generator { .. } => {
                         drop(obj);
                         self.frames[fi].push(val);

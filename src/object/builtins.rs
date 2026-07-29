@@ -1958,6 +1958,13 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         PyObject::Str(s) => Ok(py_list(s.chars().map(|c| py_str(&c.to_string())).collect())),
         PyObject::Bytes(b) => Ok(PyObjectRef::new(PyObject::ListIter { list: b.iter().map(|byte| py_int(*byte as i64)).collect(), index: 0 })),
         PyObject::ByteArray(b) => Ok(PyObjectRef::new(PyObject::ListIter { list: b.iter().map(|byte| py_int(*byte as i64)).collect(), index: 0 })),
+        PyObject::MemoryView { .. } => {
+            drop(obj);
+            let len = mv_len(&args[0])?;
+            let mut items = Vec::with_capacity(len);
+            for i in 0..len { items.push(mv_getitem(&args[0], &py_int(i as i64))?); }
+            Ok(PyObjectRef::new(PyObject::ListIter { list: items, index: 0 }))
+        }
         // `iter(a_set)` must return a real ITERATOR (advanceable via
         // `builtin_next`), not the bare materialized list `py_list` builds —
         // a raw `PyObject::List` isn't itself a valid iterator shape (unlike
