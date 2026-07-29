@@ -149,10 +149,13 @@ CPYTHON_TIMEOUT := 120
 # saturate every core, leaving the rest of the system starved for CPU during
 # the whole sweep — felt like a hang even though it was actually memory-safe
 # (swap fills from BEFORE the run, not active pageout under load; see
-# cpython_test_suite_compat.md memory for the full diagnosis). 8 leaves a
-# few cores free for the desktop/other work while barely affecting sweep
-# wall-clock (most of the 398 files finish in well under a second each).
-CPYTHON_PARALLEL := 8
+# cpython_test_suite_compat.md memory for the full diagnosis). 10 (nproc-2)
+# leaves a couple cores free for the desktop/other work — confirmed via the
+# sweep resource monitor that even 8-way parallel never used more than
+# ~9GB/32GB RAM (the earlier OOM incident was a since-fixed interpreter bug,
+# unbounded Vec growth in list()/list*n/reversed(range), not a parallelism
+# problem — see cpython_test_suite_compat.md), so there's real headroom here.
+CPYTHON_PARALLEL := 10
 
 test-cpython: build-test
 	@echo -e "$(CYAN)==> Running CPython compatibility tests ($(CPYTHON_TIMEOUT)s timeout, $(CPYTHON_PARALLEL) parallel)...$(RESET)"

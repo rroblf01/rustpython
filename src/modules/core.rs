@@ -103,13 +103,11 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     add_func!("len", builtin_len);
     add_func!("range", builtin_range);
     // "type" is registered further down as a real, subclassable Type object
-    // once `object_type` exists — see the comment there. "int"/"str" are
-    // likewise registered further down (once `object_type` exists) as real
-    // Types — see the comments there.
-    add_func!("float", builtin_float);
+    // once `object_type` exists — see the comment there. "int"/"str"/"list"/
+    // "float" are likewise registered further down (once `object_type`
+    // exists) as real Types — see the comments there.
     add_func!("complex", builtin_complex);
     add_func!("bool", builtin_bool);
-    add_func!("list", builtin_list);
     add_func!("tuple", builtin_tuple);
     add_func!("dict", builtin_dict);
     add_func!("set", builtin_set);
@@ -522,6 +520,75 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     }
     builtins.insert_str("str", str_type.clone());
     crate::object::seed_primitive_type_cache("str", str_type);
+
+    // `list` — same shape as `int`/`str` above. No method is reached ONLY
+    // at the class level (unlike `int.from_bytes`) — every instance method
+    // (`.append()`, `.sort()`, etc.) keeps resolving via native-backing
+    // delegation on `class MyList(list)` instances — so `list_dict` needs
+    // just the ctor marker.
+    let mut list_dict: HashMap<String, PyObjectRef> = HashMap::new();
+    list_dict.insert_str(crate::object::NATIVE_VALUE_CTOR_KEY, PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "list".to_string(),
+        func: builtin_list,
+    }));
+    let list_type = PyObjectRef::new(PyObject::Type {
+        name: "list".to_string(),
+        dict: Box::new(str_map_to_typedict(list_dict)),
+        bases: vec![object_type.clone()],
+        mro: vec![],
+    });
+    if let PyObject::Type { mro, .. } = &mut *list_type.borrow_mut() {
+        *mro = vec![list_type.clone(), object_type.clone()];
+    }
+    builtins.insert_str("list", list_type.clone());
+    crate::object::seed_primitive_type_cache("list", list_type);
+
+    // `float` — same shape as `int`/`str`/`list` above, but unlike those
+    // three, `float` DOES have genuine class-level-only methods (previously
+    // reached via a `bf_name == "float" && name == "..."` special case in
+    // `get_attribute_impl`, `attrs.rs` — that dispatch only ever fired when
+    // the object being accessed WAS the bare `BuiltinFunction` itself, i.e.
+    // `float.fromhex`/`float.hex`/`float.__getformat__`/`float.from_number`
+    // called unbound; a plain float VALUE's own `.hex()`/`.is_integer()`
+    // etc. go through a wholly separate `PyObject::Float(_)` instance arm,
+    // unaffected by this migration) — those become unreachable once `float`
+    // is a real `Type` (the generic `BuiltinFunction`-name dispatch never
+    // fires for it again), so they must move into `float_dict` here instead.
+    let mut float_dict: HashMap<String, PyObjectRef> = HashMap::new();
+    float_dict.insert_str(crate::object::NATIVE_VALUE_CTOR_KEY, PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "float".to_string(),
+        func: builtin_float,
+    }));
+    float_dict.insert_str("__getformat__", PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "__getformat__".to_string(),
+        func: |_args| Ok(py_str("IEEE, little-endian")),
+    }));
+    float_dict.insert_str("fromhex", PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "fromhex".to_string(),
+        func: crate::object::float_fromhex,
+    }));
+    float_dict.insert_str("hex", PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "hex".to_string(),
+        func: crate::object::float_class_hex,
+    }));
+    float_dict.insert_str("from_number", PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "from_number".to_string(),
+        func: |args| {
+            if args.is_empty() { return Err(PyError::type_error("float.from_number() takes exactly 1 argument")); }
+            Ok(py_float(args[0].as_f64().unwrap_or(f64::NAN)))
+        },
+    }));
+    let float_type = PyObjectRef::new(PyObject::Type {
+        name: "float".to_string(),
+        dict: Box::new(str_map_to_typedict(float_dict)),
+        bases: vec![object_type.clone()],
+        mro: vec![],
+    });
+    if let PyObject::Type { mro, .. } = &mut *float_type.borrow_mut() {
+        *mro = vec![float_type.clone(), object_type.clone()];
+    }
+    builtins.insert_str("float", float_type.clone());
+    crate::object::seed_primitive_type_cache("float", float_type);
 
     // `type` — a real, subclassable Type object (not just the `type(x)`
     // introspection/`type(name,bases,ns)` construction BuiltinFunction that

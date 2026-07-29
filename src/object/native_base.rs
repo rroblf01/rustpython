@@ -64,7 +64,7 @@ pub(crate) fn metatype_of(typ: &PyObjectRef) -> Option<PyObjectRef> {
 }
 
 pub(crate) fn is_recognized_native_base_name(name: &str) -> bool {
-    matches!(name, "list" | "dict" | "str" | "int")
+    matches!(name, "list" | "dict" | "str" | "int" | "float")
 }
 
 /// True iff `name` is one of the builtin exception "classes" registered by
@@ -184,6 +184,7 @@ pub(crate) fn make_native_backing(kind: &str) -> PyObjectRef {
         "dict" => py_dict(),
         "str" => py_str(""),
         "int" => py_int(0),
+        "float" => py_float(0.0),
         _ => py_none(),
     }
 }
@@ -218,6 +219,7 @@ pub(crate) fn synthesize_native_init(kind: &str, args: &[PyObjectRef]) -> PyResu
             }
         }
         "int" => builtin_int(args),
+        "float" => builtin_float(args),
         _ => Ok(py_none()),
     }
 }

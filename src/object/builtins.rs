@@ -554,6 +554,72 @@ pub fn builtin_float(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
 }
 
+/// `float.fromhex(s)` — a genuine class-level-only method (called unbound,
+/// `float.fromhex("0x1.8p3")`, never as `x.fromhex()` on a float instance),
+/// extracted out of what used to be a `bf_name == "float" && name ==
+/// "fromhex"` inline closure in `get_attribute_impl` (`attrs.rs`) so it can
+/// live in `float`'s own type dict now that `float` is a real `Type` (see
+/// `NATIVE_VALUE_CTOR_KEY`'s doc comment) — that string-name dispatch never
+/// fires for a real `Type` object, only for the old bare `BuiltinFunction`
+/// shape.
+pub(crate) fn float_fromhex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() { return Err(PyError::type_error("float.fromhex() requires exactly 1 argument")); }
+    let s = args[0].str();
+    let s = s.trim();
+    let lower = s.to_lowercase();
+    if lower == "nan" { return Ok(py_float(f64::NAN)); }
+    if lower == "inf" || lower == "+inf" || lower == "-inf" || lower == "infinity" || lower == "+infinity" || lower == "-infinity" {
+        let sign = if lower.starts_with('-') { -1.0 } else { 1.0 };
+        return Ok(py_float(sign * f64::INFINITY));
+    }
+    let s = s.strip_prefix("+").unwrap_or(s);
+    let sign = if s.starts_with('-') { -1.0 } else { 1.0 };
+    let s = s.strip_prefix('-').unwrap_or(s.strip_prefix('+').unwrap_or(s));
+    let s = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"))
+        .ok_or_else(|| PyError::value_error(format!("invalid hex float literal: {}", s)))?;
+    let (int_part, rest) = s.split_once('.').unwrap_or((s, ""));
+    let (frac_part, exp_part) = rest.split_once('p').or_else(|| rest.split_once('P'))
+        .unwrap_or((rest, ""));
+    let int_val = i64::from_str_radix(int_part, 16).unwrap_or(0);
+    let frac_val = if !frac_part.is_empty() {
+        let frac_bits = i64::from_str_radix(frac_part, 16).unwrap_or(0);
+        let frac_len = frac_part.len() as u32;
+        frac_bits as f64 / (16u64.pow(frac_len) as f64)
+    } else { 0.0 };
+    let exp: i32 = if !exp_part.is_empty() {
+        exp_part.parse().map_err(|_| PyError::value_error(format!("invalid hex float exponent: {}", exp_part)))?
+    } else { 0 };
+    let significand = int_val as f64 + frac_val;
+    let result = sign * significand * (2.0f64).powi(exp);
+    Ok(py_float(result))
+}
+
+/// `float.hex(x)` — the unbound, explicit-argument class-level form (`float.
+/// hex(3.5)`, as opposed to `x.hex()` on a float instance, which goes
+/// through a wholly separate `PyObject::Float(_)` instance arm elsewhere in
+/// `attrs.rs`, unaffected by this). Same extraction rationale as
+/// `float_fromhex` above.
+pub(crate) fn float_class_hex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() { return Err(PyError::type_error("hex() takes exactly 1 argument")); }
+    let obj = args[0].borrow();
+    if let PyObject::Float(v) = &*obj {
+        let bits = v.to_bits();
+        let sign = if (bits >> 63) != 0 { "-" } else { "" };
+        let biased_exp = ((bits >> 52) & 0x7ff) as i64;
+        let mantissa = bits & 0x000f_ffff_ffff_ffff;
+        if biased_exp == 0x7ff {
+            if mantissa == 0 { Ok(py_str(&format!("{}inf", sign))) }
+            else { Ok(py_str(&format!("{}nan", sign))) }
+        } else if *v == 0.0 { Ok(py_str(&format!("{}0x0.0p+0", sign))) }
+        else {
+            let exp = biased_exp - 1023;
+            let hex_mantissa = format!("{:013x}", mantissa);
+            let hex_mantissa = hex_mantissa.trim_end_matches('0');
+            Ok(py_str(&format!("{}0x1.{}p{:+}", sign, if hex_mantissa.is_empty() { "0" } else { hex_mantissa }, exp)))
+        }
+    } else { Err(PyError::type_error("hex() argument must be float")) }
+}
+
 /// Parses a real CPython-style complex literal string (`complex("1+2j")`,
 /// `complex("-3-4j")`, `complex("2j")`, `complex("(1+2j)")`) — finds the
 /// LAST top-level `+`/`-` before the trailing `j`/`J` (skipping one right
