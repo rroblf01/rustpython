@@ -82,7 +82,7 @@ fn sequence_index_int(idx: &PyObject) -> Option<BigInt> {
 /// crashed the whole process). Negative slice bounds are one of the most
 /// common idioms in all of Python (`seq[:-1]`, `seq[-n:]`) — this was a
 /// severe, high-blast-radius bug hiding in plain sight.
-fn normalize_slice_bounds(start: Option<isize>, stop: Option<isize>, step: isize, len: usize) -> (isize, isize) {
+pub(crate) fn normalize_slice_bounds(start: Option<isize>, stop: Option<isize>, step: isize, len: usize) -> (isize, isize) {
     let len = len as isize;
     if step > 0 {
         let start = match start {
@@ -123,7 +123,7 @@ fn normalize_slice_bounds(start: Option<isize>, stop: Option<isize>, step: isize
 /// an infinite loop — confirmed via the simplest repro, `[1,2,3][::0]`).
 /// Real CPython raises `ValueError: slice step cannot be zero` at the point
 /// a zero-step slice is actually USED for indexing, matched here.
-fn extract_slice_fields(start: &PyObjectRef, stop: &PyObjectRef, step: &PyObjectRef) -> PyResult<(Option<isize>, Option<isize>, isize)> {
+pub(crate) fn extract_slice_fields(start: &PyObjectRef, stop: &PyObjectRef, step: &PyObjectRef) -> PyResult<(Option<isize>, Option<isize>, isize)> {
     let step_val = if let PyObject::Int(i) = &*step.borrow() { i.to_isize().unwrap_or(1) } else { 1 };
     if step_val == 0 {
         return Err(PyError::value_error("slice step cannot be zero"));
@@ -218,6 +218,9 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
             }
             other => other,
         };
+    }
+    if matches!(&*obj.borrow(), PyObject::MemoryView { .. }) {
+        return mv_getitem(obj, index);
     }
     // Dict lookups: compute the key's hash BEFORE taking `obj`'s own borrow
     // (see `PyDict::set_with_hash`'s doc comment) — a key with a custom
@@ -518,6 +521,9 @@ pub fn py_setitem(obj: &PyObjectRef, index: &PyObjectRef, value: PyObjectRef) ->
     // into the instance's attribute dict under a stringified key instead.
     if let Some(native) = native_backing_of(obj) {
         return py_setitem(&native, index, value);
+    }
+    if matches!(&*obj.borrow(), PyObject::MemoryView { .. }) {
+        return mv_setitem(obj, index, value);
     }
     // Default Instance __setitem__: store key/value in the instance dict (HashMap)
     {

@@ -34,6 +34,8 @@ mod subscript;
 pub use subscript::*;
 mod exceptions_ctor;
 pub use exceptions_ctor::*;
+mod memoryview;
+pub use memoryview::*;
 
 use std::rc::Rc;
 use std::cell::RefCell;

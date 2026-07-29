@@ -3329,6 +3329,110 @@ impl PyObject {
                     _ => Err(PyError::attribute_error(format!("'file' object has no attribute '{}'", name))),
                 }
             }
+            // `array.array` had NO attributes/methods dispatched at all —
+            // even the basics (`.itemsize`, `.typecode`, `.tobytes()`,
+            // `.tolist()`) were missing, blocking any real usage beyond
+            // construction/indexing. Found via `test_memoryview.py`'s own
+            // `BaseArrayMemoryTests`, whose class body reads `array.array
+            // ('i').itemsize` — a collection-time crash for the WHOLE file
+            // otherwise.
+            PyObject::Array(arr) => {
+                let typecode = arr.typecode;
+                let is_float = array_typecode_is_float(typecode);
+                match name {
+                    "itemsize" => Ok(py_int(mv_itemsize(&typecode.to_string()) as i64)),
+                    "typecode" => Ok(py_str(&typecode.to_string())),
+                    "tobytes" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "tobytes".to_string(),
+                        func: |args| {
+                            if let PyObject::Array(arr) = &*args[0].borrow() {
+                                let is_float = array_typecode_is_float(arr.typecode);
+                                let isz = mv_itemsize(&arr.typecode.to_string());
+                                let mut out = Vec::with_capacity(arr.data.len() * isz);
+                                for &v in &arr.data {
+                                    if is_float {
+                                        if isz == 4 { out.extend_from_slice(&(v as f32).to_ne_bytes()); }
+                                        else { out.extend_from_slice(&v.to_ne_bytes()); }
+                                    } else {
+                                        let n = v as i64;
+                                        match isz {
+                                            1 => out.push(n as u8),
+                                            2 => out.extend_from_slice(&(n as i16).to_ne_bytes()),
+                                            4 => out.extend_from_slice(&(n as i32).to_ne_bytes()),
+                                            _ => out.extend_from_slice(&n.to_ne_bytes()),
+                                        }
+                                    }
+                                }
+                                Ok(PyObjectRef::imm(PyObject::Bytes(out)))
+                            } else { Err(PyError::runtime_error("tobytes on non-array")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "tolist" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "tolist".to_string(),
+                        func: |args| {
+                            if let PyObject::Array(arr) = &*args[0].borrow() {
+                                let is_float = array_typecode_is_float(arr.typecode);
+                                let items: Vec<PyObjectRef> = arr.data.iter().map(|&v| {
+                                    if is_float { py_float(v) } else { py_int(v as i64) }
+                                }).collect();
+                                Ok(py_list(items))
+                            } else { Err(PyError::runtime_error("tolist on non-array")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "append" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "append".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("append() takes exactly one argument")); }
+                            let v = if array_typecode_is_float(match &*args[0].borrow() { PyObject::Array(a) => a.typecode, _ => 'B' }) {
+                                args[1].as_f64().unwrap_or(0.0)
+                            } else {
+                                args[1].as_i64().unwrap_or(0) as f64
+                            };
+                            if let PyObject::Array(arr) = &mut *args[0].borrow_mut() {
+                                arr.data.push(v);
+                            }
+                            Ok(py_none())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "extend" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "extend".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("extend() takes exactly one argument")); }
+                            let is_float = match &*args[0].borrow() { PyObject::Array(a) => array_typecode_is_float(a.typecode), _ => false };
+                            let items = collect_iterable(&args[1])?;
+                            let mut vals = Vec::with_capacity(items.len());
+                            for it in &items {
+                                vals.push(if is_float { it.as_f64().unwrap_or(0.0) } else { it.as_i64().unwrap_or(0) as f64 });
+                            }
+                            if let PyObject::Array(arr) = &mut *args[0].borrow_mut() {
+                                arr.data.extend(vals);
+                            }
+                            Ok(py_none())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "buffer_info" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "buffer_info".to_string(),
+                        func: |args| {
+                            if let PyObject::Array(arr) = &*args[0].borrow() {
+                                Ok(py_tuple(vec![py_int(0), py_int(arr.data.len() as i64)]))
+                            } else { Err(PyError::runtime_error("buffer_info on non-array")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    _ => { let _ = is_float; Err(PyError::attribute_error(format!("'array.array' object has no attribute '{}'", name))) }
+                }
+            }
+            PyObject::MemoryView { .. } => {
+                let self_ref = PyObjectRef::new(self.clone());
+                if let Some(result) = mv_getprop(&self_ref, name) {
+                    return result;
+                }
+                mv_getattr(name).ok_or_else(|| PyError::attribute_error(format!("'memoryview' object has no attribute '{}'", name)))
+            }
             PyObject::Socket { inner: _ } => {
                 match name {
                     "bind" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {

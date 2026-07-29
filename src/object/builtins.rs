@@ -119,6 +119,10 @@ pub fn builtin_len(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         PyObject::Bytes(b) => Ok(py_int(b.len())),
         PyObject::ByteArray(b) => Ok(py_int(b.len())),
         PyObject::Array(arr) => Ok(py_int(arr.data.len())),
+        PyObject::MemoryView { .. } => {
+            drop(obj);
+            Ok(py_int(mv_len(&args[0])? as i64))
+        }
         PyObject::Instance { typ, dict } => {
             let f = lookup_dunder_via_mro(typ, "__len__");
             if let Some(f) = f {
@@ -1667,18 +1671,6 @@ pub fn builtin_ascii(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         }
     }
     Ok(py_str(&result))
-}
-
-pub fn builtin_memoryview(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.len() != 1 {
-        return Err(PyError::type_error("memoryview() takes exactly one argument"));
-    }
-    let obj = args[0].borrow();
-    match &*obj {
-        PyObject::Bytes(b) => Ok(PyObjectRef::new(PyObject::ByteArray(b.clone()))),
-        PyObject::ByteArray(b) => Ok(PyObjectRef::new(PyObject::ByteArray(b.clone()))),
-        _ => Err(PyError::type_error("memoryview: unsupported type")),
-    }
 }
 
 pub fn builtin_input(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {

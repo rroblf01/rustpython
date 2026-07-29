@@ -176,6 +176,7 @@ pub(crate) fn arg_bytes(v: &PyObjectRef) -> Option<Vec<u8>> {
         PyObject::Array(arr) if arr.typecode == 'B' || arr.typecode == 'b' || arr.typecode == 'c' => {
             Some(arr.data.iter().map(|&f| f as u8).collect())
         }
+        PyObject::MemoryView { .. } => mv_tobytes(v).ok(),
         _ => None,
     }
 }

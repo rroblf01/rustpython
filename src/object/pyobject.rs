@@ -264,6 +264,25 @@ pub enum PyObject {
         frame: std::cell::RefCell<Option<Box<crate::vm::Frame>>>,
     },
     Array(PyArray),
+    /// A real `memoryview` — previously just aliased to a CLONED
+    /// `bytearray` (no `.cast()`/`.format`/`.shape`/multi-dimensional
+    /// support at all, and mutations through it never reflected back into
+    /// the original buffer). `source` is a clone of the original `bytes`/
+    /// `bytearray` `PyObjectRef` — since cloning a `PyObjectRef::Mut(Rc<
+    /// RefCell<_>>)` clones the `Rc`, reading/writing through `source`
+    /// naturally shares the SAME underlying storage as the original object
+    /// (and any other memoryview over it), giving correct write-through
+    /// semantics for free. `format`/`shape`/`itemsize` describe how the
+    /// flat byte range is reinterpreted (set by `.cast()`); `offset` is a
+    /// BYTE offset into `source`'s raw bytes (nonzero after slicing).
+    MemoryView {
+        source: PyObjectRef,
+        format: String,
+        shape: Vec<usize>,
+        itemsize: usize,
+        offset: usize,
+        readonly: bool,
+    },
     CompiledRegex {
         regex: Box<fancy_regex::Regex>,
         pattern: String,
@@ -377,6 +396,7 @@ impl PyObject {
             PyObject::Generator { .. } => "generator",
             PyObject::Coroutine { .. } => "coroutine",
             PyObject::Array(_) => "array",
+            PyObject::MemoryView { .. } => "memoryview",
             PyObject::CompiledRegex { .. } => "re.Pattern",
             PyObject::Closure(_) => "builtin_function_or_method",
             PyObject::FutureAwaitIterator { .. } => "future_await_iterator",
@@ -522,6 +542,7 @@ impl PyObject {
                 }).collect();
                 format!("array('{}', [{}])", arr.typecode, items.join(", "))
             },
+            PyObject::MemoryView { .. } => format!("<memory at 0x{:012x}>", self as *const PyObject as usize),
             PyObject::CompiledRegex { pattern, .. } => format!("re.compile('{}')", pattern),
             PyObject::Closure(_) => "<builtin function>".to_string(),
             PyObject::FutureAwaitIterator { future, yielded } => {
@@ -596,6 +617,7 @@ impl PyObject {
                 true
             }
             PyObject::Array(arr) => !arr.data.is_empty(),
+            PyObject::MemoryView { shape, .. } => shape.first().copied().unwrap_or(0) != 0,
             PyObject::CompiledRegex { .. } => true,
             PyObject::Closure(_) => true,
             _ => true,
@@ -797,6 +819,19 @@ impl PyObject {
                 return Ok(a.as_slice() == b.as_slice());
             }
             _ => {}
+        }
+        // `memoryview` compares equal to `bytes`/`bytearray`/another
+        // `memoryview` by CONTENT (its own flat byte range, respecting
+        // `.cast()`-adjusted format/shape/offset) — checked before the
+        // discriminant short-circuit below for the same reason as the
+        // `bytes`/`bytearray` cross-type case just above.
+        if matches!(self, PyObject::MemoryView { .. }) {
+            let self_ref = PyObjectRef::new(self.clone());
+            return Ok(mv_equals(&self_ref, other_ref));
+        }
+        if matches!(&*other, PyObject::MemoryView { .. }) {
+            let self_ref = PyObjectRef::new(self.clone());
+            return Ok(mv_equals(other_ref, &self_ref));
         }
         if std::mem::discriminant(self) != std::mem::discriminant(&*other) {
             return Ok(false);
