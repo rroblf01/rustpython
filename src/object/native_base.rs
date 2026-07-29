@@ -64,7 +64,7 @@ pub(crate) fn metatype_of(typ: &PyObjectRef) -> Option<PyObjectRef> {
 }
 
 pub(crate) fn is_recognized_native_base_name(name: &str) -> bool {
-    matches!(name, "list" | "dict" | "str" | "int" | "float")
+    matches!(name, "list" | "dict" | "str" | "int" | "float" | "tuple")
 }
 
 /// True iff `name` is one of the builtin exception "classes" registered by
@@ -185,6 +185,7 @@ pub(crate) fn make_native_backing(kind: &str) -> PyObjectRef {
         "str" => py_str(""),
         "int" => py_int(0),
         "float" => py_float(0.0),
+        "tuple" => py_tuple(vec![]),
         _ => py_none(),
     }
 }
@@ -195,7 +196,7 @@ pub(crate) fn make_native_backing(kind: &str) -> PyObjectRef {
 /// NATIVE_BACKING_KEY entry with it, rather than mutating in place, since
 /// the existing value's representation — e.g. an inline SmallStr — may not
 /// even be back-referenceable via borrow_mut()).
-pub(crate) fn synthesize_native_init(kind: &str, args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+pub(crate) fn synthesize_native_init(kind: &str, args: &[PyObjectRef], keywords: &[(String, PyObjectRef)]) -> PyResult<PyObjectRef> {
     match kind {
         "list" => {
             if let Some(iterable) = args.first() {
@@ -205,10 +206,27 @@ pub(crate) fn synthesize_native_init(kind: &str, args: &[PyObjectRef]) -> PyResu
             }
         }
         "dict" => {
-            if args.is_empty() {
+            // Mirrors `call_function`'s own generic "pack keywords into a
+            // trailing dict positional arg" convention (`vm.rs`) — needed
+            // here too since `dict(**kwargs)`/`MyDict(a=1, b=2)` (a
+            // native-base subclass with no explicit `__init__`) must
+            // populate its backing from KEYWORD args exactly like the
+            // plain `dict(...)` builtin does. Without this, `keywords` was
+            // silently dropped entirely (this function never received them
+            // at all), so `class MyDict(dict): pass; MyDict(a=1, b=2)`
+            // produced an empty dict instead of `{'a': 1, 'b': 2}`.
+            if args.is_empty() && keywords.is_empty() {
                 Ok(py_dict())
-            } else {
+            } else if keywords.is_empty() {
                 builtin_dict(args)
+            } else {
+                let mut kw_dict = PyDict::new();
+                for (k, v) in keywords {
+                    kw_dict.set(py_str(k), v.clone())?;
+                }
+                let mut combined = args.to_vec();
+                combined.push(PyObjectRef::new(PyObject::Dict(Box::new(kw_dict))));
+                builtin_dict(&combined)
             }
         }
         "str" => {
@@ -220,6 +238,13 @@ pub(crate) fn synthesize_native_init(kind: &str, args: &[PyObjectRef]) -> PyResu
         }
         "int" => builtin_int(args),
         "float" => builtin_float(args),
+        "tuple" => {
+            if let Some(iterable) = args.first() {
+                Ok(py_tuple(collect_iterable(iterable)?))
+            } else {
+                Ok(py_tuple(vec![]))
+            }
+        }
         _ => Ok(py_none()),
     }
 }

@@ -136,8 +136,23 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                 match &*typ_ref {
                     PyObject::Type { dict: type_dict, mro, .. } => {
                         type_dict.get_str("__getitem__").cloned().or_else(|| {
+                            // Skip a migrated native type's OWN `__getitem__`
+                            // "escape hatch" entry when scanning ANCESTORS —
+                            // see `lookup_dunder_via_mro`'s matching
+                            // `skip_native_dunder_hatch` doc comment
+                            // (`descriptors.rs`) for the full rationale: it
+                            // exists for explicit unbound-style access, not
+                            // to preempt a native-base subclass's ordinary
+                            // instance-level dispatch (native-backing
+                            // delegation + `__missing__`), which is what the
+                            // fallback below this closure already handles
+                            // correctly.
+                            let skip_native_dunder_hatch = type_dict.contains_key_str(NATIVE_BASE_MARKER);
                             for base in mro.iter().skip(1) {
                                 if let PyObject::Type { dict: base_dict, .. } = &*base.borrow() {
+                                    if skip_native_dunder_hatch && base_dict.contains_key_str(NATIVE_VALUE_CTOR_KEY) {
+                                        continue;
+                                    }
                                     if let Some(val) = base_dict.get_str("__getitem__") {
                                         return Some(val.clone());
                                     }

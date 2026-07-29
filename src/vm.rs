@@ -6343,7 +6343,7 @@ impl VirtualMachine {
                 // that means the constructor call itself must behave like
                 // list(iterable)/dict(...)/str(x).
                 if let Some(kind) = &native_kind {
-                    let native = crate::object::synthesize_native_init(kind, &args)?;
+                    let native = crate::object::synthesize_native_init(kind, &args, &keywords)?;
                     if let PyObject::Instance { dict, .. } = &mut *instance.borrow_mut() {
                         dict.insert(crate::object::NATIVE_BACKING_KEY.to_string(), native);
                     }

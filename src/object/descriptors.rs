@@ -272,6 +272,25 @@ pub(crate) fn lookup_dunder_via_mro(typ: &PyObjectRef, name: &str) -> Option<PyO
         // None result gets a chance to run.
         let native_marker = type_dict.contains_key_str(NATIVE_BASE_MARKER);
         let skip_object_default = native_marker && matches!(name, "__repr__" | "__str__" | "__eq__" | "__ne__" | "__hash__");
+        // A migrated native type's OWN `__getitem__`/`__setitem__`/
+        // `__delitem__` entries (e.g. `dict.__setitem__`, see
+        // `NATIVE_VALUE_CTOR_KEY`'s doc comment) exist as an "escape hatch"
+        // for EXPLICIT unbound-style access (`dict.__setitem__(x, k, v)`,
+        // `super().__setitem__(k, v)` inside a subclass's own override) —
+        // they must NOT preempt a native-base subclass's ordinary,
+        // instance-level subscript dispatch, which already correctly
+        // delegates to the native backing (and, for dict specifically,
+        // consults `__missing__`) via each call site's own post-`None`
+        // fallback. Skipping them here for ancestor-scan purposes (the
+        // subclass's OWN override, if any, is still found by the
+        // `type_dict.get_str(name)` check above, unaffected) restores that
+        // fallback path for a subclass like `collections.Counter(dict)`
+        // that overrides `__missing__` but not `__getitem__` itself —
+        // confirmed via `Counter()["missing_key"]` regressing to a raw
+        // `KeyError` (bypassing `__missing__` entirely) the instant `dict`
+        // became a real `Type` with a real `__getitem__` newly sitting in
+        // every dict-subclass's mro.
+        let skip_native_dunder_hatch = native_marker && matches!(name, "__getitem__" | "__setitem__" | "__delitem__");
         // Always check the type's OWN dict first, regardless of whether
         // `mro` is empty. For an ordinary user-defined class this is a
         // no-op (real mro-building always puts the class itself at
@@ -295,6 +314,9 @@ pub(crate) fn lookup_dunder_via_mro(typ: &PyObjectRef, name: &str) -> Option<PyO
         for base in mro.iter() {
             if let PyObject::Type { name: base_name, dict: base_dict, .. } = &*base.borrow() {
                 if skip_object_default && base_name == "object" {
+                    continue;
+                }
+                if skip_native_dunder_hatch && base_dict.contains_key_str(NATIVE_VALUE_CTOR_KEY) {
                     continue;
                 }
                 if let Some(v) = base_dict.get_str(name) {

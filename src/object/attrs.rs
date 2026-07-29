@@ -4368,6 +4368,45 @@ impl PyObject {
                                                 }));
                                                 break;
                                             }
+                                            // A method found directly in a
+                                            // migrated native type's own
+                                            // dict (e.g. `dict.__setitem__`,
+                                            // `dict.__getitem__`) is stored
+                                            // as a `BuiltinMethod` with a
+                                            // PLACEHOLDER `self_obj` (see
+                                            // `NATIVE_VALUE_CTOR_KEY`'s doc
+                                            // comment) — the catch-all arm
+                                            // below returns such values
+                                            // UNCHANGED, which is correct
+                                            // for genuine bound instance
+                                            // methods (their `self_obj` is
+                                            // already the right target) but
+                                            // WRONG here: this placeholder
+                                            // must be rebound to `obj` (the
+                                            // real instance `super()` was
+                                            // constructed for), exactly like
+                                            // the `Function`/`BuiltinFunction`
+                                            // case just above. Missing this
+                                            // meant `super().__setitem__(k, v)`
+                                            // inside e.g. `enum.py`'s
+                                            // `_EnumDict.__setitem__`
+                                            // resolved to `dict.__setitem__`
+                                            // with its self_obj STILL the
+                                            // placeholder, so the call ended
+                                            // up as `dict.__setitem__(None,
+                                            // k, v)` instead of `(obj, k,
+                                            // v)` — an instant panic
+                                            // (`borrow_mut` on the
+                                            // placeholder `PyObjectRef::None`,
+                                            // which isn't `Mut`).
+                                            PyObject::BuiltinMethod { name: m_name, func, .. } => {
+                                                found = Some(PyObjectRef::imm(PyObject::BuiltinMethod {
+                                                    name: m_name.clone(),
+                                                    func: *func,
+                                                    self_obj: obj.clone(),
+                                                }));
+                                                break;
+                                            }
                                             PyObject::Property(ref d) if d.getter.is_some() => {
                                                 let g = d.getter.as_ref().unwrap();
                                                 found = Some(builtin_call(g, &[obj.clone()]).unwrap_or_else(|_| val.clone()));
@@ -4409,7 +4448,7 @@ impl PyObject {
                     }) {
                         let target = obj.clone();
                         return Ok(PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
-                            let native = synthesize_native_init(&kind, args)?;
+                            let native = synthesize_native_init(&kind, args, &[])?;
                             if let PyObject::Instance { dict, .. } = &mut *target.borrow_mut() {
                                 dict.insert(NATIVE_BACKING_KEY.to_string(), native);
                             }

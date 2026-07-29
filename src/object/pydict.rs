@@ -566,9 +566,17 @@ pub fn builtin_dict_getitem(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         return Err(PyError::type_error("dict.__getitem__() requires at least 1 argument"));
     };
     let key = key_ref.str();
-    // Check for __missing__ first (dict subclass support, e.g. Counter)
+    // Check for __missing__ first (dict subclass support, e.g. Counter).
+    // `get_attribute` already returns a properly SELF-BOUND method for an
+    // ordinary Python-defined `__missing__` (a `BoundMethod`/equivalent
+    // with `instance` baked in) — passing `instance.clone()` again here on
+    // top of that used to double up `self`, e.g. `Counter.__missing__(self,
+    // key)` receiving `(instance, instance, key)` and raising a `TypeError`
+    // that this whole call then silently swallowed via `.ok()`, making the
+    // `__missing__` lookup appear to fail even when it was genuinely
+    // defined. Only `key_ref` needs to be passed explicitly.
     let missing_result = instance.borrow().get_attribute("__missing__").ok()
-        .and_then(|missing| crate::object::call_function(&missing, vec![instance.clone(), key_ref.clone()]).ok());
+        .and_then(|missing| crate::object::call_function(&missing, vec![key_ref.clone()]).ok());
     if let Some(val) = missing_result {
         return Ok(val);
     }

@@ -104,12 +104,10 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     add_func!("range", builtin_range);
     // "type" is registered further down as a real, subclassable Type object
     // once `object_type` exists — see the comment there. "int"/"str"/"list"/
-    // "float" are likewise registered further down (once `object_type`
-    // exists) as real Types — see the comments there.
+    // "float"/"dict"/"tuple" are likewise registered further down (once
+    // `object_type` exists) as real Types — see the comments there.
     add_func!("complex", builtin_complex);
     add_func!("bool", builtin_bool);
-    add_func!("tuple", builtin_tuple);
-    add_func!("dict", builtin_dict);
     add_func!("set", builtin_set);
     add_func!("abs", builtin_abs);
     add_func!("hasattr", builtin_hasattr);
@@ -396,7 +394,7 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
             };
             let mut instance_dict = AttrMap::new();
             if let Some(kind) = &native_kind {
-                let native = crate::object::synthesize_native_init(kind, &args[1..])?;
+                let native = crate::object::synthesize_native_init(kind, &args[1..], &[])?;
                 instance_dict.insert(crate::object::NATIVE_BACKING_KEY.to_string(), native);
             }
             Ok(PyObjectRef::new(PyObject::Instance {
@@ -589,6 +587,76 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     }
     builtins.insert_str("float", float_type.clone());
     crate::object::seed_primitive_type_cache("float", float_type);
+
+    // `dict` — same shape as the others above. Unlike `list`/`str`
+    // (nothing class-level-only), `dict` DOES have genuine class-level
+    // methods previously reached via `bf_name == "dict" && name == "..."`
+    // in `get_attribute_impl` (`attrs.rs`) — those become unreachable once
+    // `dict` is a real `Type`, so `fromkeys`/`__setitem__`/`__getitem__`
+    // move into `dict_dict` here instead.
+    let mut dict_dict: HashMap<String, PyObjectRef> = HashMap::new();
+    dict_dict.insert_str(crate::object::NATIVE_VALUE_CTOR_KEY, PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "dict".to_string(),
+        func: builtin_dict,
+    }));
+    dict_dict.insert_str("fromkeys", PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "fromkeys".to_string(),
+        func: |args| {
+            if args.is_empty() { return Err(PyError::type_error("fromkeys() takes at least 1 argument")); }
+            let keys = crate::object::collect_iterable(&args[0])?;
+            let value = args.get(1).cloned().unwrap_or_else(py_none);
+            let mut d = PyDict::new();
+            for k in keys {
+                d.set(k, value.clone())?;
+            }
+            Ok(PyObjectRef::new(PyObject::Dict(Box::new(d))))
+        },
+    }));
+    dict_dict.insert_str("__setitem__", PyObjectRef::imm(PyObject::BuiltinMethod {
+        name: "__setitem__".to_string(),
+        func: crate::object::builtin_dict_setitem as BuiltinFunc,
+        self_obj: py_none(),
+    }));
+    dict_dict.insert_str("__getitem__", PyObjectRef::imm(PyObject::BuiltinMethod {
+        name: "__getitem__".to_string(),
+        func: crate::object::builtin_dict_getitem as BuiltinFunc,
+        self_obj: py_none(),
+    }));
+    let dict_type = PyObjectRef::new(PyObject::Type {
+        name: "dict".to_string(),
+        dict: Box::new(str_map_to_typedict(dict_dict)),
+        bases: vec![object_type.clone()],
+        mro: vec![],
+    });
+    if let PyObject::Type { mro, .. } = &mut *dict_type.borrow_mut() {
+        *mro = vec![dict_type.clone(), object_type.clone()];
+    }
+    builtins.insert_str("dict", dict_type.clone());
+    crate::object::seed_primitive_type_cache("dict", dict_type);
+
+    // `tuple` — same shape as `list`/`str` (no class-level-only method).
+    // Unlike those two, `tuple` was NOT previously in
+    // `is_recognized_native_base_name`/`make_native_backing`/
+    // `synthesize_native_init` at all — `class MyTuple(tuple): ...` was
+    // silently broken before this migration added it there too (same class
+    // of gap found and fixed for `float`; see the memory entry for this
+    // migration effort).
+    let mut tuple_dict: HashMap<String, PyObjectRef> = HashMap::new();
+    tuple_dict.insert_str(crate::object::NATIVE_VALUE_CTOR_KEY, PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "tuple".to_string(),
+        func: builtin_tuple,
+    }));
+    let tuple_type = PyObjectRef::new(PyObject::Type {
+        name: "tuple".to_string(),
+        dict: Box::new(str_map_to_typedict(tuple_dict)),
+        bases: vec![object_type.clone()],
+        mro: vec![],
+    });
+    if let PyObject::Type { mro, .. } = &mut *tuple_type.borrow_mut() {
+        *mro = vec![tuple_type.clone(), object_type.clone()];
+    }
+    builtins.insert_str("tuple", tuple_type.clone());
+    crate::object::seed_primitive_type_cache("tuple", tuple_type);
 
     // `type` — a real, subclassable Type object (not just the `type(x)`
     // introspection/`type(name,bases,ns)` construction BuiltinFunction that
