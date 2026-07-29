@@ -783,13 +783,26 @@ impl PyObjectRef {
                     if let Some(f) = lookup_dunder_via_mro(&typ, "__hash__") {
                         let result = call_bound_method(f, self.clone(), vec![])?;
                         let n = result.borrow();
+                        // Real Python's `__hash__` protocol: whatever `int`
+                        // is returned BECOMES the hash value directly (bit
+                        // pattern reinterpreted as unsigned) — the previous
+                        // extraction instead XOR-folded the value's
+                        // signed-little-endian BYTES together, which is not
+                        // a hash of the value at all, just visibly wrong for
+                        // anything beyond small positives (e.g. `-3` folds
+                        // to `253` — its own raw two's-complement byte —
+                        // instead of staying `-3`). Any user class with a
+                        // custom `__hash__` returning a negative int (an
+                        // extremely common pattern — `hash()` results are
+                        // routinely negative) got a completely wrong,
+                        // silently-mangled hash, breaking dict/set lookups
+                        // for such objects and any invariant checks
+                        // comparing `hash(x)` against a known value (e.g.
+                        // `hash(Fraction(n)) == hash(n)` for an integral
+                        // Fraction backed by a custom `__hash__`).
                         return if let PyObject::Int(i) = &*n {
-                            let bytes = i.to_signed_bytes_le();
-                            let mut h: usize = 0;
-                            for (j, &b) in bytes.iter().enumerate() {
-                                h ^= (b as usize) << ((j % std::mem::size_of::<usize>()) * 8);
-                            }
-                            Ok(h)
+                            let h = i.to_i64().ok_or_else(|| PyError::type_error("__hash__ result too large to fit in a C long"))?;
+                            Ok(h as usize)
                         } else {
                             Err(PyError::type_error("__hash__ should return an integer"))
                         };

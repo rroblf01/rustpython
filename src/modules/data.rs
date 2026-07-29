@@ -1966,29 +1966,365 @@ pub fn create_decimal_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
+// ---------------------------------------------------------------------------
+// fractions.Fraction — a real rational-number type, replacing a former
+// complete stub whose constructor just returned a formatted `"num/den"`
+// STRING (`py_str`) instead of a genuine Fraction object at all — no
+// arithmetic, no `__float__`, no comparisons, nothing beyond what a plain
+// string happens to support by coincidence. Found via CPython's own
+// `test_math.py::testHypot`, whose `hypot(Fraction(12, 32), Fraction(5,
+// 32))` reached `float(a_fraction_shaped_string)` and got `ValueError:
+// could not convert string to float: '3/8'`. Represented as a real
+// `PyObject::Instance` (native-Type-backed, matching how other ad-hoc
+// native classes in this codebase — e.g. `HTTPConnection` — are built) with
+// `numerator`/`denominator` stored as plain instance attributes (arbitrary-
+// precision `int`s, always reduced to lowest terms with a positive
+// denominator), so it participates in the EXISTING Instance-based
+// arithmetic/comparison dispatch (`try_dunder_binop`/`try_rich_compare`)
+// with no changes needed to `ops_binary.rs`/`ops_compare.rs` at all.
+// ---------------------------------------------------------------------------
+
+use num_bigint::{BigInt, Sign};
+use num_traits::{Zero, One, Signed};
+
+fn frac_bigint_gcd(a: &BigInt, b: &BigInt) -> BigInt {
+    let mut a = a.abs();
+    let mut b = b.abs();
+    while !b.is_zero() {
+        let t = b.clone();
+        b = &a % &b;
+        a = t;
+    }
+    a
+}
+
+fn frac_normalize(mut num: BigInt, mut den: BigInt) -> PyResult<(BigInt, BigInt)> {
+    if den.is_zero() {
+        return Err(PyError::ZeroDivisionError("Fraction(%s, 0)".to_string()));
+    }
+    if den.sign() == Sign::Minus { num = -num; den = -den; }
+    let g = frac_bigint_gcd(&num, &den);
+    if g > BigInt::one() {
+        num /= &g;
+        den /= &g;
+    }
+    Ok((num, den))
+}
+
+/// Exact binary-fraction decomposition of an `f64` (no precision loss) —
+/// matches real Python's `float.as_integer_ratio()` / `Fraction.from_float`.
+fn frac_float_to_ratio(f: f64) -> PyResult<(BigInt, BigInt)> {
+    if f.is_nan() || f.is_infinite() {
+        return Err(PyError::value_error(format!("cannot convert {} to a Fraction", f)));
+    }
+    if f == 0.0 {
+        return Ok((BigInt::zero(), BigInt::one()));
+    }
+    let bits = f.to_bits();
+    let neg = bits >> 63 == 1;
+    let biased_exp = ((bits >> 52) & 0x7ff) as i64;
+    let mantissa_bits = bits & 0x000f_ffff_ffff_ffff;
+    let (mantissa, exp): (u64, i64) = if biased_exp == 0 {
+        (mantissa_bits, -1074)
+    } else {
+        (mantissa_bits | (1u64 << 52), biased_exp - 1075)
+    };
+    let mut num = BigInt::from(mantissa);
+    if neg { num = -num; }
+    let mut den = BigInt::one();
+    if exp >= 0 {
+        num *= BigInt::from(2).pow(exp as u32);
+    } else {
+        den = BigInt::from(2).pow((-exp) as u32);
+    }
+    frac_normalize(num, den)
+}
+
+/// Parse `"3/4"`, `"3"`, `"1.5"`, `"-1.5e2"` (real `Fraction(str)` accepts
+/// decimal-literal-like strings too, converting exactly via `from_decimal`
+/// semantics) — a simplified but exact-for-terminating-decimals subset.
+fn frac_parse_str(s: &str) -> PyResult<(BigInt, BigInt)> {
+    let s = s.trim();
+    let bad = || PyError::value_error(format!("Invalid literal for Fraction: '{}'", s));
+    if let Some((n, d)) = s.split_once('/') {
+        let num: BigInt = n.trim().parse().map_err(|_| bad())?;
+        let den: BigInt = d.trim().parse().map_err(|_| bad())?;
+        return frac_normalize(num, den);
+    }
+    if let Ok(n) = s.parse::<BigInt>() {
+        return Ok((n, BigInt::one()));
+    }
+    // Decimal literal (possibly with an exponent): convert exactly via
+    // scaling by a power of 10, matching `Fraction(Decimal(s))` semantics.
+    let f: f64 = s.parse().map_err(|_| bad())?;
+    if let Some(dot) = s.find(['.', 'e', 'E']) {
+        let _ = dot;
+        // Exact decimal-string handling for the common (non-scientific)
+        // case: `int_part.frac_part` -> (int_part*10^len(frac)+frac_part) /
+        // 10^len(frac). Falls back to the (inexact) float route for
+        // scientific notation, an acceptable simplification.
+        if !s.contains(['e', 'E']) {
+            if let Some((int_part, frac_part)) = s.split_once('.') {
+                let neg = int_part.starts_with('-');
+                let int_part_clean = int_part.trim_start_matches(['-', '+']);
+                let combined = format!("{}{}", int_part_clean, frac_part);
+                if let Ok(mut num) = combined.parse::<BigInt>() {
+                    if neg { num = -num; }
+                    let den = BigInt::from(10).pow(frac_part.len() as u32);
+                    return frac_normalize(num, den);
+                }
+            }
+        }
+    }
+    frac_float_to_ratio(f)
+}
+
+fn frac_instance_num_den(v: &PyObjectRef) -> Option<(BigInt, BigInt)> {
+    if let PyObject::Instance { dict, .. } = &*v.borrow() {
+        let num = dict.get_str("numerator")?;
+        let den = dict.get_str("denominator")?;
+        if let (PyObject::Int(n), PyObject::Int(d)) = (&*num.borrow(), &*den.borrow()) {
+            return Some((n.clone(), d.clone()));
+        }
+    }
+    None
+}
+
+fn frac_is_fraction(v: &PyObjectRef) -> bool {
+    matches!(&*v.borrow(), PyObject::Instance { dict, .. } if dict.get_str("numerator").is_some() && dict.get_str("denominator").is_some())
+}
+
+fn frac_make(frac_type: &PyObjectRef, num: BigInt, den: BigInt) -> PyResult<PyObjectRef> {
+    let (num, den) = frac_normalize(num, den)?;
+    let mut dict = AttrMap::new();
+    dict.insert_str("numerator", py_int(num));
+    dict.insert_str("denominator", py_int(den));
+    Ok(PyObjectRef::new(PyObject::Instance { typ: frac_type.clone(), dict }))
+}
+
+/// Numeric operand kind for Fraction arithmetic's real-Python coercion
+/// rules: `Fraction op int` stays a `Fraction`; `Fraction op float` (or
+/// vice versa) coerces the WHOLE operation to plain `float` (matching real
+/// `Fraction.__add__`'s own documented behavior); anything else is
+/// `NotImplemented` (deferring to the other operand's reflected method).
+enum FracOperand { Frac(BigInt, BigInt), Float(f64), Other }
+
+fn frac_operand_of(v: &PyObjectRef) -> FracOperand {
+    if let Some((n, d)) = frac_instance_num_den(v) { return FracOperand::Frac(n, d); }
+    let b = v.borrow();
+    match &*b {
+        PyObject::Int(i) => FracOperand::Frac(i.clone(), BigInt::one()),
+        PyObject::Bool(bv) => FracOperand::Frac(BigInt::from(*bv as i64), BigInt::one()),
+        PyObject::Float(f) => FracOperand::Float(*f),
+        _ => FracOperand::Other,
+    }
+}
+
+fn frac_self_num_den(self_obj: &PyObjectRef) -> PyResult<(BigInt, BigInt)> {
+    frac_instance_num_den(self_obj).ok_or_else(|| PyError::type_error("not a Fraction"))
+}
+
+fn frac_self_type(self_obj: &PyObjectRef) -> PyObjectRef {
+    if let PyObject::Instance { typ, .. } = &*self_obj.borrow() { typ.clone() } else { unreachable!() }
+}
+
+fn frac_to_f64(num: &BigInt, den: &BigInt) -> f64 {
+    num.to_f64().unwrap_or(f64::NAN) / den.to_f64().unwrap_or(1.0)
+}
+
+/// Shared binary-op dispatcher: `op` combines two exact `(num, den)` pairs;
+/// `float_op` combines two `f64`s for the mixed-with-float coercion case.
+fn frac_binop(
+    args: &[PyObjectRef],
+    reflected: bool,
+    op: impl Fn(BigInt, BigInt, BigInt, BigInt) -> PyResult<(BigInt, BigInt)>,
+    float_op: impl Fn(f64, f64) -> f64,
+) -> PyResult<PyObjectRef> {
+    if args.len() < 2 { return Err(PyError::type_error("expected 2 arguments")); }
+    // `self` (args[0]) is always the Fraction whose method this is; for a
+    // reflected call (`__radd__` etc.) `self` is semantically the RIGHT
+    // operand of `other OP self`, so `op`'s arguments are swapped below
+    // rather than swapping `an`/`ad` here.
+    let (an, ad) = frac_self_num_den(&args[0])?;
+    match frac_operand_of(&args[1]) {
+        FracOperand::Frac(bn, bd) => {
+            let (rn, rd) = if reflected { op(bn, bd, an, ad)? } else { op(an, ad, bn, bd)? };
+            frac_make(&frac_self_type(&args[0]), rn, rd)
+        }
+        FracOperand::Float(bf) => {
+            let af = frac_to_f64(&an, &ad);
+            Ok(py_float(if reflected { float_op(bf, af) } else { float_op(af, bf) }))
+        }
+        FracOperand::Other => Ok(py_not_implemented()),
+    }
+}
+
 pub fn create_fractions_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
-    macro_rules! frac_func {
+    let mut frac_dict: HashMap<String, PyObjectRef> = HashMap::new();
+
+    // A plain `__init__`, NOT `NATIVE_VALUE_CTOR_KEY` — the latter is only
+    // for types whose direct construction returns a raw NATIVE value
+    // (`int(5)` returns `PyObject::Int`, never wrapped in an `Instance`;
+    // see its own doc comment) and is called with the constructor's real
+    // arguments directly, no class prepended. Fraction needs the OPPOSITE:
+    // a genuine `PyObject::Instance` (so it participates in ordinary
+    // Instance-based arithmetic/comparison dispatch), which is exactly
+    // what the standard `__init__` convention already provides — the
+    // general Type-call machinery creates a fresh empty `Instance` first,
+    // THEN calls `__init__(self, *real_args)` on it, matching a plain
+    // `class Fraction: def __init__(self, ...): ...`. (An earlier version
+    // of this mistakenly used `NATIVE_VALUE_CTOR_KEY`, which — receiving
+    // the raw args directly with no class arg at all — silently
+    // misinterpreted the first REAL constructor argument as if it were
+    // the class, corrupting every `Fraction(...)` call.)
+    frac_dict.insert_str("__init__", PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "__init__".to_string(),
+        func: |args| {
+            if args.is_empty() { return Err(PyError::type_error("__init__ requires self")); }
+            let rest = &args[1..];
+            let (num, den) = match rest.len() {
+                0 => (BigInt::zero(), BigInt::one()),
+                1 => match frac_operand_of(&rest[0]) {
+                    FracOperand::Frac(n, d) => (n, d),
+                    FracOperand::Float(f) => frac_float_to_ratio(f)?,
+                    FracOperand::Other => {
+                        let b = rest[0].borrow();
+                        match &*b {
+                            PyObject::Str(s) => frac_parse_str(s)?,
+                            _ => return Err(PyError::type_error("argument should be a string or a Rational instance")),
+                        }
+                    }
+                },
+                2 => {
+                    let n = match frac_operand_of(&rest[0]) {
+                        FracOperand::Frac(n, d) if d == BigInt::one() => n,
+                        _ => return Err(PyError::type_error("both arguments should be Rational instances")),
+                    };
+                    let d = match frac_operand_of(&rest[1]) {
+                        FracOperand::Frac(n, d) if d == BigInt::one() => n,
+                        _ => return Err(PyError::type_error("both arguments should be Rational instances")),
+                    };
+                    (n, d)
+                }
+                _ => return Err(PyError::type_error("Fraction() takes at most 2 arguments")),
+            };
+            let (num, den) = frac_normalize(num, den)?;
+            if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
+                dict.insert_str("numerator", py_int(num));
+                dict.insert_str("denominator", py_int(den));
+            }
+            Ok(py_none())
+        },
+    }));
+
+    macro_rules! frac_method {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            frac_dict.insert_str($name, PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
         };
     }
-    frac_func!("Fraction", |args| {
-        if args.len() < 2 { return Err(PyError::type_error("Fraction() requires 2 arguments")); }
-        let n = args[0].as_i64().unwrap_or(0);
-        let mut den = args[1].as_i64().unwrap_or(1);
-        if den == 0 { return Err(PyError::ValueError("Fraction denominator cannot be zero".to_string())); }
-        let mut num = n;
-        if den < 0 { num = -num; den = -den; }
-        let g = {
-            let mut a = num.abs();
-            let mut b = den;
-            while b != 0 { let t = b; b = a % b; a = t; }
-            a
-        };
-        if g > 1 { num /= g; den /= g; }
-        Ok(py_str(&format!("{}/{}", num, den)))
+    frac_method!("__add__", |args| frac_binop(args, false, |an,ad,bn,bd| Ok((&an*&bd + &bn*&ad, ad*bd)), |a,b| a+b));
+    frac_method!("__radd__", |args| frac_binop(args, true, |an,ad,bn,bd| Ok((&an*&bd + &bn*&ad, ad*bd)), |a,b| a+b));
+    frac_method!("__sub__", |args| frac_binop(args, false, |an,ad,bn,bd| Ok((&an*&bd - &bn*&ad, ad*bd)), |a,b| a-b));
+    frac_method!("__rsub__", |args| frac_binop(args, true, |an,ad,bn,bd| Ok((&an*&bd - &bn*&ad, ad*bd)), |a,b| a-b));
+    frac_method!("__mul__", |args| frac_binop(args, false, |an,ad,bn,bd| Ok((an*bn, ad*bd)), |a,b| a*b));
+    frac_method!("__rmul__", |args| frac_binop(args, true, |an,ad,bn,bd| Ok((an*bn, ad*bd)), |a,b| a*b));
+    frac_method!("__truediv__", |args| frac_binop(args, false, |an,ad,bn,bd| {
+        if bn.is_zero() { return Err(PyError::ZeroDivisionError("Fraction division by zero".to_string())); }
+        Ok((an*bd, ad*bn))
+    }, |a,b| a/b));
+    frac_method!("__rtruediv__", |args| frac_binop(args, true, |an,ad,bn,bd| {
+        if bn.is_zero() { return Err(PyError::ZeroDivisionError("Fraction division by zero".to_string())); }
+        Ok((an*bd, ad*bn))
+    }, |a,b| a/b));
+    frac_method!("__neg__", |args| {
+        let (n, d) = frac_self_num_den(&args[0])?;
+        frac_make(&frac_self_type(&args[0]), -n, d)
     });
+    frac_method!("__pos__", |args| {
+        let (n, d) = frac_self_num_den(&args[0])?;
+        frac_make(&frac_self_type(&args[0]), n, d)
+    });
+    frac_method!("__abs__", |args| {
+        let (n, d) = frac_self_num_den(&args[0])?;
+        frac_make(&frac_self_type(&args[0]), n.abs(), d)
+    });
+    frac_method!("__float__", |args| {
+        let (n, d) = frac_self_num_den(&args[0])?;
+        Ok(py_float(frac_to_f64(&n, &d)))
+    });
+    frac_method!("__int__", |args| {
+        let (n, d) = frac_self_num_den(&args[0])?;
+        Ok(py_int(n / d))
+    });
+    frac_method!("__trunc__", |args| {
+        let (n, d) = frac_self_num_den(&args[0])?;
+        Ok(py_int(n / d))
+    });
+    frac_method!("__bool__", |args| {
+        let (n, _d) = frac_self_num_den(&args[0])?;
+        Ok(py_bool(!n.is_zero()))
+    });
+    frac_method!("__repr__", |args| {
+        let (n, d) = frac_self_num_den(&args[0])?;
+        Ok(py_str(&format!("Fraction({}, {})", n, d)))
+    });
+    frac_method!("__str__", |args| {
+        let (n, d) = frac_self_num_den(&args[0])?;
+        if d == BigInt::one() { Ok(py_str(&n.to_string())) } else { Ok(py_str(&format!("{}/{}", n, d))) }
+    });
+    frac_method!("__hash__", |args| {
+        let (n, d) = frac_self_num_den(&args[0])?;
+        // Simplified (not CPython's exact modular-inverse hash algorithm,
+        // which relies on `sys.hash_info.modulus`), but preserves the two
+        // invariants real code actually depends on: an integral fraction
+        // hashes the same as the equivalent `int`, and a fraction exactly
+        // representable as a `float` hashes the same as that `float`.
+        let h = if d == BigInt::one() {
+            py_int(n).hash()?
+        } else {
+            py_float(frac_to_f64(&n, &d)).hash()?
+        };
+        Ok(py_int(h as i64))
+    });
+    frac_method!("__eq__", |args| {
+        if args.len() < 2 { return Ok(py_bool(false)); }
+        let (an, ad) = frac_self_num_den(&args[0])?;
+        match frac_operand_of(&args[1]) {
+            FracOperand::Frac(bn, bd) => Ok(py_bool(an == bn && ad == bd)),
+            FracOperand::Float(bf) => Ok(py_bool(frac_to_f64(&an, &ad) == bf)),
+            FracOperand::Other => Ok(py_not_implemented()),
+        }
+    });
+    macro_rules! frac_cmp {
+        ($name:expr, $cmp:expr) => {
+            frac_method!($name, |args| {
+                if args.len() < 2 { return Ok(py_not_implemented()); }
+                let (an, ad) = frac_self_num_den(&args[0])?;
+                match frac_operand_of(&args[1]) {
+                    FracOperand::Frac(bn, bd) => Ok(py_bool($cmp((an*&bd).cmp(&(bn*&ad))))),
+                    FracOperand::Float(bf) => Ok(py_bool($cmp(frac_to_f64(&an, &ad).partial_cmp(&bf).unwrap_or(std::cmp::Ordering::Greater)))),
+                    FracOperand::Other => Ok(py_not_implemented()),
+                }
+            });
+        };
+    }
+    frac_cmp!("__lt__", |o: std::cmp::Ordering| o.is_lt());
+    frac_cmp!("__le__", |o: std::cmp::Ordering| o.is_le());
+    frac_cmp!("__gt__", |o: std::cmp::Ordering| o.is_gt());
+    frac_cmp!("__ge__", |o: std::cmp::Ordering| o.is_ge());
+    frac_method!("as_integer_ratio", |args| {
+        let (n, d) = frac_self_num_den(&args[0])?;
+        Ok(py_tuple(vec![py_int(n), py_int(d)]))
+    });
+
+    let frac_type = PyObjectRef::new(PyObject::Type {
+        name: "Fraction".to_string(),
+        dict: Box::new(str_map_to_typedict(frac_dict)),
+        bases: vec![],
+        mro: vec![],
+    });
+    d.insert_str("Fraction", frac_type);
     d
 }
 
