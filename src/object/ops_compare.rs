@@ -42,6 +42,35 @@ pub fn py_compare(a: &PyObjectRef, b: &PyObjectRef, op: u32) -> PyResult<PyObjec
             }
         }
     }
+    // Set/FrozenSet comparisons (subset/superset/equality relations) are
+    // special-cased here — extracting clones BEFORE any borrow of `a`/`b`
+    // is taken, computing the result via `PySet`'s own `is_subset`/
+    // `is_superset`/`contains` on the clones — so that a hostile member's
+    // `__eq__`/`__hash__` (invoked internally by those calls) can freely
+    // reenter and mutate the ORIGINAL `a`/`b` without conflicting with a
+    // still-held borrow. The generic `op` dispatch just below (`a.borrow().
+    // lt(b)?` etc.) holds BOTH operands' borrows for its entire Set arm,
+    // which panics with "RefCell already (mutably) borrowed" the instant
+    // such a reentrant mutation happens — real, deliberate CPython
+    // regression test: `test_set.py`'s `TestBinaryOpsMutating` (`test_lt_
+    // with_mutation`, `test_eq_with_mutation`, etc., via `check_set_op_
+    // does_not_crash`/`make_sets_of_bad_objects`).
+    if matches!(op, 0..=5) {
+        if let (Some((sa, _)), Some((sb, _))) = (extract_pyset(a), extract_pyset(b)) {
+            let is_subset = sa.len() <= sb.len() && sa.is_subset(&sb);
+            let is_superset = sa.len() >= sb.len() && sa.is_superset(&sb);
+            let result = match op {
+                0 => sa.len() < sb.len() && is_subset,
+                1 => is_subset,
+                2 => sa.len() == sb.len() && is_subset,
+                3 => is_superset,
+                4 => sa.len() > sb.len() && is_superset,
+                5 => !(sa.len() == sb.len() && is_subset),
+                _ => unreachable!(),
+            };
+            return Ok(py_bool(result));
+        }
+    }
     let result = match op {
         0 => a.borrow().lt(b)?,
         1 => a.borrow().le(b)?,

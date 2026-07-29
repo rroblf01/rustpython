@@ -120,6 +120,9 @@ pub fn py_sub(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     }
     if let Some(r) = try_dunder_binop(a, b, "__sub__")? { return Ok(r); }
     if let Some(r) = try_dunder_binop(b, a, "__rsub__")? { return Ok(r); }
+    if let (Some((sa, frozen)), Some((sb, _))) = (extract_pyset(a), extract_pyset(b)) {
+        return set_difference(&sa, &sb, frozen);
+    }
     let a_obj = a.borrow();
     let b_obj = b.borrow();
     match (&*a_obj, &*b_obj) {
@@ -127,10 +130,6 @@ pub fn py_sub(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
         (PyObject::Float(a), PyObject::Float(b)) => Ok(py_float(a - b)),
         (PyObject::Int(a), PyObject::Float(b)) => Ok(py_float(a.to_f64().unwrap() - b)),
         (PyObject::Float(a), PyObject::Int(b)) => Ok(py_float(a - b.to_f64().unwrap())),
-        (PyObject::Set(a), PyObject::Set(b)) => set_difference(a, b, false),
-        (PyObject::Set(a), PyObject::FrozenSet(b)) => set_difference(a, b, false),
-        (PyObject::FrozenSet(a), PyObject::Set(b)) => set_difference(a, b, true),
-        (PyObject::FrozenSet(a), PyObject::FrozenSet(b)) => set_difference(a, b, true),
         (a, b) if matches!(a, PyObject::Complex(..)) || matches!(b, PyObject::Complex(..)) => {
             match (as_complex_parts(a), as_complex_parts(b)) {
                 (Some((ar, ai)), Some((br, bi))) => Ok(PyObjectRef::imm(PyObject::Complex(ar - br, ai - bi))),
@@ -517,6 +516,27 @@ pub fn py_rshift(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     }
 }
 
+/// Clones the `PySet` out of `obj` (if it's a `Set`/`FrozenSet`) via a
+/// SHORT borrow that's already dropped by the time this returns — paired
+/// `bool` is `true` for `FrozenSet`. Used by `py_sub`/`py_bit_or`/
+/// `py_bit_xor`/`py_bit_and`'s set arms specifically so their actual
+/// `set_union`/`set_intersection`/`set_difference`/`set_symmetric_diff`
+/// computation (which internally calls `.equals()` against colliding
+/// members, possibly running an arbitrary hostile `__eq__`) never runs
+/// while EITHER operand's own borrow is still held. The general match
+/// below (`a.borrow()`/`b.borrow()` held for its whole body) would
+/// otherwise panic with "RefCell already (mutably) borrowed" the instant
+/// such a callback reentrantly touched either operand set — real,
+/// deliberate CPython regression test: `test_set.py`'s
+/// `check_set_op_does_not_crash`/`make_sets_of_bad_objects`.
+pub(crate) fn extract_pyset(obj: &PyObjectRef) -> Option<(PySet, bool)> {
+    match &*obj.borrow() {
+        PyObject::Set(s) => Some((s.clone(), false)),
+        PyObject::FrozenSet(s) => Some((s.clone(), true)),
+        _ => None,
+    }
+}
+
 /// Wraps a computed `PySet` result as either `PyObject::Set` or
 /// `PyObject::FrozenSet`, matching the LEFT operand's own container type —
 /// same rule real CPython uses (`frozenset() & set()` returns a
@@ -567,14 +587,13 @@ pub fn py_bit_or(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     if let Some(r) = i64_binop(a, b, |x, y| x | y) { return r; }
     if let Some(r) = try_dunder_binop(a, b, "__or__")? { return Ok(r); }
     if let Some(r) = try_dunder_binop(b, a, "__ror__")? { return Ok(r); }
+    if let (Some((sa, frozen)), Some((sb, _))) = (extract_pyset(a), extract_pyset(b)) {
+        return set_union(&sa, &sb, frozen);
+    }
     let a_obj = a.borrow();
     let b_obj = b.borrow();
     match (&*a_obj, &*b_obj) {
         (PyObject::Int(a), PyObject::Int(b)) => Ok(py_int(a.clone() | b)),
-        (PyObject::Set(a), PyObject::Set(b)) => set_union(a, b, false),
-        (PyObject::Set(a), PyObject::FrozenSet(b)) => set_union(a, b, false),
-        (PyObject::FrozenSet(a), PyObject::Set(b)) => set_union(a, b, true),
-        (PyObject::FrozenSet(a), PyObject::FrozenSet(b)) => set_union(a, b, true),
         (PyObject::Dict(a), PyObject::Dict(b)) => {
             let mut merged = PyDict::new();
             for k in a.keys() {
@@ -600,14 +619,13 @@ pub fn py_bit_xor(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     if let Some(r) = i64_binop(a, b, |x, y| x ^ y) { return r; }
     if let Some(r) = try_dunder_binop(a, b, "__xor__")? { return Ok(r); }
     if let Some(r) = try_dunder_binop(b, a, "__rxor__")? { return Ok(r); }
+    if let (Some((sa, frozen)), Some((sb, _))) = (extract_pyset(a), extract_pyset(b)) {
+        return set_symmetric_diff(&sa, &sb, frozen);
+    }
     let a_obj = a.borrow();
     let b_obj = b.borrow();
     match (&*a_obj, &*b_obj) {
         (PyObject::Int(a), PyObject::Int(b)) => Ok(py_int(a.clone() ^ b)),
-        (PyObject::Set(a), PyObject::Set(b)) => set_symmetric_diff(a, b, false),
-        (PyObject::Set(a), PyObject::FrozenSet(b)) => set_symmetric_diff(a, b, false),
-        (PyObject::FrozenSet(a), PyObject::Set(b)) => set_symmetric_diff(a, b, true),
-        (PyObject::FrozenSet(a), PyObject::FrozenSet(b)) => set_symmetric_diff(a, b, true),
         _ => Err(PyError::type_error(format!("unsupported operand type(s) for ^: '{}' and '{}'",
             a_obj.type_name(), b_obj.type_name()))),
     }
@@ -623,14 +641,13 @@ pub fn py_bit_and(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     if let Some(r) = i64_binop(a, b, |x, y| x & y) { return r; }
     if let Some(r) = try_dunder_binop(a, b, "__and__")? { return Ok(r); }
     if let Some(r) = try_dunder_binop(b, a, "__rand__")? { return Ok(r); }
+    if let (Some((sa, frozen)), Some((sb, _))) = (extract_pyset(a), extract_pyset(b)) {
+        return set_intersection(&sa, &sb, frozen);
+    }
     let a_obj = a.borrow();
     let b_obj = b.borrow();
     match (&*a_obj, &*b_obj) {
         (PyObject::Int(a), PyObject::Int(b)) => Ok(py_int(a.clone() & b)),
-        (PyObject::Set(a), PyObject::Set(b)) => set_intersection(a, b, false),
-        (PyObject::Set(a), PyObject::FrozenSet(b)) => set_intersection(a, b, false),
-        (PyObject::FrozenSet(a), PyObject::Set(b)) => set_intersection(a, b, true),
-        (PyObject::FrozenSet(a), PyObject::FrozenSet(b)) => set_intersection(a, b, true),
         _ => Err(PyError::type_error(format!("unsupported operand type(s) for &: '{}' and '{}'",
             a_obj.type_name(), b_obj.type_name()))),
     }

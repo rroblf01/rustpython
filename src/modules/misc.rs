@@ -1681,57 +1681,142 @@ pub fn create_heapq_dict() -> HashMap<String, PyObjectRef> {
         _siftdown(heap, start, pos);
     }
 
-    heap_func!("heapify", |args| {
-        if args.is_empty() { return Err(PyError::type_error("heapify() missing required argument")); }
-        if let PyObject::List(list) = &mut *args[0].borrow_mut() {
-            let n = list.len();
-            if n > 1 {
-                for i in (0..n / 2).rev() {
-                    _siftup(list, i);
+    // `_siftdown`/`_siftup` above take a bare `&mut Vec<PyObjectRef>` — fine
+    // for `nlargest`/`nsmallest`'s own purely-local working buffer (never
+    // shared with Python code, so nothing can reenter and mutate it), but
+    // unsafe for `heapify`/`heappush`/`heappop`/`heapreplace`, which operate
+    // on the caller's REAL, live, Python-visible list: those held the
+    // list's own `borrow_mut()` for the ENTIRE sift operation, including
+    // every `py_lt` comparison — which can run arbitrary Python `__lt__`
+    // code. Real trigger: CPython's own `test_heapq.py`'s
+    // `test_comparison_operator_modifying_heap`/`..._two_heaps`, whose
+    // custom `__lt__` mutates the SAME heap list mid-comparison (append/
+    // clear/etc.) — needing `list.borrow_mut()` again while the outer one
+    // was still held, panicking with "RefCell already mutably borrowed".
+    // These `_live` variants take the list's own `PyObjectRef` instead,
+    // re-borrowing briefly (and by INDEX, with an explicit bounds check —
+    // matching real CPython's own C implementation, which re-fetches
+    // `PyList_GET_SIZE` after every comparison for the exact same reason)
+    // for each individual read/swap, never holding a borrow across a
+    // comparison call.
+    fn heap_get_live(heap_ref: &PyObjectRef, idx: usize) -> Option<PyObjectRef> {
+        if let PyObject::List(list) = &*heap_ref.borrow() { list.get(idx).cloned() } else { None }
+    }
+    fn heap_len_live(heap_ref: &PyObjectRef) -> usize {
+        if let PyObject::List(list) = &*heap_ref.borrow() { list.len() } else { 0 }
+    }
+    fn heap_swap_live(heap_ref: &PyObjectRef, i: usize, j: usize) {
+        if let PyObject::List(list) = &mut *heap_ref.borrow_mut() {
+            if i < list.len() && j < list.len() { list.swap(i, j); }
+        }
+    }
+    fn _siftdown_live(heap_ref: &PyObjectRef, start: usize, pos: usize) {
+        let mut pos = pos;
+        while pos > start {
+            let parent = (pos - 1) / 2;
+            let (item_pos, item_parent) = match (heap_get_live(heap_ref, pos), heap_get_live(heap_ref, parent)) {
+                (Some(a), Some(b)) => (a, b),
+                _ => return,
+            };
+            if py_lt(&item_pos, &item_parent).unwrap_or(false) {
+                heap_swap_live(heap_ref, pos, parent);
+                pos = parent;
+            } else {
+                break;
+            }
+        }
+    }
+    fn _siftup_live(heap_ref: &PyObjectRef, pos: usize) {
+        let end = heap_len_live(heap_ref);
+        let mut pos = pos;
+        let start = pos;
+        while pos < end {
+            let left = 2 * pos + 1;
+            let right = 2 * pos + 2;
+            let mut smallest = pos;
+            if left < end {
+                if let (Some(l), Some(s)) = (heap_get_live(heap_ref, left), heap_get_live(heap_ref, smallest)) {
+                    if py_lt(&l, &s).unwrap_or(false) { smallest = left; }
                 }
             }
-            Ok(py_none())
-        } else {
-            Err(PyError::type_error("heapify() argument must be a list"))
+            if right < end {
+                if let (Some(r), Some(s)) = (heap_get_live(heap_ref, right), heap_get_live(heap_ref, smallest)) {
+                    if py_lt(&r, &s).unwrap_or(false) { smallest = right; }
+                }
+            }
+            if smallest == pos { break; }
+            heap_swap_live(heap_ref, pos, smallest);
+            pos = smallest;
         }
+        _siftdown_live(heap_ref, start, pos);
+    }
+
+    heap_func!("heapify", |args| {
+        if args.is_empty() { return Err(PyError::type_error("heapify() missing required argument")); }
+        if !matches!(&*args[0].borrow(), PyObject::List(_)) {
+            return Err(PyError::type_error("heapify() argument must be a list"));
+        }
+        let n = heap_len_live(&args[0]);
+        if n > 1 {
+            for i in (0..n / 2).rev() {
+                _siftup_live(&args[0], i);
+            }
+        }
+        Ok(py_none())
     });
 
     heap_func!("heappush", |args| {
         if args.len() < 2 { return Err(PyError::type_error("heappush() requires 2 arguments (heap, item)")); }
+        // Check the variant via an IMMUTABLE borrow first — `.borrow_mut()`
+        // panics outright (rather than erroring) on a non-`Mut` value like
+        // `PyObjectRef::None`/`SmallInt`, so calling it unconditionally
+        // before confirming `args[0]` is really a list crashed instead of
+        // raising `TypeError` for e.g. `heappush(None, x)`. Real trigger:
+        // CPython's own `test_heapq.py`, which explicitly exercises
+        // `assertRaises(TypeError, ...)` with non-list arguments.
+        if !matches!(&*args[0].borrow(), PyObject::List(_)) {
+            return Err(PyError::type_error("heappush() argument must be a list"));
+        }
         if let PyObject::List(list) = &mut *args[0].borrow_mut() {
             list.push(args[1].clone());
-            _siftdown(list, 0, list.len() - 1);
-            Ok(py_none())
-        } else {
-            Err(PyError::type_error("heappush() argument must be a list"))
         }
+        let last = heap_len_live(&args[0]).saturating_sub(1);
+        _siftdown_live(&args[0], 0, last);
+        Ok(py_none())
     });
 
     heap_func!("heappop", |args| {
         if args.is_empty() { return Err(PyError::type_error("heappop() missing required argument")); }
-        if let PyObject::List(list) = &mut *args[0].borrow_mut() {
+        if !matches!(&*args[0].borrow(), PyObject::List(_)) {
+            return Err(PyError::type_error("heappop() argument must be a list"));
+        }
+        let result = if let PyObject::List(list) = &mut *args[0].borrow_mut() {
             if list.is_empty() { return Err(PyError::index_error("pop from an empty heap")); }
             let last = list.len() - 1;
             list.swap(0, last);
-            let result = list.pop().unwrap();
-            if !list.is_empty() { _siftup(list, 0); }
-            Ok(result)
+            list.pop().unwrap()
         } else {
-            Err(PyError::type_error("heappop() argument must be a list"))
-        }
+            unreachable!()
+        };
+        if heap_len_live(&args[0]) > 0 { _siftup_live(&args[0], 0); }
+        Ok(result)
     });
 
     heap_func!("heapreplace", |args| {
         if args.len() < 2 { return Err(PyError::type_error("heapreplace() requires 2 arguments (heap, item)")); }
-        if let PyObject::List(list) = &mut *args[0].borrow_mut() {
+        if !matches!(&*args[0].borrow(), PyObject::List(_)) {
+            return Err(PyError::type_error("heapreplace() argument must be a list"));
+        }
+        let result = if let PyObject::List(list) = &mut *args[0].borrow_mut() {
             if list.is_empty() { return Err(PyError::index_error("heapreplace() on empty heap")); }
             let result = list[0].clone();
             list[0] = args[1].clone();
-            _siftup(list, 0);
-            Ok(result)
+            result
         } else {
-            Err(PyError::type_error("heapreplace() argument must be a list"))
-        }
+            return Err(PyError::type_error("heapreplace() argument must be a list"));
+        };
+        _siftup_live(&args[0], 0);
+        Ok(result)
     });
 
     // Helper: extract comparable values for nlargest/nsmallest

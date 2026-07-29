@@ -6988,7 +6988,33 @@ impl VirtualMachine {
         // single `class MyModel(models.Model): pass` triggered 10+ nested
         // `AltersData.__init_subclass__` frames before failing).
         let self_mro = if let PyObject::Type { mro, .. } = &*class.borrow() { mro.clone() } else { vec![] };
-        let init_subclass = self_mro.iter().skip(1).find_map(|base| base.borrow().get_attribute("__init_subclass__").ok());
+        // Check each MRO entry's OWN direct dict (`get_str`), NOT the
+        // recursive `get_attribute` (which re-walks THAT base's own MRO
+        // from scratch and can resolve all the way down to `object`'s
+        // shared no-op default on its own) — using `get_attribute` here
+        // meant a multiply-inherited class whose FIRST base in MRO order
+        // doesn't itself define `__init_subclass__` (e.g. a plain mixin
+        // with no bases beyond implicit `object`) stopped at THAT base's
+        // own inherited `object.__init_subclass__` default immediately,
+        // never reaching a LATER base's real, meaningful override at all.
+        // Real trigger: `class Combined(Mixin, unittest.TestCase): pass` —
+        // `Mixin` (no explicit base) resolves `__init_subclass__` to
+        // `object`'s default via its own separate MRO before `TestCase`'s
+        // real override (which sets `_class_cleanups`, needed by
+        // `TestCase.doClassCleanups`) is ever reached, silently skipping it
+        // entirely. Checking each entry's OWN dict directly instead
+        // correctly walks the single, already-flattened `self_mro` in
+        // order — skipping bases with no direct definition — and still
+        // calls the ultimate shared `object.__init_subclass__` default
+        // exactly once if nothing else in the chain overrides it (this is
+        // what the surrounding fix, described above, was for).
+        let init_subclass = self_mro.iter().skip(1).find_map(|base| {
+            if let PyObject::Type { dict, .. } = &*base.borrow() {
+                dict.get_str("__init_subclass__").cloned()
+            } else {
+                None
+            }
+        });
         if let Some(init_subclass) = init_subclass {
             if std::env::var("RPY_DEBUG_INITSUBCLASS").is_ok() {
                 let class_name = if let PyObject::Type { name, .. } = &*class.borrow() { name.clone() } else { "?".to_string() };

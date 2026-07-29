@@ -1383,9 +1383,32 @@ pub fn builtin_dir(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 names.push(py_str(interner::lookup_str(*key)));
             }
         }
-        PyObject::Type { dict, .. } => {
+        PyObject::Type { dict, mro, .. } => {
+            // `dir(SomeClass)` must include every name reachable via the
+            // class's OWN dict AND every ancestor's (`mro`) — real
+            // CPython's `dir()` on a class is `sorted(set().union(*(vars(c)
+            // for c in cls.__mro__)))`. This previously only read the
+            // class's OWN dict, so `dir()` on ANY class with inherited
+            // members (i.e. virtually every class with a base other than
+            // bare `object`) silently omitted every name defined on a
+            // parent — confirmed via `class Combined(Mixin, unittest.
+            // TestCase): pass`, where `dir(Combined)` omitted `Mixin`'s own
+            // `test_*` methods even though `hasattr`/`getattr` found them
+            // fine (a real, general attribute-LOOKUP-vs-`dir()`-enumeration
+            // gap this was hiding) — `unittest`'s own `TestLoader.
+            // getTestCaseNames` uses exactly this `dir()` call to discover
+            // test methods, so this silently dropped every test defined on
+            // a mixin base for any multiple-inheritance test class.
+            let mut seen = std::collections::HashSet::new();
             for key in dict.keys() {
-                names.push(py_str(interner::lookup_str(*key)));
+                if seen.insert(*key) { names.push(py_str(interner::lookup_str(*key))); }
+            }
+            for base in mro {
+                if let PyObject::Type { dict: base_dict, .. } = &*base.borrow() {
+                    for key in base_dict.keys() {
+                        if seen.insert(*key) { names.push(py_str(interner::lookup_str(*key))); }
+                    }
+                }
             }
         }
         _ => {}
