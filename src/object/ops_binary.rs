@@ -36,11 +36,19 @@ pub fn try_dunder_binop(a: &PyObjectRef, b: &PyObjectRef, method: &str) -> PyRes
     // Not overridden anywhere in the mro: for a class that transparently
     // subclasses list/str (`class Foo(list): ...`), +/* on it should behave
     // like the same operation on the real native backing (dict supports
-    // neither, so it's simply not in this list).
+    // neither, so it's simply not in this list). `__and__`/`__or__`/
+    // `__xor__`/`__sub__` are here specifically for `set` subclasses
+    // (`&`/`|`/`^`/`-` are set's real operators) — added alongside `set`'s
+    // own native-base migration, since subclassing `set` at all was
+    // unsupported before then (nothing exercised this gap until now).
     if let Some(native) = native_backing_of(a) {
         let result = match method {
             "__add__" => Some(py_add(&native, b)),
             "__mul__" => Some(py_mul(&native, b)),
+            "__and__" => Some(py_bit_and(&native, b)),
+            "__or__" => Some(py_bit_or(&native, b)),
+            "__xor__" => Some(py_bit_xor(&native, b)),
+            "__sub__" => Some(py_sub(&native, b)),
             _ => None,
         };
         if let Some(result) = result {
@@ -119,7 +127,10 @@ pub fn py_sub(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
         (PyObject::Float(a), PyObject::Float(b)) => Ok(py_float(a - b)),
         (PyObject::Int(a), PyObject::Float(b)) => Ok(py_float(a.to_f64().unwrap() - b)),
         (PyObject::Float(a), PyObject::Int(b)) => Ok(py_float(a - b.to_f64().unwrap())),
-        (PyObject::Set(a), PyObject::Set(b)) => set_difference(a, b),
+        (PyObject::Set(a), PyObject::Set(b)) => set_difference(a, b, false),
+        (PyObject::Set(a), PyObject::FrozenSet(b)) => set_difference(a, b, false),
+        (PyObject::FrozenSet(a), PyObject::Set(b)) => set_difference(a, b, true),
+        (PyObject::FrozenSet(a), PyObject::FrozenSet(b)) => set_difference(a, b, true),
         (a, b) if matches!(a, PyObject::Complex(..)) || matches!(b, PyObject::Complex(..)) => {
             match (as_complex_parts(a), as_complex_parts(b)) {
                 (Some((ar, ai)), Some((br, bi))) => Ok(PyObjectRef::imm(PyObject::Complex(ar - br, ai - bi))),
@@ -506,26 +517,37 @@ pub fn py_rshift(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     }
 }
 
-fn set_union(a: &PySet, b: &PySet) -> PyResult<PyObjectRef> {
+/// Wraps a computed `PySet` result as either `PyObject::Set` or
+/// `PyObject::FrozenSet`, matching the LEFT operand's own container type —
+/// same rule real CPython uses (`frozenset() & set()` returns a
+/// `frozenset`; `set() & frozenset()` returns a `set`).
+fn wrap_set_result(result: PySet, as_frozen: bool) -> PyObjectRef {
+    if as_frozen {
+        PyObjectRef::imm(PyObject::FrozenSet(result))
+    } else {
+        PyObjectRef::new(PyObject::Set(result))
+    }
+}
+fn set_union(a: &PySet, b: &PySet, as_frozen: bool) -> PyResult<PyObjectRef> {
     let mut result = a.clone();
     for item in b.to_vec() { result.add(item)?; }
-    Ok(PyObjectRef::new(PyObject::Set(result)))
+    Ok(wrap_set_result(result, as_frozen))
 }
-fn set_intersection(a: &PySet, b: &PySet) -> PyResult<PyObjectRef> {
+fn set_intersection(a: &PySet, b: &PySet, as_frozen: bool) -> PyResult<PyObjectRef> {
     let mut result = PySet::new();
     for item in a.to_vec() { if b.contains(&item)? { result.add(item)?; } }
-    Ok(PyObjectRef::new(PyObject::Set(result)))
+    Ok(wrap_set_result(result, as_frozen))
 }
-fn set_difference(a: &PySet, b: &PySet) -> PyResult<PyObjectRef> {
+fn set_difference(a: &PySet, b: &PySet, as_frozen: bool) -> PyResult<PyObjectRef> {
     let mut result = PySet::new();
     for item in a.to_vec() { if !b.contains(&item)? { result.add(item)?; } }
-    Ok(PyObjectRef::new(PyObject::Set(result)))
+    Ok(wrap_set_result(result, as_frozen))
 }
-fn set_symmetric_diff(a: &PySet, b: &PySet) -> PyResult<PyObjectRef> {
+fn set_symmetric_diff(a: &PySet, b: &PySet, as_frozen: bool) -> PyResult<PyObjectRef> {
     let mut result = PySet::new();
     for item in a.to_vec() { if !b.contains(&item)? { result.add(item)?; } }
     for item in b.to_vec() { if !a.contains(&item)? { result.add(item)?; } }
-    Ok(PyObjectRef::new(PyObject::Set(result)))
+    Ok(wrap_set_result(result, as_frozen))
 }
 
 fn i64_binop(a: &PyObjectRef, b: &PyObjectRef, f: impl Fn(i64, i64) -> i64) -> Option<PyResult<PyObjectRef>> {
@@ -549,7 +571,10 @@ pub fn py_bit_or(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     let b_obj = b.borrow();
     match (&*a_obj, &*b_obj) {
         (PyObject::Int(a), PyObject::Int(b)) => Ok(py_int(a.clone() | b)),
-        (PyObject::Set(a), PyObject::Set(b)) => set_union(a, b),
+        (PyObject::Set(a), PyObject::Set(b)) => set_union(a, b, false),
+        (PyObject::Set(a), PyObject::FrozenSet(b)) => set_union(a, b, false),
+        (PyObject::FrozenSet(a), PyObject::Set(b)) => set_union(a, b, true),
+        (PyObject::FrozenSet(a), PyObject::FrozenSet(b)) => set_union(a, b, true),
         (PyObject::Dict(a), PyObject::Dict(b)) => {
             let mut merged = PyDict::new();
             for k in a.keys() {
@@ -579,7 +604,10 @@ pub fn py_bit_xor(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     let b_obj = b.borrow();
     match (&*a_obj, &*b_obj) {
         (PyObject::Int(a), PyObject::Int(b)) => Ok(py_int(a.clone() ^ b)),
-        (PyObject::Set(a), PyObject::Set(b)) => set_symmetric_diff(a, b),
+        (PyObject::Set(a), PyObject::Set(b)) => set_symmetric_diff(a, b, false),
+        (PyObject::Set(a), PyObject::FrozenSet(b)) => set_symmetric_diff(a, b, false),
+        (PyObject::FrozenSet(a), PyObject::Set(b)) => set_symmetric_diff(a, b, true),
+        (PyObject::FrozenSet(a), PyObject::FrozenSet(b)) => set_symmetric_diff(a, b, true),
         _ => Err(PyError::type_error(format!("unsupported operand type(s) for ^: '{}' and '{}'",
             a_obj.type_name(), b_obj.type_name()))),
     }
@@ -599,7 +627,10 @@ pub fn py_bit_and(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     let b_obj = b.borrow();
     match (&*a_obj, &*b_obj) {
         (PyObject::Int(a), PyObject::Int(b)) => Ok(py_int(a.clone() & b)),
-        (PyObject::Set(a), PyObject::Set(b)) => set_intersection(a, b),
+        (PyObject::Set(a), PyObject::Set(b)) => set_intersection(a, b, false),
+        (PyObject::Set(a), PyObject::FrozenSet(b)) => set_intersection(a, b, false),
+        (PyObject::FrozenSet(a), PyObject::Set(b)) => set_intersection(a, b, true),
+        (PyObject::FrozenSet(a), PyObject::FrozenSet(b)) => set_intersection(a, b, true),
         _ => Err(PyError::type_error(format!("unsupported operand type(s) for &: '{}' and '{}'",
             a_obj.type_name(), b_obj.type_name()))),
     }

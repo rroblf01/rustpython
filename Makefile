@@ -144,18 +144,18 @@ test-uv: $(RUSTPYTHON)
 
 # ── CPython test suite ─────────────────────────────
 CPYTHON_TIMEOUT := 120
-# Kept below nproc (12 on the dev machine this was tuned on) on purpose:
-# 12-way parallel *debug*-profile (unoptimized, no LTO) rustpython processes
-# saturate every core, leaving the rest of the system starved for CPU during
-# the whole sweep — felt like a hang even though it was actually memory-safe
-# (swap fills from BEFORE the run, not active pageout under load; see
-# cpython_test_suite_compat.md memory for the full diagnosis). 10 (nproc-2)
-# leaves a couple cores free for the desktop/other work — confirmed via the
-# sweep resource monitor that even 8-way parallel never used more than
-# ~9GB/32GB RAM (the earlier OOM incident was a since-fixed interpreter bug,
-# unbounded Vec growth in list()/list*n/reversed(range), not a parallelism
-# problem — see cpython_test_suite_compat.md), so there's real headroom here.
-CPYTHON_PARALLEL := 10
+# Matches nproc (12 on the dev machine this was tuned on) — full-core
+# parallel *debug*-profile (unoptimized, no LTO) rustpython processes will
+# starve the desktop of CPU for the ~7-8 minute duration of a sweep (a real,
+# previously-observed tradeoff, explicitly accepted in exchange for wall-
+# clock speed — see cpython_test_suite_compat.md's resource-monitor
+# diagnosis for why this is NOT a memory-safety concern: even 8-way never
+# used more than ~9GB/32GB RAM, and the earlier OOM incident that originally
+# motivated capping this was a since-fixed interpreter bug — unbounded Vec
+# growth in list()/list*n/reversed(range) — not a parallelism problem at
+# all). Drop this back toward nproc-2 if the desktop-starvation tradeoff
+# stops being worth it.
+CPYTHON_PARALLEL := 12
 
 test-cpython: build-test
 	@echo -e "$(CYAN)==> Running CPython compatibility tests ($(CPYTHON_TIMEOUT)s timeout, $(CPYTHON_PARALLEL) parallel)...$(RESET)"

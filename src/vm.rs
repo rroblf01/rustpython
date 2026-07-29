@@ -6885,6 +6885,25 @@ impl VirtualMachine {
         init_subclass_kwargs: Vec<(String, PyObjectRef)>,
         metatype: Option<PyObjectRef>,
     ) -> PyResult<PyObjectRef> {
+        // Real CPython disallows subclassing `bool` outright (`TypeError:
+        // type 'bool' is not an acceptable base type`) — unlike every other
+        // migrated native type, `bool` is a real `PyObject::Type` (fixing
+        // `type(True) is bool`) but deliberately NOT in
+        // `is_recognized_native_base_name`, so it would otherwise fall
+        // through to the generic `NATIVE_VALUE_CTOR_KEY`-based detection
+        // arm just below and be silently treated as a valid native base
+        // (constructing a nonsensical always-`False`-backed instance)
+        // instead of raising. Checked by identity against the live `bool`
+        // binding (not by name) so a shadowed/reassigned `bool` name
+        // elsewhere doesn't false-positive.
+        if let Some(bool_type) = self.builtins.get(&interner::intern("bool")) {
+            for base in &bases_vec {
+                if base.is(bool_type) {
+                    return Err(PyError::type_error("type 'bool' is not an acceptable base type"));
+                }
+            }
+        }
+
         // Detect `class Foo(list): ...` / `(dict)` / `(str)` / `(int)` —
         // either a direct native base, or inherited transitively through a
         // base that already carries the marker (propagated down so every

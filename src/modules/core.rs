@@ -104,11 +104,9 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     add_func!("range", builtin_range);
     // "type" is registered further down as a real, subclassable Type object
     // once `object_type` exists — see the comment there. "int"/"str"/"list"/
-    // "float"/"dict"/"tuple" are likewise registered further down (once
-    // `object_type` exists) as real Types — see the comments there.
-    add_func!("complex", builtin_complex);
-    add_func!("bool", builtin_bool);
-    add_func!("set", builtin_set);
+    // "float"/"dict"/"tuple"/"bytes"/"set"/"complex"/"bytearray"/"frozenset"/
+    // "bool" are likewise registered further down (once `object_type`
+    // exists) as real Types — see the comments there.
     add_func!("abs", builtin_abs);
     add_func!("hasattr", builtin_hasattr);
     add_func!("getattr", builtin_getattr);
@@ -154,9 +152,6 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     add_func!("property", builtin_property);
     add_func!("staticmethod", builtin_staticmethod);
     add_func!("classmethod", builtin_classmethod);
-    add_func!("bytes", builtin_bytes);
-    add_func!("bytearray", builtin_bytearray);
-    add_func!("frozenset", builtin_frozenset);
     add_func!("format", builtin_format);
     add_func!("object", builtin_object);
     add_func!("hash", builtin_hash);
@@ -493,7 +488,7 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
         *mro = vec![int_type.clone(), object_type.clone()];
     }
     builtins.insert_str("int", int_type.clone());
-    crate::object::seed_primitive_type_cache("int", int_type);
+    crate::object::seed_primitive_type_cache("int", int_type.clone());
 
     // `str` — the second type migrated to the `NATIVE_VALUE_CTOR_KEY`
     // mechanism, same shape as `int` above. Unlike `int` (which needed
@@ -657,6 +652,150 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     }
     builtins.insert_str("tuple", tuple_type.clone());
     crate::object::seed_primitive_type_cache("tuple", tuple_type);
+
+    // `bytes` — same shape as `list`/`str`/`tuple` (no dunder-shaped
+    // class-level method — `fromhex` is a plain classmethod-style
+    // function, not a dunder, so it carries none of the ancestor-mro
+    // hazards documented for `dict`'s migration).
+    let mut bytes_dict: HashMap<String, PyObjectRef> = HashMap::new();
+    bytes_dict.insert_str(crate::object::NATIVE_VALUE_CTOR_KEY, PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "bytes".to_string(),
+        func: builtin_bytes,
+    }));
+    bytes_dict.insert_str("fromhex", PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "fromhex".to_string(),
+        func: builtin_bytes_fromhex,
+    }));
+    let bytes_type = PyObjectRef::new(PyObject::Type {
+        name: "bytes".to_string(),
+        dict: Box::new(str_map_to_typedict(bytes_dict)),
+        bases: vec![object_type.clone()],
+        mro: vec![],
+    });
+    if let PyObject::Type { mro, .. } = &mut *bytes_type.borrow_mut() {
+        *mro = vec![bytes_type.clone(), object_type.clone()];
+    }
+    builtins.insert_str("bytes", bytes_type.clone());
+    crate::object::seed_primitive_type_cache("bytes", bytes_type);
+
+    // `set` — same shape, no class-level-only method at all.
+    let mut set_dict: HashMap<String, PyObjectRef> = HashMap::new();
+    set_dict.insert_str(crate::object::NATIVE_VALUE_CTOR_KEY, PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "set".to_string(),
+        func: builtin_set,
+    }));
+    let set_type = PyObjectRef::new(PyObject::Type {
+        name: "set".to_string(),
+        dict: Box::new(str_map_to_typedict(set_dict)),
+        bases: vec![object_type.clone()],
+        mro: vec![],
+    });
+    if let PyObject::Type { mro, .. } = &mut *set_type.borrow_mut() {
+        *mro = vec![set_type.clone(), object_type.clone()];
+    }
+    builtins.insert_str("set", set_type.clone());
+    crate::object::seed_primitive_type_cache("set", set_type);
+
+    // `complex` — same shape; `from_number` is a plain classmethod-style
+    // function (not a dunder).
+    let mut complex_dict: HashMap<String, PyObjectRef> = HashMap::new();
+    complex_dict.insert_str(crate::object::NATIVE_VALUE_CTOR_KEY, PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "complex".to_string(),
+        func: builtin_complex,
+    }));
+    complex_dict.insert_str("from_number", PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "from_number".to_string(),
+        func: |args| {
+            if args.is_empty() { return Err(PyError::type_error("complex.from_number() takes exactly 1 argument")); }
+            let n = args[0].as_f64().unwrap_or(0.0);
+            Ok(PyObjectRef::imm(PyObject::Complex(n, 0.0)))
+        },
+    }));
+    let complex_type = PyObjectRef::new(PyObject::Type {
+        name: "complex".to_string(),
+        dict: Box::new(str_map_to_typedict(complex_dict)),
+        bases: vec![object_type.clone()],
+        mro: vec![],
+    });
+    if let PyObject::Type { mro, .. } = &mut *complex_type.borrow_mut() {
+        *mro = vec![complex_type.clone(), object_type.clone()];
+    }
+    builtins.insert_str("complex", complex_type.clone());
+    crate::object::seed_primitive_type_cache("complex", complex_type);
+
+    // `bytearray` — same shape, no class-level-only method.
+    let mut bytearray_dict: HashMap<String, PyObjectRef> = HashMap::new();
+    bytearray_dict.insert_str(crate::object::NATIVE_VALUE_CTOR_KEY, PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "bytearray".to_string(),
+        func: builtin_bytearray,
+    }));
+    let bytearray_type = PyObjectRef::new(PyObject::Type {
+        name: "bytearray".to_string(),
+        dict: Box::new(str_map_to_typedict(bytearray_dict)),
+        bases: vec![object_type.clone()],
+        mro: vec![],
+    });
+    if let PyObject::Type { mro, .. } = &mut *bytearray_type.borrow_mut() {
+        *mro = vec![bytearray_type.clone(), object_type.clone()];
+    }
+    builtins.insert_str("bytearray", bytearray_type.clone());
+    crate::object::seed_primitive_type_cache("bytearray", bytearray_type);
+
+    // `frozenset` — same shape, no class-level-only method.
+    let mut frozenset_dict: HashMap<String, PyObjectRef> = HashMap::new();
+    frozenset_dict.insert_str(crate::object::NATIVE_VALUE_CTOR_KEY, PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "frozenset".to_string(),
+        func: builtin_frozenset,
+    }));
+    let frozenset_type = PyObjectRef::new(PyObject::Type {
+        name: "frozenset".to_string(),
+        dict: Box::new(str_map_to_typedict(frozenset_dict)),
+        bases: vec![object_type.clone()],
+        mro: vec![],
+    });
+    if let PyObject::Type { mro, .. } = &mut *frozenset_type.borrow_mut() {
+        *mro = vec![frozenset_type.clone(), object_type.clone()];
+    }
+    builtins.insert_str("frozenset", frozenset_type.clone());
+    crate::object::seed_primitive_type_cache("frozenset", frozenset_type);
+
+    // `bool` — a real `Type` (fixing `type(True) is bool`) but
+    // DELIBERATELY excluded from `is_recognized_native_base_name` and given
+    // NO entry in `make_native_backing`/`synthesize_native_init`: real
+    // Python disallows subclassing `bool` at all (`TypeError: type 'bool'
+    // is not an acceptable base type`) — `default_build_class` (`vm.rs`)
+    // checks for this explicitly, by identity against this exact binding,
+    // before it would otherwise reach the generic `NATIVE_VALUE_CTOR_KEY`
+    // detection arm and wrongly treat `bool` as a valid native base. Bases
+    // are `[int_type, object_type]`, matching real CPython's actual
+    // hierarchy (`bool.__bases__ == (int,)`) — `__new__` (constructing a
+    // bool from a truthiness-tested value) moves in from what used to be a
+    // `bf_name == "bool" && name == "__new__"` special case in
+    // `get_attribute_impl` (`attrs.rs`).
+    let mut bool_dict: HashMap<String, PyObjectRef> = HashMap::new();
+    bool_dict.insert_str(crate::object::NATIVE_VALUE_CTOR_KEY, PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "bool".to_string(),
+        func: builtin_bool,
+    }));
+    bool_dict.insert_str("__new__", PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "__new__".to_string(),
+        func: |args| {
+            if args.is_empty() { return Ok(py_bool(false)); }
+            if args.len() >= 2 { return Ok(py_bool(args[1].truthy())); }
+            Ok(py_bool(false))
+        },
+    }));
+    let bool_type = PyObjectRef::new(PyObject::Type {
+        name: "bool".to_string(),
+        dict: Box::new(str_map_to_typedict(bool_dict)),
+        bases: vec![int_type.clone()],
+        mro: vec![],
+    });
+    if let PyObject::Type { mro, .. } = &mut *bool_type.borrow_mut() {
+        *mro = vec![bool_type.clone(), int_type.clone(), object_type.clone()];
+    }
+    builtins.insert_str("bool", bool_type.clone());
+    crate::object::seed_primitive_type_cache("bool", bool_type);
 
     // `type` — a real, subclassable Type object (not just the `type(x)`
     // introspection/`type(name,bases,ns)` construction BuiltinFunction that

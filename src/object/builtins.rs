@@ -2500,6 +2500,21 @@ pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             if obj_type == class_name {
                 return Ok(py_bool(true));
             }
+            // `bool` is real CPython's one primitive with an actual
+            // inheritance relationship to another primitive
+            // (`bool.__bases__ == (int,)`) — `isinstance(True, int)` and
+            // `isinstance(True, object)` must both be `True`. A `bool`
+            // value here is always the PRIMITIVE `PyObjectRef::SmallBool`/
+            // `PyObject::Bool` shape (never a `PyObject::Instance`, since
+            // `bool` can't be subclassed — see `default_build_class`'s
+            // explicit block for that), so this can't be expressed via the
+            // generic mro-walk arms above (which all key off an `Instance`'s
+            // `typ`) — a narrow, direct name check is the simplest correct
+            // fix, mirroring this function's existing style for other
+            // primitive/name-based special cases.
+            if obj_type == "bool" && (class_name == "int" || class_name == "object") {
+                return Ok(py_bool(true));
+            }
             // See `builtin_isinstance`'s other `_abc_registry` fallback —
             // this one covers a PRIMITIVE (inline `SmallInt`/`SmallStr`/...
             // or boxed `Int`/`Str`/...) checked against an ABC that

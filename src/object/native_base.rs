@@ -64,7 +64,7 @@ pub(crate) fn metatype_of(typ: &PyObjectRef) -> Option<PyObjectRef> {
 }
 
 pub(crate) fn is_recognized_native_base_name(name: &str) -> bool {
-    matches!(name, "list" | "dict" | "str" | "int" | "float" | "tuple")
+    matches!(name, "list" | "dict" | "str" | "int" | "float" | "tuple" | "bytes" | "set" | "complex" | "bytearray" | "frozenset")
 }
 
 /// True iff `name` is one of the builtin exception "classes" registered by
@@ -186,6 +186,11 @@ pub(crate) fn make_native_backing(kind: &str) -> PyObjectRef {
         "int" => py_int(0),
         "float" => py_float(0.0),
         "tuple" => py_tuple(vec![]),
+        "bytes" => PyObjectRef::imm(PyObject::Bytes(Vec::new())),
+        "set" => py_set(),
+        "complex" => PyObjectRef::imm(PyObject::Complex(0.0, 0.0)),
+        "bytearray" => PyObjectRef::new(PyObject::ByteArray(Vec::new())),
+        "frozenset" => PyObjectRef::imm(PyObject::FrozenSet(PySet::new())),
         _ => py_none(),
     }
 }
@@ -245,6 +250,11 @@ pub(crate) fn synthesize_native_init(kind: &str, args: &[PyObjectRef], keywords:
                 Ok(py_tuple(vec![]))
             }
         }
+        "bytes" => builtin_bytes(args),
+        "set" => builtin_set(args),
+        "complex" => builtin_complex(args),
+        "bytearray" => builtin_bytearray(args),
+        "frozenset" => builtin_frozenset(args),
         _ => Ok(py_none()),
     }
 }

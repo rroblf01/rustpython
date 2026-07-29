@@ -108,13 +108,34 @@ pub fn contains_op(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<bool> {
                 }
                 Ok(false)
             }
+        // Clone the dict/set out of the borrow BEFORE probing — same
+        // reason as the `List`/`Tuple` arms just above: `.contains()`
+        // internally calls `.equals()` against each colliding key/member,
+        // which for an `Instance` key/member invokes the user's `__eq__`
+        // and can reentrantly touch this SAME dict/set (e.g. `d.clear()`
+        // from within its own `__eq__` — the identical hazard already
+        // fixed for `d[k]=v`/`setdefault()`/`set.add()`, just not yet for
+        // the `in` operator/`contains_op`). Holding `container`'s borrow
+        // across that used to panic with "RefCell already borrowed" the
+        // instant the reentrant call made its own borrow — confirmed via a
+        // real, adversarial CPython test reached once `test_dict.py` got
+        // far enough to hit it (previously masked behind an earlier,
+        // now-fixed hang/panic in the same file).
         PyObject::Dict(d) => {
+            let d = d.clone();
+            drop(container);
             d.contains(b)
         }
         PyObject::Set(items) => {
+            let items = items.clone();
+            drop(container);
             items.contains(b)
         }
-        PyObject::FrozenSet(items) => items.contains(b),
+        PyObject::FrozenSet(items) => {
+            let items = items.clone();
+            drop(container);
+            items.contains(b)
+        }
         // `x in some_bytes` — real CPython accepts either a single int
         // byte value (`0x25 in b"a%b"`) or a bytes-like subsequence
         // (`b"%20" in b"a%20b"`). Was missing entirely (fell through to
