@@ -472,9 +472,58 @@ pub fn py_pow(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
         (PyObject::Float(a), PyObject::Float(b)) => Ok(py_float(a.powf(*b))),
         (PyObject::Int(a), PyObject::Float(b)) => Ok(py_float(a.to_f64().unwrap().powf(*b))),
         (PyObject::Float(a), PyObject::Int(b)) => Ok(py_float(a.powf(b.to_f64().unwrap()))),
+        // `complex ** (int|float|complex)` and `(int|float) ** complex` were
+        // entirely unhandled — found via CPython's own `test_complex.py`.
+        // Uses exact repeated-squaring for a real integer exponent (matching
+        // real CPython's own fast path, and precise for e.g. `(1+2j)**2`
+        // rather than accumulating log/exp floating-point error), falling
+        // back to the general `z**w = exp(w * ln z)` polar-form identity
+        // otherwise (fractional or complex exponents).
+        _ if as_complex_parts(&a_obj).is_some() && as_complex_parts(&b_obj).is_some()
+            && (matches!(&*a_obj, PyObject::Complex(_, _)) || matches!(&*b_obj, PyObject::Complex(_, _))) =>
+        {
+            let (are, aim) = as_complex_parts(&a_obj).unwrap();
+            let (bre, bim) = as_complex_parts(&b_obj).unwrap();
+            Ok(complex_pow(are, aim, bre, bim))
+        }
         _ => Err(PyError::type_error(format!("unsupported operand type(s) for **: '{}' and '{}'",
             a_obj.type_name(), b_obj.type_name()))),
     }
+}
+
+fn complex_mul(are: f64, aim: f64, bre: f64, bim: f64) -> (f64, f64) {
+    (are * bre - aim * bim, are * bim + aim * bre)
+}
+
+fn complex_pow_int(are: f64, aim: f64, n: i64) -> (f64, f64) {
+    let neg = n < 0;
+    let mut n = n.unsigned_abs();
+    let mut result = (1.0f64, 0.0f64);
+    let mut base = (are, aim);
+    while n > 0 {
+        if n & 1 == 1 { result = complex_mul(result.0, result.1, base.0, base.1); }
+        base = complex_mul(base.0, base.1, base.0, base.1);
+        n >>= 1;
+    }
+    if neg {
+        let denom = result.0 * result.0 + result.1 * result.1;
+        (result.0 / denom, -result.1 / denom)
+    } else {
+        result
+    }
+}
+
+fn complex_pow(are: f64, aim: f64, bre: f64, bim: f64) -> PyObjectRef {
+    if bim == 0.0 && bre.fract() == 0.0 && bre.abs() < 1e15 {
+        let (re, im) = complex_pow_int(are, aim, bre as i64);
+        return PyObjectRef::imm(PyObject::Complex(re, im));
+    }
+    // General case: z^w = exp(w * ln z), ln z = ln|z| + i*arg(z).
+    let r = (are * are + aim * aim).sqrt();
+    let theta = aim.atan2(are);
+    let (ere, eim) = complex_mul(bre, bim, r.ln(), theta);
+    let exp_re = ere.exp();
+    PyObjectRef::imm(PyObject::Complex(exp_re * eim.cos(), exp_re * eim.sin()))
 }
 
 pub fn py_lshift(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {

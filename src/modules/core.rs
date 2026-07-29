@@ -1291,6 +1291,25 @@ pub fn create_abc_builtins_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
+/// Like `PyObjectRef::as_f64()`, but also consults `__float__` for an
+/// `Instance` that isn't a native numeric type — real Python's `math`
+/// functions all accept ANY object implementing `__float__` (e.g. custom
+/// numeric-like classes, `decimal.Decimal`, `fractions.Fraction`), not just
+/// literal `int`/`float`. Most of `math`'s own native functions previously
+/// used bare `.as_f64()` directly, which only ever handles native
+/// int/float/bool — rejecting a perfectly valid `__float__`-defining object
+/// with a spurious `TypeError`. Found via CPython's own `test_math.py`
+/// (`hypot(0.75, FloatLike(-1.))` and similar for `isclose`/`isnan`/
+/// `copysign`/`fmod`/`atan2`/`dist`/`sumprod`).
+fn math_arg_f64(v: &PyObjectRef) -> Option<f64> {
+    if let Some(f) = v.as_f64() { return Some(f); }
+    let f = {
+        let typ = if let PyObject::Instance { typ, .. } = &*v.borrow() { Some(typ.clone()) } else { None }?;
+        lookup_dunder_via_mro(&typ, "__float__")?
+    };
+    call_bound_method(f, v.clone(), vec![]).ok()?.as_f64()
+}
+
 pub fn create_math_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! math_func {
@@ -1406,7 +1425,7 @@ pub fn create_math_dict() -> HashMap<String, PyObjectRef> {
         ($name:expr, $f:expr) => {
             math_func!($name, |args| {
                 if args.len() != 1 { return Err(PyError::type_error(concat!($name, "() takes exactly one argument"))); }
-                let x = args[0].as_f64().ok_or_else(|| PyError::type_error(concat!($name, "() argument must be a number")))?;
+                let x = math_arg_f64(&args[0]).ok_or_else(|| PyError::type_error(concat!($name, "() argument must be a number")))?;
                 Ok(py_float(($f)(x)))
             });
         };
@@ -1433,44 +1452,44 @@ pub fn create_math_dict() -> HashMap<String, PyObjectRef> {
 
     math_func!("atan2", |args| {
         if args.len() != 2 { return Err(PyError::type_error("atan2() takes exactly two arguments")); }
-        let y = args[0].as_f64().ok_or_else(|| PyError::type_error("atan2() argument must be a number"))?;
-        let x = args[1].as_f64().ok_or_else(|| PyError::type_error("atan2() argument must be a number"))?;
+        let y = math_arg_f64(&args[0]).ok_or_else(|| PyError::type_error("atan2() argument must be a number"))?;
+        let x = math_arg_f64(&args[1]).ok_or_else(|| PyError::type_error("atan2() argument must be a number"))?;
         Ok(py_float(y.atan2(x)))
     });
     math_func!("hypot", |args| {
         let mut sum_sq = 0.0f64;
         for a in args {
-            let v = a.as_f64().ok_or_else(|| PyError::type_error("hypot() arguments must be numbers"))?;
+            let v = math_arg_f64(&a).ok_or_else(|| PyError::type_error("hypot() arguments must be numbers"))?;
             sum_sq += v * v;
         }
         Ok(py_float(sum_sq.sqrt()))
     });
     math_func!("copysign", |args| {
         if args.len() != 2 { return Err(PyError::type_error("copysign() takes exactly two arguments")); }
-        let x = args[0].as_f64().ok_or_else(|| PyError::type_error("copysign() argument must be a number"))?;
-        let y = args[1].as_f64().ok_or_else(|| PyError::type_error("copysign() argument must be a number"))?;
+        let x = math_arg_f64(&args[0]).ok_or_else(|| PyError::type_error("copysign() argument must be a number"))?;
+        let y = math_arg_f64(&args[1]).ok_or_else(|| PyError::type_error("copysign() argument must be a number"))?;
         Ok(py_float(x.copysign(y)))
     });
     math_func!("fmod", |args| {
         if args.len() != 2 { return Err(PyError::type_error("fmod() takes exactly two arguments")); }
-        let x = args[0].as_f64().ok_or_else(|| PyError::type_error("fmod() argument must be a number"))?;
-        let y = args[1].as_f64().ok_or_else(|| PyError::type_error("fmod() argument must be a number"))?;
+        let x = math_arg_f64(&args[0]).ok_or_else(|| PyError::type_error("fmod() argument must be a number"))?;
+        let y = math_arg_f64(&args[1]).ok_or_else(|| PyError::type_error("fmod() argument must be a number"))?;
         Ok(py_float(x % y))
     });
     math_func!("isnan", |args| {
         if args.len() != 1 { return Err(PyError::type_error("isnan() takes exactly one argument")); }
-        let x = args[0].as_f64().ok_or_else(|| PyError::type_error("isnan() argument must be a number"))?;
+        let x = math_arg_f64(&args[0]).ok_or_else(|| PyError::type_error("isnan() argument must be a number"))?;
         Ok(py_bool(x.is_nan()))
     });
     math_func!("isinf", |args| {
         if args.len() != 1 { return Err(PyError::type_error("isinf() takes exactly one argument")); }
-        let x = args[0].as_f64().ok_or_else(|| PyError::type_error("isinf() argument must be a number"))?;
+        let x = math_arg_f64(&args[0]).ok_or_else(|| PyError::type_error("isinf() argument must be a number"))?;
         Ok(py_bool(x.is_infinite()))
     });
     math_func!("isclose", |args| {
         if args.len() < 2 { return Err(PyError::type_error("isclose() takes at least two arguments")); }
-        let a = args[0].as_f64().ok_or_else(|| PyError::type_error("isclose() argument must be a number"))?;
-        let b = args[1].as_f64().ok_or_else(|| PyError::type_error("isclose() argument must be a number"))?;
+        let a = math_arg_f64(&args[0]).ok_or_else(|| PyError::type_error("isclose() argument must be a number"))?;
+        let b = math_arg_f64(&args[1]).ok_or_else(|| PyError::type_error("isclose() argument must be a number"))?;
         let rel_tol = 1e-9;
         let abs_tol = 0.0;
         Ok(py_bool((a - b).abs() <= (rel_tol * a.abs().max(b.abs())).max(abs_tol)))
@@ -1517,7 +1536,7 @@ pub fn create_math_dict() -> HashMap<String, PyObjectRef> {
     // Additional math functions
     math_func!("ldexp", |args| {
         if args.len() < 2 { return Err(PyError::type_error("ldexp() requires 2 arguments")); }
-        let x = args[0].as_f64().ok_or_else(|| PyError::type_error("argument must be a number"))?;
+        let x = math_arg_f64(&args[0]).ok_or_else(|| PyError::type_error("argument must be a number"))?;
         let exp = args[1].as_i64().ok_or_else(|| PyError::type_error("exponent must be an integer"))?;
         Ok(py_float(x * (2.0_f64).powi(exp as i32)))
     });
@@ -1533,7 +1552,7 @@ pub fn create_math_dict() -> HashMap<String, PyObjectRef> {
         let items = collect_iterable(&args[0])?;
         let mut total = 0.0_f64;
         for item in &items {
-            total += item.as_f64().ok_or_else(|| PyError::type_error(format!("must be real number, not {}", item.borrow().type_name())))?;
+            total += math_arg_f64(&item).ok_or_else(|| PyError::type_error(format!("must be real number, not {}", item.borrow().type_name())))?;
         }
         Ok(py_float(total))
     });
@@ -1552,28 +1571,28 @@ pub fn create_math_dict() -> HashMap<String, PyObjectRef> {
         }
         let mut total = 0.0_f64;
         for (a, b) in p.iter().zip(q.iter()) {
-            let av = a.as_f64().ok_or_else(|| PyError::type_error("sumprod() arguments must be numbers"))?;
-            let bv = b.as_f64().ok_or_else(|| PyError::type_error("sumprod() arguments must be numbers"))?;
+            let av = math_arg_f64(&a).ok_or_else(|| PyError::type_error("sumprod() arguments must be numbers"))?;
+            let bv = math_arg_f64(&b).ok_or_else(|| PyError::type_error("sumprod() arguments must be numbers"))?;
             total += av * bv;
         }
         Ok(py_float(total))
     });
     math_func!("remainder", |args| {
         if args.len() < 2 { return Err(PyError::type_error("remainder() requires 2 arguments")); }
-        let x = args[0].as_f64().ok_or_else(|| PyError::type_error("argument must be a number"))?;
-        let y = args[1].as_f64().ok_or_else(|| PyError::type_error("argument must be a number"))?;
+        let x = math_arg_f64(&args[0]).ok_or_else(|| PyError::type_error("argument must be a number"))?;
+        let y = math_arg_f64(&args[1]).ok_or_else(|| PyError::type_error("argument must be a number"))?;
         Ok(py_float(x - y * (x / y).round()))
     });
     math_func!("modf", |args| {
         if args.is_empty() { return Err(PyError::type_error("modf() requires an argument")); }
-        let x = args[0].as_f64().ok_or_else(|| PyError::type_error("argument must be a number"))?;
+        let x = math_arg_f64(&args[0]).ok_or_else(|| PyError::type_error("argument must be a number"))?;
         let frac = x.fract();
         let integer = x.trunc();
         Ok(py_tuple(vec![py_float(frac), py_float(integer)]))
     });
     math_func!("frexp", |args| {
         if args.is_empty() { return Err(PyError::type_error("frexp() requires an argument")); }
-        let x = args[0].as_f64().ok_or_else(|| PyError::type_error("argument must be a number"))?;
+        let x = math_arg_f64(&args[0]).ok_or_else(|| PyError::type_error("argument must be a number"))?;
         if x == 0.0 {
             return Ok(py_tuple(vec![py_float(0.0), py_int(0)]));
         }
@@ -1589,7 +1608,7 @@ pub fn create_math_dict() -> HashMap<String, PyObjectRef> {
     });
     math_func!("ulp", |args| {
         if args.is_empty() { return Err(PyError::type_error("ulp() requires an argument")); }
-        let x = args[0].as_f64().ok_or_else(|| PyError::type_error("argument must be a number"))?;
+        let x = math_arg_f64(&args[0]).ok_or_else(|| PyError::type_error("argument must be a number"))?;
         // Calculate ULP: distance to next representable float
         if x.is_nan() || x.is_infinite() { return Ok(py_float(x)); }
         if x == 0.0 { return Ok(py_float(f64::MIN_POSITIVE)); }
@@ -1602,8 +1621,8 @@ pub fn create_math_dict() -> HashMap<String, PyObjectRef> {
     });
     math_func!("nextafter", |args| {
         if args.len() < 2 { return Err(PyError::type_error("nextafter() requires 2 arguments")); }
-        let x = args[0].as_f64().ok_or_else(|| PyError::type_error("argument must be a number"))?;
-        let y = args[1].as_f64().ok_or_else(|| PyError::type_error("argument must be a number"))?;
+        let x = math_arg_f64(&args[0]).ok_or_else(|| PyError::type_error("argument must be a number"))?;
+        let y = math_arg_f64(&args[1]).ok_or_else(|| PyError::type_error("argument must be a number"))?;
         if x.is_nan() || y.is_nan() { return Ok(py_float(f64::NAN)); }
         if x == y { return Ok(py_float(x)); }
         if x == 0.0 {

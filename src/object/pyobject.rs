@@ -60,6 +60,30 @@ pub enum PyObject {
         list: Vec<PyObjectRef>,
         index: usize,
     },
+    /// Backing for the "old-style sequence iteration" fallback: real Python
+    /// makes ANY object with `__getitem__` but no `__iter__` iterable by
+    /// calling `obj[0]`, `obj[1]`, ... until `IndexError` (converted to
+    /// `StopIteration`) — this was entirely missing, so any such object
+    /// (an extremely common pattern predating `__iter__`'s introduction,
+    /// still widely used in real code and throughout CPython's own test
+    /// suite) raised `TypeError: '...' object is not iterable`. See
+    /// `builtin_iter`'s fallback construction and `builtin_next`'s handler.
+    GetItemIter {
+        obj: PyObjectRef,
+        index: i64,
+    },
+    /// Backing for the two-argument `iter(callable, sentinel)` form: real
+    /// Python calls `callable()` repeatedly, yielding each result until one
+    /// equals `sentinel`, at which point iteration stops (matching
+    /// CPython's own `callable_iterator`). Entirely missing before — found
+    /// via CPython's own `test_iter.py`, which uses this extensively
+    /// (`iter(file.readline, '')`-style idioms are the classic real-world
+    /// use case, not just test-only).
+    CallSentinelIter {
+        func: PyObjectRef,
+        sentinel: PyObjectRef,
+        exhausted: bool,
+    },
     /// Backing for `itertools.cycle(iterable)` — genuinely INFINITE, unlike
     /// every other `itertools` function in this file (which eagerly
     /// materializes into a plain list/`ListIter`, per this module's own
@@ -318,6 +342,8 @@ impl PyObject {
             PyObject::Range { .. } => "range",
             PyObject::RangeIter { .. } => "range_iterator",
             PyObject::ListIter { .. } => "list_iterator",
+            PyObject::GetItemIter { .. } => "iterator",
+            PyObject::CallSentinelIter { .. } => "callable_iterator",
             PyObject::EnumerateIter { .. } => "enumerate",
             PyObject::MapIterator { .. } => "map",
             PyObject::FilterIterator { .. } => "filter",
@@ -440,6 +466,8 @@ impl PyObject {
             }
             PyObject::RangeIter { .. } => "<range_iterator object>".to_string(),
             PyObject::ListIter { .. } => "<list_iterator object>".to_string(),
+            PyObject::GetItemIter { .. } => "<iterator object>".to_string(),
+            PyObject::CallSentinelIter { .. } => "<callable_iterator object>".to_string(),
             PyObject::EnumerateIter { .. } => "<enumerate object>".to_string(),
             PyObject::MapIterator { .. } => "<map object>".to_string(),
             PyObject::FilterIterator { .. } => "<filter object>".to_string(),
@@ -486,10 +514,10 @@ impl PyObject {
             PyObject::Coroutine { .. } => format!("<coroutine object>"),
             PyObject::Array(arr) => {
                 let items: Vec<String> = arr.data.iter().map(|v| {
-                    if arr.typecode == 'i' {
-                        py_int(*v as i64).repr()
-                    } else {
+                    if array_typecode_is_float(arr.typecode) {
                         py_float(*v).repr()
+                    } else {
+                        py_int(*v as i64).repr()
                     }
                 }).collect();
                 format!("array('{}', [{}])", arr.typecode, items.join(", "))

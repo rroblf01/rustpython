@@ -3802,9 +3802,23 @@ pub fn create_array_dict() -> HashMap<String, PyObjectRef> {
                 return Err(PyError::value_error("empty typecode".to_string()));
             }
             let typecode = typecode_str.chars().next().unwrap();
-            if typecode != 'i' && typecode != 'f' && typecode != 'd' {
+            // Real Python's `array` module accepts all of `bBuhHiIlLqQfd` —
+            // this previously only recognized 'i'/'f'/'d', raising
+            // `ValueError: bad typecode` for anything else (e.g. `array
+            // .array('B', ...)`, an extremely common "typed byte buffer"
+            // idiom used throughout CPython's own test suite as setup/helper
+            // code, not something specific to `array` itself). `PyArray`
+            // stores every element as `f64` regardless of typecode (a
+            // simplification — real per-typecode overflow/wraparound
+            // semantics and `itemsize` aren't modeled), but that's already
+            // true for the 'i' case this accepted before; broadening which
+            // typecodes are ACCEPTED (and read back as `int` vs `float` per
+            // `array_typecode_is_float` below) fixes the far more common
+            // "construction rejected outright" failure mode.
+            if !"bBuhHiIlLqQfd".contains(typecode) {
                 return Err(PyError::value_error(format!("bad typecode '{}'", typecode)));
             }
+            let is_float = array_typecode_is_float(typecode);
             let mut data: Vec<f64> = Vec::new();
             if args.len() > 1 {
                 let init = &args[1];
@@ -3812,19 +3826,19 @@ pub fn create_array_dict() -> HashMap<String, PyObjectRef> {
                 match &*init_borrowed {
                     PyObject::List(items) => {
                         for item in items {
-                            if typecode == 'i' {
-                                data.push(item.as_i64().unwrap_or(0) as f64);
-                            } else {
+                            if is_float {
                                 data.push(item.as_f64().unwrap_or(0.0));
+                            } else {
+                                data.push(item.as_i64().unwrap_or(0) as f64);
                             }
                         }
                     }
                     PyObject::Tuple(items) => {
                         for item in items {
-                            if typecode == 'i' {
-                                data.push(item.as_i64().unwrap_or(0) as f64);
-                            } else {
+                            if is_float {
                                 data.push(item.as_f64().unwrap_or(0.0));
+                            } else {
+                                data.push(item.as_i64().unwrap_or(0) as f64);
                             }
                         }
                     }
@@ -3834,10 +3848,10 @@ pub fn create_array_dict() -> HashMap<String, PyObjectRef> {
                         loop {
                             match builtin_next(&[iter_obj.clone()]) {
                                 Ok(item) => {
-                                    if typecode == 'i' {
-                                        data.push(item.as_i64().unwrap_or(0) as f64);
-                                    } else {
+                                    if is_float {
                                         data.push(item.as_f64().unwrap_or(0.0));
+                                    } else {
+                                        data.push(item.as_i64().unwrap_or(0) as f64);
                                     }
                                 }
                                 Err(PyError::StopIteration) => break,

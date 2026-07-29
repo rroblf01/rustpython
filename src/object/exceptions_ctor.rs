@@ -431,6 +431,16 @@ pub struct PyArray {
     pub data: Vec<f64>,
 }
 
+/// `array.array` typecodes `f`/`d` read back as `float`; every other real
+/// typecode (`bBuhHiIlLqQ`) reads back as `int` — shared by the constructor
+/// (`misc.rs`) and both element-access sites (`pyobject.rs`'s `repr`,
+/// `subscript.rs`'s `__getitem__`), which previously only special-cased
+/// `'i'` and treated every other typecode (including plain integer ones
+/// like `'B'`/`'h'`/`'q'`) as float.
+pub(crate) fn array_typecode_is_float(tc: char) -> bool {
+    tc == 'f' || tc == 'd'
+}
+
 pub struct LockInner {
     pub lock: std::sync::atomic::AtomicBool,
 }

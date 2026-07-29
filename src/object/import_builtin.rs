@@ -346,19 +346,29 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
             } else { unreachable!() }
         }
         2 => {
-            if let PyObject::Function(ref inner_f) = &*f.borrow() {
-            let code = &inner_f.code;
-            let g = &inner_f.globals;
-            let defaults = &inner_f.defaults;
-            let fname = &inner_f.code.name;
-            let closure = &inner_f.closure;
+            // Clone everything needed out under a SHORT borrow and drop it
+            // immediately — the previous version held `f.borrow()` across
+            // the ENTIRE disposable-VM `vm.execute()` call below, which
+            // runs arbitrary Python (the function's own body). Any function
+            // that sets an attribute on ITSELF during its own execution
+            // (`func.some_attr = ...` — a real, deliberately adversarial
+            // CPython regression test: `test_iter.py`'s
+            // `test_iter_function_concealing_reentrant_exhaustion`,
+            // gh-101892, whose `spam()` does exactly this) hit `STORE_ATTR`
+            // trying to `borrow_mut()` the SAME `PyObjectRef` this borrow
+            // was still holding, panicking the whole process with "RefCell
+            // already borrowed" instead of just running the (perfectly
+            // ordinary) attribute assignment.
+            let (code, g, defaults, closure, fname) = {
+                let obj = f.borrow();
+                if let PyObject::Function(inner_f) = &*obj {
+                    (inner_f.code.clone(), inner_f.globals.clone(), inner_f.defaults.clone(), inner_f.closure.clone(), inner_f.code.name)
+                } else { unreachable!() }
+            };
+            {
                 if std::env::var("RPY_DEBUG_IMPORT").is_ok() {
-                    eprintln!("BUILTIN_CALL (disposable VM): fname={} code_name={} filename={}", fname, code.name, code.filename);
+                    eprintln!("BUILTIN_CALL (disposable VM): fname={} code_name={} filename={}", crate::interner::lookup_str(fname), crate::interner::lookup_str(code.name), code.filename);
                 }
-                let code = code.clone();
-                let g = g.clone();
-                let defaults = defaults.clone();
-                let closure = closure.clone();
                 let npos = a.len();
                 let named_params = if code.vararg_name.is_some() || code.kwarg_name.is_some() {
                     code.varnames.iter().position(|n| {
@@ -427,7 +437,7 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
                 }
                 vm.frames.push(frame);
                 vm.execute()
-            } else { unreachable!() }
+            }
         }
         3 => {
             let (bf, self_obj) = {

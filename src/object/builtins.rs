@@ -1909,6 +1909,20 @@ pub fn builtin_enumerate(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 }
 
 pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    // Two-argument form: `iter(callable, sentinel)` — calls `callable()`
+    // repeatedly, yielding each result until one equals `sentinel`. Real,
+    // commonly-used Python (`iter(file.readline, '')` is the classic
+    // idiom), not just a test-only construct.
+    if args.len() == 2 {
+        if !builtin_callable(&[args[0].clone()])?.truthy() {
+            return Err(PyError::type_error(format!("iter(v, w): v must be callable")));
+        }
+        return Ok(PyObjectRef::new(PyObject::CallSentinelIter {
+            func: args[0].clone(),
+            sentinel: args[1].clone(),
+            exhausted: false,
+        }));
+    }
     if args.len() != 1 {
         return Err(PyError::type_error("iter() takes exactly one argument"));
     }
@@ -1934,6 +1948,17 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
     if let Some(native) = native_backing_of(&args[0]) {
         return builtin_iter(&[native]);
+    }
+    // Real Python's "old-style sequence iteration" fallback: an object with
+    // `__getitem__` but no `__iter__` is still iterable — `for x in obj:`
+    // calls `obj[0]`, `obj[1]`, ... until `IndexError`. Checked AFTER the
+    // `__iter__` lookup above (which already returned if present) and
+    // BEFORE the native-type match below (native types needing this exist
+    // as their own dedicated arms already).
+    if let PyObject::Instance { typ, .. } = &*args[0].borrow() {
+        if lookup_dunder_via_mro(typ, "__getitem__").is_some() {
+            return Ok(PyObjectRef::new(PyObject::GetItemIter { obj: args[0].clone(), index: 0 }));
+        }
     }
     let obj = args[0].borrow();
     match &*obj {
@@ -1969,7 +1994,8 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         // just returns it unchanged, matching real Python.
         PyObject::ListIter { .. } | PyObject::RangeIter { .. } | PyObject::CycleIter { .. }
         | PyObject::EnumerateIter { .. } | PyObject::MapIterator { .. } | PyObject::FilterIterator { .. }
-        | PyObject::ZipIterator { .. } | PyObject::FutureAwaitIterator { .. } | PyObject::GroupByIter { .. } => Ok(args[0].clone()),
+        | PyObject::ZipIterator { .. } | PyObject::FutureAwaitIterator { .. } | PyObject::GroupByIter { .. }
+        | PyObject::GetItemIter { .. } | PyObject::CallSentinelIter { .. } => Ok(args[0].clone()),
         // Anything else (plain functions, ints, ...) is genuinely not
         // iterable. The previous fallback (`Ok(args[0].clone())`)
         // silently treated ANY object as if it were already a valid
@@ -2109,6 +2135,54 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         }
         return Ok(py_tuple(vec![this_key, PyObjectRef::new(PyObject::ListIter { list: group, index: 0 })]));
     }
+    // Same reentrancy concern as `GroupByIter` just above: advancing this
+    // needs to call the underlying object's own `__getitem__` (arbitrary
+    // Python), so extract state under a short borrow, call with NO borrow
+    // held, then a second short borrow to write the new index back.
+    let getitem_state = {
+        let obj = args[0].borrow();
+        if let PyObject::GetItemIter { obj: inner, index } = &*obj { Some((inner.clone(), *index)) } else { None }
+    };
+    let call_sentinel_state = {
+        let obj = args[0].borrow();
+        if let PyObject::CallSentinelIter { func, sentinel, exhausted } = &*obj {
+            Some((func.clone(), sentinel.clone(), *exhausted))
+        } else { None }
+    };
+    if let Some((func, sentinel, exhausted)) = call_sentinel_state {
+        if exhausted {
+            return if args.len() >= 2 { Ok(args[1].clone()) } else { Err(PyError::stop_iteration()) };
+        }
+        let result = builtin_call(&func, &[])?;
+        if result.equals(&sentinel)? {
+            let mut obj = args[0].borrow_mut();
+            if let PyObject::CallSentinelIter { exhausted, .. } = &mut *obj { *exhausted = true; }
+            return if args.len() >= 2 { Ok(args[1].clone()) } else { Err(PyError::stop_iteration()) };
+        }
+        return Ok(result);
+    }
+    if let Some((inner, index)) = getitem_state {
+        return match py_getitem(&inner, &py_int(index)) {
+            Ok(v) => {
+                let mut obj = args[0].borrow_mut();
+                if let PyObject::GetItemIter { index, .. } = &mut *obj { *index += 1; }
+                Ok(v)
+            }
+            // Real Python accepts a Python-level `raise IndexError(...)`
+            // from a custom `__getitem__` just as readily as this
+            // interpreter's own native `PyError::IndexError` — not checking
+            // the `PyError::Exception` form too meant a completely
+            // ordinary `class C: def __getitem__(self, i): if i >= n: raise
+            // IndexError` (the standard idiom) would propagate the
+            // IndexError instead of stopping iteration.
+            Err(ref e) if matches!(e, PyError::IndexError(_))
+                || matches!(e, PyError::Exception(_, exc) if matches!(&*exc.borrow(), PyObject::Exception { typ, .. } if crate::vm::is_exception_subclass(typ, "IndexError"))) =>
+            {
+                if args.len() >= 2 { Ok(args[1].clone()) } else { Err(PyError::stop_iteration()) }
+            }
+            Err(e) => Err(e),
+        };
+    }
     let mut obj = args[0].borrow_mut();
     match &mut *obj {
         PyObject::List(v) => {
@@ -2194,7 +2268,19 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 let next = builtin_next(&[iter.clone()]);
                 match next {
                     Ok(val) => {
-                        let should_keep = func.borrow().type_name() == "NoneType" || builtin_call(func, &[val.clone()])?.truthy();
+                        // `filter(None, iterable)` keeps only the TRUTHY
+                        // elements of `iterable` itself (equivalent to
+                        // `filter(bool, iterable)`) — the previous
+                        // `is_none() || call(...).truthy()` short-circuited
+                        // to unconditionally `true` whenever `func` was
+                        // `None`, silently keeping EVERY element (including
+                        // falsy ones like `0`/`""`/`[]`) instead of
+                        // filtering by truthiness at all.
+                        let should_keep = if func.borrow().type_name() == "NoneType" {
+                            val.truthy()
+                        } else {
+                            builtin_call(func, &[val.clone()])?.truthy()
+                        };
                         if should_keep {
                             return Ok(val);
                         }
@@ -2746,6 +2832,64 @@ pub fn builtin_reversed(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 Ok(PyObjectRef::new(PyObject::ListIter { list: chars, index: 0 }))
             }
             _ => unreachable!(),
+        };
+    }
+    // Real Python's `reversed(obj)` protocol for a plain instance (no native
+    // fast path above): use `obj.__reversed__()` if defined, else `obj[len(
+    // obj)-1]`, `obj[len(obj)-2]`, ..., `obj[0]` via `__len__`+`__getitem__`
+    // — NEVER by draining a FORWARD iterator and reversing the result
+    // (the previous fallback below, which this replaces for the Instance
+    // case). That forward-drain approach only happens to work for
+    // `__iter__`-based objects with a genuine end; for a `__len__`+
+    // `__getitem__`-only object whose `__getitem__` never raises `IndexError`
+    // for an out-of-range index (a real, deliberate CPython regression
+    // test's own `Seq` class: `__getitem__` unconditionally `return
+    // index` — CPython's `reversed()` never needs `IndexError` from such an
+    // object since it's bounded by `__len__` instead), forward-draining
+    // hangs FOREVER. Found via `test_enumerate.py`'s `TestReversed.test_gc`
+    // — this only started hanging once `builtin_iter`'s own new `__getitem__`
+    // fallback (see `GetItemIter`) made `iter()` succeed on such objects at
+    // all, where it previously raised a quick (if wrong) `TypeError`.
+    if let PyObject::Instance { typ, .. } = &*args[0].borrow() {
+        if let Some(f) = lookup_dunder_via_mro(typ, "__reversed__") {
+            // `__reversed__ = None` is real Python's documented way to
+            // explicitly DISABLE reversal on a class that would otherwise
+            // qualify via `__len__`/`__getitem__` — must raise `TypeError`
+            // outright (matching real CPython, and `test_enumerate.py`'s
+            // own `TestReversed.test_objmethods::Blocked` class), not fall
+            // through to the `__len__` fallback below (which `Blocked`
+            // would otherwise satisfy) or try calling `None` as a function
+            // (not callable — previously produced a confusing unrelated
+            // error instead of a clean `TypeError`).
+            if matches!(&*f.borrow(), PyObject::None) {
+                return Err(PyError::type_error(format!("'{}' object is not reversible", get_type_name_for_instance(typ))));
+            }
+            return call_bound_method(f, args[0].clone(), vec![]);
+        }
+        // Real Python's `reversed()` fallback (no `__reversed__`) STRICTLY
+        // requires `__len__` — it does NOT support the same "call
+        // `__getitem__` until `IndexError`" protocol forward iteration
+        // does. An object with `__getitem__` but no `__len__` (real
+        // trigger: `test_enumerate.py`'s own `TestReversed.test_objmethods`,
+        // `class NoLen: def __getitem__(self, i): return 1`) must raise
+        // `TypeError` here, NOT fall through to the generic "unknown type:
+        // drain via iteration" path below — that path now succeeds (via
+        // `GetItemIter`) but drains FOREVER for an object whose
+        // `__getitem__` never raises `IndexError` for any index (which
+        // `reversed()` never needed to rely on in the first place, since
+        // real CPython bounds the count via `__len__` instead).
+        return if lookup_dunder_via_mro(typ, "__len__").is_some() && lookup_dunder_via_mro(typ, "__getitem__").is_some() {
+            let len = builtin_len(&[args[0].clone()])?.as_i64()
+                .ok_or_else(|| PyError::type_error("__len__() should return an int"))?;
+            let mut v = Vec::with_capacity(len.max(0) as usize);
+            let mut i = len - 1;
+            while i >= 0 {
+                v.push(py_getitem(&args[0], &py_int(i))?);
+                i -= 1;
+            }
+            Ok(PyObjectRef::new(PyObject::ListIter { list: v, index: 0 }))
+        } else {
+            Err(PyError::type_error("argument to reversed() must be a sequence"))
         };
     }
     // Unknown type: drain via iteration (no active borrow on args[0])

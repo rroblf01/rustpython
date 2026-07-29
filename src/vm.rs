@@ -3208,6 +3208,24 @@ impl VirtualMachine {
                             self.frames[fi].push(iterator);
                             return Ok(None);
                         }
+                        // No `__iter__` override (confirmed via the mro
+                        // lookup above) and no native backing — delegate
+                        // to `builtin_iter`, which implements the real
+                        // "no `__iter__`, fall back to `__getitem__`"
+                        // protocol (`for x in obj:` calling `obj[0]`,
+                        // `obj[1]`, ... until `IndexError`) and raises a
+                        // clean `TypeError` if neither exists. Previously
+                        // this fell through to `get_attribute("__iter__")`
+                        // below even with `has_override` already known
+                        // false, which doesn't raise cleanly for a plain
+                        // instance with no `__iter__` — real trigger:
+                        // `for x in SequenceClass(3): ...` (an object with
+                        // only `__getitem__`, the standard old-style
+                        // sequence-iteration idiom) silently misbehaved
+                        // instead of iterating 0, 1, 2.
+                        let iterator = crate::object::builtin_iter(&[val.clone()])?;
+                        self.frames[fi].push(iterator);
+                        return Ok(None);
                     }
                     use crate::object::ObjectAccess;
                     let raw_method = val.borrow().get_attribute("__iter__")
@@ -3289,7 +3307,8 @@ impl VirtualMachine {
                     PyObject::ListIter { .. } | PyObject::RangeIter { .. }
                     | PyObject::MapIterator { .. } | PyObject::FilterIterator { .. }
                     | PyObject::ZipIterator { .. } | PyObject::CycleIter { .. }
-                    | PyObject::GroupByIter { .. } => {
+                    | PyObject::GroupByIter { .. } | PyObject::GetItemIter { .. }
+                    | PyObject::CallSentinelIter { .. } => {
                         drop(obj);
                         self.frames[fi].push(val);
                     }
@@ -3398,7 +3417,7 @@ impl VirtualMachine {
                         // holds a materialized `items`/`len()` to compare
                         // against now that it's a lazy wrapper around a
                         // `source` iterator (see its own doc comment).
-                        PyObject::ZipIterator { .. } | PyObject::MapIterator { .. } | PyObject::FilterIterator { .. } | PyObject::CycleIter { .. } | PyObject::EnumerateIter { .. } | PyObject::GroupByIter { .. } => {
+                        PyObject::ZipIterator { .. } | PyObject::MapIterator { .. } | PyObject::FilterIterator { .. } | PyObject::CycleIter { .. } | PyObject::EnumerateIter { .. } | PyObject::GroupByIter { .. } | PyObject::GetItemIter { .. } | PyObject::CallSentinelIter { .. } => {
                             drop(obj);
                             match crate::object::builtin_next(&[iter_val.clone()]) {
                                 Ok(val) => {

@@ -429,10 +429,10 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                     return Err(PyError::index_error("array index out of range"));
                 }
                 let v = arr.data[i as usize];
-                if arr.typecode == 'i' {
-                    Ok(py_int(v as i64))
-                } else {
+                if array_typecode_is_float(arr.typecode) {
                     Ok(py_float(v))
+                } else {
+                    Ok(py_int(v as i64))
                 }
             } else {
                 Err(PyError::type_error("array indices must be integers"))
