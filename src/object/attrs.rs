@@ -409,7 +409,7 @@ impl PyObject {
                             // user-defined exception class, only working by
                             // accident for the handful of natively-
                             // represented ones.
-                            if matches!(name, "with_traceback" | "add_note" | "__traceback__" | "__context__" | "__suppress_context__" | "__notes__")
+                            if matches!(name, "with_traceback" | "add_note" | "__traceback__" | "__context__" | "__cause__" | "__suppress_context__" | "__notes__")
                                 && find_exception_base_name(typ).is_some() {
                                 return Some(match name {
                                     "with_traceback" => PyObjectRef::imm(PyObject::BuiltinMethod {
@@ -425,7 +425,16 @@ impl PyObject {
                                         func: |_args| Ok(py_none()),
                                         self_obj: PyObjectRef::new(PyObject::None),
                                     }),
-                                    "__context__" | "__traceback__" => py_none(),
+                                    // `__cause__` was missing from this list entirely
+                                    // (only `__context__`/`__traceback__` had a
+                                    // fallback) — any user-defined exception class
+                                    // reading its own `.__cause__` before ever
+                                    // setting it (e.g. `raise X from Y` wasn't used)
+                                    // raised `AttributeError` instead of `None`. Real
+                                    // trigger: CPython's own doctest/exception-group
+                                    // test files reading `.__cause__` on a plain
+                                    // user-defined exception instance.
+                                    "__context__" | "__traceback__" | "__cause__" => py_none(),
                                     "__suppress_context__" => py_bool(false),
                                     "__notes__" => py_list(vec![]),
                                     _ => unreachable!(),
@@ -2948,6 +2957,24 @@ impl PyObject {
                     "__closure__" => Ok(dict.get("__closure__").cloned().unwrap_or(py_none())),
                     "__module__" => Ok(dict.get("__module__").cloned().unwrap_or(py_none())),
                     "__annotations__" => Ok(dict.get("__annotations__").cloned().unwrap_or(py_none())),
+                    // `func.__dict__` — every custom attribute set on a
+                    // function (`f.custom = 1`) already lands in this same
+                    // `dict` (see `set_attribute`'s `PyObject::Function`
+                    // arm), but reading `__dict__` itself back out as a
+                    // real dict was missing (`AttributeError`). Real
+                    // trigger: CPython's own `test_funcattrs.py`-style
+                    // checks of `f.__dict__`. Excludes the dunder slots
+                    // above (`__name__`/`__doc__`/etc.) since real Python's
+                    // `func.__dict__` only ever holds USER-set attributes,
+                    // not those dedicated descriptor slots.
+                    "__dict__" => {
+                        let mut pd = PyDict::new();
+                        for (k, v) in dict.iter() {
+                            if k.starts_with("__") && k.ends_with("__") { continue; }
+                            pd.set(py_str(k), v.clone())?;
+                        }
+                        Ok(PyObjectRef::new(PyObject::Dict(Box::new(pd))))
+                    }
                     _ => dict.get_str(&name).cloned().ok_or_else(|| PyError::attribute_error(format!(
                         "'function' object has no attribute '{}'", name
                     ))),
@@ -5438,6 +5465,14 @@ impl PyObject {
                     "co_nlocals" => Ok(py_int(c.nlocals as i64)),
                     "co_varnames" => Ok(py_tuple(c.varnames.iter().map(|&v| py_str(crate::interner::lookup_str(v))).collect())),
                     "co_flags" => Ok(py_int(c.flags as i64)),
+                    // A handful of other commonly-introspected `co_*`
+                    // fields were missing entirely (`AttributeError`) —
+                    // real trigger: CPython's own `test_super.py`'s direct
+                    // `func.__code__.co_firstlineno` check, among others.
+                    "co_firstlineno" => Ok(py_int(c.first_lineno as i64)),
+                    "co_kwonlyargcount" => Ok(py_int(c.kwonlyarg_count as i64)),
+                    "co_names" => Ok(py_tuple(c.names.iter().map(|&v| py_str(crate::interner::lookup_str(v))).collect())),
+                    "co_consts" => Ok(py_tuple(c.consts.iter().filter_map(|cv| crate::vm::eval_const_value(cv.clone()).ok()).collect())),
                     _ => Err(PyError::attribute_error(format!("'code' object has no attribute '{}'", name))),
                 }
             }

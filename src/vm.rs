@@ -3808,7 +3808,7 @@ impl VirtualMachine {
                             // attribute resolution (kept for its attribute
                             // cache), which needs the identical fallback.
                             let attr = attr.or_else(|| {
-                                if matches!(name.as_str(), "with_traceback" | "add_note" | "__traceback__" | "__context__" | "__suppress_context__" | "__notes__")
+                                if matches!(name.as_str(), "with_traceback" | "add_note" | "__traceback__" | "__context__" | "__cause__" | "__suppress_context__" | "__notes__")
                                     && crate::object::find_exception_base_name(typ).is_some() {
                                     Some(match name.as_str() {
                                         "with_traceback" => PyObjectRef::imm(PyObject::BuiltinMethod {
@@ -3824,7 +3824,11 @@ impl VirtualMachine {
                                             func: |_args| Ok(py_none()),
                                             self_obj: obj.clone(),
                                         }),
-                                        "__context__" | "__traceback__" => py_none(),
+                                        // See the matching fix (and its full
+                                        // explanation) in `get_attribute_impl`'s
+                                        // copy of this same list (`attrs.rs`) —
+                                        // `__cause__` was missing from both.
+                                        "__context__" | "__traceback__" | "__cause__" => py_none(),
                                         "__suppress_context__" => py_bool(false),
                                         "__notes__" => py_list(vec![]),
                                         _ => unreachable!(),
@@ -4887,9 +4891,28 @@ impl VirtualMachine {
                             }
                             _ => cause.str(),
                         };
-                        // Set __cause__ on the exception object (cause field changed to PyObjectRef)
-                        if let PyObject::Exception { cause: ref mut cause_field, .. } = &mut *exc.borrow_mut() {
-                            *cause_field = Some(cause.clone());
+                        // Set __cause__ on the exception object. The native
+                        // `PyObject::Exception` representation has a
+                        // dedicated `cause` field; a user-defined exception
+                        // class (`class MyError(Exception): ...` — a plain
+                        // `PyObject::Instance`, the overwhelming majority of
+                        // real exception classes) has no such field, so
+                        // `raise X from Y` previously did NOTHING for it —
+                        // `X.__cause__` stayed `None` regardless, silently
+                        // dropping the explicit cause entirely. `Instance`'s
+                        // own `set_attribute` already supports arbitrary
+                        // attributes with no restriction, so just storing
+                        // `__cause__` there directly works, matching how
+                        // reading it back (`get_attribute_impl`'s Instance
+                        // arm) already checks the instance's own dict first.
+                        match &mut *exc.borrow_mut() {
+                            PyObject::Exception { cause: ref mut cause_field, .. } => {
+                                *cause_field = Some(cause.clone());
+                            }
+                            PyObject::Instance { dict, .. } => {
+                                dict.insert_str("__cause__", cause.clone());
+                            }
+                            _ => {}
                         }
                         return Err(PyError::Exception(format!("{} (caused by: {})", exc_msg, cause_msg), exc));
                     }

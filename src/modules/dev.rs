@@ -709,6 +709,76 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
         Ok(py_bool(is_coro))
     });
 
+    // `inspect.iscoroutine`/`isawaitable` — missing entirely
+    // (`AttributeError`), breaking `unittest.mock`'s own import-time
+    // `from inspect import iscoroutinefunction` line's neighboring runtime
+    // use (`iscoroutinefunction(obj) or inspect.isawaitable(obj)`) the
+    // moment any test imported `unittest.mock` (real trigger: CPython's
+    // own `test_getpass.py`/`test_htmlparser.py`, neither of which uses
+    // asyncio directly — the failure came purely from `mock`'s own
+    // internals). `isawaitable` real semantics: true for a coroutine
+    // object, or any object implementing `__await__` — good enough
+    // approximation without needing full PEP 492 generator-based-coroutine
+    // detection this codebase doesn't track separately anyway.
+    inspect_func!("iscoroutine", |args| {
+        if args.len() < 1 { return Err(PyError::type_error("iscoroutine() requires 1 argument")); }
+        Ok(py_bool(matches!(&*args[0].borrow(), PyObject::Coroutine { .. })))
+    });
+    inspect_func!("isawaitable", |args| {
+        if args.len() < 1 { return Err(PyError::type_error("isawaitable() requires 1 argument")); }
+        let is_awaitable = match &*args[0].borrow() {
+            PyObject::Coroutine { .. } => true,
+            PyObject::Instance { .. } => args[0].borrow().get_attribute("__await__").is_ok(),
+            _ => false,
+        };
+        Ok(py_bool(is_awaitable))
+    });
+
+    // `inspect.getattr_static(obj, attr, default=<sentinel>)` — missing
+    // entirely (`AttributeError`), breaking `unittest.mock`'s own spec-
+    // checking machinery (`static_attr = inspect.getattr_static(spec, attr,
+    // None)`) the moment a test used `Mock(spec=...)`. Real semantics:
+    // looks up `attr` WITHOUT triggering descriptor protocol / `__getattr__`
+    // side effects (an instance's own dict first, then the class's dict,
+    // then each ancestor's own dict in mro order) — a simplified but
+    // faithful-enough approximation of that "skip descriptors" contract for
+    // the common `Instance`/`Type` cases, not full C-level slot introspection.
+    inspect_func!("getattr_static", |args| {
+        if args.len() < 2 { return Err(PyError::type_error("getattr_static() requires at least 2 arguments")); }
+        let attr_name = args[1].str();
+        let default = args.get(2).cloned();
+        let found = {
+            let obj_borrowed = args[0].borrow();
+            match &*obj_borrowed {
+                PyObject::Instance { dict, typ } => {
+                    dict.get_str(&attr_name).cloned().or_else(|| {
+                        let typ_ref = typ.borrow();
+                        if let PyObject::Type { dict: type_dict, mro, .. } = &*typ_ref {
+                            type_dict.get_str(&attr_name).cloned().or_else(|| {
+                                mro.iter().find_map(|base| {
+                                    if let PyObject::Type { dict: base_dict, .. } = &*base.borrow() {
+                                        base_dict.get_str(&attr_name).cloned()
+                                    } else { None }
+                                })
+                            })
+                        } else { None }
+                    })
+                }
+                PyObject::Type { dict, mro, .. } => {
+                    dict.get_str(&attr_name).cloned().or_else(|| {
+                        mro.iter().find_map(|base| {
+                            if let PyObject::Type { dict: base_dict, .. } = &*base.borrow() {
+                                base_dict.get_str(&attr_name).cloned()
+                            } else { None }
+                        })
+                    })
+                }
+                _ => None,
+            }
+        };
+        found.or(default).ok_or_else(|| PyError::attribute_error(format!("'{}' object has no attribute '{}'", args[0].get_type_name(), attr_name)))
+    });
+
     inspect_func!("isclass", |args| {
         if args.len() < 1 { return Err(PyError::type_error("isclass() requires 1 argument")); }
         let obj = args[0].borrow();
