@@ -542,6 +542,40 @@ impl PyObject {
                     _ => Err(PyError::attribute_error(format!("'Exception' object has no attribute '{}'", name))),
                 }
             }
+            // `ExceptionGroup`/`BaseExceptionGroup` (PEP 654) had NO
+            // attribute access implemented at all — not even the two core
+            // PEP 654 fields (`.message`, `.exceptions`), let alone the
+            // same PEP 3134 chaining/traceback attributes `Exception`
+            // itself already supports just above. Real trigger: CPython's
+            // own `test_exception_group.py` — even the most basic
+            // `ExceptionGroup("msg", [...]).message` raised `AttributeError`.
+            PyObject::ExceptionGroup { typ, args, exceptions } => {
+                match name {
+                    "__name__" => Ok(py_str(typ)),
+                    "args" => Ok(py_tuple(args.clone())),
+                    "message" => Ok(args.first().cloned().unwrap_or_else(|| py_str(""))),
+                    "exceptions" => Ok(py_tuple(exceptions.clone())),
+                    "__cause__" | "__context__" | "__traceback__" => Ok(py_none()),
+                    "__suppress_context__" => Ok(py_bool(false)),
+                    "__notes__" => Ok(py_list(vec![])),
+                    "add_note" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "add_note".to_string(),
+                        func: |_args| Ok(py_none()),
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "with_traceback" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "with_traceback".to_string(),
+                        func: |args| {
+                            if args.len() < 2 {
+                                return Err(PyError::type_error("with_traceback() takes exactly one argument"));
+                            }
+                            Ok(args[0].clone())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    _ => Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", typ, name))),
+                }
+            }
             PyObject::List(_v) => {
                 match name {
                     "append" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {

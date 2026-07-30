@@ -6861,7 +6861,24 @@ impl VirtualMachine {
     }
 
     fn synth_exception(typ: &str, error: &PyError) -> PyObjectRef {
-        PyObjectRef::imm(PyObject::Exception {
+        // MUST be `Mut` (via `PyObjectRef::new`), not `Imm` — this converts
+        // EVERY native `PyError::TypeError`/`ValueError`/`ZeroDivisionError`/
+        // etc. (i.e. almost every runtime error the interpreter itself
+        // detects, as opposed to a user `raise SomeError(...)` statement,
+        // which already goes through `exceptions_ctor.rs`'s correctly-`Mut`
+        // constructor) into a Python-visible exception object. `STORE_ATTR`
+        // unconditionally rejects setting ANY attribute on an `Imm`-wrapped
+        // value (see its own doc comment) before ever reaching
+        // `PyObject::Exception`'s own (already-correct, already-permissive)
+        // `set_attribute` arm — so with the old `imm` constructor here,
+        // `except TypeError as e: e.__traceback__ = tb` (an extremely
+        // common idiom: `unittest`'s own `result.py`, `contextlib`'s
+        // generator-context-manager `__exit__`, ...) raised `AttributeError`
+        // for literally any exception synthesized this way. Confirmed via
+        // CPython's own test suite: this exact bug surfaced across 24
+        // DIFFERENT test files simultaneously (the single widest-reaching
+        // bug found this whole session), all via this one shared root cause.
+        PyObjectRef::new(PyObject::Exception {
             typ: typ.to_string(),
             args: vec![py_str(&error.message())],
             cause: None,
@@ -6932,7 +6949,10 @@ impl VirtualMachine {
             PyError::Exception(msg, exc) if msg == "StopIteration"
                 && !matches!(&*exc.borrow(), PyObject::Exception { typ, .. } if typ == "StopIteration") =>
             {
-                PyObjectRef::imm(PyObject::Exception {
+                // Same `Mut`-not-`Imm` fix, same reason, as `synth_exception`
+                // just above — a synthesized exception object must support
+                // attribute assignment (`.__traceback__ = ...` etc.).
+                PyObjectRef::new(PyObject::Exception {
                     typ: "StopIteration".to_string(),
                     args: vec![exc.clone()],
                     cause: None,
