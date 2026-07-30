@@ -1,3 +1,8 @@
+__all__ = ['NullTranslations', 'GNUTranslations', 'find', 'translation', 'install',
+           'textdomain', 'bindtextdomain', 'gettext', 'ngettext', 'pgettext',
+           'npgettext', 'dgettext', 'dngettext']
+
+
 class NullTranslations:
     def __init__(self, fp=None):
         self._info = {}

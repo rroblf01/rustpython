@@ -383,7 +383,7 @@ impl VirtualMachine {
             vm.install_source_defined_stdlib("gettext", crate::modules::GETTEXT_SOURCE, &[
                 "NullTranslations", "GNUTranslations", "find", "translation", "install",
                 "textdomain", "bindtextdomain", "gettext", "ngettext", "pgettext", "npgettext",
-                "dgettext", "dngettext",
+                "dgettext", "dngettext", "__all__",
             ]);
             vm.install_source_defined_stdlib("json", crate::modules::JSON_EXTRA_SOURCE, &["JSONEncoder", "dumps"]);
             return vm;
@@ -1228,7 +1228,7 @@ impl VirtualMachine {
          vm.install_source_defined_stdlib("gettext", crate::modules::GETTEXT_SOURCE, &[
              "NullTranslations", "GNUTranslations", "find", "translation", "install",
              "textdomain", "bindtextdomain", "gettext", "ngettext", "pgettext", "npgettext",
-             "dgettext", "dngettext",
+             "dgettext", "dngettext", "__all__",
          ]);
          vm.install_source_defined_stdlib("json", crate::modules::JSON_EXTRA_SOURCE, &["JSONEncoder", "dumps"]);
          vm
@@ -5512,7 +5512,7 @@ impl VirtualMachine {
     /// special-case below so it stops returning raw, un-invoked descriptors
     /// (confirmed general: `getattr(obj, 'some_property')` returned the
     /// `property` object itself instead of calling its getter).
-    fn resolve_descriptor_attr(&mut self, obj: &PyObjectRef, name: &str) -> Option<PyObjectRef> {
+    pub(crate) fn resolve_descriptor_attr(&mut self, obj: &PyObjectRef, name: &str) -> Option<PyObjectRef> {
         let typ = if let PyObject::Instance { typ, .. } = &*obj.borrow() { typ.clone() } else { return None; };
         let found = {
             let typ_ref = typ.borrow();

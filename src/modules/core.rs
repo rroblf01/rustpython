@@ -2209,6 +2209,20 @@ pub fn create_importlib_dict() -> HashMap<String, PyObjectRef> {
     d.insert_str("import_module", PyObjectRef::new(PyObject::BuiltinFunction { name: "import_module".to_string(), func: import_module_builtin }));
     // __version__ — indicates importlib metadata
     d.insert_str("__version__", py_str("1.0.0"));
+    // `importlib.invalidate_caches()` — real CPython clears internal
+    // finder/loader caches so newly-created files on disk (a common test
+    // pattern: write a module file, then import it) are found. This
+    // interpreter's own import machinery doesn't maintain any such cache to
+    // begin with (every import does a fresh filesystem lookup), so a no-op
+    // is the correct, safe simplification — missing entirely before raised
+    // `AttributeError`, breaking any test that merely CALLS this for
+    // hygiene even when it doesn't strictly need caches invalidated (real
+    // trigger: CPython's own `test_cmd_line_script.py`/`test_tokenize.py`/
+    // others).
+    d.insert_str("invalidate_caches", PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "invalidate_caches".to_string(),
+        func: |_args| Ok(py_none()),
+    }));
     d
 }
 
@@ -3303,6 +3317,43 @@ pub fn create_os_path_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
+/// Looks up `name` on `obj` the same way the VM's own `LOAD_ATTR` opcode
+/// does — as opposed to the raw `get_attribute()` free function, which does
+/// NOT auto-bind. Two real gaps this closes for any caller (like
+/// `attrgetter`/`methodcaller` below) that resolves an attribute
+/// PROGRAMMATICALLY rather than through the opcode:
+/// (1) a user-defined `Instance`'s own method: `get_attribute` alone returns
+/// the raw, UNBOUND `Function` — calling it directly skips `self` entirely,
+/// binding whatever the caller's first real argument was to `self` instead
+/// (confirmed: `operator.methodcaller('greet', 'world')` on an instance
+/// raised `NameError: local variable 'name' referenced before assignment`,
+/// because `'world'` silently became `self` and the real `name` parameter
+/// was never filled at all).
+/// (2) a NATIVE type's method (e.g. `"hello".upper`): these are built with
+/// `self_obj: PyObject::None` as a documented PLACEHOLDER meaning "rebind me
+/// to whatever object I was actually looked up on" — a rebind step ONLY
+/// `LOAD_ATTR`'s own inline copy performs. Skipping it means the returned
+/// `BuiltinMethod` keeps `self_obj = None` forever, so calling it later
+/// operates on `None` instead of the real object (confirmed:
+/// `operator.attrgetter('upper')("hello")()` returned `'NONE'` — the
+/// uppercased string representation of `None`, not `"hello"`'s real
+/// `.upper()` result `'HELLO'`).
+fn bound_attr(obj: &PyObjectRef, name: &str) -> PyResult<PyObjectRef> {
+    if matches!(&*obj.borrow(), PyObject::Instance { .. }) {
+        if let Ok(Some(bound)) = with_vm_mut(|vm| vm.resolve_descriptor_attr(obj, name)) {
+            return Ok(bound);
+        }
+    }
+    let attr = obj.borrow().get_attribute(name)?;
+    let needs_rebind = matches!(&*attr.borrow(), PyObject::BuiltinMethod { self_obj, .. } if matches!(&*self_obj.borrow(), PyObject::None));
+    if needs_rebind {
+        if let PyObject::BuiltinMethod { name: n, func, .. } = &*attr.borrow() {
+            return Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: n.clone(), func: *func, self_obj: obj.clone() }));
+        }
+    }
+    Ok(attr)
+}
+
 pub fn create_operator_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! op_func {
@@ -3470,6 +3521,18 @@ pub fn create_operator_dict() -> HashMap<String, PyObjectRef> {
         if args.is_empty() { return Err(PyError::type_error("operator.length_hint requires 1 argument")); }
         builtin_len(args)
     });
+    // `operator.is_`/`is_not` — plain identity checks, real Python's
+    // function-object equivalents of the `is`/`is not` operators (used
+    // e.g. as a `key=`/comparison callable where a bare operator won't do).
+    // Missing entirely before.
+    op_func!("is_", |args| {
+        if args.len() < 2 { return Err(PyError::type_error("operator.is_ requires 2 arguments")); }
+        Ok(py_bool(args[0].is(&args[1])))
+    });
+    op_func!("is_not", |args| {
+        if args.len() < 2 { return Err(PyError::type_error("operator.is_not requires 2 arguments")); }
+        Ok(py_bool(!args[0].is(&args[1])))
+    });
     // __iadd__ etc. — just wrap the binop
     op_func!("__add__", |args| { if args.len() < 2 { return Err(PyError::type_error("__add__ requires 2 arguments")); } py_add(&args[0], &args[1]) });
     op_func!("__sub__", |args| { if args.len() < 2 { return Err(PyError::type_error("__sub__ requires 2 arguments")); } py_sub(&args[0], &args[1]) });
@@ -3519,11 +3582,11 @@ pub fn create_operator_dict() -> HashMap<String, PyObjectRef> {
             let getter = PyObjectRef::new(PyObject::Closure(Rc::new(move |get_args| {
                 if get_args.is_empty() { return Err(PyError::type_error("attrgetter called with no arguments")); }
                 if attrs.len() == 1 {
-                    get_args[0].borrow().get_attribute(&attrs[0])
+                    bound_attr(&get_args[0], &attrs[0])
                 } else {
                     let mut results = Vec::new();
                     for attr in &attrs {
-                        results.push(get_args[0].borrow().get_attribute(attr)?);
+                        results.push(bound_attr(&get_args[0], attr)?);
                     }
                     Ok(PyObjectRef::imm(PyObject::Tuple(results)))
                 }
@@ -3531,6 +3594,40 @@ pub fn create_operator_dict() -> HashMap<String, PyObjectRef> {
             Ok(getter)
         },
     }));
+
+    // `operator.methodcaller(name, *args)` — missing entirely. Returns a
+    // callable that, given `obj`, calls `obj.name(*args)` — a common
+    // `key=`/callback idiom (`sorted(objs, key=methodcaller('lower'))`,
+    // real trigger: CPython's own `test_operator.py`). Positional args only
+    // (no keyword-argument support) — good enough for the common case, and
+    // consistent with this module's existing `itemgetter`/`attrgetter`
+    // factories just above, neither of which support keywords either.
+    d.insert_str("methodcaller", PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "methodcaller".to_string(),
+        func: |args| {
+            if args.is_empty() { return Err(PyError::type_error("methodcaller requires at least 1 argument")); }
+            let method_name = args[0].str();
+            let extra_args: Vec<PyObjectRef> = args[1..].to_vec();
+            let caller = PyObjectRef::new(PyObject::Closure(Rc::new(move |call_args| {
+                if call_args.is_empty() { return Err(PyError::type_error("methodcaller's callable requires an argument")); }
+                let obj = &call_args[0];
+                let method = bound_attr(obj, &method_name)?;
+                let mut full_args = extra_args.clone();
+                full_args.extend_from_slice(&call_args[1..]);
+                builtin_call(&method, &full_args)
+            })));
+            Ok(caller)
+        },
+    }));
+
+    // `operator.__all__` — missing entirely (`AttributeError`), breaking
+    // even the module's own `test___all__` sanity check at collection time
+    // (real trigger: CPython's own `test_operator.py`). Computed from the
+    // dict's own already-public (non-dunder) keys rather than a hand-
+    // maintained literal list, so it can't drift out of sync with whatever
+    // this function actually defines above.
+    let all_names: Vec<PyObjectRef> = d.keys().filter(|k| !k.starts_with('_')).map(|k| py_str(k)).collect();
+    d.insert_str("__all__", py_list(all_names));
 
     d
 }

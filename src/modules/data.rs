@@ -1290,6 +1290,12 @@ pub fn create_statistics_dict() -> HashMap<String, PyObjectRef> {
         Ok(py_float(nums[n / 2]))
     });
 
+    // `statistics.__all__` — same fix, same reason, as `operator.__all__`
+    // (`core.rs`) — missing entirely, breaking the module's own
+    // `test___all__` sanity check at collection time.
+    let all_names: Vec<PyObjectRef> = d.keys().filter(|k| !k.starts_with('_')).map(|k| py_str(k)).collect();
+    d.insert_str("__all__", py_list(all_names));
+
     d
 }
 
@@ -2830,6 +2836,12 @@ pub fn create_calendar_dict() -> HashMap<String, PyObjectRef> {
         println!();
         Ok(py_none())
     });
+
+    // `calendar.__all__` — same fix, same reason, as `operator.__all__`
+    // (`core.rs`) — missing entirely, breaking the module's own
+    // `test___all__` sanity check at collection time.
+    let all_names: Vec<PyObjectRef> = d.keys().filter(|k| !k.starts_with('_')).map(|k| py_str(k)).collect();
+    d.insert_str("__all__", py_list(all_names));
 
     d
 }

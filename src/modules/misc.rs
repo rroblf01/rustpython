@@ -1033,6 +1033,12 @@ pub fn create_copy_dict() -> HashMap<String, PyObjectRef> {
         },
     }));
 
+    // `copy.__all__` — same fix, same reason, as `operator.__all__`
+    // (`core.rs`) — missing entirely, breaking the module's own
+    // `test___all__` sanity check at collection time.
+    let all_names: Vec<PyObjectRef> = d.keys().filter(|k| !k.starts_with('_')).map(|k| py_str(k)).collect();
+    d.insert_str("__all__", py_list(all_names));
+
     d
 }
 

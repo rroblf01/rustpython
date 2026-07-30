@@ -17,6 +17,13 @@ pub struct Parser {
     // crashing with a real OS-level "stack overflow, aborting" abort, not a
     // catchable Rust panic or Python exception.
     unary_depth: usize,
+    // Nesting depth of "single-line compound-statement suite" parsing (the
+    // `if x: a; b; c` / `def f(): a; b; c` form) — see `parse_block`'s own
+    // doc comment and `expect_newline_or_eof`'s use of this field for the
+    // full story. A counter (not a bool) in case a single-line suite's own
+    // body itself starts another single-line suite (`if True: if False: a
+    // = 1`), though that's a rare style choice, not the common trigger.
+    suite_depth: usize,
 }
 
 const MAX_UNARY_DEPTH: usize = 2000;
@@ -42,6 +49,7 @@ impl Parser {
             current: first,
             peeked: None,
             unary_depth: 0,
+            suite_depth: 0,
         }
     }
 
@@ -449,6 +457,20 @@ impl Parser {
     }
 
     fn expect_newline_or_eof(&mut self) -> Result<(), String> {
+        // Inside a single-line compound-statement suite (`if x: a; b`),
+        // do NOT consume a trailing `;` (or the closing `Newline`) here —
+        // leave it in place for `parse_block`'s own explicit semicolon-loop
+        // to see and act on, so it can tell whether another statement
+        // follows on this same line. Every simple-statement parse path
+        // calls this function to mark "I'm done" — if it ate the `;`
+        // itself (as it unconditionally used to), `parse_block`'s loop
+        // would never see one to eat, and any statement after the first
+        // silently fell out of the suite entirely, parsed instead as a
+        // separate statement in the ENCLOSING scope (see `parse_block`'s
+        // own doc comment for the full, confirmed-via-repro story).
+        if self.suite_depth > 0 {
+            return Ok(());
+        }
         if self.eat(&Token::Newline) {
             return Ok(());
         }
@@ -1473,11 +1495,54 @@ impl Parser {
     fn parse_block(&mut self) -> Result<Vec<Stmt>, String> {
         let mut stmts = Vec::new();
         if !self.eat(&Token::Newline) {
-            // Single-statement body (same line after colon)
-            if !self.at(&Token::Dedent) && !self.at(&Token::EndOfFile) {
-                let line = self.lexer.get_line_col().0;
-                stmts.push(Stmt::Located(line, Box::new(self.parse_stmt()?)));
-            }
+            // Single-line body (same line after colon) — real Python grammar
+            // allows a `;`-separated CHAIN of simple statements here
+            // (`simple_stmts: simple_stmt (';' simple_stmt)* [';'] NEWLINE`),
+            // not just one. This previously parsed ONLY the first statement
+            // and returned immediately, silently leaving any `; stmt2; ...`
+            // remainder unconsumed — the enclosing statement-sequence loop
+            // (`parse_program`'s own, already-correct, semicolon-handling
+            // loop) would then pick those up as SEPARATE, subsequent
+            // statements in the ENCLOSING scope, executed unconditionally
+            // and only once (at definition/parse time), not each time the
+            // compound statement's actual body should run. Confirmed via
+            // multiple angles: `if False: a = 1; b = 2` left `b` set to `2`
+            // despite the condition being false (only `a = 1` was really
+            // gated by the `if`); `def f(x): print("A"); print("B")`
+            // executed `print("B")` immediately at DEF time (not on each
+            // call), before `print("A")` (which only ran when `f()` was
+            // actually called) — an observable REORDERING, not just a
+            // scoping leak, for any code after the def. A silent, general
+            // correctness bug for any one-line `if`/`while`/`for`/`def`/
+            // `class`/`with`/`try` body containing more than one semicolon-
+            // separated statement — a common, unremarkable style choice in
+            // real code and test suites alike, not a contrived edge case.
+            self.suite_depth += 1;
+            let result: Result<(), String> = (|| {
+                if !self.at(&Token::Dedent) && !self.at(&Token::EndOfFile) {
+                    let line = self.lexer.get_line_col().0;
+                    stmts.push(Stmt::Located(line, Box::new(self.parse_stmt()?)));
+                    while self.eat(&Token::Semicolon) {
+                        if self.at(&Token::Newline) || self.at(&Token::Dedent) || self.at(&Token::EndOfFile) {
+                            break;
+                        }
+                        let line = self.lexer.get_line_col().0;
+                        stmts.push(Stmt::Located(line, Box::new(self.parse_stmt()?)));
+                    }
+                }
+                Ok(())
+            })();
+            self.suite_depth -= 1;
+            result?;
+            // The suite ends at this line's `Newline` (or EOF/Dedent) —
+            // `expect_newline_or_eof` deliberately left it un-consumed
+            // while `suite_depth > 0` (see its own doc comment), so eat it
+            // here now that the suite itself is done. Every caller of
+            // `parse_block()` already tolerates/skips a leftover `Newline`
+            // afterward regardless, but eating it here keeps this
+            // function's own contract (consume exactly the suite, nothing
+            // more) intact rather than relying on that tolerance.
+            let _ = self.eat(&Token::Newline);
             return Ok(stmts);
         }
         if self.eat(&Token::Indent) {
