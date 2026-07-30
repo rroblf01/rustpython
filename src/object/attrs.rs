@@ -594,6 +594,21 @@ impl PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
+                    // `SyntaxError`'s extra attributes (`filename`/`lineno`/
+                    // `offset`/`text`/`end_lineno`/`end_offset`) — this
+                    // interpreter's own `syntax_error()` constructor
+                    // (`errors.rs`) doesn't thread real source-location data
+                    // through from the parser/compiler at all, so these
+                    // can't carry genuine values yet — but real Python code
+                    // that merely reads them (real trigger: CPython's own
+                    // `test_exceptions.py`) previously got `AttributeError`
+                    // instead of `None`, which is what real CPython itself
+                    // returns for a `SyntaxError` constructed without the
+                    // extra positional-args tuple. Gated to `SyntaxError`
+                    // specifically — a plain `Exception`/`ValueError`/etc.
+                    // genuinely has no such attributes in real Python either.
+                    "filename" | "lineno" | "offset" | "text" | "end_lineno" | "end_offset"
+                        if typ == "SyntaxError" => Ok(py_none()),
                     _ => Err(PyError::attribute_error(format!("'Exception' object has no attribute '{}'", name))),
                 }
             }

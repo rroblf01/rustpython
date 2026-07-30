@@ -5833,6 +5833,17 @@ impl VirtualMachine {
             }
         }
 
+        // `sys.exception()` (3.11+) — same fix, same reason, as
+        // `sys.exc_info()` just above: reads `self.exc_value` directly
+        // instead of going through `with_vm_mut`, which gave the wrong
+        // (always-empty) result from this reentrant calling context.
+        {
+            let is_exception = matches!(&*callable.borrow(), PyObject::BuiltinFunction { func, .. } if std::ptr::fn_addr_eq(*func, crate::modules::sys_exception_builtin as crate::object::BuiltinFunc));
+            if is_exception {
+                return Ok(self.exc_value.clone().unwrap_or_else(py_none));
+            }
+        }
+
         // `sys.getrecursionlimit()`/`setrecursionlimit()` — read/write
         // `self.recursion_limit` directly (same `with_vm_mut`-avoidance
         // pattern as everything else here) instead of the fallback

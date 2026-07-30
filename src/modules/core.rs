@@ -1733,6 +1733,20 @@ pub fn sys_exc_info_builtin(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Ok(result.unwrap_or_else(|_| py_tuple(vec![py_none(), py_none(), py_none()])))
 }
 
+// `sys.exception()` (3.11+) — same function-pointer-identity special-case
+// pattern as `sys_exc_info_builtin` just above (see `call_function`'s own
+// matching intercept in `vm.rs`, which is what actually makes this return
+// the right value — `with_vm_mut` alone gives the wrong, stale-empty
+// result from this reentrant calling context, confirmed via direct repro:
+// `except ValueError: sys.exception()` returned `None` instead of the real
+// exception instance, using ONLY this `with_vm_mut`-based body without the
+// intercept). Kept as a real, named (not closure) `fn` so `call_function`
+// can identify it by pointer, same as `sys_exc_info_builtin`.
+pub fn sys_exception_builtin(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    let result = crate::object::with_vm_mut(|vm| vm.exc_value.clone().unwrap_or(py_none()));
+    Ok(result.unwrap_or_else(|_| py_none()))
+}
+
 thread_local! {
     // `sys.settrace`/`gettrace`: stores the current global trace function.
     // This does NOT actually fire 'call'/'line'/'return'/'exception' trace
@@ -2038,6 +2052,14 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
     sys_func!("getfilesystemencodeerrors", |_args| Ok(py_str("surrogateescape")));
     sys_func!("getdefaultencoding", |_args| Ok(py_str("utf-8")));
     sys_func!("exc_info", sys_exc_info_builtin);
+    // `sys.exception()` (3.11+) — returns just the currently-handled
+    // exception INSTANCE (or `None`), equivalent to `sys.exc_info()[1]`.
+    // Missing entirely (`AttributeError`) broke `Lib/contextlib.py`'s own
+    // `_GeneratorContextManagerBase`/`_AsyncGeneratorContextManagerBase`
+    // internals (`frame_exc = sys.exception()`) — a module imported
+    // pervasively, so this affected many otherwise-unrelated test files the
+    // moment they merely imported something that pulls in `contextlib`.
+    sys_func!("exception", sys_exception_builtin);
     sys_func!("getrecursionlimit", sys_getrecursionlimit_builtin);
     sys_func!("setrecursionlimit", sys_setrecursionlimit_builtin);
     sys_func!("settrace", sys_settrace_builtin);
