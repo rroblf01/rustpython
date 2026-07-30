@@ -1542,6 +1542,27 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
             Ok(PyObjectRef::imm(PyObject::Bytes(chunk)))
         }))));
 
+        // `readinto(b)` — missing entirely (`AttributeError`), a real,
+        // commonly-used method (e.g. `shutil.copyfileobj`-style buffered-
+        // read loops). Reads up to `len(b)` bytes into the given writable
+        // buffer, returns the number of bytes actually read.
+        let b_readinto = buf_rc.clone();
+        let p_readinto = pos_rc.clone();
+        type_dict.insert_str("readinto", PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| {
+            if args.is_empty() { return Err(PyError::type_error("readinto() takes exactly one argument")); }
+            let data = b_readinto.borrow();
+            let pos = (*p_readinto.borrow()).min(data.len());
+            match &mut *args[0].borrow_mut() {
+                PyObject::ByteArray(dest) => {
+                    let n = dest.len().min(data.len() - pos);
+                    dest[..n].copy_from_slice(&data[pos..pos + n]);
+                    *p_readinto.borrow_mut() = pos + n;
+                    Ok(py_int(n as i64))
+                }
+                _ => Err(PyError::type_error("argument must be read-write bytes-like object")),
+            }
+        }))));
+
         let b_readline = buf_rc.clone();
         let p_readline = pos_rc.clone();
         type_dict.insert_str("readline", PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {

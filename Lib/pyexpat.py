@@ -78,3 +78,10 @@ errors = {
 }
 
 native_encoding = 'UTF-8'
+
+# `expat.version_info`/`EXPAT_VERSION` — this is a stub, not a real Expat
+# binding, so there's no genuine underlying library version to report; a
+# plausible, recent-looking tuple is enough for code that just gates a
+# feature check on it rather than asserting an exact value.
+version_info = (2, 6, 0)
+EXPAT_VERSION = 'expat_2.6.0'

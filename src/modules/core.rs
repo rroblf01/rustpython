@@ -1811,6 +1811,22 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
         println!("{}", val.repr());
         Ok(py_none())
     });
+    // `sys.unraisablehook` (3.8+) — called by the interpreter when an
+    // exception is raised somewhere it can't propagate (a `__del__`, a
+    // weakref callback, ...) and would otherwise just be silently dropped.
+    // This interpreter has no internal machinery that actually detects and
+    // invokes this hook, but real code (and test infra) routinely reads/
+    // reassigns `sys.unraisablehook` itself (`sys.unraisablehook = my_hook`
+    // to capture what WOULD be reported) — missing the attribute entirely
+    // raised `AttributeError` just from that, before any such machinery
+    // would even matter. Default mirrors real CPython's own default
+    // behavior: print a short summary to stderr.
+    sys_func!("unraisablehook", |args| {
+        if let Some(unraisable) = args.first() {
+            eprintln!("Exception ignored: {}", unraisable.repr());
+        }
+        Ok(py_none())
+    });
     d.insert_str("argv", py_list(argv.into_iter().map(|s| py_str(&s)).collect()));
     d.insert_str("path", py_list(vec![]));
     d.insert_str("modules", py_dict());
