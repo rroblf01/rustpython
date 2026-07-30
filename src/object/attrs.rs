@@ -497,7 +497,53 @@ impl PyObject {
                             self_obj: prop_obj,
                         }))
                     }
+                    // `property.__isabstractmethod__` — real Python's ABC
+                    // machinery (`abc.update_abstractmethods`, `ABCMeta`
+                    // itself) checks this to recognize `@property
+                    // @abstractmethod def foo(self): ...`-style abstract
+                    // properties; missing entirely raised `AttributeError`
+                    // for even the most basic ABC property test (real
+                    // trigger: CPython's own `test_abc.py`'s
+                    // `test_abstractproperty_basics`). True iff ANY of
+                    // getter/setter/deleter is itself marked abstract,
+                    // matching real CPython's own `property.__isabstractmethod__`.
+                    "__isabstractmethod__" => {
+                        fn is_abstract(f: &Option<PyObjectRef>) -> bool {
+                            f.as_ref()
+                                .and_then(|func| func.borrow().get_attribute("__isabstractmethod__").ok())
+                                .map(|v| v.truthy())
+                                .unwrap_or(false)
+                        }
+                        Ok(py_bool(is_abstract(getter) || is_abstract(setter) || is_abstract(deleter)))
+                    }
                     _ => Err(PyError::attribute_error(format!("'property' object has no attribute '{}'", name))),
+                }
+            }
+            // `classmethod`/`staticmethod` had NO dedicated attribute-access
+            // arm at all — any attribute access (`.__func__`,
+            // `.__isabstractmethod__`) fell through to a generic
+            // "not callable"/catch-all failure. `__isabstractmethod__` is
+            // the one real trigger found (CPython's own `test_abc.py`'s
+            // `test_abstractclassmethod_basics`/`test_abstractstaticmethod_basics`);
+            // `__func__` (the real CPython attribute exposing the wrapped
+            // function) added alongside it since it's the same shape of gap
+            // and trivial to expose from the same field.
+            PyObject::StaticMethod { func } => {
+                match name {
+                    "__func__" => Ok(func.clone()),
+                    "__isabstractmethod__" => Ok(py_bool(
+                        func.borrow().get_attribute("__isabstractmethod__").map(|v| v.truthy()).unwrap_or(false)
+                    )),
+                    _ => Err(PyError::attribute_error(format!("'staticmethod' object has no attribute '{}'", name))),
+                }
+            }
+            PyObject::ClassMethod { func } => {
+                match name {
+                    "__func__" => Ok(func.clone()),
+                    "__isabstractmethod__" => Ok(py_bool(
+                        func.borrow().get_attribute("__isabstractmethod__").map(|v| v.truthy()).unwrap_or(false)
+                    )),
+                    _ => Err(PyError::attribute_error(format!("'classmethod' object has no attribute '{}'", name))),
                 }
             }
             PyObject::Exception { typ, args, cause } => {
@@ -857,6 +903,15 @@ impl PyObject {
                             if let PyObject::Tuple(tuple) = &*args[0].borrow() {
                                 Ok(py_int(40 + (tuple.len() as i64) * 8))
                             } else { Err(PyError::runtime_error("__sizeof__ on non-tuple")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    // Same gap, same fix, as `list`'s own `__getitem__` arm.
+                    "__getitem__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__getitem__".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("__getitem__() takes exactly one argument")); }
+                            py_getitem(&args[0], &args[1])
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -1548,6 +1603,18 @@ impl PyObject {
                                 }
                                 Ok(PyObjectRef::imm(PyObject::Bytes(result)))
                             } else { Err(PyError::runtime_error("translate on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    // Same gap, same fix, as `list`'s own `__getitem__` arm
+                    // (see its doc comment) — `bytes` is a real migrated
+                    // type too, but the dunder wasn't directly callable by
+                    // name, only via the `[0]` subscript syntax itself.
+                    "__getitem__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__getitem__".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("__getitem__() takes exactly one argument")); }
+                            py_getitem(&args[0], &args[1])
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -2305,6 +2372,15 @@ impl PyObject {
                         func: |a| {
                             let s = a[0].str();
                             Ok(py_int(49 + s.len() as i64))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    // Same gap, same fix, as `list`'s own `__getitem__` arm.
+                    "__getitem__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__getitem__".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("__getitem__() takes exactly one argument")); }
+                            py_getitem(&args[0], &args[1])
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),

@@ -895,7 +895,45 @@ impl Compiler {
                 // over the function's locals (Python skips class scopes when
                 // resolving enclosing references), so keep looking inside
                 // using the same local_names as our caller.
-                Stmt::ClassDef { body, .. } => {
+                Stmt::ClassDef { bases, keywords, decorator_list, body, .. } => {
+                    // `bases`/`keywords`/`decorator_list` are ordinary
+                    // expressions evaluated in the ENCLOSING scope at the
+                    // point of the `class` statement itself (NOT inside the
+                    // class body) — e.g. `class Inner(metaclass=x):` needs
+                    // `x` from whatever scope contains this statement,
+                    // exactly like any other expression there. This was
+                    // completely unscanned (only `body` was ever looked at),
+                    // so a name referenced ONLY in a base/keyword/decorator
+                    // expression — never inside the class body itself —
+                    // was invisible to this upfront free-variable analysis:
+                    // the enclosing function never learned it needed to
+                    // expose that name as a cell, so `LOAD_DEREF` for it was
+                    // never wired up, raising `NameError` at the point the
+                    // class statement actually ran. Real trigger: CPython's
+                    // own `test_abc.py`'s `test_factory(abc_ABCMeta, ...)`
+                    // pattern — a method (itself nested in a class nested in
+                    // a function) containing `class C(metaclass=abc_ABCMeta):`,
+                    // where `abc_ABCMeta` is the outer function's own
+                    // parameter, referenced ONLY as that keyword's value.
+                    let mut header_refs = HashSet::new();
+                    for base in bases {
+                        Self::collect_names_expr(base, &mut header_refs);
+                    }
+                    for kw in keywords {
+                        Self::collect_names_expr(&kw.value, &mut header_refs);
+                    }
+                    for dec in decorator_list {
+                        Self::collect_names_expr(dec, &mut header_refs);
+                    }
+                    // Only names NOT already resolvable as a local/global of
+                    // the scope directly containing this `class` statement
+                    // need to come from further out — matching the
+                    // `FunctionDef` arm's own filtering just above.
+                    for name in header_refs {
+                        if !local_names.contains(&name) && !global_names.contains(&name) {
+                            refs.insert(name);
+                        }
+                    }
                     Self::collect_nested_refs_inner(
                         body,
                         local_names,
