@@ -754,6 +754,23 @@ impl VirtualMachine {
           // Native abc module
           modules.insert_str("abc", create_module("abc", create_abc_dict()));
 
+          // `_py_abc` — real CPython's separate pure-Python reference
+          // implementation of `ABCMeta` (used by `test_abc.py`'s own
+          // `test_factory(abc.ABCMeta, ...)` / `test_factory(_py_abc.ABCMeta,
+          // ...)` pattern to run its whole suite against both the C and
+          // Python implementations). This codebase has only ONE `ABCMeta`
+          // implementation (native Rust, no separate "C vs Python" split at
+          // all), so `_py_abc` was missing entirely — `import _py_abc`
+          // failed outright, crashing `test_abc.py` at collection before a
+          // single test ran. Aliased to the exact same dict as `abc` itself:
+          // not a literal from-scratch Python reimplementation, but an
+          // honest match for this codebase's actual architecture — it
+          // unblocks the import and lets both `test_factory` calls exercise
+          // real, working `ABCMeta` functionality (just the same
+          // implementation twice under two names, rather than two distinct
+          // ones).
+          modules.insert_str("_py_abc", create_module("_py_abc", create_abc_dict()));
+
           // Native typing module (type annotation stubs)
           // Comment out native typing - use Lib/typing.py instead
           // modules.insert_str("typing", create_module("typing", create_typing_dict()));
@@ -6820,6 +6837,21 @@ impl VirtualMachine {
             // own body mutates `self` (e.g. `self.hits += 1`, common for a
             // caching wrapper), STORE_ATTR's borrow_mut() on the very same
             // object would otherwise panic with a RefCell conflict.
+            //
+            // When the found `__call__` is ITSELF an `Instance` (not a
+            // `Function`/`BuiltinFunction`), this recurses straight back
+            // into `self.call_function` via plain Rust call-stack recursion
+            // — no Python frame is ever pushed for this step, so it never
+            // passes through the `PyObject::Function` arm's own
+            // `self.frames.len() >= self.recursion_limit` check at all. A
+            // cyclic `__call__` chain (real trigger: CPython's own
+            // `test_descr.py`'s `test_recursive_call` — `A.__call__ = A()`,
+            // then `A()()`) previously recursed forever and overflowed the
+            // real native stack instead of raising a catchable
+            // `RecursionError`. Guarded the same way as the other
+            // "disposable-VM-shaped" native recursion gap this session (see
+            // `NativeDispatchRecursionGuard`'s own doc comment).
+            let _guard = crate::object::NativeDispatchRecursionGuard::enter()?;
             let mut call_args = vec![callable.clone()];
             call_args.extend(args.iter().cloned());
             return self.call_function(f, call_args, keywords);
@@ -7344,8 +7376,58 @@ impl VirtualMachine {
 /// (matches if ANY member matches), not just a single bare type/name.
 fn exc_type_matches(expected: &PyObjectRef, exc_type_name: &str) -> PyResult<bool> {
     match &*expected.borrow() {
-        PyObject::Str(s) => Ok(is_exception_subclass(exc_type_name, s)),
-        PyObject::Type { name, .. } => Ok(is_exception_subclass(exc_type_name, name)),
+        // Same gap, same fix, as `builtin_issubclass`'s matching `Str` arm:
+        // a bare string legitimately reaches here only via the internal
+        // `WITH_EXIT` exc_type-name fallback (always a recognized
+        // builtin/module exception name) — a real `except "spam":` clause
+        // catching an arbitrary string must raise `TypeError: catching
+        // classes that do not inherit from BaseException is not allowed`
+        // instead of silently doing a by-name comparison (confirmed via
+        // CPython's own `test_baseexception.py`'s
+        // `UsageTests.test_catch_string`).
+        PyObject::Str(s) if is_builtin_exception_class_name(s) => Ok(is_exception_subclass(exc_type_name, s)),
+        PyObject::Type { name, bases, .. } => {
+            // Real Python raises `TypeError: catching classes that do not
+            // inherit from BaseException is not allowed` the moment an
+            // `except SomeClass:` clause is evaluated against a class that
+            // isn't actually an exception class — previously this arm just
+            // did a by-name comparison unconditionally, so `except
+            // NonBaseException:` (a plain `class NonBaseException(object):
+            // pass`) silently never matched instead of raising (confirmed
+            // via CPython's own `test_baseexception.py`'s
+            // `UsageTests.test_catch_non_BaseException`). A user-defined
+            // class's ancestry includes a real exception base iff
+            // `find_exception_base_name` finds a `BuiltinFunction`-shaped
+            // ancestor in its `bases`/`mro` (every built-in/module exception
+            // "class" in this codebase is represented that way) — `None`
+            // means it doesn't inherit from `BaseException` at all.
+            //
+            // EXCEPT: some native ad-hoc "exception classes" built directly
+            // in Rust (e.g. `subprocess.CalledProcessError` in `net.rs`) are
+            // deliberately constructed with `bases: vec![]` — there's no
+            // native `Exception` `Type` to list as a real base (builtin
+            // exceptions are `BuiltinFunction`s, not `Type`s), a known,
+            // documented simplification, NOT a sign the class isn't really
+            // an exception. The distinguishing signal: any class built via
+            // REAL Python `class X(...): ...` syntax always ends up with a
+            // non-empty `bases` — even `class Foo: pass` with no explicit
+            // parent gets `(object,)` inserted (confirmed: `Foo.__bases__ ==
+            // (object,)`) — so completely empty `bases` can only mean one of
+            // these native marker types, never genuine user code. Skipping
+            // the ancestry check for those (falling through to the same
+            // name-based comparison as before) restores `except
+            // subprocess.CalledProcessError:` matching without reopening the
+            // `NonBaseException`/`test_catch_non_BaseException` gap this
+            // whole check exists to close — confirmed regression via the
+            // very next sweep after landing that check, in
+            // `test_graphlib.py`'s `test_static_order_does_not_change_with_
+            // the_hash_seed` (uses `script_helper.assert_python_ok`, which
+            // catches `subprocess.CalledProcessError`).
+            if !bases.is_empty() && crate::object::find_exception_base_name(expected).is_none() {
+                return Err(PyError::type_error("catching classes that do not inherit from BaseException is not allowed"));
+            }
+            Ok(is_exception_subclass(exc_type_name, name))
+        }
         PyObject::BuiltinFunction { name, .. } => Ok(is_exception_subclass(exc_type_name, name)),
         PyObject::Tuple(items) | PyObject::List(items) => {
             for item in items {

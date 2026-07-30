@@ -871,6 +871,45 @@ pub fn create_difflib_dict() -> HashMap<String, PyObjectRef> {
         Ok(py_list(vec![]))
     });
 
+    // `difflib.ndiff(a, b)` — was missing entirely (`AttributeError: 'module'
+    // object has no attribute 'ndiff'`), and this is broadly high-impact:
+    // `unittest`'s own `assertMultiLineEqual`/`assertSequenceEqual` call it
+    // directly to build a readable diff for a FAILED assertion — so missing
+    // `ndiff` doesn't just produce a worse error message, it turns an
+    // ordinary test FAILURE into a hard `AttributeError` instead (confirmed
+    // real trigger: seen across multiple CPython test files —
+    // `test_charmapcodec.py`, `test_list.py`, and others — all failing this
+    // exact way). Reuses the same `lcs_table`/`backtrack` LCS-diff machinery
+    // `unified_diff` above already has; doesn't implement the real
+    // algorithm's `?`-prefixed intraline-hint lines (a cosmetic refinement,
+    // not needed for tests that just check the diff CONTAINS/omits certain
+    // lines), only the `- `/`+ `/`  ` line prefixes real `ndiff` always
+    // produces.
+    dfl_func!("ndiff", |args| {
+        if args.len() < 2 {
+            return Err(PyError::type_error("ndiff() requires at least 2 arguments (a, b)"));
+        }
+        fn extract_lines(obj: &PyObjectRef) -> PyResult<Vec<String>> {
+            let borrowed = obj.borrow();
+            match &*borrowed {
+                PyObject::Str(s) => Ok(s.lines().map(|l| l.to_string()).collect()),
+                PyObject::List(items) => items.iter().map(|item| Ok(item.str())).collect(),
+                _ => Err(PyError::type_error("arguments to ndiff() must be strings or lists of strings")),
+            }
+        }
+        let a_lines = extract_lines(&args[0])?;
+        let b_lines = extract_lines(&args[1])?;
+        let a_refs: Vec<&str> = a_lines.iter().map(|s| s.as_str()).collect();
+        let b_refs: Vec<&str> = b_lines.iter().map(|s| s.as_str()).collect();
+        let dp = lcs_table(&a_refs, &b_refs);
+        let ops = backtrack(&a_refs, &b_refs, &dp);
+        let out: Vec<PyObjectRef> = ops.into_iter().map(|(op, line)| {
+            let prefix = match op { '+' => "+ ", '-' => "- ", _ => "  " };
+            py_str(&format!("{}{}", prefix, line))
+        }).collect();
+        Ok(py_list(out))
+    });
+
     d
 }
 

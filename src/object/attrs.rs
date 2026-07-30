@@ -762,6 +762,45 @@ impl PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
+                    // `__getitem__`/`__setitem__`/`__delitem__` as directly
+                    // ACCESSIBLE named attributes (`[].__getitem__(0)`, not
+                    // just the `[0]` subscript syntax itself, which already
+                    // worked via a separate internal dispatch path) — were
+                    // missing entirely, raising `AttributeError` even though
+                    // `list` is a real migrated `Type` now (see this
+                    // session's "native types as real Type objects" work).
+                    // Real trigger: CPython's own `test_list.py`'s
+                    // `test_getitem`/`test_setitem`/`test_delitem`/
+                    // `test_subscript`/`test_set_subscript`, which call
+                    // these by name directly. Delegate to the exact same
+                    // `py_getitem`/`py_setitem`/`py_delitem` free functions
+                    // the subscript operators themselves already use.
+                    "__getitem__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__getitem__".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("__getitem__() takes exactly one argument")); }
+                            py_getitem(&args[0], &args[1])
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__setitem__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__setitem__".to_string(),
+                        func: |args| {
+                            if args.len() < 3 { return Err(PyError::type_error("__setitem__() takes exactly 2 arguments")); }
+                            py_setitem(&args[0], &args[1], args[2].clone())?;
+                            Ok(py_none())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__delitem__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__delitem__".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("__delitem__() takes exactly one argument")); }
+                            py_delitem(&args[0], &args[1])?;
+                            Ok(py_none())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     _ => Err(PyError::attribute_error(format!("'list' object has no attribute '{}'", name))),
             }
             }
@@ -4090,6 +4129,20 @@ impl PyObject {
                     "numerator" | "real" => Ok(py_int(_i.clone())),
                     "denominator" => Ok(py_int(1)),
                     "imag" => Ok(py_int(0)),
+                    // `int.conjugate()` — part of the same `numbers.Complex`
+                    // protocol as `float`'s arm just above; a plain int is
+                    // trivially its own conjugate. Missing before, raising
+                    // `AttributeError` (real trigger: CPython's own
+                    // `test_abstract_numbers.py`).
+                    "conjugate" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                        name: "conjugate".to_string(),
+                        func: |args| {
+                            if let PyObject::Int(v) = &*args[0].borrow() {
+                                Ok(py_int(v.clone()))
+                            } else { Err(PyError::runtime_error("conjugate on non-int")) }
+                        },
+                        self_obj: PyObjectRef::imm(PyObject::Int(_i.clone())),
+                    })),
                     "to_bytes" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "to_bytes".to_string(),
                         func: |args| {
@@ -4177,6 +4230,25 @@ impl PyObject {
             }
             PyObject::Float(_f) => {
                 match name {
+                    // `float.real`/`.imag`/`.conjugate()` — part of the
+                    // `numbers.Complex` protocol every numeric type
+                    // implements (a plain `float` is trivially its own real
+                    // part with zero imaginary part and is its own
+                    // conjugate) — entirely missing before, so any code
+                    // written generically against that protocol (real
+                    // trigger: CPython's own `test_abstract_numbers.py`)
+                    // raised `AttributeError` on a plain `float`.
+                    "real" => Ok(py_float(*_f)),
+                    "imag" => Ok(py_float(0.0)),
+                    "conjugate" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                        name: "conjugate".to_string(),
+                        func: |args| {
+                            if let PyObject::Float(v) = &*args[0].borrow() {
+                                Ok(py_float(*v))
+                            } else { Err(PyError::runtime_error("conjugate on non-float")) }
+                        },
+                        self_obj: PyObjectRef::imm(PyObject::Float(*_f)),
+                    })),
                     "__int__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "__int__".to_string(),
                         func: |args| {

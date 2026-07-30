@@ -64,10 +64,27 @@ Self = _TypingType('Self')
 NoReturn = _TypingType('NoReturn')
 NamedTuple = _TypingType('NamedTuple')
 NewType = _TypingType('NewType')
+# PEP 646 (variadic generics) / PEP 692 (`**kwargs: Unpack[...]`) — both
+# missing entirely, so any code merely IMPORTING one of these (not even
+# using it meaningfully) failed at collection time with `ImportError`.
+# Real trigger: CPython's own `test_annotationlib.py`'s
+# `from typing import Unpack, ...`. Stubbed the same way every other
+# subscriptable typing construct here is (a `_TypingType` singleton
+# supporting `X[...]`), matching this module's existing "good enough to
+# import and subscript, not full runtime semantics" scope.
+TypeVarTuple = _TypingType('TypeVarTuple')
+Unpack = _TypingType('Unpack')
 
 def overload(func): return func
 def cast(typ, val): return val
 def type_check_only(func): return func
+
+def get_type_hints(obj, globalns=None, localns=None, include_extras=False):
+    """Minimal stub: real semantics need the full PEP 563/649 evaluation
+    machinery this module doesn't implement — just exposes __annotations__
+    (or {} if absent), which is enough for code that merely checks presence/
+    keys rather than relying on forward-ref resolution."""
+    return dict(getattr(obj, '__annotations__', {}) or {})
 
 import collections
 OrderedDict = collections.OrderedDict
@@ -78,5 +95,6 @@ __all__ = [
     'Set', 'FrozenSet', 'Tuple', 'Iterable', 'Iterator', 'Sequence',
     'Mapping', 'MutableMapping', 'Generator', 'ParamSpec', 'Protocol',
     'Literal', 'TypedDict', 'ClassVar', 'Final', 'Self', 'overload',
-    'cast', 'NoReturn', 'NamedTuple', 'NewType',
+    'cast', 'NoReturn', 'NamedTuple', 'NewType', 'TypeVarTuple', 'Unpack',
+    'get_type_hints',
 ]

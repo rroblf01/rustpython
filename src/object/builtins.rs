@@ -1739,6 +1739,13 @@ pub fn call_bound_method(func: PyObjectRef, self_obj: PyObjectRef, args: Vec<PyO
             func(&all_args)
         }
         PyObject::Function(ref f) => {
+            // See `NativeDispatchRecursionGuard`'s own doc comment (`core.rs`)
+            // — without this, recursion flowing through this disposable-VM
+            // dispatch path (e.g. `A.__call__ = A(); A()()`) overflows the
+            // real native stack instead of raising a catchable
+            // `RecursionError`, since each nested call resets its own fresh
+            // VM's frame counter to zero.
+            let _guard = crate::object::NativeDispatchRecursionGuard::enter()?;
             let code = &f.code;
             let g = &f.globals;
             let defaults = &f.defaults;
@@ -1807,7 +1814,24 @@ pub fn call_bound_method(func: PyObjectRef, self_obj: PyObjectRef, args: Vec<PyO
                 for i in (named_params.saturating_sub(1))..npos {
                     extra.push(args[i].clone());
                 }
-                frame.insert_local(vararg_name.as_str(), py_tuple(extra));
+                let vararg_val = py_tuple(extra);
+                // Must ALSO land in `fast_locals` — `LOAD_FAST` reads that,
+                // not the `insert_local` name dict. Missing this meant any
+                // `*args`-taking function/method invoked through THIS
+                // disposable-VM path (constructing an instance whose class
+                // was invoked via `map()`/`filter()`/etc., e.g. `map(TestCase,
+                // testMethodNames)` calling each `TestCase.__init__(self,
+                // *args, **kwargs)`) raised "local variable 'args' referenced
+                // before assignment" the instant the function body read its
+                // own vararg tuple — real trigger: CPython's own
+                // `test_descr.py`'s `OperatorsTest.__init__(self, *args,
+                // **kwargs)`, loaded via `unittest`'s `loadTestsFromTestCase`.
+                if let Some(idx) = code.varnames.iter().position(|n| crate::interner::lookup_str(*n) == vararg_name.as_str()) {
+                    if idx < frame.fast_locals.len() {
+                        frame.fast_locals[idx] = Some(vararg_val.clone());
+                    }
+                }
+                frame.insert_local(vararg_name.as_str(), vararg_val);
             }
             if npos < named_params.saturating_sub(1) {
                 let num_defaults = code.num_defaults;
@@ -1821,6 +1845,25 @@ pub fn call_bound_method(func: PyObjectRef, self_obj: PyObjectRef, args: Vec<PyO
                             frame.insert_local(crate::interner::lookup_str(code.varnames[idx]), val);
                         }
                     }
+                }
+            }
+            // This path never receives keyword arguments at all (its own
+            // signature is positional-args-only), so `**kwargs` always ends
+            // up empty — but it still needs to be BOUND to an empty dict,
+            // not left entirely unset, or a `**kwargs`-taking function body
+            // hits the exact same "local variable referenced before
+            // assignment" as the vararg case just above the moment it reads
+            // its own kwarg parameter (real trigger: the same
+            // `OperatorsTest.__init__(self, *args, **kwargs)` scenario,
+            // whose body explicitly re-unpacks `**kwargs` into another call).
+            if let Some(kwarg_name) = &code.kwarg_name {
+                if let Some(idx) = code.varnames.iter().position(|n| crate::interner::lookup_str(*n) == kwarg_name.as_str()) {
+                    if idx < frame.fast_locals.len() {
+                        frame.fast_locals[idx] = Some(py_dict());
+                    }
+                }
+                if !frame.contains_local(kwarg_name) {
+                    frame.insert_local(kwarg_name.as_str(), py_dict());
                 }
             }
             if std::env::var("RPY_DEBUG_CBM").is_ok() {
@@ -3078,12 +3121,22 @@ pub fn builtin_issubclass(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         // for `cls`. This codebase already treats built-in/module exception
         // "classes" as interchangeable by name everywhere else (the
         // `BuiltinFunction`/`Type`/`Str` arms just above), so extending that
-        // same name-based comparison to a bare string `cls` here is consistent,
-        // not a new kind of laxness — a real user never passes a plain string
-        // as `issubclass`'s first argument, this only arises from the internal
-        // exc_type fallback. Real trigger: `test_struct.py`'s own
-        // `assertRaisesRegex(struct.error, ...)`.
-        (PyObject::Str(cls_name), _) => {
+        // same name-based comparison to a bare string `cls` here is consistent
+        // for that INTERNAL fallback specifically — but a real user calling
+        // `issubclass("hello", BaseException)` must still get real Python's
+        // `TypeError: issubclass() arg 1 must be a class` (previously this
+        // arm accepted ANY string unconditionally, so a plain string that
+        // merely happened to arrive here — confirmed via CPython's own
+        // `test_baseexception.py`, whose `test_inheritance`/`test_catch_string`
+        // pass arbitrary strings including plain object values from
+        // `builtins.__dict__` — silently returned `False`/`True` by name
+        // comparison instead of raising). Gated on `cls_name` actually being
+        // one of the recognized builtin/module exception names — every
+        // legitimate internal fallback string is drawn from exactly that set
+        // (`add_exc_type!`'s own names, or a module exception registered via
+        // `is_builtin_exception_class_name`), so an unrecognized string can
+        // only be genuine user input, not this internal fallback.
+        (PyObject::Str(cls_name), _) if is_builtin_exception_class_name(cls_name) => {
             let base_name = match &*base {
                 PyObject::BuiltinFunction { name, .. } => name.clone(),
                 PyObject::Str(s) => s.to_string(),

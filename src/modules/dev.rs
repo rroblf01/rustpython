@@ -137,6 +137,17 @@ pub fn create_abc_dict() -> HashMap<String, PyObjectRef> {
         };
     }
 
+    // `abc.get_cache_token()` — real CPython returns an opaque token that
+    // changes whenever the internal ABC registry cache is invalidated
+    // (callers compare it across calls to detect staleness). Missing
+    // entirely here (`AttributeError: 'module' object has no attribute
+    // 'get_cache_token'` — real trigger: CPython's own `test_abc.py`, and
+    // by extension `_py_abc`, which is aliased to this same dict). This
+    // implementation doesn't track cache invalidation at all, so a
+    // constant token is a safe, conservative stand-in — "never stale" is
+    // the correct simplification when there's no cache to invalidate.
+    abc_func!("get_cache_token", |_args| Ok(py_int(0)));
+
     // ABC class — returns a simple Instance with a type marker
     abc_func!("ABC", |args| {
         let _ = args;

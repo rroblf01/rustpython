@@ -839,7 +839,57 @@ impl PyObjectRef {
         EQUALS_DEPTH.with(|c| c.set(c.get() - 1));
         result
     }
+}
 
+thread_local! {
+    static NATIVE_DISPATCH_DEPTH: std::cell::Cell<usize> = std::cell::Cell::new(0);
+}
+
+/// Guards `call_bound_method`'s and `builtin_call`'s `PyObject::Function`
+/// arms — both spin up a BRAND NEW disposable `VirtualMachine` (with its own
+/// fresh, always-zero `self.frames`) for every single nested native-dispatch
+/// call (any dunder invoked from native code: `__call__`, `__repr__`,
+/// `__eq__`, ...), so `vm.rs`'s own `call_function` recursion-limit check
+/// (`self.frames.len() >= self.recursion_limit`) NEVER trips for recursion
+/// that flows through this path — each nesting level resets that counter to
+/// zero right when a fresh VM is constructed, while the REAL native (Rust)
+/// call stack keeps growing underneath, completely unbounded, until it
+/// overflows for real: a hard process abort, not a catchable
+/// `RecursionError`. Confirmed via CPython's own `test_descr.py`'s
+/// `test_recursive_call` (`A.__call__ = A()`, then `A()()` — a textbook
+/// infinite `__call__` cycle real Python catches with `RecursionError`,
+/// which this interpreter instead crashed on outright). This guard is a
+/// SEPARATE thread-local counter from any specific VM's own frame count —
+/// tracking nesting depth across ALL disposable-VM dispatches regardless of
+/// which of the two call sites (or how many alternating VMs) are involved.
+/// Capped at 500, same as the `EQUALS_DEPTH`/`REPR_DEPTH` guards just above
+/// — each nesting level here is more stack-expensive (constructs a whole VM
+/// + frame) than one ordinary Python call frame, so a smaller cap is the
+/// conservative, safe choice given the same overall native stack budget.
+pub(crate) struct NativeDispatchRecursionGuard;
+
+impl NativeDispatchRecursionGuard {
+    pub(crate) fn enter() -> PyResult<Self> {
+        let depth = NATIVE_DISPATCH_DEPTH.with(|c| {
+            let d = c.get() + 1;
+            c.set(d);
+            d
+        });
+        if depth > 500 {
+            NATIVE_DISPATCH_DEPTH.with(|c| c.set(c.get() - 1));
+            return Err(PyError::recursion_error("maximum recursion depth exceeded"));
+        }
+        Ok(NativeDispatchRecursionGuard)
+    }
+}
+
+impl Drop for NativeDispatchRecursionGuard {
+    fn drop(&mut self) {
+        NATIVE_DISPATCH_DEPTH.with(|c| c.set(c.get().saturating_sub(1)));
+    }
+}
+
+impl PyObjectRef {
     fn equals_inner(&self, other: &PyObjectRef) -> PyResult<bool> {
         if let (Some(ai), Some(bi)) = (self.as_i64(), other.as_i64()) {
             return Ok(ai == bi);
@@ -877,15 +927,25 @@ impl PyObjectRef {
         // prevents RefCell panics when an element's __eq__ mutates the same
         // container during comparison (e.g. lst.index(lst) with custom __eq__
         // that calls lst.clear()).
+        // `is_list` distinguishes the two so a `list` and a `tuple` with
+        // identical elements don't compare equal — real Python NEVER treats
+        // `list`/`tuple` as equal to each other regardless of content (only
+        // to another value of the SAME container kind). The previous
+        // version matched both into the same `Option<Vec<PyObjectRef>>`
+        // without recording which kind `self` was, so `other`'s match arms
+        // (also accepting either kind) let a `list` and a `tuple` slip
+        // through as comparable — confirmed via CPython's own
+        // `test_compare.py`, whose `assert_equality_only(t1, l1, False)`
+        // failed because `(1, 2) == [1, 2]` came back `True`.
         let self_items = match &*self.borrow() {
-            PyObject::List(items) => Some(items.clone()),
-            PyObject::Tuple(items) => Some(items.clone()),
+            PyObject::List(items) => Some((true, items.clone())),
+            PyObject::Tuple(items) => Some((false, items.clone())),
             _ => None,
         };
-        if let Some(my_items) = self_items {
+        if let Some((is_list, my_items)) = self_items {
             let other_items = match &*other.borrow() {
-                PyObject::List(items) => Some(items.clone()),
-                PyObject::Tuple(items) => Some(items.clone()),
+                PyObject::List(items) if is_list => Some(items.clone()),
+                PyObject::Tuple(items) if !is_list => Some(items.clone()),
                 _ => None,
             };
             if let Some(other_items) = other_items {

@@ -77,6 +77,45 @@ pub fn py_compare(a: &PyObjectRef, b: &PyObjectRef, op: u32) -> PyResult<PyObjec
             return Ok(py_bool(result));
         }
     }
+    // `list` ordering (`<`/`<=`/`>=`/`>`) needs the SAME clone-before-compare
+    // treatment as the `Set` case just above, for the same reason: unlike
+    // `Tuple` (immutable, so this hazard can't arise), a `list`'s own
+    // elements can have a hostile `__eq__`/`__lt__` that mutates the very
+    // list being compared (`self`/`other`) mid-comparison. Going through
+    // `PyObject::lt`/`le`/`gt`/`ge`'s `List` arm (via `a.borrow().lt(b)?`
+    // below) holds a live borrow on `a` for the ENTIRE comparison, so that
+    // reentrant mutation panics with "RefCell already borrowed" — confirmed
+    // via CPython's own `test_list.py` (a real regression test for exactly
+    // this scenario, mirroring `test_set.py`'s `TestBinaryOpsMutating`
+    // already handled by the `Set` block above). Handling `List` here
+    // instead — cloning both operands' elements up front, before any
+    // comparison call that could reenter — sidesteps the hazard entirely.
+    if matches!(op, 0 | 1 | 3 | 4) {
+        let a_items = if let PyObject::List(v) = &*a.borrow() { Some(v.clone()) } else { None };
+        if let Some(a_items) = a_items {
+            let b_items = if let PyObject::List(v) = &*b.borrow() { Some(v.clone()) } else { None };
+            if let Some(b_items) = b_items {
+                let mut ord = std::cmp::Ordering::Equal;
+                for (x, y) in a_items.iter().zip(b_items.iter()) {
+                    if !x.equals(y)? {
+                        ord = if py_compare(x, y, 0)?.truthy() { std::cmp::Ordering::Less } else { std::cmp::Ordering::Greater };
+                        break;
+                    }
+                }
+                if ord == std::cmp::Ordering::Equal {
+                    ord = a_items.len().cmp(&b_items.len());
+                }
+                let result = match op {
+                    0 => ord == std::cmp::Ordering::Less,
+                    1 => ord != std::cmp::Ordering::Greater,
+                    3 => ord != std::cmp::Ordering::Less,
+                    4 => ord == std::cmp::Ordering::Greater,
+                    _ => unreachable!(),
+                };
+                return Ok(py_bool(result));
+            }
+        }
+    }
     let result = match op {
         0 => a.borrow().lt(b)?,
         1 => a.borrow().le(b)?,
@@ -240,6 +279,26 @@ impl Compare for PyObject {
                 }
                 Ok(a.len() < b.len())
             }
+            // `list`/`bytes`/`bytearray` ordering was entirely missing —
+            // only Tuple got the lexicographic-comparison treatment above,
+            // so `[1,2] < [1,3]` or `b"a" < b"b"` raised `TypeError`
+            // outright (confirmed via CPython's own `test_compare.py`,
+            // whose whole point is exercising exactly this). `bytes`/
+            // `bytearray` are plain `Vec<u8>`, which Rust already orders
+            // lexicographically by byte value — real Python allows
+            // comparing across the two types too. `list` needs the same
+            // dunder-aware elementwise walk as `Tuple` just above (elements
+            // may be user objects with `__lt__`).
+            (PyObject::Bytes(a), PyObject::Bytes(b)) => Ok(a < b),
+            (PyObject::ByteArray(a), PyObject::ByteArray(b)) => Ok(a < b),
+            (PyObject::Bytes(a), PyObject::ByteArray(b)) => Ok(a.as_slice() < b.as_slice()),
+            (PyObject::ByteArray(a), PyObject::Bytes(b)) => Ok(a.as_slice() < b.as_slice()),
+            (PyObject::List(a), PyObject::List(b)) => {
+                for (x, y) in a.iter().zip(b.iter()) {
+                    if !x.equals(y)? { return Ok(py_compare(x, y, 0)?.truthy()); }
+                }
+                Ok(a.len() < b.len())
+            }
             (PyObject::None, PyObject::None) => Ok(false),
             _ => {
                 if std::env::var("RPY_DEBUG_LT").is_ok() {
@@ -273,6 +332,16 @@ impl Compare for PyObject {
                 }
                 Ok(a.len() <= b.len())
             }
+            (PyObject::Bytes(a), PyObject::Bytes(b)) => Ok(a <= b),
+            (PyObject::ByteArray(a), PyObject::ByteArray(b)) => Ok(a <= b),
+            (PyObject::Bytes(a), PyObject::ByteArray(b)) => Ok(a.as_slice() <= b.as_slice()),
+            (PyObject::ByteArray(a), PyObject::Bytes(b)) => Ok(a.as_slice() <= b.as_slice()),
+            (PyObject::List(a), PyObject::List(b)) => {
+                for (x, y) in a.iter().zip(b.iter()) {
+                    if !x.equals(y)? { return Ok(py_compare(x, y, 0)?.truthy()); }
+                }
+                Ok(a.len() <= b.len())
+            }
             _ => Err(PyError::type_error(format!("'<=' not supported between instances of '{}' and '{}'",
                 self.type_name(), other.type_name()))),
         }
@@ -298,6 +367,16 @@ impl Compare for PyObject {
                 }
                 Ok(a.len() > b.len())
             }
+            (PyObject::Bytes(a), PyObject::Bytes(b)) => Ok(a > b),
+            (PyObject::ByteArray(a), PyObject::ByteArray(b)) => Ok(a > b),
+            (PyObject::Bytes(a), PyObject::ByteArray(b)) => Ok(a.as_slice() > b.as_slice()),
+            (PyObject::ByteArray(a), PyObject::Bytes(b)) => Ok(a.as_slice() > b.as_slice()),
+            (PyObject::List(a), PyObject::List(b)) => {
+                for (x, y) in a.iter().zip(b.iter()) {
+                    if !x.equals(y)? { return Ok(py_compare(x, y, 4)?.truthy()); }
+                }
+                Ok(a.len() > b.len())
+            }
             _ => Err(PyError::type_error(format!("'>' not supported between instances of '{}' and '{}'",
                 self.type_name(), other.type_name()))),
         }
@@ -318,6 +397,16 @@ impl Compare for PyObject {
                 Ok(true)
             }
             (PyObject::Tuple(a), PyObject::Tuple(b)) => {
+                for (x, y) in a.iter().zip(b.iter()) {
+                    if !x.equals(y)? { return Ok(py_compare(x, y, 4)?.truthy()); }
+                }
+                Ok(a.len() >= b.len())
+            }
+            (PyObject::Bytes(a), PyObject::Bytes(b)) => Ok(a >= b),
+            (PyObject::ByteArray(a), PyObject::ByteArray(b)) => Ok(a >= b),
+            (PyObject::Bytes(a), PyObject::ByteArray(b)) => Ok(a.as_slice() >= b.as_slice()),
+            (PyObject::ByteArray(a), PyObject::Bytes(b)) => Ok(a.as_slice() >= b.as_slice()),
+            (PyObject::List(a), PyObject::List(b)) => {
                 for (x, y) in a.iter().zip(b.iter()) {
                     if !x.equals(y)? { return Ok(py_compare(x, y, 4)?.truthy()); }
                 }

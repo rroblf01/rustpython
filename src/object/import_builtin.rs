@@ -346,6 +346,12 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
             } else { unreachable!() }
         }
         2 => {
+            // See `NativeDispatchRecursionGuard`'s own doc comment (`core.rs`)
+            // — without this, recursion flowing through this disposable-VM
+            // dispatch path overflows the real native stack instead of
+            // raising a catchable `RecursionError`, since each nested call
+            // resets its own fresh VM's frame counter to zero.
+            let _guard = crate::object::NativeDispatchRecursionGuard::enter()?;
             // Clone everything needed out under a SHORT borrow and drop it
             // immediately — the previous version held `f.borrow()` across
             // the ENTIRE disposable-VM `vm.execute()` call below, which
@@ -404,7 +410,20 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
                     for i in named_params..npos {
                         extra.push(a[i].clone());
                     }
-                    frame.insert_local(vararg_name.as_str(), py_tuple(extra));
+                    let vararg_val = py_tuple(extra);
+                    // Must ALSO land in `fast_locals` — same missing-write
+                    // bug, same fix, as the analogous vararg-packing block
+                    // in `call_bound_method` just below in this same file
+                    // (real trigger: a `*args`-taking plain function invoked
+                    // via `map()`/`filter()`/etc. through THIS disposable-VM
+                    // path, not just the bound-method-via-class-construction
+                    // case that surfaced it).
+                    if let Some(idx) = code.varnames.iter().position(|n| crate::interner::lookup_str(*n) == vararg_name.as_str()) {
+                        if idx < frame.fast_locals.len() {
+                            frame.fast_locals[idx] = Some(vararg_val.clone());
+                        }
+                    }
+                    frame.insert_local(vararg_name.as_str(), vararg_val);
                 }
                 if npos < named_params {
                     let num_defaults = code.num_defaults;
@@ -431,6 +450,11 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
                     }
                 }
                 if let Some(kwarg_name) = &code.kwarg_name {
+                    if let Some(idx) = code.varnames.iter().position(|n| crate::interner::lookup_str(*n) == kwarg_name.as_str()) {
+                        if idx < frame.fast_locals.len() && frame.fast_locals[idx].is_none() {
+                            frame.fast_locals[idx] = Some(py_dict());
+                        }
+                    }
                     if !frame.contains_local(kwarg_name) {
                         frame.insert_local(kwarg_name.as_str(), py_dict());
                     }

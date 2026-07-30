@@ -1499,12 +1499,26 @@ fn struct_calcsize(fmt: &str) -> PyResult<usize> {
 }
 
 fn struct_pack_arg_bigint(val: &PyObjectRef) -> PyResult<BigInt> {
-    let b = val.borrow();
-    match &*b {
-        PyObject::Int(i) => Ok(i.clone()),
-        PyObject::Bool(bv) => Ok(BigInt::from(*bv as i64)),
-        _ => Err(struct_error("required argument is not an integer")),
+    {
+        let b = val.borrow();
+        match &*b {
+            PyObject::Int(i) => return Ok(i.clone()),
+            PyObject::Bool(bv) => return Ok(BigInt::from(*bv as i64)),
+            _ => {}
+        }
     }
+    // Real Python's `struct.pack` accepts ANY object implementing
+    // `__index__` for its integer format codes, not just a literal `int`/
+    // `bool` — this was missing entirely, so a custom `Indexable` class
+    // (`def __index__(self): return self._value`) raised a generic "not an
+    // integer" error instead of packing successfully. `to_index` (already
+    // used by `range()`/slicing for the same protocol) does exactly this —
+    // reused here rather than reimplementing the dispatch. A plain `TypeError`
+    // propagating from a missing/bad `__index__` is fine as-is: real
+    // CPython's own `struct.pack` raises bare `TypeError` for exactly these
+    // cases too (confirmed via `test_struct.py`'s own
+    // `assertRaises((TypeError, struct.error), ...)` — either is accepted).
+    to_index(val)
 }
 
 fn struct_check_bounds(code: char, n: &BigInt) -> PyResult<()> {
