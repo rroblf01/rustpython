@@ -1150,6 +1150,34 @@ impl Lexer {
                                         }
                                     }
                                 }
+                                // PEP 701 (3.12+) allows a `#`-comment
+                                // inside an f-string expression's braces,
+                                // same as real code inside parentheses
+                                // (`f'''{ # comment\n3}'''`). This character-
+                                // level scanner didn't know `#` starts a
+                                // comment at all, so a quote character
+                                // WITHIN the comment text (e.g. an
+                                // apostrophe in a contraction, `# it's`)
+                                // was misread as opening a real string
+                                // literal — desyncing `str_char` tracking
+                                // for the rest of the scan and eating the
+                                // actual closing `}` (and even the outer
+                                // f-string's own closing quotes) as if they
+                                // were still "inside a string". Skip
+                                // straight to end-of-line (or end of input),
+                                // preserving the comment text verbatim in
+                                // `expr` — the nested tokenizer
+                                // (`tokenize_fstring_expr`) already handles
+                                // `#`-comments correctly on its own.
+                                Some(c @ '#') if str_char == '\0' && state == 0 => {
+                                    expr.push(c);
+                                    loop {
+                                        match self.peek() {
+                                            None | Some('\n') => break,
+                                            Some(nc) => { expr.push(nc); self.advance(); }
+                                        }
+                                    }
+                                }
                                 Some(c @ ('\'' | '"')) if str_char == '\0' && state == 0 => {
                                     str_char = c;
                                     expr.push(c);

@@ -270,7 +270,7 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                     }
                     Ok(py_list(result))
                 }
-                _ => Err(PyError::type_error("list indices must be integers or slices")),
+                _ => Err(PyError::type_error(format!("list indices must be integers or slices, not {}", idx.type_name()))),
             }
         }
         PyObject::Tuple(items) => {
@@ -305,7 +305,7 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                     Ok(py_tuple(result))
                 }
                 _ => {
-                    Err(PyError::type_error("tuple indices must be integers or slices"))
+                    Err(PyError::type_error(format!("tuple indices must be integers or slices, not {}", idx.type_name())))
                 }
             }
         }
@@ -342,7 +342,7 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                     }
                     Ok(py_str(&result))
                 }
-                _ => Err(PyError::type_error("string indices must be integers or slices")),
+                _ => Err(PyError::type_error(format!("string indices must be integers or slices, not {}", idx.type_name()))),
             }
         }
         // PyObject::Dict is handled above, before this borrow is taken.
@@ -383,7 +383,7 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                     }
                     Ok(PyObjectRef::imm(PyObject::Bytes(result)))
                 }
-                _ => Err(PyError::type_error("bytes indices must be integers or slices")),
+                _ => Err(PyError::type_error(format!("bytes indices must be integers or slices, not {}", idx.type_name()))),
             }
         }
         PyObject::ByteArray(b) => {
@@ -419,7 +419,7 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                     }
                     Ok(PyObjectRef::new(PyObject::ByteArray(result)))
                 }
-                _ => Err(PyError::type_error("bytearray indices must be integers or slices")),
+                _ => Err(PyError::type_error(format!("bytearray indices must be integers or slices, not {}", idx.type_name()))),
             }
         }
         PyObject::Array(arr) => {
@@ -438,7 +438,7 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                     Ok(py_int(v as i64))
                 }
             } else {
-                Err(PyError::type_error("array indices must be integers"))
+                Err(PyError::type_error(format!("array indices must be integers, not {}", idx.type_name())))
             }
         }
         PyObject::Range { start, stop, step } => {
@@ -478,7 +478,7 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                     let new_stop = *start + norm_stop * *step;
                     Ok(PyObjectRef::imm(PyObject::Range { start: new_start, stop: new_stop, step: new_step }))
                 }
-                _ => Err(PyError::type_error("range indices must be integers or slices")),
+                _ => Err(PyError::type_error(format!("range indices must be integers or slices, not {}", idx.type_name()))),
             }
         }
         PyObject::Instance { dict, .. } => {
@@ -630,7 +630,7 @@ pub fn py_setitem(obj: &PyObjectRef, index: &PyObjectRef, value: PyObjectRef) ->
                 items[i as usize] = value;
                 return Ok(());
             }
-            Err(PyError::type_error("list indices must be integers or slices"))
+            Err(PyError::type_error(format!("list indices must be integers or slices, not {}", idx.type_name())))
         }
         // PyObject::Dict is handled above, before this borrow is taken.
         _ => Err(PyError::type_error(format!("'{}' object does not support item assignment", o.type_name()))),
@@ -680,7 +680,7 @@ pub fn py_delitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<()> {
                 items.remove(i as usize);
                 Ok(())
             } else {
-                Err(PyError::type_error("list indices must be integers"))
+                Err(PyError::type_error(format!("list indices must be integers or slices, not {}", idx.type_name())))
             }
         }
         // PyObject::Dict is handled above, before this borrow is taken.

@@ -440,78 +440,89 @@ pub(crate) fn instance_builtin_dict_method(name: &str, dict_snapshot: Vec<(Strin
     }))))
 }
 
+/// Resolves the REAL underlying `PyDict` data behind an "unbound-style" dict
+/// method call (`dict.keys(some_dict_or_subclass_instance)`, the common
+/// idiom a `dict` subclass uses to call the parent's real implementation
+/// while overriding the same-named method itself — real trigger: CPython's
+/// own `test_dict.py::test_dict_copy_order`'s `CustomReversedDict`).
+///
+/// These `dict_method_*` functions used to check `PyObject::Instance {
+/// dict, .. }` and read the instance's OWN generic attribute `AttrMap` —
+/// which is the WRONG storage entirely: a dict subclass instance's actual
+/// key/value data lives in a native backing (a real `PyObject::Dict` under
+/// `NATIVE_BACKING_KEY`), not its `__dict__`-equivalent attribute map (which
+/// is empty unless the subclass itself sets extra attributes). This was
+/// broken for BOTH forms of the call — a plain `dict` (not wrapped in any
+/// `Instance` at all) AND a genuine subclass instance — confirmed via
+/// direct repro (`dict.keys({'a': 1})` and `dict.keys(CustomDict(a=1))`
+/// both raised `TypeError: keys() requires a dict-like instance`).
+fn resolve_dict_like(obj: &PyObjectRef) -> Option<PyObjectRef> {
+    if matches!(&*obj.borrow(), PyObject::Dict(_)) {
+        return Some(obj.clone());
+    }
+    crate::object::native_backing_of(obj).filter(|native| matches!(&*native.borrow(), PyObject::Dict(_)))
+}
+
 /// Static dict method: get
 pub fn dict_method_get(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() < 2 { return Err(PyError::type_error("get() requires at least 1 argument")); }
-    let instance = &args[0];
-    let borrowed = instance.borrow();
-    if let PyObject::Instance { dict, .. } = &*borrowed {
-        let key = args[1].str();
-        let val = dict.get(&key).cloned().unwrap_or_else(|| {
-            if args.len() > 2 { args[2].clone() } else { py_none() }
-        });
-        drop(borrowed);
-        Ok(val)
-    } else {
-        Err(PyError::type_error("get() requires a dict-like instance"))
+    match resolve_dict_like(&args[0]) {
+        Some(d) => {
+            if let PyObject::Dict(pd) = &*d.borrow() {
+                Ok(pd.get(&args[1])?.unwrap_or_else(|| {
+                    if args.len() > 2 { args[2].clone() } else { py_none() }
+                }))
+            } else { unreachable!() }
+        }
+        None => Err(PyError::type_error("get() requires a dict-like instance")),
     }
 }
 
 /// Static dict method: __iter__
 pub fn dict_method_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() { return Err(PyError::type_error("__iter__ requires self")); }
-    let instance = &args[0];
-    let borrowed = instance.borrow();
-    if let PyObject::Instance { dict, .. } = &*borrowed {
-        let keys: Vec<PyObjectRef> = dict.keys().map(|k| py_str(k)).collect();
-        drop(borrowed);
-        Ok(PyObjectRef::new(PyObject::List(keys)))
-    } else {
-        Err(PyError::type_error("__iter__ requires a dict-like instance"))
+    match resolve_dict_like(&args[0]) {
+        Some(d) => {
+            let keys = if let PyObject::Dict(pd) = &*d.borrow() { pd.keys() } else { unreachable!() };
+            Ok(PyObjectRef::new(PyObject::ListIter { list: keys, index: 0 }))
+        }
+        None => Err(PyError::type_error("__iter__ requires a dict-like instance")),
     }
 }
 
 /// Static dict method: items
 pub fn dict_method_items(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() { return Err(PyError::type_error("items() requires self")); }
-    let instance = &args[0];
-    let borrowed = instance.borrow();
-    if let PyObject::Instance { dict, .. } = &*borrowed {
-        let items: Vec<PyObjectRef> = dict.iter().map(|(k, v)| {
-            py_tuple(vec![py_str(k), v.clone()])
-        }).collect();
-        drop(borrowed);
-        Ok(PyObjectRef::new(PyObject::List(items)))
-    } else {
-        Err(PyError::type_error("items() requires a dict-like instance"))
+    match resolve_dict_like(&args[0]) {
+        Some(d) => {
+            let items = if let PyObject::Dict(pd) = &*d.borrow() { pd.items() } else { unreachable!() };
+            Ok(py_list(items.into_iter().map(|(k, v)| py_tuple(vec![k, v])).collect()))
+        }
+        None => Err(PyError::type_error("items() requires a dict-like instance")),
     }
 }
 
 /// Static dict method: keys
 pub fn dict_method_keys(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() { return Err(PyError::type_error("keys() requires self")); }
-    let instance = &args[0];
-    let borrowed = instance.borrow();
-    if let PyObject::Instance { dict, .. } = &*borrowed {
-        let keys: Vec<PyObjectRef> = dict.keys().map(|k| py_str(k)).collect();
-        drop(borrowed);
-        Ok(PyObjectRef::new(PyObject::List(keys)))
-    } else {
-        Err(PyError::type_error("keys() requires a dict-like instance"))
+    match resolve_dict_like(&args[0]) {
+        Some(d) => {
+            let keys = if let PyObject::Dict(pd) = &*d.borrow() { pd.keys() } else { unreachable!() };
+            Ok(py_list(keys))
+        }
+        None => Err(PyError::type_error("keys() requires a dict-like instance")),
     }
 }
 
 /// Static dict method: values
 pub fn dict_method_values(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() { return Err(PyError::type_error("values() requires self")); }
-    let instance = &args[0];
-    let borrowed = instance.borrow();
-    if let PyObject::Instance { dict, .. } = &*borrowed {
-        let values: Vec<PyObjectRef> = dict.values().cloned().collect();
-        drop(borrowed);
-        Ok(PyObjectRef::new(PyObject::List(values)))
-    } else {
-        Err(PyError::type_error("values() requires a dict-like instance"))
+    match resolve_dict_like(&args[0]) {
+        Some(d) => {
+            let values = if let PyObject::Dict(pd) = &*d.borrow() { pd.values() } else { unreachable!() };
+            Ok(py_list(values))
+        }
+        None => Err(PyError::type_error("values() requires a dict-like instance")),
     }
 }
 

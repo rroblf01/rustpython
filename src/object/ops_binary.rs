@@ -170,6 +170,28 @@ pub fn py_mul(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     }
     if let Some(r) = try_dunder_binop(a, b, "__mul__")? { return Ok(r); }
     if let Some(r) = try_dunder_binop(b, a, "__rmul__")? { return Ok(r); }
+    // Sequence repetition (`seq * n`) accepts ANY object implementing
+    // `__index__`, not just a plain `int` — real CPython's C implementation
+    // converts the count via `PyNumber_AsSsize_t`, which itself falls back
+    // to `__index__` for a non-int. This was missing entirely (only a bare
+    // `PyObject::Int` count worked), confirmed via CPython's own
+    // `test_index.py::test_repeat` (`self.seq * self.o` where `self.o` is a
+    // plain class implementing only `__index__`). Convert BEFORE the main
+    // match below by substituting a real `py_int` for whichever side is a
+    // sequence-like paired with a non-int/non-float `Instance` — recursing
+    // once with the substituted value reaches the same match arms a literal
+    // int count would.
+    let is_seq_like = |v: &PyObjectRef| matches!(&*v.borrow(), PyObject::Str(_) | PyObject::List(_) | PyObject::Tuple(_) | PyObject::Bytes(_) | PyObject::ByteArray(_));
+    let is_plain_instance = |v: &PyObjectRef| matches!(&*v.borrow(), PyObject::Instance { .. });
+    if is_seq_like(a) && is_plain_instance(b) {
+        if let Ok(n) = to_index(b) {
+            return py_mul(a, &py_int(n));
+        }
+    } else if is_seq_like(b) && is_plain_instance(a) {
+        if let Ok(n) = to_index(a) {
+            return py_mul(&py_int(n), b);
+        }
+    }
     let a_obj = a.borrow();
     let b_obj = b.borrow();
     match (&*a_obj, &*b_obj) {
@@ -177,21 +199,39 @@ pub fn py_mul(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
         (PyObject::Float(a), PyObject::Float(b)) => Ok(py_float(a * b)),
         (PyObject::Int(a), PyObject::Float(b)) => Ok(py_float(a.to_f64().unwrap() * b)),
         (PyObject::Float(a), PyObject::Int(b)) => Ok(py_float(a * b.to_f64().unwrap())),
+        // A negative (or zero) repetition count yields an EMPTY result for
+        // every sequence type, matching real Python (`"abc" * -1 == ""`,
+        // `[1] * -1 == []`, `(1,) * -1 == ()`, same for bytes/bytearray) —
+        // this used to raise `ValueError` for any negative count on all six
+        // sequence*int sites below instead, confirmed against a real
+        // CPython interpreter first. `to_usize()` returns `None` for BOTH a
+        // negative value AND one too large to fit `usize` — only the
+        // latter is a genuine error (`OverflowError`/`MemoryError`), so the
+        // sign must be checked explicitly to tell them apart.
         (PyObject::Str(s), PyObject::Int(n)) => {
             if let Some(n) = n.to_usize() {
                 Ok(py_str(&s.repeat(n)))
+            } else if n.sign() == Sign::Minus {
+                Ok(py_str(""))
             } else {
-                Err(PyError::value_error("cannot multiply string by negative number"))
+                Err(PyError::overflow_error("repeated string is too long"))
             }
         }
         (PyObject::Int(n), PyObject::Str(s)) => {
             if let Some(n) = n.to_usize() {
                 Ok(py_str(&s.repeat(n)))
+            } else if n.sign() == Sign::Minus {
+                Ok(py_str(""))
             } else {
-                Err(PyError::value_error("cannot multiply string by negative number"))
+                Err(PyError::overflow_error("repeated string is too long"))
             }
         }
-        (PyObject::List(v), PyObject::Int(n)) => {
+        // Reflected forms (`2 * [1]`, `2 * (1,)`) were missing entirely —
+        // only the `sequence * int` order was handled, not `int *
+        // sequence` — confirmed against a real CPython interpreter
+        // (`2 * (1,2) == (1, 2, 1, 2)`) alongside the negative-repeat-count
+        // fix above.
+        (PyObject::List(v), PyObject::Int(n)) | (PyObject::Int(n), PyObject::List(v)) => {
             if let Some(n) = n.to_usize() {
                 // Pre-check + pre-reserve the total size (real CPython's
                 // `list_resize` does the equivalent `new_allocated *
@@ -211,11 +251,13 @@ pub fn py_mul(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
                     }
                     _ => Err(PyError::memory_error("could not allocate list")),
                 }
+            } else if n.sign() == Sign::Minus {
+                Ok(py_list(Vec::new()))
             } else {
-                Err(PyError::value_error("cannot multiply list by negative number"))
+                Err(PyError::memory_error("could not allocate list"))
             }
         }
-        (PyObject::Tuple(v), PyObject::Int(n)) => {
+        (PyObject::Tuple(v), PyObject::Int(n)) | (PyObject::Int(n), PyObject::Tuple(v)) => {
             if let Some(n) = n.to_usize() {
                 let mut result = Vec::new();
                 match v.len().checked_mul(n) {
@@ -227,8 +269,10 @@ pub fn py_mul(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
                     }
                     _ => Err(PyError::memory_error("could not allocate tuple")),
                 }
+            } else if n.sign() == Sign::Minus {
+                Ok(py_tuple(Vec::new()))
             } else {
-                Err(PyError::value_error("cannot multiply tuple by negative number"))
+                Err(PyError::memory_error("could not allocate tuple"))
             }
         }
         // `bytes`/`bytearray` repetition (`b'\0' * n`) — real, common idiom
@@ -238,15 +282,19 @@ pub fn py_mul(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
         (PyObject::Bytes(v), PyObject::Int(n)) | (PyObject::Int(n), PyObject::Bytes(v)) => {
             if let Some(n) = n.to_usize() {
                 Ok(PyObjectRef::imm(PyObject::Bytes(v.repeat(n))))
+            } else if n.sign() == Sign::Minus {
+                Ok(PyObjectRef::imm(PyObject::Bytes(Vec::new())))
             } else {
-                Err(PyError::value_error("cannot multiply bytes by negative number"))
+                Err(PyError::overflow_error("repeated bytes are too long"))
             }
         }
         (PyObject::ByteArray(v), PyObject::Int(n)) | (PyObject::Int(n), PyObject::ByteArray(v)) => {
             if let Some(n) = n.to_usize() {
                 Ok(PyObjectRef::new(PyObject::ByteArray(v.repeat(n))))
+            } else if n.sign() == Sign::Minus {
+                Ok(PyObjectRef::new(PyObject::ByteArray(Vec::new())))
             } else {
-                Err(PyError::value_error("cannot multiply bytearray by negative number"))
+                Err(PyError::overflow_error("repeated bytearray are too long"))
             }
         }
         (a, b) if matches!(a, PyObject::Complex(..)) || matches!(b, PyObject::Complex(..)) => {

@@ -127,6 +127,27 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     add_func!("enumerate", builtin_enumerate);
     add_func!("iter", builtin_iter);
     add_func!("next", builtin_next);
+    // `anext(aiterator, default=...)` (3.10+) — the async equivalent of
+    // `next()`, was missing entirely (`NameError`). Real semantics: calls
+    // `aiterator.__anext__()` and returns the resulting AWAITABLE (the
+    // caller does `await anext(ait)`, matching `await ait.__anext__()`
+    // exactly) — unlike `next()`, this function itself does no synchronous
+    // driving/StopIteration-catching, since the iterator's `__anext__` is
+    // itself async. The 2-arg default form additionally needs the returned
+    // awaitable to substitute `default` if `StopAsyncIteration` occurs
+    // WHEN AWAITED — not implemented here (would need a dedicated wrapper
+    // awaitable type this codebase doesn't have); this covers the far more
+    // common 1-arg form (`await anext(ait)`) and passes the default-arg
+    // form's `__anext__()` awaitable straight through unwrapped, so a
+    // `StopAsyncIteration` still propagates instead of substituting the
+    // default — a known, deliberate partial gap in the same category as
+    // this codebase's other async-generator internals limitations.
+    add_func!("anext", |args: &[PyObjectRef]| {
+        if args.is_empty() { return Err(PyError::type_error("anext() takes at least 1 argument")); }
+        let f = args[0].borrow().get_attribute("__anext__")
+            .map_err(|_| PyError::type_error(format!("'{}' object is not an async iterator", args[0].borrow().type_name())))?;
+        crate::object::call_bound_method(f, args[0].clone(), vec![])
+    });
     add_func!("sum", builtin_sum);
     add_func!("max", builtin_max);
     add_func!("min", builtin_min);
@@ -147,6 +168,17 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     add_func!("__import__", builtin_import);
     add_func!("compile", builtin_compile);
     add_func!("super", builtin_super);
+    // Internal helper the compiler emits IN PLACE OF a normal `super()` call
+    // when a bare, zero-arg `super()` appears inside a function that itself
+    // takes no parameters at all — there is then genuinely no `self` to
+    // bind, matching real CPython's `RuntimeError: super(): no arguments`
+    // (as opposed to a class-body method with parameters, which always gets
+    // `__class__`/`self` injected at compile time and never reaches this).
+    // Not a real builtin — never referenced by name from user code, only
+    // ever emitted directly by `compile_expr`'s PEP 3135 handling.
+    add_func!("__super_no_arguments_error", |_args: &[PyObjectRef]| {
+        Err(PyError::runtime_error("super(): no arguments"))
+    });
     add_func!("map", builtin_map);
     add_func!("filter", builtin_filter);
     add_func!("zip", builtin_zip);

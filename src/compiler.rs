@@ -3363,7 +3363,23 @@ impl Compiler {
                     // still bound to its defining name by the time any
                     // instance method actually runs, true for essentially
                     // all real code (`class Foo: ...` always binds "Foo").
-                    if self.scope == ScopeType::Function && !self.code.varnames.is_empty() {
+                    // Checking `varnames` alone used to wrongly treat a
+                    // ZERO-parameter method inside a class body (`class C:
+                    // def f(): super()`) as having a `self` to inject via
+                    // `LOAD_FAST 0`: `varnames` is non-empty there too, but
+                    // only because `__class__` (always added as a cellvar
+                    // for any method in a class body, unconditionally,
+                    // regardless of whether it even uses `super()`) landed
+                    // in slot 0 in the ABSENCE of any real parameter —
+                    // `LOAD_FAST 0` then loaded __CLASS__'s cell instead of
+                    // a real `self`, raising a confusing `UnboundLocalError`
+                    // instead of real CPython's `RuntimeError: super(): no
+                    // arguments` for this exact case. `arg_count` (plus
+                    // vararg, which also supplies a usable first positional)
+                    // is the real signal for "does this function have an
+                    // actual first parameter to bind".
+                    let has_first_param = self.code.arg_count > 0 || self.code.vararg_name.is_some();
+                    if self.scope == ScopeType::Function && has_first_param {
                         if let Some(class_name) = self.class_name_stack.last().cloned() {
                             self.compile_expr(func)?;
                             let class_name_idx = self.get_name_index(&class_name) as u32;
@@ -3382,7 +3398,19 @@ impl Compiler {
                             extra_pos = 2;
                         }
                     } else {
-                        self.compile_expr(func)?;
+                        // The enclosing function takes NO parameters at all
+                        // (`self.code.varnames.is_empty()`) — there is
+                        // genuinely no `self` to bind a bare `super()` to,
+                        // matching real CPython's `RuntimeError: super():
+                        // no arguments` (found via CPython's own
+                        // `test_super.py::test_obscure_super_errors`).
+                        // Emitting the ordinary `super` global here would
+                        // instead hit the generic, wrong `TypeError:
+                        // super() requires 2 arguments` once called with
+                        // zero args — call a dedicated internal helper that
+                        // raises the correct error/type directly instead.
+                        let name_idx = self.get_name_index("__super_no_arguments_error") as u32;
+                        self.emit(Opcode::LOAD_GLOBAL, name_idx);
                     }
                 } else {
                     self.compile_expr(func)?;

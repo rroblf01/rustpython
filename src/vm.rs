@@ -3523,6 +3523,60 @@ impl VirtualMachine {
                 let result = {
                     let obj_borrowed = obj.borrow();
                     match &*obj_borrowed {
+                        // `it.__next__()`/`it.__iter__()` on any of this
+                        // codebase's iterator shapes: `attrs.rs`'s
+                        // `get_attribute_impl` (called from `&PyObject`,
+                        // with no access to the enclosing `PyObjectRef`)
+                        // can only bind a FRESH CLONE of the iterator as
+                        // `self_obj` — for a stateful iterator (advancing
+                        // via a mutable `index` field), that silently
+                        // disconnects the returned method from the real
+                        // object: every call to `it.__next__()` re-read the
+                        // SAME starting state instead of advancing
+                        // (confirmed via direct repro: three successive
+                        // `it.__next__()` calls all returned the first
+                        // element). Handled here instead, where the real
+                        // `obj` `PyObjectRef` is available to bind directly
+                        // — same fix shape as `GET_AWAITABLE`'s own
+                        // `self_obj`-rebind elsewhere in this file, for the
+                        // identical underlying limitation.
+                        PyObject::ListIter { .. } | PyObject::RangeIter { .. } | PyObject::MapIterator { .. }
+                        | PyObject::FilterIterator { .. } | PyObject::ZipIterator { .. } | PyObject::CycleIter { .. }
+                        | PyObject::GroupByIter { .. } | PyObject::EnumerateIter { .. } | PyObject::GetItemIter { .. }
+                        | PyObject::CallSentinelIter { .. } if name == "__next__" || name == "__iter__" => {
+                            let func: crate::object::BuiltinFunc = if name == "__next__" {
+                                crate::object::builtin_next
+                            } else {
+                                crate::object::builtin_iter
+                            };
+                            Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                                name: name.clone(),
+                                func,
+                                self_obj: obj.clone(),
+                            }))
+                        }
+                        // `range_iterator`/`list_iterator.__setstate__(state)`
+                        // (real CPython's pickle-restore protocol, also
+                        // directly usable) — needs the same real-`self_obj`
+                        // treatment as `__next__`/`__iter__` just above,
+                        // since it MUTATES the iterator's position in place
+                        // (a disconnected clone would silently do nothing).
+                        // Found via CPython's own `test_range.py::
+                        // test_iterator_setstate`.
+                        PyObject::RangeIter { .. } if name == "__setstate__" => {
+                            Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                                name: name.clone(),
+                                func: crate::object::range_iter_setstate,
+                                self_obj: obj.clone(),
+                            }))
+                        }
+                        PyObject::ListIter { .. } if name == "__setstate__" => {
+                            Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                                name: name.clone(),
+                                func: crate::object::list_iter_setstate,
+                                self_obj: obj.clone(),
+                            }))
+                        }
                         PyObject::Super { cls: _, obj: _super_obj } => {
                             // super(cls, obj).attr: walk MRO of obj's type, starting after cls
                             drop(obj_borrowed);
@@ -4487,9 +4541,15 @@ impl VirtualMachine {
                     }
                 };
                 if items.len() != count {
-                    return Err(PyError::value_error(format!(
-                        "cannot unpack {} items into {} values", items.len(), count
-                    )));
+                    // Match real CPython's exact wording (confirmed against
+                    // a real interpreter) — the previous generic "cannot
+                    // unpack N items into M values" message matched neither
+                    // phrasing CPython actually uses.
+                    return Err(PyError::value_error(if items.len() < count {
+                        format!("not enough values to unpack (expected {}, got {})", count, items.len())
+                    } else {
+                        format!("too many values to unpack (expected {})", count)
+                    }));
                 }
                 for item in items.into_iter().rev() {
                     self.frames[fi].push(item);
@@ -4528,10 +4588,16 @@ impl VirtualMachine {
                     }
                 };
                 if items.len() < before + after {
+                    // Matches real CPython's wording for starred unpacking
+                    // (`a, *b, c = seq`) — "at least" since a starred target
+                    // can absorb any number of extra items above the
+                    // minimum (`before + after`), unlike plain
+                    // `UNPACK_SEQUENCE`'s exact-count requirement.
                     return Err(PyError::value_error(format!(
-                        "cannot unpack {} items into {} values", items.len(), total
+                        "not enough values to unpack (expected at least {}, got {})", before + after, items.len()
                     )));
                 }
+                let _ = total;
                 let n = items.len();
                 // Push order (bottom of stack = first to be stored):
                 //   before items, star list, after items
@@ -5428,6 +5494,31 @@ impl VirtualMachine {
                 let obj = self.frames[fi].pop()?;
                 let await_method = obj.borrow().get_attribute("__await__")
                     .map_err(|_| PyError::type_error("object does not support __await__"))?;
+                // `get_attribute` on a `Coroutine`/`Generator` returns
+                // `__await__` as a `BuiltinMethod` with a `None` PLACEHOLDER
+                // `self_obj` (it has no access to the enclosing `PyObjectRef`
+                // from inside `impl PyObject`'s `&self`-only method) — its
+                // closure body (`|args| Ok(args[0].clone())`, i.e. "return
+                // self") then returned that placeholder `None` instead of
+                // the real coroutine, so EVERY `await some_async_fn()` where
+                // `some_async_fn` itself awaits something else (i.e. any
+                // nested async call — confirmed via the simplest possible
+                // repro, `async def foo(): return 1` / `async def main():
+                // return await foo()`) pushed `None` as the "awaitable
+                // iterator" instead of the coroutine, which the immediately
+                // following `SEND` then rejected with `TypeError: SEND on
+                // non-generator/coroutine/instance` — a fundamental,
+                // previously-undetected break in the single most common
+                // async/await pattern there is. Rebind `self_obj` to the
+                // REAL object here before calling, exactly like the `SEND`
+                // opcode handler already does for `send`/`throw` just below
+                // (the established fix for this exact class of gap).
+                let await_method = match &*await_method.borrow() {
+                    PyObject::BuiltinMethod { name, func, .. } => {
+                        PyObjectRef::imm(PyObject::BuiltinMethod { name: name.clone(), func: *func, self_obj: obj.clone() })
+                    }
+                    _ => await_method.clone(),
+                };
                 let result = self.call_function(await_method, vec![], vec![])?;
                 self.frames[fi].push(result);
             }

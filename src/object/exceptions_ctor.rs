@@ -424,6 +424,16 @@ pub struct ThreadInner {
     pub result: std::sync::Arc<std::sync::Mutex<Option<PyObjectRef>>>,
     pub target: PyObjectRef,
     pub args: Vec<PyObjectRef>,
+    // `handle` is NEVER actually populated (see `start()`'s own comment:
+    // `PyObjectRef` is `!Send`, so the "thread" runs synchronously in-place
+    // rather than spawning a real OS thread) — `join()` used to check
+    // `handle.is_some()` to decide whether `start()` had been called at
+    // all, which was ALWAYS false, so `t.start(); t.join()` (an extremely
+    // common, correct usage) always raised `RuntimeError: thread not
+    // started` even though `start()` legitimately ran (synchronously) to
+    // completion. This separate flag tracks "was `start()` called" —
+    // independent of whether a real join handle exists.
+    pub started: bool,
 }
 
 #[derive(Clone)]

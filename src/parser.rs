@@ -2718,7 +2718,23 @@ impl Parser {
                     break;
                 }
                 Token::LeftBrace => {
-                    unreachable!("fstring: should not see {{");
+                    // Real, separate, deep edge case found while fixing the
+                    // f-string-expression-comment tokenizing bug above (not
+                    // fixed here): a raw f-string mixing a backslash with a
+                    // DOUBLED brace escape immediately followed by a real
+                    // expression (`fr'\{{{1+1}'`, deprecated syntax being
+                    // phased out of real CPython too) can desync
+                    // `tokenize_fstring`'s literal-vs-expression brace
+                    // handling, producing a stray `LeftBrace` token here
+                    // instead of a real error. This used to be an
+                    // `unreachable!()` panic — a hard process abort instead
+                    // of a catchable parse failure — for what is, after
+                    // all, just malformed/unsupported input. Return a
+                    // proper parse error instead so this adversarial,
+                    // deprecated-syntax edge case degrades to "this file
+                    // doesn't parse" (the pre-existing, already-accounted-
+                    // for outcome) rather than crashing the whole process.
+                    return Err("f-string: unexpected '{' (malformed brace escape)".to_string());
                 }
                 _ => {
                     if self.at(&Token::EndOfFile) {

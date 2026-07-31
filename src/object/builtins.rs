@@ -938,11 +938,19 @@ pub fn builtin_list(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             PyObject::Set(s) => Ok(py_list(s.to_vec())),
             _ => {
                 drop(obj);
-                // Try general iteration protocol via iter() + next()
-                let it = match builtin_iter(&[args[0].clone()]) {
-                    Ok(it) => it,
-                    Err(_) => return Err(PyError::type_error(format!("cannot convert '{}' object to list", args[0].borrow().type_name()))),
-                };
+                // Try general iteration protocol via iter() + next() — any
+                // error from `builtin_iter` must propagate AS-IS, not get
+                // replaced with a generic "cannot convert" TypeError: an
+                // object WITH `__iter__` whose call raises some OTHER
+                // exception (real trigger: CPython's own `list_tests.py`'s
+                // `test_constructor_exception_handling`, `class F: def
+                // __iter__(self): raise KeyboardInterrupt`) had that
+                // exception silently swallowed and replaced. `builtin_iter`
+                // already produces the correct, more accurate message for
+                // the genuinely-not-iterable case too (`'int' object is not
+                // iterable`, matching real CPython exactly) — the previous
+                // generic message here was actually a REGRESSION from that.
+                let it = builtin_iter(&[args[0].clone()])?;
                 let mut collected = Vec::new();
                 if let Some(hint) = iterable_length_hint(&args[0]) {
                     if collected.try_reserve_exact(hint).is_err() {
@@ -1172,10 +1180,11 @@ pub fn builtin_bytes(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             }
             _ => {
                 drop(obj);
-                let it = match builtin_iter(&[args[0].clone()]) {
-                    Ok(it) => it,
-                    Err(_) => return Err(PyError::type_error(format!("cannot convert '{}' to bytes", args[0].borrow().type_name()))),
-                };
+                // Same fix as `builtin_list`'s matching site: propagate
+                // `builtin_iter`'s error as-is rather than replacing it with
+                // a generic message (swallowing a real exception raised
+                // from inside a custom `__iter__`).
+                let it = builtin_iter(&[args[0].clone()])?;
                 let mut result = Vec::new();
                 loop {
                     let item = match builtin_next(&[it.clone()]) {
@@ -1511,7 +1520,15 @@ pub fn builtin_round(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             _ => return Err(PyError::type_error("round() arg must be numeric")),
         }
     };
-    if args.len() == 2 {
+    // `round(x, None)` — an EXPLICIT `None` for `ndigits` (as opposed to
+    // simply omitting the argument) must behave exactly like the 1-arg
+    // form, per real Python's `round(number, ndigits=None)` signature — NOT
+    // raise `TypeError: ndigits must be int` (confirmed via CPython's own
+    // `test_float.py::test_round_with_none_arg_direct_call`, which checks
+    // `round(1.0, None)`/`(1.0).__round__(None)` return the same `int` as
+    // plain `round(1.0)`).
+    let has_real_ndigits = args.len() == 2 && !matches!(&*args[1].borrow(), PyObject::None);
+    if has_real_ndigits {
         let n = args[1].as_i64().ok_or_else(|| PyError::type_error("ndigits must be int"))? as i32;
         Ok(py_float((val * 10_f64.powi(n)).round() / 10_f64.powi(n)))
     } else {
@@ -2088,6 +2105,44 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         // CPython's own `test_iter.py::test_countOf`).
         other => Err(PyError::type_error(format!("'{}' object is not iterable", other.type_name()))),
     }
+}
+
+/// `range_iterator.__setstate__(state)` — real CPython's pickle protocol
+/// uses this to restore a saved iteration position (`state` = number of
+/// items already consumed). Since `RangeIter.current` already tracks the
+/// LIVE position (not the original start), this only produces the exactly
+/// correct absolute position when called on a freshly-created iterator (the
+/// only realistic real-world use — restoring right after `__reduce__`/
+/// unpickling, before any `next()` calls) — advancing `current` by
+/// `state * step` from wherever it currently sits. Found via CPython's own
+/// `test_range.py::test_iterator_setstate`.
+pub fn range_iter_setstate(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() < 2 { return Err(PyError::type_error("__setstate__() takes exactly one argument")); }
+    let state = to_index(&args[1]).map_err(|_| PyError::type_error(format!(
+        "an integer is required (got type {})", args[1].borrow().type_name())))?;
+    let mut obj = args[0].borrow_mut();
+    if let PyObject::RangeIter { current, step, .. } = &mut *obj {
+        let delta = state * BigInt::from(*step);
+        *current = current.checked_add(delta.to_i64().unwrap_or(if delta.sign() == Sign::Minus { i64::MIN } else { i64::MAX }))
+            .unwrap_or(*current);
+    }
+    Ok(py_none())
+}
+
+/// `list_iterator.__setstate__(state)` — same protocol as `range_iterator`'s
+/// above, but simpler: `ListIter.index` already IS the absolute position, so
+/// this just sets it directly (clamped to the list's length, matching real
+/// CPython's own clamping behavior for an out-of-range state).
+pub fn list_iter_setstate(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() < 2 { return Err(PyError::type_error("__setstate__() takes exactly one argument")); }
+    let state = to_index(&args[1]).map_err(|_| PyError::type_error(format!(
+        "an integer is required (got type {})", args[1].borrow().type_name())))?;
+    let mut obj = args[0].borrow_mut();
+    if let PyObject::ListIter { list, index } = &mut *obj {
+        let n = state.to_usize().unwrap_or(0).min(list.len());
+        *index = n;
+    }
+    Ok(py_none())
 }
 
 pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {

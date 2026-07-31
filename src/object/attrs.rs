@@ -344,7 +344,7 @@ impl PyObject {
                     }
                 }
                 // Fallback: for dict-derived types, provide common dict methods
-                if name == "__iter__" || name == "items" || name == "keys" || name == "values"
+                if name == "__iter__" || name == "items" || name == "keys" || name == "values" || name == "get"
                 {
                     static DICT_METHODS: std::sync::OnceLock<std::collections::HashMap<String, BuiltinFunc>> = std::sync::OnceLock::new();
                     let methods = DICT_METHODS.get_or_init(|| {
@@ -353,14 +353,29 @@ impl PyObject {
                         m.insert("items".to_string(), dict_method_items as BuiltinFunc);
                         m.insert("keys".to_string(), dict_method_keys as BuiltinFunc);
                         m.insert("values".to_string(), dict_method_values as BuiltinFunc);
+                        m.insert("get".to_string(), dict_method_get as BuiltinFunc);
                         m
                     });
                     if let Some(func) = methods.get(name) {
                         let func = *func;
-                        return Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                        // A plain `BuiltinFunction`, NOT `BuiltinMethod` — this
+                        // is reached via `dict.keys` (attribute access on the
+                        // TYPE itself, for the unbound-call idiom `dict.keys
+                        // (self)` a dict subclass uses to invoke the parent's
+                        // real implementation) rather than `some_dict.keys()`
+                        // (bound instance access, handled elsewhere). A
+                        // `BuiltinMethod`'s calling convention prepends its
+                        // OWN `self_obj` ahead of whatever args the caller
+                        // passes — with a `py_none()` placeholder here, that
+                        // shifted every real argument by one (`dict.keys(d)`
+                        // called `dict_method_keys(&[None, d])`, so `args[0]`
+                        // was never `d` at all) — confirmed via direct repro
+                        // (`dict.keys({'a': 1})` unconditionally failed).
+                        // `BuiltinFunction`'s plain pass-through convention is
+                        // what an unbound-style call actually needs.
+                        return Ok(PyObjectRef::new(PyObject::BuiltinFunction {
                             name: name.to_string(),
                             func,
-                            self_obj: py_none(),
                         }));
                     }
                 }
@@ -4057,15 +4072,17 @@ impl PyObject {
                         func: |args| {
                             let obj = args[0].borrow();
                             if let PyObject::Thread(inner_arc) = &*obj {
-                                let locked = inner_arc.lock().unwrap();
-                                if locked.handle.is_some() {
-                                    return Err(PyError::runtime_error("thread already started"));
+                                let mut locked = inner_arc.lock().unwrap();
+                                if locked.started {
+                                    return Err(PyError::runtime_error("threads can only be started once"));
                                 }
+                                locked.started = true;
                                 let target = locked.target.clone();
                                 let thread_args = locked.args.clone();
                                 // Don't create a real thread (PyObjectRef is !Send)
                                 // Thread runs synchronously instead
                                 let result = locked.result.clone();
+                                drop(locked);
                                 let call_result = crate::object::builtin_call(&target, &thread_args);
                                 match call_result {
                                     Ok(val) => {
@@ -4090,8 +4107,19 @@ impl PyObject {
                                     handle.join().map_err(|_| PyError::runtime_error("thread panicked"))?;
                                     return Ok(locked.result.lock().unwrap().clone().unwrap_or_else(|| py_none()));
                                 }
+                                // No real `handle` (the common case — see
+                                // `ThreadInner::started`'s own doc comment):
+                                // `start()` already ran the target
+                                // synchronously to completion by the time it
+                                // returned, so `join()` on a `started`
+                                // thread just returns its already-available
+                                // result immediately instead of incorrectly
+                                // erroring.
+                                if locked.started {
+                                    return Ok(locked.result.lock().unwrap().clone().unwrap_or_else(|| py_none()));
+                                }
                             }
-                            Err(PyError::runtime_error("thread not started"))
+                            Err(PyError::runtime_error("cannot join thread before it is started"))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -4448,6 +4476,16 @@ impl PyObject {
                         },
                         self_obj: PyObjectRef::imm(PyObject::Int(_i.clone())),
                     })),
+                    // `int.__round__()`/`float.__round__()` — `round()` the
+                    // builtin already works, but wasn't accessible as a
+                    // named dunder (real trigger: CPython's own
+                    // `test_int.py`/`test_float.py`, both directly calling
+                    // `x.__round__(...)`).
+                    "__round__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__round__".to_string(),
+                        func: |args| builtin_round(args),
+                        self_obj: PyObjectRef::imm(PyObject::Int(_i.clone())),
+                    })),
                     "to_bytes" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "to_bytes".to_string(),
                         func: |args| {
@@ -4552,6 +4590,11 @@ impl PyObject {
                                 Ok(py_float(*v))
                             } else { Err(PyError::runtime_error("conjugate on non-float")) }
                         },
+                        self_obj: PyObjectRef::imm(PyObject::Float(*_f)),
+                    })),
+                    "__round__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__round__".to_string(),
+                        func: |args| builtin_round(args),
                         self_obj: PyObjectRef::imm(PyObject::Float(*_f)),
                     })),
                     "__int__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
@@ -5787,8 +5830,40 @@ impl PyObject {
                         let remaining = if *step > 0 { stop.saturating_sub(*current).max(0) as i64 } else { current.saturating_sub(*stop).max(0) as i64 };
                         Ok(py_int(remaining / step.abs() as i64))
                     }
+                    // Same `__next__`/`__iter__`-not-a-named-attribute gap
+                    // as every other iterator shape (see the shared
+                    // fallback arm below) — `RangeIter` needed its own case
+                    // since it already has a dedicated match arm here (for
+                    // `__length_hint__`) that would otherwise shadow the
+                    // shared one.
+                    "__next__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__next__".to_string(), func: builtin_next, self_obj: PyObjectRef::new(self.clone()),
+                    })),
+                    "__iter__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__iter__".to_string(), func: builtin_iter, self_obj: PyObjectRef::new(self.clone()),
+                    })),
                     _ => Err(PyError::attribute_error(format!("'range_iterator' object has no attribute '{}'", name))),
                 }
+            }
+            // `it.__next__()`/`it.__iter__()` as NAMED attributes were
+            // missing entirely for every one of this codebase's iterator
+            // shapes (confirmed: `iter([1]).__next__()` raised
+            // `AttributeError` despite `next(it)` — the builtin FUNCTION
+            // form, which already correctly dispatches on each of these
+            // same variants — working fine). Real trigger: CPython's own
+            // `test_tokenize.py`, which calls `.__next__()` directly on a
+            // `list_iterator`. Delegates to the already-correct
+            // `builtin_next`/`builtin_iter` implementations rather than
+            // duplicating their per-variant logic.
+            PyObject::ListIter { .. } | PyObject::MapIterator { .. }
+            | PyObject::FilterIterator { .. } | PyObject::ZipIterator { .. } | PyObject::CycleIter { .. }
+            | PyObject::GroupByIter { .. } | PyObject::EnumerateIter { .. } | PyObject::GetItemIter { .. }
+            | PyObject::CallSentinelIter { .. } if name == "__next__" || name == "__iter__" => {
+                Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                    name: name.to_string(),
+                    func: if name == "__next__" { builtin_next } else { builtin_iter },
+                    self_obj: PyObjectRef::new(self.clone()),
+                }))
             }
             _ => Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", self.type_name(), name))),
         }

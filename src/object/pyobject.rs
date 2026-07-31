@@ -764,7 +764,7 @@ impl PyObject {
             | PyObject::EnumerateIter { .. } | PyObject::GetItemIter { .. } | PyObject::CallSentinelIter { .. }
             | PyObject::ListIter { .. } | PyObject::RangeIter { .. } | PyObject::MapIterator { .. }
             | PyObject::FilterIterator { .. } | PyObject::ZipIterator { .. } | PyObject::CycleIter { .. }
-            | PyObject::GroupByIter { .. } => {
+            | PyObject::GroupByIter { .. } | PyObject::Socket { .. } => {
                 Ok(self as *const PyObject as usize)
             }
             // A READ-ONLY `memoryview` (over `bytes`) IS hashable in real
@@ -776,7 +776,13 @@ impl PyObject {
             // readonly-ness. Found via CPython's own `test_hash.py`.
             PyObject::MemoryView { readonly, .. } => {
                 if !readonly {
-                    return Err(PyError::type_error("unhashable type: 'memoryview'"));
+                    // Real CPython raises `ValueError` here, NOT `TypeError`
+                    // — a writable memoryview isn't "unhashable" in the
+                    // usual sense (real CPython's own message: "cannot hash
+                    // writable memoryview object"), it's specifically
+                    // disallowed because a live view over mutable memory
+                    // would violate hash-stability if the buffer changed.
+                    return Err(PyError::value_error("cannot hash writable memoryview object"));
                 }
                 let self_ref = PyObjectRef::new(self.clone());
                 let bytes = mv_tobytes(&self_ref)?;

@@ -805,17 +805,44 @@ pub fn create_threading_dict() -> HashMap<String, PyObjectRef> {
     }
 
     thr_func!("Thread", |args| {
-        let target = if args.len() > 0 { args[0].clone() } else { py_none() };
-        let thread_args = if args.len() > 1 {
-            if let PyObject::Tuple(items) = &*args[1].borrow() {
-                items.clone()
-            } else { vec![] }
-        } else { vec![] };
+        // Real `threading.Thread.__init__(self, group=None, target=None,
+        // name=None, args=(), kwargs=None, *, daemon=None)` is overwhelmingly
+        // called with `target`/`args` as KEYWORD arguments in real code
+        // (`Thread(target=f, args=(1, 2))`) — this used to treat `args[0]`/
+        // `args[1]` as ALWAYS being the positional `target`/`args`, so any
+        // keyword-argument call packed its kwargs into a trailing `Dict`
+        // (this project's own established calling convention) that got
+        // mistaken for the target itself, then failing to CALL it with
+        // `TypeError: 'dict' object is not callable` the moment the thread
+        // actually ran — i.e. `threading.Thread` was completely broken for
+        // the single most common way real code constructs one. Now checks
+        // for a trailing kwargs dict first and pulls `target`/`args` out of
+        // it if present, falling back to positional args only for whichever
+        // of the two a kwarg didn't already supply.
+        let (positional, kwargs) = match args.last() {
+            Some(last) if matches!(&*last.borrow(), PyObject::Dict(_)) => (&args[..args.len() - 1], Some(last.clone())),
+            _ => (args, None),
+        };
+        let kwarg = |name: &str| -> Option<PyObjectRef> {
+            kwargs.as_ref().and_then(|d| if let PyObject::Dict(d) = &*d.borrow() { d.get(&py_str(name)).ok().flatten() } else { None })
+        };
+        let target = kwarg("target")
+            .or_else(|| positional.get(1).cloned())
+            .unwrap_or_else(py_none);
+        let args_tuple = kwarg("args").or_else(|| positional.get(3).cloned());
+        let thread_args = match args_tuple {
+            Some(t) => match &*t.borrow() {
+                PyObject::Tuple(items) => items.clone(),
+                _ => vec![],
+            },
+            None => vec![],
+        };
         let inner = std::sync::Arc::new(std::sync::Mutex::new(ThreadInner {
             handle: None,
             result: std::sync::Arc::new(std::sync::Mutex::new(None)),
             target,
             args: thread_args,
+            started: false,
         }));
         Ok(PyObjectRef::new(PyObject::Thread(inner)))
     });
