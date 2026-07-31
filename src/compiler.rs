@@ -710,7 +710,7 @@ impl Compiler {
         global_names: &HashSet<String>,
         nonlocal_names: &HashSet<String>,
         enclosing_names: Option<&HashSet<String>>,
-    ) -> (Vec<String>, Vec<String>) {
+    ) -> (Vec<String>, Vec<String>, HashSet<String>) {
         // Find nonlocal declarations within this function's body
         let (body_globals, body_nonlocals) = Self::scan_global_nonlocal_decls(body);
         let mut effective_global = global_names.clone();
@@ -819,7 +819,7 @@ impl Compiler {
         }
         free_vars.sort();
 
-        (cell_vars, free_vars)
+        (cell_vars, free_vars, local_names)
     }
 
     /// Recursively find names referenced in nested function bodies that are NOT
@@ -1520,17 +1520,35 @@ impl Compiler {
                             let attr_idx = self.get_name_index(component) as u32;
                             self.emit(Opcode::LOAD_ATTR, attr_idx);
                         }
-                        let store_idx = self.get_name_index(asname) as u32;
-                        self.emit(Opcode::STORE_NAME, store_idx);
+                        // `import a.b.c as x`/plain `import time` bind a
+                        // LOCAL name when compiled inside function scope
+                        // (same static-scoping rule as any other assignment)
+                        // — this used to hardcode `STORE_NAME` unconditionally,
+                        // which happened to work by accident only because the
+                        // imported name was never pre-registered in
+                        // `varnames`, so `Expr::Name`'s LOAD side fell back to
+                        // `LOAD_GLOBAL` (which can read whatever `STORE_NAME`
+                        // wrote into the frame's globals-adjacent storage).
+                        // Once `varnames` is correctly pre-populated with
+                        // every name the function assigns anywhere in its own
+                        // body (see `compile_function`'s upfront
+                        // `local_names` pass), a name imported inside a
+                        // function is now looked up via `LOAD_FAST` — so the
+                        // store side must follow the identical scope-aware
+                        // rule, via the same helper `Expr::Name` assignment
+                        // uses, or the value never reaches `fast_locals` at
+                        // all (`UnboundLocalError`, confirmed via
+                        // `Lib/random.py`'s own `def seed(self, ...): import
+                        // time; ... time.time()`).
+                        self.compile_assign_target(&Expr::Name(asname.clone()))?;
                     } else {
                         let dot_pos = alias.name.find('.');
-                        if let Some(pos) = dot_pos {
-                            let first_name = &alias.name[..pos];
-                            let name_idx = self.get_name_index(first_name) as u32;
-                            self.emit(Opcode::STORE_NAME, name_idx);
+                        let bound_name = if let Some(pos) = dot_pos {
+                            alias.name[..pos].to_string()
                         } else {
-                            self.emit(Opcode::STORE_NAME, name_idx);
-                        }
+                            alias.name.clone()
+                        };
+                        self.compile_assign_target(&Expr::Name(bound_name))?;
                     }
                 }
             }
@@ -1553,13 +1571,10 @@ impl Compiler {
                 for alias in names {
                     let import_name_idx = self.get_name_index(&alias.name) as u32;
                     self.emit(Opcode::IMPORT_FROM, import_name_idx);
-                    if let Some(asname) = &alias.asname {
-                        let store_idx = self.get_name_index(asname) as u32;
-                        self.emit(Opcode::STORE_NAME, store_idx);
-                    } else {
-                        let store_idx = self.get_name_index(&alias.name) as u32;
-                        self.emit(Opcode::STORE_NAME, store_idx);
-                    }
+                    // Same scope-aware store as plain `Stmt::Import` above —
+                    // `from x import y` inside a function binds a LOCAL `y`.
+                    let bound_name = alias.asname.clone().unwrap_or_else(|| alias.name.clone());
+                    self.compile_assign_target(&Expr::Name(bound_name))?;
                 }
                 // Pop the module reference left on stack after IMPORT_FROM loop
                 self.emit(Opcode::POP_TOP, 0);
@@ -2778,7 +2793,7 @@ impl Compiler {
         // treated as free vars, while methods nested inside a class body
         // can still see past it to the function that encloses the class.
         let enclosing_varnames = self.compute_enclosing_names();
-        let (cell_vars, free_vars) =
+        let (cell_vars, free_vars, local_names) =
             Self::analyze_function(args, body, &self.global_names, &self.nonlocal_names, Some(&enclosing_varnames));
         self.code.cellvars = Box::new(cell_vars);
         self.code.freevars = Box::new(free_vars);
@@ -2852,6 +2867,31 @@ impl Compiler {
         for cell_var in self.code.cellvars.clone().into_iter() {
             if self.get_var_index(&cell_var).is_none() {
                 self.add_varname(&cell_var);
+            }
+        }
+
+        // Pre-populate varnames with EVERY name this function assigns
+        // anywhere in its own body (`local_names`, from the same upfront
+        // `analyze_function` pass used for cell/free vars) — not just args
+        // and cellvars. Without this, `Expr::Name`'s LOAD emission (which
+        // decides LOAD_FAST vs LOAD_GLOBAL by checking whether `name` is
+        // ALREADY in `self.code.varnames` at the point that particular
+        // reference compiles) only saw whatever an incremental top-to-bottom
+        // STORE_FAST pass had added SO FAR — a name referenced textually
+        // BEFORE its first assignment in the same function scope (`def f():
+        // print(x); x = 1`) wasn't in varnames yet, so it silently compiled
+        // to LOAD_GLOBAL instead of LOAD_FAST. That's wrong two ways at
+        // once: it can silently read an unrelated same-named GLOBAL instead
+        // of correctly failing, and even when no such global exists it
+        // raised plain `NameError` instead of `UnboundLocalError` (found via
+        // CPython's own `test_scope.py::testUnboundLocal`, which explicitly
+        // asserts `UnboundLocalError` for exactly this shape). Real Python's
+        // static scoping rule is whole-function, not incremental: ANY
+        // assignment anywhere in the function body makes that name local
+        // for the ENTIRE body, including uses before the first assignment.
+        for local_name in &local_names {
+            if self.get_var_index(local_name).is_none() {
+                self.add_varname(local_name);
             }
         }
 
@@ -3047,7 +3087,7 @@ impl Compiler {
         // locals — so this class body's code object needs those relayed
         // through as free variables, exactly like a nested function would.
         let enclosing_varnames = self.compute_enclosing_names();
-        let (_ignored_cellvars, free_vars) = Self::analyze_function(
+        let (_ignored_cellvars, free_vars, _ignored_locals) = Self::analyze_function(
             &[],
             body,
             &self.global_names,

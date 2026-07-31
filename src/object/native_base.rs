@@ -88,7 +88,7 @@ pub(crate) fn is_recognized_native_base_name(name: &str) -> bool {
 pub(crate) fn is_builtin_exception_class_name(name: &str) -> bool {
     matches!(name,
         "BaseException" | "Exception" | "TypeError" | "ValueError" |
-        "ZeroDivisionError" | "NameError" | "AttributeError" | "IndexError" |
+        "ZeroDivisionError" | "NameError" | "UnboundLocalError" | "AttributeError" | "IndexError" |
         "KeyError" | "RuntimeError" | "StopIteration" | "AssertionError" |
         "OSError" | "ImportError" | "LookupError" | "ArithmeticError" |
         "FloatingPointError" | "OverflowError" | "EnvironmentError" | "IOError" |

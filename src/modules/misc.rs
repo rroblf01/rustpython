@@ -1005,6 +1005,75 @@ pub fn create_copy_dict() -> HashMap<String, PyObjectRef> {
         }
     });
 
+    // `copy.replace(obj, /, **changes)` (Python 3.13+) — was missing
+    // entirely. Real CPython dispatches to `type(obj).__replace__(obj,
+    // **changes)`, which no type in this codebase actually defines yet —
+    // rather than adding the full generic `__replace__` protocol (a much
+    // bigger, separate effort), this covers the two shapes real code
+    // actually uses: a namedtuple's own `_replace` method (already
+    // implemented, see this session's namedtuple work), and the general
+    // `type(obj)(**{**vars(obj), **changes})` pattern that's exactly how
+    // `types.SimpleNamespace.__replace__` and dataclasses' generated
+    // `__replace__` are themselves defined in real CPython — so this
+    // produces the SAME result for any plain-attribute-holding instance,
+    // just without a real `__replace__` slot to dispatch through.
+    copy_func!("replace", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("replace() missing required argument: 'obj'"));
+        }
+        let obj = args[0].clone();
+        let changes: Vec<(PyObjectRef, PyObjectRef)> = if args.len() > 1 {
+            match &*args[1].borrow() {
+                PyObject::Dict(d) => d.items(),
+                _ => vec![],
+            }
+        } else {
+            vec![]
+        };
+        let changes_kv: Vec<(String, PyObjectRef)> = changes.iter().map(|(k, v)| (k.str(), v.clone())).collect();
+
+        // A namedtuple instance's own dict already holds `_fields` alongside
+        // its field values (see `nt_replace`'s own construction), so the
+        // generic Instance-merge path below reconstructs a namedtuple
+        // correctly too — no need for a separate `_replace`-dispatch branch.
+        let instance_parts: Option<(PyObjectRef, Vec<(String, PyObjectRef)>)> = match &*obj.borrow() {
+            PyObject::Instance { typ, dict } => {
+                Some((typ.clone(), dict.iter().map(|(k, v)| (k.to_string(), v.clone())).collect()))
+            }
+            _ => None,
+        };
+        match instance_parts {
+            // Build the replacement instance DIRECTLY (same `typ`, a fresh
+            // dict merging the original's attributes with `changes`) rather
+            // than round-tripping through `type(obj)(**kwargs)` — several
+            // native "instance-shaped" types (`types.SimpleNamespace`
+            // foremost) are constructed via a dedicated `BuiltinFunction` in
+            // their owning module, NOT via their `Instance.typ` field (an
+            // ad-hoc `Type` with empty `bases`/`mro`, used for `isinstance`/
+            // repr only) — calling THAT `Type` as if it were the real
+            // constructor silently built an empty instance, dropping every
+            // attribute. Direct construction sidesteps that mismatch
+            // entirely and matches what `SimpleNamespace.__replace__` and a
+            // plain dataclass without `__post_init__` validation logic
+            // actually do semantically anyway (new instance, replaced
+            // attributes, no side effects).
+            Some((cls, mut new_dict)) => {
+                for (k, v) in &changes_kv {
+                    match new_dict.iter_mut().find(|(existing, _)| existing == k) {
+                        Some(entry) => entry.1 = v.clone(),
+                        None => new_dict.push((k.clone(), v.clone())),
+                    }
+                }
+                let mut attrs = crate::object::AttrMap::new();
+                for (k, v) in new_dict {
+                    attrs.insert(k, v);
+                }
+                Ok(PyObjectRef::new(PyObject::Instance { typ: cls, dict: attrs }))
+            }
+            None => Err(PyError::type_error(format!("replace() does not support {} objects", obj.borrow().type_name()))),
+        }
+    });
+
     copy_func!("deepcopy", |args| {
         if args.is_empty() {
             return Err(PyError::type_error("deepcopy() missing required argument"));
@@ -1278,6 +1347,114 @@ fn get_simple_namespace_type() -> PyObjectRef {
     typ
 }
 
+thread_local! {
+    static UNION_TYPE: std::cell::RefCell<Option<PyObjectRef>> = std::cell::RefCell::new(None);
+}
+
+/// `__args__` of a `types.UnionType` instance (`int | str`), if `obj` is one
+/// — checked by the ad-hoc type's own NAME (`"types.UnionType"`, unique to
+/// this constructor) rather than object identity, avoiding a recursive
+/// `get_union_type()` call from inside `make_union`'s own flattening pass.
+pub(crate) fn union_args(obj: &PyObjectRef) -> Option<Vec<PyObjectRef>> {
+    if let PyObject::Instance { typ, dict } = &*obj.borrow() {
+        if matches!(&*typ.borrow(), PyObject::Type { name, .. } if name == "types.UnionType") {
+            if let Some(a) = dict.get("__args__") {
+                if let PyObject::Tuple(items) = &*a.borrow() {
+                    return Some(items.clone());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Builds (or extends) a PEP 604 union (`int | str`, `int | str | None`).
+/// Flattens nested unions and de-duplicates by value equality — matching
+/// real CPython (`int | int == int`, `int | (str | int) == int | str`).
+/// A single remaining member collapses to that member directly, not a
+/// one-element union (`int | int` IS `int`, not `UnionType` wrapping it).
+pub(crate) fn make_union(parts: Vec<PyObjectRef>) -> PyObjectRef {
+    let mut members: Vec<PyObjectRef> = Vec::new();
+    for part in parts {
+        let flattened = union_args(&part).unwrap_or_else(|| vec![part]);
+        for m in flattened {
+            if !members.iter().any(|existing| existing.is(&m) || existing.equals(&m).unwrap_or(false)) {
+                members.push(m);
+            }
+        }
+    }
+    if members.len() == 1 {
+        return members.into_iter().next().unwrap();
+    }
+    let mut inst_dict = AttrMap::new();
+    inst_dict.insert_str("__args__", py_tuple(members));
+    PyObjectRef::new(PyObject::Instance { typ: get_union_type(), dict: inst_dict })
+}
+
+fn union_member_repr(m: &PyObjectRef) -> String {
+    match &*m.borrow() {
+        PyObject::None => "None".to_string(),
+        PyObject::Type { name, .. } => name.clone(),
+        _ => m.repr(),
+    }
+}
+
+fn build_union_type() -> PyObjectRef {
+    let mut type_dict: HashMap<String, PyObjectRef> = HashMap::new();
+    macro_rules! bf {
+        ($name:expr, $f:expr) => {
+            PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $f })
+        };
+    }
+    type_dict.insert("__repr__".to_string(), bf!("__repr__", |args| {
+        if args.is_empty() { return Err(PyError::type_error("__repr__ missing argument")); }
+        let members = union_args(&args[0]).unwrap_or_default();
+        let parts: Vec<String> = members.iter().map(union_member_repr).collect();
+        Ok(py_str(&parts.join(" | ")))
+    }));
+    // Order-independent membership comparison (real CPython: `int | str ==
+    // str | int`) — NOT a positional/sequence comparison.
+    type_dict.insert("__eq__".to_string(), bf!("__eq__", |args| {
+        if args.len() < 2 { return Ok(py_not_implemented()); }
+        let a = match union_args(&args[0]) { Some(a) => a, None => return Ok(py_not_implemented()) };
+        let b = match union_args(&args[1]) { Some(b) => b, None => return Ok(py_not_implemented()) };
+        if a.len() != b.len() { return Ok(py_bool(false)); }
+        for x in &a {
+            if !b.iter().any(|y| x.equals(y).unwrap_or(false)) {
+                return Ok(py_bool(false));
+            }
+        }
+        Ok(py_bool(true))
+    }));
+    // Order-independent hash (XOR, matching the order-independent __eq__
+    // above) so a union is usable as a dict key/set member consistently
+    // regardless of the order its members were written in.
+    type_dict.insert("__hash__".to_string(), bf!("__hash__", |args| {
+        if args.is_empty() { return Err(PyError::type_error("__hash__ missing argument")); }
+        let members = union_args(&args[0]).unwrap_or_default();
+        let mut h: i64 = 0;
+        for m in &members { h ^= m.hash()? as i64; }
+        Ok(py_int(h))
+    }));
+    type_dict.insert("__or__".to_string(), bf!("__or__", |args| {
+        if args.len() < 2 { return Err(PyError::type_error("__or__() missing argument")); }
+        Ok(make_union(vec![args[0].clone(), args[1].clone()]))
+    }));
+    type_dict.insert("__ror__".to_string(), bf!("__ror__", |args| {
+        if args.len() < 2 { return Err(PyError::type_error("__ror__() missing argument")); }
+        Ok(make_union(vec![args[1].clone(), args[0].clone()]))
+    }));
+    PyObjectRef::new(PyObject::Type { name: "types.UnionType".to_string(), dict: Box::new(str_map_to_typedict(type_dict)), bases: vec![], mro: vec![] })
+}
+
+pub(crate) fn get_union_type() -> PyObjectRef {
+    let existing = UNION_TYPE.with(|c| c.borrow().clone());
+    if let Some(t) = existing { return t; }
+    let typ = build_union_type();
+    UNION_TYPE.with(|c| { *c.borrow_mut() = Some(typ.clone()); });
+    typ
+}
+
 pub fn create_types_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! t_func {
@@ -1394,6 +1571,13 @@ pub fn create_types_dict() -> HashMap<String, PyObjectRef> {
             Ok(PyObjectRef::new(PyObject::Instance { typ: get_simple_namespace_type(), dict: inst_dict }))
         },
     }));
+    // `types.UnionType` — the runtime type of `int | str` (PEP 604). Only
+    // exposed as a name here (real code mostly just needs `isinstance(x,
+    // types.UnionType)` or the name to exist for introspection/`__all__`
+    // checks) — the actual construction happens via `__or__`/`__ror__` on
+    // every `Type` object (see `attrs.rs`), not by calling this directly
+    // (real `UnionType` isn't constructible by calling it either).
+    d.insert_str("UnionType", get_union_type());
     // `@types.coroutine` — real CPython marks the generator function so its
     // resulting generator gets coroutine-like `__await__`/`send`/`throw`
     // behavior. This interpreter's own generator objects already expose
@@ -3019,6 +3203,17 @@ fn pickle_serialize(obj: &PyObjectRef, buf: &mut Vec<u8>) -> PyResult<()> {
             pickle_serialize(&py_int(*stop), buf)?;
             pickle_serialize(&py_int(*step), buf)?;
         }
+        PyObject::ListIter { list, index } => {
+            buf.push(b'i');
+            pickle_serialize(&py_list(list.clone()), buf)?;
+            pickle_serialize(&py_int(*index as i64), buf)?;
+        }
+        PyObject::RangeIter { current, stop, step } => {
+            buf.push(b'r');
+            pickle_serialize(&py_int(*current), buf)?;
+            pickle_serialize(&py_int(*stop), buf)?;
+            pickle_serialize(&py_int(*step), buf)?;
+        }
         _ => {
             return Err(PyError::type_error(format!(
                 "cannot pickle {} object",
@@ -3171,6 +3366,25 @@ fn pickle_deserialize(data: &[u8], pos: &mut usize) -> PyResult<PyObjectRef> {
             let stop = pickle_deserialize(data, pos)?;
             let step = pickle_deserialize(data, pos)?;
             Ok(PyObjectRef::imm(PyObject::Slice { start, stop, step }))
+        }
+        b'i' => {
+            let list = pickle_deserialize(data, pos)?;
+            let index = pickle_deserialize(data, pos)?;
+            let items = match &*list.borrow() {
+                PyObject::List(items) => items.clone(),
+                _ => return Err(PyError::type_error("invalid list_iterator pickle data")),
+            };
+            let idx = index.as_i64().unwrap_or(0) as usize;
+            Ok(PyObjectRef::new(PyObject::ListIter { list: items, index: idx }))
+        }
+        b'r' => {
+            let current = pickle_deserialize(data, pos)?;
+            let stop = pickle_deserialize(data, pos)?;
+            let step = pickle_deserialize(data, pos)?;
+            let c = current.as_i64().unwrap_or(0);
+            let e = stop.as_i64().unwrap_or(0);
+            let p = step.as_i64().unwrap_or(1);
+            Ok(PyObjectRef::new(PyObject::RangeIter { current: c, stop: e, step: p }))
         }
         _ => Err(PyError::type_error(format!(
             "unknown pickle marker byte: 0x{:02x}",
@@ -4002,6 +4216,31 @@ pub fn create_gc_dict() -> HashMap<String, PyObjectRef> {
 
     gc_func!("is_tracked", |_| {
         Ok(py_bool(false))
+    });
+
+    // `gc.set_threshold`/`gc.get_threshold` — were missing entirely
+    // (`AttributeError`). This interpreter's cycle collector (`cycle_gc.rs`)
+    // uses its own fixed collection-threshold constant, not the real
+    // generational gen0/gen1/gen2 thresholds CPython tunes here — so this
+    // doesn't actually change collection behavior, but it stores whatever
+    // was set (defaulting to CPython's own real default, `(700, 10, 10)`)
+    // so `get_threshold()` reflects it, which is enough for real code that
+    // just wants to read back what it set (or merely calls `set_threshold`
+    // to reduce GC pauses, as `test_weakref.py`/`test_weakset.py` do, never
+    // asserting on the actual collection cadence).
+    thread_local! {
+        static GC_THRESHOLDS: std::cell::Cell<(i64, i64, i64)> = const { std::cell::Cell::new((700, 10, 10)) };
+    }
+    gc_func!("set_threshold", |args| {
+        let g0 = args.first().and_then(|a| a.as_i64()).unwrap_or(700);
+        let g1 = args.get(1).and_then(|a| a.as_i64()).unwrap_or(10);
+        let g2 = args.get(2).and_then(|a| a.as_i64()).unwrap_or(10);
+        GC_THRESHOLDS.with(|c| c.set((g0, g1, g2)));
+        Ok(py_none())
+    });
+    gc_func!("get_threshold", |_| {
+        let (g0, g1, g2) = GC_THRESHOLDS.with(|c| c.get());
+        Ok(py_tuple(vec![py_int(g0), py_int(g1), py_int(g2)]))
     });
 
     d

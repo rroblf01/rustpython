@@ -131,14 +131,24 @@ pub fn builtin_len(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         // protocol across iterator types).
         PyObject::ListIter { list, index } => Ok(py_int(list.len().saturating_sub(*index))),
         PyObject::RangeIter { current, stop, step } => {
-            let remaining = if *step > 0 && *current < *stop {
-                (*stop - *current + *step - 1) / *step
-            } else if *step < 0 && *current > *stop {
-                (*current - *stop - *step - 1) / (-*step)
+            // Use BigInt throughout: `current`/`stop` can be near the i64
+            // boundary (a range_iterator unpickled with adversarial bounds,
+            // or a real near-i64::MAX/MIN range), and this arithmetic used
+            // to overflow-panic in plain i64 (`stop - current + step - 1`)
+            // instead of just returning the (possibly huge, but always
+            // representable) remaining count.
+            let current = BigInt::from(*current);
+            let stop = BigInt::from(*stop);
+            let step = BigInt::from(*step);
+            let zero = BigInt::from(0);
+            let remaining = if step > zero && current < stop {
+                (&stop - &current + &step - BigInt::from(1)) / &step
+            } else if step < zero && current > stop {
+                (&current - &stop - &step - BigInt::from(1)) / (-&step)
             } else {
-                0
+                zero.clone()
             };
-            Ok(py_int(remaining.max(0)))
+            Ok(py_int(remaining.max(zero)))
         }
         PyObject::Instance { typ, dict } => {
             let f = lookup_dunder_via_mro(typ, "__len__");
@@ -2533,6 +2543,26 @@ pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() != 2 {
         return Err(PyError::type_error("isinstance() takes exactly 2 arguments"));
     }
+    // `isinstance(x, int | str)` — a PEP 604 union used as the second
+    // argument checks membership against ANY of its parts, same as the
+    // tuple-of-types form just below (real CPython treats `X | Y` and
+    // `(X, Y)` identically here). Checked before borrowing `args[1]` as
+    // `class` below since `union_args` does its own borrow internally.
+    if let Some(members) = crate::modules::union_args(&args[1]) {
+        let _guard = IsinstanceRecursionGuard::enter()?;
+        for t in &members {
+            // A union member can be the literal `None` singleton (`int |
+            // None`, matching real CPython's own PEP 604 syntax) rather than
+            // `NoneType` itself — `isinstance(x, None)` isn't meaningful
+            // (`None` isn't a class), so check against `type(None)` instead.
+            let t = if matches!(&*t.borrow(), PyObject::None) { builtin_type_of(&[py_none()])? } else { t.clone() };
+            let check_args = vec![args[0].clone(), t];
+            if builtin_isinstance(&check_args)?.truthy() {
+                return Ok(py_bool(true));
+            }
+        }
+        return Ok(py_bool(false));
+    }
     let obj = args[0].borrow();
     let class = args[1].borrow();
     // Handle tuple of types: isinstance(x, (type1, type2, ...))
@@ -3000,6 +3030,19 @@ pub fn builtin_reversed(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 pub fn builtin_issubclass(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() != 2 {
         return Err(PyError::type_error("issubclass() takes exactly 2 arguments"));
+    }
+    // `issubclass(cls, int | str)` — same PEP 604 union-membership check as
+    // `builtin_isinstance`'s matching case just above.
+    if let Some(members) = crate::modules::union_args(&args[1]) {
+        let _guard = IsinstanceRecursionGuard::enter()?;
+        for t in &members {
+            let t = if matches!(&*t.borrow(), PyObject::None) { builtin_type_of(&[py_none()])? } else { t.clone() };
+            let check_args = vec![args[0].clone(), t];
+            if builtin_issubclass(&check_args)?.truthy() {
+                return Ok(py_bool(true));
+            }
+        }
+        return Ok(py_bool(false));
     }
     // Handle tuple of types: issubclass(cls, (type1, type2, ...))
     let base = args[1].borrow();

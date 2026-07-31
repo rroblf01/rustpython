@@ -95,6 +95,21 @@ pub fn py_add(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
             v.extend(b);
             Ok(PyObjectRef::imm(PyObject::Bytes(v)))
         }
+        (PyObject::Bytes(a), PyObject::ByteArray(b)) => {
+            let mut v = a.clone();
+            v.extend(b);
+            Ok(PyObjectRef::imm(PyObject::Bytes(v)))
+        }
+        (PyObject::ByteArray(a), PyObject::ByteArray(b)) => {
+            let mut v = a.clone();
+            v.extend(b);
+            Ok(PyObjectRef::new(PyObject::ByteArray(v)))
+        }
+        (PyObject::ByteArray(a), PyObject::Bytes(b)) => {
+            let mut v = a.clone();
+            v.extend(b);
+            Ok(PyObjectRef::new(PyObject::ByteArray(v)))
+        }
         (a, b) if matches!(a, PyObject::Complex(..)) || matches!(b, PyObject::Complex(..)) => {
             match (as_complex_parts(a), as_complex_parts(b)) {
                 (Some((ar, ai)), Some((br, bi))) => Ok(PyObjectRef::imm(PyObject::Complex(ar + br, ai + bi))),

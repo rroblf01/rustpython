@@ -100,6 +100,23 @@ impl PyError {
             cause: None,
         }))
     }
+    /// Same `PyError::Exception(name, obj)` pattern as `syntax_error`/
+    /// `memory_error`/`overflow_error` above. Real CPython's
+    /// `UnboundLocalError` (a `NameError` subclass, see `is_exception_subclass`
+    /// in `vm.rs`) is what's actually raised for "local variable referenced
+    /// before assignment" — this codebase's `LOAD_FAST` handler used to raise
+    /// a plain `PyError::NameError` for this instead, which is wrong both by
+    /// message and by exact type (`except UnboundLocalError:` couldn't catch
+    /// it, and the name `UnboundLocalError` wasn't even a registered builtin
+    /// at all — found via `test_scope.py`'s own `testUnboundLocal`).
+    pub fn unbound_local_error(msg: impl Into<String>) -> Self {
+        let msg = msg.into();
+        PyError::Exception("UnboundLocalError".to_string(), PyObjectRef::new(PyObject::Exception {
+            typ: "UnboundLocalError".to_string(),
+            args: vec![py_str(&msg)],
+            cause: None,
+        }))
+    }
     pub fn runtime_error(msg: impl Into<String>) -> Self {
         PyError::RuntimeError(msg.into())
     }

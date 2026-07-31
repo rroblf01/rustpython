@@ -2363,7 +2363,7 @@ impl VirtualMachine {
                         };
                         match inner {
                             Some(inner) => self.frames[fi].push(inner),
-                            None => return Err(PyError::name_error(format!("local variable '{}' referenced before assignment",
+                            None => return Err(PyError::unbound_local_error(format!("cannot access local variable '{}' where it is not associated with a value",
                                 self.frames[fi].code.varnames.get(var_idx).map_or("?", |&s| crate::interner::lookup_str(s))))),
                         }
                     }
@@ -2375,7 +2375,7 @@ impl VirtualMachine {
                                 self.frames[fi].code.line_number(self.frames[fi].ip.saturating_sub(1)),
                                 self.frames[fi].code.varnames);
                         }
-                        return Err(PyError::name_error(format!("local variable '{}' referenced before assignment",
+                        return Err(PyError::unbound_local_error(format!("cannot access local variable '{}' where it is not associated with a value",
                             self.frames[fi].code.varnames.get(var_idx).map_or("?", |&s| crate::interner::lookup_str(s)))));
                     }
                 }
@@ -2720,7 +2720,8 @@ impl VirtualMachine {
                 let dst = (arg >> 4) as usize;
                 let var_idx = (arg & 0xFF) as usize;
                 let val = self.frames[fi].fast_locals.get(var_idx).and_then(|v| v.clone())
-                    .ok_or_else(|| PyError::name_error("local variable referenced before assignment"))?;
+                    .ok_or_else(|| PyError::unbound_local_error(format!("cannot access local variable '{}' where it is not associated with a value",
+                        self.frames[fi].code.varnames.get(var_idx).map_or("?", |&s| crate::interner::lookup_str(s)))))?;
                 if dst < self.frames[fi].registers.len() {
                     self.frames[fi].registers[dst] = Some(val);
                 }
@@ -3548,7 +3549,57 @@ impl VirtualMachine {
                                     .map(|(_, val)| val.clone())
                             };
                             if let Some(cached_val) = cached {
-                                self.frames[fi].push(cached_val);
+                                // The cached value may be a method already
+                                // BOUND to whatever instance first populated
+                                // this cache slot (`self_obj` baked in) — the
+                                // cache itself is keyed only by
+                                // `(name_idx, type_tag)`, with no per-
+                                // instance component, so reusing it AS-IS
+                                // for a DIFFERENT instance of the same type
+                                // silently operated on the wrong `self`
+                                // (confirmed via a direct repro: calling the
+                                // same bound-method-shaped attribute on two
+                                // different instances of the same class
+                                // within one frame — e.g.
+                                // `subprocess.CompletedProcess.check_returncode`
+                                // — the second call silently used the
+                                // FIRST instance as `self`). Rebind to the
+                                // CURRENT `obj` before returning, matching
+                                // the same rebind-on-hit fix already applied
+                                // to the OTHER (module-level) attribute
+                                // cache just above in this file.
+                                //
+                                // Only rebind when the cached `self_obj` is
+                                // ITSELF an `Instance` of this SAME type —
+                                // i.e. unambiguously "some OTHER instance of
+                                // the identical class", the exact cross-
+                                // instance-pollution case above. A cached
+                                // method deliberately bound to something
+                                // ELSE (native-backing delegation for a
+                                // class transparently subclassing list/
+                                // dict/str, or any other legitimate "bound
+                                // to a fixed, different object" case) must
+                                // be returned UNCHANGED — rebinding it
+                                // unconditionally to `obj` broke exactly
+                                // that (confirmed regression: `collections`'
+                                // own `Counter.update` internals, which rely
+                                // on a cached method staying bound to its
+                                // real native-backing dict rather than the
+                                // wrapper `Instance`).
+                                let rebound = match &*cached_val.borrow() {
+                                    PyObject::BuiltinMethod { name: n, func, self_obj }
+                                        if matches!(&*self_obj.borrow(), PyObject::Instance { typ: t, .. } if t.is(typ)) =>
+                                    {
+                                        PyObjectRef::imm(PyObject::BuiltinMethod { name: n.clone(), func: *func, self_obj: obj.clone() })
+                                    }
+                                    PyObject::BoundMethod { func, self_obj }
+                                        if matches!(&*self_obj.borrow(), PyObject::Instance { typ: t, .. } if t.is(typ)) =>
+                                    {
+                                        PyObjectRef::imm(PyObject::BoundMethod { func: func.clone(), self_obj: obj.clone() })
+                                    }
+                                    _ => cached_val.clone(),
+                                };
+                                self.frames[fi].push(rebound);
                                 return Ok(None);
                             }
                             if name == "__dict__" {
@@ -7533,6 +7584,13 @@ pub(crate) fn is_exception_subclass(child_type: &str, parent_type: &str) -> bool
         "NotImplementedError" | "RecursionError" => Some("RuntimeError"),
         // Children of ImportError
         "ModuleNotFoundError" => Some("ImportError"),
+        // Children of NameError
+        "UnboundLocalError" => Some("NameError"),
+        // Children of SyntaxError — both were previously falling through to
+        // the generic `_ => Some("Exception")` catch-all (real CPython:
+        // `IndentationError(SyntaxError)`, `TabError(IndentationError)`).
+        "IndentationError" => Some("SyntaxError"),
+        "TabError" => Some("IndentationError"),
         // Children of ValueError
         "UnicodeError" | "UnicodeEncodeError" | "UnicodeDecodeError" |
         "UnicodeTranslateError" => Some("ValueError"),

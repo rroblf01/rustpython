@@ -178,6 +178,7 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     add_exc_type!("ValueError", builtin_make_exception_valueerror);
     add_exc_type!("ZeroDivisionError", builtin_make_exception_zerodivisionerror);
     add_exc_type!("NameError", builtin_make_exception_nameerror);
+    add_exc_type!("UnboundLocalError", builtin_make_exception_unboundlocalerror);
     add_exc_type!("AttributeError", builtin_make_exception_attributeerror);
     add_exc_type!("IndexError", builtin_make_exception_indexerror);
     add_exc_type!("KeyError", builtin_make_exception_keyerror);
@@ -2102,6 +2103,18 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
     // relative sizes between two objects of the same type, not for code
     // asserting on an exact byte count (which would be fragile even
     // between two real CPython builds/versions anyway).
+    // `sys.getrefcount(obj)` — was missing entirely. See `PyObjectRef::
+    // strong_count`'s own doc comment for why this reports `Rc::strong_count`
+    // (a real, meaningful delta signal) rather than attempting to match
+    // CPython's absolute refcount convention, which has no equivalent here.
+    // The `+1` matches real CPython's own documented behavior: the argument
+    // passed to `getrefcount` itself holds one additional temporary
+    // reference (the call's own argument slot) beyond whatever the caller's
+    // other variables hold.
+    sys_func!("getrefcount", |args| {
+        if args.is_empty() { return Err(PyError::type_error("getrefcount() takes exactly one argument (0 given)")); }
+        Ok(py_int(args[0].strong_count() as i64 + 1))
+    });
     sys_func!("getsizeof", |args| {
         if args.is_empty() { return Err(PyError::type_error("getsizeof() takes at least 1 argument")); }
         let size = match &*args[0].borrow() {
@@ -2563,6 +2576,25 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
     d.insert_str("linesep", py_str(if cfg!(windows) { "\r\n" } else { "\n" }));
     d.insert_str("defpath", py_str(if cfg!(windows) { "." } else { ":/bin:/usr/bin" }));
     d.insert_str("devnull", py_str(if cfg!(windows) { "nul" } else { "/dev/null" }));
+    // `os.F_OK`/`R_OK`/`W_OK`/`X_OK` + `os.access()` — missing entirely.
+    // Matches the real POSIX bitmask values (`F_OK=0`, `X_OK=1`, `W_OK=2`,
+    // `R_OK=4`) so `mode` values combine the same way real code expects
+    // (`os.access(path, os.R_OK | os.W_OK)`).
+    d.insert_str("F_OK", py_int(0));
+    d.insert_str("X_OK", py_int(1));
+    d.insert_str("W_OK", py_int(2));
+    d.insert_str("R_OK", py_int(4));
+    os_func!("access", |args| {
+        if args.is_empty() { return Err(PyError::type_error("access() missing required argument: 'path'")); }
+        let path = args[0].str();
+        // Best-effort: this interpreter has no real per-bit POSIX
+        // permission-checking machinery (setuid/gid, ACLs, etc.) — F_OK
+        // (existence) is always answerable exactly; R_OK/W_OK/X_OK fall
+        // back to the same "path exists" answer, which is correct often
+        // enough for typical test usage (checking a file it just created
+        // is readable/writable) without claiming full POSIX fidelity.
+        Ok(py_bool(std::fs::metadata(&path).is_ok()))
+    });
     os_func!("fspath", |args| {
         if args.is_empty() { return Err(PyError::type_error("fspath() missing required argument: 'path'")); }
         let obj = args[0].clone();

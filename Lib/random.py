@@ -10,7 +10,7 @@ import warnings as _warnings
 __all__ = [
     "Random", "SystemRandom",
     "seed", "random", "uniform", "randint", "choice", "shuffle",
-    "sample", "randrange", "getrandbits",
+    "sample", "choices", "randrange", "getrandbits",
     "gauss", "expovariate", "betavariate",
 ]
 
@@ -151,6 +151,38 @@ class Random:
                 pool[i], pool[i + j] = pool[i + j], pool[i]
             return pool[:k]
 
+    def choices(self, population, weights=None, *, cum_weights=None, k=1):
+        """Return a k-sized list of elements chosen WITH replacement, optionally weighted."""
+        n = len(population)
+        if cum_weights is not None:
+            if weights is not None:
+                raise TypeError("Cannot specify both weights and cumulative weights")
+            if len(cum_weights) != n:
+                raise ValueError("The number of weights does not match the population")
+        elif weights is not None:
+            if len(weights) != n:
+                raise ValueError("The number of weights does not match the population")
+            total = 0
+            cum_weights = []
+            for w in weights:
+                total += w
+                cum_weights.append(total)
+        if cum_weights is None:
+            return [population[int(self.random() * n)] for _ in range(k)]
+        total = cum_weights[-1]
+        result = []
+        for _ in range(k):
+            target = self.random() * total
+            lo, hi = 0, n - 1
+            while lo < hi:
+                mid = (lo + hi) // 2
+                if cum_weights[mid] <= target:
+                    lo = mid + 1
+                else:
+                    hi = mid
+            result.append(population[lo])
+        return result
+
     # ── Real-valued distributions ────────────────────────────────────────
 
     def uniform(self, a, b):
@@ -265,6 +297,7 @@ randint = _instance.randint
 choice = _instance.choice
 shuffle = _instance.shuffle
 sample = _instance.sample
+choices = _instance.choices
 randrange = _instance.randrange
 getrandbits = _instance.getrandbits
 gauss = _instance.gauss

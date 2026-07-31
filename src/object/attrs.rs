@@ -176,6 +176,59 @@ impl PyObject {
                 if name == "__qualname__" {
                     return Ok(py_str(type_name));
                 }
+                // `__module__` — real user-defined classes already have this
+                // seeded into their own dict at class-creation time (the
+                // class body's implicit `__module__ = __name__` statement),
+                // so this fallback is only ever reached for BUILTIN/native
+                // ad-hoc types (`int`, `str`, `types.UnionType`, ...), which
+                // never went through that seeding. Defaults to `"builtins"`
+                // (correct for the real native types; a reasonable filler
+                // for ad-hoc "instance-shaped" native types like `Path`/
+                // `SimpleNamespace`/`UnionType`, which have no real module
+                // of their own to report) — found via CPython's own
+                // `test_types.py`'s `check_disallow_instantiation` helper,
+                // which unconditionally reads `tp.__module__` on ANY type.
+                if name == "__module__" && !dict.contains_key_str("__module__") {
+                    return Ok(py_str("builtins"));
+                }
+                // PEP 604 union syntax (`int | str`, `MyClass | None`) — the
+                // `|` operator was entirely unsupported on ANY class/builtin
+                // type (`TypeError: unsupported operand type(s) for |: ...`)
+                // even though it's an extremely common modern idiom in type
+                // annotations (`def f(x: int | str)`) and isinstance checks
+                // (`isinstance(x, int | None)`), evaluated at RUNTIME
+                // whenever the annotation isn't behind `from __future__
+                // import annotations`. Gated on the type's own dict NOT
+                // already defining `__or__`/`__ror__` (same pattern as
+                // `register` just above) so a class that genuinely overrides
+                // either keeps its own behavior.
+                if (name == "__or__" || name == "__ror__") && !dict.contains_key_str(name) {
+                    // A plain `BuiltinFunction`, NOT `BuiltinMethod` — the
+                    // latter's `call_bound_method` convention prepends an
+                    // extra placeholder `self_obj` ahead of `self`/`other`
+                    // (3 args: `[None, self, other]`), which silently
+                    // shifted every argument here by one (confirmed via a
+                    // direct repro: `int | str` built a union of `[None,
+                    // int]` instead of `[int, str]`). `BuiltinFunction`'s own
+                    // convention is the plain 2-arg `[self, other]` these
+                    // closures actually expect — see `try_dunder_binop`'s own
+                    // doc comment for the exact convention split between the
+                    // two.
+                    return Ok(PyObjectRef::imm(PyObject::BuiltinFunction {
+                        name: name.to_string(),
+                        func: if name == "__or__" {
+                            |args| {
+                                if args.len() < 2 { return Err(PyError::type_error("__or__() missing argument")); }
+                                Ok(crate::modules::make_union(vec![args[0].clone(), args[1].clone()]))
+                            }
+                        } else {
+                            |args| {
+                                if args.len() < 2 { return Err(PyError::type_error("__ror__() missing argument")); }
+                                Ok(crate::modules::make_union(vec![args[1].clone(), args[0].clone()]))
+                            }
+                        },
+                    }));
+                }
                 // `ABCMeta.register(subclass)` — real CPython's `abc.py`
                 // wraps a native `_abc_register` primitive that this
                 // project already implements (`modules/core.rs`) but never
@@ -579,6 +632,30 @@ impl PyObject {
                     "__context__" | "__traceback__" => Ok(py_none()),
                     "__suppress_context__" => Ok(py_bool(false)),
                     "__notes__" => Ok(py_list(vec![])),
+                    // `BaseException.__setstate__(state)` — inherited by
+                    // every exception, used by pickle to restore extra
+                    // instance attributes on unpickling. Real semantics:
+                    // `None` is a no-op, a `dict` merges into `__dict__`,
+                    // anything else raises `TypeError` (found via CPython's
+                    // own `test_exceptions.py::test_invalid_setstate`, which
+                    // checks exactly this error case). Exceptions here have
+                    // no generic attribute-dict storage the way `Instance`
+                    // does, so a valid dict argument is accepted (matching
+                    // real behavior/not raising) but not actually persisted
+                    // — a narrower, deliberate limitation, not the gap this
+                    // fix targets.
+                    "__setstate__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__setstate__".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("__setstate__() takes exactly one argument")); }
+                            match &*args[1].borrow() {
+                                PyObject::None => Ok(py_none()),
+                                PyObject::Dict(_) => Ok(py_none()),
+                                _ => Err(PyError::type_error("state is not a dictionary")),
+                            }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     "add_note" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "add_note".to_string(),
                         func: |_args| Ok(py_none()),
@@ -939,6 +1016,14 @@ impl PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
+                    "__contains__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__contains__".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("__contains__() takes exactly one argument")); }
+                            py_contains(&args[0], &args[1])
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     _ => Err(PyError::attribute_error(format!("'tuple' object has no attribute '{}'", name))),
                 }
             }
@@ -950,6 +1035,14 @@ impl PyObject {
                             if let PyObject::Bytes(bytes) = &*args[0].borrow() {
                                 Ok(py_int(33 + bytes.len() as i64))
                             } else { Err(PyError::runtime_error("__sizeof__ on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__contains__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__contains__".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("__contains__() takes exactly one argument")); }
+                            py_contains(&args[0], &args[1])
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -974,6 +1067,19 @@ impl PyObject {
                             if let PyObject::Bytes(bytes) = &*b {
                                 Ok(py_int(bytes.len() as i64))
                             } else { Err(PyError::runtime_error("__len__ on non-bytes")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__mod__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__mod__".to_string(),
+                        func: |args| {
+                            if args.len() < 3 { return Err(PyError::type_error("__mod__() too few args")); }
+                            let fmt = match &*args[1].borrow() {
+                                PyObject::Bytes(b) => b.clone(),
+                                _ => return Err(PyError::runtime_error("__mod__ on non-bytes")),
+                            };
+                            let result = bytes_interpolate(&fmt, &args[2]).map_err(PyError::type_error)?;
+                            Ok(PyObjectRef::imm(PyObject::Bytes(result)))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -1647,6 +1753,27 @@ impl PyObject {
             }
             PyObject::ByteArray(_b) => {
                 match name {
+                    "__contains__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__contains__".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("__contains__() takes exactly one argument")); }
+                            py_contains(&args[0], &args[1])
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__mod__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__mod__".to_string(),
+                        func: |args| {
+                            if args.len() < 3 { return Err(PyError::type_error("__mod__() too few args")); }
+                            let fmt = match &*args[1].borrow() {
+                                PyObject::ByteArray(b) => b.clone(),
+                                _ => return Err(PyError::runtime_error("__mod__ on non-bytearray")),
+                            };
+                            let result = bytes_interpolate(&fmt, &args[2]).map_err(PyError::type_error)?;
+                            Ok(PyObjectRef::new(PyObject::ByteArray(result)))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     "append" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "append".to_string(),
                         func: |args| {
@@ -1891,6 +2018,14 @@ impl PyObject {
                         func: |args| Ok(py_int(args[0].hash()? as i64)),
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
+                    "__contains__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__contains__".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("__contains__() takes exactly one argument")); }
+                            py_contains(&args[0], &args[1])
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     "format" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "format".to_string(),
                         func: |args| {
@@ -2125,16 +2260,24 @@ impl PyObject {
                         name: "startswith".to_string(),
                         func: |args| {
                             if args.len() < 2 { return Err(PyError::type_error("startswith() takes at least 1 argument")); }
-                            let s = args[0].str();
-                            let chars: Vec<char> = s.chars().collect();
                             let start = opt_i64_arg(args.get(2));
                             let end = opt_i64_arg(args.get(3));
-                            let (st, en) = resolve_str_slice_bounds(chars.len(), start, end);
-                            let sub: String = chars[st..en].iter().collect();
                             let prefixes: Vec<String> = match &*args[1].borrow() {
                                 PyObject::Tuple(items) => items.iter().map(|x| x.str()).collect(),
                                 _ => vec![args[1].str()],
                             };
+                            // Borrow the haystack's content directly instead of
+                            // `.str()` (which always returns a freshly-cloned
+                            // owned `String`) — avoids an O(n) copy on EVERY
+                            // call, same reason as `char_slice_with_start`'s own
+                            // doc comment (this method is commonly called in a
+                            // tight loop with an explicit start index).
+                            let obj0 = args[0].borrow();
+                            let s: &str = match &*obj0 {
+                                PyObject::Str(cs) => cs.as_str(),
+                                _ => return Err(PyError::runtime_error("startswith on non-str")),
+                            };
+                            let (_, sub) = char_slice_with_start(s, start, end);
                             Ok(py_bool(prefixes.iter().any(|p| sub.starts_with(p.as_str()))))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
@@ -2143,16 +2286,18 @@ impl PyObject {
                         name: "endswith".to_string(),
                         func: |args| {
                             if args.len() < 2 { return Err(PyError::type_error("endswith() takes at least 1 argument")); }
-                            let s = args[0].str();
-                            let chars: Vec<char> = s.chars().collect();
                             let start = opt_i64_arg(args.get(2));
                             let end = opt_i64_arg(args.get(3));
-                            let (st, en) = resolve_str_slice_bounds(chars.len(), start, end);
-                            let sub: String = chars[st..en].iter().collect();
                             let suffixes: Vec<String> = match &*args[1].borrow() {
                                 PyObject::Tuple(items) => items.iter().map(|x| x.str()).collect(),
                                 _ => vec![args[1].str()],
                             };
+                            let obj0 = args[0].borrow();
+                            let s: &str = match &*obj0 {
+                                PyObject::Str(cs) => cs.as_str(),
+                                _ => return Err(PyError::runtime_error("endswith on non-str")),
+                            };
+                            let (_, sub) = char_slice_with_start(s, start, end);
                             Ok(py_bool(suffixes.iter().any(|p| sub.ends_with(p.as_str()))))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
@@ -2707,6 +2852,14 @@ impl PyObject {
             }
             PyObject::Set(_s) => {
                 match name {
+                    "__contains__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__contains__".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("__contains__() takes exactly one argument")); }
+                            py_contains(&args[0], &args[1])
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     "add" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "add".to_string(),
                         func: |args| {
@@ -5225,6 +5378,13 @@ impl PyObject {
                 }
                 if name == "__qualname__" {
                     return Ok(py_str(bf_name));
+                }
+                // Same gap, same fix, as the real `PyObject::Type`'s own
+                // `__module__` fallback just above — this is the OTHER
+                // ad-hoc-type representation (built-in exception "classes"),
+                // which need it too (e.g. `Exception.__module__`).
+                if name == "__module__" {
+                    return Ok(py_str("builtins"));
                 }
                 if name == "__mro__" || name == "__bases__" {
                     return Ok(PyObjectRef::new(PyObject::Tuple(vec![])));

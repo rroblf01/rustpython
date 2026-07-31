@@ -361,3 +361,118 @@ pub(crate) fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String,
 
     Ok(result)
 }
+
+/// printf-style byte-string interpolation (`bytes`/`bytearray`'s `%` operator, PEP 461).
+/// Deliberately covers the common conversions (`%s`/`%b`/`%d`/`%i`/`%o`/`%x`/`%X`/`%c`/`%%`
+/// plus width) rather than CPython's full adversarial surface (`%a`'s exact unicode-escaping
+/// repr, the `-` left-justify flag) — those are not exercised outside `test_format.py`'s own
+/// exhaustive self-test.
+pub(crate) fn bytes_interpolate(fmt: &[u8], arg: &PyObjectRef) -> Result<Vec<u8>, String> {
+    let mut result: Vec<u8> = Vec::new();
+    let mut i = 0;
+
+    let mut arg_iter: Option<Box<dyn Iterator<Item = PyObjectRef>>> = None;
+    {
+        let obj = arg.borrow();
+        if let PyObject::Tuple(items) = &*obj {
+            arg_iter = Some(Box::new(items.clone().into_iter()));
+        }
+    }
+    let arg0 = arg.clone();
+    let mut get_arg = || -> PyObjectRef {
+        if let Some(ref mut it) = arg_iter {
+            it.next().unwrap_or_else(py_none)
+        } else {
+            arg0.clone()
+        }
+    };
+
+    // Bytes-like: bytes, bytearray, or memoryview-over-bytes — used by %s/%b.
+    let as_bytes_like = |v: &PyObjectRef| -> Option<Vec<u8>> {
+        match &*v.borrow() {
+            PyObject::Bytes(b) => Some(b.clone()),
+            PyObject::ByteArray(b) => Some(b.clone()),
+            _ => None,
+        }
+    };
+
+    while i < fmt.len() {
+        let ch = fmt[i];
+        i += 1;
+        if ch != b'%' {
+            result.push(ch);
+            continue;
+        }
+        let mut flags_zero = false;
+        if i < fmt.len() && fmt[i] == b'0' {
+            flags_zero = true;
+            i += 1;
+        }
+        let mut width_str = String::new();
+        while i < fmt.len() && fmt[i].is_ascii_digit() {
+            width_str.push(fmt[i] as char);
+            i += 1;
+        }
+        let width: Option<usize> = if width_str.is_empty() { None } else {
+            Some(width_str.parse().map_err(|_| "invalid width".to_string())?)
+        };
+        if i >= fmt.len() { return Err("incomplete format".to_string()); }
+        let conv = fmt[i];
+        i += 1;
+        let formatted: Vec<u8> = match conv {
+            b'%' => vec![b'%'],
+            b's' | b'b' => {
+                let raw = get_arg();
+                as_bytes_like(&raw).ok_or_else(|| format!(
+                    "%{} requires a bytes-like object, or an object that implements __bytes__, not '{}'",
+                    conv as char, raw.borrow().type_name()
+                ))?
+            }
+            b'r' => {
+                let raw = get_arg();
+                let s = raw.repr();
+                if !s.is_ascii() { return Err("%r result contains non-ASCII data".to_string()); }
+                s.into_bytes()
+            }
+            b'd' | b'i' | b'o' | b'x' | b'X' => {
+                let raw = get_arg();
+                let n = raw.as_i64().unwrap_or(0);
+                (match conv {
+                    b'd' | b'i' => n.to_string(),
+                    b'o' => format!("{:o}", n),
+                    b'x' => format!("{:x}", n),
+                    b'X' => format!("{:X}", n),
+                    _ => unreachable!(),
+                }).into_bytes()
+            }
+            b'c' => {
+                let raw = get_arg();
+                if let Some(n) = raw.as_i64() {
+                    vec![n as u8]
+                } else if let Some(b) = as_bytes_like(&raw) {
+                    if b.len() != 1 { return Err("%c requires an integer in range(256) or a single byte".to_string()); }
+                    b
+                } else {
+                    return Err("%c requires an integer in range(256) or a single byte".to_string());
+                }
+            }
+            c => return Err(format!("unsupported format character '{}'", c as char)),
+        };
+        let padded = if let Some(w) = width {
+            if formatted.len() >= w {
+                formatted
+            } else {
+                let pad_len = w - formatted.len();
+                let pad_byte = if flags_zero { b'0' } else { b' ' };
+                let mut v = vec![pad_byte; pad_len];
+                v.extend(formatted);
+                v
+            }
+        } else {
+            formatted
+        };
+        result.extend(padded);
+    }
+
+    Ok(result)
+}

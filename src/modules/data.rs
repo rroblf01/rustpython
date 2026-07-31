@@ -86,8 +86,27 @@ pub fn create_collections_dict() -> HashMap<String, PyObjectRef> {
             ));
         }
         let typename = args[0].str();
-        let field_str = args[1].str();
-        let fields: Vec<String> = field_str.split_whitespace().map(|s| s.to_string()).collect();
+        // Real `namedtuple(typename, field_names)` accepts `field_names` as
+        // EITHER a single string (space- and/or comma-separated: `"x y"`,
+        // `"x, y"`) OR an iterable of per-field strings (`['x', 'y']`,
+        // `('x', 'y')`) — only the string form was handled before (an
+        // unconditional `.str()` on `args[1]`, so a real list/tuple
+        // silently stringified to its OWN repr, e.g. `"['x', 'y']"`, which
+        // then got whitespace-split into garbage field names like
+        // `"['x',"`/`"'y']"`). This corrupted EVERY namedtuple constructed
+        // with the list/tuple form — not just `_replace`/`copy.replace`,
+        // which is what surfaced it (even a fresh instance's own `repr()`
+        // and attribute access were broken).
+        let fields: Vec<String> = match &*args[1].borrow() {
+            PyObject::List(items) | PyObject::Tuple(items) => items.iter().map(|i| i.str()).collect(),
+            _ => {
+                let field_str = args[1].str();
+                field_str.split(|c: char| c == ',' || c.is_whitespace())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .collect()
+            }
+        };
         if fields.is_empty() {
             return Err(PyError::type_error(
                 "namedtuple() requires at least 1 field name",

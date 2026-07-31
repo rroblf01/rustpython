@@ -20,6 +20,7 @@ make_exception_func!(builtin_make_exception_typeerror, "TypeError");
 make_exception_func!(builtin_make_exception_valueerror, "ValueError");
 make_exception_func!(builtin_make_exception_zerodivisionerror, "ZeroDivisionError");
 make_exception_func!(builtin_make_exception_nameerror, "NameError");
+make_exception_func!(builtin_make_exception_unboundlocalerror, "UnboundLocalError");
 make_exception_func!(builtin_make_exception_attributeerror, "AttributeError");
 make_exception_func!(builtin_make_exception_indexerror, "IndexError");
 make_exception_func!(builtin_make_exception_keyerror, "KeyError");

@@ -1131,7 +1131,28 @@ impl Parser {
         if self.at(&Token::LeftBrace) {
             return self.parse_mapping_pattern();
         }
-        let expr = self.parse_or_expr()?;
+        // A literal/value pattern (`case 1:`, `case -1:`, `case 1+2j:`,
+        // `case "x":`) must NOT consume `|` here — `|` inside a `case`
+        // clause is ALWAYS the or-pattern separator (`parse_or_pattern`'s
+        // own job, one level up), never a bitwise-or expression. This used
+        // to call `parse_or_expr` (the full expression grammar, all the way
+        // up through logical `or`/`and`/comparison/bitwise-or), which
+        // greedily swallowed the `|` as `Expr::BinOp` before
+        // `parse_or_pattern`'s `while self.eat(&Token::Pipe)` loop ever saw
+        // it — so `case 'Y' | 'y' | 'G':` compiled as ONE `MatchValue`
+        // wrapping the literal expression `'Y' | 'y' | 'G'`, evaluated at
+        // MATCH TIME as a real binary `|` between string values (raising
+        // `TypeError: unsupported operand type(s) for |: 'str' and 'str'`
+        // the instant any such case ran) instead of three separate
+        // alternatives. Confirmed general, not `_strptime.py`-specific: any
+        // `case A | B:` where `A`/`B` don't happen to support `|` (almost
+        // everything except numbers) was completely broken. Stopping at
+        // `parse_bitwise_xor` (one precedence level tighter, skipping
+        // `parse_bitwise_or`, logical `or`/`and`/`not`, and comparisons —
+        // none of which real Python's own literal-pattern grammar permits
+        // anyway) still correctly parses negative numbers and complex
+        // literals (`-5`, `1+2j`), just without swallowing a trailing `|`.
+        let expr = self.parse_bitwise_xor()?;
         Ok(Pattern::MatchValue(Box::new(expr)))
     }
 

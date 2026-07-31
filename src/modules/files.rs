@@ -633,7 +633,14 @@ pub fn create_pathlib_dict() -> HashMap<String, PyObjectRef> {
         Ok(py_none())
     });
 
-    // .parent -> dirname (property getter)
+    // .parent -> dirname (property getter). Real pathlib's `.parent`
+    // returns another `Path` object (not a plain `str`) — real code
+    // routinely chains straight off it (`Path(__file__).parent / 'x'`, the
+    // single most common pathlib idiom, confirmed via CPython's own
+    // `test_traceback.py`'s module-level `LEVENSHTEIN_DATA_FILE = Path(
+    // __file__).parent / 'levenshtein_examples.json'`) — returning a bare
+    // string here meant every such chain hit `/`'s `'str' and 'str'`
+    // TypeError right after the `Path / str` fix above stopped masking it.
     {
         let getter = PyObjectRef::new(PyObject::BuiltinFunction {
             name: "parent".to_string(),
@@ -645,7 +652,11 @@ pub fn create_pathlib_dict() -> HashMap<String, PyObjectRef> {
                 let parent = std::path::Path::new(&s).parent()
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_default();
-                Ok(py_str(&parent))
+                let path_type = PATH_TYPE.with(|cell| cell.borrow().clone())
+                    .ok_or_else(|| PyError::runtime_error("Path type not initialized".to_string()))?;
+                let mut instance_dict = AttrMap::new();
+                instance_dict.insert_str("_path", py_str(&parent));
+                Ok(PyObjectRef::new(PyObject::Instance { typ: path_type, dict: instance_dict }))
             },
         });
         path_type_dict.insert_str("parent", PyObjectRef::new(PyObject::Property(Box::new(PropertyData {
@@ -763,6 +774,51 @@ pub fn create_pathlib_dict() -> HashMap<String, PyObjectRef> {
         }
         let result = base.to_string_lossy().to_string();
         // Get Path type from thread_local and create a new Path instance
+        let path_type = PATH_TYPE.with(|cell| {
+            cell.borrow().clone()
+        }).ok_or_else(|| PyError::runtime_error("Path type not initialized".to_string()))?;
+        let mut instance_dict = AttrMap::new();
+        instance_dict.insert_str("_path", py_str(&result));
+        Ok(PyObjectRef::new(PyObject::Instance {
+            typ: path_type,
+            dict: instance_dict,
+        }))
+    });
+
+    // `Path(...) / 'segment'` — the single most common pathlib idiom in
+    // real code — was missing entirely (`__truediv__` not defined at all),
+    // so any real path-joining-via-`/` code raised `TypeError: unsupported
+    // operand type(s) for /: 'instance' and 'str'`. Same join logic as
+    // `joinpath` just above (duplicated rather than shared — this
+    // codebase's `path_func!` macro wraps each closure directly into a
+    // `BuiltinFunction` fn pointer, so closures here can't call each other).
+    path_func!("__truediv__", |args| {
+        if args.len() < 2 {
+            return Err(PyError::type_error("__truediv__() missing argument"));
+        }
+        let mut base = std::path::PathBuf::from(path_instance_str(&args[0]));
+        base.push(args[1].str());
+        let result = base.to_string_lossy().to_string();
+        let path_type = PATH_TYPE.with(|cell| {
+            cell.borrow().clone()
+        }).ok_or_else(|| PyError::runtime_error("Path type not initialized".to_string()))?;
+        let mut instance_dict = AttrMap::new();
+        instance_dict.insert_str("_path", py_str(&result));
+        Ok(PyObjectRef::new(PyObject::Instance {
+            typ: path_type,
+            dict: instance_dict,
+        }))
+    });
+
+    // `'segment' / Path(...)` — the reflected form (real pathlib supports
+    // this via `Path.__rtruediv__`, prepending the left-hand string).
+    path_func!("__rtruediv__", |args| {
+        if args.len() < 2 {
+            return Err(PyError::type_error("__rtruediv__() missing argument"));
+        }
+        let mut base = std::path::PathBuf::from(args[1].str());
+        base.push(path_instance_str(&args[0]));
+        let result = base.to_string_lossy().to_string();
         let path_type = PATH_TYPE.with(|cell| {
             cell.borrow().clone()
         }).ok_or_else(|| PyError::runtime_error("Path type not initialized".to_string()))?;

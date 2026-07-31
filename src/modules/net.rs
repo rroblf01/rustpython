@@ -153,6 +153,66 @@ fn make_called_process_error(returncode: i64, cmd: &str, output: Vec<u8>, stderr
     PyObjectRef::new(PyObject::Instance { typ: get_called_process_error_type(), dict })
 }
 
+thread_local! {
+    static COMPLETED_PROCESS_TYPE: std::cell::RefCell<Option<PyObjectRef>> = std::cell::RefCell::new(None);
+}
+
+/// `subprocess.CompletedProcess` — `subprocess.run(...)` previously
+/// returned a bare `dict` (`{"returncode": ..., "stdout": ..., "stderr":
+/// ...}`) instead of a real object with `.returncode`/`.stdout`/`.stderr`
+/// ATTRIBUTE access, which is how every real caller uses it
+/// (`subprocess.run(...).returncode`) — `result["returncode"]` happened to
+/// also work by accident (dict subscript), but `.returncode` raised
+/// `AttributeError: 'dict' object has no attribute 'returncode'`. Same
+/// shape as `CalledProcessError` just above: a real `Type`/`Instance` pair,
+/// not a plain marker.
+fn get_completed_process_type() -> PyObjectRef {
+    let existing = COMPLETED_PROCESS_TYPE.with(|c| c.borrow().clone());
+    if let Some(t) = existing { return t; }
+    let mut type_dict: HashMap<String, PyObjectRef> = HashMap::new();
+    type_dict.insert_str("__repr__", PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "__repr__".to_string(),
+        func: |args| {
+            if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+                let rc = dict.get_str("returncode").and_then(|v| v.as_i64()).unwrap_or(0);
+                let args_repr = dict.get_str("args").map(|v| v.repr()).unwrap_or_default();
+                Ok(py_str(&format!("CompletedProcess(args={}, returncode={})", args_repr, rc)))
+            } else { Ok(py_str("CompletedProcess(...)")) }
+        },
+    }));
+    type_dict.insert_str("check_returncode", PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "check_returncode".to_string(),
+        func: |args| {
+            if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+                let rc = dict.get_str("returncode").and_then(|v| v.as_i64()).unwrap_or(0);
+                if rc != 0 {
+                    let cmd = dict.get_str("args").map(|v| v.str()).unwrap_or_default();
+                    let stdout = dict.get_str("stdout").map(|v| v.str().into_bytes()).unwrap_or_default();
+                    let stderr = dict.get_str("stderr").map(|v| v.str().into_bytes()).unwrap_or_default();
+                    let err = make_called_process_error(rc, &cmd, stdout, stderr);
+                    return Err(PyError::Exception("CalledProcessError".to_string(), err));
+                }
+            }
+            Ok(py_none())
+        },
+    }));
+    let typ = PyObjectRef::new(PyObject::Type { name: "CompletedProcess".to_string(), dict: Box::new(str_map_to_typedict(type_dict)), bases: vec![], mro: vec![] });
+    if let PyObject::Type { mro, .. } = &mut *typ.borrow_mut() {
+        *mro = vec![typ.clone()];
+    }
+    COMPLETED_PROCESS_TYPE.with(|c| { *c.borrow_mut() = Some(typ.clone()); });
+    typ
+}
+
+fn make_completed_process(cmd_args: PyObjectRef, returncode: i64, stdout: PyObjectRef, stderr: PyObjectRef) -> PyObjectRef {
+    let mut dict = crate::object::AttrMap::new();
+    dict.insert_str("args", cmd_args);
+    dict.insert_str("returncode", py_int(returncode));
+    dict.insert_str("stdout", stdout);
+    dict.insert_str("stderr", stderr);
+    PyObjectRef::new(PyObject::Instance { typ: get_completed_process_type(), dict })
+}
+
 pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! sub_func {
@@ -194,13 +254,7 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
         let returncode = output.status.code().unwrap_or(-1) as i64;
         let stdout_str = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr_str = String::from_utf8_lossy(&output.stderr).to_string();
-        let result = py_dict();
-        if let PyObject::Dict(dict) = &mut *result.borrow_mut() {
-            dict.set(py_str("returncode"), py_int(returncode)).ok();
-            dict.set(py_str("stdout"), py_str(&stdout_str)).ok();
-            dict.set(py_str("stderr"), py_str(&stderr_str)).ok();
-        }
-        Ok(result)
+        Ok(make_completed_process(args[0].clone(), returncode, py_str(&stdout_str), py_str(&stderr_str)))
     });
 
     sub_func!("check_call", |args| {

@@ -474,6 +474,25 @@ impl PyObjectRef {
         PyObjectRef::Imm(rc)
     }
 
+    /// Backs `sys.getrefcount()`. This interpreter's memory model (`Rc`-based
+    /// sharing, distinct from CPython's own refcounting) means the ABSOLUTE
+    /// number will never match a real CPython build — but `Rc::strong_count`
+    /// is a genuine, real count of live strong references to the SAME
+    /// underlying allocation, so a before/after DELTA around some operation
+    /// (the overwhelmingly common way real test code actually uses this
+    /// function: `before = sys.getrefcount(x); ...; assertEqual(getrefcount(x),
+    /// before)`) can still correctly reflect whether this interpreter itself
+    /// picked up or released a reference. Inline variants (`SmallInt`/
+    /// `SmallBool`/`SmallFloat`/`SmallStr`/`None`) have no `Rc` at all — report
+    /// a large constant, matching CPython's own convention for small
+    /// cached/immortal objects (`sys.getrefcount(1)` is always huge there too).
+    pub fn strong_count(&self) -> usize {
+        match self {
+            PyObjectRef::Mut(rc) | PyObjectRef::Imm(rc) => Rc::strong_count(rc),
+            _ => 1_000_000,
+        }
+    }
+
     pub fn borrow(&self) -> RefOrOwned<'_> {
         match self {
             PyObjectRef::SmallInt(n) => RefOrOwned::Owned(PyObject::Int(BigInt::from(*n))),
