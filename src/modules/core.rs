@@ -2229,7 +2229,7 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
             if let Some(module) = vm.modules.get(name) {
                 return Ok(module.clone());
             }
-            return Err(PyError::ImportError(format!("No module named '{}'", name)));
+            return Err(PyError::module_not_found_error(format!("No module named '{}'", name)));
         }
         // Simple name
         let module = vm.import_module_from_file(name)?;

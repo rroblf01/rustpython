@@ -95,7 +95,25 @@ pub fn builtin_import(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
         return Err(PyError::type_error("__import__() requires at least 1 argument (module name)"));
     }
+    // Mirrors the same check in `vm.rs`'s direct-dispatch fast path — `name`
+    // must actually be a `str`, not silently coerced via `.str()`.
+    if !matches!(&*args[0].borrow(), PyObject::Str(_)) {
+        return Err(PyError::type_error("__import__() argument 'name' must be str"));
+    }
     let name = args[0].str();
+    // See the matching check in `vm.rs`'s direct-dispatch fast path for why
+    // this is gated on `level == 0` (an empty name is the normal encoding
+    // of a pure relative import when `level>0`).
+    let level = args.last().and_then(|last| {
+        if let PyObject::Dict(d) = &*last.borrow() {
+            d.get(&py_str("level")).ok().flatten()
+        } else {
+            None
+        }
+    }).or_else(|| args.get(4).cloned()).and_then(|v| v.as_i64()).unwrap_or(0);
+    if name.is_empty() && level == 0 {
+        return Err(PyError::value_error("Empty module name"));
+    }
     // Handle fromlist: if provided, return the rightmost submodule. Real
     // code overwhelmingly calls `__import__(name, fromlist=[...])` with
     // `fromlist` as a KEYWORD argument (real trigger: CPython's own

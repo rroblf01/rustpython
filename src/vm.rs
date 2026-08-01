@@ -426,7 +426,7 @@ impl VirtualMachine {
                      name: "BuiltinImporter".to_string(),
                      func: |args| {
                          if args.len() < 2 { return Err(PyError::type_error("find_spec() requires 2 arguments")); }
-                         Err(PyError::ImportError(format!("No module named '{}'", args[1].str())))
+                         Err(PyError::module_not_found_error(format!("No module named '{}'", args[1].str())))
                      },
                  }),
              ]);
@@ -1762,7 +1762,7 @@ impl VirtualMachine {
                 }
             }
         }
-        Err(PyError::ImportError(format!("No module named '{}'", name)))
+        Err(PyError::module_not_found_error(format!("No module named '{}'", name)))
     }
 
     fn get_sys_path(&self) -> Vec<String> {
@@ -6070,8 +6070,56 @@ impl VirtualMachine {
         // exactly this) with the real VM directly.
         {
             let is_import = matches!(&*callable.borrow(), PyObject::BuiltinFunction { func, .. } if std::ptr::fn_addr_eq(*func, crate::object::builtin_import as crate::object::BuiltinFunc));
-            if is_import && !args.is_empty() {
-                let name = args[0].str();
+            // Real `__import__`'s `name` is commonly passed as a KEYWORD
+            // argument too (`__import__(name='sys')` — exactly what
+            // `test_builtin.py::BuiltinTest.test_import` exercises). Since
+            // `keywords` arrives as a SEPARATE parameter here (not yet
+            // packed into `args`), the old `!args.is_empty()` guard was
+            // false whenever `name` was keyword-only, silently falling
+            // through to `object::builtin_import`'s generic `with_vm_mut`
+            // path below — which then treats the whole packed kwargs DICT
+            // as the module name (stringifying it to garbage like
+            // `"{'name': 'sys'}"`) and feeds that into the import
+            // machinery, corrupting `self.modules`'s backing allocation
+            // (confirmed via `gdb`: SIGSEGV inside a `HashMap::get("sys")`
+            // call in `get_sys_path`, reached via the very same
+            // `with_vm_mut` raw-pointer-aliasing UB class documented
+            // throughout this function) rather than raising a clean error.
+            let name_kw = keywords.iter().find(|(k, _)| k == "name").map(|(_, v)| v.clone());
+            if is_import && (!args.is_empty() || name_kw.is_some()) {
+                // Real CPython rejects `name` given BOTH positionally and by
+                // keyword (`__import__('sys', name='sys')`) with a
+                // `TypeError` — `test_builtin.py::BuiltinTest.test_import`
+                // checks this exact case too.
+                if !args.is_empty() && name_kw.is_some() {
+                    return Err(PyError::type_error("argument for __import__() given by name ('name') and position (1)"));
+                }
+                let name_obj = args.get(0).cloned().or(name_kw).unwrap();
+                // Real `__import__` requires `name` to actually be a `str`
+                // (`__import__(1, 2, 3, 4)` — exercised directly by
+                // `test_builtin.py::BuiltinTest.test_import` — must raise
+                // `TypeError`, not silently coerce the int via `.str()` and
+                // go looking for a module literally named `"1"`).
+                if !matches!(&*name_obj.borrow(), PyObject::Str(_)) {
+                    return Err(PyError::type_error("__import__() argument 'name' must be str"));
+                }
+                let name = name_obj.str();
+                // `__import__('')` (empty module name) is a real
+                // `ValueError` in CPython, not "module not found" — but
+                // ONLY for an absolute import (`level=0`, the default).
+                // With `level>0` an empty name is the NORMAL, valid
+                // encoding of a pure relative import (`from . import foo`
+                // desugars to `__import__('', globals(), locals(),
+                // ['foo'], 1)`) — `test_builtin.py::BuiltinTest.test_import`
+                // exercises both: `__import__('')` (level 0, expects
+                // ValueError) and a `level=1` call with fromlist (expects
+                // ImportError from the relative-import-with-no-package
+                // check, not ValueError).
+                let level_kw = keywords.iter().find(|(k, _)| k == "level").map(|(_, v)| v.clone());
+                let level = args.get(4).cloned().or(level_kw).and_then(|v| v.as_i64()).unwrap_or(0);
+                if name.is_empty() && level == 0 {
+                    return Err(PyError::value_error("Empty module name"));
+                }
                 // `fromlist` is overwhelmingly passed as a KEYWORD argument
                 // in real code (`__import__(name, fromlist=[...])` — real
                 // trigger: CPython's own `dbm/__init__.py`), which under

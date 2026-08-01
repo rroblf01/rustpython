@@ -117,6 +117,25 @@ impl PyError {
             cause: None,
         }))
     }
+    /// Same `PyError::Exception(name, obj)` pattern as `syntax_error`/
+    /// `memory_error`/`overflow_error`/`unbound_local_error` above. Real
+    /// CPython raises `ModuleNotFoundError` (a dedicated `ImportError`
+    /// subclass, see `is_exception_subclass` in `vm.rs`) specifically for
+    /// "module not found" — every "No module named ..." site here used to
+    /// raise the plain `PyError::ImportError` variant instead, which reports
+    /// as the PARENT class name; `assertRaises(ModuleNotFoundError, ...)`
+    /// (e.g. `test_builtin.py::BuiltinTest.test_import`) doesn't accept a
+    /// raised parent class even though the subclass relationship holds in
+    /// the other direction (same asymmetry already documented for
+    /// `binascii.Error`/`ValueError`).
+    pub fn module_not_found_error(msg: impl Into<String>) -> Self {
+        let msg = msg.into();
+        PyError::Exception("ModuleNotFoundError".to_string(), PyObjectRef::new(PyObject::Exception {
+            typ: "ModuleNotFoundError".to_string(),
+            args: vec![py_str(&msg)],
+            cause: None,
+        }))
+    }
     pub fn runtime_error(msg: impl Into<String>) -> Self {
         PyError::RuntimeError(msg.into())
     }
