@@ -476,6 +476,32 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
             builtin_call(&bf, &all_args)
         }
         4 => {
+            // A real native value type (`str`, `int`, `bool`, `list`, ...)
+            // called through THIS disposable dispatcher — e.g. `map(str,
+            // seq)`/`filter(bool, seq)`, which store the callable and
+            // invoke it later via `builtin_call` rather than the main VM's
+            // own `call_function` — needs the SAME `NATIVE_VALUE_CTOR_KEY`
+            // priority check `call_function` already does (see its own doc
+            // comment in `vm.rs`), checked BEFORE the generic "build an
+            // empty Instance + call __init__" path below. Without this,
+            // `map(str, [x])` silently built a broken, empty
+            // `PyObject::Instance` (since `str`/`bool`/etc. have no REAL
+            // `__init__` of the kind this generic path expects) instead of
+            // dispatching to `builtin_str`/`builtin_bool`/etc. — confirmed
+            // via direct repro: `list(map(str, [SomeCustomClass()]))`
+            // printed the generic `<instance object at 0x...>` fallback
+            // instead of calling `__str__`, even though `str(x)` directly
+            // (main VM dispatch) worked fine. Real trigger: CPython's own
+            // `test_robotparser.py`'s `RobotFileParser.__str__`, which does
+            // `map(str, entries)` internally.
+            let native_ctor = if let PyObject::Type { dict, .. } = &*f.borrow() {
+                dict.get_str(crate::object::NATIVE_VALUE_CTOR_KEY).cloned()
+            } else {
+                None
+            };
+            if let Some(ctor) = native_ctor {
+                return builtin_call(&ctor, &a);
+            }
             if matches!(&*f.borrow(), PyObject::Type { .. }) {
                 let instance = PyObjectRef::new(PyObject::Instance {
                     typ: f.clone(),

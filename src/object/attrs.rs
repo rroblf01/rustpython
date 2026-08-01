@@ -2630,12 +2630,23 @@ impl PyObject {
                     "popitem" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "popitem".to_string(),
                         func: |args| {
+                            // Real `dict.popitem()` takes NO arguments at
+                            // all (unlike `OrderedDict.popitem(last=True)`,
+                            // a genuinely different method on a different
+                            // type) — this silently accepted and ignored
+                            // any extra positional argument instead of
+                            // raising, confirmed via CPython's own
+                            // `test_dict.py`/`mapping_tests.py::
+                            // test_popitem`, which explicitly checks
+                            // `assertRaises(TypeError, d.popitem, 42)`.
+                            if args.len() > 1 {
+                                return Err(PyError::type_error(format!(
+                                    "dict.popitem() takes no arguments ({} given)", args.len() - 1)));
+                            }
                             if let PyObject::Dict(d) = &mut *args[0].borrow_mut() {
                                 let items = d.items();
                                 if items.is_empty() { return Err(PyError::key_error("popitem(): dictionary is empty")); }
-                                let last = args.len() <= 2 || args[1].truthy();
-                                let (k, v) = if last { items.into_iter().last().unwrap() }
-                                    else { items.into_iter().next().unwrap() };
+                                let (k, v) = items.into_iter().last().unwrap();
                                 d.remove(&k)?;
                                 Ok(py_tuple(vec![k, v]))
                             } else { Err(PyError::runtime_error("popitem on non-dict")) }

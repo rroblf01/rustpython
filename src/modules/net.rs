@@ -222,11 +222,38 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
     }
     d.insert_str("CalledProcessError", get_called_process_error_type());
 
+    // Real `subprocess.run`/`check_call`/`check_output` all have `shell` as
+    // a KEYWORD-ONLY parameter (`def run(args, *, shell=False, ...)`) — this
+    // used to treat `args[1]` as if it were a POSITIONAL `shell` flag
+    // instead. Since keyword arguments arrive packed into a trailing `Dict`
+    // (this project's own established calling convention), ANY call using
+    // ANY keyword argument at all — `capture_output=True`, `text=True`,
+    // `check=True`, `timeout=...`, all extremely common — put that non-
+    // empty kwargs dict in `args[1]`, and `args[1].truthy()` on a non-empty
+    // dict is always `True`: every such call silently ran in `shell=True`
+    // mode instead, feeding the WHOLE debug-stringified command list
+    // (`"['/path/to/python', '-c', ...]"`, brackets and all) to `/bin/sh
+    // -c` as one command — confirmed via direct repro (`subprocess.run(cmd,
+    // capture_output=True, text=True)` failed with `/bin/sh: ... [/path...,:
+    // No such file or directory`, the literal Rust-debug-formatted list).
+    // Looks up `shell` specifically BY NAME in the trailing kwargs dict
+    // instead.
+    fn kwarg_bool(args: &[PyObjectRef], name: &str) -> bool {
+        match args.last() {
+            Some(last) if matches!(&*last.borrow(), PyObject::Dict(_)) => {
+                if let PyObject::Dict(d) = &*last.borrow() {
+                    d.get(&py_str(name)).ok().flatten().map(|v| v.truthy()).unwrap_or(false)
+                } else { false }
+            }
+            _ => false,
+        }
+    }
+
     sub_func!("run", |args| {
         if args.is_empty() {
             return Err(PyError::type_error("run() missing required argument"));
         }
-        let shell = if args.len() > 1 { args[1].truthy() } else { false };
+        let shell = kwarg_bool(args, "shell");
         let cmd_str = args[0].str();
         if cmd_str.is_empty() {
             return Err(PyError::ValueError("empty command".to_string()));
@@ -263,7 +290,7 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
             return Err(PyError::type_error("check_call() missing required argument"));
         }
         let cmd_str = args[0].str();
-        let shell = if args.len() > 1 { args[1].truthy() } else { false };
+        let shell = kwarg_bool(args, "shell");
         let output = if shell {
             std::process::Command::new("sh")
                 .arg("-c")
@@ -271,11 +298,23 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
                 .output()
                 .map_err(|e| PyError::OsError(format!("{}", e)))?
         } else {
-            let cmd_args: Vec<&str> = cmd_str.split_whitespace().collect();
+            // Was: `cmd_str.split_whitespace()` — the LIST form (the common
+            // case, e.g. `[sys.executable, '-E', '-c', code]`) was stringified
+            // via `.str()` first (producing the Rust-debug-ish
+            // `"['/path/to/exe', '-E', ...]"`) and THEN split on whitespace,
+            // shredding the executable path into garbage tokens like
+            // `"['/path/to/exe',"` — every list-form call failed with a
+            // spurious `OSError: No such file or directory`. Mirrors the
+            // already-correct `run`/`check_output` handling just above/below.
+            let cmd_args: Vec<String> = if let PyObject::List(items) = &*args[0].borrow() {
+                items.iter().map(|a| a.str()).collect()
+            } else {
+                cmd_str.split_whitespace().map(|s| s.to_string()).collect()
+            };
             if cmd_args.is_empty() {
                 return Err(PyError::type_error("check_call() requires a non-empty command"));
             }
-            std::process::Command::new(cmd_args[0])
+            std::process::Command::new(&cmd_args[0])
                 .args(&cmd_args[1..])
                 .output()
                 .map_err(|e| PyError::OsError(format!("{}", e)))?
@@ -291,7 +330,7 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
         if args.is_empty() {
             return Err(PyError::type_error("check_output() missing required argument"));
         }
-        let shell = if args.len() > 1 { args[1].truthy() } else { false };
+        let shell = kwarg_bool(args, "shell");
         let cmd_str = args[0].str();
         if cmd_str.is_empty() {
             return Err(PyError::ValueError("empty command".to_string()));
@@ -324,6 +363,17 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
         // Return stdout as bytes
         Ok(PyObjectRef::imm(PyObject::Bytes(output.stdout)))
     });
+
+    // Real CPython's internal `subprocess._cleanup()` reaps any finished
+    // background children it's still tracking. `Lib/test/support/script_
+    // helper.py`'s `run_python_until_end` calls it unconditionally in a
+    // `finally` block after every spawned test subprocess — it was missing
+    // entirely (`AttributeError`), so EVERY test using `assert_python_ok`/
+    // `assert_python_failure` failed there even after the process itself
+    // ran and exited correctly. This project's `Popen`/`run`/`check_call`
+    // all block synchronously with no background-process registry, so
+    // there is nothing to reap — a no-op is behavior-equivalent.
+    sub_func!("_cleanup", |_args| Ok(py_none()));
 
     // Constants
     d.insert_str("PIPE", py_int(-1));

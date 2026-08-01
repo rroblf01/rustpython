@@ -248,6 +248,21 @@ def tokenize(readline):
         yield (tok.type, tok.string)
 
 
+# Real CPython's internal wrapper around the C tokenizer — this project has
+# no separate C tokenizer to bind to, so this is a thin alias to the same
+# `generate_tokens` the pure-Python path already uses. Was missing entirely
+# (`AttributeError`), breaking every one of CPython's own `test_tokenize.py`
+# `CTokenizeTest` methods (real CPython runs each shared test method against
+# BOTH tokenizer implementations via parallel test classes) even though the
+# equivalent pure-Python-tokenizer test class already passed. `encoding`/
+# `extra_tokens` (real signature: `(source, encoding=None,
+# extra_tokens=False)`) are accepted but not acted upon — this project's
+# tokenizer doesn't implement the newer f-string FSTRING_START/MIDDLE/END
+# sub-token protocol `extra_tokens=True` would add.
+def _generate_tokens_from_c_tokenizer(source, encoding=None, extra_tokens=False):
+    return generate_tokens(source)
+
+
 def detect_encoding(readline):
     """Detect encoding from first two lines. Returns (encoding, lines_read)."""
     lines_read = []

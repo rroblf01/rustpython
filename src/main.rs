@@ -276,7 +276,7 @@ fn real_main() {
     let args: Vec<String> = raw_args.iter().skip(1).cloned().collect();
 
     // Handle flags
-    let i = 0;
+    let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--version" | "-V" => {
@@ -286,6 +286,57 @@ fn real_main() {
             "--help" | "-h" => {
                 print_usage();
                 return;
+            }
+            // `-X <opt>` (implementation-specific extension options, e.g.
+            // `-X faulthandler`/`-X dev`), `-I` (isolated mode), and `-E`
+            // (ignore `PYTHON*` environment variables) were all entirely
+            // unrecognized, immediately erroring out with "unknown option"
+            // — real CPython's own `Lib/test/support/script_helper.py`
+            // (used pervasively across the CPython test corpus to spawn a
+            // subprocess running specific test code in isolation) ALWAYS
+            // passes `-X faulthandler`, and conditionally `-I`/`-E` too —
+            // so EVERY test using it (a very common pattern: `test_
+            // assertion_error_location`, anything using `assert_python_ok`/
+            // `run_python_until_end`) failed immediately with exit code 2
+            // before ever reaching the actual test code. None of these
+            // need real semantics here (no per-flag runtime behavior this
+            // interpreter implements differs on) — just needs to not
+            // reject them, so `-c`/`-m`/the script filename that follows
+            // still gets processed correctly. `i` was previously immutable
+            // (this whole loop only ever inspected `args[0]`, since every
+            // other arm returns/exits/breaks immediately) — made mutable
+            // so multiple flags can now be consumed in sequence.
+            "-X" => {
+                if i + 1 >= args.len() {
+                    eprintln!("rustpython: -X requires an argument");
+                    std::process::exit(2);
+                }
+                i += 2;
+                continue;
+            }
+            "-I" | "-E" => {
+                i += 1;
+                continue;
+            }
+            // `-W <arg>` (warning-control filter) also takes an argument,
+            // but real CPython additionally allows it attached directly
+            // (`-Wd`, `-Wonce`, ...) rather than as a separate argv entry —
+            // `Lib/test/support/script_helper.py` uses exactly this attached
+            // form (`-Wd`), which isn't the standalone literal `"-W"` this
+            // match matches on, so it was falling through to the unknown-
+            // option catch-all and erroring out before `-X`/the script
+            // filename were ever reached.
+            "-W" => {
+                if i + 1 >= args.len() {
+                    eprintln!("rustpython: -W requires an argument");
+                    std::process::exit(2);
+                }
+                i += 2;
+                continue;
+            }
+            s if s.starts_with("-W") && s.len() > 2 => {
+                i += 1;
+                continue;
             }
             "-c" => {
                 // Execute Python code string

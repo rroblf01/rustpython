@@ -268,19 +268,69 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
     }
     fn b32_encode(data: &[u8]) -> String { b32_encode_with(data, B32_ALPHABET) }
 
+    // Raises a REAL `binascii.Error` (not a plain `ValueError`) — matters
+    // because CPython's own `test_base64.py` uses `assertRaises(binascii.
+    // Error, ...)`, which only matches an actual `binascii.Error` instance
+    // or subclass, not merely something that happens to also be a
+    // `ValueError` (the reverse: a raised `binascii.Error` IS caught by
+    // `except ValueError`, since it subclasses it — but not the other way
+    // around). Mirrors the exact construction `binascii.rs`'s own `Error`
+    // constructor uses.
+    fn binascii_error(msg: impl Into<String>) -> PyError {
+        let msg = msg.into();
+        PyError::Exception("Error".to_string(), PyObjectRef::new(PyObject::Exception {
+            typ: "Error".to_string(),
+            args: vec![py_str(&msg)],
+            cause: None,
+        }))
+    }
+
+    // Real `base64.b32decode`/`b32hexdecode` strictly validate padding —
+    // this used to accept essentially ANY input of matching alphabet
+    // characters with no structural checks at all (no length-multiple-of-8
+    // check, no padding-count/position validation), so malformed input that
+    // real CPython rejects with `binascii.Error` was silently "decoded"
+    // into garbage instead. Found via CPython's own `test_base64.py::
+    // test_b32decode_error`/`test_b32hexdecode_error`, whose sole purpose
+    // is exercising exactly these malformed-input shapes (wrong total
+    // length, padding in the wrong position, wrong padding count, `=`
+    // followed by more data). RFC 4648 §6's base32 encoding always groups
+    // input into 8-character blocks; a truncated FINAL block only ever
+    // has 2/4/5/7 real data characters (padded to 8 with `=`) — any other
+    // count, or `=` anywhere but a single contiguous run at the very end,
+    // is invalid.
     fn b32_decode_with(s: &str, alphabet: &[u8]) -> Result<Vec<u8>, String> {
         let mut rev = [255u8; 256];
         for (i, &c) in alphabet.iter().enumerate() {
             rev[c as usize] = i as u8;
         }
-        let s = s.trim_end_matches('=');
+        let bytes = s.as_bytes();
+        if bytes.len() % 8 != 0 {
+            return Err("Incorrect padding".to_string());
+        }
+        if let Some(first_pad) = bytes.iter().position(|&b| b == b'=') {
+            if !bytes[first_pad..].iter().all(|&b| b == b'=') {
+                return Err("Incorrect padding".to_string());
+            }
+            if first_pad < bytes.len().saturating_sub(8) {
+                return Err("Incorrect padding".to_string());
+            }
+            let pad_count = bytes.len() - first_pad;
+            if !matches!(pad_count, 1 | 3 | 4 | 6) {
+                return Err("Incorrect padding".to_string());
+            }
+        }
+        let trimmed = s.trim_end_matches('=');
         let mut out = Vec::new();
-        for chunk in s.as_bytes().chunks(8) {
+        for chunk in trimmed.as_bytes().chunks(8) {
+            if chunk.len() != 8 && !matches!(chunk.len(), 2 | 4 | 5 | 7) {
+                return Err("Incorrect padding".to_string());
+            }
             let mut n: u64 = 0;
             let mut valid_bits = 0;
             for &c in chunk {
                 let v = rev[c as usize];
-                if v == 255 { return Err("Invalid base32 character".to_string()); }
+                if v == 255 { return Err("Non-base32 digit found".to_string()); }
                 n = (n << 5) | v as u64;
                 valid_bits += 5;
             }
@@ -311,7 +361,7 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
         };
         match b32_decode(&s) {
             Ok(bytes) => Ok(PyObjectRef::imm(PyObject::Bytes(bytes))),
-            Err(e) => Err(PyError::value_error(e)),
+            Err(e) => Err(binascii_error(e)),
         }
     });
 
@@ -398,7 +448,7 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
             PyObject::ByteArray(b) => String::from_utf8_lossy(b).to_string(),
             _ => return Err(PyError::type_error("b32hexdecode() argument must be a string or bytes")),
         };
-        b32_decode_with(&s, B32HEX_ALPHABET).map(|b| PyObjectRef::imm(PyObject::Bytes(b))).map_err(PyError::value_error)
+        b32_decode_with(&s, B32HEX_ALPHABET).map(|b| PyObjectRef::imm(PyObject::Bytes(b))).map_err(binascii_error)
     });
 
     d

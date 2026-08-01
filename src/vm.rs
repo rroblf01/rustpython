@@ -7685,6 +7685,13 @@ pub(crate) fn is_exception_subclass(child_type: &str, parent_type: &str) -> bool
         // Children of ValueError
         "UnicodeError" | "UnicodeEncodeError" | "UnicodeDecodeError" |
         "UnicodeTranslateError" => Some("ValueError"),
+        // `binascii.Error` — real CPython subclasses `ValueError` (checked
+        // via `issubclass(binascii.Error, ValueError)`), found missing while
+        // fixing `base64.b32decode`'s error validation (its own tests do
+        // `assertRaises(binascii.Error, ...)`, which needs this ancestry to
+        // also accept a plain `ValueError` the same way `assertRaises`
+        // matching real CPython would).
+        "Error" => Some("ValueError"),
         // Children of Warning
         "UserWarning" | "DeprecationWarning" | "PendingDeprecationWarning" |
         "SyntaxWarning" | "RuntimeWarning" | "FutureWarning" |

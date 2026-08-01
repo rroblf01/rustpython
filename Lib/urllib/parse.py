@@ -240,6 +240,22 @@ def urlunsplit(components):
     return url
 
 
+# Private variants of `urlsplit`/`urlunsplit` real code sometimes calls
+# directly (e.g. `urllib.robotparser`'s own `can_fetch`, "to preserve an
+# empty query" per its own comment) — were missing entirely from this
+# module, raising `AttributeError`. `_urlsplit` differs only in its
+# `scheme` default (`None` instead of `""`, normalized to the same thing
+# here); `_urlunsplit` takes the 5 components as separate POSITIONAL
+# arguments rather than a single tuple (confirmed against a real CPython
+# interpreter's own `inspect.signature`).
+def _urlsplit(url, scheme=None, allow_fragments=True):
+    return urlsplit(url, scheme or "", allow_fragments)
+
+
+def _urlunsplit(scheme, netloc, url, query, fragment):
+    return urlunsplit((scheme or "", netloc or "", url, query, fragment))
+
+
 def urlparse(url, scheme="", allow_fragments=True):
     """Parse a URL into 6 components: (scheme, netloc, path, params, query, fragment)."""
     split = urlsplit(url, scheme, allow_fragments)
