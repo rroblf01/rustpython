@@ -2976,13 +2976,23 @@ pub fn builtin_open(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // `f.write(...)` failed with a raw OS-level "Bad file descriptor"
     // instead of writing.
     let has_plus = mode.contains('+');
-    let file = std::fs::File::options()
-        .read(mode.contains('r') || has_plus)
-        .write(mode.contains('w') || mode.contains('a') || has_plus)
+    // Mode `'x'` = exclusive create (real CPython's third create flag,
+    // alongside `'w'` create+truncate and `'a'` create+append): creates the
+    // file but FAILS with `FileExistsError` if it already exists. Was
+    // completely unrecognized — `open(path, 'xb')` (the very common "write
+    // this file only if I'm not clobbering something" idiom, used all over
+    // CPython's own test suite) set NO read/write flag at all, failing with
+    // a raw `OSError: must specify at least one of read, write, or append
+    // access`. It implies write, exactly like `'w'`.
+    let has_x = mode.contains('x');
+    let mut opts = std::fs::File::options();
+    opts.read(mode.contains('r') || has_plus)
+        .write(mode.contains('w') || mode.contains('a') || has_plus || has_x)
         .append(mode.contains('a'))
-        .create(mode.contains('w') || mode.contains('a'))
-        .truncate(mode.contains('w'))
-        .open(&filename)
+        .create(mode.contains('w') || mode.contains('a') || has_x)
+        .truncate(mode.contains('w'));
+    if has_x { opts.create_new(true); }
+    let file = opts.open(&filename)
         .map_err(|e| PyError::os_error_from_io(&e))?;
     let binary = mode.contains('b');
     Ok(PyObjectRef::new(PyObject::File { file: std::rc::Rc::new(std::cell::RefCell::new(file)), name: filename, binary, pending: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())) }))
