@@ -1977,6 +1977,31 @@ pub fn builtin_exit(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Err(PyError::SystemExit(code))
 }
 
+/// Invoke `func` in a fresh disposable VM, supporting KEYWORD arguments —
+/// unlike `call_bound_method` (which only forwards positionals). Needed by
+/// `atexit._run_exitfuncs` (`register(func, 3, key='value')` callbacks), and
+/// generally useful for running a user `Function` from native code with the
+/// full calling convention without re-entering the live VM's execute loop
+/// (which is what `vm.call_function` does from inside a builtin, and which
+/// misbehaves for user Functions).
+pub fn call_function_disposable(func: &PyObjectRef, args: Vec<PyObjectRef>, keywords: Vec<(String, PyObjectRef)>) -> PyResult<PyObjectRef> {
+    match &*func.borrow() {
+        PyObject::BuiltinFunction { func: f, .. } => f(&args),
+        PyObject::Closure(c) => c(&args),
+        PyObject::BuiltinMethod { func: f, self_obj, .. } => {
+            let mut all = vec![self_obj.clone()];
+            all.extend(args);
+            f(&all)
+        }
+        PyObject::Function(_) => {
+            let _guard = crate::object::NativeDispatchRecursionGuard::enter()?;
+            let mut vm = crate::vm::VirtualMachine::new();
+            vm.call_function(func.clone(), args, keywords)
+        }
+        _ => Err(PyError::type_error(format!("'{}' object is not callable", func.borrow().type_name()))),
+    }
+}
+
 pub fn call_bound_method(func: PyObjectRef, self_obj: PyObjectRef, args: Vec<PyObjectRef>) -> PyResult<PyObjectRef> {
     match &*func.borrow() {
         PyObject::BuiltinMethod { func: f, self_obj: s, .. } => {

@@ -4431,6 +4431,25 @@ pub fn create_atexit_dict() -> HashMap<String, PyObjectRef> {
         name: "is_tracing".to_string(),
         func: |_| Ok(py_bool(false)),
     }));
+    // `atexit._run_exitfuncs()` — runs all registered callbacks in LIFO
+    // order and CLEARS them (real CPython's internal function, exercised
+    // directly by the vendored `_test_atexit.py`, which runs it in-process
+    // to verify ordering/arg-passing/unraisable handling without exiting).
+    d.insert_str("_run_exitfuncs", PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "_run_exitfuncs".to_string(),
+        func: |_| {
+            let callbacks: Vec<(PyObjectRef, Vec<PyObjectRef>, Vec<(String, PyObjectRef)>)> =
+                EXIT_CALLBACKS.with(|cb| cb.borrow().clone());
+            for (func, extra, kwargs) in callbacks.iter().rev() {
+                // A raising callback is "unraisable" — real CPython reports
+                // it via sys.unraisablehook; this interpreter swallows it
+                // (the registry still clears).
+                let _ = crate::object::call_function_disposable(func, extra.clone(), kwargs.clone());
+            }
+            EXIT_CALLBACKS.with(|cb| cb.borrow_mut().clear());
+            Ok(py_none())
+        },
+    }));
     d
 }
 
