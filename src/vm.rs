@@ -6943,19 +6943,34 @@ impl VirtualMachine {
             // `defaults` right after the positional ones (see
             // CodeObject::kwonly_defaults_mask / MAKE_FUNCTION).
             if code.kwonlyarg_count > 0 {
+                // A live `__kwdefaults__` dict set on the function (either the
+                // default one or a REPLACEMENT — `f.__kwdefaults__ = {...}`
+                // must affect subsequent calls, test_keywordonlyarg's
+                // testKwDefaults) is the source of truth for kwonly defaults,
+                // overriding the compiled-in ones.
+                let live_kwdefaults: Option<Box<crate::object::PyDict>> = inner_f.dict.get("__kwdefaults__").and_then(|v| {
+                    if let PyObject::Dict(d) = &*v.borrow() { Some(d.clone()) } else { None }
+                });
                 let kwonly_start = code.arg_count + if code.vararg_name.is_some() { 1 } else { 0 };
                 let mut kwdefault_idx = code.num_defaults;
                 for (k, &has_default) in code.kwonly_defaults_mask.iter().enumerate() {
-                    if !has_default { continue; }
-                    let default_val = defaults.get(kwdefault_idx).cloned();
-                    kwdefault_idx += 1;
                     let idx = kwonly_start + k;
-                    if idx < new_frame.fast_locals.len() && new_frame.fast_locals[idx].is_none() {
-                        if let Some(val) = default_val {
-                            let name_clone = new_frame.code.varnames[idx].to_string();
-                            new_frame.insert_local(&name_clone, val.clone());
-                            new_frame.fast_locals[idx] = Some(val);
+                    if idx >= new_frame.fast_locals.len() || new_frame.fast_locals[idx].is_some() {
+                        continue;
+                    }
+                    let name_str = interner::lookup_str(new_frame.code.varnames[idx]).to_string();
+                    let default_val = match &live_kwdefaults {
+                        Some(d) => d.get(&py_str(&name_str)).ok().flatten(),
+                        None => {
+                            if !has_default { continue; }
+                            let v = defaults.get(kwdefault_idx).cloned();
+                            kwdefault_idx += 1;
+                            v
                         }
+                    };
+                    if let Some(val) = default_val {
+                        new_frame.insert_local(&name_str, val.clone());
+                        new_frame.fast_locals[idx] = Some(val);
                     }
                 }
             }

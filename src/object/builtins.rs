@@ -2161,7 +2161,8 @@ pub fn builtin_sorted(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
         return Err(PyError::type_error("sorted() takes at least 1 argument"));
     }
-    // Check for key keyword argument (last arg could be a dict with "key")
+    // Check for key/reverse keyword arguments (last arg could be a dict with
+    // "key"/"reverse").
     let key_fn: Option<PyObjectRef> = if args.len() >= 2 {
         // Check if last arg is a dict (keyword args container)
         let last = args.last().unwrap();
@@ -2173,6 +2174,17 @@ pub fn builtin_sorted(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         }
     } else {
         None
+    };
+    let reverse: bool = if args.len() >= 2 {
+        let last = args.last().unwrap();
+        let last_borrowed = last.borrow();
+        if let PyObject::Dict(kwargs) = &*last_borrowed {
+            kwargs.get(&py_str("reverse")).unwrap_or(None).map(|v| v.truthy()).unwrap_or(false)
+        } else {
+            false
+        }
+    } else {
+        false
     };
     let mut v = Vec::new();
     let iterable = builtin_iter(&[args[0].clone()])?;
@@ -2207,6 +2219,9 @@ pub fn builtin_sorted(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             // trait impl alone has no notion of Instance dunder dispatch.
             py_compare(&a_val, &b_val, 0).map(|r| r.truthy()).unwrap_or(false)
         });
+        if reverse {
+            v.reverse();
+        }
     }
     Ok(py_list(v))
 }

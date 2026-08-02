@@ -298,7 +298,13 @@ pub fn builtin_compile(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // callers (real trigger: a `doctest`-style engine using
     // `compile(example, "<doctest>", "eval")` to both execute an example
     // and recover its result for auto-printing).
-    let program = if mode == "eval" || mode == "single" {
+    // Real CPython's "single" mode parses a STATEMENT (interactive input can
+    // be `def f(): ...` or an expression); only "eval" is expression-only.
+    // Treating "single" as an expression parse (the previous behavior) made
+    // `compile("def f(...): pass", "<t>", "single")` raise a spurious
+    // SyntaxError (test_keywordonlyarg::testSyntaxForManyArguments, which
+    // compiles a 300-argument `def` in "single" mode).
+    let program = if mode == "eval" {
         crate::parser::try_parse_as_expression(&source).map_err(|e| PyError::syntax_error(e))?
     } else {
         let mut parser = crate::parser::Parser::new(&source);

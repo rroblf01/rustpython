@@ -1448,22 +1448,39 @@ impl Parser {
         // without it, `def f(a, *, b, c):`'s b/c were indistinguishable from
         // plain positional params anywhere later in the compiler.
         let mut seen_star = false;
+        let mut bare_star = false;
+        let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
         if !self.at(&Token::RightParen) {
             loop {
                 // Allow trailing comma: if we see ')' after a comma, stop
                 if self.at(&Token::RightParen) { break; }
 
                 if self.eat(&Token::DoubleStar) {
+                    // `**kw` after a BARE `*,` is invalid (real CPython:
+                    // "named arguments must follow bare *") — but `**kw`
+                    // after `*args` is fine (`def f(*args, **kw)`).
+                    if bare_star {
+                        return Err("named arguments must follow bare *".to_string());
+                    }
                     let name = self.expect_name()?;
                     let annotation = if self.eat(&Token::Colon) {
                         Some(Box::new(self.parse_expr()?))
                     } else { None };
+                    if !seen_names.insert(name.clone()) {
+                        return Err(format!("duplicate argument '{}' in function definition", name));
+                    }
                     args.push(Arg { arg: name, annotation, is_vararg: false, is_kwarg: true, is_posonlyarg: false, is_kwonly: false, default: None });
                     if !self.eat(&Token::Comma) { break; }
                 } else if self.eat(&Token::Star) {
                     if self.at(&Token::RightParen) || self.at(&Token::Comma) {
-                        // bare * means keyword-only args follow
+                        // bare * means keyword-only args follow — but a bare
+                        // `*` with NOTHING after it is an error (real
+                        // CPython: "named arguments must follow bare *").
+                        if self.at(&Token::RightParen) {
+                            return Err("named arguments must follow bare *".to_string());
+                        }
                         seen_star = true;
+                        bare_star = true;
                         self.eat(&Token::Comma); // consume trailing comma if present
                         continue;
                     }
@@ -1476,6 +1493,9 @@ impl Parser {
                             Some(Box::new(self.parse_expr()?))
                         }
                     } else { None };
+                    if !seen_names.insert(name.clone()) {
+                        return Err(format!("duplicate argument '{}' in function definition", name));
+                    }
                     args.push(Arg { arg: name, annotation, is_vararg: true, is_kwarg: false, is_posonlyarg: false, is_kwonly: false, default: None });
                     seen_star = true;
                     if !self.eat(&Token::Comma) { break; }
@@ -1502,6 +1522,13 @@ impl Parser {
                 } else {
                     let mut arg = self.parse_arg()?;
                     arg.is_kwonly = seen_star;
+                    if !seen_names.insert(arg.arg.clone()) {
+                        return Err(format!("duplicate argument '{}' in function definition", arg.arg));
+                    }
+                    // A named kwonly arg satisfies the bare `*,` requirement
+                    // (`def f(*, k1, **kw)` is valid; only a `**` with NO
+                    // named arg since the bare `*,` is not).
+                    bare_star = false;
                     args.push(arg);
                     if !self.eat(&Token::Comma) { break; }
                 }
@@ -1916,10 +1943,15 @@ impl Parser {
             } else if self.eat(&Token::LeftParen) {
                 let mut args = Vec::new();
                 let mut keywords = Vec::new();
+                let mut seen_keyword = false;
+                let mut seen_kw_names: std::collections::HashSet<String> = std::collections::HashSet::new();
                 if !self.at(&Token::RightParen) {
                     loop {
                         if self.at(&Token::RightParen) { break; }
                         if self.at(&Token::Star) {
+                            if seen_keyword {
+                                return Err("iterable unpacking cannot be used in keyword argument".to_string());
+                            }
                             self.next(); // consume *
                             let starred = self.parse_expr()?;
                             args.push(Expr::Starred(Box::new(starred)));
@@ -1927,12 +1959,22 @@ impl Parser {
                             self.next();
                             let value = self.parse_expr()?;
                             keywords.push(Keyword { arg: None, value: Box::new(value) });
+                            seen_keyword = true;
                         } else if self.peek() == &Token::Equal && (matches!(&self.current, Token::Name(_)) || self.at(&Token::Underscore)) {
                             let arg = Some(if self.eat(&Token::Underscore) { "_".to_string() } else { self.expect_name()? });
+                            if let Some(name) = &arg {
+                                if !seen_kw_names.insert(name.clone()) {
+                                    return Err(format!("keyword argument repeated: {}", name));
+                                }
+                            }
                             self.expect(&Token::Equal)?;
                             let value = self.parse_expr()?;
                             keywords.push(Keyword { arg, value: Box::new(value) });
+                            seen_keyword = true;
                         } else {
+                            if seen_keyword {
+                                return Err("positional argument follows keyword argument".to_string());
+                            }
                             // Parse expression with full ternary support
                             let mut expr = self.parse_conditional_expr()?;
                             // Walrus operator as a call argument: f(x := expr)

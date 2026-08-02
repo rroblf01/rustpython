@@ -2921,7 +2921,7 @@ impl Compiler {
         let mut arg_count_finalized = false;
         for arg in args {
             if arg.is_vararg {
-                self.code.vararg_name = Some(Box::new(arg.arg.clone()));
+                self.code.vararg_name = Some(Box::new(self.mangle_name(&arg.arg)));
                 if !arg_count_finalized {
                     self.code.arg_count = num_positional;
                     arg_count_finalized = true;
@@ -2929,7 +2929,7 @@ impl Compiler {
                 continue;
             }
             if arg.is_kwarg {
-                self.code.kwarg_name = Some(Box::new(arg.arg.clone()));
+                self.code.kwarg_name = Some(Box::new(self.mangle_name(&arg.arg)));
                 continue;
             }
             if arg.is_kwonly {
@@ -2954,9 +2954,10 @@ impl Compiler {
         self.code.kwonlyarg_count = kwonly_count;
         self.code.kwonly_defaults_mask = Box::new(kwonly_defaults_mask);
 
-        // Add all args to varnames (including vararg/kwarg at the end)
+        // Add all args to varnames (including vararg/kwarg at the end) —
+        // private names mangled so they match the body's mangled references.
         for arg in args {
-            self.add_varname(&arg.arg);
+            self.add_varname(&self.mangle_name(&arg.arg));
         }
 
         // Add cell vars to varnames too (so they get fast_locals slots)
