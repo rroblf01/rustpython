@@ -2674,6 +2674,66 @@ pub fn os_kill_builtin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Ok(py_none())
 }
 
+// --- Helper: convert fs::Metadata to stat dict ---
+fn stat_to_dict(meta: &std::fs::Metadata) -> HashMap<String, PyObjectRef> {
+    use std::os::unix::fs::MetadataExt;
+    let mut d = HashMap::new();
+    d.insert_str("st_mode", py_int(meta.mode() as i64));
+    d.insert_str("st_ino", py_int(meta.ino() as i64));
+    d.insert_str("st_dev", py_int(meta.dev() as i64));
+    d.insert_str("st_nlink", py_int(meta.nlink() as i64));
+    d.insert_str("st_uid", py_int(meta.uid() as i64));
+    d.insert_str("st_gid", py_int(meta.gid() as i64));
+    d.insert_str("st_size", py_int(meta.size() as i64));
+    if let Ok(t) = meta.modified() {
+        let dur = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+        d.insert_str("st_mtime", py_float(dur.as_secs_f64()));
+    }
+    if let Ok(t) = meta.accessed() {
+        let dur = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+        d.insert_str("st_atime", py_float(dur.as_secs_f64()));
+    }
+    if let Ok(t) = meta.created() {
+        let dur = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+        d.insert_str("st_ctime", py_float(dur.as_secs_f64()));
+    }
+    d
+}
+
+// CPython's os functions raise `ValueError: embedded null character`
+// when given a path containing a NUL byte (not an OSError) — the io
+// layer's `InvalidInput` error must be translated accordingly (real
+// trigger: `test_genericpath.py::test_invalid_paths`, which asserts
+// `assertRaisesRegex(ValueError, 'embedded null')` for NUL paths, and
+// `genericpath.exists`/`isfile`/`isdir`, which catch `(OSError,
+// ValueError)` and must return False for such paths).
+fn os_path_arg(obj: &PyObjectRef) -> Result<String, PyError> {
+    let s = crate::object::path_arg_to_string(obj);
+    if s.contains('\0') {
+        return Err(PyError::value_error("embedded null character"));
+    }
+    Ok(s)
+}
+
+fn stat_dev_ino(meta: &std::fs::Metadata) -> (i64, i64) {
+    use std::os::unix::fs::MetadataExt;
+    (meta.ino() as i64, meta.dev() as i64)
+}
+
+// os.fstat(fd) / os.stat(int) — `std::fs::File::from_raw_fd` takes
+// ownership of the fd, so forget it right after grabbing metadata to
+// avoid closing a caller-owned descriptor.
+fn fstat_result(fd: i64) -> PyResult<PyObjectRef> {
+    use std::os::unix::io::FromRawFd;
+    let file = unsafe { std::fs::File::from_raw_fd(fd as i32) };
+    let res = file.metadata();
+    std::mem::forget(file);
+    match res {
+        Ok(meta) => Ok(create_module("stat_result", stat_to_dict(&meta))),
+        Err(e) => Err(PyError::os_error_from_io(&e)),
+    }
+}
+
 pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! os_func {
@@ -3022,45 +3082,39 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
         }
     });
 
-    // --- Helper: convert fs::Metadata to stat dict ---
-    fn stat_to_dict(meta: &std::fs::Metadata) -> HashMap<String, PyObjectRef> {
-        use std::os::unix::fs::MetadataExt;
-        let mut d = HashMap::new();
-        d.insert_str("st_mode", py_int(meta.mode() as i64));
-        d.insert_str("st_ino", py_int(meta.ino() as i64));
-        d.insert_str("st_dev", py_int(meta.dev() as i64));
-        d.insert_str("st_nlink", py_int(meta.nlink() as i64));
-        d.insert_str("st_uid", py_int(meta.uid() as i64));
-        d.insert_str("st_gid", py_int(meta.gid() as i64));
-        d.insert_str("st_size", py_int(meta.size() as i64));
-        if let Ok(t) = meta.modified() {
-            let dur = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-            d.insert_str("st_mtime", py_float(dur.as_secs_f64()));
-        }
-        if let Ok(t) = meta.accessed() {
-            let dur = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-            d.insert_str("st_atime", py_float(dur.as_secs_f64()));
-        }
-        if let Ok(t) = meta.created() {
-            let dur = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-            d.insert_str("st_ctime", py_float(dur.as_secs_f64()));
-        }
-        d
-    }
-
-    // --- os.stat(path) ---
+    // --- os.stat(path, *, dir_fd=None, follow_symlinks=True) ---
+    // Accepts an integer file descriptor (like CPython): a bool is
+    // additionally warned about ("bool is used as a file descriptor") and
+    // then treated as fd 0/1.
     os_func!("stat", |args| {
         if args.is_empty() { return Err(PyError::type_error("stat() takes at least 1 argument")); }
-        match std::fs::metadata(&crate::object::path_arg_to_string(&args[0])) {
+        if let Some(fd) = args[0].as_i64() {
+            if matches!(args[0], PyObjectRef::SmallBool(_)) {
+                crate::modules::dev::warnings_emit("bool is used as a file descriptor", "RuntimeWarning");
+            }
+            return fstat_result(fd);
+        }
+        let path = os_path_arg(&args[0])?;
+        match std::fs::metadata(&path) {
             Ok(meta) => Ok(create_module("stat_result", stat_to_dict(&meta))),
             Err(e) => Err(PyError::os_error_from_io(&e)),
+        }
+    });
+
+    // --- os.fstat(fd) ---
+    os_func!("fstat", |args| {
+        if args.is_empty() { return Err(PyError::type_error("fstat() takes at least 1 argument")); }
+        match args[0].as_i64() {
+            Some(fd) => fstat_result(fd),
+            None => Err(PyError::type_error("fstat() argument must be an integer file descriptor")),
         }
     });
 
     // --- os.lstat(path) ---
     os_func!("lstat", |args| {
         if args.is_empty() { return Err(PyError::type_error("lstat() takes at least 1 argument")); }
-        match std::fs::symlink_metadata(&crate::object::path_arg_to_string(&args[0])) {
+        let path = os_path_arg(&args[0])?;
+        match std::fs::symlink_metadata(&path) {
             Ok(meta) => Ok(create_module("stat_result", stat_to_dict(&meta))),
             Err(e) => Err(PyError::os_error_from_io(&e)),
         }
@@ -3342,17 +3396,26 @@ pub fn create_os_path_dict() -> HashMap<String, PyObjectRef> {
 
     path_func!("exists", |args| {
         if args.is_empty() { return Err(PyError::type_error("exists() takes at least 1 argument")); }
-        Ok(py_bool(std::path::Path::new(&args[0].str()).exists()))
+        let p = crate::object::path_arg_to_string(&args[0]);
+        Ok(py_bool(std::path::Path::new(&p).exists()))
     });
 
     path_func!("isfile", |args| {
         if args.is_empty() { return Err(PyError::type_error("isfile() takes at least 1 argument")); }
-        Ok(py_bool(std::path::Path::new(&args[0].str()).is_file()))
+        let p = crate::object::path_arg_to_string(&args[0]);
+        Ok(py_bool(std::path::Path::new(&p).is_file()))
     });
 
     path_func!("isdir", |args| {
         if args.is_empty() { return Err(PyError::type_error("isdir() takes at least 1 argument")); }
-        Ok(py_bool(std::path::Path::new(&args[0].str()).is_dir()))
+        let p = crate::object::path_arg_to_string(&args[0]);
+        Ok(py_bool(std::path::Path::new(&p).is_dir()))
+    });
+
+    path_func!("lexists", |args| {
+        if args.is_empty() { return Err(PyError::type_error("lexists() takes at least 1 argument")); }
+        let p = crate::object::path_arg_to_string(&args[0]);
+        Ok(py_bool(std::fs::symlink_metadata(&p).is_ok()))
     });
 
     // `os.path.isabs(path)` — was missing entirely; a common, basic
@@ -3429,7 +3492,8 @@ pub fn create_os_path_dict() -> HashMap<String, PyObjectRef> {
 
     path_func!("getsize", |args| {
         if args.is_empty() { return Err(PyError::type_error("getsize() takes at least 1 argument")); }
-        match std::fs::metadata(&args[0].str()) {
+        let path = os_path_arg(&args[0])?;
+        match std::fs::metadata(&path) {
             Ok(meta) => Ok(py_int(meta.len() as i64)),
             Err(e) => Err(PyError::os_error_from_io(&e)),
         }
@@ -3437,7 +3501,8 @@ pub fn create_os_path_dict() -> HashMap<String, PyObjectRef> {
 
     path_func!("getmtime", |args| {
         if args.is_empty() { return Err(PyError::type_error("getmtime() takes at least 1 argument")); }
-        match std::fs::metadata(&args[0].str()) {
+        let path = os_path_arg(&args[0])?;
+        match std::fs::metadata(&path) {
             Ok(meta) => {
                 match meta.modified() {
                     Ok(time) => {
@@ -3450,6 +3515,60 @@ pub fn create_os_path_dict() -> HashMap<String, PyObjectRef> {
                 }
             }
             Err(e) => Err(PyError::os_error_from_io(&e)),
+        }
+    });
+
+    path_func!("getatime", |args| {
+        if args.is_empty() { return Err(PyError::type_error("getatime() takes at least 1 argument")); }
+        let path = os_path_arg(&args[0])?;
+        match std::fs::metadata(&path) {
+            Ok(meta) => {
+                match meta.accessed() {
+                    Ok(time) => {
+                        use std::time::SystemTime;
+                        let duration = time.duration_since(SystemTime::UNIX_EPOCH)
+                            .unwrap_or_default();
+                        Ok(py_float(duration.as_secs_f64()))
+                    }
+                    Err(e) => Err(PyError::os_error_from_io(&e)),
+                }
+            }
+            Err(e) => Err(PyError::os_error_from_io(&e)),
+        }
+    });
+
+    path_func!("getctime", |args| {
+        if args.is_empty() { return Err(PyError::type_error("getctime() takes at least 1 argument")); }
+        let path = os_path_arg(&args[0])?;
+        match std::fs::metadata(&path) {
+            Ok(meta) => {
+                // On Linux `created()` is the birth time (<= mtime); close
+                // enough for the "ctime <= mtime" check real callers make.
+                match meta.created() {
+                    Ok(time) => {
+                        use std::time::SystemTime;
+                        let duration = time.duration_since(SystemTime::UNIX_EPOCH)
+                            .unwrap_or_default();
+                        Ok(py_float(duration.as_secs_f64()))
+                    }
+                    Err(e) => Err(PyError::os_error_from_io(&e)),
+                }
+            }
+            Err(e) => Err(PyError::os_error_from_io(&e)),
+        }
+    });
+
+    path_func!("samefile", |args| {
+        if args.len() < 2 { return Err(PyError::type_error("samefile() takes at least 2 arguments")); }
+        let p1 = os_path_arg(&args[0])?;
+        let p2 = os_path_arg(&args[1])?;
+        match (std::fs::metadata(&p1), std::fs::metadata(&p2)) {
+            (Ok(m1), Ok(m2)) => {
+                let (i1, d1) = stat_dev_ino(&m1);
+                let (i2, d2) = stat_dev_ino(&m2);
+                Ok(py_bool(i1 == i2 && d1 == d2))
+            }
+            (Err(e), _) | (_, Err(e)) => Err(PyError::os_error_from_io(&e)),
         }
     });
 
@@ -3540,7 +3659,7 @@ pub fn create_os_path_dict() -> HashMap<String, PyObjectRef> {
     path_func!("commonprefix", |args| {
         if args.is_empty() { return Err(PyError::type_error("commonprefix() takes at least 1 argument")); }
         let paths: Vec<String> = crate::object::collect_iterable(&args[0])?
-            .iter().map(|p| p.str()).collect();
+            .iter().map(|p| crate::object::path_arg_to_string(p)).collect();
         if paths.is_empty() { return Ok(py_str("")); }
         let first = &paths[0];
         let mut prefix_len = first.chars().count();

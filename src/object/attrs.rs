@@ -3687,6 +3687,16 @@ impl PyObject {
                             Err(PyError::runtime_error("name access on non-file"))
                         }
                     }
+                    "fileno" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "fileno".to_string(),
+                        func: |args| {
+                            if let PyObject::File { file, .. } = &*args[0].borrow() {
+                                use std::os::unix::io::AsRawFd;
+                                Ok(py_int(file.borrow().as_raw_fd() as i64))
+                            } else { Err(PyError::runtime_error("fileno on non-file")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     "read" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "read".to_string(),
                         func: |args| {
