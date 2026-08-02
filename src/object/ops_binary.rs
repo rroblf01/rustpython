@@ -294,6 +294,13 @@ pub fn py_mul(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
             }
         }
         (PyObject::Tuple(v), PyObject::Int(n)) | (PyObject::Int(n), PyObject::Tuple(v)) => {
+            // Real CPython returns the SAME tuple object for `tuple * 1`
+            // (immutable optimization) — `id(s) == id(s*1)` holds, exercised
+            // by `seq_tests.CommonTest.test_repeat`. Need the original
+            // `PyObjectRef` (the `a`/`b` operands), not just `v`.
+            if n.is_one() {
+                return Ok(if matches!(&*a.borrow(), PyObject::Tuple(_)) { a.clone() } else { b.clone() });
+            }
             if let Some(n) = n.to_usize() {
                 let mut result = Vec::new();
                 match v.len().checked_mul(n) {

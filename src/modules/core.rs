@@ -577,6 +577,10 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
         name: "__init__".to_string(),
         func: crate::object::native_base_init_builtin,
     }));
+    str_dict.insert_str("maketrans", PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "maketrans".to_string(),
+        func: crate::object::str_maketrans_builtin,
+    }));
     let str_type = PyObjectRef::new(PyObject::Type {
         name: "str".to_string(),
         dict: Box::new(str_map_to_typedict(str_dict)),
@@ -756,6 +760,10 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     bytes_dict.insert_str("fromhex", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "fromhex".to_string(),
         func: builtin_bytes_fromhex,
+    }));
+    bytes_dict.insert_str("maketrans", PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "maketrans".to_string(),
+        func: crate::object::bytes_maketrans_builtin,
     }));
     bytes_dict.insert_str("__init__", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "__init__".to_string(),

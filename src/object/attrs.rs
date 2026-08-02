@@ -965,8 +965,18 @@ impl PyObject {
                             let items = if let PyObject::List(list) = &*args[0].borrow() {
                                 list.clone()
                             } else { return Err(PyError::runtime_error("index on non-list")) };
-                            for (i, item) in items.iter().enumerate() {
-                                if item.equals(&args[1])? { return Ok(py_int(i as i64)); }
+                            // `list.index(x, start, stop)` — the start/stop
+                            // bounds were previously IGNORED entirely (always
+                            // scanning the whole list), so `lst.index(x, 3, 1)`
+                            // returned a hit where CPython raises ValueError.
+                            // Apply CPython's slice-style clamping.
+                            let start = if args.len() > 2 { args[2].as_i64().unwrap_or(0) } else { 0 };
+                            let stop = if args.len() > 3 { args[3].as_i64().unwrap_or(i64::MAX) } else { i64::MAX };
+                            let len = items.len() as i64;
+                            let start = if start < 0 { (len + start).max(0) } else { start.min(len) };
+                            let stop = if stop < 0 { (len + stop).max(0) } else { stop.min(len) };
+                            for i in start..stop {
+                                if items[i as usize].equals(&args[1])? { return Ok(py_int(i)); }
                             }
                             Err(PyError::value_error(format!("{} is not in list", args[1].str())))
                         },
@@ -1035,8 +1045,15 @@ impl PyObject {
                         func: |args| {
                             if args.len() < 3 { return Err(PyError::type_error("insert() takes exactly 2 arguments")); }
                             if let PyObject::List(list) = &mut *args[0].borrow_mut() {
-                                let idx = args[1].as_i64().unwrap_or(0) as usize;
-                                let idx = idx.min(list.len());
+                                // Negative indices were cast straight to
+                                // `usize` (wrapping to a huge number that
+                                // `.min(len)` then clamped to the END) —
+                                // `lst.insert(-5, x)` appended instead of
+                                // inserting near the front. Clamp negatives
+                                // to 0 (CPython's list.insert semantics).
+                                let idx = args[1].as_i64().unwrap_or(0);
+                                let len = list.len() as i64;
+                                let idx = if idx < 0 { (len + idx).max(0) } else { idx.min(len) } as usize;
                                 list.insert(idx, args[2].clone());
                                 Ok(py_none())
                             } else { Err(PyError::runtime_error("insert on non-list")) }
@@ -2398,8 +2415,30 @@ impl PyObject {
                         func: |args| {
                             if args.len() < 2 { return Err(PyError::type_error("translate() takes at least 1 argument")); }
                             if let PyObject::Bytes(b) = &*args[0].borrow() {
-                                let table = if matches!(&*args[1].borrow(), PyObject::None) { None } else { arg_bytes(&args[1]) };
-                                let delete = if args.len() > 2 { arg_bytes(&args[2]).unwrap_or_default() } else { Vec::new() };
+                                // Keyword args arrive as a trailing dict
+                                // (`bytes.translate(None, delete=b'...')` — the
+                                // exact idiom shlex.quote's safe-check uses).
+                                let mut delete_arg: Option<PyObjectRef> = None;
+                                let mut table_arg = args.get(1).cloned();
+                                if let Some(last) = args.last() {
+                                    if let PyObject::Dict(d) = &*last.borrow() {
+                                        for (k, v) in d.items() {
+                                            if k.str() == "delete" { delete_arg = Some(v); }
+                                        }
+                                        if table_arg.is_some() && table_arg.as_ref().unwrap().is(last) {
+                                            table_arg = None;
+                                        }
+                                    }
+                                }
+                                let table = match &table_arg {
+                                    Some(t) if matches!(&*t.borrow(), PyObject::None) => None,
+                                    Some(t) => arg_bytes(t),
+                                    None => None,
+                                };
+                                let delete = match &delete_arg {
+                                    Some(d) => arg_bytes(d).unwrap_or_default(),
+                                    None => Vec::new(),
+                                };
                                 let mut result = Vec::with_capacity(b.len());
                                 for &c in b.iter() {
                                     if delete.contains(&c) { continue; }
@@ -2411,6 +2450,11 @@ impl PyObject {
                                 Ok(PyObjectRef::imm(PyObject::Bytes(result)))
                             } else { Err(PyError::runtime_error("translate on non-bytes")) }
                         },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "maketrans" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "maketrans".to_string(),
+                        func: |a| crate::object::bytes_maketrans_builtin(&a[1..]),
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
                     // Same gap, same fix, as `list`'s own `__getitem__` arm
@@ -3216,7 +3260,40 @@ impl PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
-                    "translate" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "translate".to_string(), func: |a| { let s = a[0].str(); if a.len() > 1 { let _table = &a[1]; } Ok(py_str(&s)) }, self_obj: PyObjectRef::new(PyObject::None) })),
+                    "translate" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "translate".to_string(),
+                        func: |a| {
+                            let s = a[0].str();
+                            if a.len() < 2 || matches!(&*a[1].borrow(), PyObject::None) {
+                                return Ok(py_str(&s));
+                            }
+                            // `str.translate(table)` — `table` is a mapping
+                            // produced by `str.maketrans`: {char:
+                            // replacement_str_or_None}. A `None` value DELETES
+                            // the char. Previously a no-op stub.
+                            let table = a[1].clone();
+                            let mut result = String::new();
+                            for ch in s.chars() {
+                                let key = py_str(&ch.to_string());
+                                let replacement = match &*table.borrow() {
+                                    PyObject::Dict(d) => d.get(&key).ok().flatten(),
+                                    _ => None,
+                                };
+                                match replacement {
+                                    None => result.push(ch),
+                                    Some(r) if matches!(&*r.borrow(), PyObject::None) => {}
+                                    Some(r) => result.push_str(&r.str()),
+                                }
+                            }
+                            Ok(py_str(&result))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "maketrans" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "maketrans".to_string(),
+                        func: |a| crate::object::str_maketrans_builtin(&a[1..]),
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     "encode" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "encode".to_string(), func: str_encode_builtin, self_obj: PyObjectRef::new(PyObject::None) })),
                     "isidentifier" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "isidentifier".to_string(),

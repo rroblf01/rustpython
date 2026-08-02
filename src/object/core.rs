@@ -593,6 +593,11 @@ impl PyObjectRef {
             (PyObjectRef::SmallInt(a), PyObjectRef::SmallInt(b)) => a == b,
             (PyObjectRef::SmallBool(a), PyObjectRef::SmallBool(b)) => a == b,
             (PyObjectRef::SmallFloat(a), PyObjectRef::SmallFloat(b)) => a.to_bits() == b.to_bits(),
+            // Short strings are stored INLINE (no Rc to compare), but real
+            // CPython interns short strings, so `x is y` for two equal
+            // interned strings is True — mirror that here (a SmallStr is
+            // inherently the "interned" form of its content).
+            (PyObjectRef::SmallStr(a), PyObjectRef::SmallStr(b)) => a.as_str() == b.as_str(),
             (PyObjectRef::None, PyObjectRef::None) => true,
             (PyObjectRef::Mut(a), PyObjectRef::Mut(b)) => Rc::ptr_eq(a, b),
             (PyObjectRef::Imm(a), PyObjectRef::Imm(b)) => Rc::ptr_eq(a, b),

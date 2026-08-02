@@ -4144,7 +4144,29 @@ impl VirtualMachine {
                                             false
                                         }
                                     };
-                                    if !dict.contains_key(&name) && !is_property_result && name_idx < self.frames[fi].attr_cache.len() {
+                                    // A method bound to THIS instance's own
+                                    // native backing (deque subclass: `pop`/
+                                    // `append`/... resolved via the native
+                                    // delegation at `get_attribute_impl`) is
+                                    // inherently per-instance — caching it
+                                    // under a `(name_idx, type_tag)` key with
+                                    // no per-instance component means the NEXT
+                                    // instance of the same class in this frame
+                                    // silently reuses a method still bound to
+                                    // the FIRST instance's backing and mutates
+                                    // the wrong object (confirmed via a deque
+                                    // subclass's `d.pop(); e.pop()` in one
+                                    // frame). `PyObject::Closure` values are
+                                    // excluded for the same reason: a
+                                    // per-instance closure (e.g. a deque
+                                    // subclass's `__copy__`, which captures
+                                    // that instance's own backing) must not
+                                    // leak into a cache another instance
+                                    // reuses.
+                                    let is_native_backing_bound = matches!(&*val.borrow(), PyObject::BuiltinMethod { self_obj, .. }
+                                        if !matches!(&*self_obj.borrow(), PyObject::Instance { .. } | PyObject::None))
+                                        || matches!(&*val.borrow(), PyObject::Closure(_));
+                                    if !dict.contains_key(&name) && !is_property_result && !is_native_backing_bound && name_idx < self.frames[fi].attr_cache.len() {
                                         self.frames[fi].attr_cache[name_idx] = Some((type_tag, val.clone()));
                                     }
                                     Ok(val)
@@ -4342,8 +4364,21 @@ impl VirtualMachine {
                                             (n.clone(), *func)
                                         } else { unreachable!() }
                                     };
-                                    // Cache for next time
-                                    ATTR_CACHE.with(|c| { c.borrow_mut().insert((type_name.clone(), n.clone()), func); });
+                                    // Cache for next time — but NOT
+                                    // `__init__` (nor `__new__`): a native
+                                    // VALUE's `__init__` (e.g. a raw deque's,
+                                    // resolved via `attrs.rs`'s per-value arm)
+                                    // and the same-name TYPE-level attribute
+                                    // (`deque.__init__`, the native-base
+                                    // initializer) are DIFFERENT methods, yet
+                                    // this cache is keyed only by
+                                    // `(type_name, name)` — caching the
+                                    // value-level one made `deque.__init__`
+                                    // silently return the wrong function after
+                                    // any `d.__init__(...)` call.
+                                    if n != "__init__" && n != "__new__" {
+                                        ATTR_CACHE.with(|c| { c.borrow_mut().insert((type_name.clone(), n.clone()), func); });
+                                    }
                                     Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                                         name: n,
                                         func,

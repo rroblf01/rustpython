@@ -372,6 +372,15 @@ pub(crate) fn get_instance_slots(typ: &PyObjectRef) -> Option<Vec<String>> {
         }
 
         if !all_slots.is_empty() {
+            // If `__dict__` is among the declared slots (real CPython's
+            // `class C: __slots__ = ('x', 'y', '__dict__')`), the instance
+            // carries a dict and accepts ARBITRARY attributes — there is no
+            // effective restriction to enforce (real trigger: a deque
+            // subclass with `__slots__ = ('x', 'y', '__dict__')` setting a
+            // plain `z` attribute).
+            if all_slots.iter().any(|s| s == "__dict__") {
+                return None;
+            }
             return Some(all_slots);
         }
     }

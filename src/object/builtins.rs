@@ -860,6 +860,74 @@ fn exception_instance_repr(instance: &PyObjectRef, class_name: &str) -> String {
     format!("{}({})", class_name, args_str)
 }
 
+pub fn str_maketrans_builtin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    // `str.maketrans(x[, y[, z]])` — builds a translation table (a dict of
+    // {char: replacement-or-None}) consumed by `str.translate`. Real
+    // CPython's single-argument form takes a mapping whose keys are
+    // length-1 strings; the 2/3-argument form maps first-string chars to
+    // second-string chars (equal length required) with an optional third
+    // string of chars to DELETE. Returns a plain `PyDict`.
+    let mut table = PyDict::new();
+    match args.len() {
+        1 => {
+            let mapping = &args[0];
+            let items: Vec<(PyObjectRef, PyObjectRef)> = match &*mapping.borrow() {
+                PyObject::Dict(d) => d.items(),
+                _ => return Err(PyError::type_error("str.maketrans() argument 1 must be a mapping, not str")),
+            };
+            for (k, v) in items {
+                if k.str().chars().count() != 1 {
+                    return Err(PyError::value_error("string keys in translate table must be of length 1"));
+                }
+                table.set(k, v)?;
+            }
+        }
+        2 | 3 => {
+            let x = args[0].str();
+            let y = args[1].str();
+            let x_chars: Vec<char> = x.chars().collect();
+            let y_chars: Vec<char> = y.chars().collect();
+            if x_chars.len() != y_chars.len() {
+                return Err(PyError::value_error("the first two maketrans arguments must have equal length"));
+            }
+            for (a, b) in x_chars.iter().zip(y_chars.iter()) {
+                table.set(py_str(&a.to_string()), py_str(&b.to_string()))?;
+            }
+            if args.len() == 3 {
+                for c in args[2].str().chars() {
+                    table.set(py_str(&c.to_string()), py_none())?;
+                }
+            }
+        }
+        _ => return Err(PyError::type_error("str.maketrans() takes 1 or 3 arguments (2 given)")),
+    }
+    Ok(PyObjectRef::new(PyObject::Dict(Box::new(table))))
+}
+
+pub fn bytes_maketrans_builtin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    // `bytes.maketrans(frm, to)` — returns a 256-byte translation table.
+    if args.len() < 2 {
+        return Err(PyError::type_error("bytes.maketrans() takes exactly 2 arguments"));
+    }
+    let frm: Vec<u8> = match &*args[0].borrow() {
+        PyObject::Bytes(b) => b.clone(),
+        _ => return Err(PyError::type_error("bytes.maketrans() argument 1 must be bytes")),
+    };
+    let to: Vec<u8> = match &*args[1].borrow() {
+        PyObject::Bytes(b) => b.clone(),
+        _ => return Err(PyError::type_error("bytes.maketrans() argument 2 must be bytes")),
+    };
+    if frm.len() != to.len() {
+        return Err(PyError::value_error("maketrans arguments must have same length"));
+    }
+    let mut result: Vec<u8> = (0u16..=255).map(|i| i as u8).collect();
+    for (i, &f) in frm.iter().enumerate() {
+        result[f as usize] = to[i];
+    }
+    Ok(PyObjectRef::imm(PyObject::Bytes(result)))
+}
+
+
 pub fn builtin_str(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() { Ok(py_str("")) }
     else {
