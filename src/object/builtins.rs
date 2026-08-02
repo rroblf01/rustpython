@@ -718,6 +718,28 @@ pub fn builtin_complex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 }
                 parse_complex_str(s)?
             }
+            // Custom `__complex__` was never consulted at all — same class
+            // of gap just fixed for `divmod()`/`__divmod__` above. Real
+            // trigger: `numbers.Complex`'s own mixin `__complex__`
+            // (`Lib/numbers.py`, implemented via `self.real`/`self.imag`),
+            // exercised directly by `test_abstract_numbers.py::test_real`
+            // (`complex(MyReal(1))`).
+            PyObject::Instance { typ, .. } => {
+                match lookup_dunder_via_mro(typ, "__complex__") {
+                    Some(f) => {
+                        let f = f.clone();
+                        let self_obj = args[0].clone();
+                        drop(obj);
+                        let result = call_bound_method(f, self_obj, vec![])?;
+                        let result_borrow = result.borrow();
+                        match &*result_borrow {
+                            PyObject::Complex(re, im) => (*re, *im),
+                            _ => return Err(PyError::type_error("__complex__ returned non-complex")),
+                        }
+                    }
+                    None => return Err(PyError::type_error(format!("complex() argument must be a string or a number, not '{}'", get_type_name_for_instance(typ)))),
+                }
+            }
             _ => return Err(PyError::type_error(format!("complex() argument must be a string or a number, not '{}'", obj.type_name()))),
         }
     };
@@ -1465,9 +1487,17 @@ pub fn builtin_dir(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         }
         _ => {}
     }
-    // Add basic attributes for all types
-    names.push(py_str("__class__"));
-    names.push(py_str("__dir__"));
+    // Add basic attributes for all types EXCEPT modules — real
+    // `dir(some_module)` is just `sorted(vars(some_module).keys())`, with
+    // no implicit `__class__`/`__dir__` added (those come from a type's
+    // MRO walk, which modules don't participate in the same way instances/
+    // classes do). Confirmed via `test_pkg.py`, which compares `dir()` on
+    // freshly-imported packages against an exact expected list that does
+    // NOT include either.
+    if !matches!(&*obj, PyObject::Module { .. }) {
+        names.push(py_str("__class__"));
+        names.push(py_str("__dir__"));
+    }
     names.sort_by(|a, b| {
         let a = a.borrow();
         let b = b.borrow();
@@ -1504,10 +1534,25 @@ pub fn builtin_locals(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 
 pub fn builtin_divmod(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() != 2 { return Err(PyError::type_error("divmod() takes exactly 2 arguments")); }
-    let a = args[0].as_i64().ok_or_else(|| PyError::type_error("divmod() arg must be int"))?;
-    let b = args[1].as_i64().ok_or_else(|| PyError::type_error("divmod() arg must be int"))?;
-    if b == 0 { return Err(PyError::value_error("division by zero")); }
-    Ok(PyObjectRef::new(PyObject::Tuple(vec![py_int(a / b), py_int(a % b)])))
+    // Was: unconditional `args[0].as_i64()`/`args[1].as_i64()` — never
+    // consulted `__divmod__`/`__rdivmod__` at all, so ANY custom numeric
+    // type (real trigger: `numbers.Real`'s own MIXIN `__divmod__`/
+    // `__rdivmod__`, already implemented in `Lib/numbers.py` in terms of
+    // `__floordiv__`/`__mod__` — exercised directly by CPython's own
+    // `test_abstract_numbers.py::test_real`) raised `TypeError: divmod()
+    // arg must be int` instead of dispatching to it. Also silently
+    // rejected plain `float` arguments, which real `divmod()` supports
+    // natively. Mirrors the established `try_dunder_binop` dispatch
+    // pattern already used by `py_add`/etc.
+    if let Some(r) = try_dunder_binop(&args[0], &args[1], "__divmod__")? { return Ok(r); }
+    if let Some(r) = try_dunder_binop(&args[1], &args[0], "__rdivmod__")? { return Ok(r); }
+    // Python's `//`/`%` floor toward negative infinity, unlike Rust's
+    // truncating `/`/`%` — reuse the already-correct `py_floordiv`/`py_mod`
+    // (which already raise `ZeroDivisionError` themselves) rather than
+    // duplicating that sign-handling logic here.
+    let q = py_floor_div(&args[0], &args[1])?;
+    let r = py_mod(&args[0], &args[1])?;
+    Ok(PyObjectRef::new(PyObject::Tuple(vec![q, r])))
 }
 
 pub fn builtin_round(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
@@ -2084,6 +2129,28 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         }
         PyObject::Dict(d) => {
             Ok(PyObjectRef::new(PyObject::ListIter { list: d.keys(), index: 0 }))
+        }
+        // `iter(f)`/`for line in f:` — see the matching `GET_ITER` opcode
+        // handling in `vm.rs` for the full story; this is the SEPARATE
+        // free-function path (`iter(f)` called explicitly, or anything
+        // routing through `collect_iterable`) that needs the identical fix.
+        PyObject::File { file, binary, .. } => {
+            use std::io::Read;
+            let mut rest = Vec::new();
+            file.borrow_mut().read_to_end(&mut rest).map_err(|e| PyError::os_error_from_io(&e))?;
+            let mut lines: Vec<PyObjectRef> = Vec::new();
+            let mut current: Vec<u8> = Vec::new();
+            for byte in rest {
+                current.push(byte);
+                if byte == b'\n' {
+                    lines.push(if *binary { PyObjectRef::imm(PyObject::Bytes(current.clone())) } else { py_str(&String::from_utf8_lossy(&current)) });
+                    current.clear();
+                }
+            }
+            if !current.is_empty() {
+                lines.push(if *binary { PyObjectRef::imm(PyObject::Bytes(current.clone())) } else { py_str(&String::from_utf8_lossy(&current)) });
+            }
+            Ok(PyObjectRef::new(PyObject::ListIter { list: lines, index: 0 }))
         }
         // Already an iterator object (one of `builtin_next`'s own
         // recognized variants) — `iter(it)` on an existing iterator
@@ -2834,6 +2901,30 @@ pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 /// doesn't exist, raising a confusing `OSError` instead of writing to the
 /// intended path.
 pub(crate) fn path_arg_to_string(obj: &PyObjectRef) -> String {
+    // PEP 519 `os.PathLike` protocol: any object with a `__fspath__()`
+    // method (real code: `pathlib.Path`, and plenty of test-only wrappers
+    // like `Lib/test/support/os_helper.py`'s `FakePath`) must have THAT
+    // called to get the real path, instead of falling through to
+    // `.str()` — which, for a plain custom class instance with no
+    // `__str__` override, produces its REPR (`<FakePath '/tmp/xxx'>`,
+    // literally including the wrapper's own class name and quoting) rather
+    // than the real path string, so every `open()`/`os.*` call given such
+    // a wrapped path silently tried to open a nonexistent file named after
+    // its own repr instead. Confirmed via `test_dbm.py::test_whichdb`,
+    // which explicitly exercises `FakePath`-wrapped paths.
+    let f = {
+        let o = obj.borrow();
+        if let PyObject::Instance { typ, .. } = &*o {
+            lookup_dunder_via_mro(typ, "__fspath__")
+        } else {
+            None
+        }
+    };
+    if let Some(f) = f {
+        if let Ok(result) = call_bound_method(f, obj.clone(), vec![]) {
+            return path_arg_to_string(&result);
+        }
+    }
     if let PyObject::Bytes(b) = &*obj.borrow() {
         String::from_utf8_lossy(b).into_owned()
     } else {
@@ -2845,8 +2936,38 @@ pub fn builtin_open(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
         return Err(PyError::type_error("open() missing required argument 'file'"));
     }
-    let filename = path_arg_to_string(&args[0]);
-    let mode = if args.len() > 1 { args[1].str() } else { "r".to_string() };
+    // A keyword call (e.g. the extremely common `open(path, encoding="utf-8")`,
+    // with NO explicit `mode`) reaches every plain `BuiltinFunction` with its
+    // keywords packed into a dict APPENDED as the last positional arg (see
+    // `vm.rs`'s `call_function`) — this was read directly as `args[1]` (the
+    // "mode" position) whenever ANY keyword was passed, regardless of
+    // whether `mode` itself was one of them. `dict.str()` on that packed
+    // kwargs dict produced something like `"{'encoding': 'utf-8'}"`, which
+    // contains none of 'r'/'w'/'a'/'+' — so NO read/write/append flag ever
+    // got set, and the file open failed with a raw, confusing `OSError:
+    // must specify at least one of read, write, or append access` instead
+    // of just opening for reading (the real, correct default). Confirmed
+    // via `test_baseexception.py::test_inheritance`'s own `open(path,
+    // encoding="utf-8")` call. Now separates a trailing kwargs dict (if
+    // present — `open()`'s real parameters are never legitimately a dict
+    // themselves, so this is unambiguous) and reads `mode` from either the
+    // second positional arg or the `mode` keyword, defaulting to `"r"`.
+    let (pos_args, kwargs) = match args.last() {
+        Some(last) if matches!(&*last.borrow(), PyObject::Dict(_)) => (&args[..args.len() - 1], Some(last)),
+        _ => (args, None),
+    };
+    let filename = path_arg_to_string(&pos_args[0]);
+    let mode = if pos_args.len() > 1 {
+        pos_args[1].str()
+    } else if let Some(kw) = kwargs {
+        if let PyObject::Dict(d) = &*kw.borrow() {
+            d.get(&py_str("mode")).ok().flatten().map(|v| v.str()).unwrap_or_else(|| "r".to_string())
+        } else {
+            "r".to_string()
+        }
+    } else {
+        "r".to_string()
+    };
     // A trailing `+` ("r+"/"w+"/"a+", real CPython's "and updating" suffix)
     // means the file is opened for BOTH reading and writing — was
     // completely ignored here, so "rb+" (read-write, don't truncate, don't
@@ -2862,8 +2983,9 @@ pub fn builtin_open(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         .create(mode.contains('w') || mode.contains('a'))
         .truncate(mode.contains('w'))
         .open(&filename)
-        .map_err(|e| PyError::OsError(format!("{}", e)))?;
-    Ok(PyObjectRef::new(PyObject::File { file: std::rc::Rc::new(std::cell::RefCell::new(file)), name: filename }))
+        .map_err(|e| PyError::os_error_from_io(&e))?;
+    let binary = mode.contains('b');
+    Ok(PyObjectRef::new(PyObject::File { file: std::rc::Rc::new(std::cell::RefCell::new(file)), name: filename, binary }))
 }
 
 pub fn builtin_any(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
@@ -2932,9 +3054,89 @@ pub fn builtin_breakpoint(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Ok(py_none())
 }
 
+// Python-semantics modulo for `BigInt` (result takes the SIGN OF THE
+// DIVISOR, unlike Rust's `%`, which takes the sign of the dividend) — needed
+// by `builtin_pow`'s 3-arg form below, whose test coverage explicitly checks
+// negative moduli (`test_pow.py::test_negative_exponent` sweeps `m` from
+// -50 to 49).
+fn bigint_mod_python(a: &BigInt, m: &BigInt) -> BigInt {
+    let r = a % m;
+    if !r.is_zero() && (r.sign() != m.sign()) { r + m } else { r }
+}
+
+// Plain Euclidean `gcd` — `num-bigint`'s `Integer` trait (which would give
+// this for free, along with `extended_gcd`) isn't an explicit dependency of
+// this project (only pulled in transitively), so this is hand-rolled rather
+// than adding a new direct dependency for one small, standard algorithm.
+fn bigint_gcd(a: &BigInt, b: &BigInt) -> BigInt {
+    let (mut a, mut b) = (a.abs(), b.abs());
+    while !b.is_zero() {
+        let t = &a % &b;
+        a = b;
+        b = t;
+    }
+    a
+}
+
+// Modular inverse via the extended Euclidean algorithm — `None` if `a` and
+// `m` aren't coprime (no inverse exists). Result's sign matches `m`'s,
+// matching real CPython's own documented `pow(a, -1, m)` behavior ("an
+// inverse, with the same sign as m").
+fn bigint_mod_inverse(a: &BigInt, m: &BigInt) -> Option<BigInt> {
+    let m_abs = m.abs();
+    if m_abs.is_zero() { return None; }
+    let (mut old_r, mut r) = (bigint_mod_python(a, &m_abs), m_abs.clone());
+    let (mut old_s, mut s) = (BigInt::one(), BigInt::zero());
+    while !r.is_zero() {
+        let q = &old_r / &r;
+        let new_r = &old_r - &q * &r;
+        old_r = r; r = new_r;
+        let new_s = &old_s - &q * &s;
+        old_s = s; s = new_s;
+    }
+    if old_r != BigInt::one() {
+        return None;
+    }
+    Some(bigint_mod_python(&old_s, m))
+}
+
 pub fn builtin_pow(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() < 2 {
         return Err(PyError::type_error("pow() requires at least 2 arguments"));
+    }
+    if args.len() == 3 && !matches!(&*args[2].borrow(), PyObject::None) {
+        // Real 3-argument `pow(base, exp, mod)` — the previous body computed
+        // `py_pow(base, exp)` (a FULL, unreduced power — e.g. literally
+        // `50**1001` as a giant bigint) and THEN took it mod `m`, instead of
+        // real modular exponentiation (reducing mod `m` at every squaring
+        // step, and computing a genuine modular INVERSE for negative
+        // exponents rather than `py_pow`'s float fallback for `exp < 0`,
+        // which is simply the wrong value entirely). Confirmed via
+        // `test_pow.py::test_negative_exponent`: a 100x100 sweep of
+        // `pow(a, -1001, m)`-shaped calls, timing out (the giant-bigint
+        // path) AND producing wrong results (the float-for-negative-exponent
+        // path) simultaneously.
+        let a = to_index(&args[0]).map_err(|_| PyError::type_error("pow() 3rd argument not allowed unless all arguments are integers"))?;
+        let b = to_index(&args[1]).map_err(|_| PyError::type_error("pow() 3rd argument not allowed unless all arguments are integers"))?;
+        let m = to_index(&args[2]).map_err(|_| PyError::type_error("pow() 3rd argument not allowed unless all arguments are integers"))?;
+        if m.is_zero() {
+            return Err(PyError::value_error("pow() 3rd argument cannot be 0"));
+        }
+        let m_abs = m.abs();
+        if m_abs.is_one() {
+            return Ok(py_int(BigInt::zero()));
+        }
+        if b.sign() == Sign::Minus {
+            if bigint_gcd(&a, &m_abs) != BigInt::one() {
+                return Err(PyError::value_error("base is not invertible for the given modulus"));
+            }
+            let inv = bigint_mod_inverse(&a, &m).ok_or_else(|| PyError::value_error("base is not invertible for the given modulus"))?;
+            let exp_abs = (-&b).to_biguint().ok_or_else(|| PyError::value_error("pow() exponent too large"))?;
+            let result = bigint_mod_python(&inv, &m_abs).modpow(&BigInt::from(exp_abs), &m_abs);
+            return Ok(py_int(bigint_mod_python(&result, &m)));
+        }
+        let result = bigint_mod_python(&a, &m_abs).modpow(&b, &m_abs);
+        return Ok(py_int(bigint_mod_python(&result, &m)));
     }
     let result = py_pow(&args[0], &args[1])?;
     if args.len() == 3 {

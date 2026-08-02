@@ -804,6 +804,17 @@ pub fn create_threading_dict() -> HashMap<String, PyObjectRef> {
         };
     }
 
+    // `threading._dangling` — real CPython's `WeakSet` of still-running
+    // `Thread` objects that never got `.join()`ed. Was missing entirely
+    // (`AttributeError`), breaking `Lib/test/support/threading_helper.py`'s
+    // `threading_setup` (`len(threading._dangling)`, paired with `_thread.
+    // _count()` above to snapshot/verify thread cleanup — used by many
+    // tests' `setUpModule`, e.g. `test_urllib2_localnet.py`). Since
+    // `Thread.start()` here always runs its target synchronously in-place
+    // and never leaves anything "dangling", a permanently empty list is
+    // behaviorally correct, not just a placeholder.
+    d.insert_str("_dangling", py_list(vec![]));
+
     thr_func!("Thread", |args| {
         // Real `threading.Thread.__init__(self, group=None, target=None,
         // name=None, args=(), kwargs=None, *, daemon=None)` is overwhelmingly
@@ -1020,6 +1031,38 @@ pub fn create_copy_dict() -> HashMap<String, PyObjectRef> {
                     let _ = new_set.add(item);
                 }
                 Ok(PyObjectRef::new(PyObject::Set(new_set)))
+            }
+            // A class transparently subclassing a native container
+            // (`class NodeList(list): pass`, real CPython's own
+            // `xml.dom.minicompat.NodeList`) with no explicit `__copy__`
+            // fell straight to the generic `Ok(obj.clone())` below — an
+            // `Rc` clone, the SAME object, not a real copy at all.
+            // Confirmed via `test_xml_dom_minicompat.py`'s own `test_
+            // nodelist_copy`/`test_nodelist_deepcopy` (`assertIsNot`/
+            // `unexpectedly identical`). Shallow-copy the native backing
+            // itself (mirroring the `PyObject::List`/`Dict`/`Set`/`Tuple`
+            // arms just above) and wrap it in a NEW `Instance` of the same
+            // class, instead of falling through to identity.
+            PyObject::Instance { typ, dict } if crate::object::native_backing_of(obj).is_some() => {
+                let native = crate::object::native_backing_of(obj).unwrap();
+                let new_native = match &*native.borrow() {
+                    PyObject::List(items) => py_list(items.clone()),
+                    PyObject::Tuple(items) => PyObjectRef::imm(PyObject::Tuple(items.clone())),
+                    PyObject::Dict(d) => {
+                        let mut nd = PyDict::new();
+                        for (k, v) in d.items() { let _ = nd.set(k, v); }
+                        PyObjectRef::new(PyObject::Dict(Box::new(nd)))
+                    }
+                    PyObject::Set(s) => {
+                        let mut ns = PySet::new();
+                        for item in s.to_vec() { let _ = ns.add(item); }
+                        PyObjectRef::new(PyObject::Set(ns))
+                    }
+                    other => PyObjectRef::new(other.clone()),
+                };
+                let mut new_dict = dict.clone();
+                new_dict.insert(crate::object::NATIVE_BACKING_KEY.to_string(), new_native);
+                Ok(PyObjectRef::new(PyObject::Instance { typ: typ.clone(), dict: new_dict }))
             }
             _ => {
                 // For instances and custom types, try __copy__
@@ -4129,6 +4172,28 @@ pub fn create_array_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
+// `_thread.start_new_thread(func, args)` — this project's threading model
+// runs the target SYNCHRONOUSLY in-place (see `_count`'s own doc comment
+// just below), so "starting a thread" just means "call `func(*args)` now".
+// A real user-defined `def other_thread():` (`PyObject::Function`) needs
+// a live `&mut VirtualMachine` to push a frame and execute — a genuine
+// gap (confirmed: `object::call_function` only handles
+// `BuiltinFunction`/`Closure`, raising `TypeError: 'function' object is
+// not callable` for a plain Python target) — but actually making the call
+// succeed synchronously, IN THIS SAME CALL STACK, reintroduces a WORSE
+// problem: any real thread-test pattern of "acquire a lock, then spawn a
+// worker that also acquires that same lock" (extremely common —
+// `test_thread.py`'s own `test__count`: `mut.acquire()` then
+// `thread.start_new_thread(task, ())` where `task` calls `mut.acquire()`
+// again) is a genuine, unbreakable DEADLOCK once the worker body actually
+// runs before `start_new_thread` returns — there is no other real OS
+// thread to ever release the lock. Confirmed by trying the natural fix
+// (routing through `vm.call_function`, matching `asyncio.run`'s own
+// pattern): `test_thread.py` and `test_threadsignals.py` both went from a
+// fast, pre-existing FAIL to a 120s TIMEOUT. A fast, wrong-shaped error is
+// a strictly better outcome for this interpreter's fake-single-threaded
+// execution model than a real hang, so deliberately left AS THE ORIGINAL,
+// restrictive `object::call_function`-based behavior rather than "fixed".
 pub fn create_thread_module_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     // Real CPython's max `Lock.acquire(timeout=...)` value (platform max C
@@ -4162,7 +4227,62 @@ pub fn create_thread_module_dict() -> HashMap<String, PyObjectRef> {
         Ok(PyObjectRef::new(PyObject::Lock(inner)))
     });
 
+    // `_thread._count()` — was missing entirely (`AttributeError`), breaking
+    // `Lib/test/support/threading_helper.py`'s `threading_setup`/
+    // `threading_cleanup` (used by a wide range of tests, e.g.
+    // `test_urllib2_localnet.py`'s `setUpModule`, to snapshot the thread
+    // count before a test and verify it settles back down after). Since
+    // `threading.Thread.start()` here always runs its target SYNCHRONOUSLY
+    // in-place (no real OS threads — `PyObjectRef` isn't `Send`), there is
+    // only ever the one, current thread live at any point this could be
+    // observed from Python; a constant `1` makes `threading_cleanup`'s
+    // `count <= orig_count` check trivially and correctly hold.
+    thr_func!("_count", |_| Ok(py_int(1)));
+
     d
+}
+
+// Real, shared registered-signal-handler storage — `signal.signal()` writes
+// here, `signal.getsignal()`/`raise_signal()`/`os.kill()` (killing our own
+// pid, the only pid that means anything in this single-process interpreter)
+// all read/invoke from the SAME map. A thread-local (not a global `static`)
+// since every other piece of shared mutable module state in this codebase
+// uses the same convention (see `WARN_FILTERS_LIST` above).
+thread_local! {
+    static SIGNAL_HANDLERS: std::cell::RefCell<std::collections::HashMap<i64, PyObjectRef>> = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+fn signal_handlers() -> &'static std::thread::LocalKey<std::cell::RefCell<std::collections::HashMap<i64, PyObjectRef>>> {
+    &SIGNAL_HANDLERS
+}
+
+/// Actually invoke a registered `signal.signal(signum, handler)` callback,
+/// matching real Python's `handler(signum, frame)` call shape (`frame` is
+/// simply `None` here — this interpreter has no cross-call frame object to
+/// hand back meaningfully at an arbitrary interrupt point). Silently does
+/// nothing if no handler is registered, or if the stored value is one of
+/// the `SIG_DFL`/`SIG_IGN` int sentinels rather than a real callable —
+/// matches `signal.signal()`'s own default/ignore semantics.
+pub(crate) fn invoke_signal_handler_impl(vm: &mut crate::vm::VirtualMachine, signum: i64) -> PyResult<PyObjectRef> {
+    let handler = SIGNAL_HANDLERS.with(|h| h.borrow().get(&signum).cloned());
+    match handler {
+        Some(h) if !matches!(&*h.borrow(), PyObject::Int(_)) => {
+            vm.call_function(h, vec![py_int(signum), py_none()], vec![])
+        }
+        _ => Ok(py_none()),
+    }
+}
+
+pub(crate) fn signal_raise_signal_impl(vm: &mut crate::vm::VirtualMachine, signum: i64) -> PyResult<PyObjectRef> {
+    invoke_signal_handler_impl(vm, signum)?;
+    Ok(py_none())
+}
+
+pub fn signal_raise_signal_builtin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() {
+        return Err(PyError::type_error("raise_signal() missing required argument (signalnum)"));
+    }
+    let signum = args[0].as_i64().ok_or_else(|| PyError::type_error("signalnum must be an int"))?;
+    crate::object::with_vm_mut(|vm| signal_raise_signal_impl(vm, signum))?
 }
 
 pub fn create_signal_dict() -> HashMap<String, PyObjectRef> {
@@ -4178,6 +4298,8 @@ pub fn create_signal_dict() -> HashMap<String, PyObjectRef> {
     d.insert_str("SIGSEGV", py_int(11));
     d.insert_str("SIGPIPE", py_int(13));
     d.insert_str("SIGALRM", py_int(14));
+    d.insert_str("SIGUSR1", py_int(10));
+    d.insert_str("SIGUSR2", py_int(12));
     d.insert_str("SIG_DFL", py_int(0));
     d.insert_str("SIG_IGN", py_int(1));
 
@@ -4187,19 +4309,43 @@ pub fn create_signal_dict() -> HashMap<String, PyObjectRef> {
         };
     }
 
+    // `signal.signal(signum, handler)` — was a total no-op (never stored
+    // `handler` anywhere), so `raise_signal`/`os.kill(os.getpid(), sig)`
+    // had no way to actually invoke a registered Python-level handler even
+    // once real handler-invocation support was added below. Real handler
+    // storage, shared across `signal`/`getsignal`/`raise_signal`/`os.kill`
+    // (see `signal_handlers` and its own doc comment).
     sig_func!("signal", |args| {
         if args.len() < 2 {
             return Err(PyError::type_error("signal() requires 2 arguments (signalnum, handler)"));
         }
-        Ok(py_none())
+        let signum = args[0].as_i64().ok_or_else(|| PyError::type_error("signalnum must be an int"))?;
+        let old = signal_handlers().with(|h| h.borrow().get(&signum).cloned()).unwrap_or_else(py_none);
+        signal_handlers().with(|h| h.borrow_mut().insert(signum, args[1].clone()));
+        Ok(old)
     });
 
     sig_func!("getsignal", |args| {
         if args.is_empty() {
             return Err(PyError::type_error("getsignal() missing required argument (signalnum)"));
         }
-        Ok(py_int(0))
+        let signum = args[0].as_i64().ok_or_else(|| PyError::type_error("signalnum must be an int"))?;
+        Ok(signal_handlers().with(|h| h.borrow().get(&signum).cloned()).unwrap_or_else(|| py_int(0)))
     });
+
+    // `signal.alarm` — this interpreter has no real OS-timer/signal-delivery
+    // mechanism (no way to schedule a future in-process interrupt), so
+    // there is nothing to actually schedule; remains a no-op.
+    sig_func!("alarm", |_args| Ok(py_int(0)));
+    // `signal.raise_signal(signum)` — was a no-op even after real handler
+    // STORAGE was added just above, because actually CALLING a registered
+    // Python-level handler needs a live `&mut VirtualMachine` (same
+    // `with_vm_mut`-is-UB class of bug as `asyncio.run`/`exec` elsewhere in
+    // this file) — real invocation happens via `vm.rs`'s own special case
+    // for this exact function pointer (see `signal_raise_signal_impl`);
+    // this is the `with_vm_mut`-based fallback for any path that reaches
+    // it without going through that special case.
+    sig_func!("raise_signal", signal_raise_signal_builtin);
 
     d
 }
@@ -4269,6 +4415,30 @@ pub fn create_gc_dict() -> HashMap<String, PyObjectRef> {
         let (g0, g1, g2) = GC_THRESHOLDS.with(|c| c.get());
         Ok(py_tuple(vec![py_int(g0), py_int(g1), py_int(g2)]))
     });
+
+    // `gc.get_debug`/`set_debug`/the `DEBUG_*` flag constants — were
+    // missing entirely (`AttributeError`), breaking `test_gc.py`'s own
+    // `setUpModule` (which unconditionally calls `gc.get_debug()` to save
+    // and later restore the debug flags around every test). This
+    // interpreter's cycle collector has no debug-tracing output to gate,
+    // so this just stores whatever was set (defaulting to `0`, matching
+    // real CPython) without acting on it.
+    thread_local! {
+        static GC_DEBUG_FLAGS: std::cell::Cell<i64> = const { std::cell::Cell::new(0) };
+    }
+    gc_func!("get_debug", |_| {
+        Ok(py_int(GC_DEBUG_FLAGS.with(|c| c.get())))
+    });
+    gc_func!("set_debug", |args| {
+        let flags = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+        GC_DEBUG_FLAGS.with(|c| c.set(flags));
+        Ok(py_none())
+    });
+    d.insert_str("DEBUG_STATS", py_int(1));
+    d.insert_str("DEBUG_COLLECTABLE", py_int(2));
+    d.insert_str("DEBUG_UNCOLLECTABLE", py_int(4));
+    d.insert_str("DEBUG_SAVEALL", py_int(32));
+    d.insert_str("DEBUG_LEAK", py_int(38));
 
     d
 }
@@ -4504,6 +4674,35 @@ pub fn create_colorsys_dict() -> HashMap<String, PyObjectRef> {
             4 => (t, p, v),
             _ => (v, p, q),
         };
+        Ok(py_tuple(vec![py_float(clampf(r)), py_float(clampf(g)), py_float(clampf(b))]))
+    });
+
+    // `colorsys.rgb_to_yiq`/`yiq_to_rgb` — were missing entirely
+    // (`AttributeError`), breaking `test_colorsys.py`. Formulas copied
+    // directly from real CPython's own `Lib/colorsys.py`.
+    cs_func!("rgb_to_yiq", |args| {
+        if args.len() < 3 {
+            return Err(PyError::type_error("rgb_to_yiq() requires 3 arguments (r, g, b)"));
+        }
+        let r = args[0].as_f64().ok_or_else(|| PyError::type_error("r must be a number"))?;
+        let g = args[1].as_f64().ok_or_else(|| PyError::type_error("g must be a number"))?;
+        let b = args[2].as_f64().ok_or_else(|| PyError::type_error("b must be a number"))?;
+        let y = 0.30 * r + 0.59 * g + 0.11 * b;
+        let i = 0.74 * (r - y) - 0.27 * (b - y);
+        let q = 0.48 * (r - y) + 0.41 * (b - y);
+        Ok(py_tuple(vec![py_float(y), py_float(i), py_float(q)]))
+    });
+
+    cs_func!("yiq_to_rgb", |args| {
+        if args.len() < 3 {
+            return Err(PyError::type_error("yiq_to_rgb() requires 3 arguments (y, i, q)"));
+        }
+        let y = args[0].as_f64().ok_or_else(|| PyError::type_error("y must be a number"))?;
+        let i = args[1].as_f64().ok_or_else(|| PyError::type_error("i must be a number"))?;
+        let q = args[2].as_f64().ok_or_else(|| PyError::type_error("q must be a number"))?;
+        let r = y + 0.9468822170900693 * i + 0.6235565819861433 * q;
+        let g = y - 0.27478764629897834 * i - 0.6356910791873801 * q;
+        let b = y - 1.1085450346420322 * i + 1.7090069284064666 * q;
         Ok(py_tuple(vec![py_float(clampf(r)), py_float(clampf(g)), py_float(clampf(b))]))
     });
 

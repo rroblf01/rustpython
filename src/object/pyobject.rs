@@ -220,6 +220,14 @@ pub enum PyObject {
     File {
         file: std::rc::Rc<std::cell::RefCell<std::fs::File>>,
         name: String,
+        // Real Python's `open(path, mode)` returns `bytes` from `read()`/
+        // `readline()`/iteration when `'b'` is in `mode`, `str` otherwise —
+        // was previously never tracked at all (every read unconditionally
+        // decoded as UTF-8 text), so `open(path, 'rb').read()` returned a
+        // `str`, not `bytes` (real trigger: `dbm/dumb.py`'s own
+        // `__getitem__`, `with _io.open(self._datfile, 'rb') as f: f.seek
+        // (pos); dat = f.read(siz)` — expects `dat` to be raw `bytes`).
+        binary: bool,
     },
     /// Backing for `subprocess.Popen` — holds the spawned child process.
     /// `child` is `None` after `.communicate()`/`.wait()` has reaped it
@@ -620,6 +628,16 @@ impl PyObject {
             PyObject::MemoryView { shape, .. } => shape.first().copied().unwrap_or(0) != 0,
             PyObject::CompiledRegex { .. } => true,
             PyObject::Closure(_) => true,
+            // `bytes`/`bytearray` were missing entirely from this match —
+            // silently fell to the generic `_ => true` catch-all, so
+            // `bool(b'')`/`bool(bytearray())` (and anywhere either is used
+            // in an implicit truth-test — `if not f.readline():`, an
+            // extremely common EOF-detection idiom) always came back
+            // `True` regardless of actual (non-)emptiness. Confirmed via
+            // CPython's own `test_bufio.py` (`self.assertFalse(line)` on
+            // an empty-bytes EOF sentinel from `readline()`).
+            PyObject::Bytes(b) => !b.is_empty(),
+            PyObject::ByteArray(b) => !b.is_empty(),
             _ => true,
         }
     }

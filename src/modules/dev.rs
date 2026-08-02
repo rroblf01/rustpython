@@ -54,6 +54,32 @@ pub fn create_warnings_dict() -> HashMap<String, PyObjectRef> {
         static WARN_FILTER: std::cell::RefCell<String> = std::cell::RefCell::new("default".to_string());
     }
 
+    // Real, shared `warnings.filters` state — was previously a fixed,
+    // disconnected empty list (`d.insert_str("filters", py_list(vec![]))`
+    // below) with `filterwarnings`/`_get_filters` both no-ops, so nothing
+    // ever actually got recorded. `Lib/test/support/__init__.py`'s
+    // `ignore_deprecations_from`/`clear_ignored_deprecations` (used by
+    // `test_support.py`'s own `setUpClass`/`tearDownClass`, which assert
+    // the filter COUNT actually grows/shrinks by 2 around two
+    // `filterwarnings` calls) need this to be real, mutable, and shared
+    // between `filterwarnings` (which appends) and `_get_filters`/
+    // `filters` (which must read back the SAME list, not a fresh copy).
+    // A `PyObjectRef::new(PyObject::List(...))` is `Rc<RefCell<_>>`-backed,
+    // so storing one clone here and returning further clones from both
+    // accessors keeps them all pointing at the same underlying storage.
+    thread_local! {
+        static WARN_FILTERS_LIST: std::cell::RefCell<Option<PyObjectRef>> = const { std::cell::RefCell::new(None) };
+    }
+    fn get_warn_filters_list() -> PyObjectRef {
+        WARN_FILTERS_LIST.with(|f| {
+            let mut opt = f.borrow_mut();
+            if opt.is_none() {
+                *opt = Some(py_list(vec![]));
+            }
+            opt.clone().unwrap()
+        })
+    }
+
     warn_func!("warn", |args| {
         let msg = if !args.is_empty() { args[0].str() } else { String::new() };
         println!("Warning: {}", msg);
@@ -68,11 +94,55 @@ pub fn create_warnings_dict() -> HashMap<String, PyObjectRef> {
         Ok(py_none())
     });
 
-    // Insert the current filter state as a readable attribute
-    d.insert_str("filters", py_list(vec![]));
+    // Insert the current filter state as a readable attribute — the SAME
+    // shared list `filterwarnings`/`_get_filters` read and mutate.
+    d.insert_str("filters", get_warn_filters_list());
 
-    warn_func!("resetwarnings", |_| Ok(py_none()));
-    warn_func!("filterwarnings", |_| Ok(py_none()));
+    warn_func!("resetwarnings", |_| {
+        let filters = get_warn_filters_list();
+        if let PyObject::List(items) = &mut *filters.borrow_mut() {
+            items.clear();
+        }
+        Ok(py_none())
+    });
+    // `warnings._get_filters()` — real CPython's internal accessor for the
+    // `filters` list (added when the C `_warnings` module took over
+    // filtering state). Was missing entirely (`AttributeError`), breaking
+    // `Lib/test/support/__init__.py`'s own `swap_attr`-based filter-
+    // save/restore helper used by `test_support.py`'s `setUpClass`. Now
+    // returns the real, shared filters list (see `get_warn_filters_list`).
+    warn_func!("_get_filters", |_| Ok(get_warn_filters_list()));
+    // `warnings.filterwarnings(action, message="", category=Warning,
+    // module="", lineno=0, append=False)` — was a complete no-op. Real
+    // semantics only needed here: append/insert a `(action, message,
+    // category, module, lineno)` tuple into the shared `filters` list —
+    // `Lib/test/support/__init__.py`'s `ignore_deprecations_from`/
+    // `clear_ignored_deprecations` only ever read the list back to count
+    // or filter entries, never act on the filtering itself (this
+    // interpreter's `warn()` doesn't consult `filters` to decide
+    // suppression at all).
+    warn_func!("filterwarnings", |args| {
+        let action = args.first().map(|a| a.str()).unwrap_or_else(|| "default".to_string());
+        let kwargs = args.last().and_then(|a| if let PyObject::Dict(d) = &*a.borrow() { Some((**d).clone()) } else { None });
+        let get_kw = |name: &str| -> PyObjectRef {
+            kwargs.as_ref().and_then(|d| d.get(&py_str(name)).ok().flatten()).unwrap_or_else(py_none)
+        };
+        let message = { let m = get_kw("message"); if matches!(&*m.borrow(), PyObject::None) { py_str("") } else { m } };
+        let category = get_kw("category");
+        let module = { let m = get_kw("module"); if matches!(&*m.borrow(), PyObject::None) { py_str("") } else { m } };
+        let lineno = { let l = get_kw("lineno"); if matches!(&*l.borrow(), PyObject::None) { py_int(0) } else { l } };
+        let append = get_kw("append").truthy();
+        let entry = py_tuple(vec![py_str(&action), message, category, module, lineno]);
+        let filters = get_warn_filters_list();
+        if let PyObject::List(items) = &mut *filters.borrow_mut() {
+            if append {
+                items.push(entry);
+            } else {
+                items.insert(0, entry);
+            }
+        }
+        Ok(py_none())
+    });
     // Real CPython's `warnings.py` does `from _warnings import (..., _deprecated,
     // ...)` — a native-extension-only helper `nturl2path`/other stdlib
     // modules call directly (`warnings._deprecated("urllib.request...",
@@ -1502,9 +1572,9 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
                 .create(mode.contains('w') || mode.contains('a'))
                 .truncate(mode.contains('w'))
                 .open(&filename)
-                .map_err(|e| PyError::OsError(format!("{}", e)))?
+                .map_err(|e| PyError::os_error_from_io(&e))?
         };
-        Ok(PyObjectRef::new(PyObject::File { file: Rc::new(RefCell::new(file)), name: filename.clone() }))
+        Ok(PyObjectRef::new(PyObject::File { file: Rc::new(RefCell::new(file)), name: filename.clone(), binary: mode.contains('b') }))
     });
 
     // BytesIO — in-memory bytes buffer
@@ -1649,8 +1719,8 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
     io_func!("open_code", |args| {
         if args.is_empty() { return Err(PyError::type_error("open_code() missing argument")); }
         let path = args[0].str();
-        let file = std::fs::File::open(&path).map_err(|e| PyError::OsError(format!("{}", e)))?;
-        Ok(PyObjectRef::new(PyObject::File { file: Rc::new(RefCell::new(file)), name: path.clone() }))
+        let file = std::fs::File::open(&path).map_err(|e| PyError::os_error_from_io(&e))?;
+        Ok(PyObjectRef::new(PyObject::File { file: Rc::new(RefCell::new(file)), name: path.clone(), binary: true }))
     });
 
     io_func!("text_encoding", |args| {

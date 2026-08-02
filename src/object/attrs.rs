@@ -14,6 +14,68 @@ pub trait ObjectAccess {
     fn del_attribute(&mut self, name: &str) -> PyResult<()>;
 }
 
+/// `str.encode(encoding='utf-8', errors='strict')` — was completely
+/// ignoring `encoding` and always emitting raw UTF-8 bytes regardless of
+/// what was actually requested, so `"Ç".encode("latin-1")` silently
+/// returned the UTF-8 bytes `b'\xc3\x87'` instead of the correct
+/// single-byte `b'\xc7'`. Confirmed via `test_utf8source.py::test_latin1`
+/// (round-tripping non-ASCII source text through `.encode("Latin-1")` to
+/// build a `bytes` source for `compile()`). Handles the common
+/// single-byte encodings directly; anything else still falls back to
+/// UTF-8 (matching the previous, universal behavior) rather than raising,
+/// to avoid regressing any caller that never specifies a real encoding.
+fn str_encode_builtin(a: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    let s = a[0].str();
+    let encoding = if a.len() > 1 && !matches!(&*a[1].borrow(), PyObject::None) { a[1].str() } else { "utf-8".to_string() };
+    let norm = encoding.to_ascii_lowercase().replace('_', "-");
+    let bytes = match norm.as_str() {
+        "latin-1" | "latin1" | "iso-8859-1" | "iso8859-1" | "l1" | "8859" | "cp819" => {
+            let mut out = Vec::with_capacity(s.len());
+            for (i, c) in s.chars().enumerate() {
+                let cp = c as u32;
+                if cp > 0xFF {
+                    return Err(PyError::Exception("UnicodeEncodeError".to_string(), PyObjectRef::new(PyObject::Exception {
+                        typ: "UnicodeEncodeError".to_string(),
+                        args: vec![
+                            py_str(&encoding),
+                            py_str(&s),
+                            py_int(i as i64),
+                            py_int(i as i64 + 1),
+                            py_str("ordinal not in range(256)"),
+                        ],
+                        cause: None,
+                    })));
+                }
+                out.push(cp as u8);
+            }
+            out
+        }
+        "ascii" | "us-ascii" | "646" => {
+            let mut out = Vec::with_capacity(s.len());
+            for (i, c) in s.chars().enumerate() {
+                let cp = c as u32;
+                if cp > 0x7F {
+                    return Err(PyError::Exception("UnicodeEncodeError".to_string(), PyObjectRef::new(PyObject::Exception {
+                        typ: "UnicodeEncodeError".to_string(),
+                        args: vec![
+                            py_str(&encoding),
+                            py_str(&s),
+                            py_int(i as i64),
+                            py_int(i as i64 + 1),
+                            py_str("ordinal not in range(128)"),
+                        ],
+                        cause: None,
+                    })));
+                }
+                out.push(cp as u8);
+            }
+            out
+        }
+        _ => s.as_bytes().to_vec(),
+    };
+    Ok(PyObjectRef::imm(PyObject::Bytes(bytes)))
+}
+
 impl PyObject {
     /// Every real Python object has `__doc__` (defaulting to `None` if not
     /// otherwise set — `bool`/`int`/etc. all inherit it from `object`).
@@ -2502,11 +2564,29 @@ impl PyObject {
                                 i = line_end;
                                 start = i;
                             }
-                            if start < len || s.ends_with('\n') || s.is_empty() || lines.is_empty() {
+                            // A trailing chunk is only pushed if there's
+                            // actual leftover content after the last
+                            // line-terminator (`start < len`) — matching
+                            // `bytes.splitlines()`'s own, already-correct
+                            // logic just above in this file. This used to
+                            // ALSO push a chunk whenever the string ended
+                            // with `\n` or was empty, backwards from real
+                            // Python semantics: `"a\nb\n".splitlines()`
+                            // must be `['a', 'b']` (NOT `['a', 'b', '']`
+                            // — a trailing newline does not create an
+                            // extra empty final line) and `"".splitlines()`
+                            // must be `[]` (NOT `['']`). Confirmed via
+                            // `test_augassign.py::testCustomMethods2`,
+                            // which compares a captured call-log list
+                            // against a multi-line string literal's
+                            // `.splitlines()` — the literal's trailing
+                            // newline (before the closing `'''`) produced
+                            // one spurious extra `''` element, permanently
+                            // failing the comparison regardless of the
+                            // actual dunder-call behavior being tested.
+                            if start < len {
                                 let line: String = chars[start..].iter().collect();
-                                if !line.is_empty() || s.ends_with('\n') || (s.is_empty() && lines.is_empty()) {
-                                    lines.push(py_str(&line));
-                                }
+                                lines.push(py_str(&line));
                             }
                             Ok(py_list(lines))
                         },
@@ -2537,7 +2617,7 @@ impl PyObject {
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
                     "translate" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "translate".to_string(), func: |a| { let s = a[0].str(); if a.len() > 1 { let _table = &a[1]; } Ok(py_str(&s)) }, self_obj: PyObjectRef::new(PyObject::None) })),
-                    "encode" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "encode".to_string(), func: |a| { let s = a[0].str(); if a.len() > 1 { let _encoding = a[1].str(); } Ok(PyObjectRef::imm(PyObject::Bytes(s.as_bytes().to_vec()))) }, self_obj: PyObjectRef::new(PyObject::None) })),
+                    "encode" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name: "encode".to_string(), func: str_encode_builtin, self_obj: PyObjectRef::new(PyObject::None) })),
                     "isidentifier" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "isidentifier".to_string(),
                         func: |a| {
@@ -3147,7 +3227,53 @@ impl PyObject {
                     "__doc__" => Ok(dict.get("__doc__").cloned().unwrap_or(py_none())),
                     "__code__" => Ok(dict.get("__code__").cloned().unwrap_or(py_none())),
                     "__globals__" => Ok(dict.get("__globals__").cloned().unwrap_or(py_none())),
-                    "__defaults__" => Ok(dict.get("__defaults__").cloned().unwrap_or(py_none())),
+                    // Real `__defaults__`/`__kwdefaults__` introspection —
+                    // was ALWAYS `None` regardless of the function's real
+                    // signature (only reflected a value if user code
+                    // explicitly assigned `f.__defaults__ = ...` by hand),
+                    // even though the real default VALUES are already
+                    // sitting right here on `f.defaults` (populated by
+                    // `MAKE_FUNCTION`, which appends kwonly defaults after
+                    // positional ones — see its own doc comment, `vm.rs`).
+                    // `__kwdefaults__` additionally needs the kwonly
+                    // parameter NAMES, which live in `varnames` right after
+                    // the positional ones (`varnames[arg_count..][..
+                    // kwonlyarg_count]` — standard CPython varnames layout).
+                    // Missing entirely broke `test_keywordonlyarg.py::
+                    // testKwDefaults` (`AttributeError` instead of a real
+                    // dict).
+                    "__defaults__" => {
+                        if let Some(v) = dict.get("__defaults__") { return Ok(v.clone()); }
+                        let kwonly_with_default = f.code.kwonly_defaults_mask.iter().filter(|&&b| b).count();
+                        let pos_count = f.defaults.len().saturating_sub(kwonly_with_default);
+                        if pos_count == 0 {
+                            Ok(py_none())
+                        } else {
+                            Ok(py_tuple(f.defaults[..pos_count].to_vec()))
+                        }
+                    }
+                    "__kwdefaults__" => {
+                        if let Some(v) = dict.get("__kwdefaults__") { return Ok(v.clone()); }
+                        let kwonly_with_default = f.code.kwonly_defaults_mask.iter().filter(|&&b| b).count();
+                        if kwonly_with_default == 0 {
+                            return Ok(py_none());
+                        }
+                        let pos_count = f.defaults.len().saturating_sub(kwonly_with_default);
+                        let mut kw_d = PyDict::new();
+                        let mut value_idx = pos_count;
+                        for (i, &has_default) in f.code.kwonly_defaults_mask.iter().enumerate() {
+                            if has_default {
+                                if let Some(&name_id) = f.code.varnames.get(f.code.arg_count + i) {
+                                    let arg_name = crate::interner::lookup_str(name_id);
+                                    if let Some(val) = f.defaults.get(value_idx) {
+                                        let _ = kw_d.set(py_str(arg_name), val.clone());
+                                    }
+                                }
+                                value_idx += 1;
+                            }
+                        }
+                        Ok(PyObjectRef::new(PyObject::Dict(Box::new(kw_d))))
+                    }
                     "__closure__" => Ok(dict.get("__closure__").cloned().unwrap_or(py_none())),
                     "__module__" => Ok(dict.get("__module__").cloned().unwrap_or(py_none())),
                     "__annotations__" => Ok(dict.get("__annotations__").cloned().unwrap_or(py_none())),
@@ -3415,7 +3541,7 @@ impl PyObject {
                                             Ok(py_int(rc))
                                         }
                                         Ok(None) => Ok(py_none()),
-                                        Err(e) => Err(PyError::OsError(format!("{}", e))),
+                                        Err(e) => Err(PyError::os_error_from_io(&e)),
                                     },
                                     None => Ok(py_none()),
                                 }
@@ -3436,7 +3562,7 @@ impl PyObject {
                                             *returncode.borrow_mut() = Some(rc);
                                             Ok(py_int(rc))
                                         }
-                                        Err(e) => Err(PyError::OsError(format!("{}", e))),
+                                        Err(e) => Err(PyError::os_error_from_io(&e)),
                                     },
                                     None => Ok(py_none()),
                                 }
@@ -3482,7 +3608,7 @@ impl PyObject {
                                                     PyObjectRef::imm(PyObject::Bytes(output.stderr)),
                                                 ]))
                                             }
-                                            Err(e) => Err(PyError::OsError(format!("{}", e))),
+                                            Err(e) => Err(PyError::os_error_from_io(&e)),
                                         }
                                     }
                                     None => Ok(py_tuple(vec![
@@ -3565,11 +3691,131 @@ impl PyObject {
                         name: "read".to_string(),
                         func: |args| {
                             use std::io::Read;
-                            if let PyObject::File { file, .. } = &*args[0].borrow() {
-                                let mut buf = String::new();
-                                file.borrow_mut().read_to_string(&mut buf).map_err(|e| PyError::OsError(format!("{}", e)))?;
-                                Ok(py_str(&buf))
+                            if let PyObject::File { file, binary, .. } = &*args[0].borrow() {
+                                // Was: unconditional `read_to_string`, always
+                                // returning `str` — completely ignored an
+                                // explicit `size` argument (`f.read(n)`, real
+                                // trigger: `dbm/dumb.py`'s own `__getitem__`,
+                                // `f.read(siz)` to read exactly one stored
+                                // value's byte range out of a shared data
+                                // file — got the ENTIRE rest of the file
+                                // instead of just `siz` bytes every time),
+                                // AND never returned `bytes` even for a file
+                                // opened in binary (`'rb'`) mode.
+                                let size = args.get(1).and_then(|a| a.as_i64());
+                                let buf: Vec<u8> = match size {
+                                    Some(n) if n >= 0 => {
+                                        let mut buf = vec![0u8; n as usize];
+                                        let read = file.borrow_mut().read(&mut buf).map_err(|e| PyError::os_error_from_io(&e))?;
+                                        buf.truncate(read);
+                                        buf
+                                    }
+                                    _ => {
+                                        let mut buf = Vec::new();
+                                        file.borrow_mut().read_to_end(&mut buf).map_err(|e| PyError::os_error_from_io(&e))?;
+                                        buf
+                                    }
+                                };
+                                if *binary {
+                                    Ok(PyObjectRef::imm(PyObject::Bytes(buf)))
+                                } else {
+                                    Ok(py_str(&String::from_utf8_lossy(&buf)))
+                                }
                             } else { Err(PyError::runtime_error("read on non-file")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    // `readline()`/`readlines()`/iteration (`for line in f:`)
+                    // were missing entirely — one of the single most common
+                    // real-Python file-reading idioms. `std::fs::File` has
+                    // no built-in line buffering, so this reads byte-by-byte
+                    // via the file's OWN current position (the same handle
+                    // `seek`/`tell` already operate on, so interleaving
+                    // `readline()` with `seek()`/`tell()` stays consistent),
+                    // stopping at (and including) `\n` or at EOF. Confirmed
+                    // missing via `dbm/dumb.py`'s own `_update` (`for line
+                    // in f:` over its index file) — `TypeError: 'file'
+                    // object is not iterable` — but the gap is completely
+                    // general, not dbm-specific.
+                    "readline" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "readline".to_string(),
+                        func: |args| {
+                            use std::io::Read;
+                            if let PyObject::File { file, binary, .. } = &*args[0].borrow() {
+                                let mut buf = Vec::new();
+                                let mut byte = [0u8; 1];
+                                loop {
+                                    match file.borrow_mut().read(&mut byte) {
+                                        Ok(0) => break,
+                                        Ok(_) => {
+                                            buf.push(byte[0]);
+                                            if byte[0] == b'\n' { break; }
+                                        }
+                                        Err(e) => return Err(PyError::os_error_from_io(&e)),
+                                    }
+                                }
+                                if *binary {
+                                    Ok(PyObjectRef::imm(PyObject::Bytes(buf)))
+                                } else {
+                                    Ok(py_str(&String::from_utf8_lossy(&buf)))
+                                }
+                            } else { Err(PyError::runtime_error("readline on non-file")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "readlines" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "readlines".to_string(),
+                        func: |args| {
+                            use std::io::Read;
+                            if let PyObject::File { file, binary, .. } = &*args[0].borrow() {
+                                let mut rest = Vec::new();
+                                file.borrow_mut().read_to_end(&mut rest).map_err(|e| PyError::os_error_from_io(&e))?;
+                                let mut lines: Vec<PyObjectRef> = Vec::new();
+                                let mut current: Vec<u8> = Vec::new();
+                                for byte in rest {
+                                    current.push(byte);
+                                    if byte == b'\n' {
+                                        lines.push(if *binary { PyObjectRef::imm(PyObject::Bytes(current.clone())) } else { py_str(&String::from_utf8_lossy(&current)) });
+                                        current.clear();
+                                    }
+                                }
+                                if !current.is_empty() {
+                                    lines.push(if *binary { PyObjectRef::imm(PyObject::Bytes(current.clone())) } else { py_str(&String::from_utf8_lossy(&current)) });
+                                }
+                                Ok(py_list(lines))
+                            } else { Err(PyError::runtime_error("readlines on non-file")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__iter__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__iter__".to_string(),
+                        func: |args| Ok(args[0].clone()),
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__next__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__next__".to_string(),
+                        func: |args| {
+                            use std::io::Read;
+                            if let PyObject::File { file, binary, .. } = &*args[0].borrow() {
+                                let mut buf = Vec::new();
+                                let mut byte = [0u8; 1];
+                                loop {
+                                    match file.borrow_mut().read(&mut byte) {
+                                        Ok(0) => break,
+                                        Ok(_) => {
+                                            buf.push(byte[0]);
+                                            if byte[0] == b'\n' { break; }
+                                        }
+                                        Err(e) => return Err(PyError::os_error_from_io(&e)),
+                                    }
+                                }
+                                if buf.is_empty() { return Err(PyError::StopIteration); }
+                                if *binary {
+                                    Ok(PyObjectRef::imm(PyObject::Bytes(buf)))
+                                } else {
+                                    Ok(py_str(&String::from_utf8_lossy(&buf)))
+                                }
+                            } else { Err(PyError::runtime_error("__next__ on non-file")) }
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -3579,9 +3825,19 @@ impl PyObject {
                             use std::io::Write;
                             if args.len() < 2 { return Err(PyError::type_error("write() takes exactly one argument")); }
                             if let PyObject::File { file, .. } = &*args[0].borrow() {
-                                let text = args[1].str();
-                                file.borrow_mut().write_all(text.as_bytes()).map_err(|e| PyError::OsError(format!("{}", e)))?;
-                                Ok(py_int(text.len() as i64))
+                                // A binary-mode file's `write()` takes real
+                                // `bytes` — was always calling `.str()` on
+                                // the argument (a `bytes` value's `str()` is
+                                // its Python REPR, `"b'...'"`, quotes/escapes
+                                // and all — writing that literal text into
+                                // the file instead of the actual raw bytes).
+                                let data: Vec<u8> = match &*args[1].borrow() {
+                                    PyObject::Bytes(b) => b.clone(),
+                                    PyObject::ByteArray(b) => b.clone(),
+                                    other => other.str().into_bytes(),
+                                };
+                                file.borrow_mut().write_all(&data).map_err(|e| PyError::os_error_from_io(&e))?;
+                                Ok(py_int(data.len() as i64))
                             } else { Err(PyError::runtime_error("write on non-file")) }
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
@@ -3591,7 +3847,7 @@ impl PyObject {
                         func: |args| {
                             use std::io::Write;
                             if let PyObject::File { file, .. } = &*args[0].borrow() {
-                                file.borrow_mut().flush().map_err(|e| PyError::OsError(format!("{}", e)))?;
+                                file.borrow_mut().flush().map_err(|e| PyError::os_error_from_io(&e))?;
                                 Ok(py_none())
                             } else { Err(PyError::runtime_error("flush on non-file")) }
                         },
@@ -3649,7 +3905,7 @@ impl PyObject {
                                     1 => SeekFrom::Current(offset),
                                     2 => SeekFrom::End(offset),
                                     _ => SeekFrom::Start(offset as u64),
-                                }).map_err(|e| PyError::OsError(format!("{}", e)))?;
+                                }).map_err(|e| PyError::os_error_from_io(&e))?;
                                 Ok(py_int(pos as i64))
                             } else { Err(PyError::runtime_error("seek on non-file")) }
                         },
@@ -3660,7 +3916,7 @@ impl PyObject {
                         func: |args| {
                             use std::io::Seek;
                             if let PyObject::File { file, .. } = &*args[0].borrow() {
-                                let pos = file.borrow_mut().stream_position().map_err(|e| PyError::OsError(format!("{}", e)))?;
+                                let pos = file.borrow_mut().stream_position().map_err(|e| PyError::os_error_from_io(&e))?;
                                 Ok(py_int(pos as i64))
                             } else { Err(PyError::runtime_error("tell on non-file")) }
                         },
@@ -3816,7 +4072,7 @@ impl PyObject {
                                 match &*inner {
                                     SocketInner::Uninitialized => {
                                         let listener = std::net::TcpListener::bind(&addr)
-                                            .map_err(|e| PyError::OsError(format!("{}", e)))?;
+                                            .map_err(|e| PyError::os_error_from_io(&e))?;
                                         listener.set_nonblocking(true).ok();
                                         *inner = SocketInner::TcpListener(listener);
                                         Ok(py_none())
@@ -3895,7 +4151,7 @@ impl PyObject {
                                             }
                                             Err(e) => {
                                                 *inner = SocketInner::TcpListener(listener);
-                                                Err(PyError::OsError(format!("{}", e)))
+                                                Err(PyError::os_error_from_io(&e))
                                             }
                                         }
                                     }
@@ -3924,7 +4180,7 @@ impl PyObject {
                                                 *inner = SocketInner::TcpStream(stream);
                                                 Ok(py_none())
                                             }
-                                            Err(e) => Err(PyError::OsError(format!("{}", e))),
+                                            Err(e) => Err(PyError::os_error_from_io(&e)),
                                         }
                                     }
                                     _ => Err(PyError::runtime_error("socket already connected or listening")),
@@ -3946,7 +4202,7 @@ impl PyObject {
                                         use std::io::Write;
                                         match stream.write_all(data.as_bytes()) {
                                             Ok(()) => Ok(py_int(data.len() as i64)),
-                                            Err(e) => Err(PyError::OsError(format!("{}", e))),
+                                            Err(e) => Err(PyError::os_error_from_io(&e)),
                                         }
                                     }
                                     _ => Err(PyError::runtime_error("send on non-stream")),
@@ -3979,7 +4235,7 @@ impl PyObject {
                                             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                                                 Ok(py_none())
                                             }
-                                            Err(e) => Err(PyError::OsError(format!("{}", e))),
+                                            Err(e) => Err(PyError::os_error_from_io(&e)),
                                         }
                                     }
                                     _ => Err(PyError::runtime_error("recv on non-stream")),
@@ -4051,7 +4307,7 @@ impl PyObject {
                                     SocketInner::TcpListener(l) => l.local_addr(),
                                     SocketInner::TcpStream(s) => s.local_addr(),
                                     SocketInner::Uninitialized => return Err(PyError::OsError("Bad file descriptor".to_string())),
-                                }.map_err(|e| PyError::OsError(format!("{}", e)))?;
+                                }.map_err(|e| PyError::os_error_from_io(&e))?;
                                 Ok(socket_addr_to_py_tuple(addr))
                             } else { Err(PyError::runtime_error("getsockname on non-socket")) }
                         },
@@ -4066,7 +4322,7 @@ impl PyObject {
                                 let addr = match &*inner {
                                     SocketInner::TcpStream(s) => s.peer_addr(),
                                     _ => return Err(PyError::OsError("Socket is not connected".to_string())),
-                                }.map_err(|e| PyError::OsError(format!("{}", e)))?;
+                                }.map_err(|e| PyError::os_error_from_io(&e))?;
                                 Ok(socket_addr_to_py_tuple(addr))
                             } else { Err(PyError::runtime_error("getpeername on non-socket")) }
                         },
@@ -4179,16 +4435,59 @@ impl PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
+                    // `acquire(blocking=True, timeout=-1)` — the old body
+                    // ignored BOTH kwargs entirely and always spun on the
+                    // atomic flag forever (`while locked.load() { yield_now() }`
+                    // with no exit condition beyond the flag itself
+                    // clearing). Since this interpreter runs everything
+                    // SYNCHRONOUSLY (no real OS threads backing Python-level
+                    // threads), nothing else can ever run concurrently to
+                    // release an already-held lock — so re-acquiring a lock
+                    // already held by "this" logical flow is a hard,
+                    // permanent deadlock unless `blocking=False` or a
+                    // `timeout` bounds the wait. Confirmed hanging via
+                    // `Lib/test/lock_tests.py`'s `test_state_after_timeout`
+                    // (`lock.acquire(); lock.acquire(timeout=0.01)`).
                     "acquire" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "acquire".to_string(),
                         func: |args| {
                             let obj = args[0].borrow();
                             if let PyObject::Lock(inner_arc) = &*obj {
+                                let kwargs = args.last().and_then(|a| if let PyObject::Dict(d) = &*a.borrow() { Some((**d).clone()) } else { None });
+                                let get_kw = |name: &str| -> Option<PyObjectRef> {
+                                    kwargs.as_ref().and_then(|d| d.get(&py_str(name)).ok().flatten())
+                                };
+                                let is_kwargs_dict = |v: &PyObjectRef| matches!(&*v.borrow(), PyObject::Dict(_));
+                                let blocking = get_kw("blocking")
+                                    .or_else(|| args.get(1).filter(|a| !is_kwargs_dict(a)).cloned())
+                                    .map(|v| v.truthy())
+                                    .unwrap_or(true);
+                                let timeout = get_kw("timeout")
+                                    .or_else(|| args.get(2).filter(|a| !is_kwargs_dict(a)).cloned())
+                                    .and_then(|v| v.as_f64());
                                 let locked = inner_arc.lock().unwrap();
-                                while locked.lock.load(std::sync::atomic::Ordering::SeqCst) {
+                                let try_take = || -> bool {
+                                    if locked.lock.load(std::sync::atomic::Ordering::SeqCst) {
+                                        false
+                                    } else {
+                                        locked.lock.store(true, std::sync::atomic::Ordering::SeqCst);
+                                        true
+                                    }
+                                };
+                                if !blocking {
+                                    return Ok(py_bool(try_take()));
+                                }
+                                if let Some(t) = timeout.filter(|t| *t >= 0.0) {
+                                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f64(t);
+                                    loop {
+                                        if try_take() { return Ok(py_bool(true)); }
+                                        if std::time::Instant::now() >= deadline { return Ok(py_bool(false)); }
+                                        std::thread::yield_now();
+                                    }
+                                }
+                                while !try_take() {
                                     std::thread::yield_now();
                                 }
-                                locked.lock.store(true, std::sync::atomic::Ordering::SeqCst);
                             }
                             Ok(py_bool(true))
                         },
@@ -4203,6 +4502,18 @@ impl PyObject {
                                 locked.lock.store(false, std::sync::atomic::Ordering::SeqCst);
                             }
                             Ok(py_none())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "locked" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "locked".to_string(),
+                        func: |args| {
+                            let obj = args[0].borrow();
+                            if let PyObject::Lock(inner_arc) = &*obj {
+                                let locked = inner_arc.lock().unwrap();
+                                return Ok(py_bool(locked.lock.load(std::sync::atomic::Ordering::SeqCst)));
+                            }
+                            Ok(py_bool(false))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -5626,9 +5937,25 @@ impl PyObject {
             }
             PyObject::Slice { start, stop, step } => {
                 match name {
-                    "start" => Ok(match &*start.borrow() { PyObject::None => py_none(), _ => py_int(start.as_i64().unwrap_or(0)) }),
-                    "stop" => Ok(match &*stop.borrow() { PyObject::None => py_none(), _ => py_int(stop.as_i64().unwrap_or(0)) }),
-                    "step" => Ok(match &*step.borrow() { PyObject::None => py_none(), _ => py_int(step.as_i64().unwrap_or(1)) }),
+                    // A real `slice`'s `.start`/`.stop`/`.step` return
+                    // WHATEVER object was actually passed to the `slice()`
+                    // constructor, unchanged (real Python slices can hold
+                    // arbitrary objects, not just ints — a documented,
+                    // if less common, pattern; e.g. custom `__index__`
+                    // objects or, as `test_slice.py::test_members` checks
+                    // directly, a totally arbitrary object with no numeric
+                    // meaning at all: `slice(obj).stop is obj`). This used
+                    // to force EVERY non-`None` value through
+                    // `.as_i64().unwrap_or(0)` — silently replacing any
+                    // non-integer stored value with `0` (or `1` for
+                    // `step`) instead of returning it, breaking both
+                    // `test_members`'s arbitrary-object case and
+                    // `test_deepcopy`'s mutable-index case (`slice([1,2],
+                    // [3,4], [5,6])` — reading `.start` back never
+                    // returned the actual list at all).
+                    "start" => Ok(start.clone()),
+                    "stop" => Ok(stop.clone()),
+                    "step" => Ok(step.clone()),
                     "indices" => {
                         let is_start_none = matches!(&*start.borrow(), PyObject::None);
                         let is_stop_none = matches!(&*stop.borrow(), PyObject::None);

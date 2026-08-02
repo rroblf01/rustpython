@@ -3372,6 +3372,41 @@ impl VirtualMachine {
                             None => return Err(PyError::type_error(format!("'{}' object is not iterable", val.get_type_name()))),
                         }
                     }
+                    // `for line in open(path):` — one of the single most
+                    // common real-Python file-reading idioms — was entirely
+                    // unhandled (`TypeError: 'file' object is not
+                    // iterable`), confirmed via `Lib/dbm/dumb.py`'s own
+                    // `_update` (`for line in f:` over its index file), but
+                    // the gap is completely general, not dbm-specific.
+                    // Reads the whole remaining content and splits it into
+                    // lines (keeping each line's own trailing `\n`, matching
+                    // real `readline()`/iteration semantics) — eager,
+                    // matching every other native-type arm in this same
+                    // match (`List`/`Tuple`/`Str`/...), not the lazy
+                    // `CallSentinelIter` `readline()`-driven approach used
+                    // by this project's OWN `readline`/`__next__` methods
+                    // (added alongside this fix, `attrs.rs`) for direct
+                    // `f.readline()`/`next(f)` calls.
+                    PyObject::File { file, binary, .. } => {
+                        use std::io::Read;
+                        let binary = *binary;
+                        let mut rest = Vec::new();
+                        file.borrow_mut().read_to_end(&mut rest).map_err(|e| PyError::os_error_from_io(&e))?;
+                        drop(obj);
+                        let mut lines: Vec<PyObjectRef> = Vec::new();
+                        let mut current: Vec<u8> = Vec::new();
+                        for byte in rest {
+                            current.push(byte);
+                            if byte == b'\n' {
+                                lines.push(if binary { PyObjectRef::imm(PyObject::Bytes(current.clone())) } else { py_str(&String::from_utf8_lossy(&current)) });
+                                current.clear();
+                            }
+                        }
+                        if !current.is_empty() {
+                            lines.push(if binary { PyObjectRef::imm(PyObject::Bytes(current.clone())) } else { py_str(&String::from_utf8_lossy(&current)) });
+                        }
+                        self.frames[fi].push(PyObjectRef::new(PyObject::ListIter { list: lines, index: 0 }));
+                    }
                     _ => return Err(PyError::type_error(format!("'{}' object is not iterable", obj.type_name()))),
                 }
                 }
@@ -3755,7 +3790,10 @@ impl VirtualMachine {
                                                     return Some(val.clone());
                                                 }
                                             }
-                                            PyObject::BuiltinFunction { name: n, func } if crate::object::is_builtin_exception_class_name(n) => {
+                                            PyObject::BuiltinFunction { name: n, func }
+                                                if crate::object::is_builtin_exception_class_name(n)
+                                                    || std::ptr::fn_addr_eq(*func, crate::object::builtin_open as crate::object::BuiltinFunc) =>
+                                            {
                                                 // Do NOT auto-bind a builtin
                                                 // exception "class" (this
                                                 // codebase's representation for
@@ -3966,7 +4004,39 @@ impl VirtualMachine {
                                     // via a minimal repro: `other.v` returning
                                     // `self.v`'s value inside a two-argument
                                     // comparison method.
-                                    if !dict.contains_key(&name) && name_idx < self.frames[fi].attr_cache.len() {
+                                    //
+                                    // A `property`'s (or any other `__get__`-
+                                    // based descriptor's) getter is called
+                                    // ABOVE and only its RETURN VALUE reaches
+                                    // this point — that value is exactly as
+                                    // instance-specific as a plain instance
+                                    // attribute (it's computed FROM the
+                                    // instance's own state), so caching it
+                                    // here under the same "found on the type"
+                                    // reasoning is the identical bug in a
+                                    // different disguise: every instance of
+                                    // the class sharing this one cache slot
+                                    // got back the FIRST instance's computed
+                                    // value forever after. Confirmed via a
+                                    // minimal, `__slots__`-free repro: `class
+                                    // Foo: x = property(lambda self: self.v)`
+                                    // — `b.x` returned `a.x`'s value.
+                                    let is_property_result = {
+                                        let typ_ref = typ.borrow();
+                                        if let PyObject::Type { dict: type_dict, mro, .. } = &*typ_ref {
+                                            let found_val: Option<PyObjectRef> = type_dict.get_str(&name).cloned().or_else(|| {
+                                                mro.iter().skip(1).find_map(|base| {
+                                                    if let PyObject::Type { dict: base_dict, .. } = &*base.borrow() {
+                                                        base_dict.get_str(&name).cloned()
+                                                    } else { None }
+                                                })
+                                            });
+                                            found_val.map(|v| matches!(&*v.borrow(), PyObject::Property(_))).unwrap_or(false)
+                                        } else {
+                                            false
+                                        }
+                                    };
+                                    if !dict.contains_key(&name) && !is_property_result && name_idx < self.frames[fi].attr_cache.len() {
                                         self.frames[fi].attr_cache[name_idx] = Some((type_tag, val.clone()));
                                     }
                                     Ok(val)
@@ -5453,13 +5523,42 @@ impl VirtualMachine {
                         _ => (py_none(), py_none()),
                     }
                 };
-                let exit_method = mgr.borrow().get_attribute("__exit__")
+                let exit_raw = mgr.borrow().get_attribute("__exit__")
                     .map_err(|_| PyError::attribute_error("context manager has no __exit__"))?;
-                // Bind the manager as self so __exit__ can access it
-                let bound = PyObjectRef::imm(PyObject::BoundMethod {
-                    func: exit_method,
-                    self_obj: mgr,
-                });
+                // A method found directly on a native type (e.g. `lock.
+                // __exit__`, `Lock`'s attribute lookup in `attrs.rs`) comes
+                // back as a `BuiltinMethod` with a PLACEHOLDER `self_obj`
+                // (see `NATIVE_VALUE_CTOR_KEY`'s doc comment) — wrapping
+                // THAT placeholder-carrying value inside another
+                // `BoundMethod{self_obj: mgr}` (the old code here) never
+                // actually rebinds it to the real manager: `mgr` never
+                // reaches the native implementation, so e.g. `Lock.__exit__`
+                // silently no-ops instead of clearing the lock flag, and
+                // ANY subsequent `with lock:` on the SAME lock hangs forever
+                // spinning on a flag that can never become false again.
+                // Mirrors the exact unwrap-and-rebuild-with-the-real-
+                // self_obj pattern `SETUP_WITH`'s own `__enter__` handling
+                // (just above) already uses — `WITH_EXIT` needs the
+                // identical treatment, not a second, ineffective wrapping.
+                let is_builtin = matches!(&*exit_raw.borrow(), PyObject::BuiltinMethod { .. });
+                let bound = if is_builtin {
+                    let b = exit_raw.borrow();
+                    match &*b {
+                        PyObject::BuiltinMethod { name, func, .. } => {
+                            PyObjectRef::imm(PyObject::BuiltinMethod {
+                                name: name.clone(),
+                                func: *func,
+                                self_obj: mgr.clone(),
+                            })
+                        }
+                        _ => unreachable!(),
+                    }
+                } else {
+                    PyObjectRef::imm(PyObject::BoundMethod {
+                        func: exit_raw,
+                        self_obj: mgr,
+                    })
+                };
                 let result = self.call_function(bound, vec![typ_obj, val, py_none()], vec![])?;
                 self.frames[fi].push(result);
             }
@@ -6059,6 +6158,98 @@ impl VirtualMachine {
             }
         }
 
+        // `sys._getframe(depth=0)` — was a complete no-op stub, always
+        // returning `None` regardless of `depth` (`object::core.rs`'s
+        // version has no VM access at all to do otherwise). Real trigger:
+        // `Lib/test/support/warnings_helper.py`'s `_filterwarnings`
+        // (`sys._getframe(2)`, to clear the CALLING module's
+        // `__warningregistry__` so warnings can be re-raised) — used by
+        // `check_warnings`, itself used pervasively across the corpus by
+        // any test asserting on warning behavior. Same `with_vm_mut`-
+        // avoidance pattern as `globals()`/`locals()` just above: reads
+        // `self.frames` directly. Returns a minimal but real `frame`-shaped
+        // `Instance` exposing `f_globals` as a live dict snapshot (each
+        // VALUE is the same shared `PyObjectRef` as the frame's real
+        // globals entry, so mutating a nested container — e.g. clearing
+        // `__warningregistry__` — still affects the real frame, even
+        // though the snapshot dict itself is a fresh copy) — enough for
+        // this and similar introspection uses, not a full frame object.
+        {
+            let is_getframe = matches!(&*callable.borrow(), PyObject::BuiltinFunction { func, .. } if std::ptr::fn_addr_eq(*func, crate::modules::sys_getframe_builtin as crate::object::BuiltinFunc));
+            if is_getframe {
+                let depth = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+                if depth < 0 {
+                    return Err(PyError::value_error("call stack is not deep enough"));
+                }
+                let idx = (self.frames.len() as i64) - 1 - depth;
+                let frame = if idx >= 0 { self.frames.get(idx as usize) } else { None };
+                let frame = frame.ok_or_else(|| PyError::value_error("call stack is not deep enough"))?;
+                let mut fg = crate::object::PyDict::new();
+                for (k, v) in frame.globals.borrow().iter() {
+                    fg.set(py_str(interner::lookup_str(*k)), v.clone())?;
+                }
+                let mut attrs = crate::object::AttrMap::new();
+                attrs.insert_str("f_globals", PyObjectRef::new(PyObject::Dict(Box::new(fg))));
+                attrs.insert_str("f_code", PyObjectRef::imm(PyObject::Code(frame.code.clone())));
+                let typ = PyObjectRef::new(PyObject::Type { name: "frame".to_string(), dict: Box::new(crate::object::TypeDict::default()), bases: vec![], mro: vec![] });
+                return Ok(PyObjectRef::new(PyObject::Instance { typ, dict: attrs }));
+            }
+        }
+
+        // `isinstance(obj, cls)`/`issubclass(sub, cls)` — real Python lets a
+        // custom METACLASS override these entirely by defining its own
+        // `__instancecheck__`/`__subclasscheck__` (distinct from, and rarer
+        // than, `__subclasshook__`-based ABC registration, which the
+        // generic `builtin_isinstance`/`builtin_issubclass` dispatch
+        // already supports elsewhere). Real trigger: CPython's own
+        // `test_typechecks.py` (`class ABC(type): def __instancecheck__
+        // (cls, inst): ...`). `object::builtin_isinstance`/
+        // `builtin_issubclass` are plain `fn(&[PyObjectRef])` with no VM
+        // access, so they can never CALL such a hook — only special-cased
+        // here, with the real, live `self`, and only when a custom
+        // metaclass hook is actually present (checked cheaply up front);
+        // falls through to the normal, unmodified dispatch otherwise, so
+        // the overwhelmingly common no-custom-metaclass path is completely
+        // unaffected. Handles the tuple-of-classes form too (`isinstance
+        // (x, (A, B))`) directly here, since `builtin_isinstance`'s OWN
+        // internal tuple recursion is a plain Rust call that never reaches
+        // this dispatch layer for each member.
+        {
+            let is_isinstance = matches!(&*callable.borrow(), PyObject::BuiltinFunction { func, .. } if std::ptr::fn_addr_eq(*func, crate::object::builtin_isinstance as crate::object::BuiltinFunc));
+            let is_issubclass = matches!(&*callable.borrow(), PyObject::BuiltinFunction { func, .. } if std::ptr::fn_addr_eq(*func, crate::object::builtin_issubclass as crate::object::BuiltinFunc));
+            if (is_isinstance || is_issubclass) && args.len() == 2 {
+                let hook_name = if is_isinstance { "__instancecheck__" } else { "__subclasscheck__" };
+                let find_hook = |cls: &PyObjectRef| -> Option<PyObjectRef> {
+                    if !matches!(&*cls.borrow(), PyObject::Type { .. }) { return None; }
+                    let mt = crate::object::metatype_of(cls)?;
+                    let hook = if let PyObject::Type { dict, .. } = &*mt.borrow() { dict.get_str(hook_name).cloned() } else { None };
+                    hook
+                };
+                let classes: Vec<PyObjectRef> = match &*args[1].borrow() {
+                    PyObject::Tuple(items) => items.clone(),
+                    _ => vec![args[1].clone()],
+                };
+                if classes.iter().any(|c| find_hook(c).is_some()) {
+                    for cls in &classes {
+                        if let Some(hook) = find_hook(cls) {
+                            let bound = PyObjectRef::imm(PyObject::BoundMethod { func: hook, self_obj: cls.clone() });
+                            let result = self.call_function(bound, vec![args[0].clone()], vec![])?;
+                            if result.truthy() {
+                                return Ok(py_bool(true));
+                            }
+                        } else if is_isinstance {
+                            if crate::object::builtin_isinstance(&[args[0].clone(), cls.clone()])?.truthy() {
+                                return Ok(py_bool(true));
+                            }
+                        } else if crate::object::builtin_issubclass(&[args[0].clone(), cls.clone()])?.truthy() {
+                            return Ok(py_bool(true));
+                        }
+                    }
+                    return Ok(py_bool(false));
+                }
+            }
+        }
+
         // `__import__(name, ...)` — what every `import` STATEMENT desugars
         // to in real CPython; this interpreter's own `IMPORT_NAME` opcode
         // doesn't route through it, but plenty of real code calls it
@@ -6156,6 +6347,31 @@ impl VirtualMachine {
             let is_asyncio_run = matches!(&*callable.borrow(), PyObject::BuiltinFunction { func, .. } if std::ptr::fn_addr_eq(*func, crate::modules::asyncio_run_builtin as crate::object::BuiltinFunc));
             if is_asyncio_run && !args.is_empty() {
                 return crate::modules::asyncio_run_impl(self, args[0].clone());
+            }
+        }
+
+        // `signal.raise_signal(signum)` / `os.kill(pid, signum)` (own pid
+        // only — the only pid meaningful in this single-process
+        // interpreter) — actually CALLING a registered `signal.signal()`
+        // handler needs a live `&mut VirtualMachine` (same class of bug as
+        // `asyncio.run`/`start_new_thread` above). Confirmed via
+        // `test_threadsignals.py`'s `acquire_retries_on_intr`, which relies
+        // on `os.kill(os.getpid(), signal.SIGUSR1)` actually invoking the
+        // handler registered via `signal.signal(signal.SIGUSR1, my_handler)`.
+        {
+            let is_raise_signal = matches!(&*callable.borrow(), PyObject::BuiltinFunction { func, .. } if std::ptr::fn_addr_eq(*func, crate::modules::signal_raise_signal_builtin as crate::object::BuiltinFunc));
+            if is_raise_signal && !args.is_empty() {
+                let signum = args[0].as_i64().ok_or_else(|| PyError::type_error("signalnum must be an int"))?;
+                return crate::modules::signal_raise_signal_impl(self, signum);
+            }
+            let is_os_kill = matches!(&*callable.borrow(), PyObject::BuiltinFunction { func, .. } if std::ptr::fn_addr_eq(*func, crate::modules::os_kill_builtin as crate::object::BuiltinFunc));
+            if is_os_kill && args.len() >= 2 {
+                let pid = args[0].as_i64().unwrap_or(-1);
+                let signum = args[1].as_i64().ok_or_else(|| PyError::type_error("signalnum must be an int"))?;
+                if pid == std::process::id() as i64 {
+                    crate::modules::invoke_signal_handler_impl(self, signum)?;
+                }
+                return Ok(py_none());
             }
         }
 
