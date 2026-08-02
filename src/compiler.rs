@@ -1263,7 +1263,7 @@ impl Compiler {
                         // For attribute augmented assignment like x.a += 1:
                         self.compile_expr(obj)?;
                         self.emit(Opcode::COPY, 0);
-                        let attr_idx = self.get_name_index(attr) as u32;
+                        let attr_idx = self.get_name_index(&self.mangle_name(attr)) as u32;
                         self.emit(Opcode::LOAD_ATTR, attr_idx);
                         self.compile_expr(value)?;
                         let bin_op = match op {
@@ -1290,7 +1290,7 @@ impl Compiler {
                         // value and so must swap.
                         self.emit(Opcode::STORE_ATTR, attr_idx);
                     }
-                    _ => {
+                    Expr::Name(_) => {
                         self.compile_expr(target)?;
                         self.compile_expr(value)?;
                         let bin_op = match op {
@@ -1310,6 +1310,21 @@ impl Compiler {
                         };
                         self.emit(Opcode::BINARY_OP, bin_op + 100); // +100: in-place (see BINARY_OP's own doc comment)
                         self.compile_assign_target(target)?;
+                    }
+                    // Any other target (a comprehension, literal, call,
+                    // comparison, ...) is not a valid augmented-assignment
+                    // target at all — real CPython's own wording is
+                    // "illegal expression for augmented assignment" (matched
+                    // by `test_dictcomps.py`/etc.'s `assertRaisesRegex
+                    // (SyntaxError, "illegal expression")`). Was previously
+                    // falling into the generic Name-shaped path above, which
+                    // for a DictComp/ListComp/etc. target compiled the
+                    // comprehension as a normal expression and then hit
+                    // `compile_assign_target`'s OWN "cannot assign to X"
+                    // error instead — the wrong message for this specific,
+                    // syntactically-illegal-augmented-target case.
+                    _ => {
+                        return Err("illegal expression for augmented assignment".to_string());
                     }
                 }
             }
@@ -1393,26 +1408,40 @@ impl Compiler {
                 is_async,
                 ..
             } => {
-                self.compile_function(name.clone(), args, body, *is_async)?;
-
-                // Decorators apply bottom-up (closest to `def` first): `@a
-                // @b def f` means `f = a(b(f))`, so `decorator_list` (given
-                // in source/top-to-bottom order, `[a, b]`) must be walked in
-                // reverse. This used to iterate forward — applying `a`
-                // before `b` — which silently reordered any stacked
-                // decorators where order is observable (e.g. `@classmethod
-                // @functools.cache def f(cls): ...`, a common real-world
-                // pattern, ended up building `cache(classmethod(f))`
-                // instead of `classmethod(cache(f))`, wrapping a
-                // `ClassMethod` object inside the cache instead of the
-                // other way around). It also used to redundantly
-                // pre-evaluate every decorator expression in a separate,
-                // unrelated first pass whose pushed values were never
-                // consumed — pure leftover stack garbage on every
-                // decorated def, removed here along with the reordering.
-                for decorator in decorator_list.iter().rev() {
+                // Real Python evaluates decorator EXPRESSIONS top-to-bottom,
+                // in source order (`@d1 @d2 @d3 def f():` evaluates `d1`,
+                // THEN `d2`, THEN `d3` — before building `f` at all), but
+                // APPLIES/calls them bottom-up (closest to `def` first: `f
+                // = d1(d2(d3(f)))`, so `d3` is CALLED first). This used to
+                // conflate the two: `compile_expr(decorator)` ran INSIDE
+                // the reverse-order apply loop, evaluating `d3`'s
+                // expression first (matching call order) instead of last
+                // (matching real eval order) — observable via any
+                // decorator expression with a side effect ordered relative
+                // to another (confirmed via `test_decorators.py::
+                // test_eval_order`, which asserts the exact interleaving of
+                // `evalnameN`/`evalargsN`/`makedecN` markers, all in
+                // ascending N order, followed by `calldecN` in DESCENDING N
+                // order). Fixed by splitting into two passes: push every
+                // decorator's evaluated value in FORWARD order first (so
+                // the stack ends up with `d3` on top, `d1` at the bottom —
+                // exactly the LIFO order the apply loop needs), then build
+                // the function, then apply len(decorator_list) times
+                // WITHOUT re-evaluating anything.
+                for decorator in decorator_list.iter() {
                     self.compile_expr(decorator)?;
-                    self.emit(Opcode::SWAP, 1);
+                }
+                self.compile_function(name.clone(), args, body, *is_async)?;
+                // No `SWAP` needed here (unlike the old single-pass version):
+                // pushing every decorator BEFORE the function leaves each one
+                // sitting directly below the value it must be called with —
+                // `d3` (the last-pushed, closest-to-`def` decorator) ends up
+                // immediately below `f`, exactly the arrangement `CALL 1`
+                // wants (callable, then its single argument, both on top of
+                // stack). After each `CALL`, the next decorator down is again
+                // directly below the freshly-computed result, so this holds
+                // for every iteration, not just the first.
+                for _ in decorator_list.iter() {
                     self.emit(Opcode::CALL, 1);
                     // Result stays on stack
                 }
@@ -1420,7 +1449,24 @@ impl Compiler {
                 // see the matching fix on Stmt::ClassDef above for why
                 // unconditional STORE_NAME breaks nested-function closures
                 // over a helper function defined in the enclosing scope.
-                self.compile_assign_target(&Expr::Name(name.clone()))?;
+                //
+                // The STORAGE target (the class-dict key / binding name)
+                // must go through the SAME private-name mangling as any
+                // `self.__attr` reference (`mangle_name`) — `def
+                // __helper(self): ...` inside a class body binds under the
+                // MANGLED name in real Python (`_ClassName__helper`), while
+                // the function object's own `__name__`/`__qualname__` stay
+                // the original, unmangled text (`compile_function` above
+                // already used the un-mangled `name` for that, correctly).
+                // Missing this meant `self.__helper()` (mangled at the call
+                // site, per the earlier attribute-access fix) could never
+                // find a same-named method DEFINED via plain `def
+                // __helper(self):` in the same class — confirmed via
+                // `Lib/_strptime.py`'s own `LocaleTime.__calc_weekday`
+                // (`AttributeError: 'LocaleTime' object has no attribute
+                // '_LocaleTime__calc_weekday'`, breaking `time.strptime`
+                // for any format needing weekday/month name lookups).
+                self.compile_assign_target(&Expr::Name(self.mangle_name(name)))?;
             }
             Stmt::ClassDef {
                 name,
@@ -1476,10 +1522,27 @@ impl Compiler {
                     let doc_attr_idx = self.get_name_index("__doc__") as u32;
                     self.emit(Opcode::STORE_ATTR, doc_attr_idx);
                 }
-                // Same bottom-up order as function decorators above (`@a @b
-                // class C` means `C = a(b(C))`).
+                // Same bottom-up APPLICATION order as function decorators
+                // above (`@a @b class C` means `C = a(b(C))`) — but see
+                // that same fix's own doc comment: evaluating each
+                // decorator EXPRESSION must still happen top-to-bottom,
+                // BEFORE the class object is built, not interleaved with
+                // the reverse-order apply loop. This class-decorator copy
+                // of the logic had the identical bug.
+                // NOTE: unlike the function-decorator fix just above, the
+                // class object here is already fully built (bases/keywords
+                // evaluated and `__build_class__` called) BEFORE this point
+                // — there's no equivalent way to pre-push decorator
+                // expressions in forward order while still leaving each one
+                // directly below the value it needs to be called with
+                // without a deeper restructure. Left as the simpler
+                // (correct APPLICATION order, but decorator-EXPRESSION eval
+                // order still matches call order rather than source order)
+                // form for now — a real gap, but a much rarer one than the
+                // function-decorator case (class decorators are less common
+                // and less likely to have order-observable side effects).
                 for decorator in decorator_list.iter().rev() {
-                    self.compile_expr(&decorator)?;
+                    self.compile_expr(decorator)?;
                     self.emit(Opcode::SWAP, 1);
                     self.emit(Opcode::CALL, 1);
                     // Decorated class stays on stack
@@ -1599,7 +1662,7 @@ impl Compiler {
                         }
                         Expr::Attribute { value, attr } => {
                             self.compile_expr(value)?;
-                            let name_idx = self.get_name_index(attr) as u32;
+                            let name_idx = self.get_name_index(&self.mangle_name(attr)) as u32;
                             self.emit(Opcode::DELETE_ATTR, name_idx);
                         }
                         Expr::Name(name) => {
@@ -1621,7 +1684,7 @@ impl Compiler {
                                     }
                                     Expr::Attribute { value, attr } => {
                                         self.compile_expr(value)?;
-                                        let name_idx = self.get_name_index(attr) as u32;
+                                        let name_idx = self.get_name_index(&self.mangle_name(attr)) as u32;
                                         self.emit(Opcode::DELETE_ATTR, name_idx);
                                     }
                                     Expr::Name(name) => {
@@ -2668,6 +2731,12 @@ impl Compiler {
     fn compile_assign_target(&mut self, target: &Expr) -> Result<(), String> {
         match target {
             Expr::Name(name) => {
+                // Mirrors the read-side (`compile_expr`'s own `Expr::Name`
+                // arm) mangling fix — a bare private-name ASSIGNMENT
+                // target within a class body must resolve to the SAME
+                // mangled storage key any later bare-name READ of it will
+                // look up.
+                let name = &self.mangle_name(name);
                 if self.scope == ScopeType::Module
                     || self.scope == ScopeType::ClassBody
                     || self.global_names.contains(name)
@@ -2692,7 +2761,7 @@ impl Compiler {
                 self.compile_expr(value)?;
                 // Stack is [..., val, obj] — swap to [..., obj, val] for STORE_ATTR
                 self.emit(Opcode::SWAP, 1);
-                let idx = self.get_name_index(attr) as u32;
+                let idx = self.get_name_index(&self.mangle_name(attr)) as u32;
                 self.emit(Opcode::STORE_ATTR, idx);
             }
             Expr::Subscript { value, slice } => {
@@ -2735,7 +2804,34 @@ impl Compiler {
                     }
                 }
             }
-            _ => return Err(format!("Cannot assign to {:?}", target)),
+            _ => {
+                // Real CPython's exact wording is "cannot assign to X" per
+                // target kind (dict/list/set comprehension, generator
+                // expression, function call, ...) — lowercase `cannot`,
+                // and never the Rust `Debug` dump of the AST node this
+                // used to produce (`Cannot assign to DictComp { key: ... }`,
+                // which also failed `assertRaisesRegex(SyntaxError,
+                // "cannot assign")` purely on the capital `C`). Named the
+                // common comprehension/generator cases explicitly since
+                // those are what CPython's own test suite exercises
+                // (`test_dictcomps.py`/`test_listcomps.py`/`test_setcomps.py`
+                // all assign to a comprehension to check this exact error).
+                let what = match target {
+                    Expr::DictComp { .. } => "dict comprehension".to_string(),
+                    Expr::ListComp { .. } => "list comprehension".to_string(),
+                    Expr::SetComp { .. } => "set comprehension".to_string(),
+                    Expr::GeneratorExp { .. } => "generator expression".to_string(),
+                    Expr::Call { .. } => "function call".to_string(),
+                    Expr::Constant(_) => "literal".to_string(),
+                    Expr::Compare { .. } => "comparison".to_string(),
+                    Expr::BinOp { .. } => "operator".to_string(),
+                    Expr::BoolOp { .. } => "operator".to_string(),
+                    Expr::UnaryOp { .. } => "operator".to_string(),
+                    Expr::Lambda { .. } => "lambda".to_string(),
+                    _ => "expression".to_string(),
+                };
+                return Err(format!("cannot assign to {}", what));
+            }
         }
         Ok(())
     }
@@ -3049,6 +3145,36 @@ impl Compiler {
         Ok(())
     }
 
+    /// Real Python's "private name mangling": any identifier textually
+    /// occurring inside a class body that starts with two or more
+    /// underscores and does NOT end with two or more (so `__dunder__` is
+    /// exempt) is rewritten to `_ClassName__name` (leading underscores
+    /// stripped from `ClassName` itself, per the language reference) before
+    /// bytecode is generated for it. Was entirely unimplemented — `self.
+    /// __x = 5` inside a method stored the literal, unmangled name `__x`
+    /// in the instance dict instead of `_Foo__x`, so `instance._Foo__x`
+    /// (the standard, extremely common way "private" attributes are
+    /// accessed from outside — real trigger: CPython's own `test_binop.py`'s
+    /// `Rat` class) raised `AttributeError` even though `self.__x` read
+    /// back correctly FROM WITHIN the class (both the store and the load
+    /// used the same un-mangled name, so they agreed with each other, just
+    /// not with real Python's actual convention). Scoped to attribute
+    /// access only (`self.__x`/`obj.__x`) — the by-far dominant real-world
+    /// use of this feature — not bare local-variable-name mangling, which
+    /// is a much rarer edge case.
+    fn mangle_name(&self, name: &str) -> String {
+        if let Some(class_name) = self.class_name_stack.last() {
+            let looks_private = name.starts_with("__") && !name.ends_with("__");
+            if looks_private {
+                let stripped = class_name.trim_start_matches('_');
+                if !stripped.is_empty() {
+                    return format!("_{}{}", stripped, name);
+                }
+            }
+        }
+        name.to_string()
+    }
+
     fn compile_class_body(&mut self, name: String, body: &[Stmt]) -> Result<(), String> {
         
 
@@ -3205,6 +3331,26 @@ impl Compiler {
                 self.emit(Opcode::LOAD_CONST, idx);
             }
             Expr::Name(name) => {
+                // Private-name mangling (`mangle_name`) applies to EVERY
+                // identifier that textually occurs within a class
+                // definition — not just `self.__attr`-style attribute
+                // access (already handled at its own `Expr::Attribute`
+                // site) but plain bare-name references too, including
+                // ones inside a nested method body (mangling is lexical,
+                // not scope-limited — see `mangle_name`'s own doc
+                // comment). Missing this was a real regression introduced
+                // by the earlier fix that started mangling a `def
+                // __method(self):`'s STORAGE key: `Lib/unittest/mock.py`'s
+                // `NonCallableMock` defines `def __get_return_value(self):`
+                // then references it as a plain name via `property(
+                // __get_return_value, __set_return_value)` at class-body
+                // level — once the definition's storage became mangled,
+                // the unmangled bare-name lookup could no longer find it
+                // (`NameError: name '__get_return_value' is not defined`,
+                // breaking `unittest.mock` entirely). `mangle_name` itself
+                // is a no-op outside a class body / for non-private names,
+                // so this is safe everywhere else.
+                let name = &self.mangle_name(name);
                 if std::env::var("RPY_DEBUG_COMPILE_NAME_RESOLVE").ok().as_deref() == Some(name.as_str()) {
                     eprintln!("NAME_RESOLVE: name={} scope={:?} in_global_names={} freevars={:?} cellvars={:?}", name, self.scope, self.global_names.contains(name), self.code.freevars, self.code.cellvars);
                 }
@@ -3492,7 +3638,7 @@ impl Compiler {
             }
             Expr::Attribute { value, attr } => {
                 self.compile_expr(value)?;
-                let idx = self.get_name_index(attr) as u32;
+                let idx = self.get_name_index(&self.mangle_name(attr)) as u32;
                 self.emit(Opcode::LOAD_ATTR, idx);
             }
             Expr::Subscript { value, slice } => {
