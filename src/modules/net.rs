@@ -263,7 +263,7 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
                 .arg("-c")
                 .arg(&cmd_str)
                 .output()
-                .map_err(|e| PyError::OsError(format!("{}", e)))?
+                .map_err(|e| PyError::os_error_from_io(&e))?
         } else {
             let cmd_args: Vec<String> = if let PyObject::List(items) = &*args[0].borrow() {
                 items.iter().map(|a| a.str()).collect()
@@ -276,7 +276,7 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
             std::process::Command::new(&cmd_args[0])
                 .args(&cmd_args[1..])
                 .output()
-                .map_err(|e| PyError::OsError(format!("{}", e)))?
+                .map_err(|e| PyError::os_error_from_io(&e))?
         };
         let returncode = output.status.code().unwrap_or(-1) as i64;
         let stdout_str = String::from_utf8_lossy(&output.stdout).to_string();
@@ -296,7 +296,7 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
                 .arg("-c")
                 .arg(&cmd_str)
                 .output()
-                .map_err(|e| PyError::OsError(format!("{}", e)))?
+                .map_err(|e| PyError::os_error_from_io(&e))?
         } else {
             // Was: `cmd_str.split_whitespace()` — the LIST form (the common
             // case, e.g. `[sys.executable, '-E', '-c', code]`) was stringified
@@ -317,7 +317,7 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
             std::process::Command::new(&cmd_args[0])
                 .args(&cmd_args[1..])
                 .output()
-                .map_err(|e| PyError::OsError(format!("{}", e)))?
+                .map_err(|e| PyError::os_error_from_io(&e))?
         };
         let returncode = output.status.code().unwrap_or(-1);
         if returncode != 0 {
@@ -340,7 +340,7 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
                 .arg("-c")
                 .arg(&cmd_str)
                 .output()
-                .map_err(|e| PyError::OsError(format!("{}", e)))?
+                .map_err(|e| PyError::os_error_from_io(&e))?
         } else {
             let cmd_args: Vec<String> = if let PyObject::List(items) = &*args[0].borrow() {
                 items.iter().map(|a| a.str()).collect()
@@ -353,7 +353,7 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
             std::process::Command::new(&cmd_args[0])
                 .args(&cmd_args[1..])
                 .output()
-                .map_err(|e| PyError::OsError(format!("{}", e)))?
+                .map_err(|e| PyError::os_error_from_io(&e))?
         };
         if !output.status.success() {
             let rc = output.status.code().unwrap_or(-1) as i64;
@@ -448,7 +448,7 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
             }
         }
 
-        let child = command.spawn().map_err(|e| PyError::OsError(format!("{}", e)))?;
+        let child = command.spawn().map_err(|e| PyError::os_error_from_io(&e))?;
         let pid = child.id() as i64;
         Ok(PyObjectRef::new(PyObject::Process {
             child: std::rc::Rc::new(std::cell::RefCell::new(Some(child))),

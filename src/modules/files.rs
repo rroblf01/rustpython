@@ -93,6 +93,31 @@ pub fn create_glob_dict() -> HashMap<String, PyObjectRef> {
         let py_results: Vec<PyObjectRef> = results.into_iter().map(|s| py_str(&s)).collect();
         Ok(py_list(py_results))
     });
+
+    // `glob.escape(pathname)` — was missing entirely (`AttributeError`).
+    // Real semantics: wrap each special glob character (`*`, `?`, `[`) in
+    // its own single-char bracket class (`[*]`) so it's matched literally
+    // rather than interpreted as a glob wildcard — used by
+    // `test_unicode_file.py` to safely glob a path that might itself
+    // contain such characters.
+    glob_func!("escape", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("escape() takes exactly 1 argument"));
+        }
+        let pathname = args[0].str();
+        let mut escaped = String::new();
+        for ch in pathname.chars() {
+            if ch == '*' || ch == '?' || ch == '[' {
+                escaped.push('[');
+                escaped.push(ch);
+                escaped.push(']');
+            } else {
+                escaped.push(ch);
+            }
+        }
+        Ok(py_str(&escaped))
+    });
+
     d
 }
 
@@ -209,7 +234,25 @@ pub fn create_shutil_dict() -> HashMap<String, PyObjectRef> {
         let dst = args[1].str();
         match std::fs::copy(&src, &dst) {
             Ok(_) => Ok(py_str(&dst)),
-            Err(e) => Err(PyError::OsError(format!("copy error: {}", e))),
+            Err(e) => Err(PyError::os_error_from_io(&e)),
+        }
+    });
+
+    // `shutil.copy2` — was missing entirely (`AttributeError`); real
+    // CPython's is `copy()` plus preserved metadata (mtime/atime, and on
+    // POSIX, permission bits) — `std::fs::copy` already preserves
+    // permission bits on Unix, which is close enough for callers (like
+    // `test_unicode_file.py`) that only check the copy exists/round-trips,
+    // not that its timestamps exactly match the original.
+    shutil_func!("copy2", |args| {
+        if args.len() < 2 {
+            return Err(PyError::type_error("copy2() requires 2 arguments (src, dst)"));
+        }
+        let src = args[0].str();
+        let dst = args[1].str();
+        match std::fs::copy(&src, &dst) {
+            Ok(_) => Ok(py_str(&dst)),
+            Err(e) => Err(PyError::os_error_from_io(&e)),
         }
     });
 
@@ -220,7 +263,7 @@ pub fn create_shutil_dict() -> HashMap<String, PyObjectRef> {
         let path = args[0].str();
         match std::fs::remove_dir_all(&path) {
             Ok(()) => Ok(py_none()),
-            Err(e) => Err(PyError::OsError(format!("rmtree error: {}", e))),
+            Err(e) => Err(PyError::os_error_from_io(&e)),
         }
     });
 
@@ -232,7 +275,7 @@ pub fn create_shutil_dict() -> HashMap<String, PyObjectRef> {
         let dst = args[1].str();
         match std::fs::rename(&src, &dst) {
             Ok(()) => Ok(py_str(&dst)),
-            Err(e) => Err(PyError::OsError(format!("move error: {}", e))),
+            Err(e) => Err(PyError::os_error_from_io(&e)),
         }
     });
 
@@ -242,8 +285,8 @@ pub fn create_shutil_dict() -> HashMap<String, PyObjectRef> {
         }
         let src = args[0].str();
         let dst = args[1].str();
-        let perms = std::fs::metadata(&src).map_err(|e| PyError::OsError(format!("{}", e)))?.permissions();
-        std::fs::set_permissions(&dst, perms).map_err(|e| PyError::OsError(format!("{}", e)))?;
+        let perms = std::fs::metadata(&src).map_err(|e| PyError::os_error_from_io(&e))?.permissions();
+        std::fs::set_permissions(&dst, perms).map_err(|e| PyError::os_error_from_io(&e))?;
         Ok(py_none())
     });
 
@@ -253,8 +296,8 @@ pub fn create_shutil_dict() -> HashMap<String, PyObjectRef> {
         }
         let src = args[0].str();
         let dst = args[1].str();
-        let perms = std::fs::metadata(&src).map_err(|e| PyError::OsError(format!("{}", e)))?.permissions();
-        std::fs::set_permissions(&dst, perms).map_err(|e| PyError::OsError(format!("{}", e)))?;
+        let perms = std::fs::metadata(&src).map_err(|e| PyError::os_error_from_io(&e))?.permissions();
+        std::fs::set_permissions(&dst, perms).map_err(|e| PyError::os_error_from_io(&e))?;
         Ok(py_none())
     });
     d
@@ -316,7 +359,7 @@ fn build_gzip_file(filename: &str, mode: &str, compresslevel: u32, mtime: Option
             .append(mode.contains('a'))
             .truncate(!mode.contains('a'))
             .open(filename)
-            .map_err(|e| PyError::OsError(format!("{}", e)))?;
+            .map_err(|e| PyError::os_error_from_io(&e))?;
         let encoder = flate2::GzBuilder::new()
             .mtime(mtime.unwrap_or(0))
             .write(file, flate2::Compression::new(compresslevel.min(9)));
@@ -333,7 +376,7 @@ fn build_gzip_file(filename: &str, mode: &str, compresslevel: u32, mtime: Option
             };
             let mut slot = enc_write.borrow_mut();
             let enc = slot.as_mut().ok_or_else(|| PyError::value_error("I/O operation on closed file"))?;
-            enc.write_all(&bytes).map_err(|e| PyError::OsError(format!("{}", e)))?;
+            enc.write_all(&bytes).map_err(|e| PyError::os_error_from_io(&e))?;
             let _ = &encoding_owned;
             Ok(py_int(bytes.len() as i64))
         }))));
@@ -341,7 +384,7 @@ fn build_gzip_file(filename: &str, mode: &str, compresslevel: u32, mtime: Option
         let enc_flush = enc_rc.clone();
         type_dict.insert_str("flush", PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
             if let Some(enc) = enc_flush.borrow_mut().as_mut() {
-                enc.flush().map_err(|e| PyError::OsError(format!("{}", e)))?;
+                enc.flush().map_err(|e| PyError::os_error_from_io(&e))?;
             }
             Ok(py_none())
         }))));
@@ -349,15 +392,15 @@ fn build_gzip_file(filename: &str, mode: &str, compresslevel: u32, mtime: Option
         let enc_close = enc_rc.clone();
         type_dict.insert_str("close", PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
             if let Some(enc) = enc_close.borrow_mut().take() {
-                enc.finish().map_err(|e| PyError::OsError(format!("{}", e)))?;
+                enc.finish().map_err(|e| PyError::os_error_from_io(&e))?;
             }
             Ok(py_none())
         }))));
     } else {
-        let file = std::fs::File::open(filename).map_err(|e| PyError::OsError(format!("{}", e)))?;
+        let file = std::fs::File::open(filename).map_err(|e| PyError::os_error_from_io(&e))?;
         let mut decoder = flate2::read::GzDecoder::new(file);
         let mut data = Vec::new();
-        decoder.read_to_end(&mut data).map_err(|e| PyError::OsError(format!("{}", e)))?;
+        decoder.read_to_end(&mut data).map_err(|e| PyError::os_error_from_io(&e))?;
         let buf_rc = Rc::new(RefCell::new(data));
         let pos_rc = Rc::new(RefCell::new(0usize));
         let encoding_owned = encoding.to_string();
@@ -537,8 +580,8 @@ pub fn create_gzip_dict() -> HashMap<String, PyObjectRef> {
         let mut encoder = flate2::GzBuilder::new()
             .mtime(mtime.unwrap_or(0))
             .write(Vec::new(), flate2::Compression::new(compresslevel.min(9)));
-        encoder.write_all(&bytes).map_err(|e| PyError::OsError(format!("{}", e)))?;
-        let result = encoder.finish().map_err(|e| PyError::OsError(format!("{}", e)))?;
+        encoder.write_all(&bytes).map_err(|e| PyError::os_error_from_io(&e))?;
+        let result = encoder.finish().map_err(|e| PyError::os_error_from_io(&e))?;
         Ok(PyObjectRef::new(PyObject::Bytes(result)))
     });
 

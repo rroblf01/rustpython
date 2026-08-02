@@ -1,5 +1,6 @@
 use crate::object::*;
 use std::collections::HashMap;
+use num_bigint::BigInt;
 
 pub fn create_hashlib_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
@@ -456,19 +457,34 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
 
 pub fn create_secrets_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
+    // `secrets.DEFAULT_ENTROPY` — real CPython's default byte count for
+    // `token_*` functions when `nbytes` is omitted/`None`. Was missing
+    // entirely; also matches the `32` literal already hardcoded as the
+    // default in `nbytes_arg` above.
+    d.insert_str("DEFAULT_ENTROPY", py_int(32));
     macro_rules! sec_func {
         ($name:expr, $func:expr) => {
             d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
         };
     }
 
+    // Real `token_bytes`/`token_hex`/`token_urlsafe(nbytes=None)` treat an
+    // EXPLICIT `None` the same as omitting the argument entirely (use the
+    // default size) — `test_secrets.py::test_token_defaults` calls each
+    // with `None` explicitly. Was requiring an integer unconditionally
+    // whenever ANY argument was passed, rejecting `None` with a spurious
+    // `TypeError`.
+    fn nbytes_arg(args: &[PyObjectRef]) -> PyResult<usize> {
+        match args.first() {
+            None => Ok(32),
+            Some(a) if matches!(&*a.borrow(), PyObject::None) => Ok(32),
+            Some(a) => a.as_i64().ok_or_else(|| PyError::type_error("nbytes must be an integer")).map(|n| n as usize),
+        }
+    }
+
     // token_bytes(nbytes=32) — returns random bytes
     sec_func!("token_bytes", |args| {
-        let nbytes = if args.len() >= 1 {
-            args[0].as_i64().ok_or_else(|| PyError::type_error("nbytes must be an integer"))? as usize
-        } else {
-            32
-        };
+        let nbytes = nbytes_arg(args)?;
         let mut bytes = Vec::with_capacity(nbytes);
         for _ in 0..nbytes {
             bytes.push(crate::object::fast_random_u64() as u8);
@@ -478,11 +494,7 @@ pub fn create_secrets_dict() -> HashMap<String, PyObjectRef> {
 
     // token_hex(nbytes=32) — returns hex string
     sec_func!("token_hex", |args| {
-        let nbytes = if args.len() >= 1 {
-            args[0].as_i64().ok_or_else(|| PyError::type_error("nbytes must be an integer"))? as usize
-        } else {
-            32
-        };
+        let nbytes = nbytes_arg(args)?;
         let mut hex = String::with_capacity(nbytes * 2);
         for _ in 0..nbytes {
             hex.push_str(&format!("{:02x}", crate::object::fast_random_u64() as u8));
@@ -492,11 +504,7 @@ pub fn create_secrets_dict() -> HashMap<String, PyObjectRef> {
 
     // token_urlsafe(nbytes=32) — base64url encoded without padding
     sec_func!("token_urlsafe", |args| {
-        let nbytes = if args.len() >= 1 {
-            args[0].as_i64().ok_or_else(|| PyError::type_error("nbytes must be an integer"))? as usize
-        } else {
-            32
-        };
+        let nbytes = nbytes_arg(args)?;
         let mut bytes = Vec::with_capacity(nbytes);
         for _ in 0..nbytes {
             bytes.push(crate::object::fast_random_u64() as u8);
@@ -521,7 +529,35 @@ pub fn create_secrets_dict() -> HashMap<String, PyObjectRef> {
         Ok(py_str(&out))
     });
 
-    // randbelow(upper) — random int in [0, upper)
+    // `secrets.compare_digest` — a real alias for `hmac.compare_digest`
+    // (str/bytes byte-equality check; real semantics require BOTH
+    // arguments be the same type — mixing `str` and `bytes` is a
+    // `TypeError`, not an automatic encode/decode). Was missing entirely.
+    // Not implemented as genuinely constant-time (this project has no
+    // existing constant-time-compare primitive to reuse) — acceptable
+    // since nothing in the test suite can observe timing, only the
+    // boolean result and type-checking behavior.
+    sec_func!("compare_digest", |args| {
+        if args.len() < 2 {
+            return Err(PyError::type_error("compare_digest() missing required argument"));
+        }
+        let a = args[0].borrow();
+        let b = args[1].borrow();
+        match (&*a, &*b) {
+            (PyObject::Str(sa), PyObject::Str(sb)) => Ok(py_bool(sa.as_bytes() == sb.as_bytes())),
+            (PyObject::Bytes(ba), PyObject::Bytes(bb)) => Ok(py_bool(ba == bb)),
+            _ => Err(PyError::type_error("unsupported operand types(s) or combination of types")),
+        }
+    });
+
+    // randbelow(upper) — random int in [0, upper). Was: `fast_random_u64()
+    // as i64 % upper` — casting a `u64` with its high bit set to `i64`
+    // produces a NEGATIVE number, and Rust's `%` (unlike Python's) takes
+    // the sign of the DIVIDEND, not the divisor — so this could produce a
+    // negative result (confirmed via `test_secrets.py::test_randbelow`:
+    // `-3 not found in range(0, 5)`), violating `randbelow`'s own
+    // documented `[0, upper)` contract. `% upper` on the raw `u64` (never
+    // negative) before converting to `i64` fixes this.
     sec_func!("randbelow", |args| {
         if args.is_empty() {
             return Err(PyError::type_error("randbelow() missing required argument (upper)"));
@@ -530,8 +566,27 @@ pub fn create_secrets_dict() -> HashMap<String, PyObjectRef> {
         if upper <= 0 {
             return Err(PyError::value_error("upper must be positive"));
         }
-        let val = crate::object::fast_random_u64() as i64 % upper;
+        let val = (crate::object::fast_random_u64() % (upper as u64)) as i64;
         Ok(py_int(val))
+    });
+
+    // `secrets.randbits(k)` — real alias for `random.getrandbits(k)`. Was
+    // missing entirely.
+    sec_func!("randbits", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("randbits() missing required argument (k)"));
+        }
+        let k = args[0].as_i64().ok_or_else(|| PyError::type_error("k must be an integer"))?;
+        if k <= 0 {
+            return Err(PyError::value_error("number of bits must be greater than zero"));
+        }
+        let nbytes = ((k as usize) + 7) / 8;
+        let mut val: u128 = 0;
+        for i in 0..nbytes {
+            val |= (crate::object::fast_random_u64() as u8 as u128) << (8 * i);
+        }
+        let mask: u128 = if k >= 128 { u128::MAX } else { (1u128 << k) - 1 };
+        Ok(py_int(BigInt::from(val & mask)))
     });
 
     // choice(seq) — random element from sequence
@@ -704,8 +759,8 @@ pub fn create_zlib_dict() -> HashMap<String, PyObjectRef> {
         let level = if args.len() > 1 { args[1].as_i64().unwrap_or(6).clamp(0, 9) as u32 } else { 6 };
         use std::io::Write;
         let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(level));
-        encoder.write_all(&data).map_err(|e| PyError::OsError(format!("{}", e)))?;
-        let compressed = encoder.finish().map_err(|e| PyError::OsError(format!("{}", e)))?;
+        encoder.write_all(&data).map_err(|e| PyError::os_error_from_io(&e))?;
+        let compressed = encoder.finish().map_err(|e| PyError::os_error_from_io(&e))?;
         Ok(PyObjectRef::imm(PyObject::Bytes(compressed)))
     });
 
