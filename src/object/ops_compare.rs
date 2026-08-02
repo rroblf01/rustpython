@@ -65,6 +65,22 @@ pub fn py_compare(a: &PyObjectRef, b: &PyObjectRef, op: u32) -> PyResult<PyObjec
                 let b_cmp = b_native.unwrap_or_else(|| b.clone());
                 return py_compare(&a_cmp, &b_cmp, op);
             }
+            // A `fractions.Fraction`/`decimal.Decimal` INSTANCE compared
+            // against a native complex/int/float (or another Fraction/
+            // Decimal) — real CPython's numeric tower compares these by
+            // VALUE (`Fraction(2002,2) == 1001+0j`, `Decimal('1001.0') ==
+            // 1001`). `try_rich_compare` returned None (Fraction/Decimal
+            // have no __eq__ for these operand types), so without this the
+            // fallback below would return raw IDENTITY for ==/!=.
+            if matches!(op, 2 | 5) {
+                if let (Some(ap), Some(bp)) = (
+                    crate::modules::numeric_parts_from_ref(a),
+                    crate::modules::numeric_parts_from_ref(b),
+                ) {
+                    let eq = ap == bp;
+                    return Ok(py_bool(if op == 2 { eq } else { !eq }));
+                }
+            }
             return Ok(py_bool(match op {
                 2 => a.is(b),
                 5 => !a.is(b),

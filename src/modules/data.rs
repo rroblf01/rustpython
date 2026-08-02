@@ -1405,8 +1405,18 @@ fn parse_decimal_str(raw: &str) -> Option<DecValue> {
     Some(DecValue { special: DecSpecial::Finite, sign, coeff, exp })
 }
 
-fn decval_from_f64(f: f64) -> DecValue {
-    // float -> Decimal must be exact (matching CPython's Decimal(float)),
+/// Largest `k` such that `b^k` divides `n` (for prime `b`).
+fn factor_power_of(n: &num_bigint::BigUint, b: u8) -> u32 {
+    let mut v = n.clone();
+    let mut k = 0u32;
+    while &v % num_bigint::BigUint::from(b) == num_bigint::BigUint::from(0u8) {
+        v /= num_bigint::BigUint::from(b);
+        k += 1;
+    }
+    k
+}
+
+fn decval_from_f64(f: f64) -> DecValue {    // float -> Decimal must be exact (matching CPython's Decimal(float)),
     // so go through the float's own repr rather than lossy formatting.
     if f.is_nan() { return DecValue::nan(); }
     if f.is_infinite() { return DecValue::infinity(f < 0.0); }
@@ -1549,7 +1559,41 @@ fn decval_from_pyobject(v: &PyObjectRef) -> PyResult<DecValue> {
             }
         }
         PyObject::None => Ok(DecValue::zero()),
-        _ => Err(PyError::type_error("conversion from unsupported type to Decimal")),
+        // A `fractions.Fraction` operand (e.g. `Decimal('1') < Fraction(1,2)` /
+        // `Decimal('1001.0') == Fraction(2002, 2)` — CPython's numeric tower
+        // converts the Fraction to a Decimal for the comparison) — was
+        // hitting the `_ =>` "unsupported type" TypeError below.
+        _ => {
+            if let Some((num, den)) = frac_instance_num_den(v) {
+                let (sign, coeff) = if num.sign() == num_bigint::Sign::Minus {
+                    (true, (-num.clone()).to_biguint().unwrap_or_default())
+                } else {
+                    (false, num.to_biguint().unwrap_or_default())
+                };
+                let den_b = den.to_biguint().unwrap_or_default();
+                // value = coeff/den_b; express as coeff * 10^e with
+                // denominator's 2s/5s factored: e = den_b's excess of 5s
+                // over 2s (or negative).
+                let (twos, fives) = (factor_power_of(&den_b, 2), factor_power_of(&den_b, 5));
+                let exp = fives as i64 - twos as i64;
+                let mut scaled = coeff;
+                if exp > 0 {
+                    scaled *= num_bigint::BigUint::from(10u8).pow(exp as u32);
+                }
+                let mut den_rem = den_b;
+                for _ in 0..twos { den_rem /= 2u8; }
+                for _ in 0..fives { den_rem /= 5u8; }
+                // den_rem must be 1 now (any 2s/5s removed); remaining
+                // factors make it non-terminating — approximate via float.
+                if den_rem == num_bigint::BigUint::from(1u8) {
+                    Ok(DecValue { special: DecSpecial::Finite, sign, coeff: scaled.into(), exp })
+                } else {
+                    Ok(decval_from_f64(frac_to_f64(&num, &den)))
+                }
+            } else {
+                Err(PyError::type_error("conversion from unsupported type to Decimal"))
+            }
+        }
     }
 }
 
@@ -1716,8 +1760,7 @@ fn decimal_compare(a: &DecValue, b: &DecValue) -> Option<std::cmp::Ordering> {
     Some(a_signed.cmp(&b_signed))
 }
 
-fn decval_to_f64(v: &DecValue) -> f64 {
-    match v.special {
+fn decval_to_f64(v: &DecValue) -> f64 {    match v.special {
         DecSpecial::Infinity => if v.sign { f64::NEG_INFINITY } else { f64::INFINITY },
         DecSpecial::QNaN | DecSpecial::SNaN => f64::NAN,
         DecSpecial::Finite => {
@@ -1730,8 +1773,32 @@ fn decval_to_f64(v: &DecValue) -> f64 {
     }
 }
 
-fn normalize_decval(v: &DecValue) -> DecValue {
-    if v.special != DecSpecial::Finite || v.is_zero() {
+/// Extract an object's numeric VALUE as `(real, imag)` parts, covering the
+/// native numeric variants PLUS `fractions.Fraction` and `decimal.Decimal`
+/// instances — real CPython's numeric tower compares all of these by value
+/// (`Fraction(2002,2) == 1001+0j` and `Decimal('1001.0') == 1001+0j` are
+/// both True). Used by the cross-type equality path in `PyObject::equals`.
+pub(crate) fn numeric_parts_from_ref(obj: &PyObjectRef) -> Option<(f64, f64)> {
+    let borrowed = obj.borrow();
+    match &*borrowed {
+        PyObject::Complex(re, im) => Some((*re, *im)),
+        PyObject::Int(n) => n.to_f64().map(|f| (f, 0.0)),
+        PyObject::Float(f) => Some((*f, 0.0)),
+        PyObject::Bool(b) => Some((if *b { 1.0 } else { 0.0 }, 0.0)),
+        PyObject::Instance { .. } => {
+            if let Some((num, den)) = frac_instance_num_den(obj) {
+                Some((frac_to_f64(&num, &den), 0.0))
+            } else if let Some(v) = instance_to_decval(obj) {
+                Some((decval_to_f64(&v), 0.0))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn normalize_decval(v: &DecValue) -> DecValue {    if v.special != DecSpecial::Finite || v.is_zero() {
         if v.is_zero() { return DecValue { special: DecSpecial::Finite, sign: v.sign, coeff: num_bigint::BigInt::from(0), exp: 0 }; }
         return v.clone();
     }
@@ -1805,14 +1872,32 @@ fn build_decimal_type() -> PyObjectRef {
     }));
     type_dict.insert_str("__eq__", bf!("__eq__", |args| {
         let a = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
-        let b = match decval_from_pyobject(&args[1]) { Ok(v) => v, Err(_) => return Ok(py_bool(false)) };
+        // An operand that isn't convertible to a Decimal (complex, a
+        // user-defined class, ...) must return NotImplemented so the OTHER
+        // side's reflected __eq__ gets a chance (`Decimal('1001.0') ==
+        // 1001+0j` is True via complex.__eq__, not False).
+        let b = match decval_from_pyobject(&args[1]) {
+            Ok(v) => v,
+            Err(_) => return Ok(py_not_implemented()),
+        };
         Ok(py_bool(decimal_compare(&a, &b) == Some(std::cmp::Ordering::Equal)))
     }));
     macro_rules! dec_cmp {
         ($name:expr, $ord:pat) => {
             type_dict.insert($name.to_string(), bf!($name, |args| {
                 let a = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
-                let b = decval_from_pyobject(&args[1])?;
+                let b = match decval_from_pyobject(&args[1]) {
+                    Ok(v) => v,
+                    // An unconvertible operand (complex, ...) must produce
+                    // the standard "not supported between instances"
+                    // TypeError, matching real CPython — not the internal
+                    // conversion message.
+                    Err(_) => return Err(PyError::type_error(format!(
+                        "'{}' not supported between instances of '{}' and '{}'",
+                        match $name { "__lt__" => "<", "__gt__" => ">", _ => "?" },
+                        args[0].get_type_name(), args[1].get_type_name()
+                    ))),
+                };
                 match decimal_compare(&a, &b) {
                     Some($ord) => Ok(py_bool(true)),
                     Some(_) => Ok(py_bool(false)),
@@ -1825,7 +1910,13 @@ fn build_decimal_type() -> PyObjectRef {
     dec_cmp!("__gt__", std::cmp::Ordering::Greater);
     type_dict.insert_str("__le__", bf!("__le__", |args| {
         let a = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
-        let b = decval_from_pyobject(&args[1])?;
+        let b = match decval_from_pyobject(&args[1]) {
+            Ok(v) => v,
+            Err(_) => return Err(PyError::type_error(format!(
+                "'<=' not supported between instances of '{}' and '{}'",
+                args[0].get_type_name(), args[1].get_type_name()
+            ))),
+        };
         match decimal_compare(&a, &b) {
             Some(std::cmp::Ordering::Less) | Some(std::cmp::Ordering::Equal) => Ok(py_bool(true)),
             Some(_) => Ok(py_bool(false)),
@@ -1834,7 +1925,13 @@ fn build_decimal_type() -> PyObjectRef {
     }));
     type_dict.insert_str("__ge__", bf!("__ge__", |args| {
         let a = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
-        let b = decval_from_pyobject(&args[1])?;
+        let b = match decval_from_pyobject(&args[1]) {
+            Ok(v) => v,
+            Err(_) => return Err(PyError::type_error(format!(
+                "'>=' not supported between instances of '{}' and '{}'",
+                args[0].get_type_name(), args[1].get_type_name()
+            ))),
+        };
         match decimal_compare(&a, &b) {
             Some(std::cmp::Ordering::Greater) | Some(std::cmp::Ordering::Equal) => Ok(py_bool(true)),
             Some(_) => Ok(py_bool(false)),

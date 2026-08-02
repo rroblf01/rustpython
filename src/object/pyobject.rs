@@ -895,6 +895,17 @@ impl PyObject {
         // plain ints keep comparing via exact `BigInt` equality below
         // instead of a lossy `to_f64()` round-trip that would silently
         // break equality for integers beyond f64's 53-bit mantissa.
+        // `fractions.Fraction`/`decimal.Decimal` instances join the tower
+        // too (`Fraction(2002,2) == 1001+0j` — real test_compare.py's
+        // assert_equality_only over the numeric types).
+        if let (Some(a), Some(b)) = (
+            crate::modules::numeric_parts_from_ref(&PyObjectRef::new(self.clone())),
+            crate::modules::numeric_parts_from_ref(other_ref),
+        ) {
+            if !matches!(self, PyObject::Int(_)) || !matches!(&*other, PyObject::Int(_)) {
+                return Ok(a == b);
+            }
+        }
         let both_plain_ints = matches!(self, PyObject::Int(_)) && matches!(&*other, PyObject::Int(_));
         if !both_plain_ints {
             if let (Some(a_parts), Some(b_parts)) = (as_complex_parts(self), as_complex_parts(&*other)) {
