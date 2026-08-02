@@ -1574,7 +1574,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
                 .open(&filename)
                 .map_err(|e| PyError::os_error_from_io(&e))?
         };
-        Ok(PyObjectRef::new(PyObject::File { file: Rc::new(RefCell::new(file)), name: filename.clone(), binary: mode.contains('b') }))
+        Ok(PyObjectRef::new(PyObject::File { file: Rc::new(RefCell::new(file)), name: filename.clone(), binary: mode.contains('b'), pending: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())) }))
     });
 
     // BytesIO — in-memory bytes buffer
@@ -1720,7 +1720,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
         if args.is_empty() { return Err(PyError::type_error("open_code() missing argument")); }
         let path = args[0].str();
         let file = std::fs::File::open(&path).map_err(|e| PyError::os_error_from_io(&e))?;
-        Ok(PyObjectRef::new(PyObject::File { file: Rc::new(RefCell::new(file)), name: path.clone(), binary: true }))
+        Ok(PyObjectRef::new(PyObject::File { file: Rc::new(RefCell::new(file)), name: path.clone(), binary: true, pending: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())) }))
     });
 
     io_func!("text_encoding", |args| {

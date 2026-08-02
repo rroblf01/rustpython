@@ -228,6 +228,15 @@ pub enum PyObject {
         // `__getitem__`, `with _io.open(self._datfile, 'rb') as f: f.seek
         // (pos); dat = f.read(siz)` — expects `dat` to be raw `bytes`).
         binary: bool,
+        // Text-mode incremental-decoder state: an incomplete UTF-8 sequence
+        // at the end of a `read(n)` chunk that landed mid-multibyte-character
+        // is buffered here and carried into the NEXT read, so streaming
+        // `read(1)`-at-a-time (or any chunk boundary) doesn't corrupt a
+        // character into U+FFFD replacement chars. Real Python's
+        // `TextIOWrapper` keeps exactly this state. (Confirmed via
+        // `test_netrc.py::test_token_value_non_ascii`, which reads a
+        // UTF-8 file one byte at a time.)
+        pending: std::rc::Rc<std::cell::RefCell<Vec<u8>>>,
     },
     /// Backing for `subprocess.Popen` — holds the spawned child process.
     /// `child` is `None` after `.communicate()`/`.wait()` has reaped it

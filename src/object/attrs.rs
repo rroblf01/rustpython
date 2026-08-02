@@ -3691,7 +3691,7 @@ impl PyObject {
                         name: "read".to_string(),
                         func: |args| {
                             use std::io::Read;
-                            if let PyObject::File { file, binary, .. } = &*args[0].borrow() {
+                            if let PyObject::File { file, binary, pending, .. } = &*args[0].borrow() {
                                 // Was: unconditional `read_to_string`, always
                                 // returning `str` — completely ignored an
                                 // explicit `size` argument (`f.read(n)`, real
@@ -3719,7 +3719,51 @@ impl PyObject {
                                 if *binary {
                                     Ok(PyObjectRef::imm(PyObject::Bytes(buf)))
                                 } else {
-                                    Ok(py_str(&String::from_utf8_lossy(&buf)))
+                                    // Text-mode streaming decode: a size-limited
+                                    // read must return whole CHARACTERS, so if
+                                    // the chunk ends mid-multibyte-sequence,
+                                    // keep reading bytes until the character
+                                    // completes (or EOF) — otherwise
+                                    // `f.read(1)`-at-a-time over a UTF-8 file
+                                    // corrupted `¡¢` into `����` (each byte
+                                    // lossy-decoded in isolation) and, worse,
+                                    // returned "" before a char was ready,
+                                    // which breaks the ubiquitous
+                                    // `iter(f.read, "")` sentinel idiom
+                                    // (`test_netrc.py::test_token_value_non_ascii`).
+                                    let mut full: Vec<u8> = std::mem::take(&mut *pending.borrow_mut());
+                                    full.extend_from_slice(&buf);
+                                    loop {
+                                        match std::str::from_utf8(&full) {
+                                            Ok(s) => return Ok(py_str(s)),
+                                            Err(e) if e.error_len().is_none() && size.is_some() => {
+                                                // Incomplete trailing sequence
+                                                // and this was a size-limited
+                                                // read: pull more bytes to
+                                                // finish the character.
+                                                let mut extra = [0u8; 1];
+                                                match file.borrow_mut().read(&mut extra) {
+                                                    Ok(0) => {
+                                                        // EOF — decode what we
+                                                        // have lossily rather
+                                                        // than hang forever.
+                                                        return Ok(py_str(&String::from_utf8_lossy(&full)));
+                                                    }
+                                                    Ok(_) => full.push(extra[0]),
+                                                    Err(e) => return Err(PyError::os_error_from_io(&e)),
+                                                }
+                                            }
+                                            Err(_) => {
+                                                // Genuinely invalid bytes, or
+                                                // an incomplete tail at EOF:
+                                                // lossy-decode everything
+                                                // (preserving the pre-existing
+                                                // lossy behavior so no existing
+                                                // caller regresses).
+                                                return Ok(py_str(&String::from_utf8_lossy(&full)));
+                                            }
+                                        }
+                                    }
                                 }
                             } else { Err(PyError::runtime_error("read on non-file")) }
                         },

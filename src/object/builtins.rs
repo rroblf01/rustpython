@@ -2985,7 +2985,7 @@ pub fn builtin_open(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         .open(&filename)
         .map_err(|e| PyError::os_error_from_io(&e))?;
     let binary = mode.contains('b');
-    Ok(PyObjectRef::new(PyObject::File { file: std::rc::Rc::new(std::cell::RefCell::new(file)), name: filename, binary }))
+    Ok(PyObjectRef::new(PyObject::File { file: std::rc::Rc::new(std::cell::RefCell::new(file)), name: filename, binary, pending: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())) }))
 }
 
 pub fn builtin_any(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {

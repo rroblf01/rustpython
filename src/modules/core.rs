@@ -2097,19 +2097,19 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
         file: std::rc::Rc::new(std::cell::RefCell::new(dup_std_fd(0).unwrap_or_else(|_| {
             std::fs::File::open("/dev/null").unwrap()
         }))),
-        name: "<stdin>".to_string(), binary: false,
+        name: "<stdin>".to_string(), binary: false, pending: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
     }));
     d.insert_str("stdout", PyObjectRef::new(PyObject::File {
         file: std::rc::Rc::new(std::cell::RefCell::new(dup_std_fd(1).unwrap_or_else(|_| {
             std::fs::File::create("/dev/null").unwrap()
         }))),
-        name: "<stdout>".to_string(), binary: false,
+        name: "<stdout>".to_string(), binary: false, pending: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
     }));
     d.insert_str("stderr", PyObjectRef::new(PyObject::File {
         file: std::rc::Rc::new(std::cell::RefCell::new(dup_std_fd(2).unwrap_or_else(|_| {
             std::fs::File::create("/dev/null").unwrap()
         }))),
-        name: "<stderr>".to_string(), binary: false,
+        name: "<stderr>".to_string(), binary: false, pending: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
     }));
     d.insert_str("platform", py_str(std::env::consts::OS));
     // sys.implementation — CPython returns a namespace with name, cache_tag, etc.
@@ -2923,7 +2923,7 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
         Ok(PyObjectRef::new(PyObject::File {
             file: std::rc::Rc::new(std::cell::RefCell::new(file)),
             name: format!("<fdopen>"),
-            binary: mode.contains('b'),
+            binary: mode.contains('b'), pending: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
         }))
     });
 
