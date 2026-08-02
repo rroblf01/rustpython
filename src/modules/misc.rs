@@ -4181,7 +4181,10 @@ pub fn create_logging_config_dict() -> HashMap<String, PyObjectRef> {
 }
 
 thread_local! {
-    static EXIT_CALLBACKS: std::cell::RefCell<Vec<PyObjectRef>> = std::cell::RefCell::new(Vec::new());
+    // Each callback stores the callable plus the extra positional args
+    // (and a trailing keyword dict, if any) it was registered with — real
+    // `atexit.register(func, *args, **kwargs)` passes those on invocation.
+    static EXIT_CALLBACKS: std::cell::RefCell<Vec<(PyObjectRef, Vec<PyObjectRef>, Vec<(String, PyObjectRef)>)>> = std::cell::RefCell::new(Vec::new());
 }
 
 pub fn create_atexit_dict() -> HashMap<String, PyObjectRef> {
@@ -4190,7 +4193,28 @@ pub fn create_atexit_dict() -> HashMap<String, PyObjectRef> {
         name: "register".to_string(),
         func: |args| {
             if args.is_empty() { return Err(PyError::type_error("register() requires a callable argument")); }
-            EXIT_CALLBACKS.with(|cb| cb.borrow_mut().push(args[0].clone()));
+            // Real `atexit.register(func, *args, **kwargs)` stores the extra
+            // positional args (and, if present, a trailing keyword dict) and
+            // passes them to `func` when it runs at shutdown — `test_atexit`
+            // registers `print` with a message arg, and `test_shutdown`
+            // asserts the printed output.
+            let func = args[0].clone();
+            let mut extra = args[1..].to_vec();
+            let mut kwargs: Vec<(String, PyObjectRef)> = Vec::new();
+            let trailing_is_dict = extra.last().map(|l| matches!(&*l.borrow(), PyObject::Dict(_))).unwrap_or(false);
+            if trailing_is_dict {
+                // Extract the trailing keyword-dict's items into `kwargs`
+                // (cloned so no borrow is held across `extra.pop()`).
+                let items: Vec<(String, PyObjectRef)> = {
+                    let b = extra.last().unwrap().borrow();
+                    if let PyObject::Dict(d) = &*b {
+                        d.items().into_iter().map(|(k, v)| (k.str(), v)).collect()
+                    } else { Vec::new() }
+                };
+                extra.pop();
+                kwargs = items;
+            }
+            EXIT_CALLBACKS.with(|cb| cb.borrow_mut().push((func, extra, kwargs)));
             Ok(py_none())
         },
     }));
@@ -4201,7 +4225,7 @@ pub fn create_atexit_dict() -> HashMap<String, PyObjectRef> {
             // Remove all occurrences of the given callable
             EXIT_CALLBACKS.with(|cb| {
                 let mut callbacks = cb.borrow_mut();
-                callbacks.retain(|c| !std::ptr::eq(c, &args[0]));
+                callbacks.retain(|(f, _, _)| !std::ptr::eq(f, &args[0]));
             });
             Ok(py_none())
         },
@@ -4214,14 +4238,44 @@ pub fn create_atexit_dict() -> HashMap<String, PyObjectRef> {
             Ok(py_none())
         },
     }));
+    // `atexit._ncallbacks` — real CPython's internal count of registered
+    // callbacks, read directly by `test_atexit.py`'s `test_callbacks_leak`/
+    // `test_callbacks_leak_refcycle` to detect leaked registrations. Backed
+    // by the live `EXIT_CALLBACKS` list length so it stays in sync.
+    d.insert_str("_ncallbacks", PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "_ncallbacks".to_string(),
+        func: |_| {
+            Ok(py_int(EXIT_CALLBACKS.with(|cb| cb.borrow().len() as i64)))
+        },
+    }));
+    // `atexit.is_tracing()` — real CPython returns True iff a Python-level
+    // trace function is currently set (`sys.gettrace() != None`). This
+    // interpreter's `sys.settrace` is a no-op stub, so no tracing is ever
+    // active; `test_atexit.py`'s leak tests call it during callback
+    // iteration.
+    d.insert_str("is_tracing", PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "is_tracing".to_string(),
+        func: |_| Ok(py_bool(false)),
+    }));
     d
 }
 
 /// Run all registered atexit handlers, using the provided VM.
 pub fn run_atexit_handlers(vm: &mut crate::vm::VirtualMachine) {
-    let callbacks: Vec<PyObjectRef> = EXIT_CALLBACKS.with(|cb| cb.borrow().clone());
-    for cb in callbacks {
-        let _ = vm.call_function(cb, vec![], vec![]);
+    // Real CPython runs exit handlers in LIFO order (last registered runs
+    // FIRST) — `test_shutdown`'s `atexit.register(print, "one"); atexit.
+    // register(print, "two")` expects output `two` then `one`.
+    let callbacks: Vec<(PyObjectRef, Vec<PyObjectRef>, Vec<(String, PyObjectRef)>)> = EXIT_CALLBACKS.with(|cb| cb.borrow().clone());
+    for (func, extra, kwargs) in callbacks.iter().rev() {
+        let mut call_args = extra.clone();
+        if !kwargs.is_empty() {
+            let mut kwd = PyDict::new();
+            for (k, v) in kwargs {
+                let _ = kwd.set(py_str(k), v.clone());
+            }
+            call_args.push(PyObjectRef::new(PyObject::Dict(Box::new(kwd))));
+        }
+        let _ = vm.call_function(func.clone(), call_args, vec![]);
     }
 }
 

@@ -106,3 +106,13 @@ def pathname2url(path):
 
 def url2pathname(path):
     return path
+
+
+def urlcleanup():
+    """Clear the global URL cache (real CPython's urllib.request.urlcleanup).
+
+    This interpreter keeps no URL cache, so the cleanup is a genuine no-op —
+    but test files (e.g. test_robotparser.py) call it in setUpClass/cleanup
+    and require it to exist.
+    """
+    pass

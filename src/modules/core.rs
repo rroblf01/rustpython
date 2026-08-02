@@ -34,6 +34,32 @@ fn write_fd(fd: i32, data: &[u8]) -> std::io::Result<usize> {
     result
 }
 
+/// Seek on a raw file descriptor (backs `os.lseek(fd, offset, whence)`).
+/// Returns the resulting absolute offset.
+fn lseek_fd(fd: i32, offset: i64, whence: i32) -> std::io::Result<i64> {
+    use std::os::unix::io::FromRawFd;
+    use std::io::Seek;
+    use std::io::SeekFrom;
+    // SAFETY: from_raw_fd takes ownership, but we use forget() to return it.
+    let mut f = unsafe { std::fs::File::from_raw_fd(fd) };
+    let seek_from = match whence {
+        0 if offset >= 0 => SeekFrom::Start(offset as u64),
+        0 => {
+            std::mem::forget(f);
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid argument"));
+        }
+        1 => SeekFrom::Current(offset),
+        2 => SeekFrom::End(offset),
+        _ => {
+            std::mem::forget(f);
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid whence"));
+        }
+    };
+    let result = f.seek(seek_from);
+    std::mem::forget(f);
+    result.map(|pos| pos as i64)
+}
+
 /// Close a raw file descriptor by wrapping it in a File and dropping it.
 fn close_fd(fd: i32) {
     use std::os::unix::io::FromRawFd;
@@ -2766,6 +2792,23 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
     d.insert_str("X_OK", py_int(1));
     d.insert_str("W_OK", py_int(2));
     d.insert_str("R_OK", py_int(4));
+    // `os.SEEK_SET`/`SEEK_CUR`/`SEEK_END` — the whence constants for
+    // `os.lseek`/`file.seek` (real POSIX values 0/1/2).
+    d.insert_str("SEEK_SET", py_int(0));
+    d.insert_str("SEEK_CUR", py_int(1));
+    d.insert_str("SEEK_END", py_int(2));
+    os_func!("lseek", |args| {
+        if args.len() < 3 {
+            return Err(PyError::type_error("lseek() requires 3 arguments"));
+        }
+        let fd = args[0].as_i64().ok_or_else(|| PyError::type_error("an integer is required (got type fd)"))? as i32;
+        let offset = args[1].as_i64().ok_or_else(|| PyError::type_error("an integer is required"))?;
+        let whence = args[2].as_i64().ok_or_else(|| PyError::type_error("an integer is required"))? as i32;
+        match lseek_fd(fd, offset, whence) {
+            Ok(pos) => Ok(py_int(pos)),
+            Err(e) => Err(PyError::os_error_from_io(&e)),
+        }
+    });
     os_func!("access", |args| {
         if args.is_empty() { return Err(PyError::type_error("access() missing required argument: 'path'")); }
         let path = args[0].str();

@@ -25,6 +25,10 @@ def get_traceback_limit():
     return 0
 
 
+def is_tracing():
+    return False
+
+
 def clear_traces():
     pass
 

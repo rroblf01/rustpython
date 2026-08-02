@@ -378,12 +378,16 @@ fn real_main() {
                 }
                 let mut vm = VirtualMachine::new_with_args(sys_argv);
                 match vm.run(code_obj) {
-                    Ok(_val) => {}
+                    Ok(_val) => {
+                        crate::modules::run_atexit_handlers(&mut vm);
+                    }
                     Err(e) => {
                         if let PyError::SystemExit(exit_code) = &e {
+                            crate::modules::run_atexit_handlers(&mut vm);
                             std::process::exit(*exit_code);
                         }
                         print_traceback(&vm, &e, "<string>");
+                        crate::modules::run_atexit_handlers(&mut vm);
                         std::process::exit(1);
                     }
                 }
@@ -443,12 +447,16 @@ fn real_main() {
                 };
 
                 match vm.run(code_obj) {
-                    Ok(_val) => {}
+                    Ok(_val) => {
+                        crate::modules::run_atexit_handlers(&mut vm);
+                    }
                     Err(e) => {
                         if let PyError::SystemExit(exit_code) = &e {
+                            crate::modules::run_atexit_handlers(&mut vm);
                             std::process::exit(*exit_code);
                         }
                         print_traceback(&vm, &e, "<module>");
+                        crate::modules::run_atexit_handlers(&mut vm);
                         std::process::exit(1);
                     }
                 }
@@ -512,12 +520,16 @@ fn real_main() {
                 // data next to the script).
                 vm.globals.borrow_mut().insert(crate::interner::intern("__file__"), object::py_str(filename));
                 match vm.run(code) {
-                    Ok(_val) => {}
+                    Ok(_val) => {
+                        crate::modules::run_atexit_handlers(&mut vm);
+                    }
                     Err(e) => {
                         if let PyError::SystemExit(exit_code) = &e {
+                            crate::modules::run_atexit_handlers(&mut vm);
                             std::process::exit(*exit_code);
                         }
                         print_traceback(&vm, &e, filename);
+                        crate::modules::run_atexit_handlers(&mut vm);
                         std::process::exit(1);
                     }
                 }
