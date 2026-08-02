@@ -22,7 +22,7 @@ mod builtins;
 pub use builtins::*;
 mod generators;
 pub use generators::*;
-mod import_builtin;
+pub(crate) mod import_builtin;
 pub use import_builtin::*;
 mod descriptors;
 pub use descriptors::*;

@@ -233,15 +233,32 @@ fn detect_pep263_encoding(bytes: &[u8]) -> Option<String> {
 }
 
 /// Decode raw source bytes (`compile()`'s `source` argument as `bytes`/
-/// `bytearray`) using its own PEP 263 coding cookie if present, defaulting
-/// to UTF-8 otherwise (real CPython's own default).
-fn decode_source_bytes(bytes: &[u8]) -> String {
+/// `bytearray`, or a source file read off disk by the import machinery)
+/// using its own PEP 263 coding cookie if present, defaulting to UTF-8
+/// otherwise (real CPython's own default). STRICT: a file/bytes blob that
+/// isn't valid in the implied encoding is a `SyntaxError` (real CPython's
+/// `(unicode error) 'utf-8' codec can't decode byte ...`), NOT silently
+/// lossy-corrupted — `test_utf8source.py::test_badsyntax` imports a
+/// latin-1-encoded, no-cookie source file and requires the resulting
+/// `SyntaxError` message to contain `'utf-8'`.
+pub(crate) fn decode_source_bytes(bytes: &[u8]) -> PyResult<String> {
     let encoding = detect_pep263_encoding(bytes).unwrap_or_else(|| "utf-8".to_string());
-    match encoding.to_ascii_lowercase().replace('_', "-").as_str() {
+    let normalized = encoding.to_ascii_lowercase().replace('_', "-");
+    // A UTF-8 BOM is valid (U+FEFF) but must be stripped so it doesn't end
+    // up as a stray character tokenizing the source.
+    let src: &[u8] = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
+    match normalized.as_str() {
         "latin-1" | "latin1" | "iso-8859-1" | "iso8859-1" | "l1" => {
-            bytes.iter().map(|&b| b as char).collect()
+            Ok(src.iter().map(|&b| b as char).collect())
         }
-        _ => String::from_utf8_lossy(bytes).into_owned(),
+        _ => match std::str::from_utf8(src) {
+            Ok(s) => Ok(s.to_string()),
+            Err(e) => Err(PyError::syntax_error(format!(
+                "(unicode error) 'utf-8' codec can't decode byte 0x{:x} in position {}: invalid start byte",
+                src.get(e.valid_up_to()).copied().unwrap_or(0),
+                e.valid_up_to()
+            ))),
+        },
     }
 }
 
@@ -257,7 +274,7 @@ pub fn builtin_compile(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // `test_utf8source.py::test_latin1`: `compile()` on Latin-1-encoded
     // source containing `Ç` never even defined the variable it assigned).
     let source = match &*args[0].borrow() {
-        PyObject::Bytes(b) | PyObject::ByteArray(b) => decode_source_bytes(b),
+        PyObject::Bytes(b) | PyObject::ByteArray(b) => decode_source_bytes(b)?,
         _ => args[0].str(),
     };
     let filename = args[1].str();

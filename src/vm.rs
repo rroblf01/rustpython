@@ -541,6 +541,11 @@ impl VirtualMachine {
 
           // Native locale module
           modules.insert_str("locale", create_module("locale", create_locale_dict()));
+          // Native _locale module — in real CPython this IS the C extension
+          // that the pure-Python `locale` module delegates to. Registering it
+          // natively (instead of the Lib/_locale.py stub) makes `setlocale`,
+          // `localeconv`, etc. real shared state (see create_locale_dict).
+          modules.insert_str("_locale", create_module("_locale", create_locale_dict()));
 
           // gettext module (mostly Python source — see install_source_defined_stdlib below)
           modules.insert_str("gettext", create_module("gettext", create_gettext_dict()));
@@ -1571,7 +1576,7 @@ impl VirtualMachine {
                             format!("{}/{}.py", base_trimmed, child),
                             format!("{}/{}/__init__.py", base_trimmed, child),
                         ] {
-                            if let Ok(source) = std::fs::read_to_string(candidate) {
+                            if let Some(source) = self.read_module_source(candidate)? {
                                 found_child = true;
                                 let is_pkg = candidate.ends_with("__init__.py");
                                 let empty_dict = if is_pkg {
@@ -1666,7 +1671,7 @@ impl VirtualMachine {
             } else {
                 format!("{}/{}.py", base, py_name)
             };
-            if let Ok(source) = std::fs::read_to_string(&py_path) {
+            if let Some(source) = self.read_module_source(&py_path)? {
                 let empty_mod = create_module(name, HashMap::new());
                 self.modules.insert(name.to_string(), empty_mod.clone());
                 if let Some(sys_mod) = self.modules.get("sys") {
@@ -1703,7 +1708,7 @@ impl VirtualMachine {
             } else {
                 format!("{}/{}/__init__.py", base, py_name)
             };
-            if let Ok(source) = std::fs::read_to_string(&init_path) {
+            if let Some(source) = self.read_module_source(&init_path)? {
                 let pkg_dir = std::path::Path::new(&init_path).parent()
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_default();
@@ -1778,6 +1783,22 @@ impl VirtualMachine {
             }
         }
         vec![]
+    }
+
+    /// Read a `.py` source file off disk and decode it as real Python would:
+    /// PEP 263 coding cookie if present, strict UTF-8 otherwise. Returns
+    /// `Ok(None)` when the file simply doesn't exist (caller continues its
+    /// path search), but PROPAGATES a decode failure — a file that exists
+    /// yet isn't valid in its implied encoding is a `SyntaxError`, exactly
+    /// as a real import would raise, NOT a silent "module not found".
+    /// Deliberately NOT `std::fs::read_to_string` — that lossy-substitutes
+    /// non-UTF-8 bytes (confirmed via `test_utf8source.py::test_badsyntax`).
+    fn read_module_source(&self, path: &str) -> PyResult<Option<String>> {
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(_) => return Ok(None),
+        };
+        crate::object::import_builtin::decode_source_bytes(&bytes).map(Some)
     }
 
     fn exec_module_source(&mut self, source: &str, path: &str, name: &str) -> PyResult<PyObjectRef> {
