@@ -198,17 +198,17 @@ impl Parser {
     fn parse_simple_stmt(&mut self) -> Result<Stmt, String> {
         if self.at(&Token::Pass) {
             self.next();
-            let _ = self.expect_newline_or_eof();
+            self.expect_newline_or_eof()?;
             return Ok(Stmt::Pass);
         }
         if self.at(&Token::Break) {
             self.next();
-            let _ = self.expect_newline_or_eof();
+            self.expect_newline_or_eof()?;
             return Ok(Stmt::Break);
         }
         if self.at(&Token::Continue) {
             self.next();
-            let _ = self.expect_newline_or_eof();
+            self.expect_newline_or_eof()?;
             return Ok(Stmt::Continue);
         }
         if self.at(&Token::Return) {
@@ -391,7 +391,7 @@ impl Parser {
                     value = Expr::Tuple(elts);
                 }
             }
-            let _ = self.expect_newline_or_eof();
+            self.expect_newline_or_eof()?;
             Ok(Stmt::Assign { targets, value: Box::new(value) })
         } else if self.at(&Token::PlusEqual) || self.at(&Token::MinusEqual)
             || self.at(&Token::StarEqual) || self.at(&Token::SlashEqual)
@@ -429,7 +429,7 @@ impl Parser {
                 }
                 value = Expr::Tuple(elts);
             }
-            let _ = self.expect_newline_or_eof();
+            self.expect_newline_or_eof()?;
             Ok(Stmt::AugAssign {
                 target: Box::new(expr),
                 op,
@@ -444,14 +444,21 @@ impl Parser {
             } else {
                 None
             };
-            let _ = self.expect_newline_or_eof();
+            self.expect_newline_or_eof()?;
             Ok(Stmt::AnnAssign {
                 target: Box::new(expr),
                 annotation: Box::new(annotation),
                 value,
             })
         } else {
-            let _ = self.expect_newline_or_eof();
+            // A bare `print` followed by more tokens (`print "Hello"` — the
+            // Python 2 print statement) gets CPython's dedicated hint.
+            if let Expr::Name(n) = &expr {
+                if n == "print" && !self.at(&Token::Newline) && !self.at(&Token::Semicolon) && !self.at(&Token::EndOfFile) {
+                    return Err("Missing parentheses in call to 'print'. Did you mean print(...)".to_string());
+                }
+            }
+            self.expect_newline_or_eof()?;
             Ok(Stmt::Expr(Box::new(expr)))
         }
     }
@@ -481,7 +488,12 @@ impl Parser {
         if self.at(&Token::EndOfFile) {
             return Ok(());
         }
-        Ok(())
+        // A trailing non-terminator token means two statements were jammed
+        // together with no separator (`print "Hello World"` / `x = 1 y`) —
+        // real Python raises SyntaxError. This used to silently return Ok,
+        // leaving the token for the outer loop to parse as a SECOND
+        // statement on the same line (test_print's TestPy2MigrationHint).
+        Err("invalid syntax".to_string())
     }
 
     // ---- Compound statements ----
@@ -989,7 +1001,7 @@ impl Parser {
         }
         self.expect(&Token::Equal)?;
         let value = self.parse_expr()?;
-        let _ = self.expect_newline_or_eof();
+        self.expect_newline_or_eof()?;
         Ok(Stmt::TypeAlias { name, type_params, value: Box::new(value) })
     }
 
@@ -1269,13 +1281,13 @@ impl Parser {
         } else {
             None
         };
-        let _ = self.expect_newline_or_eof();
+        self.expect_newline_or_eof()?;
         Ok(Stmt::Return(value))
     }
 
     fn parse_yield_stmt(&mut self) -> Result<Stmt, String> {
         let expr = self.parse_yield_expr()?;
-        let _ = self.expect_newline_or_eof();
+        self.expect_newline_or_eof()?;
         Ok(Stmt::Expr(Box::new(expr)))
     }
 
@@ -1285,7 +1297,7 @@ impl Parser {
             let e = self.parse_expr()?;
             if self.eat(&Token::From) {
                 let cause = self.parse_expr()?;
-                let _ = self.expect_newline_or_eof();
+                self.expect_newline_or_eof()?;
                 return Ok(Stmt::Raise {
                     exc: Some(Box::new(e)),
                     cause: Some(Box::new(cause)),
@@ -1295,7 +1307,7 @@ impl Parser {
         } else {
             None
         };
-        let _ = self.expect_newline_or_eof();
+        self.expect_newline_or_eof()?;
         Ok(Stmt::Raise { exc, cause: None })
     }
 
@@ -1305,7 +1317,7 @@ impl Parser {
         while self.eat(&Token::Comma) {
             names.push(self.expect_name()?);
         }
-        let _ = self.expect_newline_or_eof();
+        self.expect_newline_or_eof()?;
         Ok(Stmt::Global(names))
     }
 
@@ -1315,7 +1327,7 @@ impl Parser {
         while self.eat(&Token::Comma) {
             names.push(self.expect_name()?);
         }
-        let _ = self.expect_newline_or_eof();
+        self.expect_newline_or_eof()?;
         Ok(Stmt::Nonlocal(names))
     }
 
@@ -1327,7 +1339,7 @@ impl Parser {
         } else {
             None
         };
-        let _ = self.expect_newline_or_eof();
+        self.expect_newline_or_eof()?;
         Ok(Stmt::Assert { test: Box::new(test), msg })
     }
 
@@ -1340,7 +1352,7 @@ impl Parser {
             }
             targets.push(self.parse_expr()?);
         }
-        let _ = self.expect_newline_or_eof();
+        self.expect_newline_or_eof()?;
         Ok(Stmt::Delete(targets))
     }
 
@@ -1350,7 +1362,7 @@ impl Parser {
         while self.eat(&Token::Comma) {
             names.push(self.parse_alias()?);
         }
-        let _ = self.expect_newline_or_eof();
+        self.expect_newline_or_eof()?;
         Ok(Stmt::Import(names))
     }
 
@@ -1386,7 +1398,7 @@ impl Parser {
             while self.eat(&Token::Newline) {}  // skip newlines before closing paren
             self.expect(&Token::RightParen)?;
         }
-        let _ = self.expect_newline_or_eof();
+        self.expect_newline_or_eof()?;
         Ok(Stmt::ImportFrom { module, names, level })
     }
 

@@ -37,10 +37,29 @@ pub(crate) fn print_with_vm(vm: &mut crate::vm::VirtualMachine, args: &[PyObject
     for (k, v) in keywords {
         match k.as_str() {
             "sep" => {
-                if !matches!(&*v.borrow(), PyObject::None) { sep = v.str(); }
+                if !matches!(&*v.borrow(), PyObject::None) {
+                    // `print(..., sep=3)` must raise TypeError (real CPython:
+                    // "sep must be None or a string"), not stringify — a
+                    // plain `.str()` silently coerced any value.
+                    if !matches!(&*v.borrow(), PyObject::Str(_)) {
+                        return Err(PyError::type_error(format!(
+                            "sep must be None or a string, not {}",
+                            v.borrow().type_name()
+                        )));
+                    }
+                    sep = v.str();
+                }
             }
             "end" => {
-                if !matches!(&*v.borrow(), PyObject::None) { end = v.str(); }
+                if !matches!(&*v.borrow(), PyObject::None) {
+                    if !matches!(&*v.borrow(), PyObject::Str(_)) {
+                        return Err(PyError::type_error(format!(
+                            "end must be None or a string, not {}",
+                            v.borrow().type_name()
+                        )));
+                    }
+                    end = v.str();
+                }
             }
             "file" => {
                 if !matches!(&*v.borrow(), PyObject::None) { file = Some(v.clone()); }
@@ -65,7 +84,11 @@ pub(crate) fn print_with_vm(vm: &mut crate::vm::VirtualMachine, args: &[PyObject
         .map_err(|_| PyError::attribute_error("'file' object has no attribute 'write'"))?;
 
     if flush {
-        let _ = call_method_rebound(vm, &target, "flush", vec![]);
+        // A raising `flush` must PROPAGATE (real CPython: `print(x,
+        // file=f, flush=True)` surfaces f.flush()'s exception —
+        // test_print.py::test_print_flush asserts RuntimeError passes
+        // through). Was `let _ =` swallowing it.
+        call_method_rebound(vm, &target, "flush", vec![])?;
     }
 
     Ok(py_none())
@@ -88,6 +111,16 @@ fn call_method_rebound(vm: &mut crate::vm::VirtualMachine, target: &PyObjectRef,
     let bound = match &*method.borrow() {
         PyObject::BuiltinMethod { func, name: mname, .. } => {
             PyObjectRef::imm(PyObject::BuiltinMethod { name: mname.clone(), func: *func, self_obj: target.clone() })
+        }
+        // A user-defined method (raw `Function` from the type dict — the
+        // ObjectAccess `get_attribute` trait doesn't auto-bind, unlike
+        // LOAD_ATTR) must be wrapped in a BoundMethod so `self` is prepended.
+        // Without this, `print(..., file=custom_filelike)` calling the
+        // object's `write` invoked it with one argument missing (its own
+        // `self`), raising a TypeError mapped to a bogus "'file' object has
+        // no attribute 'write'" (test_print.py::test_print_flush).
+        PyObject::Function(_) => {
+            PyObjectRef::new(PyObject::BoundMethod { func: method.clone(), self_obj: target.clone() })
         }
         _ => method.clone(),
     };
