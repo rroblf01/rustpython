@@ -151,6 +151,10 @@ pub fn py_list(items: Vec<PyObjectRef>) -> PyObjectRef {
     PyObjectRef::new(PyObject::List(items))
 }
 
+pub fn py_deque(data: VecDeque<PyObjectRef>, maxlen: Option<usize>) -> PyObjectRef {
+    PyObjectRef::new(PyObject::Deque { data, maxlen })
+}
+
 pub fn py_tuple(items: Vec<PyObjectRef>) -> PyObjectRef {
     PyObjectRef::imm(PyObject::Tuple(items))
 }

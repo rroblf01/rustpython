@@ -273,6 +273,42 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                 _ => Err(PyError::type_error(format!("list indices must be integers or slices, not {}", idx.type_name()))),
             }
         }
+        PyObject::Deque { data, .. } => {
+            let idx = index.borrow();
+            if let Some(i) = sequence_index_int(&idx) {
+                let i = i.to_isize().ok_or_else(|| PyError::index_error("deque index out of range"))?;
+                let len = data.len() as isize;
+                let i = if i < 0 { len + i } else { i };
+                if i < 0 || i >= len {
+                    return Err(PyError::index_error("deque index out of range"));
+                }
+                return Ok(data[i as usize].clone());
+            }
+            match &*idx {
+                PyObject::Slice { start, stop, step } => {
+                    let mut result = VecDeque::new();
+                    let len = data.len();
+                    let (start_val, stop_val, step_val) = extract_slice_fields(start, stop, step)?;
+                    let (start_n, stop_n) = normalize_slice_bounds(start_val, stop_val, step_val, len);
+                    let mut i = start_n;
+                    if step_val > 0 {
+                        while i < stop_n {
+                            result.push_back(data[i as usize].clone());
+                            match i.checked_add(step_val) { Some(next) => i = next, None => break };
+                        }
+                    } else {
+                        while i > stop_n {
+                            result.push_back(data[i as usize].clone());
+                            match i.checked_add(step_val) { Some(next) => i = next, None => break };
+                        }
+                    }
+                    // Real CPython's `deque.__getitem__(slice)` returns a
+                    // plain (maxlen=None) deque.
+                    Ok(py_deque(result, None))
+                }
+                _ => Err(PyError::type_error(format!("deque indices must be integers or slices, not {}", idx.type_name()))),
+            }
+        }
         PyObject::Tuple(items) => {
             let idx = index.borrow();
             if let Some(i) = sequence_index_int(&idx) {
@@ -632,6 +668,20 @@ pub fn py_setitem(obj: &PyObjectRef, index: &PyObjectRef, value: PyObjectRef) ->
             }
             Err(PyError::type_error(format!("list indices must be integers or slices, not {}", idx.type_name())))
         }
+        PyObject::Deque { data, .. } => {
+            let idx = index.borrow();
+            if let Some(i) = sequence_index_int(&idx) {
+                let i = i.to_isize().ok_or_else(|| PyError::index_error("deque index out of range"))?;
+                let len = data.len() as isize;
+                let i = if i < 0 { len + i } else { i };
+                if i < 0 || i >= len {
+                    return Err(PyError::index_error("deque assignment index out of range"));
+                }
+                data[i as usize] = value;
+                return Ok(());
+            }
+            Err(PyError::type_error(format!("deque indices must be integers or slices, not {}", idx.type_name())))
+        }
         // PyObject::Dict is handled above, before this borrow is taken.
         _ => Err(PyError::type_error(format!("'{}' object does not support item assignment", o.type_name()))),
     }
@@ -681,6 +731,21 @@ pub fn py_delitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<()> {
                 Ok(())
             } else {
                 Err(PyError::type_error(format!("list indices must be integers or slices, not {}", idx.type_name())))
+            }
+        }
+        PyObject::Deque { data, .. } => {
+            let idx = index.borrow();
+            if let Some(i) = sequence_index_int(&idx) {
+                let i = i.to_isize().ok_or_else(|| PyError::index_error("deque index out of range"))?;
+                let len = data.len() as isize;
+                let i = if i < 0 { len + i } else { i };
+                if i < 0 || i >= len {
+                    return Err(PyError::index_error("deque index out of range"));
+                }
+                data.remove(i as usize);
+                Ok(())
+            } else {
+                Err(PyError::type_error(format!("deque indices must be integers or slices, not {}", idx.type_name())))
             }
         }
         // PyObject::Dict is handled above, before this borrow is taken.

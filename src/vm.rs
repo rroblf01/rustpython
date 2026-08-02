@@ -470,8 +470,8 @@ impl VirtualMachine {
          let json_dict = create_json_dict();
          modules.insert_str("json", create_module("json", json_dict));
 
-         let collections_dict = create_collections_dict();
-          modules.insert_str("collections", create_module("collections", collections_dict));
+         let collections_dict = create_collections_dict(builtins.get(&interner::intern("object")).cloned().unwrap_or_else(py_none));
+         modules.insert_str("collections", create_module("collections", collections_dict));
 
           let functools_dict = create_functools_dict();
           modules.insert_str("functools", create_module("functools", functools_dict));
@@ -3065,12 +3065,77 @@ impl VirtualMachine {
                         9 => Some("__ior__"), 10 => Some("__ixor__"), 11 => Some("__iand__"),
                         12 => Some("__imatmul__"), _ => None,
                     };
-                    if let Some(name) = idunder {
-                        if matches!(&*left.borrow(), PyObject::Instance { .. }) {
-                            if let Some(r) = crate::object::try_dunder_binop(&left, &right, name)? {
-                                self.frames[fi].push(r);
+                if let Some(name) = idunder {
+                    if matches!(&*left.borrow(), PyObject::Instance { .. }) {
+                        if let Some(r) = crate::object::try_dunder_binop(&left, &right, name)? {
+                            self.frames[fi].push(r);
+                            return Ok(None);
+                        }
+                    }
+                }
+                }
+                // Native `deque` has no real Python-callable `__iadd__`/
+                // `__imul__` dunder in its type dict (native methods are
+                // dispatched via `attrs.rs`'s `get_attribute_impl`, which
+                // doesn't fire for operator opcodes) — so `d += 'bcd'` /
+                // `d *= 3` on a raw deque would otherwise fall through to
+                // `py_add`/`py_mul` below, which are correct for `d + e`/
+                // `d * n` (both build a NEW deque) but wrong for the
+                // in-place forms (`d += 'bcd'` must EXTEND the live deque
+                // even though `d + 'bcd'` raises TypeError). Handle the
+                // in-place forms directly here.
+                if in_place {
+                    let is_deque = matches!(&*left.borrow(), PyObject::Deque { .. });
+                    if is_deque {
+                        match op {
+                            // `d += iterable` — extend in place (real
+                            // CPython's `deque.__iadd__`), accepts any
+                            // iterable. Materialize the source FIRST so
+                            // self-extend (`d += d`) doesn't trip the deque
+                            // iterator's own mutation detection mid-iteration.
+                            0 => {
+                                let it = crate::object::builtin_iter(&[right])?;
+                                let mut items = Vec::new();
+                                loop {
+                                    match crate::object::builtin_next(&[it.clone()]) {
+                                        Ok(v) => items.push(v),
+                                        Err(crate::object::PyError::StopIteration) => break,
+                                        Err(e) => return Err(e),
+                                    }
+                                }
+                                {
+                                    if let PyObject::Deque { data, maxlen } = &mut *left.borrow_mut() {
+                                        for item in items {
+                                            data.push_back(item);
+                                            if let Some(maxlen) = maxlen {
+                                                while data.len() > *maxlen { data.pop_front(); }
+                                            }
+                                        }
+                                    }
+                                }
+                                self.frames[fi].push(left);
                                 return Ok(None);
                             }
+                            // `d *= n` — repeat in place, truncated to maxlen.
+                            2 => {
+                                let n = right.as_i64().ok_or_else(|| PyError::type_error("an integer is required"))?;
+                                if let PyObject::Deque { data, maxlen } = &mut *left.borrow_mut() {
+                                    let n = n.max(0) as usize;
+                                    let items: Vec<crate::object::PyObjectRef> = data.iter().cloned().collect();
+                                    data.clear();
+                                    for _ in 0..n {
+                                        for item in &items {
+                                            data.push_back(item.clone());
+                                            if let Some(maxlen) = maxlen {
+                                                while data.len() > *maxlen { data.pop_front(); }
+                                            }
+                                        }
+                                    }
+                                }
+                                self.frames[fi].push(left);
+                                return Ok(None);
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -3304,6 +3369,9 @@ impl VirtualMachine {
                     PyObject::List(v) => {
                         self.frames[fi].push(PyObjectRef::new(PyObject::ListIter { list: v.clone(), index: 0 }));
                     }
+                    PyObject::Deque { data, .. } => {
+                        self.frames[fi].push(PyObjectRef::new(PyObject::DequeIter { deque: val.clone(), index: 0, start_len: data.len() }));
+                    }
                     PyObject::Tuple(v) => {
                         self.frames[fi].push(PyObjectRef::new(PyObject::ListIter { list: v.clone(), index: 0 }));
                     }
@@ -3505,7 +3573,7 @@ impl VirtualMachine {
                         // holds a materialized `items`/`len()` to compare
                         // against now that it's a lazy wrapper around a
                         // `source` iterator (see its own doc comment).
-                        PyObject::ZipIterator { .. } | PyObject::MapIterator { .. } | PyObject::FilterIterator { .. } | PyObject::CycleIter { .. } | PyObject::EnumerateIter { .. } | PyObject::GroupByIter { .. } | PyObject::GetItemIter { .. } | PyObject::CallSentinelIter { .. } => {
+                        PyObject::ZipIterator { .. } | PyObject::MapIterator { .. } | PyObject::FilterIterator { .. } | PyObject::CycleIter { .. } | PyObject::EnumerateIter { .. } | PyObject::GroupByIter { .. } | PyObject::GetItemIter { .. } | PyObject::CallSentinelIter { .. } | PyObject::DequeIter { .. } => {
                             drop(obj);
                             match crate::object::builtin_next(&[iter_val.clone()]) {
                                 Ok(val) => {

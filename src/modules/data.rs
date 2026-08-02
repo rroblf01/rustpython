@@ -34,7 +34,7 @@ pub fn create_json_dict() -> HashMap<String, PyObjectRef> {
 // VirtualMachine::install_source_defined_stdlib.
 pub const JSON_EXTRA_SOURCE: &str = include_str!("json_extra.py");
 
-pub fn create_collections_dict() -> HashMap<String, PyObjectRef> {
+pub fn create_collections_dict(object_type: PyObjectRef) -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! coll_func {
         ($name:expr, $func:expr) => {
@@ -42,24 +42,39 @@ pub fn create_collections_dict() -> HashMap<String, PyObjectRef> {
         };
     }
 
-    // deque: double-ended queue
-    coll_func!("deque", |args| {
-        let iterable = if args.len() > 0 { Some(args[0].clone()) } else { None };
-        let mut deque = std::collections::VecDeque::new();
-        if let Some(iter) = iterable {
-            // Iterate over the iterable and add items
-            if let Ok(it) = crate::object::builtin_iter(&[iter]) {
-                loop {
-                    match crate::object::builtin_next(&[it.clone()]) {
-                        Ok(v) => deque.push_back(v),
-                        Err(crate::object::PyError::StopIteration) => break,
-                        Err(e) => return Err(e),
-                    }
-                }
-            }
-        }
-        Ok(PyObjectRef::new(PyObject::List(deque.into_iter().collect())))
+    // `deque` — a REAL subclassable native type (migrated from the plain
+    // `BuiltinFunction` alias-to-`List` that used to be registered here,
+    // which couldn't support `class X(deque)`, `d.appendleft()` (the
+    // recurring `test_shlex` failure), bounded `maxlen` truncation, or
+    // round-tripping through pickle). Registered exactly like `list`/
+    // `int`/etc. in `create_builtins`: a `PyObject::Type` whose dict holds
+    // the native constructor under `NATIVE_VALUE_CTOR_KEY` (so `deque(x)`
+    // dispatches to `builtin_deque` and returns a raw `PyObject::Deque`,
+    // never an `Instance`) plus `__init__` (`native_base_init_builtin`, so
+    // `d.__init__(iterable)` / `deque.__init__(subclass_instance, ...)`
+    // repopulate the backing) — `default_build_class`'s native-base
+    // detection then makes `class X(deque): ...` a first-class subclassable
+    // type like any other native container.
+    let mut deque_dict: HashMap<String, PyObjectRef> = HashMap::new();
+    deque_dict.insert_str(crate::object::NATIVE_VALUE_CTOR_KEY, PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "deque".to_string(),
+        func: crate::object::builtin_deque,
+    }));
+    deque_dict.insert_str("__init__", PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "__init__".to_string(),
+        func: crate::object::native_base_init_builtin,
+    }));
+    let deque_type = PyObjectRef::new(PyObject::Type {
+        name: "deque".to_string(),
+        dict: Box::new(str_map_to_typedict(deque_dict)),
+        bases: vec![object_type.clone()],
+        mro: vec![],
     });
+    if let PyObject::Type { mro, .. } = &mut *deque_type.borrow_mut() {
+        *mro = vec![deque_type.clone(), object_type.clone()];
+    }
+    crate::object::seed_primitive_type_cache("deque", deque_type.clone());
+    d.insert("deque".to_string(), deque_type);
 
     // OrderedDict: remembers insertion order
     coll_func!("OrderedDict", |args| {

@@ -40,7 +40,7 @@ pub use memoryview::*;
 use std::rc::Rc;
 use std::cell::RefCell;
 use std::fmt;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use num_bigint::{BigInt, Sign};
 use num_traits::{Zero, One, ToPrimitive, Signed};

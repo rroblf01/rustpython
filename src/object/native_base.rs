@@ -64,7 +64,7 @@ pub(crate) fn metatype_of(typ: &PyObjectRef) -> Option<PyObjectRef> {
 }
 
 pub(crate) fn is_recognized_native_base_name(name: &str) -> bool {
-    matches!(name, "list" | "dict" | "str" | "int" | "float" | "tuple" | "bytes" | "set" | "complex" | "bytearray" | "frozenset")
+    matches!(name, "list" | "dict" | "str" | "int" | "float" | "tuple" | "bytes" | "set" | "complex" | "bytearray" | "frozenset" | "deque")
 }
 
 /// True iff `name` is one of the builtin exception "classes" registered by
@@ -210,6 +210,7 @@ pub(crate) fn make_native_backing(kind: &str) -> PyObjectRef {
         "complex" => PyObjectRef::imm(PyObject::Complex(0.0, 0.0)),
         "bytearray" => PyObjectRef::new(PyObject::ByteArray(Vec::new())),
         "frozenset" => PyObjectRef::imm(PyObject::FrozenSet(PySet::new())),
+        "deque" => py_deque(std::collections::VecDeque::new(), None),
         _ => py_none(),
     }
 }
@@ -274,6 +275,17 @@ pub(crate) fn synthesize_native_init(kind: &str, args: &[PyObjectRef], keywords:
         "complex" => builtin_complex(args),
         "bytearray" => builtin_bytearray(args),
         "frozenset" => builtin_frozenset(args),
+        "deque" => {
+            let mut combined = args.to_vec();
+            if !keywords.is_empty() {
+                let mut kw_dict = PyDict::new();
+                for (k, v) in keywords {
+                    kw_dict.set(py_str(k), v.clone())?;
+                }
+                combined.push(PyObjectRef::new(PyObject::Dict(Box::new(kw_dict))));
+            }
+            builtin_deque(&combined)
+        }
         _ => Ok(py_none()),
     }
 }

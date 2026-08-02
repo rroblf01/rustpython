@@ -117,6 +117,33 @@ pub fn contains_op(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<bool> {
                 }
                 Ok(false)
             }
+            PyObject::Deque { data, .. } => {
+                // Same clone-out-of-the-borrow treatment as `List` above,
+                // PLUS CPython's length-change mutation detection: a
+                // pathological element `__eq__` that mutates this SAME deque
+                // mid-scan (real triggers: `test_deque.py`'s `test_contains`
+                // — `MutateCmp` clears the deque and returns False; a class
+                // whose `__eq__` clears the deque and returns `NotImplemented`)
+                // must raise `RuntimeError: deque mutated during iteration`,
+                // not just give a wrong answer.
+                let items: Vec<PyObjectRef> = data.iter().cloned().collect();
+                let start_len = data.len();
+                drop(container);
+                for item in &items {
+                    // Rich `==` (not raw `equals`) so a custom Instance
+                    // element's reflected `__eq__` is consulted (`ALWAYS_EQ
+                    // in deque([1])` — `1 == ALWAYS_EQ` must call
+                    // `ALWAYS_EQ.__eq__(1)` and match).
+                    if item.is(b) || py_compare(item, b, 2)?.truthy() { return Ok(true); }
+                    let current_len = a.borrow();
+                    if let PyObject::Deque { data, .. } = &*current_len {
+                        if data.len() != start_len {
+                            return Err(PyError::runtime_error("deque mutated during iteration"));
+                        }
+                    }
+                }
+                Ok(false)
+            }
         // Clone the dict/set out of the borrow BEFORE probing — same
         // reason as the `List`/`Tuple` arms just above: `.contains()`
         // internally calls `.equals()` against each colliding key/member,

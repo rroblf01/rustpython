@@ -42,6 +42,14 @@ pub enum PyObject {
     Bytes(Vec<u8>),
     ByteArray(Vec<u8>),
     List(Vec<PyObjectRef>),
+    /// Backing for `collections.deque`. `maxlen` follows real CPython: a
+    /// bounded deque drops items from the OPPOSITE end as new ones arrive
+    /// (`deque('abcdef', 4)` == `deque('cdef')`), `None` means unbounded.
+    /// Stored as a `VecDeque` for O(1) amortized push/pop at both ends.
+    Deque {
+        data: VecDeque<PyObjectRef>,
+        maxlen: Option<usize>,
+    },
     Tuple(Vec<PyObjectRef>),
     Dict(Box<PyDict>),
     Set(PySet),
@@ -59,6 +67,18 @@ pub enum PyObject {
     ListIter {
         list: Vec<PyObjectRef>,
         index: usize,
+    },
+    /// Backing for `iter(deque)` — a LIVE iterator over the deque (mutations
+    /// are reflected, unlike a snapshot), with CPython's mutation detection:
+    /// if the deque's length changes between the iterator's creation and a
+    /// `next()` call, `RuntimeError: deque mutated during iteration` is
+    /// raised (real trigger: `test_deque.py`'s `test_iter_with_altered_data`
+    /// and `test_runtime_error_on_empty_deque`). `start_len` is the length
+    /// at iterator creation; `index` advances through `deque[index]`.
+    DequeIter {
+        deque: PyObjectRef,
+        index: usize,
+        start_len: usize,
     },
     /// Backing for the "old-style sequence iteration" fallback: real Python
     /// makes ANY object with `__getitem__` but no `__iter__` iterable by
@@ -371,6 +391,7 @@ impl PyObject {
             PyObject::Bytes(_) => "bytes",
             PyObject::ByteArray(_) => "bytearray",
             PyObject::List(_) => "list",
+            PyObject::Deque { .. } => "deque",
             PyObject::Tuple(_) => "tuple",
             PyObject::Dict(_) => "dict",
             PyObject::Set(_) => "set",
@@ -378,6 +399,7 @@ impl PyObject {
             PyObject::Range { .. } => "range",
             PyObject::RangeIter { .. } => "range_iterator",
             PyObject::ListIter { .. } => "list_iterator",
+            PyObject::DequeIter { .. } => "deque_iterator",
             PyObject::GetItemIter { .. } => "iterator",
             PyObject::CallSentinelIter { .. } => "callable_iterator",
             PyObject::EnumerateIter { .. } => "enumerate",
@@ -473,6 +495,13 @@ impl PyObject {
                 let items: Vec<String> = items.iter().map(|x| x.repr()).collect();
                 format!("[{}]", items.join(", "))
             }
+            PyObject::Deque { data, maxlen } => {
+                let items: Vec<String> = data.iter().map(|x| x.repr()).collect();
+                match maxlen {
+                    Some(n) => format!("deque([{}], maxlen={})", items.join(", "), n),
+                    None => format!("deque([{}])", items.join(", ")),
+                }
+            }
             PyObject::Tuple(items) => {
                 let items: Vec<String> = items.iter().map(|x| x.repr()).collect();
                 if items.len() == 1 {
@@ -503,6 +532,7 @@ impl PyObject {
             }
             PyObject::RangeIter { .. } => "<range_iterator object>".to_string(),
             PyObject::ListIter { .. } => "<list_iterator object>".to_string(),
+            PyObject::DequeIter { .. } => "<deque_iterator object>".to_string(),
             PyObject::GetItemIter { .. } => "<iterator object>".to_string(),
             PyObject::CallSentinelIter { .. } => "<callable_iterator object>".to_string(),
             PyObject::EnumerateIter { .. } => "<enumerate object>".to_string(),
@@ -602,6 +632,7 @@ impl PyObject {
             PyObject::Float(f) => *f != 0.0,
             PyObject::Str(s) => !s.is_empty(),
             PyObject::List(v) => !v.is_empty(),
+            PyObject::Deque { data, .. } => !data.is_empty(),
             PyObject::Tuple(v) => !v.is_empty(),
             PyObject::Dict(d) => !d.is_empty(),
             PyObject::Set(s) => !s.is_empty(),
@@ -921,6 +952,20 @@ impl PyObject {
                 }
             }
             (PyObject::List(a), PyObject::List(b)) => {
+                let mut eq = true;
+                if a.len() != b.len() { eq = false; }
+                if eq {
+                    for (x, y) in a.iter().zip(b.iter()) {
+                        if !(x.is(y) || x.equals(y)?) { eq = false; break; }
+                    }
+                }
+                eq
+            }
+            (PyObject::Deque { data: a, .. }, PyObject::Deque { data: b, .. }) => {
+                // Content-only equality — real CPython's `deque.__eq__`
+                // ignores `maxlen` (`deque('abc') == deque('abc', 3)` is
+                // True) and returns NotImplemented for non-deques (so
+                // `deque('abc') == ['a','b','c']` is False).
                 let mut eq = true;
                 if a.len() != b.len() { eq = false; }
                 if eq {

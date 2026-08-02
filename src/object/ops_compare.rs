@@ -145,6 +145,33 @@ pub fn py_compare(a: &PyObjectRef, b: &PyObjectRef, op: u32) -> PyResult<PyObjec
                 return Ok(py_bool(result));
             }
         }
+        // `deque` ordering gets the same clone-before-compare treatment as
+        // `List` just above (its own elements can carry a mutating `__eq__`
+        // that reenters and mutates the deque being compared mid-comparison).
+        let a_items = if let PyObject::Deque { data, .. } = &*a.borrow() { Some(data.clone()) } else { None };
+        if let Some(a_items) = a_items {
+            let b_items = if let PyObject::Deque { data, .. } = &*b.borrow() { Some(data.clone()) } else { None };
+            if let Some(b_items) = b_items {
+                let mut ord = std::cmp::Ordering::Equal;
+                for (x, y) in a_items.iter().zip(b_items.iter()) {
+                    if !x.equals(y)? {
+                        ord = if py_compare(x, y, 0)?.truthy() { std::cmp::Ordering::Less } else { std::cmp::Ordering::Greater };
+                        break;
+                    }
+                }
+                if ord == std::cmp::Ordering::Equal {
+                    ord = a_items.len().cmp(&b_items.len());
+                }
+                let result = match op {
+                    0 => ord == std::cmp::Ordering::Less,
+                    1 => ord != std::cmp::Ordering::Greater,
+                    3 => ord != std::cmp::Ordering::Less,
+                    4 => ord == std::cmp::Ordering::Greater,
+                    _ => unreachable!(),
+                };
+                return Ok(py_bool(result));
+            }
+        }
     }
     let result = match op {
         0 => a.borrow().lt(b)?,
@@ -329,6 +356,12 @@ impl Compare for PyObject {
                 }
                 Ok(a.len() < b.len())
             }
+            (PyObject::Deque { data: a, .. }, PyObject::Deque { data: b, .. }) => {
+                for (x, y) in a.iter().zip(b.iter()) {
+                    if !x.equals(y)? { return Ok(py_compare(x, y, 0)?.truthy()); }
+                }
+                Ok(a.len() < b.len())
+            }
             (PyObject::None, PyObject::None) => Ok(false),
             _ => {
                 if std::env::var("RPY_DEBUG_LT").is_ok() {
@@ -372,6 +405,12 @@ impl Compare for PyObject {
                 }
                 Ok(a.len() <= b.len())
             }
+            (PyObject::Deque { data: a, .. }, PyObject::Deque { data: b, .. }) => {
+                for (x, y) in a.iter().zip(b.iter()) {
+                    if !x.equals(y)? { return Ok(py_compare(x, y, 0)?.truthy()); }
+                }
+                Ok(a.len() <= b.len())
+            }
             _ => Err(PyError::type_error(format!("'<=' not supported between instances of '{}' and '{}'",
                 self.type_name(), other.type_name()))),
         }
@@ -407,6 +446,12 @@ impl Compare for PyObject {
                 }
                 Ok(a.len() > b.len())
             }
+            (PyObject::Deque { data: a, .. }, PyObject::Deque { data: b, .. }) => {
+                for (x, y) in a.iter().zip(b.iter()) {
+                    if !x.equals(y)? { return Ok(py_compare(x, y, 4)?.truthy()); }
+                }
+                Ok(a.len() > b.len())
+            }
             _ => Err(PyError::type_error(format!("'>' not supported between instances of '{}' and '{}'",
                 self.type_name(), other.type_name()))),
         }
@@ -437,6 +482,12 @@ impl Compare for PyObject {
             (PyObject::Bytes(a), PyObject::ByteArray(b)) => Ok(a.as_slice() >= b.as_slice()),
             (PyObject::ByteArray(a), PyObject::Bytes(b)) => Ok(a.as_slice() >= b.as_slice()),
             (PyObject::List(a), PyObject::List(b)) => {
+                for (x, y) in a.iter().zip(b.iter()) {
+                    if !x.equals(y)? { return Ok(py_compare(x, y, 4)?.truthy()); }
+                }
+                Ok(a.len() >= b.len())
+            }
+            (PyObject::Deque { data: a, .. }, PyObject::Deque { data: b, .. }) => {
                 for (x, y) in a.iter().zip(b.iter()) {
                     if !x.equals(y)? { return Ok(py_compare(x, y, 4)?.truthy()); }
                 }

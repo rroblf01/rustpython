@@ -85,6 +85,19 @@ pub fn py_add(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
             v.extend(b.clone());
             Ok(py_list(v))
         }
+        (PyObject::Deque { data: a, maxlen: am }, PyObject::Deque { data: b, .. }) => {
+            // `deque.__add__` preserves the LEFT operand's maxlen and
+            // truncates the concatenation to it (`deque('abcdef', 4) +
+            // deque('gh')` == `deque(['e','f','g','h'], maxlen=4)`).
+            let mut data = a.clone();
+            for item in b.iter() {
+                data.push_back(item.clone());
+                if let Some(maxlen) = am {
+                    while data.len() > *maxlen { data.pop_front(); }
+                }
+            }
+            Ok(py_deque(data, *am))
+        }
         (PyObject::Tuple(a), PyObject::Tuple(b)) => {
             let mut v = a.clone();
             v.extend(b.clone());
@@ -296,6 +309,37 @@ pub fn py_mul(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
                 Ok(py_tuple(Vec::new()))
             } else {
                 Err(PyError::memory_error("could not allocate tuple"))
+            }
+        }
+        (PyObject::Deque { data: v, maxlen }, PyObject::Int(n)) | (PyObject::Int(n), PyObject::Deque { data: v, maxlen }) => {
+            // `deque.__mul__`/`__rmul__` preserves the deque's maxlen and
+            // truncates the repetition to its LAST `maxlen` items
+            // (`deque('abc', maxlen=5) * 2` == `deque('bcabc')`, matching
+            // CPython — `test_mul` in `test_deque.py`); n <= 0 yields an
+            // empty deque (maxlen still preserved).
+            if let Some(n) = n.to_usize() {
+                let mut result = VecDeque::new();
+                let ok = match maxlen {
+                    Some(_) => true, // bounded by maxlen, cannot overflow
+                    None => v.len().checked_mul(n).map(|total| result.try_reserve_exact(total).is_ok()).unwrap_or(false),
+                };
+                if ok {
+                    for _ in 0..n {
+                        for item in v.iter() {
+                            result.push_back(item.clone());
+                            if let Some(maxlen) = maxlen {
+                                while result.len() > *maxlen { result.pop_front(); }
+                            }
+                        }
+                    }
+                    Ok(py_deque(result, *maxlen))
+                } else {
+                    Err(PyError::memory_error("could not allocate deque"))
+                }
+            } else if n.sign() == Sign::Minus {
+                Ok(py_deque(VecDeque::new(), *maxlen))
+            } else {
+                Err(PyError::memory_error("could not allocate deque"))
             }
         }
         // `bytes`/`bytearray` repetition (`b'\0' * n`) — real, common idiom

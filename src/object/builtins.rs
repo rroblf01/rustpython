@@ -102,6 +102,7 @@ pub fn builtin_len(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     match &*obj {
         PyObject::Str(s) => Ok(py_int(s.chars().count())),
         PyObject::List(v) => Ok(py_int(v.len())),
+        PyObject::Deque { data, .. } => Ok(py_int(data.len())),
         PyObject::Tuple(v) => Ok(py_int(v.len())),
         PyObject::Dict(d) => Ok(py_int(d.len())),
         PyObject::Set(s) => Ok(py_int(s.len())),
@@ -130,6 +131,18 @@ pub fn builtin_len(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         // `test_iterlen.py`, whose whole purpose is exercising this exact
         // protocol across iterator types).
         PyObject::ListIter { list, index } => Ok(py_int(list.len().saturating_sub(*index))),
+        PyObject::DequeIter { deque, index, start_len } => {
+            let remaining = {
+                let dq = deque.borrow();
+                if let PyObject::Deque { data, .. } = &*dq {
+                    if data.len() != *start_len { None } else { Some(data.len().saturating_sub(*index)) }
+                } else { None }
+            };
+            match remaining {
+                Some(n) => Ok(py_int(n)),
+                None => Ok(py_int(0)),
+            }
+        }
         PyObject::RangeIter { current, stop, step } => {
             // Use BigInt throughout: `current`/`stop` can be near the i64
             // boundary (a range_iterator unpickled with adversarial bounds,
@@ -990,6 +1003,77 @@ pub fn builtin_list(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             }
         }
     }
+}
+
+pub fn builtin_deque(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    // `deque(iterable=None, maxlen=None)` — `maxlen` may come positionally
+    // (`deque('abc', 3)`) or as a keyword (`deque('abc', maxlen=3)`); the
+    // VM packs keywords into a trailing `PyObject::Dict`.
+    let mut positional_maxlen: Option<PyObjectRef> = None;
+    let mut iterable: Option<PyObjectRef> = None;
+    let mut kw_maxlen: Option<PyObjectRef> = None;
+    let mut iterable_seen = false;
+    for arg in args.iter() {
+        if let PyObject::Dict(d) = &*arg.borrow() {
+            for (k, v) in d.items() {
+                if k.str() == "maxlen" {
+                    if kw_maxlen.is_some() || positional_maxlen.is_some() {
+                        return Err(PyError::type_error("deque() got multiple values for argument 'maxlen'"));
+                    }
+                    kw_maxlen = Some(v);
+                } else {
+                    return Err(PyError::type_error(format!("deque() got an unexpected keyword argument '{}'", k.str())));
+                }
+            }
+        } else if !iterable_seen {
+            iterable = Some(arg.clone());
+            iterable_seen = true;
+        } else if positional_maxlen.is_none() {
+            positional_maxlen = Some(arg.clone());
+        } else {
+            return Err(PyError::type_error("deque() takes at most 2 arguments"));
+        }
+    }
+    if positional_maxlen.is_some() && kw_maxlen.is_some() {
+        return Err(PyError::type_error("deque() got multiple values for argument 'maxlen'"));
+    }
+    let maxlen_ref = positional_maxlen.or(kw_maxlen);
+    let maxlen = if let Some(m) = maxlen_ref {
+        // `maxlen=None` (positional or keyword) means UNBOUNDED.
+        if matches!(&*m.borrow(), PyObject::None) {
+            None
+        } else {
+            let n = m.as_i64().ok_or_else(|| PyError::type_error("an integer is required"))?;
+            if n < 0 {
+                return Err(PyError::value_error("maxlen must be non-negative"));
+            }
+            Some(n as usize)
+        }
+    } else {
+        None
+    };
+    let mut data: VecDeque<PyObjectRef> = VecDeque::new();
+    if let Some(iter) = iterable {
+        // Iterate through the real iterator protocol (NOT `__len__` +
+        // `__getitem__`) — a lying source (`seq_tests.LyingTuple`) reports a
+        // wrong `__len__` but a real iterator yields the true contents.
+        let it = builtin_iter(&[iter])?;
+        loop {
+            match builtin_next(&[it.clone()]) {
+                Ok(v) => {
+                    data.push_back(v);
+                    if let Some(maxlen) = maxlen {
+                        if data.len() > maxlen {
+                            data.pop_front();
+                        }
+                    }
+                }
+                Err(PyError::StopIteration) => break,
+                Err(e) => return Err(e),
+            }
+        }
+    }
+    Ok(py_deque(data, maxlen))
 }
 
 pub fn builtin_tuple(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
@@ -2127,6 +2211,9 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         PyObject::List(v) => {
             Ok(PyObjectRef::new(PyObject::ListIter { list: v.clone(), index: 0 }))
         }
+        PyObject::Deque { data, .. } => {
+            Ok(PyObjectRef::new(PyObject::DequeIter { deque: args[0].clone(), index: 0, start_len: data.len() }))
+        }
         PyObject::Dict(d) => {
             Ok(PyObjectRef::new(PyObject::ListIter { list: d.keys(), index: 0 }))
         }
@@ -2158,7 +2245,7 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         PyObject::ListIter { .. } | PyObject::RangeIter { .. } | PyObject::CycleIter { .. }
         | PyObject::EnumerateIter { .. } | PyObject::MapIterator { .. } | PyObject::FilterIterator { .. }
         | PyObject::ZipIterator { .. } | PyObject::FutureAwaitIterator { .. } | PyObject::GroupByIter { .. }
-        | PyObject::GetItemIter { .. } | PyObject::CallSentinelIter { .. } => Ok(args[0].clone()),
+        | PyObject::GetItemIter { .. } | PyObject::CallSentinelIter { .. } | PyObject::DequeIter { .. } => Ok(args[0].clone()),
         // Anything else (plain functions, ints, ...) is genuinely not
         // iterable. The previous fallback (`Ok(args[0].clone())`)
         // silently treated ANY object as if it were already a valid
@@ -2522,6 +2609,32 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 // way.
                 *current = current.checked_add(*step).unwrap_or(if *step > 0 { i64::MAX } else { i64::MIN });
                 Ok(v)
+            }
+        }
+        PyObject::DequeIter { deque, index, start_len } => {
+            let (done, item) = {
+                let dq = deque.borrow();
+                if let PyObject::Deque { data, .. } = &*dq {
+                    if data.len() != *start_len {
+                        return Err(PyError::runtime_error("deque mutated during iteration"));
+                    }
+                    if *index >= data.len() {
+                        (true, None)
+                    } else {
+                        (false, Some(data[*index].clone()))
+                    }
+                } else {
+                    (true, None)
+                }
+            };
+            if done {
+                if args.len() >= 2 { Ok(args[1].clone()) }
+                else { Err(PyError::stop_iteration()) }
+            } else if let Some(v) = item {
+                if let PyObject::DequeIter { index, .. } = &mut *obj { *index += 1; }
+                Ok(v)
+            } else {
+                Err(PyError::runtime_error("deque iterator over non-deque"))
             }
         }
         _ => Err(PyError::type_error(format!("'{}' is not an iterator", obj.type_name()))),

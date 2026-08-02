@@ -451,6 +451,15 @@ pub enum PyObjectRef {
     Imm(Rc<RefCell<PyObject>>),  // Immutable: Int, Str, Float, Tuple, Bytes, Code, Function
 }
 
+// Identity stack of `PyObject` pointers currently being repr'd, used by
+// `repr_inner`'s deque arm for real cycle detection (print `[...]` when the
+// SAME deque re-enters, matching CPython's `Py_ReprEnter` behavior — a
+// depth-based guard can't produce CPython's exact output for a
+// self-referencing deque).
+thread_local! {
+    static REPR_VISITED: std::cell::RefCell<Vec<*const ()>> = std::cell::RefCell::new(Vec::new());
+}
+
 impl PyObjectRef {
     /// Create a MUTABLE PyObjectRef (for List, Dict, Set, Instance)
     pub fn new(obj: PyObject) -> Self {
@@ -641,6 +650,40 @@ impl PyObjectRef {
         // during repr(mylist)).
         let obj = self.borrow();
         match &*obj {
+            PyObject::Deque { data, maxlen } => {
+                // Real CPython's `deque_repr` uses `Py_ReprEnter`/
+                // `Py_ReprLeave` (tracking the deque object's IDENTITY, not
+                // a depth count) and prints `[...]` when the SAME deque is
+                // repr'd reentrantly — `d = deque(range(200)); d.append(d);
+                // repr(d)` must end in `..., 199, [...]], ...`, which a
+                // pure depth-based guard (the generic `REPR_DEPTH` above)
+                // cannot produce.
+                let ptr: Option<*const ()> = match self {
+                    PyObjectRef::Mut(rc) | PyObjectRef::Imm(rc) => Some(Rc::as_ptr(rc) as *const ()),
+                    _ => None,
+                };
+                let reentered = if let Some(ptr) = ptr {
+                    REPR_VISITED.with(|v| {
+                        let mut v = v.borrow_mut();
+                        if v.contains(&ptr) { true } else { v.push(ptr); false }
+                    })
+                } else { false };
+                if reentered {
+                    return "[...]".to_string();
+                }
+                let cloned: Vec<PyObjectRef> = data.iter().cloned().collect();
+                let maxlen_copy = *maxlen;
+                drop(obj);
+                let parts: Vec<String> = cloned.iter().map(|x| x.repr()).collect();
+                let s = match maxlen_copy {
+                    Some(n) => format!("deque([{}], maxlen={})", parts.join(", "), n),
+                    None => format!("deque([{}])", parts.join(", ")),
+                };
+                if let Some(ptr) = ptr {
+                    REPR_VISITED.with(|v| { v.borrow_mut().retain(|&p| p != ptr); });
+                }
+                s
+            }
             PyObject::List(items) => {
                 let cloned: Vec<PyObjectRef> = items.clone();
                 drop(obj);
