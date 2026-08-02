@@ -1475,8 +1475,51 @@ impl VirtualMachine {
         }
     }
 
-    pub fn import_module_from_file(&mut self, name: &str) -> PyResult<PyObjectRef> {
-        // Guard against genuine infinite import recursion with a clean
+    /// Return the cached module for `name` if it's genuinely still imported
+    /// (`sys.modules` has it). If it was `del sys.modules['x']`'d, build a
+    /// FRESH module object (sharing the dict contents) and re-register it in
+    /// both maps — real Python re-imports the module, and for a native module
+    /// a fresh object is the faithful equivalent (test_atexit's
+    /// test_atexit_instances asserts `atexit2 is not atexit1` while both
+    /// share the same callback registry).
+    pub fn import_cached_or_fresh(&mut self, name: &str) -> Option<PyObjectRef> {
+        let module = self.modules.get(name)?.clone();
+        let in_sys_modules = if let Some(sys_mod) = self.modules.get("sys") {
+            if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
+                if let Some(mod_dict) = dict.get_str("modules") {
+                    let md = mod_dict.borrow();
+                    if let PyObject::Dict(d) = &*md {
+                        d.get(&crate::object::py_str(name)).ok().flatten().is_some()
+                    } else { false }
+                } else { false }
+            } else { false }
+        } else { false };
+        if in_sys_modules {
+            return Some(module);
+        }
+        let fresh = PyObjectRef::new(PyObject::Module {
+            name: name.to_string(),
+            dict: {
+                let b = module.borrow();
+                if let PyObject::Module { dict, .. } = &*b {
+                    dict.clone()
+                } else { Box::new(crate::object::TypeDict::default()) }
+            },
+        });
+        self.modules.insert(name.to_string(), fresh.clone());
+        if let Some(sys_mod) = self.modules.get("sys") {
+            if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
+                if let Some(mod_dict) = dict.get_str("modules") {
+                    if let PyObject::Dict(d) = &mut *mod_dict.borrow_mut() {
+                        let _ = d.set(crate::object::py_str(name), fresh.clone());
+                    }
+                }
+            }
+        }
+        Some(fresh)
+    }
+
+    pub fn import_module_from_file(&mut self, name: &str) -> PyResult<PyObjectRef> {        // Guard against genuine infinite import recursion with a clean
         // error (showing the exact chain) instead of a raw stack overflow —
         // kept permanently (env-gated print is always-on; the depth check
         // itself is cheap) rather than added back by hand each time.
@@ -5313,7 +5356,7 @@ impl VirtualMachine {
                 if std::env::var("RPY_DEBUG_IMPORT").is_ok() {
                     eprintln!("IMPORT_NAME: resolved={} cached={}", resolved, self.modules.contains_key(&resolved));
                 }
-                if let Some(module) = self.modules.get(&resolved) {
+                if let Some(module) = self.import_cached_or_fresh(&resolved) {
                     // For 'import a.b.c' where fromlist is empty (regular import, not 'from a.b import X'),
                     // push the top-level module so STORE_NAME stores the package, not the submodule
                     let is_from_import = {

@@ -5,6 +5,23 @@ use super::*;
 
 // ---- __import__ builtin ----
 
+/// True iff `name` is present in the `sys.modules` dict (the real import
+/// cache). Used to distinguish "module already imported" from "module was
+/// `del sys.modules['x']`'d and must be re-imported fresh".
+fn sys_modules_has(vm: &crate::vm::VirtualMachine, name: &str) -> bool {
+    if let Some(sys_mod) = vm.modules.get("sys") {
+        if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
+            if let Some(mod_dict) = dict.get_str("modules") {
+                let md = mod_dict.borrow();
+                if let PyObject::Dict(d) = &*md {
+                    return d.get(&py_str(name)).ok().flatten().is_some();
+                }
+            }
+        }
+    }
+    false
+}
+
 // Extracted out of `builtin_import` so `vm.rs`'s `call_function` can invoke
 // it directly with the real, live `&mut VirtualMachine` instead of going
 // through `with_vm_mut` — `__import__()` is what every `import` STATEMENT
@@ -68,9 +85,11 @@ pub(crate) fn import_impl(vm: &mut crate::vm::VirtualMachine, name: &str, has_do
         name.to_string()
     };
 
-    // Check if already loaded
-    if let Some(module) = vm.modules.get(&resolved_name) {
-        return Ok(module.clone());
+    // Check if already loaded — `sys.modules` is the source of truth for
+    // import caching (a module `del sys.modules['x']`'d must re-import as a
+    // fresh object, test_atexit's test_atexit_instances).
+    if let Some(module) = vm.import_cached_or_fresh(&resolved_name) {
+        return Ok(module);
     }
 
     // Try to import the module from file
