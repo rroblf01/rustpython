@@ -5,6 +5,66 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+// Warnings recording for `warnings.catch_warnings(record=True)`. A stack of
+// active record lists: `catch_warnings(record=True).__enter__` pushes a new
+// list and returns it; native `warn()` appends WarningMessage objects to the
+// innermost one; `__exit__` pops. `None` entries represent non-recording
+// `catch_warnings` contexts (still tracked so a nested recording context
+// restores the outer one correctly). This is what makes `unittest`'s
+// `assertWarns`/`assertWarnsRegex` actually see warnings instead of failing
+// with "... not triggered" (real trigger: `test_genericpath.py`'s
+// `test_exists_bool`, which expects a `RuntimeWarning` when a bool is passed
+// as a file descriptor).
+thread_local! {
+    static WARN_RECORD_STACK: std::cell::RefCell<Vec<Option<PyObjectRef>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn warning_message_obj(message: PyObjectRef) -> PyObjectRef {
+    let mut dict = AttrMap::new();
+    dict.insert_str("message", message);
+    dict.insert_str("category", py_none());
+    dict.insert_str("filename", py_str(""));
+    dict.insert_str("lineno", py_int(0));
+    PyObjectRef::new(PyObject::Instance {
+        typ: PyObjectRef::new(PyObject::Module {
+            name: "warnings".to_string(),
+            dict: Box::new(str_map_to_typedict(HashMap::new())),
+        }),
+        dict,
+    })
+}
+
+pub(crate) fn warnings_emit(msg: &str, category: &str) {
+    let mut recorded = false;
+    WARN_RECORD_STACK.with(|s| {
+        if let Some(Some(list)) = s.borrow().last() {
+            if let PyObject::List(items) = &mut *list.borrow_mut() {
+                let ex = PyObjectRef::new(PyObject::Exception {
+                    typ: category.to_string(),
+                    args: vec![py_str(msg)],
+                    cause: None,
+                });
+                items.push(warning_message_obj(ex));
+                recorded = true;
+            }
+        }
+    });
+    if !recorded {
+        println!("Warning: {}", msg);
+    }
+}
+
+pub(crate) fn warnings_push_record(list: Option<PyObjectRef>) {
+    WARN_RECORD_STACK.with(|s| s.borrow_mut().push(list));
+}
+
+pub(crate) fn warnings_pop_record() {
+    WARN_RECORD_STACK.with(|s| {
+        s.borrow_mut().pop();
+    });
+}
+
 pub fn create_pdb_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! pdb_func {
@@ -82,7 +142,8 @@ pub fn create_warnings_dict() -> HashMap<String, PyObjectRef> {
 
     warn_func!("warn", |args| {
         let msg = if !args.is_empty() { args[0].str() } else { String::new() };
-        println!("Warning: {}", msg);
+        let category = if args.len() > 1 { args[1].borrow().type_name() } else { "UserWarning".to_string() };
+        warnings_emit(&msg, &category);
         Ok(py_none())
     });
 
@@ -182,12 +243,22 @@ pub fn create_warnings_dict() -> HashMap<String, PyObjectRef> {
             let record = if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
                 dict.get_str("_record").map(|v| v.truthy()).unwrap_or(false)
             } else { false };
-            if record { Ok(py_list(vec![])) } else { Ok(py_none()) }
+            if record {
+                let list = py_list(vec![]);
+                warnings_push_record(Some(list.clone()));
+                Ok(list)
+            } else {
+                warnings_push_record(None);
+                Ok(py_none())
+            }
         },
     }));
     cw_dict.insert_str("__exit__", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "__exit__".to_string(),
-        func: |_args| Ok(py_bool(false)),
+        func: |_args| {
+            warnings_pop_record();
+            Ok(py_bool(false))
+        },
     }));
     d.insert_str("catch_warnings", PyObjectRef::new(PyObject::Type {
         name: "catch_warnings".to_string(),

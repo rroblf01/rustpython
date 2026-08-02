@@ -2883,8 +2883,22 @@ pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     return Ok(py_bool(true));
                 }
             }
-            // Exception hierarchy
-            Ok(py_bool(crate::vm::is_exception_subclass(&obj_type, &class_name)))
+            // Exception hierarchy — but only for objects that can actually
+            // BE exceptions: real `PyObject::Exception` instances (builtin
+            // or user-defined subclass), or builtin exception CLASS names.
+            // `is_exception_subclass` maps unknown type names to `Exception`
+            // by default (so user-defined `class MyError(Exception)` bodies
+            // resolve correctly), which wrongly made ANY primitive value —
+            // `isinstance('x', BaseException)`, `isinstance([], ValueError)`
+            // — resolve through the exception table and return True. Real
+            // trigger: `Lib/test/support/os_helper.py`'s `FakePath.__fspath__`
+            // guards on `isinstance(self.path, BaseException)`, and a str
+            // path incorrectly took the exception-raising branch, so every
+            // `os.path.*`/`open()` call handed a `FakePath` failed.
+            if matches!(&*obj, PyObject::Exception { .. }) || is_builtin_exception_class_name(&obj_type) {
+                return Ok(py_bool(crate::vm::is_exception_subclass(&obj_type, &class_name)));
+            }
+            Ok(py_bool(false))
         }
     }
 }
