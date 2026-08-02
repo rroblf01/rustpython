@@ -127,9 +127,14 @@ test-one:
 		exit 1; \
 	fi
 	@echo -e "$(CYAN)==> Running $(FILE)...$(RESET)"
-	@export PYTHONPATH=$(TEST_VENV_SITE):$${PYTHONPATH:-}; \
-	./$(RUSTPYTHON) "$(FILE)" 2>&1; \
-	echo "exit code: $$?"
+	@binary="$$(cd "$$(dirname "$(RUSTPYTHON)")" && pwd)/$$(basename "$(RUSTPYTHON)")"; \
+	testfile="$$(cd "$$(dirname "$(FILE)")" && pwd)/$$(basename "$(FILE)")"; \
+	scratch_dir="$$(mktemp -d "/tmp/rustpython-test-one-scratch.XXXXXX")"; \
+	export PYTHONPATH=$(TEST_VENV_SITE):$${PYTHONPATH:-}; \
+	(cd "$$scratch_dir" && "$$binary" "$$testfile") 2>&1; \
+	exit_code=$$?; \
+	rm -rf "$$scratch_dir"; \
+	echo "exit code: $$exit_code"
 
 # Test with real site-packages (uv project)
 test-uv: $(RUSTPYTHON)

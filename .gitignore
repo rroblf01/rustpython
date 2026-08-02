@@ -11,6 +11,7 @@ testproject/
 .venv/
 .claude/
 CLAUDE.md
+INSTRUCTIONS.md
 # Other AI coding tool scratch directories (not part of this project)
 .hermes/
 .opencode/
