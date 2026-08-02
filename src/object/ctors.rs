@@ -56,6 +56,28 @@ pub(crate) fn register_class(cls: &PyObjectRef) {
     CLASS_REGISTRY.with(|r| r.borrow_mut().push(cls.clone()));
 }
 
+/// Find a registered class by its `__module__`/`__name__` qualified name —
+/// backs the native pickle's subclass reconstruction. Searches the global
+/// class registry (NOT `sys.modules`, which is VM-relative and unreliable
+/// when the active VM pointer is a transient disposable one) for a `Type`
+/// whose own dict matches both fields.
+pub(crate) fn find_class_by_qualified_name(module: &str, name: &str) -> Option<PyObjectRef> {
+    CLASS_REGISTRY.with(|r| {
+        for cls in r.borrow().iter() {
+            if let PyObject::Type { name: tname, dict, .. } = &*cls.borrow() {
+                if tname != name {
+                    continue;
+                }
+                let module_name = dict.get_str("__module__").map(|m| m.str()).unwrap_or_default();
+                if module_name == module {
+                    return Some(cls.clone());
+                }
+            }
+        }
+        None
+    })
+}
+
 /// Direct (non-transitive) subclasses of `cls`, in registration order —
 /// backs `type.__subclasses__()`.
 pub(crate) fn direct_subclasses_of(cls: &PyObjectRef) -> Vec<PyObjectRef> {

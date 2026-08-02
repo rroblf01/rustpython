@@ -520,6 +520,22 @@ pub fn deepcopy_one(obj: &PyObjectRef, memo: &PyObjectRef) -> Result<PyObjectRef
             }
             Ok(new_list)
         }
+        PyObject::Deque { .. } => {
+            let new_deque = py_deque(std::collections::VecDeque::new(), None);
+            remember(memo, obj, &new_deque);
+            let (items, maxlen) = if let PyObject::Deque { data, maxlen } = &*obj.borrow() {
+                (data.iter().cloned().collect::<Vec<_>>(), *maxlen)
+            } else { unreachable!() };
+            let mut new_data = std::collections::VecDeque::new();
+            for item in &items {
+                new_data.push_back(deepcopy_one(item, memo)?);
+            }
+            if let PyObject::Deque { data, maxlen: ml } = &mut *new_deque.borrow_mut() {
+                *data = new_data;
+                *ml = maxlen;
+            }
+            Ok(new_deque)
+        }
         PyObject::Dict(_) => {
             let new_dict = PyObjectRef::new(PyObject::Dict(Box::new(PyDict::new())));
             remember(memo, obj, &new_dict);

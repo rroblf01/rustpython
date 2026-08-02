@@ -552,6 +552,26 @@ impl PyObject {
                             // native backing's own dict entry as plain
                             // instance-attribute data.
                             if let Some(native) = dict.get(NATIVE_BACKING_KEY) {
+                                // A deque subclass's `__copy__`/`copy()` must
+                                // return a NEW instance of the SAME subclass
+                                // (real CPython: `D('abc').__copy__()` is a
+                                // `D`), not a raw deque — the generic native
+                                // delegation below would rebind `self_obj` to
+                                // the backing deque and build a plain deque.
+                                if matches!(&*native.borrow(), PyObject::Deque { .. }) && (name == "__copy__" || name == "copy") {
+                                    let typ_clone = typ.clone();
+                                    let new_native = {
+                                        let b = native.borrow();
+                                        if let PyObject::Deque { data, maxlen } = &*b {
+                                            py_deque(data.clone(), *maxlen)
+                                        } else { unreachable!() }
+                                    };
+                                    return Some(PyObjectRef::new(PyObject::Closure(Rc::new(move |_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                                        let mut new_dict = AttrMap::new();
+                                        new_dict.insert(NATIVE_BACKING_KEY.to_string(), new_native.clone());
+                                        Ok(PyObjectRef::new(PyObject::Instance { typ: typ_clone.clone(), dict: new_dict }))
+                                    }))));
+                                }
                                 if let Ok(val) = native.borrow().get_attribute(name) {
                                     let rebound = if let PyObject::BuiltinMethod { name: n, func, .. } = &*val.borrow() {
                                         PyObjectRef::imm(PyObject::BuiltinMethod { name: n.clone(), func: *func, self_obj: native.clone() })

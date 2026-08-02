@@ -1032,6 +1032,9 @@ pub fn create_copy_dict() -> HashMap<String, PyObjectRef> {
                 }
                 Ok(PyObjectRef::new(PyObject::Set(new_set)))
             }
+            PyObject::Deque { data, maxlen } => {
+                Ok(py_deque(data.clone(), *maxlen))
+            }
             // A class transparently subclassing a native container
             // (`class NodeList(list): pass`, real CPython's own
             // `xml.dom.minicompat.NodeList`) with no explicit `__copy__`
@@ -3196,7 +3199,19 @@ pub fn create_graphlib_dict() -> HashMap<String, PyObjectRef> {
 ///   [ ... ] -> list (elements serialized recursively)
 ///   ( ... ) -> tuple (elements serialized recursively)
 ///   { ... } -> dict (alternating key-value pairs serialized recursively)
-fn pickle_serialize(obj: &PyObjectRef, buf: &mut Vec<u8>) -> PyResult<()> {
+/// Extract a stable identity pointer for a boxed (non-inline) `PyObject` —
+/// used by `pickle_serialize`'s memo so a container (list/dict/deque) that
+/// appears twice in one pickle — including a genuine cycle like
+/// `d.append(d)` — serializes as a `@<id>` reference instead of recursing
+/// forever (real CPython's pickle memo does the same).
+fn container_ptr(o: &PyObjectRef) -> Option<*const ()> {
+    match o {
+        PyObjectRef::Mut(rc) | PyObjectRef::Imm(rc) => Some(std::rc::Rc::as_ptr(rc) as *const ()),
+        _ => None,
+    }
+}
+
+fn pickle_serialize(obj: &PyObjectRef, buf: &mut Vec<u8>, memo: &mut Vec<*const ()>) -> PyResult<()> {
     match &*obj.borrow() {
         PyObject::None => buf.push(b'N'),
         PyObject::Bool(true) => buf.push(b'T'),
@@ -3240,49 +3255,160 @@ fn pickle_serialize(obj: &PyObjectRef, buf: &mut Vec<u8>) -> PyResult<()> {
             buf.extend_from_slice(b);
         }
         PyObject::List(items) => {
+            if let Some(ptr) = container_ptr(obj) {
+                if let Some(id) = memo.iter().position(|&p| p == ptr) {
+                    buf.push(b'@');
+                    buf.extend_from_slice(id.to_string().as_bytes());
+                    buf.push(b'\n');
+                    return Ok(());
+                }
+                memo.push(ptr);
+            }
             buf.push(b'[');
             for item in items {
-                pickle_serialize(item, buf)?;
+                pickle_serialize(item, buf, memo)?;
             }
             buf.push(b']');
+        }
+        PyObject::Deque { data, maxlen } => {
+            if let Some(ptr) = container_ptr(obj) {
+                if let Some(id) = memo.iter().position(|&p| p == ptr) {
+                    buf.push(b'@');
+                    buf.extend_from_slice(id.to_string().as_bytes());
+                    buf.push(b'\n');
+                    return Ok(());
+                }
+                memo.push(ptr);
+            }
+            buf.push(b'D');
+            match maxlen {
+                Some(n) => {
+                    buf.push(b'M');
+                    buf.extend_from_slice(n.to_string().as_bytes());
+                    buf.push(b'\n');
+                }
+                None => buf.push(b'N'),
+            }
+            buf.push(b'[');
+            for item in data.iter() {
+                pickle_serialize(item, buf, memo)?;
+            }
+            buf.push(b']');
+        }
+        PyObject::DequeIter { deque, index, start_len } => {
+            buf.push(b'q');
+            pickle_serialize(deque, buf, memo)?;
+            pickle_serialize(&py_int(*index as i64), buf, memo)?;
+            pickle_serialize(&py_int(*start_len as i64), buf, memo)?;
         }
         PyObject::Tuple(items) => {
             buf.push(b'(');
             for item in items {
-                pickle_serialize(item, buf)?;
+                pickle_serialize(item, buf, memo)?;
             }
             buf.push(b')');
         }
         PyObject::Dict(d) => {
+            if let Some(ptr) = container_ptr(obj) {
+                if let Some(id) = memo.iter().position(|&p| p == ptr) {
+                    buf.push(b'@');
+                    buf.extend_from_slice(id.to_string().as_bytes());
+                    buf.push(b'\n');
+                    return Ok(());
+                }
+                memo.push(ptr);
+            }
             buf.push(b'{');
             for (k, v) in d.items() {
-                pickle_serialize(&k, buf)?;
-                pickle_serialize(&v, buf)?;
+                pickle_serialize(&k, buf, memo)?;
+                pickle_serialize(&v, buf, memo)?;
             }
             buf.push(b'}');
         }
         PyObject::Slice { start, stop, step } => {
             buf.push(b's');
-            pickle_serialize(start, buf)?;
-            pickle_serialize(stop, buf)?;
-            pickle_serialize(step, buf)?;
+            pickle_serialize(start, buf, memo)?;
+            pickle_serialize(stop, buf, memo)?;
+            pickle_serialize(step, buf, memo)?;
         }
         PyObject::Range { start, stop, step } => {
             buf.push(b'R');
-            pickle_serialize(&py_int(*start), buf)?;
-            pickle_serialize(&py_int(*stop), buf)?;
-            pickle_serialize(&py_int(*step), buf)?;
+            pickle_serialize(&py_int(*start), buf, memo)?;
+            pickle_serialize(&py_int(*stop), buf, memo)?;
+            pickle_serialize(&py_int(*step), buf, memo)?;
         }
         PyObject::ListIter { list, index } => {
             buf.push(b'i');
-            pickle_serialize(&py_list(list.clone()), buf)?;
-            pickle_serialize(&py_int(*index as i64), buf)?;
+            pickle_serialize(&py_list(list.clone()), buf, memo)?;
+            pickle_serialize(&py_int(*index as i64), buf, memo)?;
         }
         PyObject::RangeIter { current, stop, step } => {
             buf.push(b'r');
-            pickle_serialize(&py_int(*current), buf)?;
-            pickle_serialize(&py_int(*stop), buf)?;
-            pickle_serialize(&py_int(*step), buf)?;
+            pickle_serialize(&py_int(*current), buf, memo)?;
+            pickle_serialize(&py_int(*stop), buf, memo)?;
+            pickle_serialize(&py_int(*step), buf, memo)?;
+        }
+        // A deque-backed SUBCLASS instance (`class Deque(deque): pass; d =
+        // Deque('abc')`) — serialize the class reference (module+name), the
+        // deque content (iterated through the instance's own `__iter__`, so
+        // a subclass that overrides `__iter__` to raise — real CPython's
+        // `DequeWithBadIter`, whose `__reduce_ex__` does `list(self)` —
+        // correctly makes `pickle.dumps` raise TypeError), and the
+        // instance dict. The instance's own pointer is memoized so both the
+        // deque content and the instance dict can self-reference it
+        // (`d.append(d)`, `d.x = d`).
+        PyObject::Instance { typ, dict } if crate::object::native_backing_of(obj).map(|n| matches!(&*n.borrow(), PyObject::Deque { .. })).unwrap_or(false) => {
+            if let Some(ptr) = container_ptr(obj) {
+                if let Some(id) = memo.iter().position(|&p| p == ptr) {
+                    buf.push(b'@');
+                    buf.extend_from_slice(id.to_string().as_bytes());
+                    buf.push(b'\n');
+                    return Ok(());
+                }
+                memo.push(ptr);
+            }
+            let (module, name) = {
+                let tb = typ.borrow();
+                if let PyObject::Type { name: tname, dict: tdict, .. } = &*tb {
+                    let module = tdict.get_str("__module__").map(|m| m.str()).unwrap_or_else(|| "builtins".to_string());
+                    (module, tname.clone())
+                } else { return Err(PyError::type_error("cannot pickle non-type instance")) }
+            };
+            buf.push(b'C');
+            pickle_serialize(&py_str(&module), buf, memo)?;
+            pickle_serialize(&py_str(&name), buf, memo)?;
+            let maxlen = crate::object::native_backing_of(obj)
+                .and_then(|n| {
+                    let nb = n.borrow();
+                    if let PyObject::Deque { maxlen, .. } = &*nb { *maxlen } else { None }
+                });
+            match maxlen {
+                Some(m) => {
+                    buf.push(b'M');
+                    buf.extend_from_slice(m.to_string().as_bytes());
+                    buf.push(b'\n');
+                }
+                None => buf.push(b'N'),
+            }
+            // items via the instance's own __iter__ protocol
+            buf.push(b'[');
+            let it = builtin_iter(&[obj.clone()])?;
+            loop {
+                match builtin_next(&[it.clone()]) {
+                    Ok(v) => pickle_serialize(&v, buf, memo)?,
+                    Err(PyError::StopIteration) => break,
+                    Err(e) => return Err(e),
+                }
+            }
+            buf.push(b']');
+            // instance dict (excluding the internal native backing)
+            buf.push(b'{');
+            for (k, v) in dict.iter() {
+                if k == crate::object::NATIVE_BACKING_KEY { continue; }
+                pickle_serialize(&py_str(&k), buf, memo)?;
+                pickle_serialize(&v, buf, memo)?;
+            }
+            buf.push(b'}');
         }
         _ => {
             return Err(PyError::type_error(format!(
@@ -3295,7 +3421,11 @@ fn pickle_serialize(obj: &PyObjectRef, buf: &mut Vec<u8>) -> PyResult<()> {
 }
 
 /// Deserialize a Python object from bytes using the custom pickle format.
-fn pickle_deserialize(data: &[u8], pos: &mut usize) -> PyResult<PyObjectRef> {
+/// Deserialize a Python object from bytes using the custom pickle format.
+/// `memo` mirrors the serializer's container memo: each container's ref is
+/// registered BEFORE its children are read, so a `@<id>` reference (a cycle
+/// or an alias) resolves to the shared object being built.
+fn pickle_deserialize(data: &[u8], pos: &mut usize, memo: &mut Vec<PyObjectRef>) -> PyResult<PyObjectRef> {
     if *pos >= data.len() {
         return Err(PyError::type_error("unexpected end of pickle data"));
     }
@@ -3385,20 +3515,166 @@ fn pickle_deserialize(data: &[u8], pos: &mut usize) -> PyResult<PyObjectRef> {
             Ok(PyObjectRef::imm(PyObject::Bytes(bytes)))
         }
         b'[' => {
+            let list_ref = py_list(Vec::new());
+            memo.push(list_ref.clone());
             let mut items = Vec::new();
             while *pos < data.len() && data[*pos] != b']' {
-                items.push(pickle_deserialize(data, pos)?);
+                items.push(pickle_deserialize(data, pos, memo)?);
             }
             if *pos >= data.len() {
                 return Err(PyError::type_error("unterminated list in pickle data"));
             }
             *pos += 1; // skip ']'
-            Ok(py_list(items))
+            if let PyObject::List(l) = &mut *list_ref.borrow_mut() {
+                *l = items;
+            }
+            Ok(list_ref)
+        }
+        b'D' => {
+            let deque_ref = py_deque(std::collections::VecDeque::new(), None);
+            memo.push(deque_ref.clone());
+            let maxlen = match data.get(*pos) {
+                Some(b'M') => {
+                    *pos += 1;
+                    let start = *pos;
+                    while *pos < data.len() && data[*pos] != b'\n' {
+                        *pos += 1;
+                    }
+                    if *pos >= data.len() {
+                        return Err(PyError::type_error("unterminated maxlen in pickle data"));
+                    }
+                    let s = std::str::from_utf8(&data[start..*pos])
+                        .map_err(|_| PyError::type_error("invalid utf-8 in pickle maxlen"))?;
+                    *pos += 1; // skip '\n'
+                    Some(s.parse::<usize>().map_err(|_| PyError::type_error(format!("invalid maxlen: {}", s)))?)
+                }
+                Some(b'N') => {
+                    *pos += 1;
+                    None
+                }
+                _ => return Err(PyError::type_error("malformed deque pickle data")),
+            };
+            if *pos >= data.len() || data[*pos] != b'[' {
+                return Err(PyError::type_error("malformed deque pickle data"));
+            }
+            *pos += 1;
+            let mut items = std::collections::VecDeque::new();
+            while *pos < data.len() && data[*pos] != b']' {
+                items.push_back(pickle_deserialize(data, pos, memo)?);
+            }
+            if *pos >= data.len() {
+                return Err(PyError::type_error("unterminated deque in pickle data"));
+            }
+            *pos += 1; // skip ']'
+            if let PyObject::Deque { data: d, maxlen: ml } = &mut *deque_ref.borrow_mut() {
+                *d = items;
+                *ml = maxlen;
+            }
+            Ok(deque_ref)
+        }
+        b'q' => {
+            let deque = pickle_deserialize(data, pos, memo)?;
+            let index = pickle_deserialize(data, pos, memo)?;
+            let start_len = pickle_deserialize(data, pos, memo)?;
+            Ok(PyObjectRef::new(PyObject::DequeIter {
+                deque,
+                index: index.as_i64().unwrap_or(0) as usize,
+                start_len: start_len.as_i64().unwrap_or(0) as usize,
+            }))
+        }
+        b'@' => {
+            let start = *pos;
+            while *pos < data.len() && data[*pos] != b'\n' {
+                *pos += 1;
+            }
+            if *pos >= data.len() {
+                return Err(PyError::type_error("unterminated memo reference in pickle data"));
+            }
+            let s = std::str::from_utf8(&data[start..*pos])
+                .map_err(|_| PyError::type_error("invalid utf-8 in pickle memo reference"))?;
+            *pos += 1; // skip '\n'
+            let id: usize = s.parse().map_err(|_| PyError::type_error(format!("invalid memo reference: {}", s)))?;
+            memo.get(id).cloned().ok_or_else(|| PyError::type_error(format!("pickle memo reference out of range: {}", id)))
+        }
+        // Deque-backed subclass instance (see the serializer's matching arm).
+        b'C' => {
+            let module = pickle_deserialize(data, pos, memo)?;
+            let name = pickle_deserialize(data, pos, memo)?;
+            let module_str = module.str();
+            let class_name = name.str();
+            // Resolve the class from the global class registry (every
+            // user-defined class is registered at construction) — NOT
+            // `sys.modules`/`vm.modules`, which are VM-relative and
+            // unreliable here because the active VM pointer can be a
+            // transient disposable one during `pickle.loads`.
+            let typ = crate::object::find_class_by_qualified_name(&module_str, &class_name)
+                .ok_or_else(|| PyError::type_error(format!("cannot find class {}.{} referenced by pickle data", module_str, class_name)))?;
+            let instance = PyObjectRef::new(PyObject::Instance {
+                typ: typ.clone(),
+                dict: AttrMap::new(),
+            });
+            memo.push(instance.clone());
+            let maxlen = match data.get(*pos) {
+                Some(b'M') => {
+                    *pos += 1;
+                    let start = *pos;
+                    while *pos < data.len() && data[*pos] != b'\n' {
+                        *pos += 1;
+                    }
+                    if *pos >= data.len() {
+                        return Err(PyError::type_error("unterminated maxlen in pickle data"));
+                    }
+                    let s = std::str::from_utf8(&data[start..*pos])
+                        .map_err(|_| PyError::type_error("invalid utf-8 in pickle maxlen"))?;
+                    *pos += 1;
+                    Some(s.parse::<usize>().map_err(|_| PyError::type_error(format!("invalid maxlen: {}", s)))?)
+                }
+                Some(b'N') => {
+                    *pos += 1;
+                    None
+                }
+                _ => return Err(PyError::type_error("malformed deque-instance pickle data")),
+            };
+            if *pos >= data.len() || data[*pos] != b'[' {
+                return Err(PyError::type_error("malformed deque-instance pickle data"));
+            }
+            *pos += 1;
+            let mut items = Vec::new();
+            while *pos < data.len() && data[*pos] != b']' {
+                items.push(pickle_deserialize(data, pos, memo)?);
+            }
+            if *pos >= data.len() {
+                return Err(PyError::type_error("unterminated deque-instance in pickle data"));
+            }
+            *pos += 1;
+            if *pos >= data.len() || data[*pos] != b'{' {
+                return Err(PyError::type_error("malformed deque-instance pickle data"));
+            }
+            *pos += 1;
+            let mut inst_dict = AttrMap::new();
+            while *pos < data.len() && data[*pos] != b'}' {
+                let k = pickle_deserialize(data, pos, memo)?;
+                if *pos >= data.len() {
+                    return Err(PyError::type_error("unterminated instance dict in pickle data"));
+                }
+                let v = pickle_deserialize(data, pos, memo)?;
+                inst_dict.insert(k.str(), v);
+            }
+            if *pos >= data.len() {
+                return Err(PyError::type_error("unterminated instance dict in pickle data"));
+            }
+            *pos += 1;
+            let backing = py_deque(items.into_iter().collect(), maxlen);
+            inst_dict.insert(crate::object::NATIVE_BACKING_KEY.to_string(), backing);
+            if let PyObject::Instance { dict: d, .. } = &mut *instance.borrow_mut() {
+                *d = inst_dict;
+            }
+            Ok(instance)
         }
         b'(' => {
             let mut items = Vec::new();
             while *pos < data.len() && data[*pos] != b')' {
-                items.push(pickle_deserialize(data, pos)?);
+                items.push(pickle_deserialize(data, pos, memo)?);
             }
             if *pos >= data.len() {
                 return Err(PyError::type_error("unterminated tuple in pickle data"));
@@ -3407,39 +3683,42 @@ fn pickle_deserialize(data: &[u8], pos: &mut usize) -> PyResult<PyObjectRef> {
             Ok(py_tuple(items))
         }
         b'{' => {
-            let mut dict = crate::object::PyDict::new();
+            let dict_ref = PyObjectRef::new(PyObject::Dict(Box::new(crate::object::PyDict::new())));
+            memo.push(dict_ref.clone());
             while *pos < data.len() && data[*pos] != b'}' {
-                let key = pickle_deserialize(data, pos)?;
+                let key = pickle_deserialize(data, pos, memo)?;
                 if *pos >= data.len() {
                     return Err(PyError::type_error("unterminated dict in pickle data"));
                 }
-                let value = pickle_deserialize(data, pos)?;
-                dict.set(key, value)?;
+                let value = pickle_deserialize(data, pos, memo)?;
+                if let PyObject::Dict(d) = &mut *dict_ref.borrow_mut() {
+                    d.set(key, value)?;
+                }
             }
             if *pos >= data.len() {
                 return Err(PyError::type_error("unterminated dict in pickle data"));
             }
             *pos += 1; // skip '}'
-            Ok(PyObjectRef::new(PyObject::Dict(Box::new(dict))))
+            Ok(dict_ref)
         }
         b'R' => {
-            let start = pickle_deserialize(data, pos)?;
-            let stop = pickle_deserialize(data, pos)?;
-            let step = pickle_deserialize(data, pos)?;
+            let start = pickle_deserialize(data, pos, memo)?;
+            let stop = pickle_deserialize(data, pos, memo)?;
+            let step = pickle_deserialize(data, pos, memo)?;
             let s = start.as_i64().unwrap_or(0);
             let e = stop.as_i64().unwrap_or(0);
             let p = step.as_i64().unwrap_or(1);
             Ok(PyObjectRef::imm(PyObject::Range { start: s, stop: e, step: p }))
         }
         b's' => {
-            let start = pickle_deserialize(data, pos)?;
-            let stop = pickle_deserialize(data, pos)?;
-            let step = pickle_deserialize(data, pos)?;
+            let start = pickle_deserialize(data, pos, memo)?;
+            let stop = pickle_deserialize(data, pos, memo)?;
+            let step = pickle_deserialize(data, pos, memo)?;
             Ok(PyObjectRef::imm(PyObject::Slice { start, stop, step }))
         }
         b'i' => {
-            let list = pickle_deserialize(data, pos)?;
-            let index = pickle_deserialize(data, pos)?;
+            let list = pickle_deserialize(data, pos, memo)?;
+            let index = pickle_deserialize(data, pos, memo)?;
             let items = match &*list.borrow() {
                 PyObject::List(items) => items.clone(),
                 _ => return Err(PyError::type_error("invalid list_iterator pickle data")),
@@ -3448,9 +3727,9 @@ fn pickle_deserialize(data: &[u8], pos: &mut usize) -> PyResult<PyObjectRef> {
             Ok(PyObjectRef::new(PyObject::ListIter { list: items, index: idx }))
         }
         b'r' => {
-            let current = pickle_deserialize(data, pos)?;
-            let stop = pickle_deserialize(data, pos)?;
-            let step = pickle_deserialize(data, pos)?;
+            let current = pickle_deserialize(data, pos, memo)?;
+            let stop = pickle_deserialize(data, pos, memo)?;
+            let step = pickle_deserialize(data, pos, memo)?;
             let c = current.as_i64().unwrap_or(0);
             let e = stop.as_i64().unwrap_or(0);
             let p = step.as_i64().unwrap_or(1);
@@ -3534,7 +3813,8 @@ pub fn create_pickle_dict() -> HashMap<String, PyObjectRef> {
             return Err(PyError::type_error("dumps() missing required argument"));
         }
         let mut buf = Vec::new();
-        pickle_serialize(&args[0], &mut buf)?;
+        let mut memo: Vec<*const ()> = Vec::new();
+        pickle_serialize(&args[0], &mut buf, &mut memo)?;
         Ok(PyObjectRef::imm(PyObject::Bytes(buf)))
     });
 
@@ -3552,7 +3832,8 @@ pub fn create_pickle_dict() -> HashMap<String, PyObjectRef> {
             }
         };
         let mut pos = 0;
-        let result = pickle_deserialize(&data, &mut pos)?;
+        let mut memo: Vec<PyObjectRef> = Vec::new();
+        let result = pickle_deserialize(&data, &mut pos, &mut memo)?;
         // Check there's no trailing garbage (except for flat values where pos may be at end)
         if pos != data.len() {
             return Err(PyError::type_error(format!(

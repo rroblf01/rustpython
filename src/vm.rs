@@ -4002,6 +4002,25 @@ impl VirtualMachine {
                             // instance-attribute data.
                             let attr = attr.or_else(|| {
                                 let native = dict.get(crate::object::NATIVE_BACKING_KEY)?;
+                                // A deque subclass's `__copy__`/`copy()` must
+                                // return a NEW instance of the SAME subclass
+                                // (not a raw deque) — build that closure here,
+                                // since this inline resolution path mirrors
+                                // `get_attribute_impl`'s own handling.
+                                if matches!(&*native.borrow(), PyObject::Deque { .. }) && (name == "__copy__" || name == "copy") {
+                                    let typ_clone = typ.clone();
+                                    let new_native = {
+                                        let b = native.borrow();
+                                        if let PyObject::Deque { data, maxlen } = &*b {
+                                            py_deque(data.clone(), *maxlen)
+                                        } else { unreachable!() }
+                                    };
+                                    return Some(PyObjectRef::new(PyObject::Closure(Rc::new(move |_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                                        let mut new_dict = crate::object::AttrMap::new();
+                                        new_dict.insert(crate::object::NATIVE_BACKING_KEY.to_string(), new_native.clone());
+                                        Ok(PyObjectRef::new(PyObject::Instance { typ: typ_clone.clone(), dict: new_dict }))
+                                    }))));
+                                }
                                 let val = native.borrow().get_attribute(&name).ok()?;
                                 let rebound = match &*val.borrow() {
                                     PyObject::BuiltinMethod { name: n, func, .. } => {
