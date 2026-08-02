@@ -989,6 +989,15 @@ impl PyObjectRef {
                 }
             }
         }
+        // Real CPython short-circuits container/slice `==` on POINTER
+        // IDENTITY before comparing components — `s1 == s1` where a
+        // component's `__eq__` raises (test_slice.py::test_cmp's `BadCmp`)
+        // is True, not an exception. Bare Instances with a custom `__eq__`
+        // do NOT short-circuit (`b == b` calls `__eq__` and may raise, as
+        // the same test asserts).
+        if !matches!(&*self.borrow(), PyObject::Instance { .. }) && self.is(other) {
+            return Ok(true);
+        }
         // For container types, clone elements before element-wise comparison
         // so the RefCell borrow on the container is released first. This
         // prevents RefCell panics when an element's __eq__ mutates the same

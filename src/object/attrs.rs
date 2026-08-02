@@ -6688,32 +6688,58 @@ impl PyObject {
                     "stop" => Ok(stop.clone()),
                     "step" => Ok(step.clone()),
                     "indices" => {
-                        let is_start_none = matches!(&*start.borrow(), PyObject::None);
-                        let is_stop_none = matches!(&*stop.borrow(), PyObject::None);
-                        let is_step_none = matches!(&*step.borrow(), PyObject::None);
-                        let s_start_raw = start.as_i64().unwrap_or(0);
-                        let s_stop_raw = stop.as_i64().unwrap_or(0);
-                        let s_step_raw = step.as_i64().unwrap_or(1);
+                        let start_ref = start.clone();
+                        let stop_ref = stop.clone();
+                        let step_ref = step.clone();
                         Ok(PyObjectRef::imm(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
                             if args.is_empty() { return Err(PyError::type_error("indices() takes exactly 1 argument")); }
-                            let length = args[0].as_i64().ok_or_else(|| PyError::type_error("indices() argument must be an int"))?;
-                            if length < 0 { return Err(PyError::value_error("length should not be negative")); }
-                            let step = if is_step_none || s_step_raw == 0 { 1 } else { s_step_raw };
-                            if step == 0 { return Err(PyError::value_error("slice step cannot be zero")); }
-                            let start = if is_start_none { if step > 0 { 0 } else { length - 1 } }
-                                else { s_start_raw };
-                            let stop = if is_stop_none { if step > 0 { length } else { -length - 1 } }
-                                else { s_stop_raw };
-                            let (res_start, res_stop) = if step > 0 {
-                                let start_val = if start < 0 { (length + start).max(0) } else { start.min(length) };
-                                let stop_val = if stop < 0 { (length + stop).max(0) } else { stop.min(length) };
-                                (start_val, stop_val)
-                            } else {
-                                let start_val = if start < 0 { (length + start).max(-1) } else { start.min(length - 1) };
-                                let stop_val = if stop < 0 { (length + stop).max(-1) } else { stop.min(length - 1) };
-                                (start_val, stop_val)
+                            // Components can be ANY int (huge ones beyond
+                            // i64 — real test_slice.py::test_indices sweeps
+                            // values up to 2**100) or an `__index__` object;
+                            // a float / arbitrary object must raise
+                            // TypeError. Parsed at CALL time (accessing
+                            // `.indices` must never validate the components).
+                            let comp = |v: &PyObjectRef| -> PyResult<num_bigint::BigInt> {
+                                crate::object::to_index(v).map_err(|_| PyError::type_error(
+                                    "slice indices must be integers or None or have an __index__ method"
+                                ))
                             };
-                            Ok(py_tuple(vec![py_int(res_start as i64), py_int(res_stop as i64), py_int(step as i64)]))
+                            let is_none = |v: &PyObjectRef| matches!(&*v.borrow(), PyObject::None);
+                            let length = comp(&args[0])?;
+                            if length.sign() == num_bigint::Sign::Minus {
+                                return Err(PyError::value_error("length should not be negative"));
+                            }
+                            let one = num_bigint::BigInt::from(1);
+                            let zero = num_bigint::BigInt::from(0);
+                            let s_step_raw = if is_none(&step_ref) { None } else { Some(comp(&step_ref)?) };
+                            let step = match &s_step_raw {
+                                Some(s) if !s.is_zero() => s.clone(),
+                                Some(_) => return Err(PyError::value_error("slice step cannot be zero")),
+                                None => one.clone(),
+                            };
+                            let neg = step.sign() == num_bigint::Sign::Minus;
+                            let start = match &*start_ref.borrow() {
+                                PyObject::None => if neg { &length - &one } else { zero.clone() },
+                                _ => comp(&start_ref)?,
+                            };
+                            let stop = match &*stop_ref.borrow() {
+                                PyObject::None => if neg { -(&length + &one) } else { length.clone() },
+                                _ => comp(&stop_ref)?,
+                            };
+                            // clamp(v, lo, hi): negative v means length+v.
+                            let clamp = |v: num_bigint::BigInt, lo: &num_bigint::BigInt, hi: &num_bigint::BigInt| -> num_bigint::BigInt {
+                                let v = if v.sign() == num_bigint::Sign::Minus { &length + &v } else { v };
+                                let v = if &v < lo { lo.clone() } else { v };
+                                if &v > hi { hi.clone() } else { v }
+                            };
+                            let (res_start, res_stop) = if neg {
+                                let lo = num_bigint::BigInt::from(-1);
+                                let hi = &length - &one;
+                                (clamp(start, &lo, &hi), clamp(stop, &lo, &hi))
+                            } else {
+                                (clamp(start, &zero, &length), clamp(stop, &zero, &length))
+                            };
+                            Ok(py_tuple(vec![py_int(res_start), py_int(res_stop), py_int(step)]))
                         }))))
                     }
                     "__hash__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
