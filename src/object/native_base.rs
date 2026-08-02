@@ -278,6 +278,54 @@ pub(crate) fn synthesize_native_init(kind: &str, args: &[PyObjectRef], keywords:
     }
 }
 
+/// Real `dict.__init__`/`list.__init__`/etc. for a class that transparently
+/// subclasses a native type — installed directly in each migrated type's own
+/// dict (see `modules::core::create_core_dicts`'s per-type `*_dict` blocks)
+/// so it's found by the NORMAL mro walk, both for `super().__init__(...)`
+/// calls and for the unbound `dict.__init__(instance, ...)` idiom.
+///
+/// Before this existed, NEITHER call form actually populated anything:
+/// mro order for e.g. `class Foo(dict)` is `[Foo, dict, object]`, and since
+/// `dict`'s own type-dict had NO `__init__` entry at all, the mro walk
+/// (in `get_attribute_impl`'s `super()`-handling arm, `attrs.rs`) fell
+/// through PAST `dict` to `object`'s generic no-op `__init__` and stopped
+/// there — `object`'s `__init__` was found and auto-bound first, so a
+/// SEPARATE special-case closure written specifically to populate the
+/// native backing (also in `attrs.rs`, guarded on "not found via any Type
+/// in the mro") was silently unreachable dead code: the mro walk always
+/// found `object.__init__` before ever falling through to it. Confirmed via
+/// `_strptime.py`'s `TimeRE.__init__` (`class TimeRE(dict): ... base =
+/// super(); base.__init__(mapping)`), which builds a completely EMPTY dict
+/// instead of the real strptime-directive regex table, breaking every
+/// `datetime.strptime`/`time.strptime` call — SIGSEGV/hang-adjacent
+/// discovery via `test_datetime.py` unittest module loading (a `KeyError`
+/// deep in `_strptime`, since the resulting `TimeRE` instance was empty).
+///
+/// A plain `BuiltinFunction` (not `BuiltinMethod` with a placeholder
+/// `self_obj` — the recurring arg-shift bug documented throughout this
+/// session) taking `self` as `args[0]`, matching the exact unbound-method
+/// convention real `def __init__(self, ...)` methods use: the normal mro
+/// walk auto-binds `Function`/`BuiltinFunction` values found via `super()`
+/// into a `BoundMethod` (prepending `self` at CALL time), and a direct
+/// `dict.__init__(instance, ...)` access returns it unbound, requiring the
+/// caller to pass `instance` explicitly — both forms end up calling this
+/// with `self` in `args[0]` either way.
+pub(crate) fn native_base_init_builtin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    let self_obj = args.first().ok_or_else(|| PyError::type_error("__init__() missing required argument: 'self'"))?.clone();
+    let rest = &args[1..];
+    let kind = {
+        let typ = if let PyObject::Instance { typ, .. } = &*self_obj.borrow() { Some(typ.clone()) } else { None };
+        typ.and_then(|t| native_base_of_type(&t))
+    };
+    if let Some(kind) = kind {
+        let native = synthesize_native_init(&kind, rest, &[])?;
+        if let PyObject::Instance { dict, .. } = &mut *self_obj.borrow_mut() {
+            dict.insert(NATIVE_BACKING_KEY.to_string(), native);
+        }
+    }
+    Ok(py_none())
+}
+
 pub(crate) fn collect_iterable(iterable: &PyObjectRef) -> PyResult<Vec<PyObjectRef>> {
     let iter_obj = builtin_iter(&[iterable.clone()])?;
     let mut items = Vec::new();

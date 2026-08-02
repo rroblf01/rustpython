@@ -549,6 +549,25 @@ pub fn deepcopy_one(obj: &PyObjectRef, memo: &PyObjectRef) -> Result<PyObjectRef
             remember(memo, obj, &result);
             Ok(result)
         }
+        // A `slice`'s `start`/`stop`/`step` can be arbitrary (mutable)
+        // objects, not just ints (see the `.start`/`.stop`/`.step`
+        // attribute-getter's own doc comment in `attrs.rs`) — was falling
+        // to the generic `_` fallback below, which has no
+        // `native_backing_of`/`__deepcopy__` for a plain `Slice` and so
+        // just cloned the `Rc`, returning the SAME object. Real Python
+        // deep-copies each of the three fields independently (confirmed:
+        // `test_slice.py::test_deepcopy`'s "corner case for mutable
+        // indices", `slice([1,2],[3,4],[5,6])`, asserts the copy `is not`
+        // the original AND each field `is not` its original counterpart).
+        PyObject::Slice { start, stop, step } => {
+            let (start, stop, step) = (start.clone(), stop.clone(), step.clone());
+            let new_start = deepcopy_one(&start, memo)?;
+            let new_stop = deepcopy_one(&stop, memo)?;
+            let new_step = deepcopy_one(&step, memo)?;
+            let result = PyObjectRef::imm(PyObject::Slice { start: new_start, stop: new_stop, step: new_step });
+            remember(memo, obj, &result);
+            Ok(result)
+        }
         _ => {
             // Custom `__deepcopy__` takes priority (matching real Python's
             // `copy.deepcopy` protocol) — without this, an Instance nested
@@ -558,6 +577,31 @@ pub fn deepcopy_one(obj: &PyObjectRef, memo: &PyObjectRef) -> Result<PyObjectRef
             if let Ok(dc_method) = obj.borrow().get_attribute("__deepcopy__") {
                 let result = call_function(&dc_method, vec![obj.clone(), memo.clone()])?;
                 remember(memo, obj, &result);
+                return Ok(result);
+            }
+            // Same native-base-subclass gap as `copy.copy`'s own fallback
+            // (`misc.rs`) — a class transparently subclassing a native
+            // container with no `__deepcopy__` override fell straight to
+            // `obj.clone()` (an `Rc` clone, the SAME object), instead of
+            // recursively deep-copying its actual contents. Deep-copy the
+            // native backing's elements (not just a shallow copy of the
+            // top-level container, unlike `copy.copy`) and wrap the result
+            // in a NEW `Instance` of the same class.
+            if let Some(native) = native_backing_of(obj) {
+                let placeholder = PyObjectRef::new(PyObject::None);
+                remember(memo, obj, &placeholder);
+                let new_native = deepcopy_one(&native, memo)?;
+                let (typ, dict) = if let PyObject::Instance { typ, dict } = &*obj.borrow() {
+                    (typ.clone(), dict.clone())
+                } else {
+                    unreachable!()
+                };
+                let mut new_dict = dict;
+                new_dict.insert(NATIVE_BACKING_KEY.to_string(), new_native);
+                let result = PyObjectRef::new(PyObject::Instance { typ, dict: new_dict });
+                if let PyObject::Dict(memo_dict) = &mut *memo.borrow_mut() {
+                    memo_dict.set_by_identity(obj.clone(), result.clone());
+                }
                 return Ok(result);
             }
             let result = obj.clone();

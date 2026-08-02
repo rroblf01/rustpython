@@ -35,6 +35,36 @@ pub fn py_compare(a: &PyObjectRef, b: &PyObjectRef, op: u32) -> PyResult<PyObjec
             if let Some(result) = try_rich_compare(a, b, op)? {
                 return Ok(py_bool(result));
             }
+            // A class transparently subclassing a native container
+            // (`class MyList(list): pass`) with NO explicit comparison
+            // dunders anywhere in its own mro falls through to here —
+            // `list`/`str`/`tuple`/etc themselves (now real, migrated
+            // `Type` objects) have no ACTUAL Python-callable `__eq__`/
+            // `__lt__`/etc stored in their type-dict (native comparison is
+            // implemented via the separate `PyObject::equals`/`Compare`
+            // machinery below, never as a real dunder `lookup_dunder_via_
+            // mro` could find), so `try_rich_compare` always returned
+            // `None` here and this fell all the way to raw IDENTITY
+            // comparison for `==`/`!=` (`TypeError` for ordering) —
+            // `MyList([1,2]) == MyList([1,2])` was always `False` unless
+            // the two were the literal same object, and e.g. a `str`
+            // subclass instance compared with `<` against another raised
+            // `TypeError` outright even though real `str` is totally
+            // ordered and a subclass inherits that (confirmed via
+            // `test_xml_dom_minicompat.py`'s `NodeList(list)` and
+            // `test_compare.py::test_str_subclass`). Delegate to the
+            // NATIVE BACKING by recursing into `py_compare` itself with
+            // the unwrapped native value(s) — reuses ALL of its existing
+            // native comparison logic (list/tuple/str/bytes ordering, set
+            // subset/superset semantics, ...) instead of duplicating any
+            // of it here.
+            let a_native = native_backing_of(a);
+            let b_native = native_backing_of(b);
+            if a_native.is_some() || b_native.is_some() {
+                let a_cmp = a_native.unwrap_or_else(|| a.clone());
+                let b_cmp = b_native.unwrap_or_else(|| b.clone());
+                return py_compare(&a_cmp, &b_cmp, op);
+            }
             return Ok(py_bool(match op {
                 2 => a.is(b),
                 5 => !a.is(b),

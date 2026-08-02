@@ -969,8 +969,19 @@ impl PyObjectRef {
             };
             if let Some(other_items) = other_items {
                 if my_items.len() != other_items.len() { return Ok(false); }
+                // Real container `==` shortcuts each element via identity
+                // BEFORE falling back to `__eq__` (`x is y or x == y`) —
+                // needed for non-reflexive elements (`float('nan')`, or any
+                // object whose `__eq__` always returns `False`, e.g. a
+                // sentinel type). Was calling `x.equals(y)?` alone, so two
+                // lists/tuples containing the exact SAME such object at
+                // corresponding positions still compared unequal overall —
+                // confirmed via CPython's own `test_contains.py::test_
+                // nonreflexive` (`constructor(values) == constructor(values)`
+                // for the SAME `values` tuple, containing both `nan` and a
+                // never-equal sentinel, must be `True`).
                 for (x, y) in my_items.iter().zip(other_items.iter()) {
-                    if !x.equals(y)? { return Ok(false); }
+                    if !(x.is(y) || x.equals(y)?) { return Ok(false); }
                 }
                 return Ok(true);
             }
@@ -987,13 +998,15 @@ impl PyObjectRef {
             };
             if let Some(other_items) = other_dict {
                 if my_items.len() != other_items.len() { return Ok(false); }
+                // Same identity-shortcut fix as the List/Tuple case just
+                // above, for both keys and values.
                 for (k, va) in my_items {
                     let mut found = None;
                     for (ok, ov) in &other_items {
-                        if ok.equals(&k)? { found = Some(ov); break; }
+                        if ok.is(&k) || ok.equals(&k)? { found = Some(ov); break; }
                     }
                     match found {
-                        Some(vb) => { if !va.equals(vb)? { return Ok(false); } }
+                        Some(vb) => { if !(va.is(vb) || va.equals(vb)?) { return Ok(false); } }
                         None => { return Ok(false); }
                     }
                 }

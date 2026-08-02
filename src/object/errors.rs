@@ -128,6 +128,51 @@ impl PyError {
     /// raised parent class even though the subclass relationship holds in
     /// the other direction (same asymmetry already documented for
     /// `binascii.Error`/`ValueError`).
+    /// Builds an `OSError` FROM A REAL `std::io::Error`, picking the exact
+    /// specific subclass real CPython would raise (`FileNotFoundError`,
+    /// `PermissionError`, `FileExistsError`, `IsADirectoryError`,
+    /// `NotADirectoryError`, `InterruptedError`) based on `e.kind()`,
+    /// instead of the generic `PyError::OsError` every filesystem-touching
+    /// call site used to construct unconditionally. Since ALL of these are
+    /// real `OSError` subclasses (already registered in `is_exception_
+    /// subclass`, `vm.rs`), catching via the specific name is a real,
+    /// extremely common Python idiom (`except FileNotFoundError:`,
+    /// `Lib/test/support/os_helper.py`'s own `rmtree` helper) that
+    /// previously NEVER matched anything this interpreter's own filesystem
+    /// functions raised — every such `except` silently let the OSError
+    /// propagate uncaught instead of being handled gracefully. Confirmed
+    /// via `test_dbm.py::test_whichdb`: `os_helper.rmtree`'s `except
+    /// FileNotFoundError: pass` never caught the "directory doesn't exist
+    /// yet" case on a fresh run, crashing every single caller.
+    pub fn os_error_from_io(e: &std::io::Error) -> Self {
+        use std::io::ErrorKind;
+        let msg = format!("{}", e);
+        let name = match e.kind() {
+            ErrorKind::NotFound => "FileNotFoundError",
+            ErrorKind::PermissionDenied => "PermissionError",
+            ErrorKind::AlreadyExists => "FileExistsError",
+            ErrorKind::Interrupted => "InterruptedError",
+            _ => return PyError::OsError(msg),
+        };
+        PyError::Exception(name.to_string(), PyObjectRef::new(PyObject::Exception {
+            typ: name.to_string(),
+            args: vec![py_str(&msg)],
+            cause: None,
+        }))
+    }
+
+    /// Same pattern as `os_error_from_io` above, for the (rarer) call sites
+    /// that construct a "file not found"-shaped message by hand rather than
+    /// from a real `std::io::Error` (e.g. an explicit existence check).
+    pub fn file_not_found_error(msg: impl Into<String>) -> Self {
+        let msg = msg.into();
+        PyError::Exception("FileNotFoundError".to_string(), PyObjectRef::new(PyObject::Exception {
+            typ: "FileNotFoundError".to_string(),
+            args: vec![py_str(&msg)],
+            cause: None,
+        }))
+    }
+
     pub fn module_not_found_error(msg: impl Into<String>) -> Self {
         let msg = msg.into();
         PyError::Exception("ModuleNotFoundError".to_string(), PyObjectRef::new(PyObject::Exception {

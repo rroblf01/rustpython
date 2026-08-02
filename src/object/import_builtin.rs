@@ -204,11 +204,62 @@ pub fn builtin_exec(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
 }
 
+/// PEP 263 source-encoding-cookie detection: real Python scans the first
+/// TWO lines of a `bytes` source for a `# -*- coding: <name> -*-`-shaped
+/// comment before falling back to UTF-8. Only meaningful for `bytes`/
+/// `bytearray` source (a `str` source is already decoded, nothing to
+/// detect) — needed so `compile()` can decode non-UTF-8 source bytes
+/// (e.g. Latin-1) correctly instead of corrupting/mis-tokenizing them.
+fn detect_pep263_encoding(bytes: &[u8]) -> Option<String> {
+    for line in bytes.split(|&b| b == b'\n').take(2) {
+        let line = String::from_utf8_lossy(line);
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some(idx) = trimmed.find("coding").map(|i| i + "coding".len()) {
+            let rest = trimmed[idx..].trim_start();
+            if let Some(rest) = rest.strip_prefix(':').or_else(|| rest.strip_prefix('=')) {
+                let name: String = rest.trim_start().chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_' || *c == '.')
+                    .collect();
+                if !name.is_empty() {
+                    return Some(name);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Decode raw source bytes (`compile()`'s `source` argument as `bytes`/
+/// `bytearray`) using its own PEP 263 coding cookie if present, defaulting
+/// to UTF-8 otherwise (real CPython's own default).
+fn decode_source_bytes(bytes: &[u8]) -> String {
+    let encoding = detect_pep263_encoding(bytes).unwrap_or_else(|| "utf-8".to_string());
+    match encoding.to_ascii_lowercase().replace('_', "-").as_str() {
+        "latin-1" | "latin1" | "iso-8859-1" | "iso8859-1" | "l1" => {
+            bytes.iter().map(|&b| b as char).collect()
+        }
+        _ => String::from_utf8_lossy(bytes).into_owned(),
+    }
+}
+
 pub fn builtin_compile(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() < 3 {
         return Err(PyError::type_error("compile() requires 3 arguments (source, filename, mode)"));
     }
-    let source = args[0].str();
+    // `bytes`/`bytearray` source must be decoded using its OWN encoding
+    // (PEP 263 coding cookie, defaulting to UTF-8) — `.str()` on a `bytes`
+    // object is its Python REPR (`"b'...'"`, quotes and escapes included),
+    // not a decode, which silently fed garbage/mis-shaped source into the
+    // parser instead of the real characters (confirmed via
+    // `test_utf8source.py::test_latin1`: `compile()` on Latin-1-encoded
+    // source containing `Ç` never even defined the variable it assigned).
+    let source = match &*args[0].borrow() {
+        PyObject::Bytes(b) | PyObject::ByteArray(b) => decode_source_bytes(b),
+        _ => args[0].str(),
+    };
     let filename = args[1].str();
     let mode = args[2].str();
     // The `mode` argument was previously READ but never actually consulted

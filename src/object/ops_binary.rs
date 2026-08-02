@@ -116,8 +116,31 @@ pub fn py_add(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
                 _ => Err(PyError::type_error(format!("unsupported operand type(s) for +: '{}' and '{}'", a.type_name(), b.type_name()))),
             }
         }
-        _ => Err(PyError::type_error(format!("unsupported operand type(s) for +: '{}' and '{}'",
-            a_obj.type_name(), b_obj.type_name())))
+        // A class transparently subclassing a native container (`class
+        // MyList(list): pass`) with no explicit `__add__` anywhere in its
+        // mro falls through to here as a plain `PyObject::Instance`,
+        // matching none of the arms above (which only match the RAW
+        // native variants) — `MyList([1,2]) + MyList([3,4])` raised a
+        // spurious `TypeError` instead of concatenating, exactly the same
+        // "native dunders aren't real Python-callable methods, so mro
+        // lookup finds nothing" gap already fixed for `==`/`!=` just above
+        // in `ops_compare.rs`. Delegate to the native backing (or the
+        // operand itself, if it's already a raw native value on one side,
+        // e.g. `MyList([1,2]) + [3,4]`) by recursing with the unwrapped
+        // values.
+        _ => {
+            let a_native = native_backing_of(a);
+            let b_native = native_backing_of(b);
+            if a_native.is_some() || b_native.is_some() {
+                let a_use = a_native.unwrap_or_else(|| a.clone());
+                let b_use = b_native.unwrap_or_else(|| b.clone());
+                drop(a_obj);
+                drop(b_obj);
+                return py_add(&a_use, &b_use);
+            }
+            Err(PyError::type_error(format!("unsupported operand type(s) for +: '{}' and '{}'",
+                a_obj.type_name(), b_obj.type_name())))
+        }
     }
 }
 
@@ -614,7 +637,32 @@ fn complex_pow(are: f64, aim: f64, bre: f64, bim: f64) -> PyObjectRef {
 pub fn py_lshift(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
         if bi < 0 { return Err(PyError::value_error("negative shift count")); }
-        return Ok(py_int(ai.wrapping_shl(bi as u32)));
+        // Was: unconditional `wrapping_shl` — Rust's `wrapping_shl` reduces
+        // the SHIFT AMOUNT modulo 64 (not the result), so `1 << 50000`
+        // computed `1i64.wrapping_shl(50000 % 64)` == `1 << 16` == `65536`
+        // instead of the correct ~15,000-digit bigint — a silent, badly
+        // wrong result for any shift amount that doesn't fit i64, not an
+        // error or a slow-but-correct path. Confirmed via CPython's own
+        // `test_pow.py::test_big_exp` (`1 << 50000`). Real CPython promotes
+        // to arbitrary precision the instant a shift would lose bits —
+        // same "checked op, BigInt fallback on overflow" pattern as
+        // `py_pow`'s own `checked_pow` above. A round-trip check
+        // (`result >> bi == ai`) after `checked_shl` catches every
+        // overflowing case (including negative `ai`, where `>>` is
+        // arithmetic/sign-extending in Rust, matching two's-complement
+        // semantics), not just `bi >= 64`.
+        if ai == 0 {
+            return Ok(py_int(0));
+        }
+        if bi < 63 {
+            if let Some(result) = ai.checked_shl(bi as u32) {
+                if result >> (bi as u32) == ai {
+                    return Ok(py_int(result));
+                }
+            }
+        }
+        let big_a = BigInt::from(ai);
+        return Ok(py_int(big_a << (bi as usize)));
     }
     if let Some(r) = try_dunder_binop(a, b, "__lshift__")? { return Ok(r); }
     if let Some(r) = try_dunder_binop(b, a, "__rlshift__")? { return Ok(r); }

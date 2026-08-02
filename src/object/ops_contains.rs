@@ -78,6 +78,15 @@ pub fn contains_op(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<bool> {
     let container = a.borrow();
     match &*container {
         PyObject::Str(s) => {
+            // Real `'x' in some_str` requires `x` to ALREADY be a `str` —
+            // was coercing ANY `b` via `.str()` (e.g. `None` -> `"None"`)
+            // and checking substring containment against that, silently
+            // returning `False` for a nonsensical comparison instead of
+            // raising. Confirmed via CPython's own `test_contains.py`
+            // (`None in 'abc'` must raise `TypeError`).
+            if !matches!(&*b.borrow(), PyObject::Str(_)) {
+                return Err(PyError::type_error(format!("'in <string>' requires string as left operand, not {}", b.get_type_name())));
+            }
             let item_str = b.str();
             Ok(s.contains(&item_str))
         }

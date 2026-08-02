@@ -72,11 +72,42 @@ pub(crate) fn generator_next_fallback(args: &[PyObjectRef]) -> PyResult<PyObject
             }
             Err(e) => {
                 *frame_opt = None;
-                Err(e)
+                Err(wrap_stopiteration_pep479(e))
             }
         }
     } else {
         Err(PyError::StopIteration)
+    }
+}
+
+/// PEP 479: a `StopIteration` that escapes from a generator's OWN body code
+/// (as opposed to the generator's normal exhaustion, which this interpreter
+/// signals via a DIFFERENT, internal `PyError::StopIteration`/`Exception
+/// ("StopIteration", ...)` produced right here in `generator_next_fallback`
+/// once its frame naturally finishes) must be converted into a `RuntimeError`
+/// instead of propagating as-is — otherwise a `StopIteration` accidentally
+/// raised deep inside a generator (e.g. `yield f()` where `f()` itself raises
+/// `StopIteration`) is silently indistinguishable from the generator simply
+/// being done, which is exactly the surprising-early-termination bug PEP 479
+/// exists to prevent. Confirmed missing via `test_generator_stop.py`'s own
+/// `test_stopiteration_wrapping`/`test_stopiteration_wrapping_context`.
+fn wrap_stopiteration_pep479(e: PyError) -> PyError {
+    let stop_instance = match &e {
+        PyError::StopIteration => Some(PyObjectRef::new(PyObject::Exception {
+            typ: "StopIteration".to_string(),
+            args: vec![],
+            cause: None,
+        })),
+        PyError::Exception(name, obj) if name == "StopIteration" => Some(obj.clone()),
+        _ => None,
+    };
+    match stop_instance {
+        Some(inst) => PyError::Exception("RuntimeError".to_string(), PyObjectRef::new(PyObject::Exception {
+            typ: "RuntimeError".to_string(),
+            args: vec![py_str("generator raised StopIteration")],
+            cause: Some(inst),
+        })),
+        None => e,
     }
 }
 
@@ -240,7 +271,7 @@ pub(crate) fn generator_throw_with_vm(vm: &mut crate::vm::VirtualMachine, args: 
                 Err(e) => {
                     vm.frames.pop();
                     *frame_opt = None;
-                    Err(e)
+                    Err(wrap_stopiteration_pep479(e))
                 }
             }
         } else {
