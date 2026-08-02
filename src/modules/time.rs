@@ -150,9 +150,43 @@ fn format_strftime(fmt: &str, y: i64, m: i64, d: i64, h: i64, min: i64, s: i64, 
                 Some('H') => result.push_str(&format!("{:02}", h)),
                 Some('M') => result.push_str(&format!("{:02}", min)),
                 Some('S') => result.push_str(&format!("{:02}", s)),
+                // `%I` (12-hour, 01-12) and `%p` (AM/PM) — `test_strftime.py`'s
+                // FATAL strftest1 list checks both (an unsupported standard
+                // directive that comes back unchanged starting with '%' is a
+                // hard failure, not a soft one).
+                Some('I') => {
+                    let ih = h % 12;
+                    result.push_str(&format!("{:02}", if ih == 0 { 12 } else { ih }));
+                }
+                Some('p') => result.push_str(if h < 12 { "AM" } else { "PM" }),
                 Some('j') => result.push_str(&format!("{:03}", yday + 1)),
                 Some('w') => result.push_str(&format!("{}", (wday + 1) % 7)),
                 Some('u') => result.push_str(&format!("{}", if wday == 0 { 7 } else { wday })),
+                // `%U`/`%W` — week numbers (Sunday-first / Monday-first),
+                // matching the exact formula `test_strftime.py` itself uses
+                // (`(tm_yday + jan1_tm_wday)//7` with the Monday-based
+                // Python `tm_wday` convention, and its `%W` variant).
+                Some('U') => {
+                    let jan1_wday = weekday_yday_for(y, 1, 1).0;
+                    result.push_str(&format!("{:02}", (yday + 1 + jan1_wday) / 7));
+                }
+                Some('W') => {
+                    let jan1_wday = weekday_yday_for(y, 1, 1).0;
+                    result.push_str(&format!("{:02}", (yday + 1 + (jan1_wday - 1).rem_euclid(7)) / 7));
+                }
+                Some('Z') => { /* this interpreter models no timezone (localtime == gmtime == UTC) — emit nothing rather than the raw directive */ }
+                Some('e') => result.push_str(&format!("{:2}", d)),
+                Some('k') => result.push_str(&format!("{:2}", h)),
+                Some('n') => result.push('\n'),
+                Some('t') => result.push('\t'),
+                Some('R') => result.push_str(&format!("{:02}:{:02}", h, min)),
+                Some('T') => result.push_str(&format!("{:02}:{:02}:{:02}", h, min, s)),
+                Some('D') => result.push_str(&format!("{:02}/{:02}/{:02}", m, d, y % 100)),
+                Some('r') => {
+                    let ih = h % 12;
+                    let ih = if ih == 0 { 12 } else { ih };
+                    result.push_str(&format!("{:02}:{:02}:{:02} {}", ih, min, s, if h < 12 { "AM" } else { "PM" }));
+                }
                 Some('A') => {
                     let weekdays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
                     result.push_str(weekdays[wday as usize]);
@@ -366,20 +400,51 @@ pub fn create_time_dict() -> HashMap<String, PyObjectRef> {
 
     // gmtime(secs=None) -> struct_time
     time_func!("gmtime", |args| {
-        let secs = if !args.is_empty() { args[0].as_i64().unwrap_or(0) } else {
+        let secs = if !args.is_empty() {
+            args[0].as_i64().or_else(|| args[0].as_f64().map(|f| f as i64)).unwrap_or(0)
+        } else {
             SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64
         };
         let (y, m, d, h, min, s, wday, yday) = epoch_to_ymd(secs);
         Ok(make_struct_time(y, m, d, h, min, s, wday, yday, 0))
     });
 
-    // localtime(secs=None) -> struct_time
+    // localtime(secs=None) -> struct_time — accepts int OR float seconds
+    // (real CPython does; `time.mktime` returns a float, so round-tripping
+    // `localtime(mktime(t))` must not silently coerce a float to 0).
     time_func!("localtime", |args| {
-        let secs = if !args.is_empty() { args[0].as_i64().unwrap_or(0) } else {
+        let secs = if !args.is_empty() {
+            args[0].as_i64().or_else(|| args[0].as_f64().map(|f| f as i64)).unwrap_or(0)
+        } else {
             SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64
         };
         let (y, m, d, h, min, s, wday, yday) = epoch_to_ymd(secs);
         Ok(make_struct_time(y, m, d, h, min, s, wday, yday, 0))
+    });
+
+    // mktime(t) -> float — inverse of localtime(): interpret the caller's
+    // date fields as this interpreter's own timezone (UTC — the only one it
+    // models; localtime/gmtime are identical here) and return epoch seconds.
+    // Was missing entirely (`AttributeError`), breaking `test_strftime.py`'s
+    // `_update_variables` (`time.mktime(jan1)` to derive tm_wday/tm_yday for
+    // `%U`/`%W` week-number computations) and any caller that round-trips a
+    // struct_time through epoch seconds. Real CPython additionally NORMALIZES
+    // out-of-range fields (tm_mday=32 rolls into next month); not modeled
+    // here — the common case passes valid dates.
+    time_func!("mktime", |args| {
+        let t = args.first().ok_or_else(|| PyError::type_error("mktime() missing required argument"))?;
+        let get = |field: &str, idx: usize| -> i64 {
+            match &*t.borrow() {
+                PyObject::Instance { dict, .. } => dict.get(field).and_then(|v| v.as_i64()).unwrap_or(0),
+                PyObject::Tuple(items) => items.get(idx).and_then(|v| v.as_i64()).unwrap_or(0),
+                _ => 0,
+            }
+        };
+        let (y, mo, d) = (get("tm_year", 0), get("tm_mon", 1), get("tm_mday", 2));
+        let (h, mi, s) = (get("tm_hour", 3), get("tm_min", 4), get("tm_sec", 5));
+        let days = civil_to_days(y, mo, d);
+        let secs = days * 86400 + h * 3600 + mi * 60 + s;
+        Ok(py_float(secs as f64))
     });
 
     // strftime(format, struct_time) -> string
@@ -412,6 +477,49 @@ pub fn create_time_dict() -> HashMap<String, PyObjectRef> {
             epoch_to_ymd(now)
         };
         Ok(py_str(&format_strftime(&fmt, y, m, d, h, min, s, wday, yday)))
+    });
+
+    // asctime(t=None) -> str — real CPython's classic fixed-width
+    // "Sun Jun 20 23:21:05 1993" layout (`%a %b %d %H:%M:%S %Y`, with the
+    // day space-padded, not zero-padded). Was missing entirely. The test
+    // suite's `fixasctime` helper exists precisely because real asctime
+    // space-pads single-digit days.
+    time_func!("asctime", |args| {
+        let (y, m, d, h, min, s, wday, _) = if let Some(t) = args.first() {
+            let get = |field: &str, idx: usize| -> i64 {
+                match &*t.borrow() {
+                    PyObject::Instance { dict, .. } => dict.get(field).and_then(|v| v.as_i64()).unwrap_or(0),
+                    PyObject::Tuple(items) => items.get(idx).and_then(|v| v.as_i64()).unwrap_or(0),
+                    _ => 0,
+                }
+            };
+            (get("tm_year", 0), get("tm_mon", 1), get("tm_mday", 2),
+             get("tm_hour", 3), get("tm_min", 4), get("tm_sec", 5),
+             get("tm_wday", 6), 0)
+        } else {
+            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+            epoch_to_ymd(now)
+        };
+        let wdays = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+        let months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+        let wd = wdays[((wday % 7 + 7) % 7) as usize];
+        let mo = months[((((m - 1) % 12) + 12) % 12) as usize];
+        Ok(py_str(&format!("{} {} {:2} {:02}:{:02}:{:02} {:04}", wd, mo, d, h, min, s, y)))
+    });
+
+    // ctime(secs=None) -> str — real CPython's `asctime(localtime(secs))`.
+    time_func!("ctime", |args| {
+        let secs = if let Some(a) = args.first() {
+            a.as_i64().or_else(|| a.as_f64().map(|f| f as i64)).unwrap_or(0)
+        } else {
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64
+        };
+        let (y, m, d, h, min, s, wday, _) = epoch_to_ymd(secs);
+        let wdays = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+        let months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+        let wd = wdays[((wday % 7 + 7) % 7) as usize];
+        let mo = months[((((m - 1) % 12) + 12) % 12) as usize];
+        Ok(py_str(&format!("{} {} {:2} {:02}:{:02}:{:02} {:04}", wd, mo, d, h, min, s, y)))
     });
 
     // strptime(string, format) -> struct_time
