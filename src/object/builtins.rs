@@ -106,7 +106,7 @@ pub(crate) fn print_with_vm(vm: &mut crate::vm::VirtualMachine, args: &[PyObject
 /// "write on non-file" — confirmed by testing plain `f.write(x)` (which
 /// goes through `LOAD_ATTR`'s rebind-in-place logic, not `call_bound_method`)
 /// working correctly on the exact same object.
-fn call_method_rebound(vm: &mut crate::vm::VirtualMachine, target: &PyObjectRef, name: &str, call_args: Vec<PyObjectRef>) -> PyResult<PyObjectRef> {
+pub(crate) fn call_method_rebound(vm: &mut crate::vm::VirtualMachine, target: &PyObjectRef, name: &str, call_args: Vec<PyObjectRef>) -> PyResult<PyObjectRef> {
     let method = target.borrow().get_attribute(name)?;
     let bound = match &*method.borrow() {
         PyObject::BuiltinMethod { func, name: mname, .. } => {

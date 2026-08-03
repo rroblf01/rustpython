@@ -4741,8 +4741,25 @@ impl VirtualMachine {
                     let src_borrowed = source.borrow();
                     match &*src_borrowed {
                         PyObject::Dict(d) => d.items(),
-                        _ => return Err(PyError::type_error(
-                            format!("cannot merge non-dict into dict"))),
+                        // General mapping (e.g. `types.MappingProxyType`):
+                        // DICT_MERGE is emitted for `{**mapping}` / `f(**mapping)`
+                        // and only handled bare Dicts before — any other mapping
+                        // raised "cannot merge non-dict into dict". Pull the
+                        // items via `keys()` + `__getitem__` (the established
+                        // call_method_rebound path; the mappingproxy closures
+                        // work with or without a bound self).
+                        _ => {
+                            let mut out: Vec<(PyObjectRef, PyObjectRef)> = Vec::new();
+                            let keys_obj = crate::object::call_method_rebound(self, &source, "keys", vec![])?;
+                            if let PyObject::List(items) = &*keys_obj.borrow() {
+                                let keys: Vec<PyObjectRef> = items.clone();
+                                for k in keys {
+                                    let v = crate::object::call_method_rebound(self, &source, "__getitem__", vec![k.clone()])?;
+                                    out.push((k, v));
+                                }
+                            }
+                            out
+                        }
                     }
                 };
                 let mut target_borrowed = target.borrow_mut();

@@ -1678,7 +1678,113 @@ pub fn create_types_dict() -> HashMap<String, PyObjectRef> {
         d.insert_str("CodeType", code_type);
     }
     d.insert_str("CellType", py_str("cell"));
-    d.insert_str("MappingProxyType", py_str("mappingproxy"));
+    // `types.MappingProxyType(dict)` — a read-only view of a mapping. Only
+    // a placeholder ("mappingproxy") string before, so `types.
+    // MappingProxyType({})` (real trigger: CPython's own `test_hmac.py`,
+    // a default arg unpacked via `**`) blew up with "'str' object is not
+    // callable". Implemented as a callable that wraps the given dict in an
+    // Instance exposing `keys`/`__iter__`/`__getitem__`/`get`/`__len__`/
+    // `items`/`__contains__`; the dict stays shared with the caller (a true
+    // view: mutations through the original dict are visible).
+    d.insert_str("MappingProxyType", PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "MappingProxyType".to_string(),
+        func: |args| {
+            if args.len() != 1 {
+                return Err(PyError::type_error("mappingproxy() takes exactly one argument"));
+            }
+            let src = args[0].clone();
+            let is_dict = matches!(&*src.borrow(), PyObject::Dict(_));
+            let inner: PyObjectRef = if is_dict {
+                src.clone()
+            } else {
+                // Non-dict mapping: materialize a snapshot dict via items().
+                let mut items = Vec::new();
+                if let Ok(it) = builtin_iter(&[src]) {
+                    loop {
+                        match builtin_next(&[it.clone()]) {
+                            Ok(v) => {
+                                if let PyObject::Tuple(vals) = &*v.borrow() {
+                                    if vals.len() == 2 {
+                                        items.push((vals[0].clone(), vals[1].clone()));
+                                    }
+                                }
+                            }
+                            Err(PyError::StopIteration) => break,
+                            Err(e) => return Err(e),
+                        }
+                    }
+                }
+                let mut d = crate::object::PyDict::new();
+                for (k, v) in items {
+                    let _ = d.set(k, v);
+                }
+                PyObjectRef::new(PyObject::Dict(Box::new(d)))
+            };
+            let mut dict = crate::object::AttrMap::new();
+            let typ = PyObjectRef::new(PyObject::Type {
+                name: "mappingproxy".to_string(),
+                dict: Box::new(str_map_to_typedict({
+                    let mut td = HashMap::new();
+                    // Each method captures `inner` directly rather than
+                    // relying on self: attribute-call (`m.get(k)`) passes a
+                    // bare Closure with NO self, while the dunder/subscript
+                    // paths (`m[k]`, `len(m)`) prepend it — so reading the
+                    // key as the LAST arg works for both shapes.
+                    let key_arg = |args: &[PyObjectRef]| args.last().cloned();
+                    for (name, field) in [("keys", "keys"), ("values", "values"), ("items", "items"), ("__len__", "len"), ("__iter__", "keys")] {
+                        let inner = inner.clone();
+                        let field = field.to_string();
+                        td.insert_str(name, PyObjectRef::new(PyObject::Closure(Rc::new(move |_args: &[PyObjectRef]| {
+                            if let PyObject::Dict(d) = &*inner.borrow() {
+                                match field.as_str() {
+                                    "keys" => Ok(py_list(d.keys().iter().cloned().collect())),
+                                    "values" => Ok(py_list(d.values().iter().cloned().collect())),
+                                    "items" => Ok(py_list(d.items().into_iter().map(|(k, v)| py_tuple(vec![k, v])).collect())),
+                                    "len" => Ok(py_int(d.len() as i64)),
+                                    _ => Err(PyError::runtime_error("unhandled mappingproxy field")),
+                                }
+                            } else {
+                                Err(PyError::type_error("mappingproxy wrapping a non-dict"))
+                            }
+                        }))));
+                    }
+                    for (name, field) in [("get", "get"), ("__getitem__", "getitem"), ("__contains__", "contains")] {
+                        let inner = inner.clone();
+                        let field = field.to_string();
+                        td.insert_str(name, PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| {
+                            let k = key_arg(args).ok_or_else(|| PyError::type_error(format!("{}() missing key argument", field)))?;
+                            if let PyObject::Dict(d) = &*inner.borrow() {
+                                match field.as_str() {
+                                    "contains" => Ok(py_bool(d.contains(&k).unwrap_or(false))),
+                                    "get" => {
+                                        // `get` is only ever reached via
+                                        // attribute-call (no self): args =
+                                        // [key] or [key, default].
+                                        let key = args.first().cloned().ok_or_else(|| PyError::type_error("get() missing key"))?;
+                                        match d.get(&key).ok().flatten() {
+                                            Some(v) => Ok(v),
+                                            None => Ok(args.get(1).cloned().unwrap_or_else(|| PyObjectRef::new(PyObject::None))),
+                                        }
+                                    }
+                                    "getitem" => match d.get(&k).ok().flatten() {
+                                        Some(v) => Ok(v),
+                                        None => Err(PyError::key_error(k.repr())),
+                                    },
+                                    _ => Err(PyError::runtime_error("unhandled mappingproxy field")),
+                                }
+                            } else {
+                                Err(PyError::type_error("mappingproxy wrapping a non-dict"))
+                            }
+                        }))));
+                    }
+                    td
+                })),
+                bases: vec![],
+                mro: vec![],
+            });
+            Ok(PyObjectRef::new(PyObject::Instance { typ, dict }))
+        },
+    }));
     // GenericAlias — used for generic type annotations like list[int], dict[str, int]
     d.insert_str("GenericAlias", py_str("types.GenericAlias"));
 
