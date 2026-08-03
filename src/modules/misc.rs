@@ -4520,6 +4520,24 @@ pub(crate) fn set_sys_module(mod_ref: Option<PyObjectRef>) {
     CURRENT_SYS_MODULE.with(|m| *m.borrow_mut() = mod_ref);
 }
 
+thread_local! {
+    // The real builtins map (see `set_builtins_ref`) — lets native code
+    // resolve a builtin exception CLASS object by name.
+    static CURRENT_BUILTINS: std::cell::RefCell<Option<std::rc::Rc<std::collections::HashMap<crate::interner::StrId, PyObjectRef>>>> = std::cell::RefCell::new(None);
+}
+
+pub(crate) fn set_builtins_ref(builtins: std::rc::Rc<std::collections::HashMap<crate::interner::StrId, PyObjectRef>>) {
+    CURRENT_BUILTINS.with(|b| *b.borrow_mut() = Some(builtins));
+}
+
+pub(crate) fn get_builtin_class(name: &str) -> Option<PyObjectRef> {
+    CURRENT_BUILTINS.with(|b| {
+        let map = b.borrow().clone()?;
+        let id = crate::interner::intern(name);
+        map.get(&id).cloned()
+    })
+}
+
 fn get_current_unraisablehook() -> Option<PyObjectRef> {
     CURRENT_SYS_MODULE.with(|m| {
         let mod_ref = m.borrow().clone()?;
@@ -4539,6 +4557,9 @@ fn get_current_unraisablehook() -> Option<PyObjectRef> {
 // matches what Python code holds) and exc_value a real PyObject::Exception.
 fn build_unraisable_args(func: &PyObjectRef, err: &PyError) -> PyObjectRef {
     let exc_name = py_error_type_name(err);
+    if std::env::var("RPY_DEBUG_UNRAISABLE").is_ok() {
+        eprintln!("UNRAISABLE name={} err={:?} builtin={:?}", exc_name, err, get_builtin_class(&exc_name).map(|b| b.repr()));
+    }
     let exc_value = PyObjectRef::new(PyObject::Exception {
         typ: exc_name.clone(),
         args: py_error_args(err),
@@ -4569,8 +4590,8 @@ fn build_unraisable_args(func: &PyObjectRef, err: &PyError) -> PyObjectRef {
         }
     });
     let mut attrs = crate::object::AttrMap::new();
-    attrs.insert_str("object", PyObjectRef::new(PyObject::None));
-    attrs.insert_str("err_msg", py_str(&format!("Exception ignored in atexit callback {:?}", func.repr())));
+    attrs.insert_str("object", py_none());
+    attrs.insert_str("err_msg", py_str(&format!("Exception ignored in atexit callback {}", func.repr())));
     attrs.insert_str("exc_type", exc_type.unwrap_or_else(|| py_none()));
     attrs.insert_str("exc_value", exc_value);
     attrs.insert_str("exc_traceback", py_none());
@@ -4594,7 +4615,21 @@ fn py_error_type_name(err: &PyError) -> String {
         PyError::ZeroDivisionError(_) => "ZeroDivisionError".to_string(),
         PyError::RuntimeError(_) => "RuntimeError".to_string(),
         PyError::SystemExit(_) => "SystemExit".to_string(),
-        PyError::Exception(name, _) => name.clone(),
+        PyError::Exception(name, exc) => {
+            // `raise SomeClass` (bare class, no message) comes through as
+            // PyError::Exception("", exc) — the NAME field is empty, so
+            // recover the exception type from the exc object itself.
+            if name.is_empty() {
+                match &*exc.borrow() {
+                    PyObject::Exception { typ, .. } => typ.clone(),
+                    PyObject::ExceptionGroup { typ, .. } => typ.clone(),
+                    PyObject::Instance { typ, .. } => typ.borrow().type_name(),
+                    _ => "Exception".to_string(),
+                }
+            } else {
+                name.clone()
+            }
+        }
         PyError::OsError(_) => "OSError".to_string(),
         PyError::ImportError(_) => "ImportError".to_string(),
         PyError::RecursionError(_) => "RecursionError".to_string(),

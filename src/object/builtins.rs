@@ -342,6 +342,32 @@ pub fn builtin_type_of(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         match &*borrowed {
             PyObject::Instance { typ, .. } => Ok(typ.clone()),
             PyObject::Type { .. } => Ok(args[0].clone()),
+            // `type(exc)` for a native exception instance returns the REAL
+            // exception class (the builtin `BuiltinFunction`, e.g.
+            // `ZeroDivisionError`) — real CPython: `type(ZeroDivisionError(
+            // 'x')) is ZeroDivisionError`. Previously it fell through to the
+            // synthetic name-based Type below, so `type(exc_value) ==
+            // ZeroDivisionError` was False (test_atexit's unraisable
+            // assertion). Fall back to the synthetic Type if the class isn't
+            // resolvable (e.g. a module-specific exception).
+            PyObject::Exception { typ, .. } | PyObject::ExceptionGroup { typ, .. } => {
+                let name = typ.clone();
+                drop(borrowed);
+                if let Some(cls) = crate::modules::get_builtin_class(&name) {
+                    return Ok(cls);
+                }
+                if let Some(cached) = PRIMITIVE_TYPE_CACHE.with(|c| c.borrow().get(&name).cloned()) {
+                    return Ok(cached);
+                }
+                let new_type = PyObjectRef::new(PyObject::Type {
+                    name: name.clone(),
+                    dict: Box::new(TypeDict::default()),
+                    bases: vec![],
+                    mro: vec![],
+                });
+                PRIMITIVE_TYPE_CACHE.with(|c| { c.borrow_mut().insert(name, new_type.clone()); });
+                Ok(new_type)
+            }
             _ => {
                 let name = borrowed.type_name();
                 drop(borrowed);

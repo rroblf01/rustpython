@@ -1216,6 +1216,12 @@ impl VirtualMachine {
           // Wrap builtins in Rc for sharing across frames
           let builtins = Rc::new(builtins);
 
+          // Share the real builtins map so native code can resolve a builtin
+          // exception CLASS by name (type() of a PyObject::Exception must
+          // return the real ZeroDivisionError & co., not a synthetic Type —
+          // test_atexit's `type(exc_value) == ZeroDivisionError`).
+          crate::modules::set_builtins_ref(Rc::clone(&builtins));
+
           // Populate the disposable-VM fast path's cache (see the doc
           // comment at the top of this function) — safe to do BEFORE the
           // `install_source_defined_stdlib` calls below even though those
