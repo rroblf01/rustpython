@@ -2975,7 +2975,13 @@ pub fn create_getopt_dict() -> HashMap<String, PyObjectRef> {
 
         let mut opts: Vec<PyObjectRef> = Vec::new();
         let mut positional: Vec<PyObjectRef> = Vec::new();
-        let mut i: usize = 1; // Skip the program name (args[0])
+        // Process EVERY arg from index 0 — the caller decides whether to pass
+        // sys.argv (program name included) or sys.argv[1:] (options only).
+        // The previous `i = 1` skip silently dropped a leading option
+        // (real trigger: quopri.main's `getopt.getopt(sys.argv[1:], 'td')`
+        // with sys.argv[1:] == ['-d'] — the '-d' was skipped, so decode was
+        // never enabled).
+        let mut i: usize = 0;
         let mut options_done = false;
 
         while i < arg_list.len() {

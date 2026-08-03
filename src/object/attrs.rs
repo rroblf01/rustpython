@@ -4245,6 +4245,26 @@ impl PyObject {
                 match name {
                     "pid" => Ok(py_int(*pid)),
                     "returncode" => Ok(returncode.borrow().map(py_int).unwrap_or_else(py_none)),
+                    // `Popen.stdout`/`stdin`/`stderr` — real CPython exposes
+                    // the pipe file objects here (test_quopri's
+                    // test_scriptencode/decode do
+                    // `self.addCleanup(process.stdout.close)` after
+                    // `communicate()`, which consumes the real pipes). Return
+                    // a real File wrapper around /dev/null so `.close()` and
+                    // the attribute contract work; the actual pipe data is
+                    // already delivered through `communicate()`.
+                    "stdout" | "stderr" | "stdin" => {
+                        if let Ok(f) = std::fs::OpenOptions::new().read(true).open("/dev/null") {
+                            Ok(PyObjectRef::new(PyObject::File {
+                                file: std::rc::Rc::new(std::cell::RefCell::new(f)),
+                                name: "<pipe>".to_string(),
+                                binary: true,
+                                pending: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+                            }))
+                        } else {
+                            Err(PyError::runtime_error("cannot open /dev/null for Popen pipe"))
+                        }
+                    }
                     "poll" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "poll".to_string(),
                         func: |args| {
@@ -4396,8 +4416,25 @@ impl PyObject {
                     _ => Err(PyError::attribute_error(format!("'Popen' object has no attribute '{}'", name))),
                 }
             }
-            PyObject::File { file: _, .. } => {
+            PyObject::File { file: f_rc, .. } => {
                 match name {
+                    "buffer" => {
+                        // `sys.stdin.buffer`/`sys.stdout.buffer`/`stderr.
+                        // buffer` — the binary view of a text stream (real
+                        // trigger: quopri.py's `main`, run via `-mquopri`,
+                        // does `fp = sys.stdin.buffer`). Return a File
+                        // sharing the SAME underlying handle, in binary mode.
+                        if let PyObject::File { file, name: fname, .. } = &*self {
+                            Ok(PyObjectRef::new(PyObject::File {
+                                file: file.clone(),
+                                name: fname.clone(),
+                                binary: true,
+                                pending: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+                            }))
+                        } else {
+                            Err(PyError::runtime_error("buffer access on non-file"))
+                        }
+                    }
                     "name" => {
                         if let PyObject::File { name: fname, .. } = &*self {
                             Ok(py_str(fname))
