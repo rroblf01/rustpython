@@ -598,8 +598,8 @@ impl PyObject {
             PyObject::Queue(_) => "<Queue>".to_string(),
             PyObject::Super { .. } => format!("<super object>"),
             PyObject::Property(_) => format!("<property object>"),
-            PyObject::StaticMethod { .. } => format!("<staticmethod object>"),
-            PyObject::ClassMethod { .. } => format!("<classmethod object>"),
+            PyObject::StaticMethod { func } => format!("<staticmethod({})>", func.repr()),
+            PyObject::ClassMethod { func } => format!("<classmethod({})>", func.repr()),
             PyObject::Generator { .. } => format!("<generator object>"),
             PyObject::Coroutine { .. } => format!("<coroutine object>"),
             PyObject::Array(arr) => {

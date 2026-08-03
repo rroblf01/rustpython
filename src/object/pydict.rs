@@ -218,8 +218,19 @@ impl PyDict {
         }
         // Propagate to Instance dict if this is a __dict__ view
         if let Some(ref inst_ref) = self.instance_ref {
-            if let PyObject::Instance { dict, .. } = &mut *inst_ref.borrow_mut() {
-                dict.insert(key.str(), val_for_instance);
+            match &mut *inst_ref.borrow_mut() {
+                PyObject::Instance { dict, .. } => {
+                    dict.insert(key.str(), val_for_instance);
+                }
+                // `func.__dict__['k'] = v` (decorator helpers like
+                // test_decorators.py's MiscDecorators.author set a function
+                // attribute through the live __dict__ view) — the propagation
+                // is currently Instance-only; without this arm the write went
+                // into the copy and `f.author` never saw it.
+                PyObject::Function(f) => {
+                    f.dict.insert(key.str(), val_for_instance);
+                }
+                _ => {}
             }
         }
     }

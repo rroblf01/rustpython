@@ -735,19 +735,27 @@ impl PyObject {
             PyObject::StaticMethod { func } => {
                 match name {
                     "__func__" => Ok(func.clone()),
+                    "__wrapped__" => Ok(func.clone()),
                     "__isabstractmethod__" => Ok(py_bool(
                         func.borrow().get_attribute("__isabstractmethod__").map(|v| v.truthy()).unwrap_or(false)
                     )),
-                    _ => Err(PyError::attribute_error(format!("'staticmethod' object has no attribute '{}'", name))),
+                    // `__name__`/`__module__`/`__qualname__`/`__doc__`/
+                    // `__annotations__`/`__dict__` all delegate to the
+                    // wrapped callable (test_decorators.py's
+                    // check_wrapper_attrs asserts them on the descriptor).
+                    _ => func.borrow().get_attribute(name)
+                        .map_err(|_| PyError::attribute_error(format!("'staticmethod' object has no attribute '{}'", name))),
                 }
             }
             PyObject::ClassMethod { func } => {
                 match name {
                     "__func__" => Ok(func.clone()),
+                    "__wrapped__" => Ok(func.clone()),
                     "__isabstractmethod__" => Ok(py_bool(
                         func.borrow().get_attribute("__isabstractmethod__").map(|v| v.truthy()).unwrap_or(false)
                     )),
-                    _ => Err(PyError::attribute_error(format!("'classmethod' object has no attribute '{}'", name))),
+                    _ => func.borrow().get_attribute(name)
+                        .map_err(|_| PyError::attribute_error(format!("'classmethod' object has no attribute '{}'", name))),
                 }
             }
             PyObject::Exception { typ, args, cause } => {
