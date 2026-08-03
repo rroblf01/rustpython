@@ -584,6 +584,14 @@ impl VirtualMachine {
 
           // Native bisect module for binary search
           modules.insert_str("bisect", create_module("bisect", create_bisect_dict()));
+          // `_bisect` — real CPython's C accelerator for `bisect`; CPython's
+          // own `test_bisect.py` builds its C-backed test class via
+          // `import_fresh_module('bisect', fresh=['_bisect'])`, which failed
+          // with `ModuleNotFoundError: No module named '_bisect'`, yielding
+          // `module = None` and `'NoneType' object has no attribute
+          // 'bisect_right'` for every C-class test. Same dict as `bisect`
+          // (this interpreter has no separate pure-Python wrapper).
+          modules.insert_str("_bisect", create_module("_bisect", create_bisect_dict()));
 
           // Native heapq module for heap queue operations
           modules.insert_str("heapq", create_module("heapq", create_heapq_dict()));

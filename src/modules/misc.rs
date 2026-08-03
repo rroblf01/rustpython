@@ -2198,107 +2198,141 @@ pub fn create_bisect_dict() -> HashMap<String, PyObjectRef> {
         };
     }
 
+    // Shared argument parsing for every bisect/insort function: positional
+    // `a, x[, lo[, hi]]` OR the keyword forms `a=..., x=..., lo=..., hi=...,
+    // key=...` (the VM packs keywords into a trailing `PyObject::Dict`).
+    // Returns the sequence, the probe, lo/hi as Option (None = default), and
+    // the optional key callable.
+    fn bisect_parse<'a>(args: &'a [PyObjectRef]) -> PyResult<(PyObjectRef, PyObjectRef, Option<i64>, Option<i64>, Option<PyObjectRef>)> {
+        let mut pos: Vec<PyObjectRef> = args.to_vec();
+        let mut kw_a: Option<PyObjectRef> = None;
+        let mut kw_x: Option<PyObjectRef> = None;
+        let mut kw_lo: Option<i64> = None;
+        let mut kw_hi: Option<i64> = None;
+        let mut kw_key: Option<PyObjectRef> = None;
+        if let Some(last) = pos.last().cloned() {
+            if let PyObject::Dict(d) = &*last.borrow() {
+                for (k, v) in d.items() {
+                    match k.str().as_str() {
+                        "a" => kw_a = Some(v),
+                        "x" => kw_x = Some(v),
+                        "lo" => kw_lo = Some(v.as_i64().ok_or_else(|| PyError::type_error("lo must be an integer"))?),
+                        "hi" => kw_hi = Some(v.as_i64().ok_or_else(|| PyError::type_error("hi must be an integer"))?),
+                        "key" => kw_key = Some(v),
+                        other => return Err(PyError::type_error(format!("bisect() got an unexpected keyword argument '{}'", other))),
+                    }
+                }
+                pos.pop();
+            }
+        }
+        let a = match kw_a {
+            Some(a) => a,
+            None => pos.first().cloned().ok_or_else(|| PyError::type_error("missing required argument: 'a'"))?,
+        };
+        let x = match kw_x {
+            Some(x) => x,
+            None => pos.get(1).cloned().ok_or_else(|| PyError::type_error("missing required argument: 'x'"))?,
+        };
+        let p_lo = pos.get(2).map(|v| v.as_i64().ok_or_else(|| PyError::type_error("lo must be an integer"))).transpose()?;
+        let p_hi = pos.get(3).map(|v| v.as_i64().ok_or_else(|| PyError::type_error("hi must be an integer"))).transpose()?;
+        Ok((a, x, kw_lo.or(p_lo), kw_hi.or(p_hi), kw_key))
+    }
+
+    // Apply the optional key function to `obj`.
+    fn bisect_key(key: &Option<PyObjectRef>, obj: &PyObjectRef) -> PyResult<PyObjectRef> {
+        match key {
+            Some(k) => builtin_call(k, &[obj.clone()]),
+            None => Ok(obj.clone()),
+        }
+    }
+
+    // Bisect works on ANY random-access sequence (`a[mid]` + `len(a)`), not
+    // just lists — real CPython's own test_bisect runs it against `range`
+    // with n = sys.maxsize (test_large_range). Use the generic
+    // `py_getitem`/`builtin_len` instead of destructuring a List.
+    fn bisect_locate(a: &PyObjectRef, x: &PyObjectRef, lo: Option<i64>, hi: Option<i64>, right: bool, key: &Option<PyObjectRef>) -> PyResult<PyObjectRef> {
+        let len = builtin_len(&[a.clone()])?.as_i64().ok_or_else(|| PyError::type_error("sequence length must be an integer"))?;
+        let key_x = bisect_key(key, x)?;
+        let lo_raw = lo.unwrap_or(0);
+        if lo_raw < 0 { return Err(PyError::value_error("lo must be non-negative")); }
+        let hi_raw = hi.unwrap_or(len);
+        if hi_raw < lo_raw { return Err(PyError::value_error("hi must be greater than lo")); }
+        let mut lo = lo_raw as usize;
+        let mut hi = hi_raw.min(len) as usize;
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let mid_item = crate::object::py_getitem(a, &py_int(mid as i64))?;
+            let key_mid = bisect_key(key, &mid_item)?;
+            if right {
+                // bisect_right: find the first position where `x` can be
+                // inserted while staying to the RIGHT of equal elements:
+                // if key(x) < key(a[mid]) go left, else go right.
+                if py_lt(&key_x, &key_mid)? { hi = mid; } else { lo = mid + 1; }
+            } else {
+                // bisect_left: first position >= x.
+                if py_lt(&key_mid, &key_x)? { lo = mid + 1; } else { hi = mid; }
+            }
+        }
+        Ok(py_int(lo as i64))
+    }
+
     bisect_func!("bisect_left", |args| {
-        if args.len() < 2 { return Err(PyError::type_error("bisect_left() requires at least 2 arguments (list, item)")); }
-        let items = {
-            let a = args[0].borrow();
-            match &*a { PyObject::List(v) => v.clone(), _ => return Err(PyError::type_error("bisect_left() argument must be a list")) }
-        };
-        let x = &args[1];
-        let mut lo = if args.len() > 2 { args[2].as_i64().ok_or_else(|| PyError::type_error("lo must be an integer"))? as usize } else { 0 };
-        let mut hi = if args.len() > 3 { args[3].as_i64().ok_or_else(|| PyError::type_error("hi must be an integer"))? as usize } else { items.len() };
-        while lo < hi {
-            let mid = (lo + hi) / 2;
-            if py_lt(&items[mid], x)? { lo = mid + 1; } else { hi = mid; }
-        }
-        Ok(py_int(lo as i64))
+        if args.is_empty() { return Err(PyError::type_error("bisect_left() missing required argument: 'a'")); }
+        let (a, x, lo, hi, key) = bisect_parse(args)?;
+        bisect_locate(&a, &x, lo, hi, false, &key)
     });
 
-    // bisect = bisect_right (CPython convention)
-    bisect_func!("bisect", |args| {
-        if args.len() < 2 { return Err(PyError::type_error("bisect_right() requires at least 2 arguments (list, item)")); }
-        let items = {
-            let a = args[0].borrow();
-            match &*a { PyObject::List(v) => v.clone(), _ => return Err(PyError::type_error("bisect_right() argument must be a list")) }
-        };
-        let x = &args[1];
-        let mut lo = if args.len() > 2 { args[2].as_i64().ok_or_else(|| PyError::type_error("lo must be an integer"))? as usize } else { 0 };
-        let mut hi = if args.len() > 3 { args[3].as_i64().ok_or_else(|| PyError::type_error("hi must be an integer"))? as usize } else { items.len() };
-        while lo < hi {
-            let mid = (lo + hi) / 2;
-            if py_lt(x, &items[mid])? { hi = mid; } else { lo = mid + 1; }
-        }
-        Ok(py_int(lo as i64))
+    // bisect = bisect_right (CPython convention) — test_bisect asserts
+    // `bisect is bisect_right`, so both names must hold the SAME object.
+    let bisect_right = PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "bisect_right".to_string(),
+        func: |args: &[PyObjectRef]| {
+            if args.is_empty() { return Err(PyError::type_error("bisect_right() missing required argument: 'a'")); }
+            let (a, x, lo, hi, key) = bisect_parse(args)?;
+            bisect_locate(&a, &x, lo, hi, true, &key)
+        },
     });
+    d.insert("bisect_right".to_string(), bisect_right.clone());
+    d.insert("bisect".to_string(), bisect_right);
 
-    // bisect_right = bisect (CPython alias)
-    bisect_func!("bisect_right", |args| {
-        if args.len() < 2 { return Err(PyError::type_error("bisect_right() requires at least 2 arguments (list, item)")); }
-        let items = {
-            let a = args[0].borrow();
-            match &*a { PyObject::List(v) => v.clone(), _ => return Err(PyError::type_error("bisect_right() argument must be a list")) }
+    fn bisect_insert(a: &PyObjectRef, x: &PyObjectRef, lo: Option<i64>, hi: Option<i64>, right: bool, key: &Option<PyObjectRef>) -> PyResult<PyObjectRef> {
+        let pos = bisect_locate(a, x, lo, hi, right, key)?.as_i64().ok_or_else(|| PyError::type_error("internal"))? as usize;
+        // Call `a.insert(pos, x)` — real CPython's insort goes through the
+        // object's own `insert` method, so it works on list subclasses and
+        // duck-typed sequences (test_bisect's custom `Range`, which records
+        // last_insert, and a `List(list)` subclass with its own insert),
+        // not just bare lists. Rebind a native BuiltinMethod to the real
+        // `a` (get_attribute leaves a placeholder self_obj); a raw Function
+        // (user-defined insert) gets `a` passed positionally as self.
+        let method = a.borrow().get_attribute("insert")?;
+        let result = match &*method.borrow() {
+            PyObject::BuiltinMethod { name, func, .. } => {
+                let bound = PyObjectRef::imm(PyObject::BuiltinMethod { name: name.clone(), func: *func, self_obj: a.clone() });
+                call_function_disposable(&bound, vec![py_int(pos as i64), x.clone()], vec![])
+            }
+            _ => call_function_disposable(&method, vec![a.clone(), py_int(pos as i64), x.clone()], vec![]),
         };
-        let x = &args[1];
-        let mut lo = if args.len() > 2 { args[2].as_i64().ok_or_else(|| PyError::type_error("lo must be an integer"))? as usize } else { 0 };
-        let mut hi = if args.len() > 3 { args[3].as_i64().ok_or_else(|| PyError::type_error("hi must be an integer"))? as usize } else { items.len() };
-        while lo < hi {
-            let mid = (lo + hi) / 2;
-            if py_lt(x, &items[mid])? { hi = mid; } else { lo = mid + 1; }
-        }
-        Ok(py_int(lo as i64))
-    });
+        result.map(|_| py_none())
+    }
 
     bisect_func!("insort_left", |args| {
-        if args.len() < 2 { return Err(PyError::type_error("insort_left() requires at least 2 arguments (list, item)")); }
-        let items = {
-            let a = args[0].borrow();
-            match &*a { PyObject::List(v) => v.clone(), _ => return Err(PyError::type_error("insort_left() argument must be a list")) }
-        };
-        let x = &args[1];
-        let mut lo = if args.len() > 2 { args[2].as_i64().ok_or_else(|| PyError::type_error("lo must be an integer"))? as usize } else { 0 };
-        let mut hi = if args.len() > 3 { args[3].as_i64().ok_or_else(|| PyError::type_error("hi must be an integer"))? as usize } else { items.len() };
-        while lo < hi {
-            let mid = (lo + hi) / 2;
-            if py_lt(&items[mid], x)? { lo = mid + 1; } else { hi = mid; }
-        }
-        if let PyObject::List(list) = &mut *args[0].borrow_mut() { list.insert(lo, x.clone()); Ok(py_none()) }
-        else { Err(PyError::type_error("insort_left() argument must be a list")) }
+        if args.is_empty() { return Err(PyError::type_error("insort_left() missing required argument: 'a'")); }
+        let (a, x, lo, hi, key) = bisect_parse(args)?;
+        bisect_insert(&a, &x, lo, hi, false, &key)
     });
 
-    bisect_func!("insort_right", |args| {
-        if args.len() < 2 { return Err(PyError::type_error("insort_right() requires at least 2 arguments (list, item)")); }
-        let items = {
-            let a = args[0].borrow();
-            match &*a { PyObject::List(v) => v.clone(), _ => return Err(PyError::type_error("insort_right() argument must be a list")) }
-        };
-        let x = &args[1];
-        let mut lo = if args.len() > 2 { args[2].as_i64().ok_or_else(|| PyError::type_error("lo must be an integer"))? as usize } else { 0 };
-        let mut hi = if args.len() > 3 { args[3].as_i64().ok_or_else(|| PyError::type_error("hi must be an integer"))? as usize } else { items.len() };
-        while lo < hi {
-            let mid = (lo + hi) / 2;
-            if py_lt(x, &items[mid])? { hi = mid; } else { lo = mid + 1; }
-        }
-        if let PyObject::List(list) = &mut *args[0].borrow_mut() { list.insert(lo, x.clone()); Ok(py_none()) }
-        else { Err(PyError::type_error("insort_right() argument must be a list")) }
+    // insort = insort_right (CPython convention) — `insort is insort_right`
+    // in test_bisect, so share the object.
+    let insort_right = PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "insort_right".to_string(),
+        func: |args: &[PyObjectRef]| {
+            if args.is_empty() { return Err(PyError::type_error("insort_right() missing required argument: 'a'")); }
+            let (a, x, lo, hi, key) = bisect_parse(args)?;
+            bisect_insert(&a, &x, lo, hi, true, &key)
+        },
     });
-
-    // insort = insort_right (CPython convention)
-    bisect_func!("insort", |args| {
-        if args.len() < 2 { return Err(PyError::type_error("insort() requires at least 2 arguments (list, item)")); }
-        let items = {
-            let a = args[0].borrow();
-            match &*a { PyObject::List(v) => v.clone(), _ => return Err(PyError::type_error("insort() argument must be a list")) }
-        };
-        let x = &args[1];
-        let mut lo = if args.len() > 2 { args[2].as_i64().ok_or_else(|| PyError::type_error("lo must be an integer"))? as usize } else { 0 };
-        let mut hi = if args.len() > 3 { args[3].as_i64().ok_or_else(|| PyError::type_error("hi must be an integer"))? as usize } else { items.len() };
-        while lo < hi {
-            let mid = (lo + hi) / 2;
-            if py_lt(x, &items[mid])? { hi = mid; } else { lo = mid + 1; }
-        }
-        if let PyObject::List(list) = &mut *args[0].borrow_mut() { list.insert(lo, x.clone()); Ok(py_none()) }
-        else { Err(PyError::type_error("insort() argument must be a list")) }
-    });
+    d.insert("insort_right".to_string(), insort_right.clone());
+    d.insert("insort".to_string(), insort_right);
 
     d
 }
