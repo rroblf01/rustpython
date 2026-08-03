@@ -768,22 +768,37 @@ pub fn create_itertools_dict() -> HashMap<String, PyObjectRef> {
     });
 
     it_func!("product", |args| {
-        if args.is_empty() {
+        let mut args: Vec<PyObjectRef> = args.to_vec();
+        let mut repeat = 1;
+        if let Some(last) = args.last().map(|a| a.clone()) {
+            let is_dict = matches!(&*last.borrow(), PyObject::Dict(_));
+            if is_dict {
+                if let PyObject::Dict(dict) = &*last.borrow() {
+                    if let Ok(Some(r)) = dict.get(&crate::object::py_str("repeat")) {
+                        repeat = r.as_i64().ok_or_else(|| PyError::type_error("repeat must be int"))? as usize;
+                    }
+                }
+                args.pop();
+            }
+        }
+        if args.is_empty() || repeat == 0 {
             return Ok(py_list(vec![py_tuple(vec![])]));
         }
         let mut pools: Vec<Vec<PyObjectRef>> = Vec::new();
-        for arg in args {
-            let mut pool = Vec::new();
-            if let Ok(it) = builtin_iter(&[arg.clone()]) {
-                loop {
-                    match builtin_next(&[it.clone()]) {
-                        Ok(v) => pool.push(v),
-                        Err(PyError::StopIteration) => break,
-                        Err(e) => return Err(e),
+        for _ in 0..repeat {
+            for arg in &args {
+                let mut pool = Vec::new();
+                if let Ok(it) = builtin_iter(&[arg.clone()]) {
+                    loop {
+                        match builtin_next(&[it.clone()]) {
+                            Ok(v) => pool.push(v),
+                            Err(PyError::StopIteration) => break,
+                            Err(e) => return Err(e),
+                        }
                     }
                 }
+                pools.push(pool);
             }
-            pools.push(pool);
         }
         let mut result = vec![vec![]];
         for pool in &pools {
