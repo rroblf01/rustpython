@@ -393,41 +393,45 @@ fn real_main() {
                 }
                 return;
             }
-            "-m" => {
-                // Run a module as a script
-                if i + 1 >= args.len() {
-                    eprintln!("rustpython: -m requires an argument");
-                    std::process::exit(2);
-                }
-                let module_name = args[i + 1].clone();
+            s if s == "-m" || (s.starts_with("-m") && s.len() > 2) => {
+                // Run a module as a script. `-mmodname` (joined) and
+                // `-m modname` are both valid.
+                let module_name: String = if args[i].len() > 2 {
+                    args[i][2..].to_string()
+                } else {
+                    if i + 1 >= args.len() {
+                        eprintln!("rustpython: -m requires an argument");
+                        std::process::exit(2);
+                    }
+                    i += 1;
+                    args[i].clone()
+                };
 
-                // Build sys.argv for -m mode
+                // Build sys.argv for -m mode: `i` points at the module-name
+                // token in both the joined (`-mmod`) and separated
+                // (`-m mod`) forms (for joined, `i` is the `-mmod` token
+                // itself), so the remaining script args start at `i + 1`.
                 let mut sys_argv: Vec<String> = vec![module_name.clone()];
-                if i + 2 < args.len() {
-                    sys_argv.extend_from_slice(&args[i + 2..]);
+                if i + 1 < args.len() {
+                    sys_argv.extend_from_slice(&args[i + 1..]);
                 }
 
                 // Create VM and try to run the module
                 let mut vm = VirtualMachine::new_with_args(sys_argv);
 
-                // Create a __main__-like script that imports and runs the module
-                let _main_script = format!(
-                    "import runpy\nrunpy._run_module_as_main('{}', alter_argv=True)\n",
+                // Real `python -m mod` runs the module's body with its
+                // `__name__` set to `__main__`, so the standard
+                // `if __name__ == "__main__":` guard fires. The previous
+                // implementation just imported the module and called
+                // `.main()` (when present) — wrong for any module that
+                // guards on `__name__` (test_quopri's `-mquopri` subprocess,
+                // `python -m http.server`, `-m unittest`, ...). Import the
+                // module, then re-run its own source into its module dict
+                // with `__name__` swapped to `__main__`.
+                let script = format!(
+                    "import sys\nimport importlib\n_mod = importlib.import_module('{}')\n_src = open(_mod.__file__, 'rb').read()\n_code = compile(_src, _mod.__file__, 'exec')\n_mod.__name__ = '__main__'\nsys.modules['__main__'] = _mod\nexec(_code, _mod.__dict__)\n",
                     module_name.replace("'", "\\'")
                 );
-
-                // If runpy isn't available, try simpler approach:
-                // import the module and call its __main__.py equivalent
-                let _alt_script = format!(
-                    "import {} as _runmod\nif hasattr(_runmod, 'main'):\n    _runmod.main()\n",
-                    module_name
-                );
-
-                // First try the simple approach: just import and check __name__
-                let script = format!(
-                    "import sys\nimport {0}\nsys.modules['__main__'] = sys.modules['{0}']\n", module_name
-                ) + "if hasattr(sys.modules['__main__'], 'main'):\n"
-                + "    sys.modules['__main__'].main()\n";
 
                 let mut parser = Parser::new(&script);
                 let program = match parser.parse_program() {
