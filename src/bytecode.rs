@@ -53,6 +53,11 @@ pub enum Opcode {
     POP_JUMP_IF_TRUE = 99,
     RAISE_VARARGS = 100,
     RERAISE = 101,
+    // Clears `active_exception` so a following RERAISE pops its operand from
+    // the VALUE STACK instead (except* semantics: after the handlers, the
+    // unmatched ExceptionGroup sits on the stack and must be re-raised, not
+    // the original exception held in active_exception).
+    CLEAR_EXCEPTION_INFO = 121,
     SEND = 102,
     SET_ADD = 103,
     SET_FUNCTION_ATTRIBUTE = 104,

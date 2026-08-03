@@ -4999,6 +4999,15 @@ impl VirtualMachine {
                 }
             }
 
+            Opcode::CLEAR_EXCEPTION_INFO => {
+                // except*: drop the active exception so the following RERAISE
+                // pops the UNMATCHED ExceptionGroup from the value stack
+                // (RERAISE prefers active_exception, which still holds the
+                // ORIGINAL exception — re-raising that would re-raise even a
+                // fully-handled group).
+                self.frames[fi].active_exception = None;
+            }
+
             Opcode::POP_EXCEPT => {
                 // Pop the exception object from the value stack.
                 // In CPython this operates on a separate block stack for

@@ -1901,6 +1901,11 @@ impl Compiler {
                         }
                     }
                     self.pending_cleanup.pop(); // PopExcept
+                    // except*: re-raise only the UNMATCHED exceptions. The
+                    // unmatched ExceptionGroup is on the value stack (pushed
+                    // by CHECK_EXC_MATCH_STAR); RERAISE must use it, not the
+                    // original exception still held in active_exception.
+                    self.emit(Opcode::CLEAR_EXCEPTION_INFO, 0);
                     self.emit(Opcode::RERAISE, 0);
                     self.fix_label(handler_done);
                     self.emit(Opcode::POP_EXCEPT, 0);
@@ -2034,6 +2039,9 @@ impl Compiler {
                         }
                     }
                     self.pending_cleanup.pop(); // PopExcept
+                    // except*: re-raise only the UNMATCHED exceptions (see
+                    // the sibling except* block's comment).
+                    self.emit(Opcode::CLEAR_EXCEPTION_INFO, 0);
                     self.emit(Opcode::RERAISE, 0);
                     self.fix_label(handler_done);
                     self.emit(Opcode::POP_EXCEPT, 0);
