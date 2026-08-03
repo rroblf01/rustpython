@@ -434,26 +434,70 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
                 _ => std::process::Stdio::inherit(),
             }
         };
+        // `stderr=STDOUT` (-2): the child's stdout and stderr must flow into
+        // the SAME pipe (CPython merges them; test_cmd_line_script's
+        // interactive_python drains the combined stream looking for the
+        // REPL prompt, which is written to stderr). Rust's `Command` has no
+        // "stderr = stdout" `Stdio`, so build a socketpair, hand BOTH the
+        // child's stdout and stderr the same write end, and expose the read
+        // end as both `.stdout` and `.stderr`.
+        let stderr_is_stdout = get_kw("stderr").map(|v| v.as_i64() == Some(-2)).unwrap_or(false);
+        let mut merged_read_end: Option<std::rc::Rc<std::cell::RefCell<std::fs::File>>> = None;
+        if stderr_is_stdout {
+            use std::os::fd::OwnedFd;
+            use std::os::unix::io::IntoRawFd;
+            if let Ok((read_sock, write_sock)) = std::os::unix::net::UnixStream::pair() {
+                let write2 = write_sock.try_clone();
+                let read_file = unsafe { std::fs::File::from_raw_fd(read_sock.into_raw_fd()) };
+                merged_read_end = Some(std::rc::Rc::new(std::cell::RefCell::new(read_file)));
+                command.stdout(std::process::Stdio::from(unsafe { OwnedFd::from_raw_fd(write_sock.into_raw_fd()) }));
+                if let Ok(w2) = write2 {
+                    command.stderr(std::process::Stdio::from(unsafe { OwnedFd::from_raw_fd(w2.into_raw_fd()) }));
+                } else {
+                    command.stderr(std::process::Stdio::null());
+                }
+            }
+        }
         if let Some(v) = get_kw("stdin") { command.stdin(stdio_for(&v)); }
-        if let Some(v) = get_kw("stdout") { command.stdout(stdio_for(&v)); }
-        if let Some(v) = get_kw("stderr") {
-            // `STDOUT` (-2) means "merge into the same stream as stdout" —
-            // Rust's `Command` has no simple pre-spawn "same fd as stdout"
-            // API, so approximate by piping stderr separately too (still
-            // captured via `.communicate()`, just as a distinct stream
-            // rather than truly interleaved byte-for-byte with stdout).
-            match v.as_i64() {
-                Some(-2) => { command.stderr(std::process::Stdio::piped()); }
-                _ => { command.stderr(stdio_for(&v)); }
+        if !stderr_is_stdout {
+            if let Some(v) = get_kw("stdout") { command.stdout(stdio_for(&v)); }
+            if let Some(v) = get_kw("stderr") {
+                match v.as_i64() {
+                    Some(-2) => { command.stderr(std::process::Stdio::piped()); }
+                    _ => { command.stderr(stdio_for(&v)); }
+                }
             }
         }
 
-        let child = command.spawn().map_err(|e| PyError::os_error_from_io(&e))?;
+        let mut child = command.spawn().map_err(|e| PyError::os_error_from_io(&e))?;
         let pid = child.id() as i64;
+        // Take the piped ends into the Process so `.stdin`/`.stdout`/
+        // `.stderr` expose real, readable/writable file objects (not dummy
+        // /dev/null — the interactive REPL tests write a statement then
+        // read the prompt back, which needs the actual pipe).
+        use std::os::unix::io::{IntoRawFd, FromRawFd};
+        let wrap_pipe = |p: Option<std::process::ChildStdout>| -> Option<std::rc::Rc<std::cell::RefCell<std::fs::File>>> {
+            p.map(|s| std::rc::Rc::new(std::cell::RefCell::new(unsafe { std::fs::File::from_raw_fd(s.into_raw_fd()) })))
+        };
+        let wrap_pipe_in = |p: Option<std::process::ChildStdin>| -> Option<std::rc::Rc<std::cell::RefCell<std::fs::File>>> {
+            p.map(|s| std::rc::Rc::new(std::cell::RefCell::new(unsafe { std::fs::File::from_raw_fd(s.into_raw_fd()) })))
+        };
+        let wrap_pipe_err = |p: Option<std::process::ChildStderr>| -> Option<std::rc::Rc<std::cell::RefCell<std::fs::File>>> {
+            p.map(|s| std::rc::Rc::new(std::cell::RefCell::new(unsafe { std::fs::File::from_raw_fd(s.into_raw_fd()) })))
+        };
+        let (stdout_pipe, stderr_pipe) = if let Some(m) = merged_read_end {
+            (Some(m.clone()), Some(m))
+        } else {
+            (wrap_pipe(child.stdout.take()), wrap_pipe_err(child.stderr.take()))
+        };
+        let stdin_pipe = wrap_pipe_in(child.stdin.take());
         Ok(PyObjectRef::new(PyObject::Process {
             child: std::rc::Rc::new(std::cell::RefCell::new(Some(child))),
             returncode: std::rc::Rc::new(std::cell::RefCell::new(None)),
             pid,
+            stdin_pipe,
+            stdout_pipe,
+            stderr_pipe,
         }))
     });
 

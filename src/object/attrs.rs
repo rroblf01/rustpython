@@ -4241,20 +4241,30 @@ impl PyObject {
                     _ => Err(PyError::attribute_error(format!("'coroutine' object has no attribute '{}'", name))),
                 }
             }
-            PyObject::Process { pid, returncode, .. } => {
+            PyObject::Process { child, pid, returncode, stdin_pipe, stdout_pipe, stderr_pipe } => {
                 match name {
                     "pid" => Ok(py_int(*pid)),
                     "returncode" => Ok(returncode.borrow().map(py_int).unwrap_or_else(py_none)),
                     // `Popen.stdout`/`stdin`/`stderr` — real CPython exposes
-                    // the pipe file objects here (test_quopri's
-                    // test_scriptencode/decode do
-                    // `self.addCleanup(process.stdout.close)` after
-                    // `communicate()`, which consumes the real pipes). Return
-                    // a real File wrapper around /dev/null so `.close()` and
-                    // the attribute contract work; the actual pipe data is
-                    // already delivered through `communicate()`.
+                    // the pipe file objects here (test_quopri's cleanup
+                    // closes them; test_cmd_line_script's interactive_python
+                    // WRITES to stdin and READS the prompt back from the
+                    // output pipes). Returns a File wrapping the actual pipe
+                    // captured at Popen construction.
                     "stdout" | "stderr" | "stdin" => {
-                        if let Ok(f) = std::fs::OpenOptions::new().read(true).open("/dev/null") {
+                        let pipe = match name {
+                            "stdout" => stdout_pipe.as_ref(),
+                            "stderr" => stderr_pipe.as_ref(),
+                            _ => stdin_pipe.as_ref(),
+                        };
+                        if let Some(p) = pipe {
+                            Ok(PyObjectRef::new(PyObject::File {
+                                file: p.clone(),
+                                name: "<pipe>".to_string(),
+                                binary: true,
+                                pending: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+                            }))
+                        } else if let Ok(f) = std::fs::OpenOptions::new().read(true).open("/dev/null") {
                             Ok(PyObjectRef::new(PyObject::File {
                                 file: std::rc::Rc::new(std::cell::RefCell::new(f)),
                                 name: "<pipe>".to_string(),
@@ -4323,38 +4333,63 @@ impl PyObject {
                     "communicate" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "communicate".to_string(),
                         func: |args| {
-                            if let PyObject::Process { child, returncode, .. } = &*args[0].borrow() {
-                                let input = args.get(1).filter(|v| !matches!(&*v.borrow(), PyObject::None));
-                                let taken = child.borrow_mut().take();
-                                match taken {
-                                    Some(mut c) => {
-                                        if let Some(inp) = input {
-                                            if let Some(mut stdin) = c.stdin.take() {
-                                                use std::io::Write;
-                                                let bytes = match &*inp.borrow() {
-                                                    PyObject::Bytes(b) => b.clone(),
-                                                    other => other.str().into_bytes(),
-                                                };
-                                                let _ = stdin.write_all(&bytes);
-                                            }
-                                        }
-                                        match c.wait_with_output() {
-                                            Ok(output) => {
-                                                *returncode.borrow_mut() = Some(output.status.code().unwrap_or(-1) as i64);
-                                                Ok(py_tuple(vec![
-                                                    PyObjectRef::imm(PyObject::Bytes(output.stdout)),
-                                                    PyObjectRef::imm(PyObject::Bytes(output.stderr)),
-                                                ]))
-                                            }
-                                            Err(e) => Err(PyError::os_error_from_io(&e)),
-                                        }
-                                    }
-                                    None => Ok(py_tuple(vec![
-                                        PyObjectRef::imm(PyObject::Bytes(Vec::new())),
-                                        PyObjectRef::imm(PyObject::Bytes(Vec::new())),
-                                    ])),
+                            // Clone the Process internals out first so we can
+                            // mutate the Process (closing stdin) without
+                            // holding a borrow on it.
+                            let (child, returncode, stdin_pipe, stdout_pipe, stderr_pipe) = {
+                                match &*args[0].borrow() {
+                                    PyObject::Process { child, returncode, stdin_pipe, stdout_pipe, stderr_pipe, .. } => (
+                                        child.clone(), returncode.clone(),
+                                        stdin_pipe.clone(), stdout_pipe.clone(), stderr_pipe.clone(),
+                                    ),
+                                    _ => return Err(PyError::runtime_error("communicate on non-process")),
                                 }
-                            } else { Err(PyError::runtime_error("communicate on non-process")) }
+                            };
+                            let input = args.get(1).filter(|v| !matches!(&*v.borrow(), PyObject::None));
+                            // Write the input to the child's stdin pipe.
+                            if let (Some(inp), Some(stdin)) = (input, &stdin_pipe) {
+                                use std::io::Write;
+                                let bytes = match &*inp.borrow() {
+                                    PyObject::Bytes(b) => b.clone(),
+                                    other => other.str().into_bytes(),
+                                };
+                                let _ = stdin.borrow_mut().write_all(&bytes);
+                            }
+                            // CLOSE stdin so the child sees EOF and can
+                            // finish (a child reading stdin blocks until the
+                            // write end closes — not closing here deadlocked
+                            // communicate() against -mquopri, which reads all
+                            // of stdin before producing output). The Process's
+                            // slot AND our own cloned handle must both drop.
+                            if stdin_pipe.is_some() {
+                                if let PyObject::Process { stdin_pipe: sp, .. } = &mut *args[0].borrow_mut() {
+                                    *sp = None;
+                                }
+                            }
+                            drop(stdin_pipe);
+                            // Read stdout + stderr pipes to EOF.
+                            use std::io::Read;
+                            let read_all = |p: &std::rc::Rc<std::cell::RefCell<std::fs::File>>| -> Vec<u8> {
+                                let mut buf = Vec::new();
+                                let _ = p.borrow_mut().read_to_end(&mut buf);
+                                buf
+                            };
+                            let stdout = stdout_pipe.as_ref().map(read_all).unwrap_or_default();
+                            let stderr = stderr_pipe.as_ref().map(read_all).unwrap_or_default();
+                            // Reap the child for its returncode.
+                            let taken = child.borrow_mut().take();
+                            let rc = match taken {
+                                Some(mut c) => match c.wait() {
+                                    Ok(status) => status.code().unwrap_or(-1) as i64,
+                                    Err(_) => -1,
+                                },
+                                None => returncode.borrow().unwrap_or(-1),
+                            };
+                            *returncode.borrow_mut() = Some(rc);
+                            Ok(py_tuple(vec![
+                                PyObjectRef::imm(PyObject::Bytes(stdout)),
+                                PyObjectRef::imm(PyObject::Bytes(stderr)),
+                            ]))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),

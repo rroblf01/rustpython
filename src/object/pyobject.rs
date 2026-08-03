@@ -262,11 +262,18 @@ pub enum PyObject {
     /// `child` is `None` after `.communicate()`/`.wait()` has reaped it
     /// (via `wait_with_output`, which consumes the `Child`); `returncode`
     /// is filled in at that point and read by subsequent `.poll()`/`.wait()`
-    /// calls without needing the (now-gone) child handle.
+    /// calls without needing the (now-gone) child handle. When constructed
+    /// with `stdin/stdout/stderr=PIPE`, the corresponding pipe ends are
+    /// taken from the child at construction and exposed as `.stdin`/
+    /// `.stdout`/`.stderr` file objects (real CPython exposes them; the
+    /// interactive REPL tests write a statement then read the prompt).
     Process {
         child: std::rc::Rc<std::cell::RefCell<Option<std::process::Child>>>,
         returncode: std::rc::Rc<std::cell::RefCell<Option<i64>>>,
         pid: i64,
+        stdin_pipe: Option<std::rc::Rc<std::cell::RefCell<std::fs::File>>>,
+        stdout_pipe: Option<std::rc::Rc<std::cell::RefCell<std::fs::File>>>,
+        stderr_pipe: Option<std::rc::Rc<std::cell::RefCell<std::fs::File>>>,
     },
     Socket {
         inner: std::rc::Rc<std::cell::RefCell<SocketInner>>,
