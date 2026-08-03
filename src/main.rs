@@ -96,7 +96,16 @@ fn calculate_indent(line: &str, current: usize) -> usize {
 fn run_repl() {
     println!("RustPython 0.1.0 - A Python 3 reimplementation in Rust");
     println!("Type 'exit()' or Ctrl-D to quit");
-    println!();
+    // NOTE: no trailing blank line — CPython's interactive_python drains
+    // the merged stdout+stderr reading 4 bytes at a time looking for the
+    // prompt, then falls back to readline() which blocks on the
+    // newline-less prompt; a bare blank line before the prompt leaves
+    // readline() stuck forever.
+    // Flush the banner immediately: stdout to a pipe is block-buffered, and
+    // an interactive driver (interactive_python) reads the banner before the
+    // prompt.
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
 
     let mut vm = VirtualMachine::new();
     let mut rl = rustyline::DefaultEditor::new().map_err(|e| format!("Failed to create editor: {}", e)).unwrap();
@@ -104,13 +113,44 @@ fn run_repl() {
     let history_path = std::path::Path::new(&home).join(".rustpython_history");
     let _ = rl.load_history(&history_path);
 
+    // With a piped (non-TTY) stdin — `printf 'print("x")\n' | rustpython`,
+    // or `subprocess.Popen(..., stdin=PIPE)` driving the REPL
+    // (test_cmd_line_script.py's interactive_python) — rustyline can't read
+    // line-by-line and the REPL would block until EOF, hanging any caller
+    // that writes a statement then waits for output. Read plain lines from
+    // stdin instead in that case.
+    use std::io::IsTerminal;
+    let piped_stdin = !std::io::stdin().is_terminal();
+
     let mut source_buf = String::new();
     let mut indent_level = 0;
 
     loop {
         let prompt = if source_buf.is_empty() { ">>> " } else { "... " };
 
-        let line = if source_buf.is_empty() {
+        let line = if piped_stdin {
+            // Real CPython writes REPL prompts to stderr when stdin is not
+            // a TTY (so the interactive_python-style drain can find them).
+            // The banner has no blank line before the prompt (see the
+            // run_repl comment), so the drain's read(4) reaches the prompt
+            // directly and never readline()s into it.
+            eprint!("{}", prompt);
+            let mut buf = String::new();
+            use std::io::BufRead;
+            match std::io::stdin().lock().read_line(&mut buf) {
+                Ok(0) => Err(rustyline::error::ReadlineError::Eof),
+                Ok(_) => {
+                    if let Some(stripped) = buf.strip_suffix('\n') {
+                        buf = stripped.to_string();
+                    }
+                    if let Some(stripped) = buf.strip_suffix('\r') {
+                        buf = stripped.to_string();
+                    }
+                    Ok(buf)
+                }
+                Err(e) => Err(rustyline::error::ReadlineError::Io(e)),
+            }
+        } else if source_buf.is_empty() {
             rl.readline(prompt)
         } else {
             let initial = " ".repeat(indent_level);
@@ -139,6 +179,10 @@ fn run_repl() {
                         Ok(val) => call_displayhook(&vm, &val),
                         Err(e) => eprintln!("{}", e),
                     }
+                    // Flush so an interactive driver sees the output
+                    // immediately (stdout to a pipe is block-buffered).
+                    use std::io::Write;
+                    let _ = std::io::stdout().flush();
                     source_buf.clear();
                     indent_level = 0;
                     continue;
@@ -158,6 +202,8 @@ fn run_repl() {
                         Ok(val) => call_displayhook(&vm, &val),
                         Err(e) => eprintln!("{}", e),
                     }
+                    use std::io::Write;
+                    let _ = std::io::stdout().flush();
                     source_buf.clear();
                     indent_level = 0;
                 } else {
@@ -277,6 +323,7 @@ fn real_main() {
 
     // Handle flags
     let mut i = 0;
+    let mut interactive = false;
     while i < args.len() {
         match args[i].as_str() {
             "--version" | "-V" => {
@@ -315,6 +362,16 @@ fn real_main() {
                 continue;
             }
             "-I" | "-E" => {
+                i += 1;
+                continue;
+            }
+            // `-i` — interactive mode: run the script/-c/-m first, then drop
+            // into the REPL. Was unrecognized ("unknown option"), which made
+            // test_cmd_line_script.py's interactive_python ('-i' + piped
+            // stdin) spawn a child that printed the error and exited, then
+            // hung forever reading its empty stderr looking for the prompt.
+            "-i" => {
+                interactive = true;
                 i += 1;
                 continue;
             }
@@ -543,8 +600,12 @@ fn real_main() {
                 std::process::exit(1);
             }
         }
-    } else if raw_args.len() == 1 {
-        // REPL
+        // `-i`: drop into the REPL after the script finishes.
+        if interactive {
+            run_repl();
+        }
+    } else if raw_args.len() == 1 || interactive {
+        // REPL (also forced after -i)
         run_repl();
     } else {
         // No file and not REPL (e.g. just flags)
