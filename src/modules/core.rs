@@ -607,6 +607,17 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
         name: "maketrans".to_string(),
         func: crate::object::str_maketrans_builtin,
     }));
+    // `str.casefold` — the instance-level method resolves via the Str
+    // get_attribute arm, but unbound CLASS-level access (`str.casefold`,
+    // real CPython's own `test_bisect.py` uses it as a key function) failed
+    // with AttributeError because the type dict only had the ctor marker.
+    str_dict.insert_str("casefold", PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "casefold".to_string(),
+        func: |args: &[PyObjectRef]| {
+            if args.is_empty() { return Err(PyError::type_error("casefold() missing required argument")); }
+            Ok(py_str(&args[0].str().to_lowercase()))
+        },
+    }));
     let str_type = PyObjectRef::new(PyObject::Type {
         name: "str".to_string(),
         dict: Box::new(str_map_to_typedict(str_dict)),

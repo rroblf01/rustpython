@@ -517,21 +517,16 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                 _ => Err(PyError::type_error(format!("range indices must be integers or slices, not {}", idx.type_name()))),
             }
         }
-        PyObject::Instance { dict, .. } => {
-            let key = index.str();
-            let val = dict.get(&key).cloned();
-            drop(o);
-            if let Some(v) = val {
-                Ok(v)
-            } else {
-                // Check for __missing__ (dict subclass support, e.g. Counter)
-                let missing = obj.borrow().get_attribute("__missing__").ok()
-                    .and_then(|m| crate::object::call_function(&m, vec![obj.clone(), index.clone()]).ok());
-                match missing {
-                    Some(v) => Ok(v),
-                    None => Err(PyError::key_error(index.str())),
-                }
-            }
+        // A plain Instance with no `__getitem__` anywhere in its MRO and no
+        // native backing. Real CPython raises TypeError here ("'X' object is
+        // not subscriptable") — it does NOT fall back to treating the
+        // instance's `__dict__` as a mapping. (That wrong fallback surfaced
+        // via test_bisect's `LenOnly`/`GetOnly` error-handling classes:
+        // `bisect` indexing `a[mid]` on an object with no `__getitem__` got
+        // a KeyError instead of the required TypeError.)
+        PyObject::Instance { typ, .. } => {
+            let type_name = get_type_name_for_instance(typ);
+            Err(PyError::type_error(format!("'{}' object is not subscriptable", type_name)))
         }
         _ => Err(PyError::type_error(format!("'{}' object is not subscriptable", o.type_name()))),
     }
