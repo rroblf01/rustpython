@@ -51,6 +51,7 @@ make_exception_func!(builtin_make_exception_stopasynciteration, "StopAsyncIterat
 make_exception_func!(builtin_make_exception_eoferror, "EOFError");
 make_exception_func!(builtin_make_exception_syntaxerror, "SyntaxError");
 make_exception_func!(builtin_make_exception_cycleerror, "CycleError");
+make_exception_func!(builtin_make_exception_incompleteinputerror, "_IncompleteInputError");
 make_exception_func!(builtin_make_exception_decimalexception, "DecimalException");
 make_exception_func!(builtin_make_exception_invalidoperation, "InvalidOperation");
 make_exception_func!(builtin_make_exception_decimaldivisionbyzero, "DivisionByZero");

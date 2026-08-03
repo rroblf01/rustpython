@@ -8246,6 +8246,10 @@ pub(crate) fn is_exception_subclass(child_type: &str, parent_type: &str) -> bool
         // `IndentationError(SyntaxError)`, `TabError(IndentationError)`).
         "IndentationError" => Some("SyntaxError"),
         "TabError" => Some("IndentationError"),
+        // `_IncompleteInputError` — codeop's internal signal for
+        // still-incomplete input (raised by compile() with
+        // PyCF_ALLOW_INCOMPLETE_INPUT); a SyntaxError subclass in CPython.
+        "_IncompleteInputError" => Some("SyntaxError"),
         // Children of ValueError
         "UnicodeError" | "UnicodeEncodeError" | "UnicodeDecodeError" |
         "UnicodeTranslateError" => Some("ValueError"),

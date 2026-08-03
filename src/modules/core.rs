@@ -262,6 +262,7 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     add_exc_type!("StopAsyncIteration", builtin_make_exception_stopasynciteration);
     add_exc_type!("EOFError", builtin_make_exception_eoferror);
     add_exc_type!("SyntaxError", builtin_make_exception_syntaxerror);
+    add_exc_type!("_IncompleteInputError", builtin_make_exception_incompleteinputerror);
     add_exc_type!("ConnectionError", builtin_make_exception_connectionerror);
     add_exc_type!("BrokenPipeError", builtin_make_exception_brokenpipeerror);
     add_exc_type!("ConnectionRefusedError", builtin_make_exception_connectionrefusederror);

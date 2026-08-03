@@ -253,7 +253,7 @@ impl Opcode {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Instr {
     pub op: Opcode,
     pub arg: u32,
@@ -350,6 +350,35 @@ pub struct CodeObject {
     /// Line number for each instruction (0 = unknown).
     /// Same length as `instructions`; stored separately so Instr stays 8 bytes.
     pub line_numbers: Vec<u32>,
+}
+
+/// Structural equality for `CodeObject` — real CPython code objects compare
+/// equal when their compiled contents match (test_codeop asserts
+/// `compile_command(src) == compile(src, ...)`). Every field is compared
+/// EXCEPT `const_cache`, a lazily-populated per-const parse cache that is a
+/// pure implementation detail (identical code compiled twice has different
+/// caches but must compare equal).
+impl PartialEq for CodeObject {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.arg_count == other.arg_count
+            && self.kwonlyarg_count == other.kwonlyarg_count
+            && self.nlocals == other.nlocals
+            && self.instructions == other.instructions
+            && self.consts == other.consts
+            && self.names == other.names
+            && self.varnames == other.varnames
+            && self.freevars == other.freevars
+            && self.cellvars == other.cellvars
+            && self.filename == other.filename
+            && self.first_lineno == other.first_lineno
+            && self.flags == other.flags
+            && self.vararg_name == other.vararg_name
+            && self.kwarg_name == other.kwarg_name
+            && self.num_defaults == other.num_defaults
+            && self.kwonly_defaults_mask == other.kwonly_defaults_mask
+            && self.line_numbers == other.line_numbers
+    }
 }
 
 impl CodeObject {
@@ -743,7 +772,7 @@ fn read_const_value(data: &[u8], pos: &mut usize) -> Result<ConstValue, String> 
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ConstValue {
     None,
     Bool(bool),

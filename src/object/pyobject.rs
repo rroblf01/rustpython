@@ -1047,6 +1047,12 @@ impl PyObject {
                 a == b && ae == be && ap == bp
             }
             (PyObject::CompiledRegex { pattern: a, flags: af, .. }, PyObject::CompiledRegex { pattern: b, flags: bf, .. }) => a == b && af == bf,
+            // Code objects compare structurally — real CPython's
+            // `code.__eq__` does (test_codeop asserts `compile_command(src)
+            // == compile(src, ...)`). Two separately compiled-but-identical
+            // code objects must be equal even though their `const_cache`
+            // (excluded from CodeObject's PartialEq) differs.
+            (PyObject::Code(a), PyObject::Code(b)) => **a == **b,
             // Reference-identity types (matching the identity-based hash
             // above): equal iff it's really the same underlying object.
             (PyObject::Function(_), PyObject::Function(_))
