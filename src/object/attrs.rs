@@ -2774,8 +2774,41 @@ impl PyObject {
                             // `test_listcomps.py`, which builds source code
                             // via `"...{code}...".format(code=code)`).
                             let rest = &args[1..];
+                            // A trailing Dict is only the kwargs pack when the
+                            // format string actually uses NAMED fields
+                            // (`'{name}'`); otherwise a dict passed as an
+                            // ordinary positional arg (e.g.
+                            // `'{}'.format({b'a': [b'b']})`, real trigger:
+                            // test_urlparse's `_SubTest.__str__` formatting
+                            // subTest params that are themselves dicts) would
+                            // be wrongly eaten as the kwargs pack, leaving
+                            // zero positional args.
+                            let has_named_fields = {
+                                let mut saw_named = false;
+                                let mut in_field = false;
+                                let mut in_suffix = false;
+                                let mut name_part = String::new();
+                                for c in fmt.chars() {
+                                    if c == '{' {
+                                        if !in_field { in_field = true; name_part.clear(); in_suffix = false; }
+                                    } else if c == '}' {
+                                        if in_field && !name_part.is_empty() && !name_part.chars().all(|ch| ch.is_ascii_digit()) {
+                                            saw_named = true;
+                                        }
+                                        in_field = false;
+                                    } else if in_field {
+                                        // Only the NAME portion (before any
+                                        // `!conversion` / `:spec`) determines
+                                        // whether the field is named — stop
+                                        // collecting once a suffix starts.
+                                        if c == '!' || c == ':' { in_suffix = true; continue; }
+                                        if !in_suffix && !c.is_whitespace() { name_part.push(c); }
+                                    }
+                                }
+                                saw_named
+                            };
                             let kwargs_dict: Option<PyObjectRef> = match rest.last() {
-                                Some(a) if matches!(&*a.borrow(), PyObject::Dict(_)) => Some(a.clone()),
+                                Some(a) if has_named_fields && matches!(&*a.borrow(), PyObject::Dict(_)) => Some(a.clone()),
                                 _ => None,
                             };
                             let pos_args: &[PyObjectRef] = if kwargs_dict.is_some() { &rest[..rest.len()-1] } else { rest };
