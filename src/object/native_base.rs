@@ -95,6 +95,8 @@ pub(crate) fn is_builtin_exception_class_name(name: &str) -> bool {
         "FileNotFoundError" | "PermissionError" | "NotImplementedError" |
         "RecursionError" | "KeyboardInterrupt" | "GeneratorExit" | "SystemExit" |
         "ModuleNotFoundError" | "StopAsyncIteration" | "EOFError" | "SyntaxError" |
+        "PythonFinalizationError" |
+        "EncodingWarning" |
         "ConnectionError" | "BrokenPipeError" | "ConnectionRefusedError" |
         "BlockingIOError" | "ChildProcessError" | "InterruptedError" |
         "TimeoutError" | "UnicodeDecodeError" | "UnicodeEncodeError" |

@@ -3656,13 +3656,27 @@ pub fn builtin_issubclass(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         // represented as BuiltinFunction constructors rather than Type
         // objects — resolve ancestry by name via the same table `except`
         // and isinstance() use, instead of only accepting real Type values.
+        // A BuiltinFunction that is NOT a recognized exception class is not
+        // a class at all (real CPython: issubclass(abs, X) raises TypeError)
+        // — without this gate, `is_exception_subclass`'s catch-all mapped
+        // ANY BuiltinFunction name (abs, print, ...) to Exception, so
+        // `issubclass(abs, BaseException)` returned True.
         (PyObject::BuiltinFunction { name: cls_name, .. }, _) => {
+            if !is_builtin_exception_class_name(cls_name) {
+                return Err(PyError::type_error("issubclass() arg 1 must be a class"));
+            }
             let base_name = match &*base {
                 PyObject::BuiltinFunction { name, .. } => name.clone(),
                 PyObject::Str(s) => s.to_string(),
                 PyObject::Type { name, .. } => name.clone(),
                 _ => base.str(),
             };
+            // Everything (including every exception "class") is a subclass of
+            // `object` — `issubclass(Exception, object)` must be True
+            // (test_baseexception::test_builtins_new_style).
+            if base_name == "object" {
+                return Ok(py_bool(true));
+            }
             if crate::vm::is_exception_subclass(cls_name, &base_name) {
                 return Ok(py_bool(true));
             }

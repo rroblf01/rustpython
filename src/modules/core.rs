@@ -244,17 +244,30 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     add_exc_type!("StopIteration", builtin_make_exception_stopiteration);
     add_exc_type!("AssertionError", builtin_make_exception_assertionerror);
     add_exc_type!("OSError", builtin_make_exception_oserror);
+    // `IOError`/`EnvironmentError` are ALIASES of `OSError` (real CPython:
+    // `IOError is OSError` is True — they're bound to the SAME object and
+    // their `__name__` is "OSError"). Registering them as separate classes
+    // made `issubclass(IOError, BaseException)` find them as distinct
+    // names, which test_baseexception's hierarchy audit flags as "not
+    // accounted for" (the hierarchy file only lists OSError).
+    {
+        let oserror = builtins.get("OSError").cloned().unwrap_or_else(|| {
+            PyObjectRef::new(PyObject::BuiltinFunction { name: "OSError".to_string(), func: builtin_make_exception_oserror })
+        });
+        builtins.insert_str("EnvironmentError", oserror.clone());
+        builtins.insert_str("IOError", oserror);
+    }
     add_exc_type!("ImportError", builtin_make_exception_importerror);
     add_exc_type!("LookupError", builtin_make_exception_lookuperror);
     add_exc_type!("ArithmeticError", builtin_make_exception_arithmeticerror);
     add_exc_type!("FloatingPointError", builtin_make_exception_floatingpointerror);
     add_exc_type!("OverflowError", builtin_make_exception_overflowerror);
-    add_exc_type!("EnvironmentError", builtin_make_exception_environmenterror);
-    add_exc_type!("IOError", builtin_make_exception_ioerror);
+    // EnvironmentError/IOError are registered as OSError aliases above.
     add_exc_type!("FileNotFoundError", builtin_make_exception_filenotfounderror);
     add_exc_type!("PermissionError", builtin_make_exception_permissionerror);
     add_exc_type!("NotImplementedError", builtin_make_exception_notimplementederror);
     add_exc_type!("RecursionError", builtin_make_exception_recursionerror);
+    add_exc_type!("PythonFinalizationError", builtin_make_exception_pythonfinalizationerror);
     add_exc_type!("KeyboardInterrupt", builtin_make_exception_keyboardinterrupt);
     add_exc_type!("GeneratorExit", builtin_make_exception_generatorexit);
     add_exc_type!("SystemExit", builtin_make_exception_systemexit);
@@ -285,6 +298,7 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     add_exc_type!("FutureWarning", builtin_make_exception_futurewarning);
     add_exc_type!("ImportWarning", builtin_make_exception_importwarning);
     add_exc_type!("UnicodeWarning", builtin_make_exception_unicodewarning);
+    add_exc_type!("EncodingWarning", builtin_make_exception_encodingwarning);
     add_exc_type!("BytesWarning", builtin_make_exception_byteswarning);
     add_exc_type!("ResourceWarning", builtin_make_exception_resourcewarning);
     add_exc_type!("ReferenceError", builtin_make_exception_referenceerror);

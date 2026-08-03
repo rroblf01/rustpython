@@ -628,3 +628,11 @@ pub fn deepcopy_one(obj: &PyObjectRef, memo: &PyObjectRef) -> Result<PyObjectRef
     }
 }
 
+// Late additions — PythonFinalizationError (RuntimeError subclass) and
+// EncodingWarning (Warning subclass) were registered in CPython but missing
+// here entirely, so `issubclass(EncodingWarning, Warning)`/`issubclass(
+// PythonFinalizationError, RuntimeError)` (test_baseexception's
+// exception-hierarchy audit) found nothing to resolve.
+make_exception_func!(builtin_make_exception_pythonfinalizationerror, "PythonFinalizationError");
+make_exception_func!(builtin_make_exception_encodingwarning, "EncodingWarning");
+

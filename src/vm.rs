@@ -7441,6 +7441,7 @@ impl VirtualMachine {
                 None
             };
 
+            let mut class_cell: Option<PyObjectRef> = None;
             match &*func.borrow() {
                 PyObject::Function(ref f) => {
             let code = &f.code;
@@ -7466,9 +7467,23 @@ impl VirtualMachine {
                     // staying flat across a frame_floor transition where it
                     // should have dropped by one.
                     let result = self.execute();
-                    if let Some(frame) = self.frames.pop() {
-                        self.release_frame(frame);
-                    }
+                    // PEP 3135: capture the class body's `__class__` cell so
+                    // it can be populated with the finished class (methods
+                    // created here close over it as a free var, letting bare
+                    // super() resolve the class). The frame is released back
+                    // to the pool right after, which clears fast_locals, so
+                    // the cell must be grabbed now.
+                    class_cell = {
+                        let popped = self.frames.pop();
+                        let cell = popped.as_ref().and_then(|fr| {
+                            let idx = fr.code.varnames.iter().position(|&n| crate::interner::lookup_str(n) == "__class__");
+                            idx.and_then(|i| fr.fast_locals.get(i).and_then(|v| v.clone()))
+                        });
+                        if let Some(frame) = popped {
+                            self.release_frame(frame);
+                        }
+                        cell
+                    };
                     result?;
                 }
                 _ => return Err(PyError::type_error("class body must be a function")),
@@ -7535,11 +7550,21 @@ impl VirtualMachine {
                 }
             }
 
-            if let Some(mc) = effective_metaclass {
-                return self.build_class_with_metaclass(name_str, name.clone(), bases_vec, namespace_dict, order, mc, init_subclass_kwargs, prepared_namespace);
+            let class_result = if let Some(mc) = effective_metaclass {
+                self.build_class_with_metaclass(name_str, name.clone(), bases_vec, namespace_dict, order, mc, init_subclass_kwargs, prepared_namespace)
+            } else {
+                self.default_build_class(name_str, bases_vec, namespace_dict, init_subclass_kwargs, None)
+            };
+            let class_obj = class_result?;
+            // PEP 3135: populate the class body's `__class__` cell with the
+            // finished class, so bare `super()` in any method created in the
+            // body resolves it (methods close over this cell as a free var).
+            if let Some(cell) = class_cell {
+                if let PyObject::Cell { value } = &mut *cell.borrow_mut() {
+                    *value = Some(class_obj.clone());
+                }
             }
-
-            return self.default_build_class(name_str, bases_vec, namespace_dict, init_subclass_kwargs, None);
+            return Ok(class_obj);
         }
 
         // `staticmethod` objects are directly callable since Python 3.10
@@ -8236,12 +8261,13 @@ pub(crate) fn is_exception_subclass(child_type: &str, parent_type: &str) -> bool
         "EnvironmentError" | "IOError" => Some("OSError"),
         "FileNotFoundError" | "PermissionError" | "NotADirectoryError" |
         "IsADirectoryError" | "FileExistsError" => Some("OSError"),
-        "ConnectionError" | "BrokenPipeError" | "ConnectionAbortedError" |
-        "ConnectionRefusedError" | "ConnectionResetError" => Some("OSError"),
+        "ConnectionError" => Some("OSError"),
+        "BrokenPipeError" | "ConnectionAbortedError" | "ConnectionRefusedError" |
+        "ConnectionResetError" => Some("ConnectionError"),
         "BlockingIOError" | "ChildProcessError" | "InterruptedError" |
         "ProcessLookupError" | "TimeoutError" => Some("OSError"),
         // Children of RuntimeError
-        "NotImplementedError" | "RecursionError" => Some("RuntimeError"),
+        "NotImplementedError" | "RecursionError" | "PythonFinalizationError" => Some("RuntimeError"),
         // Children of ImportError
         "ModuleNotFoundError" => Some("ImportError"),
         // Children of NameError
@@ -8256,8 +8282,9 @@ pub(crate) fn is_exception_subclass(child_type: &str, parent_type: &str) -> bool
         // PyCF_ALLOW_INCOMPLETE_INPUT); a SyntaxError subclass in CPython.
         "_IncompleteInputError" => Some("SyntaxError"),
         // Children of ValueError
-        "UnicodeError" | "UnicodeEncodeError" | "UnicodeDecodeError" |
-        "UnicodeTranslateError" => Some("ValueError"),
+        "UnicodeError" => Some("ValueError"),
+        "UnicodeEncodeError" | "UnicodeDecodeError" |
+        "UnicodeTranslateError" => Some("UnicodeError"),
         // `binascii.Error` — real CPython subclasses `ValueError` (checked
         // via `issubclass(binascii.Error, ValueError)`), found missing while
         // fixing `base64.b32decode`'s error validation (its own tests do
@@ -8266,7 +8293,7 @@ pub(crate) fn is_exception_subclass(child_type: &str, parent_type: &str) -> bool
         // matching real CPython would).
         "Error" => Some("ValueError"),
         // Children of Warning
-        "UserWarning" | "DeprecationWarning" | "PendingDeprecationWarning" |
+        "UserWarning" | "DeprecationWarning" | "PendingDeprecationWarning" | "EncodingWarning" |
         "SyntaxWarning" | "RuntimeWarning" | "FutureWarning" |
         "ImportWarning" | "UnicodeWarning" | "BytesWarning" |
         "ResourceWarning" => Some("Warning"),

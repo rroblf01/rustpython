@@ -762,6 +762,19 @@ impl PyObject {
                 match name {
                     "__name__" => Ok(py_str(typ)),
                     "args" => Ok(py_tuple(args.clone())),
+                    // `__str__`/`__repr__` — real exceptions always expose
+                    // both (test_baseexception's verify_instance_interface
+                    // asserts `args`/`__str__`/`__repr__` on EVERY builtin
+                    // exception instance). CPython: str(exc) joins str(args)
+                    // (empty args -> empty string); repr is `TypeName(args)`.
+                    "__str__" => {
+                        let parts: Vec<String> = args.iter().map(|a| a.str()).collect();
+                        Ok(py_str(&parts.join(", ")))
+                    }
+                    "__repr__" => {
+                        let parts: Vec<String> = args.iter().map(|a| a.repr()).collect();
+                        Ok(py_str(&format!("{}({})", typ, parts.join(", "))))
+                    }
                     "__cause__" => {
                         match cause {
                             Some(cause_exc) => Ok(cause_exc.clone()),
@@ -850,6 +863,14 @@ impl PyObject {
                 match name {
                     "__name__" => Ok(py_str(typ)),
                     "args" => Ok(py_tuple(args.clone())),
+                    "__str__" => {
+                        let parts: Vec<String> = args.iter().map(|a| a.str()).collect();
+                        Ok(py_str(&parts.join(", ")))
+                    }
+                    "__repr__" => {
+                        let parts: Vec<String> = args.iter().map(|a| a.repr()).collect();
+                        Ok(py_str(&format!("{}({})", typ, parts.join(", "))))
+                    }
                     "message" => Ok(args.first().cloned().unwrap_or_else(|| py_str(""))),
                     "exceptions" => Ok(py_tuple(exceptions.clone())),
                     "__cause__" | "__context__" | "__traceback__" => Ok(py_none()),
