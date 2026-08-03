@@ -733,8 +733,11 @@ impl VirtualMachine {
           // Native platform module
           modules.insert_str("platform", create_module("platform", create_platform_dict()));
 
-          // Native getopt module
-          modules.insert_str("getopt", create_module("getopt", create_getopt_dict()));
+          // `getopt` — the real CPython Lib/getopt.py (vendored) is loaded
+          // from disk instead: it exposes the internals CPython's own
+          // test_getopt.py exercises directly (do_shorts/do_longs/
+          // gnu_getopt/GetoptError/short_has_arg/long_has_args) that the
+          // native Rust version never had, and its algorithm is authoritative.
 
           // Native getpass module
           modules.insert_str("getpass", create_module("getpass", create_getpass_dict()));
