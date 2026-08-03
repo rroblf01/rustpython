@@ -4334,6 +4334,30 @@ impl VirtualMachine {
                                                     self.frames[fi].push(py_none());
                                                     return Ok(None);
                                                 }
+                                                // PEP 562 module `__getattr__`:
+                                                // a module whose own dict lacks
+                                                // the attribute but defines
+                                                // `__getattr__` (lazy-attribute
+                                                // pattern; real trigger: the
+                                                // vendored `test.support.
+                                                // _hypothesis_stubs.strategies`,
+                                                // which backends every
+                                                // strategy name through a
+                                                // module-level `__getattr__`)
+                                                // must have it invoked before
+                                                // erroring.
+                                                if matches!(&*obj.borrow(), PyObject::Module { .. }) {
+                                                    let g = obj.borrow().get_attribute("__getattr__");
+                                                    if let Ok(getattr_method) = g {
+                                                        if !matches!(&*getattr_method.borrow(), PyObject::None) {
+                                                            // Module __getattr__ takes ONLY the attribute name —
+                                                            // the module itself is NOT bound as self.
+                                                            let result = self.call_function(getattr_method, vec![py_str(&name)], vec![])?;
+                                                            self.frames[fi].push(result);
+                                                            return Ok(None);
+                                                        }
+                                                    }
+                                                }
                                                 return Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", obj_type_name_for_err, name)));
                                             }
                                         }
