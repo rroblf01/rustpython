@@ -371,7 +371,205 @@ pub fn create_binascii_dict() -> HashMap<String, PyObjectRef> {
         Ok(PyObjectRef::imm(PyObject::Bytes(out)))
     });
 
-    // --- rlecode_hqx (stub) ---
+    // RFC 1521 quoted-printable encoder — faithful port of CPython's
+    // `binascii.b2a_qp` (Modules/binascii.c): MAXLINESIZE soft line breaks,
+    // CRLF detection, trailing-whitespace encoding, `quotetabs`/`istext`/
+    // `header` flags (kwargs arrive packed in a trailing Dict).
+    bin_func!("b2a_qp", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("b2a_qp() missing required argument"));
+        }
+        let data = match &*args[0].borrow() {
+            PyObject::Bytes(b) => b.clone(),
+            PyObject::ByteArray(b) => b.clone(),
+            _ => return Err(PyError::type_error("argument must be bytes or bytearray")),
+        };
+        let mut quotetabs = false;
+        let mut istext = true;
+        let mut header = false;
+        if let Some(last) = args.last().cloned() {
+            if let PyObject::Dict(d) = &*last.borrow() {
+                for (k, v) in d.items() {
+                    match k.str().as_str() {
+                        "quotetabs" => quotetabs = v.truthy(),
+                        "istext" => istext = v.truthy(),
+                        "header" => header = v.truthy(),
+                        _ => return Err(PyError::type_error(format!("b2a_qp() got an unexpected keyword argument '{}'", k.str()))),
+                    }
+                }
+            }
+        }
+        const MAXLINESIZE: usize = 76;
+        let datalen = data.len();
+        let mut crlf = false;
+        if let Some(pos) = data.iter().position(|&b| b == b'\n') {
+            if pos > 0 && data[pos - 1] == b'\r' { crlf = true; }
+        }
+        let needs_encode = |i: usize, linelen: usize, data: &[u8]| -> bool {
+            let b = data[i];
+            (b > 126)
+                || b == b'='
+                || (header && b == b'_')
+                || (b == b'.' && linelen == 0
+                    && (i + 1 == datalen || data[i + 1] == b'\n' || data[i + 1] == b'\r' || data[i + 1] == 0))
+                || (!istext && (b == b'\r' || b == b'\n'))
+                || ((b == b'\t' || b == b' ') && i + 1 == datalen)
+                || (b < 33 && b != b'\r' && b != b'\n'
+                    && (quotetabs || (b != b'\t' && b != b' ')))
+        };
+        // Pass 1: compute output size.
+        let mut odatalen = 0usize;
+        let mut linelen = 0usize;
+        let mut i = 0usize;
+        while i < datalen {
+            let mut delta = 0usize;
+            if needs_encode(i, linelen, &data) {
+                if linelen + 3 >= MAXLINESIZE { linelen = 0; delta += if crlf { 3 } else { 2 }; }
+                linelen += 3;
+                delta += 3;
+                i += 1;
+            } else {
+                let b = data[i];
+                if istext && (b == b'\n' || (i + 1 < datalen && b == b'\r' && data[i + 1] == b'\n')) {
+                    linelen = 0;
+                    if i > 0 && (data[i - 1] == b' ' || data[i - 1] == b'\t') { delta += 2; }
+                    delta += if crlf { 2 } else { 1 };
+                    if b == b'\r' { i += 2; } else { i += 1; }
+                } else {
+                    if i + 1 != datalen && data[i + 1] != b'\n' && linelen + 1 >= MAXLINESIZE {
+                        linelen = 0;
+                        delta += if crlf { 3 } else { 2 };
+                    }
+                    linelen += 1;
+                    delta += 1;
+                    i += 1;
+                }
+            }
+            odatalen += delta;
+        }
+        // Pass 2: emit.
+        let mut out: Vec<u8> = Vec::with_capacity(odatalen);
+        let mut linelen = 0usize;
+        let mut i = 0usize;
+        while i < datalen {
+            if needs_encode(i, linelen, &data) {
+                if linelen + 3 >= MAXLINESIZE {
+                    out.push(b'=');
+                    if crlf { out.push(b'\r'); }
+                    out.push(b'\n');
+                    linelen = 0;
+                }
+                let b = data[i];
+                out.push(b'=');
+                out.push(b"0123456789ABCDEF"[(b >> 4) as usize]);
+                out.push(b"0123456789ABCDEF"[(b & 0x0f) as usize]);
+                i += 1;
+                linelen += 3;
+            } else {
+                let b = data[i];
+                if istext && (b == b'\n' || (i + 1 < datalen && b == b'\r' && data[i + 1] == b'\n')) {
+                    linelen = 0;
+                    if let Some(&last) = out.last() {
+                        if last == b' ' || last == b'\t' {
+                            out.pop();
+                            out.push(b'=');
+                            out.push(b"0123456789ABCDEF"[(last >> 4) as usize]);
+                            out.push(b"0123456789ABCDEF"[(last & 0x0f) as usize]);
+                        }
+                    }
+                    if crlf { out.push(b'\r'); }
+                    out.push(b'\n');
+                    if b == b'\r' { i += 2; } else { i += 1; }
+                } else {
+                    if i + 1 != datalen && data[i + 1] != b'\n' && linelen + 1 >= MAXLINESIZE {
+                        out.push(b'=');
+                        if crlf { out.push(b'\r'); }
+                        out.push(b'\n');
+                        linelen = 0;
+                    }
+                    out.push(b);
+                    i += 1;
+                    linelen += 1;
+                }
+            }
+        }
+        // Header mode converts spaces to `_` (RFC 1522) — CPython emits the
+        // plain char in the main loop but the space becomes `_`. Applied as a
+        // final pass since spaces pass through the emit loop unchanged.
+        if header {
+            for ch in out.iter_mut() {
+                if *ch == b' ' { *ch = b'_'; }
+            }
+        }
+        Ok(PyObjectRef::imm(PyObject::Bytes(out)))
+    });
+
+    // RFC 1521 quoted-printable decoder — faithful port of CPython's
+    // `binascii.a2b_qp` (header flag for `_` -> space).
+    bin_func!("a2b_qp", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("a2b_qp() missing required argument"));
+        }
+        let data = match &*args[0].borrow() {
+            PyObject::Bytes(b) => b.clone(),
+            PyObject::ByteArray(b) => b.clone(),
+            _ => return Err(PyError::type_error("argument must be bytes or bytearray")),
+        };
+        let mut header = false;
+        if let Some(last) = args.last().cloned() {
+            if let PyObject::Dict(d) = &*last.borrow() {
+                for (k, v) in d.items() {
+                    match k.str().as_str() {
+                        "header" => header = v.truthy(),
+                        _ => return Err(PyError::type_error(format!("a2b_qp() got an unexpected keyword argument '{}'", k.str()))),
+                    }
+                }
+            }
+        }
+        let hexval = |c: u8| -> Option<u8> {
+            match c {
+                b'0'..=b'9' => Some(c - b'0'),
+                b'a'..=b'f' => Some(c - b'a' + 10),
+                b'A'..=b'F' => Some(c - b'A' + 10),
+                _ => None,
+            }
+        };
+        let datalen = data.len();
+        let mut out: Vec<u8> = Vec::with_capacity(datalen);
+        let mut i = 0usize;
+        while i < datalen {
+            if data[i] == b'=' {
+                i += 1;
+                if i >= datalen { break; }
+                if data[i] == b'\n' || data[i] == b'\r' {
+                    // Soft line break.
+                    if data[i] != b'\n' {
+                        while i < datalen && data[i] != b'\n' { i += 1; }
+                    }
+                    if i < datalen { i += 1; }
+                } else if data[i] == b'=' {
+                    out.push(b'=');
+                    i += 1;
+                } else if i + 1 < datalen {
+                    if let (Some(h), Some(l)) = (hexval(data[i]), hexval(data[i + 1])) {
+                        out.push((h << 4) | l);
+                        i += 2;
+                    } else {
+                        out.push(b'=');
+                    }
+                } else {
+                    out.push(b'=');
+                }
+            } else if header && data[i] == b'_' {
+                out.push(b' ');
+                i += 1;
+            } else {
+                out.push(data[i]);
+                i += 1;
+            }
+        }
+        Ok(PyObjectRef::imm(PyObject::Bytes(out)))
+    });
     bin_func!("rlecode_hqx", |args| {
         if args.is_empty() {
             return Err(PyError::type_error("rlecode_hqx() missing required argument"));
