@@ -361,7 +361,11 @@ fn real_main() {
                 i += 2;
                 continue;
             }
-            "-I" | "-E" => {
+            "-I" | "-E" | "-u" => {
+                // `-u` (unbuffered stdout/stderr) is a no-op here (Rust's
+                // stdout is flushed explicitly where it matters); `-I`/`-E`
+                // as above. `-u` comes from test.support's run_test_script
+                // ("-u" to get full output if a test hangs).
                 i += 1;
                 continue;
             }
