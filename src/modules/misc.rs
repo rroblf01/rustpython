@@ -4507,6 +4507,113 @@ thread_local! {
     static EXIT_CALLBACKS: std::cell::RefCell<Vec<(PyObjectRef, Vec<PyObjectRef>, Vec<(String, PyObjectRef)>)>> = std::cell::RefCell::new(Vec::new());
 }
 
+thread_local! {
+    // The real `sys` module (registered once at VM init) — native code like
+    // atexit's `_run_exitfuncs` reads the CURRENT `sys.unraisablehook` from
+    // it to report raising callbacks. A disposable VM's own sys module would
+    // hold the DEFAULT hook, losing any reassignment made by
+    // `catch_unraisable_exception`-style contexts.
+    static CURRENT_SYS_MODULE: std::cell::RefCell<Option<PyObjectRef>> = std::cell::RefCell::new(None);
+}
+
+pub(crate) fn set_sys_module(mod_ref: Option<PyObjectRef>) {
+    CURRENT_SYS_MODULE.with(|m| *m.borrow_mut() = mod_ref);
+}
+
+fn get_current_unraisablehook() -> Option<PyObjectRef> {
+    CURRENT_SYS_MODULE.with(|m| {
+        let mod_ref = m.borrow().clone()?;
+        let borrowed = mod_ref.borrow();
+        if let PyObject::Module { dict, .. } = &*borrowed {
+            dict.get_str("unraisablehook").cloned()
+        } else {
+            None
+        }
+    })
+}
+
+// `UnraisableHookArgs`-shaped object for a raising atexit callback (real
+// CPython passes object=None for atexit callbacks, the func's repr in
+// err_msg, and the exception's type/value). exc_type is the real builtin
+// exception class (looked up through sys.modules['builtins'], so identity
+// matches what Python code holds) and exc_value a real PyObject::Exception.
+fn build_unraisable_args(func: &PyObjectRef, err: &PyError) -> PyObjectRef {
+    let exc_name = py_error_type_name(err);
+    let exc_value = PyObjectRef::new(PyObject::Exception {
+        typ: exc_name.clone(),
+        args: py_error_args(err),
+        cause: None,
+    });
+    let exc_type = CURRENT_SYS_MODULE.with(|m| {
+        let mod_ref = m.borrow().clone()?;
+        let borrowed = mod_ref.borrow();
+        let modules = if let PyObject::Module { dict, .. } = &*borrowed {
+            dict.get_str("modules").cloned()
+        } else {
+            None
+        };
+        let modules = modules?;
+        let builtins_mod = {
+            let mb = modules.borrow();
+            if let PyObject::Dict(d) = &*mb {
+                d.get(&py_str("builtins")).ok().flatten()
+            } else {
+                None
+            }
+        }?;
+        let bb = builtins_mod.borrow();
+        if let PyObject::Module { dict, .. } = &*bb {
+            dict.get_str(&exc_name).cloned()
+        } else {
+            None
+        }
+    });
+    let mut attrs = crate::object::AttrMap::new();
+    attrs.insert_str("object", PyObjectRef::new(PyObject::None));
+    attrs.insert_str("err_msg", py_str(&format!("Exception ignored in atexit callback {:?}", func.repr())));
+    attrs.insert_str("exc_type", exc_type.unwrap_or_else(|| py_none()));
+    attrs.insert_str("exc_value", exc_value);
+    attrs.insert_str("exc_traceback", py_none());
+    let typ = PyObjectRef::new(PyObject::Type {
+        name: "UnraisableHookArgs".to_string(),
+        dict: Box::new(crate::object::str_map_to_typedict(std::collections::HashMap::new())),
+        bases: vec![],
+        mro: vec![],
+    });
+    PyObjectRef::new(PyObject::Instance { typ, dict: attrs })
+}
+
+fn py_error_type_name(err: &PyError) -> String {
+    match err {
+        PyError::TypeError(_) => "TypeError".to_string(),
+        PyError::ValueError(_) => "ValueError".to_string(),
+        PyError::NameError(_) => "NameError".to_string(),
+        PyError::AttributeError(_) => "AttributeError".to_string(),
+        PyError::IndexError(_) => "IndexError".to_string(),
+        PyError::KeyError(_) => "KeyError".to_string(),
+        PyError::ZeroDivisionError(_) => "ZeroDivisionError".to_string(),
+        PyError::RuntimeError(_) => "RuntimeError".to_string(),
+        PyError::SystemExit(_) => "SystemExit".to_string(),
+        PyError::Exception(name, _) => name.clone(),
+        PyError::OsError(_) => "OSError".to_string(),
+        PyError::ImportError(_) => "ImportError".to_string(),
+        PyError::RecursionError(_) => "RecursionError".to_string(),
+        _ => "Exception".to_string(),
+    }
+}
+
+fn py_error_args(err: &PyError) -> Vec<PyObjectRef> {
+    match err {
+        PyError::TypeError(m) | PyError::ValueError(m) | PyError::NameError(m) | PyError::AttributeError(m)
+        | PyError::IndexError(m) | PyError::KeyError(m) | PyError::ZeroDivisionError(m) | PyError::RuntimeError(m)
+        | PyError::ImportError(m) | PyError::RecursionError(m) | PyError::OsError(m) => vec![py_str(m)],
+        PyError::Exception(_, exc) => {
+            if let PyObject::Exception { args, .. } = &*exc.borrow() { args.clone() } else { vec![exc.clone()] }
+        }
+        _ => vec![],
+    }
+}
+
 pub fn create_atexit_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     d.insert_str("register", PyObjectRef::new(PyObject::BuiltinFunction {
@@ -4542,16 +4649,22 @@ pub fn create_atexit_dict() -> HashMap<String, PyObjectRef> {
         name: "unregister".to_string(),
         func: |args| {
             if args.is_empty() { return Err(PyError::type_error("unregister() requires a callable argument")); }
-            // Remove all occurrences of the given callable, compared by
-            // identity (real CPython: `unregister(func)` matches the SAME
-            // function object). The previous `std::ptr::eq(f, &args[0])`
-            // compared the ADDRESSES of the two &PyObjectRef references
-            // (always different stack slots), so unregister never removed
-            // anything.
-            EXIT_CALLBACKS.with(|cb| {
-                let mut callbacks = cb.borrow_mut();
-                callbacks.retain(|(f, _, _)| !f.is(&args[0]));
+            let target = args[0].clone();
+            // Real CPython compares callbacks with `==` (a callback's own
+            // `__eq__` may even call unregister re-entrantly — see CPython
+            // issue #112127 / _test_atexit's test_eq_unregister), NOT
+            // identity. Evaluate equality WITHOUT holding the callbacks
+            // borrow (re-entrant unregister needs borrow_mut), removing each
+            // match from the live list as it is found.
+            let funcs: Vec<PyObjectRef> = EXIT_CALLBACKS.with(|cb| {
+                cb.borrow().iter().map(|(f, _, _)| f.clone()).collect()
             });
+            for f in &funcs {
+                let eq = crate::object::py_compare(f, &target, 2).map(|v| v.truthy()).unwrap_or(false);
+                if eq {
+                    EXIT_CALLBACKS.with(|cb| cb.borrow_mut().retain(|(g, _, _)| !g.is(f)));
+                }
+            }
             Ok(py_none())
         },
     }));
@@ -4593,9 +4706,16 @@ pub fn create_atexit_dict() -> HashMap<String, PyObjectRef> {
                 EXIT_CALLBACKS.with(|cb| cb.borrow().clone());
             for (func, extra, kwargs) in callbacks.iter().rev() {
                 // A raising callback is "unraisable" — real CPython reports
-                // it via sys.unraisablehook; this interpreter swallows it
-                // (the registry still clears).
-                let _ = crate::object::call_function_disposable(func, extra.clone(), kwargs.clone());
+                // it via sys.unraisablehook (the current hook, which
+                // catch_unraisable_exception-style contexts may have
+                // reassigned), then continues with the next callback.
+                let result = crate::object::call_function_disposable(func, extra.clone(), kwargs.clone());
+                if let Err(err) = result {
+                    let unraisable = build_unraisable_args(func, &err);
+                    if let Some(hook) = get_current_unraisablehook() {
+                        let _ = crate::object::call_function_disposable(&hook, vec![unraisable], vec![]);
+                    }
+                }
             }
             EXIT_CALLBACKS.with(|cb| cb.borrow_mut().clear());
             Ok(py_none())

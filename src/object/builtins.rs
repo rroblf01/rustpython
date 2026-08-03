@@ -1993,6 +1993,18 @@ pub fn call_function_disposable(func: &PyObjectRef, args: Vec<PyObjectRef>, keyw
             all.extend(args);
             f(&all)
         }
+        PyObject::BoundMethod { func, self_obj } => {
+            // A bound method (user-defined `self.method`) reached through the
+            // disposable path — prepend its bound self, then dispatch the
+            // underlying callable (real trigger: atexit's `_run_exitfuncs`
+            // reporting through a `sys.unraisablehook` that is a bound method,
+            // as `test.support.catch_unraisable_exception` installs).
+            let mut all = vec![self_obj.clone()];
+            all.extend(args);
+            let _guard = crate::object::NativeDispatchRecursionGuard::enter()?;
+            let mut vm = crate::vm::VirtualMachine::new();
+            vm.call_function(func.clone(), all, keywords)
+        }
         PyObject::Function(_) => {
             let _guard = crate::object::NativeDispatchRecursionGuard::enter()?;
             let mut vm = crate::vm::VirtualMachine::new();

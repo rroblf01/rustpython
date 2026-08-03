@@ -439,7 +439,15 @@ impl VirtualMachine {
              sys_dict.insert_str("path_importer_cache", py_dict());
          }
           modules.insert_str("sys", create_module("sys", sys_dict.clone()));
-           for (k, v) in sys_dict.clone() { builtins.insert(interner::intern(&k), v); }
+            for (k, v) in sys_dict.clone() { builtins.insert(interner::intern(&k), v); }
+
+         // Share the sys module with native code that must read the CURRENT
+         // `sys.unraisablehook` (atexit's `_run_exitfuncs` reports a raising
+         // callback through it — the hook may have been reassigned by
+         // `catch_warnings`-style contexts like test.support's
+         // `catch_unraisable_exception`, so it must be read live, not
+         // captured at module-creation time).
+         crate::modules::set_sys_module(modules.get("sys").cloned());
 
          // Native os module
          let os_mod = create_module("os", create_os_dict());
