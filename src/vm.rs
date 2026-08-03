@@ -945,7 +945,9 @@ impl VirtualMachine {
           // kept only in case `Lib/email/` needs to be reverted.
 
           // Native configparser module
-          modules.insert_str("configparser", create_module("configparser", create_configparser_dict()));
+          // `configparser` is loaded from the vendored real CPython
+          // Lib/configparser.py (the native Rust version was missing module
+          // internals like `_default_dict` that test_configparser exercises).
 
           // Native xml.etree.ElementTree module
           let xml_etree_mod = create_module("xml.etree.ElementTree", create_xml_etree_dict());

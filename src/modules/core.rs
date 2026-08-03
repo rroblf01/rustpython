@@ -520,7 +520,16 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
             if args.len() < 2 {
                 return Err(PyError::type_error("__class_getitem__ requires at least 2 arguments (cls, item)"));
             }
-            Ok(py_tuple(vec![args[0].clone(), args[1].clone()]))
+            // Build a real types.GenericAlias (previously returned a bare
+            // (cls, item) tuple, so `dict[str, str] | None` — configparser.py's
+            // class annotations — raised "unsupported operand types for |").
+            let item = &args[1];
+            let item_args = if let PyObject::Tuple(t) = &*item.borrow() {
+                t.clone()
+            } else {
+                vec![item.clone()]
+            };
+            Ok(crate::modules::make_generic_alias(args[0].clone(), item_args))
         },
     }));
     // __format__(self, format_spec): basic format support
