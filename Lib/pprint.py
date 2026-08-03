@@ -251,7 +251,8 @@ class PrettyPrinter:
 
 
     def _pprint_list(self, object, stream, indent, allowance, context, level):
-        stream.write('[')        self._format_items(object, stream, indent, allowance + 1,
+        stream.write('[')
+        self._format_items(object, stream, indent, allowance + 1,
                            context, level)
         stream.write(']')
 
