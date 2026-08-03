@@ -619,6 +619,11 @@ pub fn create_hmac_dict() -> HashMap<String, PyObjectRef> {
         };
     }
 
+    // `hmac.compare_digest` — CPython's own `test_hmac.py` asserts this IS
+    // `_operator._compare_digest` (same object), so register the shared
+    // instance (see `core::shared_compare_digest`).
+    d.insert_str("compare_digest", crate::modules::core::shared_compare_digest());
+
     // new(key, msg=None, digestmod=None) — returns an HMAC object with hexdigest()/digest()
     hmac_func!("new", |args| {
         if args.is_empty() {
