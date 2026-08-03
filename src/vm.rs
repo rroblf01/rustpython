@@ -6450,8 +6450,23 @@ impl VirtualMachine {
                 if depth < 0 {
                     return Err(PyError::value_error("call stack is not deep enough"));
                 }
+                // A generator/coroutine resumed via generator_next_fallback
+                // runs its frame in a DISPOSABLE VM whose `frames` stack has
+                // ONLY that one frame — so `sys._getframe(2)` inside it
+                // (real trigger: warnings_helper._filterwarnings, a
+                // generator calling `sys._getframe(2)` to clear the calling
+                // module's `__warningregistry__`) raised "call stack is not
+                // deep enough". Real CPython's generator frames chain to the
+                // CALLER's frames; this VM's don't. Clamp instead of
+                // erroring: return the deepest available frame (usually the
+                // generator's own), which still gives the caller a usable
+                // `f_globals` to operate on.
                 let idx = (self.frames.len() as i64) - 1 - depth;
-                let frame = if idx >= 0 { self.frames.get(idx as usize) } else { None };
+                let frame = if idx >= 0 {
+                    self.frames.get(idx as usize)
+                } else {
+                    self.frames.first()
+                };
                 let frame = frame.ok_or_else(|| PyError::value_error("call stack is not deep enough"))?;
                 let mut fg = crate::object::PyDict::new();
                 for (k, v) in frame.globals.borrow().iter() {

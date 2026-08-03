@@ -1927,7 +1927,14 @@ pub fn sys_getframe_builtin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             return Err(PyError::value_error("call stack is not deep enough"));
         }
         let idx = (vm.frames.len() as i64) - 1 - depth;
-        let frame = if idx >= 0 { vm.frames.get(idx as usize) } else { None };
+        let frame = if idx >= 0 {
+            vm.frames.get(idx as usize)
+        } else {
+            // Clamp to the deepest available frame (generator frames run in
+            // a disposable VM with only their own frame — see the vm.rs
+            // special-case's own comment).
+            vm.frames.first()
+        };
         let frame = frame.ok_or_else(|| PyError::value_error("call stack is not deep enough"))?;
         let mut fg = crate::object::PyDict::new();
         for (k, v) in frame.globals.borrow().iter() {
