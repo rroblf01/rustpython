@@ -358,6 +358,20 @@ impl Compiler {
                 for kw in keywords {
                     Self::collect_names_expr(&kw.value, names);
                 }
+                // A bare `super()` (PEP 3135) implicitly references the
+                // textually-enclosing class via the `__class__` name — it
+                // must be collected so the free-variable analysis wires the
+                // `__class__` cell for methods (without this, `__class__`
+                // never appears in a method's freevars and bare super in a
+                // class nested in a function falls back to LOAD_GLOBAL of
+                // the class name, which isn't a global there).
+                if args.is_empty() && keywords.is_empty() {
+                    if let Expr::Name(n) = func.as_ref() {
+                        if n == "super" {
+                            names.insert("__class__".to_string());
+                        }
+                    }
+                }
             }
             Expr::IfExp { test, body, orelse } => {
                 Self::collect_names_expr(test, names);
@@ -2888,23 +2902,23 @@ impl Compiler {
         // any intervening class-body scopes) so module globals aren't
         // treated as free vars, while methods nested inside a class body
         // can still see past it to the function that encloses the class.
-        let enclosing_varnames = self.compute_enclosing_names();
+        // PEP 3135: a method inside a class body additionally sees
+        // `__class__` as a free var — the class body's own `__class__` cell,
+        // populated by __build_class__ with the finished class, so bare
+        // `super()` resolves the textually-enclosing class even when the
+        // class is defined inside a function (its name isn't a global there).
+        let mut enclosing_varnames = self.compute_enclosing_names();
+        if self.scope == ScopeType::Function {
+            if let Some(outer) = self.scope_stack.last() {
+                if outer.scope == ScopeType::ClassBody {
+                    enclosing_varnames.insert("__class__".to_string());
+                }
+            }
+        }
         let (cell_vars, free_vars, local_names) =
             Self::analyze_function(args, body, &self.global_names, &self.nonlocal_names, Some(&enclosing_varnames));
         self.code.cellvars = Box::new(cell_vars);
         self.code.freevars = Box::new(free_vars);
-
-        // PEP 3135: Add __class__ as cell var for methods inside a class body
-        if self.scope == ScopeType::Function {
-            if let Some(outer) = self.scope_stack.last() {
-                if outer.scope == ScopeType::ClassBody {
-                    if !self.code.cellvars.contains(&"__class__".to_string()) {
-                        self.code.cellvars.push("__class__".to_string());
-                        if cfg!(feature = "profile") {  }
-                    }
-                }
-            }
-        }
 
         // Separate regular (positional-or-keyword) args from vararg/kwarg/
         // keyword-only ones. Keyword-only params (arg.is_kwonly — set by the
@@ -3222,6 +3236,18 @@ impl Compiler {
             Some(&enclosing_varnames),
         );
         self.code.freevars = Box::new(free_vars);
+        // PEP 3135: the class body itself owns the `__class__` cell that
+        // `__build_class__` fills with the finished class — methods created
+        // here reference it as a free var, so bare `super()` in them can
+        // resolve the class. MUST be in cellvars (before the relay below
+        // finalizes this scope's layout) so LOAD_CLOSURE/METHOD capture it,
+        // AND in varnames so the frame's MAKE_CELL creates the cell.
+        if !self.code.cellvars.contains(&"__class__".to_string()) {
+            self.code.cellvars.push("__class__".to_string());
+            if self.get_var_index("__class__").is_none() {
+                self.add_varname("__class__");
+            }
+        }
 
         // Real Python implicitly seeds __module__ = <enclosing module's
         // __name__> and __qualname__ = <class name> as the first two
@@ -3241,6 +3267,15 @@ impl Compiler {
             self.emit(Opcode::LOAD_CONST, qualname_const_idx);
             let qualname_attr_idx = self.get_name_index("__qualname__") as u32;
             self.emit(Opcode::STORE_NAME, qualname_attr_idx);
+        }
+
+        // MAKE_CELL for the class body's cellvars (the `__class__` cell) so
+        // the frame's fast_locals slot holds a real Cell for __build_class__
+        // to populate.
+        for cell_var in self.code.cellvars.clone().iter() {
+            if let Some(idx) = self.get_var_index(cell_var) {
+                self.emit(Opcode::MAKE_CELL, idx as u32);
+            }
         }
 
         self.compile_stmts(body)?;
@@ -3529,8 +3564,29 @@ impl Compiler {
                     if self.scope == ScopeType::Function && has_first_param {
                         if let Some(class_name) = self.class_name_stack.last().cloned() {
                             self.compile_expr(func)?;
-                            let class_name_idx = self.get_name_index(&class_name) as u32;
-                            self.emit(Opcode::LOAD_GLOBAL, class_name_idx);
+                            // PEP 3135: resolve the class through the
+                            // `__class__` free var (a cell the class body
+                            // owns, filled by __build_class__) — NOT
+                            // LOAD_GLOBAL of the class name, which fails
+                            // for a class defined inside a function (its
+                            // name is a local there, not a global).
+                            let class_idx = self.code.freevars.iter().position(|n| n == "__class__");
+                            if let Some(fv_idx) = class_idx {
+                                let deref_idx = self.code.cellvars.len() + fv_idx;
+                                if std::env::var("RPY_DEBUG_SUPER").is_ok() {
+                                    eprintln!("SUPER LOAD_DEREF class={} fv_idx={} cellvars={:?} freevars={:?}", class_name, fv_idx, self.code.cellvars, self.code.freevars);
+                                }
+                                self.emit(Opcode::LOAD_DEREF, deref_idx as u32);
+                            } else {
+                                if std::env::var("RPY_DEBUG_SUPER").is_ok() {
+                                    eprintln!("SUPER LOAD_GLOBAL fallback class={} cellvars={:?} freevars={:?}", class_name, self.code.cellvars, self.code.freevars);
+                                }
+                                // Fallback: class name as a global (module-
+                                // level classes still work even if the
+                                // __class__ cell didn't get wired up).
+                                let class_name_idx = self.get_name_index(&class_name) as u32;
+                                self.emit(Opcode::LOAD_GLOBAL, class_name_idx);
+                            }
                             self.emit(Opcode::LOAD_FAST, 0);
                             extra_pos = 2;
                         } else {
