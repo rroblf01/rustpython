@@ -1453,6 +1453,7 @@ impl Parser {
         // without it, `def f(a, *, b, c):`'s b/c were indistinguishable from
         // plain positional params anywhere later in the compiler.
         let mut seen_star = false;
+        let mut seen_slash = false;
         let mut bare_star = false;
         let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
         if !self.at(&Token::RightParen) {
@@ -1508,12 +1509,16 @@ impl Parser {
                     // Positional-only parameter separator '/' — marks end of positional-only params.
                     // All args parsed before this are already marked as positional-only.
                     // After '/', there's usually a comma, and then the next args are regular params.
-                    if !args.is_empty() {
-                        // Mark all existing args (that are not *vararg or **kwarg) as positional-only
-                        for arg in args.iter_mut() {
-                            if !arg.is_vararg && !arg.is_kwarg {
-                                arg.is_posonlyarg = true;
-                            }
+                    // Real Python validation: '/' must follow at least one param, and
+                    // must NOT follow `*`/`**` (or a bare `*,`).
+                    if args.is_empty() || seen_star || seen_slash || args.iter().any(|a| a.is_vararg || a.is_kwarg) {
+                        return Err("unexpected '/' in function definition".to_string());
+                    }
+                    seen_slash = true;
+                    // Mark all existing args (that are not *vararg or **kwarg) as positional-only
+                    for arg in args.iter_mut() {
+                        if !arg.is_vararg && !arg.is_kwarg {
+                            arg.is_posonlyarg = true;
                         }
                     }
                     if self.at(&Token::Comma) {
@@ -1537,6 +1542,19 @@ impl Parser {
                     args.push(arg);
                     if !self.eat(&Token::Comma) { break; }
                 }
+            }
+        }
+        // General rule: a positional parameter without a default cannot
+        // follow one WITH a default (across the `/` boundary too).
+        let mut seen_default = false;
+        for arg in args.iter() {
+            if arg.is_vararg || arg.is_kwarg || arg.is_kwonly {
+                continue;
+            }
+            if arg.default.is_some() {
+                seen_default = true;
+            } else if seen_default {
+                return Err("parameter without a default follows parameter with a default".to_string());
             }
         }
         Ok(args)
@@ -2874,9 +2892,16 @@ impl Parser {
         let mut args: Vec<Arg> = Vec::new();
         let mut seen_star = false;
         let mut seen_slash = false;
+        let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
         loop {
             if self.at(&Token::Colon) { break; }
             if self.at(&Token::Slash) && !seen_slash {
+                // Same validation as def parameters: '/' must follow a param
+                // and must not follow `*` (real CPython rejects
+                // `lambda *, a, /:` and `lambda /:`).
+                if args.is_empty() || seen_star || args.iter().any(|a| a.is_vararg || a.is_kwarg) {
+                    return Err("unexpected '/' in lambda".to_string());
+                }
                 self.next();
                 seen_slash = true;
                 for arg in args.iter_mut() {
@@ -2898,13 +2923,22 @@ impl Parser {
                     continue;
                 }
                 let name = self.expect_name()?;
+                if !seen_names.insert(name.clone()) {
+                    return Err(format!("duplicate argument '{}' in function definition", name));
+                }
                 args.push(Arg { arg: name, annotation: None, is_vararg: true, is_kwarg: false, is_posonlyarg: false, is_kwonly: false, default: None });
                 seen_star = true;
             } else if self.eat(&Token::DoubleStar) {
                 let name = self.expect_name()?;
+                if !seen_names.insert(name.clone()) {
+                    return Err(format!("duplicate argument '{}' in function definition", name));
+                }
                 args.push(Arg { arg: name, annotation: None, is_vararg: false, is_kwarg: true, is_posonlyarg: false, is_kwonly: false, default: None });
             } else {
                 let name = self.expect_name()?;
+                if !seen_names.insert(name.clone()) {
+                    return Err(format!("duplicate argument '{}' in function definition", name));
+                }
                 let default = if self.eat(&Token::Equal) {
                     Some(Box::new(self.parse_expr()?))
                 } else {
@@ -2913,6 +2947,18 @@ impl Parser {
                 args.push(Arg { arg: name, annotation: None, is_vararg: false, is_kwarg: false, is_posonlyarg: false, is_kwonly: seen_star, default });
             }
             if !self.eat(&Token::Comma) { break; }
+        }
+        // Same default-ordering rule as def parameters.
+        let mut seen_default = false;
+        for arg in args.iter() {
+            if arg.is_vararg || arg.is_kwarg || arg.is_kwonly {
+                continue;
+            }
+            if arg.default.is_some() {
+                seen_default = true;
+            } else if seen_default {
+                return Err("parameter without a default follows parameter with a default".to_string());
+            }
         }
         Ok(args)
     }

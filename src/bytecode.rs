@@ -309,6 +309,7 @@ pub(crate) fn needs_arg(op: Opcode) -> bool {
 pub struct CodeObject {
     pub name: StrId,
     pub arg_count: usize,
+    pub posonlyarg_count: usize,
     pub kwonlyarg_count: usize,
     pub nlocals: usize,
     pub instructions: Vec<Instr>,
@@ -367,6 +368,7 @@ impl PartialEq for CodeObject {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name
             && self.arg_count == other.arg_count
+            && self.posonlyarg_count == other.posonlyarg_count
             && self.kwonlyarg_count == other.kwonlyarg_count
             && self.nlocals == other.nlocals
             && self.instructions == other.instructions
@@ -391,6 +393,7 @@ impl CodeObject {
         CodeObject {
             name: crate::interner::intern(name),
             arg_count: 0,
+            posonlyarg_count: 0,
             kwonlyarg_count: 0,
             nlocals: 0,
             instructions: Vec::new(),
@@ -441,6 +444,7 @@ impl CodeObject {
         let mut buf = Vec::new();
         write_str(&mut buf, crate::interner::lookup_str(self.name));
         write_u32(&mut buf, self.arg_count as u32);
+        write_u32(&mut buf, self.posonlyarg_count as u32);
         write_u32(&mut buf, self.kwonlyarg_count as u32);
         write_u32(&mut buf, self.nlocals as u32);
 
@@ -502,6 +506,7 @@ impl CodeObject {
 
         let name = crate::interner::intern(&read_str(data, &mut pos)?);
         let arg_count = read_u32(data, &mut pos)? as usize;
+        let posonlyarg_count = read_u32(data, &mut pos)? as usize;
         let kwonlyarg_count = read_u32(data, &mut pos)? as usize;
         let nlocals = read_u32(data, &mut pos)? as usize;
 
@@ -564,6 +569,7 @@ impl CodeObject {
         Ok(CodeObject {
             name,
             arg_count,
+            posonlyarg_count,
             kwonlyarg_count,
             nlocals,
             instructions,

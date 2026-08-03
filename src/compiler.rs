@@ -2975,6 +2975,9 @@ impl Compiler {
         self.code.num_defaults = defaults_count;
         self.code.kwonlyarg_count = kwonly_count;
         self.code.kwonly_defaults_mask = Box::new(kwonly_defaults_mask);
+        // Positional-only params (before `/` in the signature) are the FIRST
+        // `posonlyarg_count` positional params.
+        self.code.posonlyarg_count = args.iter().take_while(|a| a.is_posonlyarg && !a.is_vararg && !a.is_kwarg && !a.is_kwonly).count();
 
         // Add all args to varnames (including vararg/kwarg at the end) —
         // private names mangled so they match the body's mangled references.

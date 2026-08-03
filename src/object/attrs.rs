@@ -762,6 +762,43 @@ impl PyObject {
                 match name {
                     "__name__" => Ok(py_str(typ)),
                     "args" => Ok(py_tuple(args.clone())),
+                    // `StopIteration.value` (and StopAsyncIteration) — the
+                    // value a generator/coroutine returned (real code: a
+                    // driver does `coro.send(None)` and reads `e.value`).
+                    // Real CPython: StopIteration(value).value == value.
+                    "value" if typ == "StopIteration" || typ == "StopAsyncIteration" => {
+                        if args.len() == 1 {
+                            Ok(args[0].clone())
+                        } else if args.is_empty() {
+                            Ok(py_none())
+                        } else {
+                            Ok(py_tuple(args.clone()))
+                        }
+                    }
+                    // `lineno`/`offset` — a real SyntaxError carries its
+                    // source position (test.support's check_syntax_error
+                    // asserts both are not None). The parser's error
+                    // messages embed "L<line>:<col>:" as a prefix; parse it
+                    // out lazily. Defaults to None for non-syntax errors.
+                    "lineno" | "offset" => {
+                        let want_lineno = name == "lineno";
+                        let parsed = args.first().and_then(|a| {
+                            let s = a.str();
+                            if let Some(rest) = s.strip_prefix('L') {
+                                let (ln, rest) = rest.split_once(':')?;
+                                let (col, _rest) = rest.split_once(':')?;
+                                let line = ln.parse::<i64>().ok()?;
+                                let offset = col.parse::<i64>().ok()?;
+                                Some((line, offset))
+                            } else {
+                                None
+                            }
+                        });
+                        match parsed {
+                            Some((line, offset)) => Ok(py_int(if want_lineno { line } else { offset })),
+                            None => Ok(py_none()),
+                        }
+                    }
                     // `__str__`/`__repr__` — real exceptions always expose
                     // both (test_baseexception's verify_instance_interface
                     // asserts `args`/`__str__`/`__repr__` on EVERY builtin
@@ -6065,6 +6102,11 @@ impl PyObject {
                 };
                 if let Some(obj_type) = obj_type {
                     if let PyObject::Type { mro, .. } = &*obj_type.borrow() {
+                        if std::env::var("RPY_DEBUG_SUPER2").is_ok() {
+                            let cls_name = cls.borrow().type_name().to_string();
+                            let mro_names: Vec<String> = mro.iter().map(|m| m.borrow().type_name()).collect();
+                            eprintln!("SUPER2 cls={} obj_type={} mro={:?} name={}", cls_name, obj_type.borrow().type_name(), mro_names, name);
+                        }
                         // Find cls in MRO, start search from the next class.
                         // If `cls` isn't in `obj`'s MRO at all — e.g. a
                         // zero-arg `super()`'s compiled-in `LOAD_GLOBAL
@@ -6918,6 +6960,7 @@ impl PyObject {
                     // `func.__code__.co_firstlineno` check, among others.
                     "co_firstlineno" => Ok(py_int(c.first_lineno as i64)),
                     "co_kwonlyargcount" => Ok(py_int(c.kwonlyarg_count as i64)),
+                    "co_posonlyargcount" => Ok(py_int(c.posonlyarg_count as i64)),
                     "co_names" => Ok(py_tuple(c.names.iter().map(|&v| py_str(crate::interner::lookup_str(v))).collect())),
                     "co_consts" => Ok(py_tuple(c.consts.iter().filter_map(|cv| crate::vm::eval_const_value(cv.clone()).ok()).collect())),
                     _ => Err(PyError::attribute_error(format!("'code' object has no attribute '{}'", name))),

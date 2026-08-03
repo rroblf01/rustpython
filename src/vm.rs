@@ -226,7 +226,7 @@ fn find_lib_dir() -> String {
 /// kwargs.pop('dest', None)` called as `f(dest=...)`) got silently
 /// misrouted into that local's fast-locals slot instead of `**kwargs`,
 /// making it vanish from `kwargs` entirely.
-fn formal_param_index(varnames: &[crate::interner::StrId], arg_count: usize, kwonlyarg_count: usize, kwonly_start: usize, key: &str) -> Option<usize> {
+fn formal_param_index(varnames: &[crate::interner::StrId], arg_count: usize, _posonlyarg_count: usize, kwonlyarg_count: usize, kwonly_start: usize, key: &str) -> Option<usize> {
     let key_id = crate::interner::intern(key);
     if let Some(idx) = varnames.get(0..arg_count).and_then(|s| s.iter().position(|&n| n == key_id)) {
         return Some(idx);
@@ -2050,6 +2050,12 @@ impl VirtualMachine {
     /// Returns Some(result) if the function was simple enough, None otherwise.
     fn try_exec_simple(code: &CodeObject, args: &[PyObjectRef]) -> Option<PyResult<PyObjectRef>> {
         if code.vararg_name.is_some() || code.kwarg_name.is_some() || code.num_defaults > 0 {
+            return None;
+        }
+        // Keyword-only params need the slow path's missing-kwonly validation
+        // (`f(1,2,3)` on `def f(a,b,/,c,*,d,e)` must raise "missing ... d'
+        // and 'e'", not silently leave them unbound).
+        if code.kwonlyarg_count > 0 {
             return None;
         }
         // A wrong argument count must raise `TypeError` (see the slow path's
@@ -6993,13 +6999,20 @@ impl VirtualMachine {
                 self.release_frame(new_frame);
                 let num_defaults = code.num_defaults;
                 let min_required = named_params.saturating_sub(num_defaults);
-                let msg = if num_defaults == 0 {
-                    format!("{}() takes {} positional argument{} but {} {} given",
+                let verb = if npos == 1 { "was" } else { "were" };
+                let msg = if code.kwonlyarg_count > 0 {
+                    // Real Python: "... but M positional arguments (and K
+                    // keyword-only arguments) were given" when the function
+                    // also has keyword-only params.
+                    format!("{}() takes {} positional argument{} but {} positional arguments (and {} keyword-only argument{}) {} given",
                         fname, named_params, if named_params == 1 { "" } else { "s" },
-                        npos, if npos == 1 { "was" } else { "were" })
+                        npos, code.kwonlyarg_count, if code.kwonlyarg_count == 1 { "" } else { "s" }, verb)
+                } else if num_defaults == 0 {
+                    format!("{}() takes {} positional argument{} but {} {} given",
+                        fname, named_params, if named_params == 1 { "" } else { "s" }, npos, verb)
                 } else {
                     format!("{}() takes from {} to {} positional arguments but {} {} given",
-                        fname, min_required, named_params, npos, if npos == 1 { "was" } else { "were" })
+                        fname, min_required, named_params, npos, verb)
                 };
                 return Err(PyError::type_error(msg));
             }
@@ -7058,7 +7071,16 @@ impl VirtualMachine {
             if let Some(kwarg_name) = &code.kwarg_name {
                 let kw_dict = py_dict();
                 for (key, value) in &keywords {
-                    if let Some(idx) = formal_param_index(&new_frame.code.varnames, code.arg_count, code.kwonlyarg_count, kwonly_start, key) {
+                    if let Some(idx) = formal_param_index(&new_frame.code.varnames, code.arg_count, code.posonlyarg_count, code.kwonlyarg_count, kwonly_start, key) {
+                        // A keyword targeting a positional-only param goes
+                        // into **kwargs (real Python: `f(42, a=1)` with `a`
+                        // posonly lands in kwargs, never on the param).
+                        if idx < code.posonlyarg_count {
+                            if let PyObject::Dict(ref mut dict) = &mut *kw_dict.borrow_mut() {
+                                dict.set(py_str(key), value.clone())?;
+                            }
+                            continue;
+                        }
                         // A keyword targeting a formal parameter that ALREADY
                         // received a positional value — real Python's
                         // `TypeError: ...() got multiple values for argument
@@ -7095,8 +7117,25 @@ impl VirtualMachine {
                 // must raise `TypeError` — previously silently accepted as
                 // either a no-op or a throwaway local-name insertion the
                 // function body never referenced.
-                for (key, value) in &keywords {
-                    match formal_param_index(&new_frame.code.varnames, code.arg_count, code.kwonlyarg_count, kwonly_start, key) {
+                // With no **kwargs, ALL keywords targeting positional-only
+                // params are reported together (real Python's
+                // "got some positional-only arguments passed as keyword
+                // arguments: 'a, b'").
+                let posonly_keywords: Vec<&String> = keywords.iter()
+                    .filter_map(|(k, _)| formal_param_index(&new_frame.code.varnames, code.arg_count, code.posonlyarg_count, code.kwonlyarg_count, kwonly_start, k)
+                        .filter(|idx| *idx < code.posonlyarg_count).map(|_| k))
+                    .collect();
+                if !posonly_keywords.is_empty() {
+                    self.release_frame(new_frame);
+                    let names = posonly_keywords.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", ");
+                    return Err(PyError::type_error(format!("{}() got some positional-only arguments passed as keyword arguments: '{}'", fname, names)));
+                }                for (key, value) in &keywords {
+                    match formal_param_index(&new_frame.code.varnames, code.arg_count, code.posonlyarg_count, code.kwonlyarg_count, kwonly_start, key) {
+                        Some(idx) if idx < code.posonlyarg_count => {
+                            // Unreachable (pre-scanned above) — keep for safety.
+                            self.release_frame(new_frame);
+                            return Err(PyError::type_error(format!("{}() got some positional-only arguments passed as keyword arguments: '{}'", fname, key)));
+                        }
                         Some(idx) if idx < positional_filled => {
                             self.release_frame(new_frame);
                             return Err(PyError::type_error(format!("{}() got multiple values for argument '{}'", fname, key)));
