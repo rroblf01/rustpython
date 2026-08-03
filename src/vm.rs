@@ -614,8 +614,10 @@ impl VirtualMachine {
           // Native textwrap module
           modules.insert_str("textwrap", create_module("textwrap", create_textwrap_dict()));
 
-          // Native pprint module
-          modules.insert_str("pprint", create_module("pprint", create_pprint_dict()));
+          // `pprint` and `reprlib` are loaded from the vendored real CPython
+          // Lib/ modules (their class-based APIs — PrettyPrinter/Repr — are
+          // what test_pprint/test_reprlib exercise, and the native Rust
+          // versions only had the top-level helper functions).
 
           // Native hashlib module
           modules.insert_str("hashlib", create_module("hashlib", create_hashlib_dict()));
@@ -835,8 +837,8 @@ impl VirtualMachine {
           // as `_datetime` above.
           modules.insert_str("_operator", create_module("_operator", create_operator_dict()));
 
-          // Native reprlib module
-          modules.insert_str("reprlib", create_module("reprlib", create_reprlib_dict()));
+          // Native reprlib module — REMOVED (reprlib is now loaded from the
+          // vendored real Lib/reprlib.py, which provides the Repr class).
 
           // Native array module
           modules.insert_str("array", create_module("array", create_array_dict()));

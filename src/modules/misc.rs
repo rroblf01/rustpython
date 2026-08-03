@@ -4945,6 +4945,22 @@ pub fn create_thread_module_dict() -> HashMap<String, PyObjectRef> {
     // Real CPython's max `Lock.acquire(timeout=...)` value (platform max C
     // `long` in seconds, roughly). Needed by `test.support.lock_tests`.
     d.insert_str("TIMEOUT_MAX", py_float(4294967.0));
+    // `_thread.get_ident()` — the calling thread's identifier (real CPython's
+    // pprint.py and reprlib.py both use it as a recursion-guard key).
+    d.insert_str("get_ident", PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "get_ident".to_string(),
+        func: |_args: &[PyObjectRef]| {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            thread_local! { static ID: AtomicU64 = const { AtomicU64::new(0) }; }
+            static NEXT: AtomicU64 = AtomicU64::new(1);
+            let id = ID.with(|c| {
+                let mut v = c.load(Ordering::Relaxed);
+                if v == 0 { v = NEXT.fetch_add(1, Ordering::Relaxed); c.store(v, Ordering::Relaxed); }
+                v
+            });
+            Ok(py_int(id as i64))
+        },
+    }));
     macro_rules! thr_func {
         ($name:expr, $func:expr) => {
             d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
