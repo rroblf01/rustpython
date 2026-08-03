@@ -3758,6 +3758,27 @@ impl VirtualMachine {
                             let attr = obj.borrow().get_attribute(&name)?;
                             Ok(attr)
                         }
+                        PyObject::Function(_) if name == "__dict__" => {
+                            // `func.__dict__` as a LIVE view backed by the
+                            // function's real dict (writes through via
+                            // `PyDict::set_with_hash`'s Function arm) — the
+                            // get_attribute_impl snapshot copy made the common
+                            // `func.__dict__['x'] = v` decorator-helper
+                            // pattern silently write into a discarded copy.
+                            // Mirrors the Instance `__dict__` live-view right
+                            // below.
+                            let mut pd = crate::object::PyDict::new();
+                            if let PyObject::Function(f) = &*obj.borrow() {
+                                for (k, v) in f.dict.iter() {
+                                    if k.starts_with("__") && k.ends_with("__") { continue; }
+                                    let _ = pd.set(py_str(k), v.clone());
+                                }
+                            }
+                            drop(obj_borrowed);
+                            pd.instance_ref = Some(obj.clone());
+                            self.frames[fi].push(PyObjectRef::new(PyObject::Dict(Box::new(pd))));
+                            return Ok(None);
+                        }
                         PyObject::Instance { dict, typ } => {
                             // Inline attribute cache: skip full lookup if cached
                             // with matching type tag — only valid when this
@@ -6668,6 +6689,27 @@ impl VirtualMachine {
                         hm.extend(str_map_to_strid_map(crate::object::dict_arg_to_hashmap(l, "exec() locals must be a dict")?));
                     }
                     Some(Rc::new(RefCell::new(hm)))
+                } else if is_eval {
+                    // `eval(source)` with no globals/locals args: CPython
+                    // defaults both to the CALLING frame's globals AND
+                    // locals, so an expression can read the enclosing
+                    // function's parameters/locals (`eval('args[1] is not
+                    // None')` inside `def check(*args)` — real trigger:
+                    // CPython's own test_decorators.py's `dbcheck` helper).
+                    // Build a read-only snapshot: the frame's globals merged
+                    // with its fast-locals by varname.
+                    if let Some(f) = self.frames.last() {
+                        let mut hm: HashMap<StrId, PyObjectRef> =
+                            f.globals.borrow().iter().map(|(k, v)| (*k, v.clone())).collect();
+                        for (i, name) in f.code.varnames.iter().enumerate() {
+                            if let Some(v) = f.fast_locals.get(i).and_then(|v| v.clone()) {
+                                hm.insert(*name, v);
+                            }
+                        }
+                        Some(Rc::new(RefCell::new(hm)))
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 };
@@ -7493,6 +7535,14 @@ impl VirtualMachine {
             }
 
             return self.default_build_class(name_str, bases_vec, namespace_dict, init_subclass_kwargs, None);
+        }
+
+        // `staticmethod` objects are directly callable since Python 3.10
+        // (they forward to the wrapped callable) — test_decorators asserts
+        // `staticmethod(f)(1) == 1`. `classmethod` objects are NOT callable
+        // (assertRaises(TypeError, classmethod(f), 1)), so no arm for those.
+        if let PyObject::StaticMethod { func } = &*callable.borrow() {
+            return self.call_function(func.clone(), args, keywords);
         }
 
         if let PyObject::Closure(c) = &*callable.borrow() {
