@@ -4542,10 +4542,15 @@ pub fn create_atexit_dict() -> HashMap<String, PyObjectRef> {
         name: "unregister".to_string(),
         func: |args| {
             if args.is_empty() { return Err(PyError::type_error("unregister() requires a callable argument")); }
-            // Remove all occurrences of the given callable
+            // Remove all occurrences of the given callable, compared by
+            // identity (real CPython: `unregister(func)` matches the SAME
+            // function object). The previous `std::ptr::eq(f, &args[0])`
+            // compared the ADDRESSES of the two &PyObjectRef references
+            // (always different stack slots), so unregister never removed
+            // anything.
             EXIT_CALLBACKS.with(|cb| {
                 let mut callbacks = cb.borrow_mut();
-                callbacks.retain(|(f, _, _)| !std::ptr::eq(f, &args[0]));
+                callbacks.retain(|(f, _, _)| !f.is(&args[0]));
             });
             Ok(py_none())
         },
