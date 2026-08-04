@@ -74,6 +74,11 @@ impl PyError {
     /// standard idiom for validating/pre-checking source code).
     pub fn syntax_error(msg: impl Into<String>) -> Self {
         let msg = msg.into();
+        // Most parser errors carry an "L<line>:<col>:" prefix; custom
+        // validation errors ("unexpected '/' ...") don't. Ensure a position
+        // is always present so `SyntaxError.lineno`/`.offset` are never
+        // None (test.support's check_syntax_error asserts both exist).
+        let msg = if msg.starts_with('L') { msg } else { format!("L1:1: {}", msg) };
         PyError::Exception("SyntaxError".to_string(), PyObjectRef::new(PyObject::Exception {
             typ: "SyntaxError".to_string(),
             args: vec![py_str(&msg)],

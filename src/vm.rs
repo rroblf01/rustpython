@@ -7000,16 +7000,20 @@ impl VirtualMachine {
                 let num_defaults = code.num_defaults;
                 let min_required = named_params.saturating_sub(num_defaults);
                 let verb = if npos == 1 { "was" } else { "were" };
-                let msg = if code.kwonlyarg_count > 0 {
-                    // Real Python: "... but M positional arguments (and K
-                    // keyword-only arguments) were given" when the function
-                    // also has keyword-only params.
-                    format!("{}() takes {} positional argument{} but {} positional arguments (and {} keyword-only argument{}) {} given",
-                        fname, named_params, if named_params == 1 { "" } else { "s" },
-                        npos, code.kwonlyarg_count, if code.kwonlyarg_count == 1 { "" } else { "s" }, verb)
-                } else if num_defaults == 0 {
-                    format!("{}() takes {} positional argument{} but {} {} given",
-                        fname, named_params, if named_params == 1 { "" } else { "s" }, npos, verb)
+                let msg = if num_defaults == 0 {
+                    if code.kwonlyarg_count > 0 {
+                        // Real Python: "... but M positional arguments (and K
+                        // keyword-only arguments) were given" when the
+                        // function has NO defaults but DOES have keyword-only
+                        // params. (The "takes from X to Y" form below never
+                        // gets this suffix.)
+                        format!("{}() takes {} positional argument{} but {} positional arguments (and {} keyword-only argument{}) {} given",
+                            fname, named_params, if named_params == 1 { "" } else { "s" },
+                            npos, code.kwonlyarg_count, if code.kwonlyarg_count == 1 { "" } else { "s" }, verb)
+                    } else {
+                        format!("{}() takes {} positional argument{} but {} {} given",
+                            fname, named_params, if named_params == 1 { "" } else { "s" }, npos, verb)
+                    }
                 } else {
                     format!("{}() takes from {} to {} positional arguments but {} {} given",
                         fname, min_required, named_params, npos, verb)
