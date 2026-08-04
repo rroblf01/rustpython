@@ -229,7 +229,11 @@ pub(crate) fn format_percent_e(f: f64, prec: usize, alternate: bool, upper: bool
     // the mantissa to `prec` decimals — the old `abs / 10^exp` division
     // introduced float error (1.230005 -> 1.23001).
     let sci = format!("{:e}", abs);
-    let (mant_s, exp_s) = sci.split_once('e').unwrap();
+    let (mant_s, exp_s) = match sci.split_once('e') {
+        Some(p) => p,
+        // inf/nan have no 'e' in {:e} output
+        None => return format!("{}{}", sign, sci),
+    };
     let mut exp: i32 = exp_s.parse().unwrap_or(0);
     let mantissa: f64 = mant_s.parse().unwrap_or(1.0);
     // Round mantissa to prec decimals, handling carry to 10.
