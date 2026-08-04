@@ -72,6 +72,11 @@ pub fn py_not(val: &PyObjectRef) -> PyObjectRef {
 }
 
 pub fn py_pos(val: &PyObjectRef) -> PyResult<PyObjectRef> {
+    // `+bool` yields the int 0/1 (a NEW int object, not the same bool) —
+    // test_bool's test_math asserts `+False is not False`.
+    if let PyObjectRef::SmallBool(b) = val {
+        return Ok(py_int(if *b { 1 } else { 0 }));
+    }
     if val.as_i64().is_some() || val.as_f64().is_some() {
         return Ok(val.clone());
     }

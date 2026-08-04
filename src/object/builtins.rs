@@ -1845,6 +1845,7 @@ pub fn builtin_abs(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         PyObject::Int(i) => Ok(py_int(i.clone().abs())),
         PyObject::Float(f) => Ok(py_float(f.abs())),
         PyObject::Complex(re, im) => Ok(py_float(re.hypot(*im))),
+        PyObject::Bool(b) => Ok(py_int(if *b { 1 } else { 0 })),
         PyObject::Instance { typ, .. } => {
             match lookup_dunder_via_mro(typ, "__abs__") {
                 Some(f) => {
