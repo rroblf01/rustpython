@@ -6924,6 +6924,7 @@ impl VirtualMachine {
                     }
                     let consts = jit_consts.borrow();
                     let mut result = PyObjectRef::None;
+                    let _guard = crate::jit::set_jit_globals(func_globals.clone());
                     func_ptr(fast_locals.as_ptr(), fast_locals.len(), consts.as_ptr(), &mut result);
                     return Ok(result);
                 }

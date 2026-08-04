@@ -6,11 +6,38 @@
 use std::collections::HashSet;
 use std::collections::HashMap;
 use std::cell::RefCell;
+use std::rc::Rc;
+use crate::interner::StrId;
 use cranelift::prelude::*;
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module};
 use crate::object::PyObjectRef;
 use crate::bytecode::*;
+
+// The current JIT-executing function's globals, set by the VM right before
+// it invokes a compiled function's `func_ptr`. `jit_make_function` (the
+// extern "C" helper that builds a new `PyFunction` for a `def` inside a JIT
+// region) needs these to give the new function the right globals and
+// __module__ — it used to read them via `with_vm_mut`, which is aliasing UB
+// because the JIT region is already running under that VM's dispatch.
+thread_local! {
+    static CURRENT_JIT_GLOBALS: RefCell<Option<Rc<RefCell<HashMap<StrId, PyObjectRef>>>>> =
+        RefCell::new(None);
+}
+
+/// Set the JIT-executing function's globals for the current thread (called
+/// by the VM around each JIT invocation). Returns a guard that restores the
+/// previous value on drop.
+pub struct JitGlobalsGuard;
+impl Drop for JitGlobalsGuard {
+    fn drop(&mut self) {
+        CURRENT_JIT_GLOBALS.with(|g| *g.borrow_mut() = None);
+    }
+}
+pub fn set_jit_globals(g: Rc<RefCell<HashMap<StrId, PyObjectRef>>>) -> JitGlobalsGuard {
+    CURRENT_JIT_GLOBALS.with(|c| *c.borrow_mut() = Some(g));
+    JitGlobalsGuard
+}
 
 // The `extern "C" fn jit_*` functions below are called directly from
 // Cranelift-compiled machine code (see the CALL-with-known-target codegen
@@ -715,13 +742,9 @@ extern "C" fn jit_make_function(items: *const crate::object::PyObjectRef, arg: i
                 items_v.clone()
             } else { Vec::new() }
         } else { Vec::new() };
-        let globals = crate::object::with_vm_mut(|vm| {
-            let fi = vm.frames.len() - 1;
-            vm.frames[fi].module_globals.clone()
-                .unwrap_or_else(|| vm.frames[fi].globals.clone())
-        });
-        let func_obj = match globals {
-            Ok(g) => {
+         let globals = CURRENT_JIT_GLOBALS.with(|g| g.borrow().clone());
+         let func_obj = match globals {
+             Some(g) => {
                 let code_rc = code.clone();
                 let func = crate::object::PyObject::Function(Box::new(crate::object::PyFunction {
                     code,
@@ -737,22 +760,19 @@ extern "C" fn jit_make_function(items: *const crate::object::PyObjectRef, arg: i
                 if let crate::object::PyObject::Function(ref mut inner_f) = &mut *func_ref.borrow_mut() {
                     let dict = &mut inner_f.dict;
                     dict.insert("__code__".to_string(), crate::object::PyObjectRef::imm(crate::object::PyObject::Code(code_rc)));
-                    if let Ok(mg) = crate::object::with_vm_mut(|vm| {
-                        let fi = vm.frames.len() - 1;
-                        let mg = vm.frames[fi].module_globals.clone();
-                        if let Some(mg) = mg {
-                            let b = mg.borrow();
+                    let mg_name = CURRENT_JIT_GLOBALS.with(|g| {
+                        g.borrow().as_ref().and_then(|g| {
+                            let b = g.borrow();
                             b.get(&crate::interner::intern("__name__")).cloned()
-                        } else { None }
-                    }) {
-                        if let Some(name) = mg {
-                            dict.insert("__module__".to_string(), name);
-                        }
+                        })
+                    });
+                    if let Some(name) = mg_name {
+                        dict.insert("__module__".to_string(), name);
                     }
                 }
                 func_ref
             }
-            Err(_) => crate::object::py_none(),
+            None => crate::object::py_none(),
         };
         std::ptr::write(out, func_obj);
     }
