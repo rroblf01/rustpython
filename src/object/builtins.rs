@@ -1823,16 +1823,27 @@ pub fn builtin_round(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             _ => return Err(PyError::type_error("round() arg must be numeric")),
         }
     };
-    // `round(x, None)` — an EXPLICIT `None` for `ndigits` (as opposed to
-    // simply omitting the argument) must behave exactly like the 1-arg
-    // form, per real Python's `round(number, ndigits=None)` signature — NOT
-    // raise `TypeError: ndigits must be int` (confirmed via CPython's own
-    // `test_float.py::test_round_with_none_arg_direct_call`, which checks
-    // `round(1.0, None)`/`(1.0).__round__(None)` return the same `int` as
-    // plain `round(1.0)`).
-    let has_real_ndigits = args.len() == 2 && !matches!(&*args[1].borrow(), PyObject::None);
+    // `round(x, None)` / `round(x, ndigits=None)` — an EXPLICIT `None` for
+    // `ndigits` must behave exactly like the 1-arg form.
+    // The ndigits value comes from args[1] or a trailing kwargs dict
+    // (`round(1.23, ndigits=None)` packs {ndigits: None}).
+    let ndigits_arg: Option<PyObjectRef> = {
+        let trailing = args.last();
+        if let Some(d) = trailing {
+            if let PyObject::Dict(pd) = &*d.borrow() {
+                pd.get(&py_str("ndigits")).ok().flatten()
+            } else {
+                args.get(1).cloned()
+            }
+        } else {
+            args.get(1).cloned()
+        }
+    };
+    let has_real_ndigits = ndigits_arg.as_ref()
+        .map(|n| !matches!(&*n.borrow(), PyObject::None))
+        .unwrap_or(false);
     if has_real_ndigits {
-        let n = args[1].as_i64().ok_or_else(|| PyError::type_error("ndigits must be int"))? as i32;
+        let n = ndigits_arg.as_ref().unwrap().as_i64().ok_or_else(|| PyError::type_error("ndigits must be int"))? as i32;
         Ok(py_float((val * 10_f64.powi(n)).round() / 10_f64.powi(n)))
     } else {
         Ok(py_int(val.round() as i64))
