@@ -642,6 +642,69 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
             Ok(py_str(&args[0].str().to_lowercase()))
         },
     }));
+    // Unbound CLASS-level access to the common str methods (`str.strip`,
+    // `map(str.strip, ...)` — the standard idiom test_format_testfile uses).
+    // Each delegates to the same instance method (resolved via get_attribute
+    // on the first arg). The macro's per-name literal makes each closure
+    // non-capturing (coerces to BuiltinFunc).
+    macro_rules! str_unbound {
+        ($name:literal) => {
+            str_dict.insert_str($name, PyObjectRef::new(PyObject::BuiltinFunction {
+                name: $name.to_string(),
+                func: |args: &[PyObjectRef]| {
+                    if args.is_empty() {
+                        return Err(PyError::type_error(concat!($name, "() missing required argument: 'self'")));
+                    }
+                    // The instance method's BuiltinMethod carries a PLACEHOLDER
+                    // self_obj (None) — the receiver is bound by the CALL
+                    // machinery on `s.strip()`. Call the underlying func
+                    // directly with the receiver as the first arg.
+                    let method = args[0].borrow().get_attribute($name)?;
+                    let is_builtin_method = {
+                        let m = method.borrow();
+                        matches!(&*m, PyObject::BuiltinMethod { .. })
+                    };
+                    if is_builtin_method {
+                        let m = method.borrow();
+                        if let PyObject::BuiltinMethod { func, .. } = &*m {
+                            let mut all = vec![args[0].clone()];
+                            all.extend_from_slice(&args[1..]);
+                            return func(&all);
+                        }
+                    }
+                    // Non-BuiltinMethod (e.g. an override from a subclass's
+                    // dict) — call it with the receiver prepended.
+                    let mut all = vec![args[0].clone()];
+                    all.extend_from_slice(&args[1..]);
+                    crate::object::call_function_disposable(&method, all, vec![])
+                },
+            }));
+        };
+    }
+    str_unbound!("strip");
+    str_unbound!("rstrip");
+    str_unbound!("lstrip");
+    str_unbound!("split");
+    str_unbound!("rsplit");
+    str_unbound!("upper");
+    str_unbound!("lower");
+    str_unbound!("replace");
+    str_unbound!("format");
+    str_unbound!("join");
+    str_unbound!("startswith");
+    str_unbound!("endswith");
+    str_unbound!("find");
+    str_unbound!("rfind");
+    str_unbound!("index");
+    str_unbound!("rindex");
+    str_unbound!("count");
+    str_unbound!("splitlines");
+    str_unbound!("capitalize");
+    str_unbound!("title");
+    str_unbound!("swapcase");
+    str_unbound!("zfill");
+    str_unbound!("encode");
+    str_unbound!("decode");
     let str_type = PyObjectRef::new(PyObject::Type {
         name: "str".to_string(),
         dict: Box::new(str_map_to_typedict(str_dict)),
