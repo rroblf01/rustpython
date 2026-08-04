@@ -580,6 +580,13 @@ fn py_pow_float(x: f64, y: f64) -> PyResult<PyObjectRef> {
     if x == 0.0 && y < 0.0 && y.is_finite() {
         return Err(PyError::ZeroDivisionError("0.0 cannot be raised to a negative power".to_string()));
     }
+    // A negative base with a NON-INTEGER exponent defers to complex pow
+    // (CPython: (-2.0)**0.5 is complex ~ (8.66e-17+1.41j)).
+    if x < 0.0 && y.fract() != 0.0 {
+        let r = (-x).powf(y);
+        let theta = y * std::f64::consts::PI;
+        return Ok(PyObjectRef::imm(PyObject::Complex(r * theta.cos(), r * theta.sin())));
+    }
     let result = x.powf(y);
     if result.is_infinite() && x.is_finite() && y.is_finite() {
         return Err(PyError::overflow_error("(34, 'Numerical result out of range')"));

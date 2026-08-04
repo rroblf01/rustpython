@@ -108,7 +108,16 @@ pub fn float_binop_dunder(args: &[PyObjectRef], reverse: bool, kind: u8) -> PyRe
                 rem
             }
         }
-        3 => af.powf(bf),
+        3 => {
+            // Negative base with a non-integer exponent defers to complex
+            // pow ((-2.0)**0.5 is complex); 0.0**negative raises.
+            if af < 0.0 && bf.fract() != 0.0 {
+                let r = (-af).powf(bf);
+                let theta = bf * std::f64::consts::PI;
+                return Ok(PyObjectRef::imm(PyObject::Complex(r * theta.cos(), r * theta.sin())));
+            }
+            af.powf(bf)
+        }
         4 => af + bf,
         5 => af - bf,
         6 => af * bf,
