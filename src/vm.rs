@@ -8538,7 +8538,25 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
     };
 
     // --- parse [type] ---
-    let fmt_type = if idx < len { Some(chars[idx]) } else { None };
+    let fmt_type = if idx < len {
+        let t = chars[idx];
+        idx += 1;
+        Some(t)
+    } else { None };
+
+    // Any characters left unconsumed mean an invalid specifier — real
+    // CPython raises `ValueError: Invalid format specifier '<spec>' for
+    // object of type '<type>'` (test_format's
+    // test_better_error_message_format asserts the exact message). The
+    // type char itself was consumed above, so a trailing second type char
+    // (e.g. '%M' -> '%' consumed as type, 'M' leftover) lands here.
+    if idx < len {
+        let typename = val.borrow().type_name().to_string();
+        return Err(PyError::value_error(format!(
+            "Invalid format specifier '{}' for object of type '{}'",
+            spec_str, typename
+        )));
+    }
 
     // Determine value type
     let val_borrowed = val.borrow();
