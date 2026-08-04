@@ -678,16 +678,47 @@ pub fn create_dis_dict() -> HashMap<String, PyObjectRef> {
 
     dis_func!("get_instructions", |args| {
         let code = extract_code(args)?;
+        // Real CPython's dis returns `Instruction` objects with .opname/
+        // .argval/.arg/.offset/.starts_line attributes (and tuple
+        // unpacking). Build one shared namedtuple class.
+        let namedtuple = crate::modules::get_module("collections")
+            .and_then(|m| m.borrow().get_attribute("namedtuple").ok())
+            .ok_or_else(|| PyError::runtime_error("collections.namedtuple missing"))?;
+        let instruction_type = crate::object::call_function_disposable(&namedtuple, vec![
+            py_str("Instruction"),
+            py_list(vec![py_str("opname"), py_str("argval"), py_str("arg"), py_str("offset"), py_str("starts_line")]),
+        ], vec![])?;
         let mut instr_list = Vec::new();
         for (i, instr) in code.instructions.iter().enumerate() {
             let offset = (i * 2) as i64;
             let opname = format!("{:?}", instr.op);
             let arg = instr.arg as i64;
-            instr_list.push(py_tuple(vec![
-                py_int(offset),
+            // argval: the meaningful operand (const value / name / arg).
+            let argval = match instr.op {
+                crate::bytecode::Opcode::LOAD_CONST => {
+                    if let Some(cv) = code.consts.get(instr.arg as usize) {
+                        crate::vm::eval_const_value(cv.clone()).ok()
+                    } else {
+                        Some(py_int(arg))
+                    }
+                }
+                crate::bytecode::Opcode::LOAD_NAME | crate::bytecode::Opcode::LOAD_GLOBAL
+                | crate::bytecode::Opcode::STORE_NAME | crate::bytecode::Opcode::LOAD_ATTR
+                | crate::bytecode::Opcode::STORE_ATTR | crate::bytecode::Opcode::DELETE_NAME
+                | crate::bytecode::Opcode::LOAD_DEREF | crate::bytecode::Opcode::STORE_DEREF
+                | crate::bytecode::Opcode::LOAD_FAST | crate::bytecode::Opcode::STORE_FAST
+                | crate::bytecode::Opcode::DELETE_FAST => {
+                    code.names.get(instr.arg as usize).map(|&n| py_str(crate::interner::lookup_str(n)))
+                }
+                _ => Some(py_int(arg)),
+            };
+            instr_list.push(crate::object::call_function_disposable(&instruction_type, vec![
                 py_str(&opname),
+                argval.unwrap_or_else(|| PyObjectRef::new(PyObject::None)),
                 py_int(arg),
-            ]));
+                py_int(offset),
+                PyObjectRef::new(PyObject::None),
+            ], vec![])?);
         }
         Ok(py_list(instr_list))
     });

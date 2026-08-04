@@ -6,6 +6,12 @@
 // internally in this pass — see the plan's own note on scope.
 use super::*;
 
+thread_local! {
+    // PEP 649 computed-annotation cache, keyed by each function's
+    // `__annotate__` closure identity (see the `__annotations__` arm).
+    static ANN_CACHE: std::cell::RefCell<std::collections::HashMap<usize, PyObjectRef>> = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
 // ---- Attribute access ----
 
 pub trait ObjectAccess {
@@ -4053,14 +4059,30 @@ impl PyObject {
                     "__closure__" => Ok(dict.get("__closure__").cloned().unwrap_or(py_none())),
                     "__module__" => Ok(dict.get("__module__").cloned().unwrap_or(py_none())),
                     "__annotations__" => {
-                        // PEP 649: if the function has a `__annotate__`
-                        // closure, calling it lazily computes the annotations
-                        // dict (undefined annotation names only fail on first
-                        // access, not at def time).
+                        // PEP 649: calling `__annotate__` lazily computes the
+                        // annotations dict (undefined names fail only on
+                        // first access). Cache per function (keyed by the
+                        // __annotate__ closure's identity, or the function's
+                        // own object address for the no-annotation empty
+                        // dict) so repeated access returns the SAME dict —
+                        // test_decorators asserts `func.__annotations__ is
+                        // func.__annotations__`.
                         if let Some(annotate) = dict.get_str("__annotate__").cloned() {
-                            return crate::object::call_function_disposable(&annotate, vec![], vec![]);
+                            let key = annotate.get_id();
+                            if let Some(cached) = ANN_CACHE.with(|c| c.borrow().get(&key).cloned()) {
+                                return Ok(cached);
+                            }
+                            let result = crate::object::call_function_disposable(&annotate, vec![], vec![])?;
+                            ANN_CACHE.with(|c| c.borrow_mut().insert(key, result.clone()));
+                            return Ok(result);
                         }
-                        Ok(dict.get("__annotations__").cloned().unwrap_or_else(|| crate::object::py_dict()))
+                        let key = self as *const PyObject as usize;
+                        if let Some(cached) = ANN_CACHE.with(|c| c.borrow().get(&key).cloned()) {
+                            return Ok(cached);
+                        }
+                        let empty = crate::object::py_dict();
+                        ANN_CACHE.with(|c| c.borrow_mut().insert(key, empty.clone()));
+                        Ok(empty)
                     }
                     // `func.__dict__` — every custom attribute set on a
                     // function (`f.custom = 1`) already lands in this same

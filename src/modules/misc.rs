@@ -4693,6 +4693,29 @@ pub(crate) fn get_builtin_class(name: &str) -> Option<PyObjectRef> {
     })
 }
 
+/// Look up a module by name through the live `sys.modules` dict (no VM
+/// needed — a plain dict read; safe from inside a native closure that is
+/// itself running under the VM).
+pub(crate) fn get_module(name: &str) -> Option<PyObjectRef> {
+    CURRENT_SYS_MODULE.with(|m| {
+        let sys_mod = m.borrow().clone()?;
+        let modules = {
+            let b = sys_mod.borrow();
+            if let PyObject::Module { dict, .. } = &*b {
+                dict.get_str("modules").cloned()
+            } else {
+                None
+            }
+        }?;
+        let mb = modules.borrow();
+        if let PyObject::Dict(d) = &*mb {
+            d.get(&py_str(name)).ok().flatten()
+        } else {
+            None
+        }
+    })
+}
+
 fn get_current_unraisablehook() -> Option<PyObjectRef> {
     CURRENT_SYS_MODULE.with(|m| {
         let mod_ref = m.borrow().clone()?;
