@@ -234,19 +234,71 @@ pub(crate) fn format_percent_e(f: f64, prec: usize, alternate: bool, upper: bool
         // inf/nan have no 'e' in {:e} output
         None => return format!("{}{}", sign, sci),
     };
-    let mut exp: i32 = exp_s.parse().unwrap_or(0);
-    let mantissa: f64 = mant_s.parse().unwrap_or(1.0);
-    // Round mantissa to prec decimals, handling carry to 10.
-    let rounded: f64 = format!("{:.*}", prec, mantissa).parse().unwrap_or(mantissa);
-    let (mut mant_out, exp_out) = if rounded >= 10.0 {
-        (1.0f64, exp + 1)
-    } else {
-        (rounded, exp)
-    };
-    let mut s = format!("{:.*}", prec, mant_out);
-    if alternate && prec == 0 {
-        s.push('.');
+    let exp: i32 = exp_s.parse().unwrap_or(0);
+    // Round the mantissa's DIGITS to `prec` decimals with round-half-even on
+    // the exact decimal string (format!("{:.p}", f64) uses the nearest double
+    // and rounds 1.230005 up -> 1.23001; CPython's exact half-even gives
+    // 1.23000). mant_s is the shortest repr like "1.230005".
+    let digits: Vec<char> = mant_s.chars().filter(|&c| c != '.').collect();
+    let keep = prec + 1; // significant digits (1 before the point)
+    let mut out_digits: Vec<char> = digits.clone();
+    let mut exp_out = exp;
+    if digits.len() > keep {
+        // round to `keep` digits
+        let mut rounded: Vec<char> = digits[..keep].to_vec();
+        let next = digits[keep];
+        let round_up = if next > '5' {
+            true
+        } else if next < '5' {
+            false
+        } else {
+            // next == '5': round half to even on the last kept digit
+            let has_nonzero = digits[keep + 1..].iter().any(|&c| c != '0');
+            if has_nonzero {
+                true
+            } else {
+                let last = rounded[keep - 1];
+                last.to_digit(10).unwrap_or(0) % 2 == 1
+            }
+        };
+        if round_up {
+            // increment the digit string (with carry)
+            let mut i = keep as isize - 1;
+            loop {
+                if i < 0 {
+                    rounded.insert(0, '1');
+                    exp_out += 1;
+                    break;
+                }
+                let d = rounded[i as usize].to_digit(10).unwrap_or(0);
+                if d == 9 {
+                    rounded[i as usize] = '0';
+                    i -= 1;
+                } else {
+                    rounded[i as usize] = char::from_digit(d + 1, 10).unwrap_or('0');
+                    break;
+                }
+            }
+            // a carry out of the top digit ("999" -> "1000") yields one extra
+            // digit — keep just `keep` of them (1.00e+04, not 1.000e+04)
+            rounded.truncate(keep);
+        }
+        out_digits = rounded;
     }
+    while out_digits.len() < keep {
+        out_digits.push('0');
+    }
+    // build "d.ddd" from out_digits (drop trailing zeros for prec>0 handled by caller)
+    let int_c = out_digits[0];
+    let s = if prec == 0 {
+        if alternate {
+            format!("{}.", int_c)
+        } else {
+            int_c.to_string()
+        }
+    } else {
+        format!("{}.{}", int_c, out_digits[1..].iter().collect::<String>())
+    };
     let e_char = if upper { 'E' } else { 'e' };
     let exp_sign = if exp_out < 0 { '-' } else { '+' };
     format!("{}{}{}{}{:02}", sign, s, e_char, exp_sign, exp_out.abs())
@@ -358,6 +410,7 @@ fn byte_index_in(fmt: &str, rest: &str) -> usize {
 
 pub(crate) fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String, String> {    let mut result = String::new();
     let mut chars = fmt.chars();
+    let mut converted = 0usize;
 
     // Handle tuple arguments: consume one element per format spec. Real
     // CPython's `%` operator does this ONLY for a tuple RHS — a list (or
@@ -493,7 +546,8 @@ pub(crate) fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String,
                 Some('%') => result.push('%'),
                 Some(conv @ 's') | Some(conv @ 'r') | Some(conv @ 'f') | Some(conv @ 'd') | Some(conv @ 'i')
                 | Some(conv @ 'o') | Some(conv @ 'x') | Some(conv @ 'X') | Some(conv @ 'c')
-                | Some(conv @ 'e') | Some(conv @ 'E') | Some(conv @ 'g') | Some(conv @ 'G') | Some(conv @ 'u') | Some(conv @ 'F') => {
+                | Some(conv @ 'e') | Some(conv @ 'E') | Some(conv @ 'g') | Some(conv @ 'G') | Some(conv @ 'u') | Some(conv @ 'F') | Some(conv @ 'a') => {
+                    converted += 1;
                     let raw = if let Some(ref key) = mapping_key {
                         let obj = arg.borrow();
                         match &*obj {
@@ -505,10 +559,28 @@ pub(crate) fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String,
                         get_arg()
                     };
 
+                    if matches!(conv, 'f' | 'F' | 'e' | 'E' | 'g' | 'G')
+                        && !matches!(&*raw.borrow(), PyObject::Int(_) | PyObject::Bool(_) | PyObject::Float(_)) {
+                        return Err(format!("must be real number, not {}", raw.borrow().type_name()));
+                    }
                     let formatted = match conv {
                         's' => raw.str(),
                         'r' => raw.repr(),
+                        'a' => {
+                            // ascii() repr: repr with ALL non-ASCII escaped
+                            let r = raw.repr();
+                            let mut out = String::new();
+                            for c in r.chars() {
+                                if c.is_ascii() { out.push(c); }
+                                else if (c as u32) <= 0xFFFF { out.push_str(&format!("\\u{:04x}", c as u32)); }
+                                else { out.push_str(&format!("\\U{:08x}", c as u32)); }
+                            }
+                            out
+                        }
                         'f' => {
+                            if !matches!(&*raw.borrow(), PyObject::Int(_) | PyObject::Bool(_) | PyObject::Float(_)) {
+                                return Err(format!("must be real number, not {}", raw.borrow().type_name()));
+                            }
                             let f = raw.as_f64().unwrap_or(0.0);
                             let prec = precision.unwrap_or(6);
                             // CPython's test_format exercises %12.*f with
@@ -613,9 +685,27 @@ pub(crate) fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String,
                         }
                         'c' => {
                             if let Some(i) = raw.as_i64() {
-                                char::from_u32(i as u32).map(|c| c.to_string()).unwrap_or_default()
+                                // %c of an int must be a valid Unicode scalar
+                                // (0..0x110000) — out of range raises
+                                // OverflowError ("%c arg not in range(0x110000)").
+                                match char::from_u32(i as u32) {
+                                    Some(c) => c.to_string(),
+                                    None => return Err("%c arg not in range(0x110000) [overflow]".to_string()),
+                                }
+                            } else if matches!(&*raw.borrow(), PyObject::Str(_)) {
+                                let s = raw.str();
+                                if s.chars().count() != 1 {
+                                    return Err(format!(
+                                        "%c requires an int or a unicode character, not a string of length {}",
+                                        s.chars().count()
+                                    ));
+                                }
+                                s.chars().next().map(|c| c.to_string()).unwrap_or_default()
                             } else {
-                                raw.str().chars().next().map(|c| c.to_string()).unwrap_or_default()
+                                return Err(format!(
+                                    "%c requires an int or a unicode character, not {}",
+                                    raw.borrow().type_name()
+                                ));
                             }
                         }
                         _ => unreachable!(),
@@ -665,7 +755,12 @@ pub(crate) fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String,
         }
     }
 
-    // Real CPython raises if the arg tuple has MORE elements than specs.
+    // Real CPython raises if a single non-mapping arg is provided but no
+    // conversion consumed it, or a tuple has MORE elements than specs.
+    let arg_is_dict = matches!(&*arg0.borrow(), PyObject::Dict(_));
+    if arg_iter.is_none() && !arg_is_dict && converted == 0 {
+        return Err("not all arguments converted during string formatting".to_string());
+    }
     if let Some(it) = arg_iter {
         let mut it = it;
         if it.next().is_some() {

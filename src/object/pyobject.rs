@@ -1079,6 +1079,29 @@ impl PyObject {
 fn escape_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
+        // Escape non-ASCII chars that are NOT printable (CPython's repr
+        // keeps printable non-ASCII like 'café'/U+0374 but escapes
+        // unassigned/format chars like U+0378 as \\u0378). Approximation of
+        // Unicode printability without a full DB: letters/digits/marks plus
+        // common punctuation/symbol/space ranges are kept; everything else
+        // is escaped.
+        fn is_printable(c: char) -> bool {
+            if c.is_alphanumeric() || c.is_whitespace() {
+                return true;
+            }
+            let cp = c as u32;
+            // Common punctuation/symbol/space ranges (a coarse superset).
+            matches!(cp,
+                0x00A0..=0x00FF      // Latin-1 supplement (incl. é)
+                | 0x2000..=0x206F    // punctuation + spaces
+                | 0x2100..=0x214F    // letterlike symbols
+                | 0x2190..=0x2BFF    // arrows, math, misc symbols
+                | 0x2E00..=0x2E7F    // supplemental punctuation
+                | 0x3000..=0x303F    // CJK punctuation
+                | 0xFE50..=0xFE6F    // small form variants
+                | 0xFF00..=0xFFEF    // halfwidth/fullwidth forms
+            )
+        }
         match c {
             '\n' => out.push_str("\\n"),
             '\t' => out.push_str("\\t"),
@@ -1090,6 +1113,10 @@ fn escape_string(s: &str) -> String {
             '\x7f' => out.push_str("\\x7f"),
             c if c.is_control() => match c as u32 {
                 code @ 0..=0xff => out.push_str(&format!("\\x{:02x}", code as u8)),
+                code @ 0x100..=0xffff => out.push_str(&format!("\\u{:04x}", code)),
+                code => out.push_str(&format!("\\U{:08x}", code)),
+            },
+            c if !is_printable(c) => match c as u32 {
                 code @ 0x100..=0xffff => out.push_str(&format!("\\u{:04x}", code)),
                 code => out.push_str(&format!("\\U{:08x}", code)),
             },
