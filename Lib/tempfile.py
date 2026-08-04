@@ -121,8 +121,9 @@ class TemporaryFile:
 class NamedTemporaryFile:
     def __init__(self, mode="w+b", buffering=-1, encoding=None,
                  newline=None, suffix="", prefix="tmp", dir=None,
-                 delete=True, errors=None):
+                 delete=True, delete_on_close=True, errors=None):
         self._delete = delete
+        self.delete_on_close = delete_on_close
         self._close_called = False
         fd, self.name = mkstemp(suffix, prefix, dir)
         self._file = _os.fdopen(fd, mode, buffering=-1, encoding=encoding,
@@ -141,7 +142,7 @@ class NamedTemporaryFile:
                 self._file.close()
             except Exception:
                 pass
-            if self._delete:
+            if self._delete and self.delete_on_close:
                 try:
                     _os.unlink(self.name)
                 except Exception:
