@@ -71,6 +71,14 @@ enum PendingCleanup {
 struct LoopInfo {
     start_label: usize,
     end_label: usize,
+    // A `break`/`continue` must run only the pending cleanups (with/except)
+    // registered WITHIN the loop body — cleanups registered OUTSIDE the
+    // loop (e.g. a `with` wrapping the whole loop: `with cm: for x: break`)
+    // run naturally at their own scope's end, and running them inline at
+    // the break would corrupt the stack (the outer loop's iterator sits
+    // above the with-manager). `cleanup_start` snapshots pending_cleanup's
+    // length at loop start.
+    cleanup_start: usize,
     // `for`/`async for` loops keep their iterator object sitting on the
     // stack for the loop's whole duration (FOR_ITER peeks it each pass;
     // END_FOR pops it once on natural exhaustion, right before
@@ -1076,7 +1084,7 @@ impl Compiler {
             Stmt::Pass => {}
             Stmt::Break => {
                 let (end_label, is_for, cleanup) = if let Some(loop_info) = self.loop_stack.last() {
-                    (loop_info.end_label, loop_info.is_for, self.pending_cleanup.clone())
+                    (loop_info.end_label, loop_info.is_for, self.pending_cleanup[loop_info.cleanup_start..].to_vec())
                 } else {
                     return Err("'break' outside loop".to_string());
                 };
@@ -1096,6 +1104,11 @@ impl Compiler {
                             }
                             self.emit(Opcode::CALL, 3);
                             self.emit(Opcode::POP_TOP, 0);
+                            // The with-manager (pushed by SETUP_WITH) still
+                            // sits on the stack after the __exit__ call —
+                            // pop it so the for-iterator below it becomes
+                            // the top again.
+                            self.emit(Opcode::POP_TOP, 0);
                         }
                         PendingCleanup::Finally(_) => {
                             // Finally blocks are handled inline by the compiler,
@@ -1112,7 +1125,7 @@ impl Compiler {
             }
             Stmt::Continue => {
                 let (start_label, cleanup) = if let Some(loop_info) = self.loop_stack.last() {
-                    (loop_info.start_label, self.pending_cleanup.clone())
+                    (loop_info.start_label, self.pending_cleanup[loop_info.cleanup_start..].to_vec())
                 } else {
                     return Err("'continue' outside loop".to_string());
                 };
@@ -1131,6 +1144,9 @@ impl Compiler {
                                 self.emit(Opcode::LOAD_CONST, const_none);
                             }
                             self.emit(Opcode::CALL, 3);
+                            self.emit(Opcode::POP_TOP, 0);
+                            // Pop the with-manager left below the __exit__
+                            // result (continue keeps the for-iterator).
                             self.emit(Opcode::POP_TOP, 0);
                         }
                         PendingCleanup::Finally(_) => {
@@ -1365,6 +1381,7 @@ impl Compiler {
                 self.loop_stack.push(LoopInfo {
                     start_label,
                     end_label,
+                    cleanup_start: self.pending_cleanup.len(),
                     is_for: false,
                 });
                 self.compile_expr(test)?;
@@ -1398,6 +1415,7 @@ impl Compiler {
                 self.loop_stack.push(LoopInfo {
                     start_label,
                     end_label,
+                    cleanup_start: self.pending_cleanup.len(),
                     is_for: true,
                 });
                 self.mark_label(start_label);
