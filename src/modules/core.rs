@@ -3446,6 +3446,19 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
     d.insert_str("linesep", py_str("\n"));
     d.insert_str("pathsep", py_str(":"));
 
+    // `os.supports_dir_fd`/`supports_follow_symlinks`/`supports_effective_ids`/
+    // `supports_fd` — real CPython exposes frozensets of the os functions
+    // honoring each keyword. Ours honor NONE of them, so expose empty
+    // frozensets: tests guard `{os.open, os.stat} <= os.supports_dir_fd`
+    // (test_glob.py) and skip the dir_fd/symlinks path when the subset check
+    // fails, falling back to the plain path — which is exactly what this
+    // interpreter supports. `supports_bytes_environ` is a plain bool.
+    let empty_frozen: PyObjectRef = crate::object::builtin_frozenset(&[]).unwrap_or_else(|_| PyObjectRef::imm(PyObject::FrozenSet(crate::object::PySet::new())));
+    for name in ["supports_dir_fd", "supports_effective_ids", "supports_fd", "supports_follow_symlinks"] {
+        d.insert(name.to_string(), empty_frozen.clone());
+    }
+    d.insert_str("supports_bytes_environ", py_bool(true));
+
     // os.path sub-module will be wired as a proper submodule in vm.rs
     // The path attribute is set there (not inline) to allow proper os.path import
     d
