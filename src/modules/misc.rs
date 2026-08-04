@@ -2950,6 +2950,206 @@ pub fn create_csv_dict() -> HashMap<String, PyObjectRef> {
         }
     });
 
+    // `csv.DictReader(csvfile, fieldnames=None, ...)` — iterates csv.reader
+    // rows as dicts keyed by fieldnames (the first row if none given).
+    let dict_reader_type = PyObjectRef::new(PyObject::Type {
+        name: "DictReader".to_string(),
+        dict: Box::new(str_map_to_typedict(HashMap::new())),
+        bases: vec![],
+        mro: vec![],
+    });
+    if let PyObject::Type { dict, .. } = &mut *dict_reader_type.borrow_mut() {
+        dict.insert_str("__init__", PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__init__".to_string(),
+            func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                if args.len() < 2 {
+                    return Err(PyError::type_error("DictReader() missing required argument: 'csvfile'"));
+                }
+                let self_obj = &args[0];
+                let csvfile = &args[1];
+                // Read all lines from the file-like / string source.
+                let content: String = {
+                    if matches!(&*csvfile.borrow(), PyObject::Str(_)) {
+                        csvfile.str()
+                    } else if let Ok(read) = csvfile.borrow().get_attribute("read") {
+                        let v = crate::object::call_function_disposable(&read, vec![], vec![])?;
+                        v.str()
+                    } else {
+                        csvfile.str()
+                    }
+                };
+                let rows: Vec<Vec<String>> = content.lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .map(|l| l.split(',').map(|f| f.trim().to_string()).collect())
+                    .collect();
+                let fieldnames: Vec<String> = if let Some(fn_arg) = args.get(2) {
+                    if matches!(&*fn_arg.borrow(), PyObject::None) {
+                        rows.first().cloned().unwrap_or_default()
+                    } else {
+                        let b = fn_arg.borrow();
+                        if let PyObject::List(items) = &*b {
+                            items.iter().map(|i| i.str()).collect()
+                        } else {
+                            fn_arg.str().split(',').map(|s| s.trim().to_string()).collect()
+                        }
+                    }
+                } else {
+                    rows.first().cloned().unwrap_or_default()
+                };
+                let data_rows: Vec<Vec<String>> = if args.get(2).map(|a| matches!(&*a.borrow(), PyObject::None)).unwrap_or(args.len() < 3) {
+                    rows.into_iter().skip(1).collect()
+                } else {
+                    rows
+                };
+                self_obj.borrow_mut().set_attribute("fieldnames", py_list(fieldnames.iter().map(|f| py_str(f)).collect()))?;
+                let fieldnames2 = fieldnames.clone();
+                let data_rows2 = data_rows.clone();
+                self_obj.borrow_mut().set_attribute("_rows", py_list(data_rows2.into_iter().map(|r| py_list(r.into_iter().map(|v| py_str(&v)).collect())).collect()))?;
+                let _ = fieldnames2;
+                Ok(py_none())
+            },
+        }));
+        // __iter__ returns a list iterator over dict rows.
+        dict.insert_str("__iter__", PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__iter__".to_string(),
+            func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                let self_obj = &args[0];
+                let fieldnames: Vec<PyObjectRef> = self_obj.borrow().get_attribute("fieldnames")
+                    .and_then(|f| {
+                        let b = f.borrow();
+                        if let PyObject::List(items) = &*b { Ok(items.clone()) } else { Err(PyError::type_error("fieldnames")) }
+                    })
+                    .unwrap_or_default();
+                let rows: Vec<PyObjectRef> = self_obj.borrow().get_attribute("_rows")
+                    .and_then(|r| {
+                        let b = r.borrow();
+                        if let PyObject::List(items) = &*b { Ok(items.clone()) } else { Err(PyError::type_error("_rows")) }
+                    })
+                    .unwrap_or_default();
+                let mut dicts = Vec::new();
+                for row in rows {
+                    let rb = row.borrow();
+                    if let PyObject::List(cells) = &*rb {
+                        let d = crate::object::py_dict();
+                        {
+                            let mut db = d.borrow_mut();
+                            if let PyObject::Dict(pd) = &mut *db {
+                                for (i, fname) in fieldnames.iter().enumerate() {
+                                    let key = fname.str();
+                                    let val = cells.get(i).cloned().unwrap_or_else(|| py_none());
+                                    pd.set(py_str(&key), val)?;
+                                }
+                            }
+                        }
+                        dicts.push(d);
+                    }
+                }
+                Ok(PyObjectRef::new(PyObject::ListIter { list: dicts, index: 0 }))
+            },
+        }));
+        dict.insert_str("__next__", PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__next__".to_string(),
+            func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                let self_obj = &args[0];
+                let it = crate::object::builtin_iter(&[self_obj.clone()])?;
+                crate::object::builtin_next(&[it.clone()])
+            },
+        }));
+    }
+    d.insert_str("DictReader", dict_reader_type.clone());
+
+    // `csv.DictWriter(csvfile, fieldnames, ...)` — writerow/writeheader
+    // against a native file-like sink.
+    let dict_writer_type = PyObjectRef::new(PyObject::Type {
+        name: "DictWriter".to_string(),
+        dict: Box::new(str_map_to_typedict(HashMap::new())),
+        bases: vec![],
+        mro: vec![],
+    });
+    if let PyObject::Type { dict, .. } = &mut *dict_writer_type.borrow_mut() {
+        dict.insert_str("__init__", PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__init__".to_string(),
+            func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                if args.len() < 3 {
+                    return Err(PyError::type_error("DictWriter() missing required argument: 'fieldnames'"));
+                }
+                let self_obj = &args[0];
+                let _sink = &args[1];
+                let fn_arg = &args[2];
+                let fieldnames: Vec<PyObjectRef> = {
+                    let b = fn_arg.borrow();
+                    if let PyObject::List(items) = &*b {
+                        items.clone()
+                    } else {
+                        fn_arg.str().split(',').map(|s| py_str(s.trim())).collect()
+                    }
+                };
+                self_obj.borrow_mut().set_attribute("fieldnames", py_list(fieldnames.clone()))?;
+                self_obj.borrow_mut().set_attribute("_lines", py_list(vec![]))?;
+                Ok(py_none())
+            },
+        }));
+        dict.insert_str("writeheader", PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "writeheader".to_string(),
+            func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                let self_obj = &args[0];
+                let fieldnames = self_obj.borrow().get_attribute("fieldnames")
+                    .and_then(|f| { let b = f.borrow(); if let PyObject::List(items) = &*b { Ok(items.iter().map(|i| i.str()).collect::<Vec<_>>()) } else { Err(PyError::type_error("fieldnames")) } })
+                    .unwrap_or_default();
+                let line = fieldnames.join(",");
+                if let Ok(lines) = self_obj.borrow().get_attribute("_lines") {
+                    if let PyObject::List(items) = &mut *lines.borrow_mut() {
+                        items.push(py_str(&line));
+                    }
+                }
+                Ok(py_none())
+            },
+        }));
+        dict.insert_str("writerow", PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "writerow".to_string(),
+            func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                let self_obj = &args[0];
+                let row = args.get(1).ok_or_else(|| PyError::type_error("writerow() missing argument"))?;
+                let fieldnames: Vec<PyObjectRef> = self_obj.borrow().get_attribute("fieldnames")
+                    .and_then(|f| { let b = f.borrow(); if let PyObject::List(items) = &*b { Ok(items.clone()) } else { Err(PyError::type_error("fieldnames")) } })
+                    .unwrap_or_default();
+                let mut cells: Vec<String> = Vec::new();
+                for fname in &fieldnames {
+                    let key = fname.str();
+                    let val = row.borrow().get_attribute(&key).map(|v| v.str()).unwrap_or_default();
+                    cells.push(val);
+                }
+                let line = cells.join(",");
+                if let Ok(lines) = self_obj.borrow().get_attribute("_lines") {
+                    if let PyObject::List(items) = &mut *lines.borrow_mut() {
+                        items.push(py_str(&line));
+                    }
+                }
+                Ok(py_none())
+            },
+        }));
+        dict.insert_str("writerows", PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "writerows".to_string(),
+            func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                let self_obj = &args[0];
+                let rows = args.get(1).ok_or_else(|| PyError::type_error("writerows() missing argument"))?;
+                let it = crate::object::builtin_iter(&[rows.clone()])?;
+                loop {
+                    match crate::object::builtin_next(&[it.clone()]) {
+                        Ok(row) => {
+                            let wrow = self_obj.borrow().get_attribute("writerow")?;
+                            crate::object::call_function_disposable(&wrow, vec![row], vec![])?;
+                        }
+                        Err(crate::object::PyError::StopIteration) => break,
+                        Err(e) => return Err(e),
+                    }
+                }
+                Ok(py_none())
+            },
+        }));
+    }
+    d.insert_str("DictWriter", dict_writer_type);
+
     d
 }
 
