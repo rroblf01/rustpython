@@ -582,7 +582,7 @@ fn py_pow_float(x: f64, y: f64) -> PyResult<PyObjectRef> {
     }
     // A negative base with a NON-INTEGER exponent defers to complex pow
     // (CPython: (-2.0)**0.5 is complex ~ (8.66e-17+1.41j)).
-    if x < 0.0 && y.fract() != 0.0 {
+    if x < 0.0 && y.fract() != 0.0 && y.is_finite() {
         let r = (-x).powf(y);
         let theta = y * std::f64::consts::PI;
         return Ok(PyObjectRef::imm(PyObject::Complex(r * theta.cos(), r * theta.sin())));
