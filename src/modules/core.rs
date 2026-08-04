@@ -1058,20 +1058,36 @@ fn _codecs_writer(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Err(PyError::value_error("stream writer not implemented"))
 }
 
+thread_local! {
+    // Shared codec error-handler registry (`codecs.register_error` /
+    // `codecs.lookup_error` / `_codecs._unregister_error` all operate on
+    // this) — real CPython keeps it in `_codecs`; this interpreter's
+    // Lib/codecs.py delegates to these natives.
+    static CODEC_ERROR_HANDLERS: std::cell::RefCell<std::collections::HashMap<String, PyObjectRef>> = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+pub(crate) fn _codecs_register_error(name: &str, handler: PyObjectRef) {
+    CODEC_ERROR_HANDLERS.with(|h| {
+        h.borrow_mut().insert(name.to_lowercase(), handler);
+    });
+}
+
 fn _codecs_lookup_error(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() < 1 {
         return Err(PyError::type_error("lookup_error() requires at least 1 argument"));
     }
     let name = args[0].str().to_lowercase();
-    match name.as_str() {
-        "strict" | "ignore" | "replace"
-        | "xmlcharrefreplace" | "backslashreplace"
-        | "namereplace" | "surrogateescape" | "surrogatepass" => {
-            Ok(py_str(&name))
-        }
-        _ => Err(PyError::value_error(format!(
-            "unknown error handler: '{}'", name
-        ))),
+    let found = CODEC_ERROR_HANDLERS.with(|h| h.borrow().get(&name).cloned());
+    match found {
+        Some(h) => Ok(h),
+        None => Err(PyError::Exception(
+            "LookupError".to_string(),
+            PyObjectRef::new(PyObject::Exception {
+                typ: "LookupError".to_string(),
+                args: vec![py_str(&format!("unknown error handler: '{}'", name))],
+                cause: None,
+            }),
+        )),
     }
 }
 
@@ -1157,12 +1173,40 @@ fn _codecs_decode_func(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 }
 
 /// Create the `_codecs` module dictionary.
-pub fn create_codecs_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    d.insert_str("lookup_error", PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "lookup_error".to_string(),
-        func: _codecs_lookup_error,
-    }));
+ pub fn create_codecs_dict() -> HashMap<String, PyObjectRef> {
+     let mut d = HashMap::new();
+     d.insert_str("lookup_error", PyObjectRef::new(PyObject::BuiltinFunction {
+         name: "lookup_error".to_string(),
+         func: _codecs_lookup_error,
+     }));
+     d.insert_str("_register_error", PyObjectRef::new(PyObject::BuiltinFunction {
+         name: "_register_error".to_string(),
+         func: |args: &[PyObjectRef]| {
+             if args.len() < 2 {
+                 return Err(PyError::type_error("_register_error() requires at least 2 arguments"));
+             }
+             _codecs_register_error(&args[0].str(), args[1].clone());
+             Ok(py_none())
+         },
+     }));
+     d.insert_str("_unregister_error", PyObjectRef::new(PyObject::BuiltinFunction {
+         name: "_unregister_error".to_string(),
+         func: |args: &[PyObjectRef]| {
+             if args.len() < 1 {
+                 return Err(PyError::type_error("_unregister_error() requires at least 1 argument"));
+             }
+             let name = args[0].str().to_lowercase();
+             // Built-in handler names cannot be unregistered (real CPython
+             // raises ValueError).
+             if matches!(name.as_str(),
+                 "strict" | "ignore" | "replace" | "backslashreplace" | "namereplace"
+                 | "xmlcharrefreplace" | "surrogateescape" | "surrogatepass") {
+                 return Err(PyError::value_error(format!("cannot unregister builtin error handler '{}'", name)));
+             }
+             let removed = CODEC_ERROR_HANDLERS.with(|h| h.borrow_mut().remove(&name));
+             Ok(py_bool(removed.is_some()))
+         },
+     }));
     d.insert_str("lookup", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "lookup".to_string(),
         func: _codecs_lookup,

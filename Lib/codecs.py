@@ -44,14 +44,19 @@ BOM_UTF8 = b'\xef\xbb\xbf'
 BOM_UTF16_LE = b'\xff\xfe'
 BOM_UTF16_BE = b'\xfe\xff'
 
-# Error handlers registry
-_error_handlers = {}
+# Error handlers registry — shared with _codecs (real CPython keeps this
+# in the _codecs C module; this stub delegates to it so register_error/
+# lookup_error/unregister_error and _codecs._unregister_error agree).
+import _codecs as _codecs
 
 def register_error(name, handler):
-    _error_handlers[name] = handler
+    _codecs._register_error(name, handler)
 
 def lookup_error(name):
-    return _error_handlers.get(name)
+    return _codecs.lookup_error(name)
+
+def unregister_error(name):
+    return _codecs._unregister_error(name)
 
 def strict_errors(exception):
     raise exception
