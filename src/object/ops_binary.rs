@@ -552,7 +552,13 @@ pub fn py_mod(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
 /// Python's `7.5 % -3.0 == -1.5`, not `1.5`.
 fn py_float_mod(a: f64, b: f64) -> PyResult<PyObjectRef> {
     let rem = a % b;
-    if rem != 0.0 && (rem < 0.0) != (b < 0.0) {
+    // A zero result takes the DIVISOR's sign (CPython: -0.0 % 1.0 == 0.0,
+    // -0.0 % -1.0 == -0.0) — a plain `rem != 0.0` check treats -0.0 as "no
+    // adjustment" and returns the wrong sign.
+    if rem == 0.0 {
+        return Ok(py_float(if b.is_sign_negative() { -0.0 } else { 0.0 }));
+    }
+    if (rem < 0.0) != (b < 0.0) {
         Ok(py_float(rem + b))
     } else {
         Ok(py_float(rem))

@@ -96,7 +96,18 @@ pub fn float_binop_dunder(args: &[PyObjectRef], reverse: bool, kind: u8) -> PyRe
     let result = match kind {
         0 => af / bf,
         1 => (af / bf).floor(),
-        2 => af % bf,
+        2 => {
+            // Python's %: result has the divisor's sign; a zero result takes
+            // the divisor's sign too (-0.0 % 1.0 == 0.0).
+            let rem = af % bf;
+            if rem == 0.0 {
+                if bf.is_sign_negative() { -0.0 } else { 0.0 }
+            } else if (rem < 0.0) != (bf < 0.0) {
+                rem + bf
+            } else {
+                rem
+            }
+        }
         3 => af.powf(bf),
         4 => af + bf,
         5 => af - bf,
