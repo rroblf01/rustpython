@@ -12,6 +12,48 @@ thread_local! {
     static ANN_CACHE: std::cell::RefCell<std::collections::HashMap<usize, PyObjectRef>> = std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
+/// Binary-op dispatch for float's numeric-protocol dunders
+/// (`float.__truediv__`, `__rsub__`, ...). `kind` selects the operator, and
+/// `reverse` swaps the operands for the reflected forms. Computes the raw
+/// f64 arithmetic DIRECTLY (NOT via py_div/py_add etc., which re-dispatch
+/// the dunder and would recurse infinitely). Referenced from non-capturing
+/// closures so it coerces to `BuiltinFunc` (fn pointer).
+pub fn float_binop_dunder(args: &[PyObjectRef], reverse: bool, kind: u8) -> PyResult<PyObjectRef> {
+    if args.len() < 2 {
+        return Err(PyError::type_error("binary operator needs 2 arguments"));
+    }
+    // The established native-dunder calling convention: reached via the
+    // operator path (`try_dunder_binop`) the closure receives
+    // `[self_obj, self, other]` (3 args), but a DIRECT call like
+    // `(1.0).__truediv__(2)` delivers `[self, other]` (2 args, the bound
+    // self already consumed). Reading the LAST TWO args handles both.
+    let (a, b) = (&args[args.len() - 2], &args[args.len() - 1]);
+    let (a, b) = if reverse { (b, a) } else { (a, b) };
+    let af = a.as_f64();
+    let bf = b.as_f64();
+    // A non-numeric operand (e.g. a custom class implementing __float__)
+    // must yield NotImplemented so the operator machinery falls through to
+    // the other side's reflected dunder (`1.0 + Rat` -> Rat.__radd__) —
+    // computing with NAN would swallow the real result. Note as_f64 returns
+    // Some for a REAL float('nan'), so genuine NaN still propagates.
+    if af.is_none() || bf.is_none() {
+        return Ok(crate::object::py_not_implemented());
+    }
+    let af = af.unwrap();
+    let bf = bf.unwrap();
+    let result = match kind {
+        0 => af / bf,
+        1 => (af / bf).floor(),
+        2 => af % bf,
+        3 => af.powf(bf),
+        4 => af + bf,
+        5 => af - bf,
+        6 => af * bf,
+        _ => return Err(PyError::type_error("unknown operator")),
+    };
+    Ok(py_float(result))
+}
+
 // ---- Attribute access ----
 
 pub trait ObjectAccess {
@@ -5917,7 +5959,6 @@ impl PyObject {
             }
             PyObject::Float(_f) => {
                 match name {
-                    // `float.real`/`.imag`/`.conjugate()` — part of the
                     // `numbers.Complex` protocol every numeric type
                     // implements (a plain `float` is trivially its own real
                     // part with zero imaginary part and is its own
@@ -5949,6 +5990,89 @@ impl PyObject {
                             } else { Err(PyError::runtime_error("__int__ on non-float")) }
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    // The numeric protocol dunders — real floats expose the
+                    // full arithmetic operator set as methods
+                    // (float(2).__truediv__(d), test_float's
+                    // test_floatasratio calls exactly this). Route through
+                    // the same py_* helpers the operators themselves use.
+                    "__truediv__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: name.to_string(),
+                        func: |args: &[PyObjectRef]| float_binop_dunder(args, false, 0),
+                        self_obj: PyObjectRef::imm(PyObject::Float(*_f)),
+                    })),
+                    "__rtruediv__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: name.to_string(),
+                        func: |args: &[PyObjectRef]| float_binop_dunder(args, true, 0),
+                        self_obj: PyObjectRef::imm(PyObject::Float(*_f)),
+                    })),
+                    "__floordiv__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: name.to_string(),
+                        func: |args: &[PyObjectRef]| float_binop_dunder(args, false, 1),
+                        self_obj: PyObjectRef::imm(PyObject::Float(*_f)),
+                    })),
+                    "__rfloordiv__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: name.to_string(),
+                        func: |args: &[PyObjectRef]| float_binop_dunder(args, true, 1),
+                        self_obj: PyObjectRef::imm(PyObject::Float(*_f)),
+                    })),
+                    "__mod__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: name.to_string(),
+                        func: |args: &[PyObjectRef]| float_binop_dunder(args, false, 2),
+                        self_obj: PyObjectRef::imm(PyObject::Float(*_f)),
+                    })),
+                    "__rmod__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: name.to_string(),
+                        func: |args: &[PyObjectRef]| float_binop_dunder(args, true, 2),
+                        self_obj: PyObjectRef::imm(PyObject::Float(*_f)),
+                    })),
+                    "__pow__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: name.to_string(),
+                        func: |args: &[PyObjectRef]| float_binop_dunder(args, false, 3),
+                        self_obj: PyObjectRef::imm(PyObject::Float(*_f)),
+                    })),
+                    "__rpow__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: name.to_string(),
+                        func: |args: &[PyObjectRef]| float_binop_dunder(args, true, 3),
+                        self_obj: PyObjectRef::imm(PyObject::Float(*_f)),
+                    })),
+                    "__add__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: name.to_string(),
+                        func: |args: &[PyObjectRef]| float_binop_dunder(args, false, 4),
+                        self_obj: PyObjectRef::imm(PyObject::Float(*_f)),
+                    })),
+                    "__radd__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: name.to_string(),
+                        func: |args: &[PyObjectRef]| float_binop_dunder(args, true, 4),
+                        self_obj: PyObjectRef::imm(PyObject::Float(*_f)),
+                    })),
+                    "__sub__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: name.to_string(),
+                        func: |args: &[PyObjectRef]| float_binop_dunder(args, false, 5),
+                        self_obj: PyObjectRef::imm(PyObject::Float(*_f)),
+                    })),
+                    "__rsub__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: name.to_string(),
+                        func: |args: &[PyObjectRef]| float_binop_dunder(args, true, 5),
+                        self_obj: PyObjectRef::imm(PyObject::Float(*_f)),
+                    })),
+                    "__mul__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: name.to_string(),
+                        func: |args: &[PyObjectRef]| float_binop_dunder(args, false, 6),
+                        self_obj: PyObjectRef::imm(PyObject::Float(*_f)),
+                    })),
+                    "__rmul__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: name.to_string(),
+                        func: |args: &[PyObjectRef]| float_binop_dunder(args, true, 6),
+                        self_obj: PyObjectRef::imm(PyObject::Float(*_f)),
+                    })),
+                    "__neg__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__neg__".to_string(),
+                        func: |args: &[PyObjectRef]| {
+                            if args.is_empty() { return Err(PyError::type_error("__neg__ needs 1 argument")); }
+                            crate::object::py_neg(&args[0])
+                        },
+                        self_obj: PyObjectRef::imm(PyObject::Float(*_f)),
                     })),
                     "as_integer_ratio" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "as_integer_ratio".to_string(),
