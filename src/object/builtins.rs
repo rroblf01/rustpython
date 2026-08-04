@@ -614,6 +614,7 @@ pub fn builtin_float(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     _ => c,
                 }
             }).collect();
+            let normalized: String = normalized.chars().filter(|&c| c != '_').collect();
             let f: f64 = normalized.parse().map_err(|_| PyError::value_error(format!("could not convert string to float: '{}'", s)))?;
             Ok(py_float(f))
         }
@@ -628,6 +629,7 @@ pub fn builtin_float(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     _ => c,
                 }
             }).collect();
+            let normalized: String = normalized.chars().filter(|&c| c != '_').collect();
             let f: f64 = normalized.parse().map_err(|_| PyError::value_error(format!("could not convert string to float: '{}'", s)))?;
             Ok(py_float(f))
         }
@@ -642,6 +644,7 @@ pub fn builtin_float(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     _ => c,
                 }
             }).collect();
+            let normalized: String = normalized.chars().filter(|&c| c != '_').collect();
             let f: f64 = normalized.parse().map_err(|_| PyError::value_error(format!("could not convert string to float: '{}'", s)))?;
             Ok(py_float(f))
         }
