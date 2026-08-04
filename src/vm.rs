@@ -8534,8 +8534,28 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
     }
 
     // --- parse grouping option [,|_] ---
-    if idx < len && (chars[idx] == ',' || chars[idx] == '_') {
+    let grouping: Option<char> = if idx < len && (chars[idx] == ',' || chars[idx] == '_') {
+        let g = chars[idx];
         idx += 1;
+        Some(g)
+    } else {
+        None
+    };
+    // CPython scans the WHOLE spec for grouping chars: both ',' and '_'
+    // anywhere -> mixed error; a repeated char -> repeated error. This also
+    // catches '{:.,_f}' (`.` before `_` wouldn't parse as grouping above).
+    {
+        let commas = spec_str.chars().filter(|&c| c == ',').count();
+        let underscores = spec_str.chars().filter(|&c| c == '_').count();
+        if commas > 0 && underscores > 0 {
+            return Err(PyError::value_error("Cannot specify both ',' and '_'."));
+        }
+        if commas > 1 {
+            return Err(PyError::value_error("Cannot specify ',' with ','."));
+        }
+        if underscores > 1 {
+            return Err(PyError::value_error("Cannot specify '_' with '_'."));
+        }
     }
 
     // --- parse [.precision] ---
@@ -8729,6 +8749,14 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
         _ => val.str(),
     };
 
+    // Thousands grouping (',' or '_'): insert the separator every 3 digits
+    // of the integer part (format(1234567, ',') == '1,234,567').
+    let base = if let Some(sep) = grouping {
+        apply_grouping(&base, sep)
+    } else {
+        base
+    };
+
     // The `z` flag coerces a NEGATIVE ZERO RESULT (after rounding) to
     // positive zero — `f'{-.01:z.1f}'` rounds -0.01 to '-0.0' then coerces
     // to '0.0'. Applied to the formatted base before padding.
@@ -8814,6 +8842,33 @@ fn format_float_with_sign(val: f64, sign: char, precision: Option<usize>) -> Str
         None => format!("{}", val),
     };
     apply_sign(&s, val, sign)
+}
+
+/// Insert ',' or '_' every 3 digits of the integer part of a formatted
+/// number (thousands grouping).
+fn apply_grouping(s: &str, sep: char) -> String {
+    let (sign, rest) = if let Some(r) = s.strip_prefix('-') {
+        ("-", r)
+    } else if let Some(r) = s.strip_prefix('+') {
+        ("+", r)
+    } else {
+        ("", s)
+    };
+    let (int_part, frac) = match rest.split_once('.') {
+        Some((i, f)) => (i, Some(f)),
+        None => (rest, None),
+    };
+    let mut grouped = String::new();
+    for (i, c) in int_part.chars().enumerate() {
+        if i > 0 && (int_part.len() - i) % 3 == 0 {
+            grouped.push(sep);
+        }
+        grouped.push(c);
+    }
+    match frac {
+        Some(f) => format!("{}{}.{}", sign, grouped, f),
+        None => format!("{}{}", sign, grouped),
+    }
 }
 
 /// Apply padding/alignment to a base string.
