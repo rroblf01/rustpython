@@ -1165,7 +1165,7 @@ impl PyObject {
                             let start = if start < 0 { (len + start).max(0) } else { start.min(len) };
                             let stop = if stop < 0 { (len + stop).max(0) } else { stop.min(len) };
                             for i in start..stop {
-                                if items[i as usize].equals(&args[1])? { return Ok(py_int(i)); }
+                                if items[i as usize].is(&args[1]) || items[i as usize].equals(&args[1])? { return Ok(py_int(i)); }
                             }
                             Err(PyError::value_error(format!("{} is not in list", args[1].str())))
                         },
@@ -1178,7 +1178,7 @@ impl PyObject {
                             let items = if let PyObject::List(list) = &*args[0].borrow() {
                                 list.clone()
                             } else { return Err(PyError::runtime_error("count on non-list")) };
-                            let c = items.iter().filter(|item| item.equals(&args[1]).unwrap_or(false)).count();
+                            let c = items.iter().filter(|item| item.is(&args[1]) || item.equals(&args[1]).unwrap_or(false)).count();
                             Ok(py_int(c as i64))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
@@ -1285,7 +1285,7 @@ impl PyObject {
                                 list.clone()
                             } else { return Err(PyError::runtime_error("__contains__ on non-list")) };
                             for item in items.iter() {
-                                if item.equals(&args[1])? { return Ok(py_bool(true)); }
+                                if item.is(&args[1]) || item.equals(&args[1])? { return Ok(py_bool(true)); }
                             }
                             Ok(py_bool(false))
                         },
