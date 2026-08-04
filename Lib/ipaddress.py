@@ -33,9 +33,17 @@ class IPv4Address:
         else:
             s = str(address)
             parts = s.split('.')
-            if len(parts) != 4:
+            # Real CPython accepts 1-4 dotted parts, padding missing octets
+            # with zeros on the left: '1' -> 0.0.0.1, '1.2' -> 1.0.2,
+            # '1.2.3' -> 1.2.3, plus the full dotted-quad form. (The
+            # simplified vendored parser only handled exactly 4 parts.)
+            if len(parts) > 4:
                 raise ValueError("Invalid IPv4 address")
-            self._ip = _ipv4_to_int(parts)
+            for p in parts:
+                if not p.isdigit() or int(p) > 255:
+                    raise ValueError("Invalid IPv4 address")
+            octets = [0] * (4 - len(parts)) + [int(p) for p in parts]
+            self._ip = _ipv4_to_int(octets)
 
     def __str__(self):
         return _int_to_ipv4(self._ip)
@@ -149,6 +157,10 @@ class IPv6Address:
             self._ip = address._ip
         else:
             s = str(address)
+            # Strip an IPv6 zone/scope id ('%eth0', '%scope') — real
+            # CPython ignores it for the address value.
+            if '%' in s:
+                s = s.split('%', 1)[0]
             if s == '::':
                 self._ip = 0
             elif s.startswith('::'):
@@ -229,7 +241,13 @@ class _BaseNetwork:
         else:
             addr_str = str(address)
             self._prefixlen = self._max_prefixlen
-        self._network = int(self._address_class(addr_str))
+        # An integer address is already a packed int — pass it straight to
+        # _address_class (IPv4Network(1) etc.); a string must round-trip
+        # through the address constructor.
+        if isinstance(address, int):
+            self._network = int(address)
+        else:
+            self._network = int(self._address_class(addr_str))
         self._mask = ((1 << self._prefixlen) - 1) << (self._max_prefixlen - self._prefixlen)
         self._network = self._network & self._mask
 
