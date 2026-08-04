@@ -1418,7 +1418,7 @@ impl Compiler {
                 args,
                 body,
                 decorator_list,
-                returns: _,
+                returns,
                 is_async,
                 ..
             } => {
@@ -1445,7 +1445,7 @@ impl Compiler {
                 for decorator in decorator_list.iter() {
                     self.compile_expr(decorator)?;
                 }
-                self.compile_function(name.clone(), args, body, *is_async)?;
+                self.compile_function(name.clone(), args, body, *is_async, returns)?;
                 // No `SWAP` needed here (unlike the old single-pass version):
                 // pushing every decorator BEFORE the function leaves each one
                 // sitting directly below the value it must be called with —
@@ -2864,6 +2864,7 @@ impl Compiler {
         args: &[Arg],
         body: &[Stmt],
         is_async: bool,
+        returns: &Option<Box<Expr>>,
     ) -> Result<(), String> {
         if std::env::var("RPY_DEBUG_COMPILE").is_ok() {
             eprintln!("compile_function: name={} is_async={}", name, is_async);
@@ -3158,6 +3159,43 @@ impl Compiler {
         }
 
         self.emit(Opcode::MAKE_FUNCTION, make_func_arg);
+
+        // PEP 649 deferred annotations: build a nested `__annotate__`
+        // function whose body RETURNS the annotations dict, and attach it as
+        // `func.__annotate__`. The annotation EXPRESSIONS are only evaluated
+        // when `__annotations__` is first accessed (real CPython 3.14
+        // behavior) — eagerly evaluating them at def time broke modules with
+        // annotations referencing names defined conditionally or later
+        // (`Lib/_colorize.py`'s `-> Self`).
+        let has_annotations = args.iter().any(|a| a.annotation.is_some()) || returns.is_some();
+        if has_annotations {
+            let mut keys: Vec<Option<Expr>> = Vec::new();
+            let mut values: Vec<Expr> = Vec::new();
+            for arg in args.iter() {
+                if let Some(annotation) = &arg.annotation {
+                    keys.push(Some(Expr::Constant(Constant::String(self.mangle_name(&arg.arg)))));
+                    values.push((**annotation).clone());
+                }
+            }
+            if let Some(returns) = returns {
+                keys.push(Some(Expr::Constant(Constant::String("return".to_string()))));
+                values.push((**returns).clone());
+            }
+            let annotate_body = vec![Stmt::Return(Some(Box::new(Expr::Dict { keys, values })))];
+            // Keep the main function on the stack for the attach below.
+            self.emit(Opcode::DUP_TOP, 0);
+            // The nested function needs its own docstring-free, no-defaults
+            // signature; compile_function handles the recursion.
+            self.compile_function(
+                "__annotate__".to_string(),
+                &[],
+                &annotate_body,
+                false,
+                &None,
+            )?;
+            let annotate_attr_idx = self.get_name_index("__annotate__") as u32;
+            self.emit(Opcode::STORE_ATTR, annotate_attr_idx);
+        }
 
         // Set __doc__ if there was a docstring
         if let Some(doc) = docstring {
@@ -3702,6 +3740,7 @@ impl Compiler {
                     args,
                     &[Stmt::Return(Some(body.clone()))],
                     false,
+                    &None,
                 )?;
             }
             Expr::Attribute { value, attr } => {

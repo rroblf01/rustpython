@@ -4052,7 +4052,16 @@ impl PyObject {
                     }
                     "__closure__" => Ok(dict.get("__closure__").cloned().unwrap_or(py_none())),
                     "__module__" => Ok(dict.get("__module__").cloned().unwrap_or(py_none())),
-                    "__annotations__" => Ok(dict.get("__annotations__").cloned().unwrap_or(py_none())),
+                    "__annotations__" => {
+                        // PEP 649: if the function has a `__annotate__`
+                        // closure, calling it lazily computes the annotations
+                        // dict (undefined annotation names only fail on first
+                        // access, not at def time).
+                        if let Some(annotate) = dict.get_str("__annotate__").cloned() {
+                            return crate::object::call_function_disposable(&annotate, vec![], vec![]);
+                        }
+                        Ok(dict.get("__annotations__").cloned().unwrap_or_else(|| crate::object::py_dict()))
+                    }
                     // `func.__dict__` — every custom attribute set on a
                     // function (`f.custom = 1`) already lands in this same
                     // `dict` (see `set_attribute`'s `PyObject::Function`
