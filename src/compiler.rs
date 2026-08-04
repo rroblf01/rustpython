@@ -3097,8 +3097,7 @@ impl Compiler {
                     if self.get_var_index(fv_name).is_none() {
                         self.add_varname(fv_name);
                     }
-                }
-                // A name relayed from further out that we (as the
+                }                // A name relayed from further out that we (as the
                 // intervening scope) also expose as one of our *own*
                 // cellvars purely so a nested function can see it (see
                 // `analyze_function`'s cell_vars doc comment) is present in
@@ -3297,6 +3296,21 @@ impl Compiler {
                 self.add_varname("__class__");
             }
         }
+        // The class body analysis may ALSO have marked `__class__` as one of
+        // OUR freevars — because the method bodies nested here reference it
+        // via `super()`, and the enclosing function's `__class__` (a
+        // different cell: e.g. a class defined inside ANOTHER class's method
+        // sees the OUTER class's `__class__`) is in our computed enclosing
+        // names. That is wrong: this class body OWNS its own `__class__`
+        // cell (pushed above), and methods must close over THAT one — the
+        // relay prefers the freevar slot, which would thread the OUTER
+        // class's cell through instead (bare `super()` then resolved to the
+        // enclosing method's class, e.g. PositionalOnlyTestCase, and raised
+        // AttributeError). Drop it from our freevars so the relay's cellvar
+        // path is taken.
+        if let Some(pos) = self.code.freevars.iter().position(|n| n == "__class__") {
+            self.code.freevars.remove(pos);
+        }
 
         // Real Python implicitly seeds __module__ = <enclosing module's
         // __name__> and __qualname__ = <class name> as the first two
@@ -3338,6 +3352,7 @@ impl Compiler {
         self.code.first_lineno = 1;
 
         let inner_free_vars = self.code.freevars.clone();
+
 
         let func_code = std::mem::replace(&mut self.code, old_code);
         self.labels = old_labels;
