@@ -734,7 +734,7 @@ pub(crate) fn float_fromhex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 /// `x * 2.0f64.powi(exp)` overflows to inf for exp >= 1024 even when the
 /// true value (e.g. `0x.fffffffffffff8p+1024` == the max normal) is
 /// finite. Scales in 512-bit chunks, staying within f64 range.
-fn ldexp_f64(x: f64, exp: i32) -> f64 {
+pub(crate) fn ldexp_f64(x: f64, exp: i32) -> f64 {
     let mut x = x;
     let mut e = exp;
     let big = 2.0f64.powf(512.0);

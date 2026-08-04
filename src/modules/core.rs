@@ -1955,7 +1955,7 @@ pub fn create_math_dict() -> HashMap<String, PyObjectRef> {
         if args.len() < 2 { return Err(PyError::type_error("ldexp() requires 2 arguments")); }
         let x = math_arg_f64(&args[0]).ok_or_else(|| PyError::type_error("argument must be a number"))?;
         let exp = args[1].as_i64().ok_or_else(|| PyError::type_error("exponent must be an integer"))?;
-        Ok(py_float(x * (2.0_f64).powi(exp as i32)))
+        Ok(py_float(crate::object::ldexp_f64(x, exp as i32)))
     });
     math_func!("fsum", |args| {
         if args.is_empty() { return Err(PyError::type_error("fsum() requires an argument")); }
