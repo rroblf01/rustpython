@@ -18,8 +18,54 @@ thread_local! {
 /// f64 arithmetic DIRECTLY (NOT via py_div/py_add etc., which re-dispatch
 /// the dunder and would recurse infinitely). Referenced from non-capturing
 /// closures so it coerces to `BuiltinFunc` (fn pointer).
-pub fn float_binop_dunder(args: &[PyObjectRef], reverse: bool, kind: u8) -> PyResult<PyObjectRef> {
-    if args.len() < 2 {
+/// Convert an f64 to its exact integer via ceil/floor/trunc (`mode`: 0 =
+/// trunc toward zero, 1 = ceil toward +inf, 2 = floor toward -inf). Returns
+/// an error for nan/inf. Handles values beyond i64 range (1.23e167).
+fn f64_to_int_ceil_floor_trunc(v: f64, mode: u8) -> PyResult<BigInt> {
+    if v.is_nan() {
+        return Err(PyError::value_error("cannot convert float NaN to integer"));
+    }
+    if v.is_infinite() {
+        return Err(PyError::overflow_error("cannot convert float infinity to integer"));
+    }
+    let bits = v.to_bits();
+    let sign = if (bits >> 63) == 0 { 1 } else { -1 };
+    let biased = ((bits >> 52) & 0x7ff) as i32;
+    let mantissa = bits & 0x000f_ffff_ffff_ffff;
+    if v == 0.0 {
+        return Ok(BigInt::from(0));
+    }
+    let exp = biased - 1023;
+    let mantissa_full = if biased == 0 { mantissa } else { (1u64 << 52) | mantissa };
+    let mag = BigInt::from(mantissa_full);
+    // value = mantissa_full * 2^(exp - 52) — the 52-bit fraction offset.
+    // q = trunc(|v|), had_frac = whether |v| is non-integral.
+    let (q, had_frac) = if exp >= 52 {
+        (mag << ((exp - 52) as usize), false)
+    } else {
+        let shift = (52 - exp) as usize;
+        let denom = BigInt::from(1u64) << shift;
+        let q = &mag / &denom;
+        let r = &mag % &denom;
+        (q, !r.is_zero())
+    };
+    if sign < 0 {
+        // trunc(-x) = -q; ceil(-x) = -q (toward +inf); floor(-x) = -(q+1)
+        // if fractional.
+        return Ok(match mode {
+            0 => -q,
+            1 => -q,
+            _ => if had_frac { -q - 1 } else { -q },
+        });
+    }
+    Ok(match mode {
+        0 => q,
+        1 => if had_frac { q + 1 } else { q },
+        _ => q,
+    })
+}
+
+pub fn float_binop_dunder(args: &[PyObjectRef], reverse: bool, kind: u8) -> PyResult<PyObjectRef> {    if args.len() < 2 {
         return Err(PyError::type_error("binary operator needs 2 arguments"));
     }
     // The established native-dunder calling convention: reached via the
@@ -6194,7 +6240,7 @@ impl PyObject {
                         name: "__ceil__".to_string(),
                         func: |args| {
                             if let PyObject::Float(v) = &*args[0].borrow() {
-                                Ok(py_int(v.ceil() as i64))
+                                f64_to_int_ceil_floor_trunc(*v, 1).map(py_int)
                             } else { Err(PyError::runtime_error("__ceil__ on non-float")) }
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
@@ -6203,7 +6249,7 @@ impl PyObject {
                         name: "__floor__".to_string(),
                         func: |args| {
                             if let PyObject::Float(v) = &*args[0].borrow() {
-                                Ok(py_int(v.floor() as i64))
+                                f64_to_int_ceil_floor_trunc(*v, 2).map(py_int)
                             } else { Err(PyError::runtime_error("__floor__ on non-float")) }
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
@@ -6212,7 +6258,7 @@ impl PyObject {
                         name: "__trunc__".to_string(),
                         func: |args| {
                             if let PyObject::Float(v) = &*args[0].borrow() {
-                                Ok(py_int(v.trunc() as i64))
+                                f64_to_int_ceil_floor_trunc(*v, 0).map(py_int)
                             } else { Err(PyError::runtime_error("__trunc__ on non-float")) }
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
