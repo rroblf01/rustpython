@@ -2901,6 +2901,62 @@ impl PyObject {
                             let mut next_auto = 0usize;
                             let mut used_manual_numbering = false;
                             let mut used_auto_numbering = false;
+                            // Resolve nested `{field}` replacements inside a
+                            // format spec string (e.g. the `{}` in `{:0{}x}`
+                            // takes the next arg as the width). Returns the
+                            // spec with each nested field's value substituted.
+                            let resolve_nested_spec = |spec: &str,
+                                                       next_auto: &mut usize,
+                                                       used_manual_numbering: &mut bool,
+                                                       used_auto_numbering: &mut bool,
+                                                       pos_args: &[PyObjectRef],
+                                                       kwargs_dict: Option<&PyObjectRef>|
+                             -> PyResult<String> {
+                                let mut out = String::new();
+                                let mut sc = spec.chars();
+                                while let Some(c) = sc.next() {
+                                    if c == '{' {
+                                        let mut inner = String::new();
+                                        loop {
+                                            match sc.next() {
+                                                Some('}') => break,
+                                                Some(c) => inner.push(c),
+                                                None => return Err(PyError::value_error("unterminated nested format field")),
+                                            }
+                                        }
+                                        let inner = inner.trim();
+                                        if inner.is_empty() {
+                                            if *used_manual_numbering {
+                                                return Err(PyError::value_error("cannot switch from manual field specification to automatic field numbering"));
+                                            }
+                                            *used_auto_numbering = true;
+                                            let idx = *next_auto;
+                                            *next_auto += 1;
+                                            match pos_args.get(idx) {
+                                                Some(v) => out.push_str(&v.str()),
+                                                None => return Err(PyError::index_error("Replacement index out of range for positional args tuple")),
+                                            }
+                                        } else if let Ok(n) = inner.parse::<usize>() {
+                                            if *used_auto_numbering {
+                                                return Err(PyError::value_error("cannot switch from automatic field numbering to manual field specification"));
+                                            }
+                                            *used_manual_numbering = true;
+                                            match pos_args.get(n) {
+                                                Some(v) => out.push_str(&v.str()),
+                                                None => return Err(PyError::index_error("Replacement index out of range for positional args tuple")),
+                                            }
+                                        } else {
+                                            match kwargs_dict.and_then(|d| if let PyObject::Dict(dd) = &*d.borrow() { dd.get(&py_str(inner)).ok().flatten() } else { None }) {
+                                                Some(v) => out.push_str(&v.str()),
+                                                None => return Err(PyError::key_error(format!("'{}'", inner))),
+                                            }
+                                        }
+                                    } else {
+                                        out.push(c);
+                                    }
+                                }
+                                Ok(out)
+                            };
                             while let Some(c) = chars.next() {
                                 if c == '{' {
                                     // Check for {{ escape
@@ -2909,11 +2965,16 @@ impl PyObject {
                                         chars.next();
                                         continue;
                                     }
-                                    // Parse field text up to the matching `}`.
+                                    // Parse field text up to the matching `}`,
+                                    // tracking nested braces: `{:0{}x}`'s
+                                    // inner `{}` must not close the field.
                                     let mut field = String::new();
+                                    let mut depth = 0usize;
                                     loop {
                                         match chars.next() {
-                                            Some('}') => break,
+                                            Some('}') if depth == 0 => break,
+                                            Some('}') => { depth -= 1; field.push('}'); }
+                                            Some('{') => { depth += 1; field.push('{'); }
                                             Some(c) => field.push(c),
                                             None => return Err(PyError::value_error("unterminated format field")),
                                         }
@@ -2965,7 +3026,15 @@ impl PyObject {
                                         Some("s") => py_str(&val.str()),
                                         _ => val,
                                     };
-                                    result.push_str(&crate::vm::format_with_spec(&val, spec)?);
+                                    // Resolve NESTED replacement fields inside
+                                    // the spec — `'{:0{}x}'`'s `{}` takes the
+                                    // next format arg as the width
+                                    // (test_strtod's reference strtod formats
+                                    // with `{:0{}x}`). Each nested field
+                                    // consumes one arg from the SAME auto/
+                                    // manual counters.
+                                    let spec = resolve_nested_spec(spec, &mut next_auto, &mut used_manual_numbering, &mut used_auto_numbering, pos_args, kwargs_dict.as_ref())?;
+                                    result.push_str(&crate::vm::format_with_spec(&val, &spec)?);
                                 } else if c == '}' {
                                     if chars.as_str().starts_with('}') {
                                         result.push('}');
@@ -5950,10 +6019,24 @@ impl PyObject {
                                 } else if *v == 0.0 {
                                     Ok(py_str(&format!("{}0x0.0p+0", sign)))
                                 } else {
-                                    let exp = biased_exp - 1023;
                                     let hex_mantissa = format!("{:013x}", mantissa);
-                                    let hex_mantissa = hex_mantissa.trim_end_matches('0');
-                                    Ok(py_str(&format!("{}0x1.{}p{:+}", sign, if hex_mantissa.is_empty() { "0" } else { hex_mantissa }, exp)))
+                                    if biased_exp == 0 {
+                                        // Subnormal: CPython writes the raw
+                                        // 52-bit mantissa after a 0x0. prefix
+                                        // at fixed exponent -1022
+                                        // ('0x0.048bd262b030bp-1022'), not the
+                                        // normalized 0x1.XXXXp-1023 form.
+                                        Ok(py_str(&format!("{}0x0.{}p-1022", sign, hex_mantissa)))
+                                    } else {
+                                        let exp = biased_exp - 1023;
+                                        // CPython keeps ALL 13 frac hex digits
+                                        // (52 mantissa bits); trimming trailing
+                                        // zeros produced a different hex string
+                                        // than float.hex()/test_strtod expect
+                                        // (e.g. '0x1.6544243f809b0p+54' not
+                                        // '0x1.6544243f809bp+54').
+                                        Ok(py_str(&format!("{}0x1.{}p{:+}", sign, hex_mantissa, exp)))
+                                    }
                                 }
                             } else { Err(PyError::runtime_error("hex on non-float")) }
                         },
