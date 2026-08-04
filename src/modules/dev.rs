@@ -688,6 +688,9 @@ pub fn create_dis_dict() -> HashMap<String, PyObjectRef> {
             py_str("Instruction"),
             py_list(vec![py_str("opname"), py_str("argval"), py_str("arg"), py_str("offset"), py_str("starts_line")]),
         ], vec![])?;
+        if std::env::var("RPY_DEBUG_DIS").is_ok() {
+            eprintln!("DIS instruction_type = {}", instruction_type.repr());
+        }
         let mut instr_list = Vec::new();
         for (i, instr) in code.instructions.iter().enumerate() {
             let offset = (i * 2) as i64;

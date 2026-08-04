@@ -3519,6 +3519,26 @@ impl Compiler {
                 self.emit(Opcode::BINARY_OP, bin_op);
             }
             Expr::UnaryOp { op, operand } => {
+                // CPython 3.11+ folds `not (a is b)` into a single inverted
+                // IS_OP (no UNARY_NOT emitted) — test_positional_only_arg's
+                // test_annotations_constant_fold asserts exactly this in the
+                // __annotate__ code. Fold the same for `not (a is not b)`.
+                if let UnaryOp::Not = op {
+                    if let Expr::Compare { left, ops, comparators } = operand.as_ref() {
+                        if ops.len() == 1 && comparators.len() == 1 {
+                            match ops[0] {
+                                CmpOp::Is | CmpOp::IsNot => {
+                                    self.compile_expr(left)?;
+                                    self.compile_expr(&comparators[0])?;
+                                    let invert = if matches!(ops[0], CmpOp::Is) { 1 } else { 0 };
+                                    self.emit(Opcode::IS_OP, invert);
+                                    return Ok(());
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
                 self.compile_expr(operand)?;
                 match op {
                     UnaryOp::Not => self.emit(Opcode::UNARY_NOT, 0),
@@ -3564,8 +3584,27 @@ impl Compiler {
                         CmpOp::LtE => 1,
                         CmpOp::Gt => 4,
                         CmpOp::GtE => 3,
-                        CmpOp::Is => 8,
-                        CmpOp::IsNot => 9,
+                        CmpOp::Is => {
+                            // CPython 3.11+ has a dedicated IS_OP for
+                            // identity (arg 0 = is, 1 = is not); COMPARE_OP
+                            // 8/9 were the pre-3.11 encodings.
+                            self.emit(Opcode::IS_OP, 0);
+                            if i < ops.len() - 1 {
+                                self.emit(Opcode::DUP_TOP, 0);
+                                self.emit_jump(Opcode::POP_JUMP_IF_FALSE, chained_end);
+                                self.emit(Opcode::POP_TOP, 0);
+                            }
+                            continue;
+                        }
+                        CmpOp::IsNot => {
+                            self.emit(Opcode::IS_OP, 1);
+                            if i < ops.len() - 1 {
+                                self.emit(Opcode::DUP_TOP, 0);
+                                self.emit_jump(Opcode::POP_JUMP_IF_FALSE, chained_end);
+                                self.emit(Opcode::POP_TOP, 0);
+                            }
+                            continue;
+                        }
                         CmpOp::In => 6,
                         CmpOp::NotIn => 7,
                     };

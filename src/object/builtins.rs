@@ -2036,6 +2036,14 @@ pub fn call_function_disposable(func: &PyObjectRef, args: Vec<PyObjectRef>, keyw
             let mut vm = crate::vm::VirtualMachine::new();
             vm.call_function(func.clone(), args, keywords)
         }
+        PyObject::Type { .. } => {
+            // Calling a class (user class / namedtuple factory result /
+            // builtin type) from a native closure — route through a fresh VM
+            // so instance creation runs the normal __new__/__init__ path.
+            let _guard = crate::object::NativeDispatchRecursionGuard::enter()?;
+            let mut vm = crate::vm::VirtualMachine::new();
+            vm.call_function(func.clone(), args, keywords)
+        }
         _ => Err(PyError::type_error(format!("'{}' object is not callable", func.borrow().type_name()))),
     }
 }

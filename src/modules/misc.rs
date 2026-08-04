@@ -3915,6 +3915,19 @@ fn pickle_serialize(obj: &PyObjectRef, buf: &mut Vec<u8>, memo: &mut Vec<*const 
             }
             buf.push(b'}');
         }
+        // A module-level function — serialized BY REFERENCE (module +
+        // name), like real pickle's save_global. Unpickling resolves the
+        // global again.
+        PyObject::Function(f) => {
+            buf.push(b'E');
+            let module = f.dict.get("__module__").map(|m| m.str())
+                .or_else(|| {
+                    f.globals.borrow().get(&crate::interner::intern("__name__")).map(|m| m.str())
+                })
+                .unwrap_or_else(|| "builtins".to_string());
+            pickle_serialize(&py_str(&module), buf, memo)?;
+            pickle_serialize(&py_str(&crate::interner::lookup_str(f.code.name)), buf, memo)?;
+        }
         _ => {
             return Err(PyError::type_error(format!(
                 "cannot pickle {} object",
@@ -4101,7 +4114,21 @@ fn pickle_deserialize(data: &[u8], pos: &mut usize, memo: &mut Vec<PyObjectRef>)
             let id: usize = s.parse().map_err(|_| PyError::type_error(format!("invalid memo reference: {}", s)))?;
             memo.get(id).cloned().ok_or_else(|| PyError::type_error(format!("pickle memo reference out of range: {}", id)))
         }
-        // Deque-backed subclass instance (see the serializer's matching arm).
+        b'E' => {
+            // Function by reference (see the matching serializer arm).
+            let module = pickle_deserialize(data, pos, memo)?;
+            let name = pickle_deserialize(data, pos, memo)?;
+            let module_str = module.str();
+            let name_str = name.str();
+            let func = crate::modules::get_module(&module_str)
+                .and_then(|m| m.borrow().get_attribute(&name_str).ok())
+                .ok_or_else(|| PyError::type_error(format!("cannot find function {}.{} referenced by pickle data", module_str, name_str)))?;
+            if matches!(&*func.borrow(), PyObject::Function(_)) {
+                Ok(func)
+            } else {
+                Err(PyError::type_error(format!("{}.{} is not a function", module_str, name_str)))
+            }
+        }
         b'C' => {
             let module = pickle_deserialize(data, pos, memo)?;
             let name = pickle_deserialize(data, pos, memo)?;
