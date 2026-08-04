@@ -1243,6 +1243,109 @@ fn _codecs_decode_func(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             Ok(py_none())
         },
     }));
+
+    // Builtin codec error handlers (`codecs.backslashreplace_errors` etc. —
+    // real CPython exposes these from the C `_codecs` module). Each takes a
+    // Unicode{Encode,Decode,Translate}Error and returns (replacement, end).
+    // Extract start/end/object/reason from the exception by attribute.
+    fn err_bounds(exc: &PyObjectRef) -> (usize, usize, Option<PyObjectRef>) {
+        let getattr = |name: &str| -> Option<PyObjectRef> {
+            exc.borrow().get_attribute(name).ok()
+        };
+        let end = getattr("end").and_then(|e| e.as_i64()).unwrap_or(0) as usize;
+        let obj = getattr("object");
+        let start = getattr("start").and_then(|e| e.as_i64()).unwrap_or(0) as usize;
+        (start, end, obj)
+    }
+    fn err_object_str(obj: &Option<PyObjectRef>) -> String {
+        obj.as_ref().map(|o| o.str()).unwrap_or_default()
+    }
+    // backslashreplace: encode -> \xNN/\uNNNN/\UNNNNNNNN; decode -> \xNN per byte.
+    fn backslashreplace_impl(exc: &PyObjectRef) -> PyResult<PyObjectRef> {
+        let (start, end, obj) = err_bounds(exc);
+        let s = err_object_str(&obj);
+        let chars: Vec<char> = s.chars().collect();
+        let slice = &chars[start.min(chars.len())..end.min(chars.len())];
+        let mut out = String::new();
+        for &ch in slice {
+            let cp = ch as u32;
+            if cp < 0x100 {
+                out.push_str(&format!("\\x{:02x}", cp));
+            } else if cp < 0x10000 {
+                out.push_str(&format!("\\u{:04x}", cp));
+            } else {
+                out.push_str(&format!("\\U{:08x}", cp));
+            }
+        }
+        Ok(py_tuple(vec![py_str(&out), py_int(end as i64)]))
+    }
+    // xmlcharrefreplace: -> &#NN; / &#xNNNN;
+    fn xmlcharrefreplace_impl(exc: &PyObjectRef) -> PyResult<PyObjectRef> {
+        let (start, end, obj) = err_bounds(exc);
+        let s = err_object_str(&obj);
+        let chars: Vec<char> = s.chars().collect();
+        let slice = &chars[start.min(chars.len())..end.min(chars.len())];
+        let mut out = String::new();
+        for &ch in slice {
+            let cp = ch as u32;
+            if cp < 0x100 {
+                out.push_str(&format!("&#{};", cp));
+            } else {
+                out.push_str(&format!("&#x{:x};", cp));
+            }
+        }
+        Ok(py_tuple(vec![py_str(&out), py_int(end as i64)]))
+    }
+    // surrogateescape: decode handler mapping raw bytes to low surrogates.
+    fn surrogateescape_impl(exc: &PyObjectRef) -> PyResult<PyObjectRef> {
+        let (start, end, obj) = err_bounds(exc);
+        let raw = obj.as_ref().map(|o| {
+            let b = o.borrow();
+            if let PyObject::Bytes(v) = &*b { v.clone() } else { vec![] }
+        }).unwrap_or_default();
+        let mut out: Vec<u8> = Vec::new();
+        for byte in &raw[start.min(raw.len())..end.min(raw.len())] {
+            let ch = 0xDC00u32 | (*byte as u32);
+            out.extend_from_slice(&ch.to_string().into_bytes());
+        }
+        Ok(py_tuple(vec![py_str(&String::from_utf8_lossy(&out)), py_int(end as i64)]))
+    }
+    // surrogatepass: pass the surrogates through unchanged (accept).
+    fn surrogatepass_impl(exc: &PyObjectRef) -> PyResult<PyObjectRef> {
+        let (start, end, obj) = err_bounds(exc);
+        let s = err_object_str(&obj);
+        let chars: Vec<char> = s.chars().collect();
+        let slice: String = chars[start.min(chars.len())..end.min(chars.len())].iter().collect();
+        Ok(py_tuple(vec![py_str(&slice), py_int(end as i64)]))
+    }
+    d.insert_str("backslashreplace_errors", PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "backslashreplace_errors".to_string(),
+        func: |args: &[PyObjectRef]| {
+            if args.is_empty() { return Err(PyError::type_error("backslashreplace_errors() missing argument")); }
+            backslashreplace_impl(&args[0])
+        },
+    }));
+    d.insert_str("xmlcharrefreplace_errors", PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "xmlcharrefreplace_errors".to_string(),
+        func: |args: &[PyObjectRef]| {
+            if args.is_empty() { return Err(PyError::type_error("xmlcharrefreplace_errors() missing argument")); }
+            xmlcharrefreplace_impl(&args[0])
+        },
+    }));
+    d.insert_str("surrogateescape_errors", PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "surrogateescape_errors".to_string(),
+        func: |args: &[PyObjectRef]| {
+            if args.is_empty() { return Err(PyError::type_error("surrogateescape_errors() missing argument")); }
+            surrogateescape_impl(&args[0])
+        },
+    }));
+    d.insert_str("surrogatepass_errors", PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "surrogatepass_errors".to_string(),
+        func: |args: &[PyObjectRef]| {
+            if args.is_empty() { return Err(PyError::type_error("surrogatepass_errors() missing argument")); }
+            surrogatepass_impl(&args[0])
+        },
+    }));
     d
 }
 

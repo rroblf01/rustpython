@@ -71,6 +71,15 @@ register_error('strict', strict_errors)
 register_error('replace', replace_errors)
 register_error('ignore', ignore_errors)
 
+backslashreplace_errors = _codecs.backslashreplace_errors
+xmlcharrefreplace_errors = _codecs.xmlcharrefreplace_errors
+surrogateescape_errors = _codecs.surrogateescape_errors
+surrogatepass_errors = _codecs.surrogatepass_errors
+register_error('backslashreplace', backslashreplace_errors)
+register_error('xmlcharrefreplace', xmlcharrefreplace_errors)
+register_error('surrogateescape', surrogateescape_errors)
+register_error('surrogatepass', surrogatepass_errors)
+
 class IncrementalEncoder:
     def __init__(self, errors='strict'):
         self.errors = errors

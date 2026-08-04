@@ -786,8 +786,7 @@ impl PyObject {
                     // asserts both are not None). The parser's error
                     // messages embed "L<line>:<col>:" as a prefix; parse it
                     // out lazily. Defaults to None for non-syntax errors.
-                    "lineno" | "offset" => {
-                        let want_lineno = name == "lineno";
+                    "lineno" | "offset" => {                        let want_lineno = name == "lineno";
                         let parsed = args.first().and_then(|a| {
                             let s = a.str();
                             if let Some(rest) = s.strip_prefix('L') {
@@ -802,6 +801,27 @@ impl PyObject {
                         });
                         match parsed {
                             Some((line, offset)) => Ok(py_int(if want_lineno { line } else { offset })),
+                            None => Ok(py_none()),
+                        }
+                    }
+                    // `encoding`/`object`/`start`/`end`/`reason` — the
+                    // UnicodeError family's five positional args
+                    // (UnicodeEncodeError('utf-8', obj, start, end, reason));
+                    // codec error-handler functions (backslashreplace_errors
+                    // etc.) read these.
+                    "encoding" | "object" | "start" | "end" | "reason"
+                        if typ == "UnicodeError" || typ == "UnicodeEncodeError"
+                            || typ == "UnicodeDecodeError" || typ == "UnicodeTranslateError" =>
+                    {
+                        let idx = match name {
+                            "encoding" => 0,
+                            "object" => 1,
+                            "start" => 2,
+                            "end" => 3,
+                            _ => 4,
+                        };
+                        match args.get(idx) {
+                            Some(v) => Ok(v.clone()),
                             None => Ok(py_none()),
                         }
                     }
