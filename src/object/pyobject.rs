@@ -1086,6 +1086,10 @@ fn escape_string(s: &str) -> String {
         // common punctuation/symbol/space ranges are kept; everything else
         // is escaped.
         fn is_printable(c: char) -> bool {
+            // All ASCII printable (space..~) are printable.
+            if c.is_ascii() {
+                return c >= ' ' && c != '\x7f';
+            }
             if c.is_alphanumeric() || c.is_whitespace() {
                 return true;
             }
