@@ -632,6 +632,7 @@ pub fn builtin_float(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         PyObject::Float(f) => Ok(py_float(*f)),
         PyObject::Str(s) => {
             let s: &str = s;
+            let s_orig = s;
             let s = s.trim_matches(|c: char| c.is_whitespace());
             let normalized: String = s.chars().map(|c| {
                 match c {
@@ -642,7 +643,7 @@ pub fn builtin_float(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 }
             }).collect();
             let normalized: String = validate_underscores(&normalized)?.chars().filter(|&c| c != '_').collect();
-            let f: f64 = normalized.parse().map_err(|_| PyError::value_error(format!("could not convert string to float: '{}'", s)))?;
+            let f: f64 = normalized.parse().map_err(|_| PyError::value_error(format!("could not convert string to float: '{}'", s_orig)))?;
             Ok(py_float(f))
         }
         PyObject::Bytes(b) => {
