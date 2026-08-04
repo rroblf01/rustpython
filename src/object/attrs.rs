@@ -3382,7 +3382,7 @@ impl PyObject {
                             // `test_str.py`'s own `assertRaises(ValueError)`
                             // around several of these.
                             let result = string_interpolate(&fmt, &args[2]).map_err(|e| {
-    if e.contains("too big") { PyError::overflow_error(e) } else { PyError::value_error(e) }
+    if e.contains("too big") { PyError::overflow_error(e) } else if e.contains("a real number is required") || e.contains("an integer is required") { PyError::type_error(e) } else { PyError::value_error(e) }
 })?;
                             Ok(py_str(&result))
                         },

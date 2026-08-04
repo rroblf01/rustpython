@@ -313,9 +313,9 @@ fn bigint_of(raw: &PyObjectRef) -> num_bigint::BigInt {
     match &*b {
         PyObject::Int(bi) => bi.clone(),
         PyObject::Bool(bb) => num_bigint::BigInt::from(if *bb { 1i32 } else { 0 }),
-        // A float that is a whole number converts exactly for %d/%x/%o
-        // ('%d' % -1.2345678901234568e+29 -> the full integer).
-        PyObject::Float(f) if f.fract() == 0.0 && f.is_finite() => {
+        // A float truncates toward zero for %d/%i ('%d' % 3.14 -> 3); the
+        // exact integer of a whole f64 is preserved.
+        PyObject::Float(f) if f.is_finite() => {
             num_bigint::BigInt::from(*f as i128)
         }
         _ => num_bigint::BigInt::from(raw.as_i64().unwrap_or(0)),
@@ -348,6 +348,12 @@ fn zero_pad_precision(mut s: String, precision: usize, has_prefix: bool) -> Stri
     } else {
         s
     }
+}
+
+/// Byte index of the current position in the format string (for error
+/// messages like "unsupported format character 'x' (0x78) at index N").
+fn byte_index_in(fmt: &str, rest: &str) -> usize {
+    fmt.len().saturating_sub(rest.len())
 }
 
 pub(crate) fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String, String> {    let mut result = String::new();
@@ -474,8 +480,16 @@ pub(crate) fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String,
                 }
             }
 
+            let had_spec = !flags.is_empty() || width.is_some() || precision.is_some() || mapping_key.is_some();
             match chars.next() {
                 None => return Err("incomplete format".to_string()),
+                // `%%` is only an escape when the % follows immediately — a
+                // % after a flag/width/precision is an unsupported character
+                // ('% %s' reports the second % at index 2).
+                Some('%') if had_spec => {
+                    return Err(format!("unsupported format character '%' (0x25) at index {}",
+                        byte_index_in(fmt, chars.as_str())));
+                }
                 Some('%') => result.push('%'),
                 Some(conv @ 's') | Some(conv @ 'r') | Some(conv @ 'f') | Some(conv @ 'd') | Some(conv @ 'i')
                 | Some(conv @ 'o') | Some(conv @ 'x') | Some(conv @ 'X') | Some(conv @ 'c')
@@ -531,6 +545,11 @@ pub(crate) fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String,
                             format_percent_g(f, prec, flags.contains('#'))
                         }
                         'd' | 'i' | 'u' => {
+                            // A non-numeric arg must raise ("%d format: a
+                            // real number is required, not str").
+                            if !matches!(&*raw.borrow(), PyObject::Int(_) | PyObject::Bool(_) | PyObject::Float(_)) {
+                                return Err(format!("%{} format: a real number is required, not {}", conv, raw.borrow().type_name()));
+                            }
                             // Handle big ints that overflow i64, and float
                             // whole numbers ('%d' % -1.2e29) — stringify via
                             // BigInt (test_common_format).
@@ -551,6 +570,9 @@ pub(crate) fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String,
                             } else { s }
                         }
                         'o' => {
+                            if !matches!(&*raw.borrow(), PyObject::Int(_) | PyObject::Bool(_)) {
+                                return Err(format!("%{} format: an integer is required, not {}", conv, raw.borrow().type_name()));
+                            }
                             let bi = bigint_of(&raw);
                             let neg = bi.sign() == num_bigint::Sign::Minus;
                             let mut s = if flags.contains('#') {
@@ -562,6 +584,9 @@ pub(crate) fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String,
                             s
                         }
                         'x' => {
+                            if !matches!(&*raw.borrow(), PyObject::Int(_) | PyObject::Bool(_)) {
+                                return Err(format!("%{} format: an integer is required, not {}", conv, raw.borrow().type_name()));
+                            }
                             let bi = bigint_of(&raw);
                             let neg = bi.sign() == num_bigint::Sign::Minus;
                             let mut s = if flags.contains('#') {
@@ -573,6 +598,9 @@ pub(crate) fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String,
                             s
                         }
                         'X' => {
+                            if !matches!(&*raw.borrow(), PyObject::Int(_) | PyObject::Bool(_)) {
+                                return Err(format!("%{} format: an integer is required, not {}", conv, raw.borrow().type_name()));
+                            }
                             let bi = bigint_of(&raw);
                             let neg = bi.sign() == num_bigint::Sign::Minus;
                             let mut s = if flags.contains('#') {
@@ -629,7 +657,8 @@ pub(crate) fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String,
                     };
                     result.push_str(&padded);
                 }
-                Some(c) => return Err(format!("unsupported format character '{}'", c)),
+                Some(c) => return Err(format!("unsupported format character '{}' (0x{:02x}) at index {}",
+                    c, c as u32, byte_index_in(fmt, chars.as_str()))),
             }
         } else {
             result.push(ch);
@@ -735,6 +764,12 @@ pub(crate) fn bytes_interpolate(fmt: &[u8], arg: &PyObjectRef) -> Result<Vec<u8>
         if i >= fmt.len() { return Err("incomplete format".to_string()); }
         let conv = fmt[i];
         i += 1;
+        // `%%` is only an escape when the % follows immediately — after a
+        // flag it is an unsupported character ('% %s' -> the second %).
+        let had_spec = flags_zero || flags_alt || flags_minus || flags_plus || flags_space || width.is_some() || precision.is_some();
+        if conv == b'%' && had_spec {
+            return Err(format!("unsupported format character '%' (0x25) at index {}", i - 1));
+        }
         if conv != b'%' { converted += 1; }
         let formatted: Vec<u8> = match conv {
             b'%' => vec![b'%'],
@@ -796,6 +831,20 @@ pub(crate) fn bytes_interpolate(fmt: &[u8], arg: &PyObjectRef) -> Result<Vec<u8>
             }
             b'd' | b'i' | b'u' | b'o' | b'x' | b'X' => {
                 let raw = get_arg();
+                let is_real = matches!(conv, b'd' | b'i' | b'u');
+                let allowed = if is_real {
+                    matches!(&*raw.borrow(), PyObject::Int(_) | PyObject::Bool(_) | PyObject::Float(_))
+                } else {
+                    // %x/%X/%o reject even whole floats (an integer is required)
+                    matches!(&*raw.borrow(), PyObject::Int(_) | PyObject::Bool(_))
+                };
+                if !allowed {
+                    return Err(format!(
+                        "%{} format: {} is required, not {}", conv as char,
+                        if is_real { "a real number" } else { "an integer" },
+                        raw.borrow().type_name()
+                    ));
+                }
                 let bi = bigint_of(&raw);
                 let mut s = match conv {
                     b'd' | b'i' | b'u' => {
@@ -928,7 +977,8 @@ pub(crate) fn bytes_interpolate(fmt: &[u8], arg: &PyObjectRef) -> Result<Vec<u8>
                     } else { out }
                 } else { out }
             }
-            c => return Err(format!("unsupported format character '{}'", c as char)),
+            c => return Err(format!("unsupported format character '{}' (0x{:02x}) at index {}",
+                c as char, c as u32, i - 1)),
         };
         let padded = if let Some(w) = width {
             if formatted.len() >= w {
