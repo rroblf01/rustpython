@@ -965,6 +965,17 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
             Ok(py_bool(false))
         },
     }));
+    // bool.from_bytes returns a REAL bool (False/True), unlike the int 0/1
+    // int.from_bytes produces (test_bool's test_from_bytes asserts
+    // `is False`/`is True`). Must be in bool's own dict — via int's MRO it
+    // would resolve to the same object as int.from_bytes.
+    bool_dict.insert_str("from_bytes", PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "from_bytes".to_string(),
+        func: |args: &[PyObjectRef]| {
+            let v = crate::object::builtin_int_from_bytes(args)?;
+            Ok(py_bool(v.truthy()))
+        },
+    }));
     let bool_type = PyObjectRef::new(PyObject::Type {
         name: "bool".to_string(),
         dict: Box::new(str_map_to_typedict(bool_dict)),
