@@ -278,7 +278,8 @@ pub(crate) fn eval_const_value(const_val: ConstValue) -> PyResult<PyObjectRef> {
             }
         }
         ConstValue::Float(s) => {
-            let f: f64 = s.parse().map_err(|_| {
+            let s_clean: String = crate::object::validate_underscores(&s)?.chars().filter(|&c| c != '_').collect();
+            let f: f64 = s_clean.parse().map_err(|_| {
                 PyError::value_error(format!("invalid float: {}", s))
             })?;
             py_float(f)

@@ -599,7 +599,7 @@ pub fn builtin_int_from_bytes(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 
 /// Validate underscore placement in a numeric string: underscores must sit
 /// BETWEEN two digits (leading/trailing/double/adjacent-to-dot are invalid).
-fn validate_underscores(s: &str) -> PyResult<String> {
+pub(crate) fn validate_underscores(s: &str) -> PyResult<String> {
     // Hex literals allow underscores between hex digits; decimal floats only
     // between plain digits (an underscore next to 'e'/'.'/start/end is bad).
     let is_hex = s.starts_with("0x") || s.starts_with("0X");
