@@ -679,11 +679,12 @@ pub(crate) fn float_fromhex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let s = s.strip_prefix("+").unwrap_or(s);
     let sign = if s.starts_with('-') { -1.0 } else { 1.0 };
     let s = s.strip_prefix('-').unwrap_or(s.strip_prefix('+').unwrap_or(s));
-    let s = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"))
-        .ok_or_else(|| PyError::value_error(format!("invalid hex float literal: {}", s)))?;
-    let (int_part, rest) = s.split_once('.').unwrap_or((s, ""));
-    let (frac_part, exp_part) = rest.split_once('p').or_else(|| rest.split_once('P'))
-        .unwrap_or((rest, ""));
+    let s = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
+    // Split off the 'p' exponent FIRST — a mantissa without a dot
+    // ('0x1p-1022') otherwise loses its exponent to the dot-split below.
+    let (mantissa, exp_part) = s.split_once('p').or_else(|| s.split_once('P'))
+        .unwrap_or((s, ""));
+    let (int_part, frac_part) = mantissa.split_once('.').unwrap_or((mantissa, ""));
     let int_val = i64::from_str_radix(int_part, 16).unwrap_or(0);
     let frac_val = if !frac_part.is_empty() {
         let frac_bits = i64::from_str_radix(frac_part, 16).unwrap_or(0);
@@ -694,8 +695,35 @@ pub(crate) fn float_fromhex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         exp_part.parse().map_err(|_| PyError::value_error(format!("invalid hex float exponent: {}", exp_part)))?
     } else { 0 };
     let significand = int_val as f64 + frac_val;
-    let result = sign * significand * (2.0f64).powi(exp);
+    let result = sign * ldexp_f64(significand, exp);
     Ok(py_float(result))
+}
+
+/// `x * 2**exp` without intermediate overflow/underflow — a naive
+/// `x * 2.0f64.powi(exp)` overflows to inf for exp >= 1024 even when the
+/// true value (e.g. `0x.fffffffffffff8p+1024` == the max normal) is
+/// finite. Scales in 512-bit chunks, staying within f64 range.
+fn ldexp_f64(x: f64, exp: i32) -> f64 {
+    let mut x = x;
+    let mut e = exp;
+    let big = 2.0f64.powf(512.0);
+    let small = 2.0f64.powf(-512.0);
+    while e > 1023 {
+        x *= big;
+        e -= 512;
+        if !x.is_finite() && x > 0.0 {
+            // Overflow is genuine (value really is inf).
+            return x;
+        }
+    }
+    while e < -1022 {
+        x *= small;
+        e += 512;
+        if x == 0.0 {
+            return x;
+        }
+    }
+    x * 2.0f64.powi(e)
 }
 
 /// `float.hex(x)` — the unbound, explicit-argument class-level form (`float.
