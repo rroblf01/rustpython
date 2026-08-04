@@ -3292,7 +3292,11 @@ impl VirtualMachine {
                 let result = if let Some(f) = neg_method {
                     call_bound_method(f, val.clone(), vec![])?
                 } else {
-                    py_sub(&py_int(0), &val)?
+                    // Direct negation, NOT `0 - val` — the latter collapses
+                    // -0.0 to +0.0 in IEEE arithmetic (0 - 0.0 == +0.0),
+                    // losing the sign bit (test_format_testfile's `%f % -f`
+                    // on a zero arg expects '-0').
+                    py_neg(&val)?
                 };
                 self.frames[fi].push(result);
             }
@@ -4302,8 +4306,25 @@ impl VirtualMachine {
                         }
                         _ => {
                             let type_name = obj_borrowed.type_name();
-                            // Check inline cache first
-                            let cached = ATTR_CACHE.with(|c| c.borrow().get(&(type_name.clone(), name.clone())).copied());
+                            // Check inline cache first — but NOT for a TYPE
+                            // receiver: the cache is keyed only by
+                            // `(type_name, name)` and is populated by
+                            // VALUE-level lookups (`line.strip` on a str
+                            // value caches the instance strip under
+                            // ("str","strip")), so a later TYPE-level lookup
+                            // (`str.strip` on the str CLASS) would hit it and
+                            // return the WRONG, already-value-bound method
+                            // bound to the class (str.strip(s) then passed
+                            // the class as self -> "<class 'str'>"). Type
+                            // attribute access is rare and needs the full
+                            // get_attribute path (which returns the raw
+                            // unbound descriptor).
+                            let is_type_obj = matches!(&*obj_borrowed, PyObject::Type { .. });
+                            let cached = if is_type_obj {
+                                None
+                            } else {
+                                ATTR_CACHE.with(|c| c.borrow().get(&(type_name.clone(), name.clone())).copied())
+                            };
                             if let Some(func) = cached {
                                 drop(obj_borrowed);
                                 Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
@@ -4312,7 +4333,6 @@ impl VirtualMachine {
                                     self_obj: obj.clone(),
                                 }))
                             } else {
-                                let is_type_obj = matches!(&*obj_borrowed, PyObject::Type { .. });
                                 let direct = obj_borrowed.get_attribute(&name);
                                 let obj_type_name_for_err = obj_borrowed.type_name();
                                 let attr = match direct {
@@ -8627,48 +8647,40 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
         // Float: fixed-point
         (Some('f'), _, true) | (Some('F'), _, true) => {
             if let PyObject::Float(f) = &*val_borrowed {
-                let s = format_float_with_sign(*f, sign, precision);
+                // 'f' defaults to precision 6 (like %f), not str() — real
+                // CPython: format(0.0, 'f') == '0.000000'.
+                let mut s = format_float_with_sign(*f, sign, Some(precision.unwrap_or(6)));
+                if alternate && !s.contains('.') {
+                    s.push('.');
+                }
                 s
             } else { val.str() }
         }
         // Float: scientific lowercase
         (Some('e'), _, true) => {
             if let PyObject::Float(f) = &*val_borrowed {
-                let s = match precision {
-                    Some(p) => format!("{:.prec$e}", f, prec = p),
-                    None => format!("{:e}", f),
-                };
-                // Apply sign
+                let s = crate::object::format_percent_e(*f, precision.unwrap_or(6), alternate, false);
                 apply_sign(&s, *f, sign)
             } else { val.str() }
         }
         // Float: scientific uppercase
         (Some('E'), _, true) => {
             if let PyObject::Float(f) = &*val_borrowed {
-                let s = match precision {
-                    Some(p) => format!("{:.prec$E}", f, prec = p),
-                    None => format!("{:E}", f),
-                };
+                let s = crate::object::format_percent_e(*f, precision.unwrap_or(6), alternate, true);
                 apply_sign(&s, *f, sign)
             } else { val.str() }
         }
         // Float: general lowercase
         (Some('g'), _, true) => {
             if let PyObject::Float(f) = &*val_borrowed {
-                let s = match precision {
-                    Some(p) => format!("{:.prec$}", f, prec = p),
-                    None => format!("{}", f),
-                };
+                let s = crate::object::format_percent_g(*f, precision.unwrap_or(6), alternate);
                 apply_sign(&s, *f, sign)
             } else { val.str() }
         }
         // Float: general uppercase
         (Some('G'), _, true) => {
             if let PyObject::Float(f) = &*val_borrowed {
-                let s = match precision {
-                    Some(p) => format!("{:.prec$}", f, prec = p).to_uppercase(),
-                    None => format!("{}", f).to_uppercase(),
-                };
+                let s = crate::object::format_percent_g(*f, precision.unwrap_or(6), alternate).to_uppercase();
                 apply_sign(&s, *f, sign)
             } else { val.str() }
         }

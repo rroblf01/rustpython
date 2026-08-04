@@ -190,8 +190,161 @@ pub fn py_set() -> PyObjectRef {
 }
 
 /// printf-style string interpolation (% operator)
-pub(crate) fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String, String> {
-    let mut result = String::new();
+/// Fixed-point formatting that tolerates huge precisions (Rust's own
+/// `format!("{:.prec$}", ...)` panics past a limit). f64 decimal expansions
+/// are exact within ~55 digits, so format at min(prec, 100) and pad with
+/// zeros to `prec`.
+fn format_fixed_padded(f: f64, prec: usize) -> String {
+    if prec <= 100 {
+        return format!("{:.prec$}", f, prec = prec);
+    }
+    let base = format!("{:.prec$}", f, prec = 100);
+    // Strip to the integer part + existing decimals, then pad.
+    let mut s = base;
+    if let Some(dot) = s.find('.') {
+        let decimals = s.len() - dot - 1;
+        if decimals < prec {
+            s.push_str(&"0".repeat(prec - decimals));
+        }
+    } else {
+        s.push('.');
+        s.push_str(&"0".repeat(prec));
+    }
+    s
+}
+
+/// `%e`/`%E` scientific-notation formatting: mantissa with `prec` digits
+/// after the point, then `e±NN` (exponent at least 2 digits, `E` for %E).
+/// `alternate` (#) keeps the decimal point when prec == 0.
+pub(crate) fn format_percent_e(f: f64, prec: usize, alternate: bool, upper: bool) -> String {
+    let sign = if f.is_sign_negative() { "-" } else { "" };
+    let abs = f.abs();
+    if abs == 0.0 {
+        let mut s = format!("{:.*}e+00", prec, 0.0f64);
+        if alternate && prec == 0 { s = format!("{}.e+00", 0.0f64); }
+        let e_char = if upper { 'E' } else { 'e' };
+        return format!("{}{}", sign, s.replace('e', &e_char.to_string()));
+    }
+    // Get the mantissa/exponent from {:e} (exact-ish decimal), then round
+    // the mantissa to `prec` decimals — the old `abs / 10^exp` division
+    // introduced float error (1.230005 -> 1.23001).
+    let sci = format!("{:e}", abs);
+    let (mant_s, exp_s) = sci.split_once('e').unwrap();
+    let mut exp: i32 = exp_s.parse().unwrap_or(0);
+    let mantissa: f64 = mant_s.parse().unwrap_or(1.0);
+    // Round mantissa to prec decimals, handling carry to 10.
+    let rounded: f64 = format!("{:.*}", prec, mantissa).parse().unwrap_or(mantissa);
+    let (mut mant_out, exp_out) = if rounded >= 10.0 {
+        (1.0f64, exp + 1)
+    } else {
+        (rounded, exp)
+    };
+    let mut s = format!("{:.*}", prec, mant_out);
+    if alternate && prec == 0 {
+        s.push('.');
+    }
+    let e_char = if upper { 'E' } else { 'e' };
+    let exp_sign = if exp_out < 0 { '-' } else { '+' };
+    format!("{}{}{}{}{:02}", sign, s, e_char, exp_sign, exp_out.abs())
+}
+
+/// `%g`/`%G` general formatting: precision = significant digits; uses
+/// scientific if the exponent is < -4 or >= precision, else fixed; strips
+/// trailing zeros unless `#`.
+pub(crate) fn format_percent_g(f: f64, prec: usize, alternate: bool) -> String {
+    let abs = f.abs();
+    if abs == 0.0 {
+        let sign = if f.is_sign_negative() { "-" } else { "" };
+        let mut s = format!("{}{:.*}", sign, prec.saturating_sub(1).max(0), 0.0f64);
+        if alternate {
+            if !s.contains('.') {
+                s.push('.');
+            }
+            return s;
+        }
+        while s.contains('.') && s.ends_with('0') { s.pop(); }
+        if s.ends_with('.') { s.pop(); }
+        return s;
+    }
+    let exp = abs.log10().floor() as i32;
+    // Precision 0 is treated as 1 significant digit for the sci threshold
+    // (CPython: %.0g of 1 is '1', but %.0g of 10 is '1e+01').
+    let eff_prec = prec.max(1);
+    let use_sci = exp < -4 || exp >= eff_prec as i32;
+    if use_sci {
+        // %g scientific uses precision-1 decimals
+        let mut s = format_percent_e(f, prec.saturating_sub(1), alternate, false);
+        // strip trailing zeros in mantissa unless alternate
+        if !alternate {
+            let e_pos = s.find('e').unwrap_or(s.len());
+            let mut mant = s[..e_pos].to_string();
+            if mant.contains('.') {
+                while mant.ends_with('0') { mant.pop(); }
+                if mant.ends_with('.') { mant.pop(); }
+            }
+            s = format!("{}{}", mant, &s[e_pos..]);
+        }
+        s
+    } else {
+        // fixed: prec = significant digits = prec-1 decimals
+        let decimals = (eff_prec as i32 - 1 - exp).max(0) as usize;
+        let mut s = format!("{:.*}", decimals, f);
+        if !alternate {
+            if s.contains('.') {
+                while s.ends_with('0') { s.pop(); }
+                if s.ends_with('.') { s.pop(); }
+            }
+        } else if !s.contains('.') {
+            s.push('.');
+        }
+        s
+    }
+}
+
+/// Zero-pad an integer conversion (`%x`/`%X`/`%o`/`%d`) to `precision`
+/// digits, accounting for a `0x`/`0X`/`0o` alternate prefix.
+/// Extract the BigInt value of an object for integer %-conversions.
+fn bigint_of(raw: &PyObjectRef) -> num_bigint::BigInt {
+    let b = raw.borrow();
+    match &*b {
+        PyObject::Int(bi) => bi.clone(),
+        PyObject::Bool(bb) => num_bigint::BigInt::from(if *bb { 1i32 } else { 0 }),
+        // A float that is a whole number converts exactly for %d/%x/%o
+        // ('%d' % -1.2345678901234568e+29 -> the full integer).
+        PyObject::Float(f) if f.fract() == 0.0 && f.is_finite() => {
+            num_bigint::BigInt::from(*f as i128)
+        }
+        _ => num_bigint::BigInt::from(raw.as_i64().unwrap_or(0)),
+    }
+}
+
+fn zero_pad_precision(mut s: String, precision: usize, has_prefix: bool) -> String {
+    if precision > 1000 { return s; }
+    // Strip a leading sign first so it stays before the 0x prefix and zeros
+    // ('%#.23x' of -big -> '-0x0012...', not '-00x12...').
+    let (sign, rest) = if let Some(r) = s.strip_prefix('-') {
+        ("-", r.to_string())
+    } else if let Some(r) = s.strip_prefix('+') {
+        ("+", r.to_string())
+    } else {
+        ("", s.clone())
+    };
+    let prefix_len = if has_prefix { 2 } else { 0 };
+    let body_len = rest.len().saturating_sub(prefix_len);
+    if precision > body_len {
+        let zeros = "0".repeat(precision - body_len);
+        if has_prefix {
+            let (prefix, body) = rest.split_at(2);
+            format!("{}{}{}{}", sign, prefix, zeros, body)
+        } else {
+            format!("{}{}{}", sign, zeros, rest)
+        }
+    } else {
+        s
+    }
+}
+
+pub(crate) fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String, String> {    let mut result = String::new();
     let mut chars = fmt.chars();
 
     // Handle tuple arguments: consume one element per format spec. Real
@@ -247,13 +400,16 @@ pub(crate) fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String,
             }
             // Parse optional width specifier (e.g., %03o, %02d, %3s, %4d)
             let mut width: Option<usize> = None;
-            // Check for flags (only '0' flag supported)
+            // Parse flags (`0`, `-`, `+`, space, `#`) — previously only `0`.
             let mut flags = String::new();
-            let peek = chars.clone();
-            if let Some(c) = peek.as_str().chars().next() {
-                if c == '0' {
-                    flags.push('0');
-                    chars.next();
+            loop {
+                let mut peek = chars.clone();
+                match peek.next() {
+                    Some(c) if c == '0' || c == '-' || c == '+' || c == ' ' || c == '#' => {
+                        flags.push(c);
+                        chars.next();
+                    }
+                    _ => break,
                 }
             }
             // Parse width (digits)
@@ -285,31 +441,39 @@ pub(crate) fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String,
             let mut precision: Option<usize> = None;
             if chars.clone().next() == Some('.') {
                 chars.next();
-                let mut prec_str = String::new();
-                loop {
-                    let mut peek3 = chars.clone();
-                    match peek3.next() {
-                        Some(c) if c.is_ascii_digit() => { prec_str.push(c); chars.next(); }
-                        _ => break,
+                // Dynamic precision `.*` — the value comes from the next arg.
+                if chars.clone().next() == Some('*') {
+                    chars.next();
+                    let p = get_arg();
+                    precision = Some(p.as_i64().unwrap_or(6).max(0) as usize);
+                } else {
+                    let mut prec_str = String::new();
+                    loop {
+                        let mut peek3 = chars.clone();
+                        match peek3.next() {
+                            Some(c) if c.is_ascii_digit() => { prec_str.push(c); chars.next(); }
+                            _ => break,
+                        }
                     }
-                }
-                precision = Some(if prec_str.is_empty() { 0 } else {
-                    let p = prec_str.parse::<usize>().map_err(|_| "invalid precision".to_string())?;
-                    // See the matching `width` cap above — a precision this
-                    // large parses fine but panics Rust's own `format!`
-                    // machinery when actually used (`test_str.py::
+                    precision = Some(if prec_str.is_empty() { 0 } else {
+                        let p = prec_str.parse::<usize>().map_err(|_| "invalid precision".to_string())?;
+                        // See the matching `width` cap above — a precision this
+                        // large parses fine but panics Rust's own `format!`
+                        // machinery when actually used (`test_str.py::
                     // test_formatting_huge_precision`: `"%.{}f" %
                     // (sys.maxsize + 1)`).
-                    if p > 1000 { return Err("precision too big".to_string()); }
-                    p
-                });
+                     if p > 1000 { return Err("precision too big".to_string()); }
+                     p
+                 });
+                }
             }
 
             match chars.next() {
                 None => return Err("incomplete format: trailing %".to_string()),
                 Some('%') => result.push('%'),
                 Some(conv @ 's') | Some(conv @ 'r') | Some(conv @ 'f') | Some(conv @ 'd') | Some(conv @ 'i')
-                | Some(conv @ 'o') | Some(conv @ 'x') | Some(conv @ 'X') | Some(conv @ 'c') => {
+                | Some(conv @ 'o') | Some(conv @ 'x') | Some(conv @ 'X') | Some(conv @ 'c')
+                | Some(conv @ 'e') | Some(conv @ 'E') | Some(conv @ 'g') | Some(conv @ 'G') | Some(conv @ 'u') | Some(conv @ 'F') => {
                     let raw = if let Some(ref key) = mapping_key {
                         let obj = arg.borrow();
                         match &*obj {
@@ -326,35 +490,91 @@ pub(crate) fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String,
                         'r' => raw.repr(),
                         'f' => {
                             let f = raw.as_f64().unwrap_or(0.0);
-                            format!("{:.prec$}", f, prec = precision.unwrap_or(6))
+                            let prec = precision.unwrap_or(6);
+                            // CPython's test_format exercises %12.*f with
+                            // precision 123456 (must work); sys.maxsize must
+                            // still overflow. Rust's own format! panics at
+                            // large precisions, so format at <=100 decimals
+                            // (exact for any f64) and pad the rest with
+                            // zeros.
+                            if prec > 200000 { return Err("precision too big".to_string()); }
+                            let mut s = format_fixed_padded(f, prec);
+                            if flags.contains('#') && !s.contains('.') {
+                                s.push('.');
+                            }
+                            s
+                        }
+                        'F' => {
+                            let f = raw.as_f64().unwrap_or(0.0);
+                            let prec = precision.unwrap_or(6);
+                            if prec > 200000 { return Err("precision too big".to_string()); }
+                            let mut s = format_fixed_padded(f, prec);
+                            if flags.contains('#') && !s.contains('.') {
+                                s.push('.');
+                            }
+                            s
+                        }
+                        'e' | 'E' => {
+                            let f = raw.as_f64().unwrap_or(0.0);
+                            let prec = precision.unwrap_or(6);
+                            format_percent_e(f, prec, flags.contains('#'), false)
+                        }
+                        'g' | 'G' => {
+                            let f = raw.as_f64().unwrap_or(0.0);
+                            let prec = precision.unwrap_or(6);
+                            format_percent_g(f, prec, flags.contains('#'))
                         }
                         'd' | 'i' => {
-                            if let Some(i) = raw.as_i64() {
-                                i.to_string()
-                            } else {
-                                "0".to_string()
+                            // Handle big ints that overflow i64, and float
+                            // whole numbers ('%d' % -1.2e29) — stringify via
+                            // BigInt (test_common_format).
+                            let mut s = bigint_of(&raw).to_string();
+                            if !s.starts_with('-') {
+                                if flags.contains('+') { s = format!("+{}", s); }
+                                else if flags.contains(' ') { s = format!(" {}", s); }
                             }
+                            // `.precision` zero-pads %d/%i (`%.100d` of 1
+                            // -> 99 zeros then 1). A huge precision
+                            // (e.g. sys.maxsize from `%.*d`) must raise,
+                            // not allocate an astronomical string.
+                            if let Some(p) = precision {
+                                if p > 1000 { return Err("precision too big".to_string()); }
+                                if p > s.len() {
+                                    format!("{}{}", "0".repeat(p - s.len()), s)
+                                } else { s }
+                            } else { s }
                         }
                         'o' => {
-                            if let Some(i) = raw.as_i64() {
-                                format!("{:o}", i)
-                            } else {
-                                "0".to_string()
-                            }
+                            let bi = bigint_of(&raw);
+                            let neg = bi.sign() == num_bigint::Sign::Minus;
+                            let mut s = if flags.contains('#') {
+                                if neg { format!("-0o{:o}", bi.abs()) } else { format!("0o{:o}", bi) }
+                            } else { format!("{:o}", bi) };
+                            if !s.starts_with('-') && flags.contains('+') { s = format!("+{}", s); }
+                            else if !s.starts_with('-') && flags.contains(' ') { s = format!(" {}", s); }
+                            s
                         }
                         'x' => {
-                            if let Some(i) = raw.as_i64() {
-                                format!("{:x}", i)
-                            } else {
-                                "0".to_string()
-                            }
+                            let bi = bigint_of(&raw);
+                            let neg = bi.sign() == num_bigint::Sign::Minus;
+                            let mut s = if flags.contains('#') {
+                                if neg { format!("-0x{:x}", bi.abs()) } else { format!("0x{:x}", bi) }
+                            } else { format!("{:x}", bi) };
+                            if !s.starts_with('-') && flags.contains('+') { s = format!("+{}", s); }
+                            else if !s.starts_with('-') && flags.contains(' ') { s = format!(" {}", s); }
+                            if let Some(p) = precision { s = zero_pad_precision(s, p, flags.contains('#')) }
+                            s
                         }
                         'X' => {
-                            if let Some(i) = raw.as_i64() {
-                                format!("{:X}", i)
-                            } else {
-                                "0".to_string()
-                            }
+                            let bi = bigint_of(&raw);
+                            let neg = bi.sign() == num_bigint::Sign::Minus;
+                            let mut s = if flags.contains('#') {
+                                if neg { format!("-0X{:X}", bi.abs()) } else { format!("0X{:X}", bi) }
+                            } else { format!("{:X}", bi) };
+                            if !s.starts_with('-') && flags.contains('+') { s = format!("+{}", s); }
+                            else if !s.starts_with('-') && flags.contains(' ') { s = format!(" {}", s); }
+                            if let Some(p) = precision { s = zero_pad_precision(s, p, flags.contains('#')) }
+                            s
                         }
                         'c' => {
                             if let Some(i) = raw.as_i64() {
@@ -366,10 +586,32 @@ pub(crate) fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String,
                         _ => unreachable!(),
                     };
 
-                    // Apply width
+                    // Apply width (respecting - left-justify, 0 zero-pad)
                     let padded = if let Some(w) = width {
-                        if flags.contains('0') {
-                            format!("{:0>width$}", formatted, width = w)
+                        if flags.contains('-') {
+                            format!("{:<width$}", formatted, width = w)
+                        } else if flags.contains('0') {
+                            // Zero-pad AFTER the sign and any 0x/0o prefix
+                            // (`%032d` of -big -> '-000...digits';
+                            // `%#027x` -> '0x00001234567890abcdef12345').
+                            let (sign, rest) = if let Some(r) = formatted.strip_prefix('-') {
+                                ("-", r)
+                            } else if let Some(r) = formatted.strip_prefix('+') {
+                                ("+", r)
+                            } else {
+                                ("", formatted.as_str())
+                            };
+                            let (prefix, body) = if let Some(r) = rest.strip_prefix("0x") {
+                                ("0x", r)
+                            } else if let Some(r) = rest.strip_prefix("0X") {
+                                ("0X", r)
+                            } else if let Some(r) = rest.strip_prefix("0o") {
+                                ("0o", r)
+                            } else {
+                                ("", rest)
+                            };
+                            let padded = format!("{:0>width$}", body, width = w.saturating_sub(sign.len() + prefix.len()));
+                            format!("{}{}{}", sign, prefix, padded)
                         } else {
                             format!("{:>width$}", formatted, width = w)
                         }
@@ -385,6 +627,13 @@ pub(crate) fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String,
         }
     }
 
+    // Real CPython raises if the arg tuple has MORE elements than specs.
+    if let Some(it) = arg_iter {
+        let mut it = it;
+        if it.next().is_some() {
+            return Err("not all arguments converted during string formatting".to_string());
+        }
+    }
     Ok(result)
 }
 
@@ -418,10 +667,12 @@ pub(crate) fn bytes_interpolate(fmt: &[u8], arg: &PyObjectRef) -> Result<Vec<u8>
         match &*v.borrow() {
             PyObject::Bytes(b) => Some(b.clone()),
             PyObject::ByteArray(b) => Some(b.clone()),
+            PyObject::MemoryView { .. } => crate::object::mv_tobytes(v).ok(),
             _ => None,
         }
     };
 
+    let mut converted = 0usize;
     while i < fmt.len() {
         let ch = fmt[i];
         i += 1;
@@ -430,9 +681,20 @@ pub(crate) fn bytes_interpolate(fmt: &[u8], arg: &PyObjectRef) -> Result<Vec<u8>
             continue;
         }
         let mut flags_zero = false;
-        if i < fmt.len() && fmt[i] == b'0' {
-            flags_zero = true;
-            i += 1;
+        let mut flags_alt = false;
+        let mut flags_minus = false;
+        let mut flags_plus = false;
+        let mut flags_space = false;
+        loop {
+            if i >= fmt.len() { break; }
+            match fmt[i] {
+                b'0' => { flags_zero = true; i += 1; }
+                b'#' => { flags_alt = true; i += 1; }
+                b'-' => { flags_minus = true; i += 1; }
+                b'+' => { flags_plus = true; i += 1; }
+                b' ' => { flags_space = true; i += 1; }
+                _ => break,
+            }
         }
         let mut width_str = String::new();
         while i < fmt.len() && fmt[i].is_ascii_digit() {
@@ -442,45 +704,214 @@ pub(crate) fn bytes_interpolate(fmt: &[u8], arg: &PyObjectRef) -> Result<Vec<u8>
         let width: Option<usize> = if width_str.is_empty() { None } else {
             Some(width_str.parse().map_err(|_| "invalid width".to_string())?)
         };
+        // Parse optional `.precision` (e.g. b"%.2f", b"%.0d") and dynamic `.*`.
+        let mut precision: Option<usize> = None;
+        if i < fmt.len() && fmt[i] == b'.' {
+            i += 1;
+            if i < fmt.len() && fmt[i] == b'*' {
+                i += 1;
+                let p = get_arg();
+                precision = Some(p.as_i64().unwrap_or(6).max(0) as usize);
+            } else {
+                let mut prec_str = String::new();
+                while i < fmt.len() && fmt[i].is_ascii_digit() {
+                    prec_str.push(fmt[i] as char);
+                    i += 1;
+                }
+                precision = Some(if prec_str.is_empty() { 0 } else {
+                    prec_str.parse().map_err(|_| "invalid precision".to_string())?
+                });
+            }
+        }
         if i >= fmt.len() { return Err("incomplete format".to_string()); }
         let conv = fmt[i];
         i += 1;
+        if conv != b'%' { converted += 1; }
         let formatted: Vec<u8> = match conv {
             b'%' => vec![b'%'],
             b's' | b'b' => {
                 let raw = get_arg();
-                as_bytes_like(&raw).ok_or_else(|| format!(
-                    "%{} requires a bytes-like object, or an object that implements __bytes__, not '{}'",
-                    conv as char, raw.borrow().type_name()
-                ))?
+                if let Some(b) = as_bytes_like(&raw) {
+                    b
+                } else if let Some(f) = raw.borrow().get_attribute("__bytes__").ok() {
+                    crate::object::call_bound_method(f, raw.clone(), vec![])
+                        .and_then(|r| {
+                            let rb = r.borrow();
+                            if let PyObject::Bytes(b) = &*rb { Ok(b.clone()) } else { Err(crate::object::PyError::type_error("__bytes__ returned non-bytes")) }
+                        })
+                        .map_err(|_| format!(
+                            "%{} requires a bytes-like object, or an object that implements __bytes__, not '{}'",
+                            conv as char, raw.borrow().type_name()
+                        ))?
+                } else {
+                    return Err(format!(
+                        "%{} requires a bytes-like object, or an object that implements __bytes__, not '{}'",
+                        conv as char, raw.borrow().type_name()
+                    ));
+                }
             }
             b'r' => {
                 let raw = get_arg();
                 let s = raw.repr();
-                if !s.is_ascii() { return Err("%r result contains non-ASCII data".to_string()); }
-                s.into_bytes()
+                // Escape non-ASCII like %a (CPython: b'%r' % 'Մ' ==
+                // b"'\\u0544'").
+                let mut bytes: Vec<u8> = Vec::new();
+                for ch in s.chars() {
+                    if ch.is_ascii() {
+                        bytes.push(ch as u8);
+                    } else if (ch as u32) <= 0xFFFF {
+                        bytes.extend_from_slice(format!("\\u{:04x}", ch as u32).as_bytes());
+                    } else {
+                        bytes.extend_from_slice(format!("\\U{:08x}", ch as u32).as_bytes());
+                    }
+                }
+                bytes
+            }
+            b'a' => {
+                // ascii() representation: ASCII chars verbatim, non-ASCII
+                // as \uXXXX / \UXXXXXXXX escapes (CPython: b'%a' % 'Մ'
+                // == b"'\\u0544'").
+                let raw = get_arg();
+                let s = raw.repr();
+                let mut bytes: Vec<u8> = Vec::new();
+                for ch in s.chars() {
+                    if ch.is_ascii() {
+                        bytes.push(ch as u8);
+                    } else if (ch as u32) <= 0xFFFF {
+                        bytes.extend_from_slice(format!("\\u{:04x}", ch as u32).as_bytes());
+                    } else {
+                        bytes.extend_from_slice(format!("\\U{:08x}", ch as u32).as_bytes());
+                    }
+                }
+                bytes
             }
             b'd' | b'i' | b'o' | b'x' | b'X' => {
                 let raw = get_arg();
-                let n = raw.as_i64().unwrap_or(0);
-                (match conv {
-                    b'd' | b'i' => n.to_string(),
-                    b'o' => format!("{:o}", n),
-                    b'x' => format!("{:x}", n),
-                    b'X' => format!("{:X}", n),
+                let bi = bigint_of(&raw);
+                let mut s = match conv {
+                    b'd' | b'i' => {
+                        if let Some(p) = precision {
+                            // zero-pad to precision digits (`%.100d` of 1)
+                            if p > 1000 { return Err("precision too big".to_string()); }
+                            let s2 = bi.to_string();
+                            if p > s2.len() {
+                                format!("{}{}", "0".repeat(p - s2.len()), s2)
+                            } else { s2 }
+                        } else { bi.to_string() }
+                    }
+                    b'o' => if flags_alt {
+                        if bi.sign() == num_bigint::Sign::Minus { format!("-0o{:o}", bi.abs()) } else { format!("0o{:o}", bi) }
+                    } else { format!("{:o}", bi) },
+                    b'x' => if flags_alt {
+                        if bi.sign() == num_bigint::Sign::Minus { format!("-0x{:x}", bi.abs()) } else { format!("0x{:x}", bi) }
+                    } else { format!("{:x}", bi) },
+                    b'X' => if flags_alt {
+                        if bi.sign() == num_bigint::Sign::Minus { format!("-0X{:X}", bi.abs()) } else { format!("0X{:X}", bi) }
+                    } else { format!("{:X}", bi) },
                     _ => unreachable!(),
-                }).into_bytes()
+                };
+                if !s.starts_with('-') {
+                    if flags_plus { s = format!("+{}", s); }
+                    else if flags_space { s = format!(" {}", s); }
+                }
+                if let Some(p) = precision {
+                    s = zero_pad_precision(s, p, flags_alt);
+                }
+                if let Some(w) = width {
+                    s = if flags_minus {
+                        format!("{:<width$}", s, width = w)
+                    } else if flags_zero {
+                        // zero-pad after the sign and 0x/0o prefix
+                        let (sign, rest) = if let Some(r) = s.strip_prefix('-') {
+                            ("-", r)
+                        } else if let Some(r) = s.strip_prefix('+') {
+                            ("+", r)
+                        } else {
+                            ("", s.as_str())
+                        };
+                        let (prefix, body) = if let Some(r) = rest.strip_prefix("0x") {
+                            ("0x", r)
+                        } else if let Some(r) = rest.strip_prefix("0X") {
+                            ("0X", r)
+                        } else if let Some(r) = rest.strip_prefix("0o") {
+                            ("0o", r)
+                        } else {
+                            ("", rest)
+                        };
+                        let padded = format!("{:0>width$}", body, width = w.saturating_sub(sign.len() + prefix.len()));
+                        format!("{}{}{}", sign, prefix, padded)
+                    } else {
+                        format!("{:>width$}", s, width = w)
+                    };
+                }
+                s.into_bytes()
+            }
+            b'e' | b'E' | b'f' | b'F' | b'g' | b'G' => {
+                let raw = get_arg();
+                // Must be a real number — a str arg raises TypeError
+                // ("float argument required, not str"), not silently 0.0.
+                let is_num = raw.as_f64().is_some() || matches!(&*raw.borrow(), PyObject::Int(_) | PyObject::Float(_));
+                if !is_num {
+                    return Err(format!(
+                        "float argument required, not '{}'", raw.borrow().type_name()
+                    ));
+                }
+                let f = raw.as_f64().unwrap_or(0.0);
+                let p = precision.unwrap_or(6);
+                if p > 200000 { return Err("precision too big".to_string()); }
+                let s = match conv {
+                    b'e' | b'E' => crate::object::format_percent_e(f, p, false, conv == b'E'),
+                    b'g' | b'G' => {
+                        let mut s = crate::object::format_percent_g(f, p, false);
+                        if conv == b'G' { s = s.to_uppercase(); }
+                        s
+                    }
+                    _ => format_fixed_padded(f, p),
+                };
+                let mut s = s.into_bytes();
+                if let Some(w) = width {
+                    let s_str = String::from_utf8_lossy(&s).to_string();
+                    let padded = if flags_minus {
+                        format!("{:<width$}", s_str, width = w)
+                    } else if flags_zero {
+                        format!("{:0>width$}", s_str, width = w)
+                    } else {
+                        format!("{:>width$}", s_str, width = w)
+                    };
+                    s = padded.into_bytes();
+                }
+                s
             }
             b'c' => {
                 let raw = get_arg();
-                if let Some(n) = raw.as_i64() {
+                let out = if let Some(n) = raw.as_i64() {
+                    if n < 0 || n > 255 { return Err("%c arg not in range(256) [overflow]".to_string()); }
                     vec![n as u8]
+                } else if matches!(&*raw.borrow(), PyObject::Int(_) | PyObject::Bool(_)) {
+                    // A big int (e.g. 2**128) is out of range(256).
+                    return Err("%c arg not in range(256) [overflow]".to_string());
                 } else if let Some(b) = as_bytes_like(&raw) {
-                    if b.len() != 1 { return Err("%c requires an integer in range(256) or a single byte".to_string()); }
+                    if b.len() != 1 { return Err("%c requires an integer in range(256) or a single byte, not a bytes object of length {}".to_string()); }
                     b
+                } else if matches!(&*raw.borrow(), PyObject::Str(_)) {
+                    return Err("%c requires an integer in range(256) or a single byte, not str".to_string());
                 } else {
                     return Err("%c requires an integer in range(256) or a single byte".to_string());
-                }
+                };
+                if let Some(w) = width {
+                    if out.len() < w {
+                        let pad = w - out.len();
+                        if flags_minus {
+                            let mut v = out.clone();
+                            v.extend(std::iter::repeat(b' ').take(pad));
+                            v
+                        } else {
+                            let mut v = std::iter::repeat(b' ').take(pad).collect::<Vec<u8>>();
+                            v.extend(out);
+                            v
+                        }
+                    } else { out }
+                } else { out }
             }
             c => return Err(format!("unsupported format character '{}'", c as char)),
         };
@@ -500,5 +931,17 @@ pub(crate) fn bytes_interpolate(fmt: &[u8], arg: &PyObjectRef) -> Result<Vec<u8>
         result.extend(padded);
     }
 
+    // Real CPython raises if a single non-mapping arg is provided but no
+    // conversion consumed it, or a tuple has MORE elements than specs.
+    let arg_is_dict = matches!(&*arg0.borrow(), PyObject::Dict(_));
+    if arg_iter.is_none() && converted == 0 && !arg_is_dict {
+        return Err("not all arguments converted during bytes formatting".to_string());
+    }
+    if let Some(it) = arg_iter {
+        let mut it = it;
+        if it.next().is_some() {
+            return Err("not all arguments converted during bytes formatting".to_string());
+        }
+    }
     Ok(result)
 }

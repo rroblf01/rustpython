@@ -480,6 +480,9 @@ impl PyObject {
                         self_obj: py_none(),
                     }));
                 }
+                if std::env::var("RPY_DEBUG_TYPEATTR").is_ok() && name == "strip" {
+                    eprintln!("TYPEATTR type={} name={} dict_has={}", type_name, name, dict.contains_key_str(&name));
+                }
                 // Check own dict first
                 if let Some(val) = dict.get_str(&name).cloned() {
                     // Unwrap staticmethod descriptor so type access returns the function directly
@@ -1912,7 +1915,9 @@ impl PyObject {
                                 PyObject::Bytes(b) => b.clone(),
                                 _ => return Err(PyError::runtime_error("__mod__ on non-bytes")),
                             };
-                            let result = bytes_interpolate(&fmt, &args[2]).map_err(PyError::type_error)?;
+                            let result = bytes_interpolate(&fmt, &args[2]).map_err(|e| {
+    if e.contains("too big") || e.contains("[overflow]") { PyError::overflow_error(e.trim_end_matches(" [overflow]").to_string()) } else { PyError::type_error(e) }
+})?;
                             Ok(PyObjectRef::imm(PyObject::Bytes(result)))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
@@ -2630,7 +2635,9 @@ impl PyObject {
                                 PyObject::ByteArray(b) => b.clone(),
                                 _ => return Err(PyError::runtime_error("__mod__ on non-bytearray")),
                             };
-                            let result = bytes_interpolate(&fmt, &args[2]).map_err(PyError::type_error)?;
+                            let result = bytes_interpolate(&fmt, &args[2]).map_err(|e| {
+    if e.contains("too big") || e.contains("[overflow]") { PyError::overflow_error(e.trim_end_matches(" [overflow]").to_string()) } else { PyError::type_error(e) }
+})?;
                             Ok(PyObjectRef::new(PyObject::ByteArray(result)))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
@@ -3374,7 +3381,9 @@ impl PyObject {
                             // `ValueError`, not `RuntimeError` — confirmed by
                             // `test_str.py`'s own `assertRaises(ValueError)`
                             // around several of these.
-                            let result = string_interpolate(&fmt, &args[2]).map_err(PyError::value_error)?;
+                            let result = string_interpolate(&fmt, &args[2]).map_err(|e| {
+    if e.contains("too big") { PyError::overflow_error(e) } else { PyError::value_error(e) }
+})?;
                             Ok(py_str(&result))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),

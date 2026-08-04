@@ -55,15 +55,20 @@ pub fn py_neg(val: &PyObjectRef) -> PyResult<PyObjectRef> {
     if let Some(i) = val.as_i64() {
         return Ok(py_int(-i));
     }
-    if let Some(f) = val.as_f64() {
-        return Ok(py_float(-f));
-    }
-    let obj = val.borrow();
-    match &*obj {
+    // A boxed BigInt must negate EXACTLY (not via as_f64, which loses
+    // precision) — my UNARY_NEGATIVE rework routes big-int negation here.
+    let b = val.borrow();
+    match &*b {
         PyObject::Int(n) => Ok(py_int(-n.clone())),
         PyObject::Float(n) => Ok(py_float(-n)),
         PyObject::Complex(re, im) => Ok(PyObjectRef::imm(PyObject::Complex(-re, -im))),
-        _ => Err(PyError::type_error(format!("bad operand type for unary -: '{}'", obj.type_name()))),
+        _ => {
+            drop(b);
+            if let Some(f) = val.as_f64() {
+                return Ok(py_float(-f));
+            }
+            Err(PyError::type_error(format!("bad operand type for unary -: '{}'", val.borrow().type_name())))
+        }
     }
 }
 
