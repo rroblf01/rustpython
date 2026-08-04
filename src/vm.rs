@@ -7379,6 +7379,21 @@ impl VirtualMachine {
         // library) — a STORE_ATTR on `callable` while this function still
         // held it borrowed here was a genuine double-borrow panic.
         if let Some((native_kind, init_func)) = type_construct_info {
+            // A user-defined `__new__` (a Python Function, not the native
+            // float/int/... `__new__`) must be called and its result
+            // returned (class Foo3(float): def __new__(...): return
+            // float.__new__(cls, 2*value) — Foo3(21) == 42). The native
+            // __new__ on the base type builds the default instance.
+            let custom_new = crate::object::lookup_dunder_via_mro(&callable, "__new__")
+                .filter(|f| matches!(&*f.borrow(), PyObject::Function(_)));
+            if let Some(new_fn) = custom_new {
+                let mut new_args = args.clone();
+                new_args.insert(0, callable.clone());
+                let result = self.call_function(new_fn, new_args, keywords)?;
+                // The __new__ result is the instance (unless it's an
+                // incompatible type — CPython then returns it raw).
+                return Ok(result);
+            }
             let mut instance_dict = AttrMap::new();
             if let Some(kind) = &native_kind {
                 instance_dict.insert(crate::object::NATIVE_BACKING_KEY.to_string(), crate::object::make_native_backing(kind));
