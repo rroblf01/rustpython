@@ -285,10 +285,13 @@ extern "C" fn jit_call(func: *const PyObjectRef, nargs: i64, args: *const PyObje
             std::ptr::write(out, val);
             return;
         }
-        // For regular Python functions, delegate to VM via callback
+        // For regular Python functions, delegate to VM via a FRESH VM — the
+        // JIT region is running under the shared VM's dispatch, so
+        // `with_vm_mut` reborrowing that same VM here is aliasing UB
+        // (hashbrown's copy_nonoverlapping abort in test_shlex).
         let func_val = (*func).clone();
-        let cb_result = crate::object::with_vm_mut(|vm| vm.call_function(func_val, v, Vec::new()));
-        if let Ok(Ok(val)) = cb_result {
+        let cb_result = crate::object::call_function_disposable(&func_val, v, Vec::new());
+        if let Ok(val) = cb_result {
             std::ptr::write(out, val);
             return;
         }
@@ -337,8 +340,9 @@ extern "C" fn jit_call_kw(func: *const PyObjectRef, npos: i64, nkw: i64, items: 
                 return;
             }
         }
-        let cb_result = crate::object::with_vm_mut(|vm| vm.call_function(func_val, args, keywords));
-        if let Ok(Ok(val)) = cb_result {
+        let func_val = (*func).clone();
+        let cb_result = crate::object::call_function_disposable(&func_val, args, keywords);
+        if let Ok(val) = cb_result {
             std::ptr::write(out, val);
             return;
         }
