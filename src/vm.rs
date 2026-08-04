@@ -8633,6 +8633,39 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
     let is_int = matches!(&*val_borrowed, PyObject::Int(_) | PyObject::Bool(_));
     let is_float = matches!(&*val_borrowed, PyObject::Float(_));
 
+    // Complex formatting: apply the spec to BOTH parts and join
+    // (format(1.2+0j, '.0f') == '1+0j').
+    let complex_parts = if let PyObject::Complex(re, im) = &*val_borrowed {
+        Some((*re, *im))
+    } else {
+        None
+    };
+    if let Some((re, im)) = complex_parts {
+        let spec_clone = spec_str.to_string();
+        // A spec with a numeric TYPE (f/e/g/%/n) applies to EACH part
+        // (format(1+2j, '.1f') == '1.0+2.0j'); width/align-only specs apply
+        // to the whole complex string (format(1+2j, '<8') == '(1+2j)  ').
+        let has_numeric_type = spec_str.trim_end_matches(|c: char| c.is_ascii_digit())
+            .chars().last()
+            .map(|c| matches!(c, 'f' | 'F' | 'e' | 'E' | 'g' | 'G' | '%' | 'n'))
+            .unwrap_or(false);
+        if !has_numeric_type {
+            drop(val_borrowed);
+            // Format the complex via str(), then apply the spec as a string.
+            let s = val.str();
+            let p = py_str(&s);
+            return crate::vm::format_with_spec(&p, &spec_clone);
+        }
+        let fmt_part = |part: f64| -> PyResult<String> {
+            let p = py_float(part);
+            crate::vm::format_with_spec(&p, &spec_clone)
+        };
+        let re_s = fmt_part(re)?;
+        let sign = if im < 0.0 || (im.is_sign_negative() && im == 0.0) { "-" } else { "+" };
+        let im_abs = fmt_part(im.abs())?;
+        return Ok(format!("{}{}{}j", re_s, sign, im_abs));
+    }
+
     // Generate the formatted value based on type
     let base = match (fmt_type, is_int, is_float) {
         // Integer: decimal (default or 'd')
