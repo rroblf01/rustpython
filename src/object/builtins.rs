@@ -597,6 +597,22 @@ pub fn builtin_int_from_bytes(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Ok(py_int(n))
 }
 
+/// Validate underscore placement in a numeric string: underscores must sit
+/// BETWEEN two digits (leading/trailing/double/adjacent-to-dot are invalid).
+fn validate_underscores(s: &str) -> PyResult<String> {
+    let chars: Vec<char> = s.chars().collect();
+    for i in 0..chars.len() {
+        if chars[i] == '_' {
+            let prev_ok = i > 0 && chars[i - 1].is_ascii_hexdigit();
+            let next_ok = i + 1 < chars.len() && chars[i + 1].is_ascii_hexdigit();
+            if !(prev_ok && next_ok) {
+                return Err(PyError::value_error(format!("invalid decimal literal")));
+            }
+        }
+    }
+    Ok(s.to_string())
+}
+
 pub fn builtin_float(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() { return Ok(py_float(0.0)); }
     let obj = args[0].borrow();
@@ -614,7 +630,7 @@ pub fn builtin_float(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     _ => c,
                 }
             }).collect();
-            let normalized: String = normalized.chars().filter(|&c| c != '_').collect();
+            let normalized: String = validate_underscores(&normalized)?.chars().filter(|&c| c != '_').collect();
             let f: f64 = normalized.parse().map_err(|_| PyError::value_error(format!("could not convert string to float: '{}'", s)))?;
             Ok(py_float(f))
         }
@@ -629,7 +645,7 @@ pub fn builtin_float(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     _ => c,
                 }
             }).collect();
-            let normalized: String = normalized.chars().filter(|&c| c != '_').collect();
+            let normalized: String = validate_underscores(&normalized)?.chars().filter(|&c| c != '_').collect();
             let f: f64 = normalized.parse().map_err(|_| PyError::value_error(format!("could not convert string to float: '{}'", s)))?;
             Ok(py_float(f))
         }
@@ -644,7 +660,7 @@ pub fn builtin_float(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     _ => c,
                 }
             }).collect();
-            let normalized: String = normalized.chars().filter(|&c| c != '_').collect();
+            let normalized: String = validate_underscores(&normalized)?.chars().filter(|&c| c != '_').collect();
             let f: f64 = normalized.parse().map_err(|_| PyError::value_error(format!("could not convert string to float: '{}'", s)))?;
             Ok(py_float(f))
         }
