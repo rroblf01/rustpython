@@ -1916,7 +1916,7 @@ impl PyObject {
                                 _ => return Err(PyError::runtime_error("__mod__ on non-bytes")),
                             };
                             let result = bytes_interpolate(&fmt, &args[2]).map_err(|e| {
-    if e.contains("too big") || e.contains("[overflow]") { PyError::overflow_error(e.trim_end_matches(" [overflow]").to_string()) } else { PyError::type_error(e) }
+    if e.contains("too big") || e.contains("[overflow]") { PyError::overflow_error(e.trim_end_matches(" [overflow]").to_string()) } else if e.contains("unsupported format character") || e == "incomplete format" { PyError::value_error(e) } else { PyError::type_error(e) }
 })?;
                             Ok(PyObjectRef::imm(PyObject::Bytes(result)))
                         },
@@ -2636,7 +2636,7 @@ impl PyObject {
                                 _ => return Err(PyError::runtime_error("__mod__ on non-bytearray")),
                             };
                             let result = bytes_interpolate(&fmt, &args[2]).map_err(|e| {
-    if e.contains("too big") || e.contains("[overflow]") { PyError::overflow_error(e.trim_end_matches(" [overflow]").to_string()) } else { PyError::type_error(e) }
+    if e.contains("too big") || e.contains("[overflow]") { PyError::overflow_error(e.trim_end_matches(" [overflow]").to_string()) } else if e.contains("unsupported format character") || e == "incomplete format" { PyError::value_error(e) } else { PyError::type_error(e) }
 })?;
                             Ok(PyObjectRef::new(PyObject::ByteArray(result)))
                         },

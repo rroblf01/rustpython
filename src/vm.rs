@@ -8467,6 +8467,16 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
         '-'  // default: show sign only for negatives
     };
 
+    // --- parse [z] (3.11+ float zero-coercion flag) ---
+    // Forces +0.0/-0.0 to plain 0.0. Parsed here so the spec isn't rejected
+    // as invalid (the coercion itself is applied in the float arms by
+    // zeroing negative zero).
+    let zero_coerce = if idx < len && chars[idx] == 'z' {
+        idx += 1;
+        true
+    } else {
+        false
+    };
     // --- parse [#] ---
     let alternate = if idx < len && chars[idx] == '#' { idx += 1; true } else { false };
 
@@ -8583,6 +8593,21 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
         )));
     }
 
+    // `z` is only allowed for float values with a float presentation type —
+    // `{0:zd}`, `{0:z}` (int) and `{'x':zs}` (str) all raise
+    // "Negative zero coercion (z) not allowed".
+    if zero_coerce {
+        let t = fmt_type.unwrap_or('\0');
+        // z is allowed with a FLOAT presentation (f/e/g/%) for any numeric
+        // value (an int with z.1f is fine), and with the DEFAULT type only
+        // for an actual float. Non-float presentations (d/s/x...) reject it.
+        let is_float_present = t == 'f' || t == 'F' || t == 'e' || t == 'E' || t == 'g' || t == 'G' || t == '%';
+        let is_default_float = t == '\0' && matches!(&*val.borrow(), PyObject::Float(_));
+        if !(is_float_present || is_default_float) {
+            return Err(PyError::value_error("Negative zero coercion (z) not allowed"));
+        }
+    }
+
     // Determine value type
     let val_borrowed = val.borrow();
     let is_int = matches!(&*val_borrowed, PyObject::Int(_) | PyObject::Bool(_));
@@ -8644,44 +8669,48 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
 
         // Float: default (no type) — use str() for compat
         (None, _, true) => val.str(),
-        // Float: fixed-point
-        (Some('f'), _, true) | (Some('F'), _, true) => {
-            if let PyObject::Float(f) = &*val_borrowed {
+        // Float: fixed-point (an int with 'f' converts to float first)
+        (Some('f'), _, _) | (Some('F'), _, _) => {
+            if let Some(mut f) = val.as_f64() {
+                if zero_coerce && f == 0.0 { f = 0.0; }
                 // 'f' defaults to precision 6 (like %f), not str() — real
                 // CPython: format(0.0, 'f') == '0.000000'.
-                let mut s = format_float_with_sign(*f, sign, Some(precision.unwrap_or(6)));
-                if alternate && !s.contains('.') {
-                    s.push('.');
+                let mut s = format_float_with_sign(f, sign, Some(precision.unwrap_or(6)));
+                if alternate && !s.contains('.') {                    s.push('.');
                 }
                 s
             } else { val.str() }
         }
         // Float: scientific lowercase
-        (Some('e'), _, true) => {
-            if let PyObject::Float(f) = &*val_borrowed {
-                let s = crate::object::format_percent_e(*f, precision.unwrap_or(6), alternate, false);
-                apply_sign(&s, *f, sign)
+        (Some('e'), _, _) => {
+            if let Some(mut f) = val.as_f64() {
+                if zero_coerce && f == 0.0 { f = 0.0; }
+                let s = crate::object::format_percent_e(f, precision.unwrap_or(6), alternate, false);
+                apply_sign(&s, f, sign)
             } else { val.str() }
         }
         // Float: scientific uppercase
-        (Some('E'), _, true) => {
-            if let PyObject::Float(f) = &*val_borrowed {
-                let s = crate::object::format_percent_e(*f, precision.unwrap_or(6), alternate, true);
-                apply_sign(&s, *f, sign)
+        (Some('E'), _, _) => {
+            if let Some(mut f) = val.as_f64() {
+                if zero_coerce && f == 0.0 { f = 0.0; }
+                let s = crate::object::format_percent_e(f, precision.unwrap_or(6), alternate, true);
+                apply_sign(&s, f, sign)
             } else { val.str() }
         }
         // Float: general lowercase
-        (Some('g'), _, true) => {
-            if let PyObject::Float(f) = &*val_borrowed {
-                let s = crate::object::format_percent_g(*f, precision.unwrap_or(6), alternate);
-                apply_sign(&s, *f, sign)
+        (Some('g'), _, _) => {
+            if let Some(mut f) = val.as_f64() {
+                if zero_coerce && f == 0.0 { f = 0.0; }
+                let s = crate::object::format_percent_g(f, precision.unwrap_or(6), alternate);
+                apply_sign(&s, f, sign)
             } else { val.str() }
         }
         // Float: general uppercase
-        (Some('G'), _, true) => {
-            if let PyObject::Float(f) = &*val_borrowed {
-                let s = crate::object::format_percent_g(*f, precision.unwrap_or(6), alternate).to_uppercase();
-                apply_sign(&s, *f, sign)
+        (Some('G'), _, _) => {
+            if let Some(mut f) = val.as_f64() {
+                if zero_coerce && f == 0.0 { f = 0.0; }
+                let s = crate::object::format_percent_g(f, precision.unwrap_or(6), alternate).to_uppercase();
+                apply_sign(&s, f, sign)
             } else { val.str() }
         }
         // Float: percentage
@@ -8698,6 +8727,21 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
 
         // Default for string or any other type: str() representation
         _ => val.str(),
+    };
+
+    // The `z` flag coerces a NEGATIVE ZERO RESULT (after rounding) to
+    // positive zero — `f'{-.01:z.1f}'` rounds -0.01 to '-0.0' then coerces
+    // to '0.0'. Applied to the formatted base before padding.
+    let base = if zero_coerce && base.starts_with('-') {
+        let rest = &base[1..];
+        let is_zero_form = rest.parse::<f64>().map(|v| v == 0.0).unwrap_or(false);
+        if is_zero_form {
+            base[1..].to_string()
+        } else {
+            base
+        }
+    } else {
+        base
     };
 
     // Apply zero-padding (fill='0', align='=' for numbers)

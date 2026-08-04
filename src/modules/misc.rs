@@ -738,6 +738,11 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         if args.len() < 1 {
             return Err(PyError::type_error("compile() takes at least 1 argument"));
         }
+        // Compiling an already-compiled pattern returns it unchanged
+        // (CPython: re.compile(re.compile('x')) is a no-op).
+        if matches!(&*args[0].borrow(), PyObject::CompiledRegex { .. }) {
+            return Ok(args[0].clone());
+        }
         let pattern = args[0].str();
         let flags = if args.len() > 1 { args[1].as_i64().unwrap_or(0) as i32 } else { 0 };
         match compile_python_regex_flags(&pattern, flags) {

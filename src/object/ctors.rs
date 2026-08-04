@@ -326,6 +326,8 @@ fn zero_pad_precision(mut s: String, precision: usize, has_prefix: bool) -> Stri
         ("-", r.to_string())
     } else if let Some(r) = s.strip_prefix('+') {
         ("+", r.to_string())
+    } else if let Some(r) = s.strip_prefix(' ') {
+        (" ", r.to_string())
     } else {
         ("", s.clone())
     };
@@ -469,7 +471,7 @@ pub(crate) fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String,
             }
 
             match chars.next() {
-                None => return Err("incomplete format: trailing %".to_string()),
+                None => return Err("incomplete format".to_string()),
                 Some('%') => result.push('%'),
                 Some(conv @ 's') | Some(conv @ 'r') | Some(conv @ 'f') | Some(conv @ 'd') | Some(conv @ 'i')
                 | Some(conv @ 'o') | Some(conv @ 'x') | Some(conv @ 'X') | Some(conv @ 'c')
@@ -524,7 +526,7 @@ pub(crate) fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String,
                             let prec = precision.unwrap_or(6);
                             format_percent_g(f, prec, flags.contains('#'))
                         }
-                        'd' | 'i' => {
+                        'd' | 'i' | 'u' => {
                             // Handle big ints that overflow i64, and float
                             // whole numbers ('%d' % -1.2e29) — stringify via
                             // BigInt (test_common_format).
@@ -552,6 +554,7 @@ pub(crate) fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String,
                             } else { format!("{:o}", bi) };
                             if !s.starts_with('-') && flags.contains('+') { s = format!("+{}", s); }
                             else if !s.starts_with('-') && flags.contains(' ') { s = format!(" {}", s); }
+                            if let Some(p) = precision { s = zero_pad_precision(s, p, flags.contains('#')) }
                             s
                         }
                         'x' => {
@@ -598,6 +601,8 @@ pub(crate) fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String,
                                 ("-", r)
                             } else if let Some(r) = formatted.strip_prefix('+') {
                                 ("+", r)
+                            } else if let Some(r) = formatted.strip_prefix(' ') {
+                                (" ", r)
                             } else {
                                 ("", formatted.as_str())
                             };
@@ -785,11 +790,11 @@ pub(crate) fn bytes_interpolate(fmt: &[u8], arg: &PyObjectRef) -> Result<Vec<u8>
                 }
                 bytes
             }
-            b'd' | b'i' | b'o' | b'x' | b'X' => {
+            b'd' | b'i' | b'u' | b'o' | b'x' | b'X' => {
                 let raw = get_arg();
                 let bi = bigint_of(&raw);
                 let mut s = match conv {
-                    b'd' | b'i' => {
+                    b'd' | b'i' | b'u' => {
                         if let Some(p) = precision {
                             // zero-pad to precision digits (`%.100d` of 1)
                             if p > 1000 { return Err("precision too big".to_string()); }
@@ -826,6 +831,8 @@ pub(crate) fn bytes_interpolate(fmt: &[u8], arg: &PyObjectRef) -> Result<Vec<u8>
                             ("-", r)
                         } else if let Some(r) = s.strip_prefix('+') {
                             ("+", r)
+                        } else if let Some(r) = s.strip_prefix(' ') {
+                            (" ", r)
                         } else {
                             ("", s.as_str())
                         };
@@ -860,13 +867,17 @@ pub(crate) fn bytes_interpolate(fmt: &[u8], arg: &PyObjectRef) -> Result<Vec<u8>
                 let p = precision.unwrap_or(6);
                 if p > 200000 { return Err("precision too big".to_string()); }
                 let s = match conv {
-                    b'e' | b'E' => crate::object::format_percent_e(f, p, false, conv == b'E'),
+                    b'e' | b'E' => crate::object::format_percent_e(f, p, flags_alt, conv == b'E'),
                     b'g' | b'G' => {
-                        let mut s = crate::object::format_percent_g(f, p, false);
+                        let mut s = crate::object::format_percent_g(f, p, flags_alt);
                         if conv == b'G' { s = s.to_uppercase(); }
                         s
                     }
-                    _ => format_fixed_padded(f, p),
+                    _ => {
+                        let mut s = format_fixed_padded(f, p);
+                        if flags_alt && !s.contains('.') { s.push('.'); }
+                        s
+                    }
                 };
                 let mut s = s.into_bytes();
                 if let Some(w) = width {
