@@ -600,11 +600,22 @@ pub fn builtin_int_from_bytes(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 /// Validate underscore placement in a numeric string: underscores must sit
 /// BETWEEN two digits (leading/trailing/double/adjacent-to-dot are invalid).
 fn validate_underscores(s: &str) -> PyResult<String> {
+    // Hex literals allow underscores between hex digits; decimal floats only
+    // between plain digits (an underscore next to 'e'/'.'/start/end is bad).
+    let is_hex = s.starts_with("0x") || s.starts_with("0X");
     let chars: Vec<char> = s.chars().collect();
     for i in 0..chars.len() {
         if chars[i] == '_' {
-            let prev_ok = i > 0 && chars[i - 1].is_ascii_hexdigit();
-            let next_ok = i + 1 < chars.len() && chars[i + 1].is_ascii_hexdigit();
+            let prev_ok = i > 0 && if is_hex {
+                chars[i - 1].is_ascii_hexdigit()
+            } else {
+                chars[i - 1].is_ascii_digit()
+            };
+            let next_ok = i + 1 < chars.len() && if is_hex {
+                chars[i + 1].is_ascii_hexdigit()
+            } else {
+                chars[i + 1].is_ascii_digit()
+            };
             if !(prev_ok && next_ok) {
                 return Err(PyError::value_error(format!("invalid decimal literal")));
             }
