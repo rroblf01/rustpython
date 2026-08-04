@@ -8661,8 +8661,11 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
             crate::vm::format_with_spec(&p, &spec_clone)
         };
         let re_s = fmt_part(re)?;
-        let sign = if im < 0.0 || (im.is_sign_negative() && im == 0.0) { "-" } else { "+" };
+        // Determine the imag sign from the FORMATTED part (z already coerced
+        // a rounded -0.0 to positive, and a negative mantissa keeps its -).
         let im_abs = fmt_part(im.abs())?;
+        let im_signed = fmt_part(im)?;
+        let sign = if im_signed.starts_with('-') { "-" } else { "+" };
         return Ok(format!("{}{}{}j", re_s, sign, im_abs));
     }
 
