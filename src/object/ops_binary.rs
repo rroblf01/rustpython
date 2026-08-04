@@ -16,9 +16,6 @@ pub fn try_dunder_binop(a: &PyObjectRef, b: &PyObjectRef, method: &str) -> PyRes
         }
     };
     if let Some(f) = f {
-        if std::env::var("RPY_DEBUG_POW").is_ok() && method == "__pow__" {
-            eprintln!("TRY_DUNDER_POW found f={:?}", f.repr());
-        }
         // `call_bound_method`'s `BuiltinMethod` arm always prepends *both*
         // the method's own (placeholder, for a native type's dunder — see
         // `get_attribute`) `self_obj` *and* the `a` we pass here as a
