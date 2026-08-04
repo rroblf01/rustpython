@@ -41,6 +41,12 @@ pub fn float_binop_dunder(args: &[PyObjectRef], reverse: bool, kind: u8) -> PyRe
     }
     let af = af.unwrap();
     let bf = bf.unwrap();
+    // `0.0 ** negative` must raise ZeroDivisionError ("0.0 cannot be
+    // raised to a negative power") — powf would return inf (test_pow's
+    // test_powfloat asserts the error).
+    if kind == 3 && af == 0.0 && bf < 0.0 {
+        return Err(PyError::zero_division());
+    }
     let result = match kind {
         0 => af / bf,
         1 => (af / bf).floor(),
