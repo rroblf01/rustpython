@@ -2162,7 +2162,10 @@ impl VirtualMachine {
                 }
                 Opcode::POP_JUMP_IF_FALSE => {
                     let val = stack.pop()?;
-                    if !val.truthy() { ip = instr.arg as usize; }
+                    match val.try_truthy() {
+                        Ok(t) => { if !t { ip = instr.arg as usize; } }
+                        Err(e) => return Some(Err(e)),
+                    }
                 }
                 Opcode::JUMP_FORWARD => {
                     ip = ip + instr.arg as usize;
@@ -3345,14 +3348,14 @@ impl VirtualMachine {
 
             Opcode::POP_JUMP_IF_FALSE => {
                 let val = self.frames[fi].pop()?;
-                if !val.truthy() {
+                if !val.try_truthy()? {
                     self.frames[fi].ip = arg as usize;
                 }
             }
 
             Opcode::POP_JUMP_IF_TRUE => {
                 let val = self.frames[fi].pop()?;
-                if val.truthy() {
+                if val.try_truthy()? {
                     self.frames[fi].ip = arg as usize;
                 }
             }

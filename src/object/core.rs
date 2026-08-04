@@ -803,6 +803,66 @@ impl PyObjectRef {
             }
         }
     }
+
+    /// Fallible truthiness for the explicit `if`/`while`/boolean-context
+    /// paths where real CPython MUST propagate a raising `__bool__` /
+    /// `__len__` (test_bool's test_interpreter_convert_to_bool_raises: a
+    /// condition whose `__bool__` raises TypeError must raise, not be
+    /// swallowed). The infallible `truthy()` above is intentionally kept
+    /// for places that genuinely cannot error (and would hang instead).
+    pub fn try_truthy(&self) -> PyResult<bool> {
+        match self {
+            PyObjectRef::SmallInt(n) => Ok(*n != 0),
+            PyObjectRef::SmallBool(b) => Ok(*b),
+            PyObjectRef::SmallFloat(f) => Ok(*f != 0.0),
+            PyObjectRef::SmallStr(s) => Ok(!s.as_str().is_empty()),
+            PyObjectRef::None => Ok(false),
+            PyObjectRef::Mut(_) | PyObjectRef::Imm(_) => {
+                let typ_opt = if let PyObject::Instance { typ, .. } = &*self.borrow() {
+                    Some(typ.clone())
+                } else {
+                    None
+                };
+                if let Some(typ) = typ_opt {
+                    if let Some(f) = lookup_dunder_via_mro(&typ, "__bool__") {
+                        if matches!(&*f.borrow(), PyObject::None) {
+                            return Err(PyError::type_error(format!(
+                                "'{}' cannot be interpreted as a boolean",
+                                typ.borrow().type_name()
+                            )));
+                        }
+                        let result = call_bound_method(f, self.clone(), vec![])?;
+                        return match result {
+                            PyObjectRef::SmallBool(b) => Ok(b),
+                            other => Err(PyError::type_error(format!(
+                                "__bool__ should return bool, returned {}",
+                                other.borrow().type_name()
+                            ))),
+                        };
+                    }
+                    if let Some(f) = lookup_dunder_via_mro(&typ, "__len__") {
+                        if matches!(&*f.borrow(), PyObject::None) {
+                            return Err(PyError::type_error(format!(
+                                "'{}' cannot be interpreted as a boolean",
+                                typ.borrow().type_name()
+                            )));
+                        }
+                        let result = call_bound_method(f, self.clone(), vec![])?;
+                        let n = result.as_i64()
+                            .ok_or_else(|| PyError::type_error("__len__() should return >= 0 integer"))?;
+                        return Ok(n != 0);
+                    }
+                    if let Some(native) = native_backing_of(self) {
+                        return Ok(native.truthy());
+                    }
+                    Ok(true)
+                } else {
+                    Ok(self.borrow().truthy())
+                }
+            }
+        }
+    }
+
     pub fn hash(&self) -> PyResult<usize> {
         match self {
             // `hash_bigint` (also used by boxed `PyObject::Int`/whole-number

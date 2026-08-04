@@ -33,7 +33,7 @@ pub fn py_compare(a: &PyObjectRef, b: &PyObjectRef, op: u32) -> PyResult<PyObjec
         let is_b_instance = matches!(&*b.borrow(), PyObject::Instance { .. });
         if is_a_instance || is_b_instance {
             if let Some(result) = try_rich_compare(a, b, op)? {
-                return Ok(py_bool(result));
+                return Ok(result);
             }
             // A class transparently subclassing a native container
             // (`class MyList(list): pass`) with NO explicit comparison
@@ -268,7 +268,7 @@ pub fn is_stop_iteration_error(e: &PyError) -> bool {
 /// `test_compare.py` (`test_ne_high_priority`/`test_ne_low_priority`/
 /// `test_other_delegation`, which assert the EXACT sequence and count of
 /// dunder calls made).
-fn try_rich_compare(a: &PyObjectRef, b: &PyObjectRef, op: u32) -> PyResult<Option<bool>> {
+fn try_rich_compare(a: &PyObjectRef, b: &PyObjectRef, op: u32) -> PyResult<Option<PyObjectRef>> {
     let (own_name, refl_name) = match op {
         0 => ("__lt__", "__gt__"),
         1 => ("__le__", "__ge__"),
@@ -286,12 +286,17 @@ fn try_rich_compare(a: &PyObjectRef, b: &PyObjectRef, op: u32) -> PyResult<Optio
         if sub.is(base) { return false; }
         if let PyObject::Type { mro, .. } = &*sub.borrow() { mro.iter().any(|c| c.is(base)) } else { false }
     };
-    let try_side = |self_ref: &PyObjectRef, other_ref: &PyObjectRef, method: &str| -> PyResult<Option<bool>> {
+    let try_side = |self_ref: &PyObjectRef, other_ref: &PyObjectRef, method: &str| -> PyResult<Option<PyObjectRef>> {
         if let PyObject::Instance { typ, .. } = &*self_ref.borrow() {
             if let Some(f) = lookup_dunder_via_mro(typ, method) {
                 let result = call_bound_method(f, self_ref.clone(), vec![other_ref.clone()])?;
                 if !is_not_implemented(&result) {
-                    return Ok(Some(result.truthy()));
+                    // Return the RAW dunder result — real CPython's rich
+                    // comparison returns it as-is (test_bool's Symbol.__gt__
+                    // returns a SymbolicBool, which the `if` then truth-tests,
+                    // propagating its raising __bool__); converting here with
+                    // truthy() swallowed that error.
+                    return Ok(Some(result));
                 }
             }
         }

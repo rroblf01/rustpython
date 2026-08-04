@@ -1042,12 +1042,19 @@ pub fn builtin_bool(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let typ_opt = {
         let obj = args[0].borrow();
         if let PyObject::Instance { typ, .. } = &*obj {
-            if matches!(lookup_dunder_via_mro(typ, "__bool__").map(|f| f.borrow().clone()).unwrap_or(PyObject::None), PyObject::None)
-                && matches!(lookup_dunder_via_mro(typ, "__len__").map(|f| f.borrow().clone()).unwrap_or(PyObject::None), PyObject::None)
-            {
-                None
-            } else {
+            let has_bool = lookup_dunder_via_mro(typ, "__bool__");
+            let has_len = lookup_dunder_via_mro(typ, "__len__");
+            // Distinguish "no __bool__/__len__ at all" from "the attribute
+            // exists but is None" — the latter (class A: __bool__ = None)
+            // must STILL raise TypeError ('A' cannot be interpreted as a
+            // boolean), not silently fall back to truthiness. Real CPython
+            // reserves a slot when __bool__/__len__ is set to None.
+            let has_bool_slot = has_bool.is_some();
+            let has_len_slot = has_len.is_some();
+            if has_bool_slot || has_len_slot {
                 Some(typ.clone())
+            } else {
+                None
             }
         } else {
             None
@@ -1061,6 +1068,15 @@ pub fn builtin_bool(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         // (e.g. `def __bool__(self): return self`) — confirmed via CPython's
         // own `test_bool.test_convert_to_bool`.
         if let Some(f) = lookup_dunder_via_mro(&typ, "__bool__") {
+            // `__bool__ = None` (a broken slot) must raise "'<Type>' cannot
+            // be interpreted as a boolean" — real CPython's exact error for
+            // test_blocked's `class A: __bool__ = None`.
+            if matches!(&*f.borrow(), PyObject::None) {
+                return Err(PyError::type_error(format!(
+                    "'{}' cannot be interpreted as a boolean",
+                    typ.borrow().type_name()
+                )));
+            }
             let result = call_bound_method(f, args[0].clone(), vec![])?;
             return match result {
                 PyObjectRef::SmallBool(b) => Ok(py_bool(b)),
