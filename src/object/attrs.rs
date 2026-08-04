@@ -65,7 +65,8 @@ fn f64_to_int_ceil_floor_trunc(v: f64, mode: u8) -> PyResult<BigInt> {
     })
 }
 
-pub fn float_binop_dunder(args: &[PyObjectRef], reverse: bool, kind: u8) -> PyResult<PyObjectRef> {    if args.len() < 2 {
+pub fn float_binop_dunder(args: &[PyObjectRef], reverse: bool, kind: u8) -> PyResult<PyObjectRef> {
+    if args.len() < 2 {
         return Err(PyError::type_error("binary operator needs 2 arguments"));
     }
     // The established native-dunder calling convention: reached via the
@@ -89,8 +90,9 @@ pub fn float_binop_dunder(args: &[PyObjectRef], reverse: bool, kind: u8) -> PyRe
     let bf = bf.unwrap();
     // `0.0 ** negative` must raise ZeroDivisionError ("0.0 cannot be
     // raised to a negative power") — powf would return inf (test_pow's
-    // test_powfloat asserts the error).
-    if kind == 3 && af == 0.0 && bf < 0.0 {
+    // test_powfloat asserts the error). But 0.0 ** -inf legitimately
+    // diverges to inf (non-finite exponent).
+    if kind == 3 && af == 0.0 && bf < 0.0 && bf.is_finite() {
         return Err(PyError::zero_division());
     }
     let result = match kind {
