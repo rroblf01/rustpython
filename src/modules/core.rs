@@ -761,7 +761,16 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     }));
     float_dict.insert_str("__getformat__", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "__getformat__".to_string(),
-        func: |_args| Ok(py_str("IEEE, little-endian")),
+        func: |args: &[PyObjectRef]| {
+            if args.is_empty() { return Err(PyError::type_error("__getformat__() takes exactly one argument")); }
+            if !matches!(&*args[0].borrow(), PyObject::Str(_)) {
+                return Err(PyError::type_error("__getformat__() argument must be str"));
+            }
+            match args[0].str().as_str() {
+                "double" | "float" => Ok(py_str("IEEE, little-endian")),
+                other => Err(PyError::value_error(format!("__getformat__() argument must be 'double' or 'float', not '{}'", other))),
+            }
+        },
     }));
     float_dict.insert_str("fromhex", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "fromhex".to_string(),
