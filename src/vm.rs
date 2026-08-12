@@ -7410,34 +7410,34 @@ impl VirtualMachine {
                 typ: callable.clone(),
                 dict: instance_dict,
             });
-            if init_func.is_none() {
-                // No Python- or Rust-defined __init__ anywhere in the mro:
-                // for a native-subclassing class (`class Foo(list): pass`),
-                // that means the constructor call itself must behave like
-                // list(iterable)/dict(...)/str(x).
-                if let Some(kind) = &native_kind {
-                    let native = crate::object::synthesize_native_init(kind, &args, &keywords)?;
-                    if let PyObject::Instance { dict, .. } = &mut *instance.borrow_mut() {
-                        dict.insert(crate::object::NATIVE_BACKING_KEY.to_string(), native);
-                    }
-                } else if crate::object::find_exception_base_name(&callable).is_some() {
-                    // `class MyError(Exception): pass` (no explicit
-                    // __init__) — real Python's `BaseException.__init__`
-                    // always stores `self.args = args`, which is what
-                    // `str(exc)`/`repr(exc)` and every uncaught-exception
-                    // traceback print. Exception builtins (Exception,
-                    // ValueError, ...) are `BuiltinFunction`s, not
-                    // `PyObject::Type`s, so they never appear in `mro` and
-                    // were completely invisible to this constructor logic —
-                    // ANY user-defined exception subclass (an extremely
-                    // common, foundational pattern) silently got no `args`
-                    // at all, surfacing as "MyError: " (empty message) or
-                    // "Exception: re-raise" (the internal dispatch tag)
-                    // instead of the real message whenever it passed through
-                    // a `with`/`finally` or propagated uncaught.
-                    if let PyObject::Instance { dict, .. } = &mut *instance.borrow_mut() {
-                        dict.insert_str("args", py_tuple(args.clone()));
-                    }
+            // The native VALUE comes from `__new__(cls, *args)` — CPython
+            // builds it BEFORE `__init__` runs, so even a custom `__init__`
+            // (which overrides the native float/int/... init) must NOT leave
+            // the backing at its default (`class Foo(float): def __init__
+            // (self, x, ...): ...; Foo(2.5)` is still 2.5 — test_float's
+            // test_keywords_in_subclass). Synthesize from the constructor
+            // args unconditionally when there's a native base.
+            if let Some(kind) = &native_kind {
+                let native = crate::object::synthesize_native_init(kind, &args, &keywords)?;
+                if let PyObject::Instance { dict, .. } = &mut *instance.borrow_mut() {
+                    dict.insert(crate::object::NATIVE_BACKING_KEY.to_string(), native);
+                }
+            } else if init_func.is_none() && crate::object::find_exception_base_name(&callable).is_some() {
+                // `class MyError(Exception): pass` (no explicit __init__) —
+                // real Python's `BaseException.__init__` always stores
+                // `self.args = args`, which is what `str(exc)`/`repr(exc)`
+                // and every uncaught-exception traceback print. Exception
+                // builtins (Exception, ValueError, ...) are
+                // `BuiltinFunction`s, not `PyObject::Type`s, so they never
+                // appear in `mro` and were completely invisible to this
+                // constructor logic — ANY user-defined exception subclass
+                // (an extremely common, foundational pattern) silently got
+                // no `args` at all, surfacing as "MyError: " (empty message)
+                // or "Exception: re-raise" (the internal dispatch tag)
+                // instead of the real message whenever it passed through a
+                // `with`/`finally` or propagated uncaught.
+                if let PyObject::Instance { dict, .. } = &mut *instance.borrow_mut() {
+                    dict.insert_str("args", py_tuple(args.clone()));
                 }
             }
             if let Some(init_func) = init_func {
