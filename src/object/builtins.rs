@@ -809,7 +809,9 @@ pub(crate) fn float_fromhex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let s = args[0].str();
     let s = s.trim();
     let lower = s.to_lowercase();
-    if lower == "nan" { return Ok(py_float(f64::NAN)); }
+    // nan spellings (with optional sign, case-insensitive) — all produce the
+    // same nan.
+    if lower == "nan" || lower == "+nan" || lower == "-nan" { return Ok(py_float(f64::NAN)); }
     if lower == "inf" || lower == "+inf" || lower == "-inf" || lower == "infinity" || lower == "+infinity" || lower == "-infinity" {
         let sign = if lower.starts_with('-') { -1.0 } else { 1.0 };
         return Ok(py_float(sign * f64::INFINITY));
@@ -823,17 +825,85 @@ pub(crate) fn float_fromhex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let (mantissa, exp_part) = s.split_once('p').or_else(|| s.split_once('P'))
         .unwrap_or((s, ""));
     let (int_part, frac_part) = mantissa.split_once('.').unwrap_or((mantissa, ""));
-    let int_val = i64::from_str_radix(int_part, 16).unwrap_or(0);
-    let frac_val = if !frac_part.is_empty() {
-        let frac_bits = i64::from_str_radix(frac_part, 16).unwrap_or(0);
-        let frac_len = frac_part.len() as u32;
-        frac_bits as f64 / (16u64.pow(frac_len) as f64)
-    } else { 0.0 };
-    let exp: i32 = if !exp_part.is_empty() {
+    // Parse the mantissa EXACTLY: d = int * 16**frac_len + frac (a 17-digit
+    // hex int overflows i64 — 0x10000000000000000 must be 2**64, not
+    // silently 0); the fractional point is folded into the binary exponent
+    // as 4 bits per fractional hex digit.
+    let parse_hex = |t: &str| -> PyResult<BigInt> {
+        if t.is_empty() {
+            Ok(BigInt::from(0))
+        } else {
+            BigInt::parse_bytes(t.as_bytes(), 16)
+                .ok_or_else(|| PyError::value_error(format!("invalid hexadecimal floating-point literal: '{}'", args[0].str())))
+        }
+    };
+    let int_d = parse_hex(int_part)?;
+    let frac_d = parse_hex(frac_part)?;
+    let frac_len = frac_part.len() as u64;
+    let d = int_d * (BigInt::from(16u32).pow(frac_len as u32)) + frac_d;
+    let exp: BigInt = if !exp_part.is_empty() {
         exp_part.parse().map_err(|_| PyError::value_error(format!("invalid hex float exponent: {}", exp_part)))?
-    } else { 0 };
-    let significand = int_val as f64 + frac_val;
-    let result = sign * ldexp_f64(significand, exp);
+    } else { BigInt::from(0) };
+    // value = d * 2**(exp - 4*frac_len); round-half-even to the nearest
+    // f64 EXACTLY (d.to_f64() before scaling would lose the low bits that
+    // decide subnormal rounding — 0x1.00000000000000001p-1075 rounds to
+    // TINY, not 0).
+    let k = {
+        let adj = exp - BigInt::from(4) * BigInt::from(frac_len as i64);
+        match adj.to_i64() {
+            Some(e) => e,
+            None => {
+                if adj.sign() == num_bigint::Sign::Minus {
+                    return Ok(py_float(sign * 0.0));
+                }
+                return Err(PyError::overflow_error("hexadecimal value too large to represent as a float"));
+            }
+        }
+    };
+    let result = if d == BigInt::zero() {
+        sign * 0.0
+    } else {
+        let t = d.bits() as i64; // bit length of d
+        let e = t - 1 + k; // exponent of the most significant bit
+        let r = if e > 1023 {
+            f64::INFINITY
+        } else if e >= -1022 {
+            // normal range: doubles spaced 2**(e-52); n = round(d / 2**(t-53))
+            let n = if t <= 53 {
+                d.clone() << ((53 - t) as u64)
+            } else {
+                round_half_even_rat(&d, &(BigInt::from(1i64) << ((t - 53) as u64)))
+            };
+            if n >= (BigInt::from(1i64) << 53) {
+                // rounded up into the next binade
+                if e + 1 > 1023 {
+                    f64::INFINITY
+                } else {
+                    ldexp_f64(1.0, (e + 1) as i32)
+                }
+            } else {
+                ldexp_f64(n.to_f64().unwrap_or(0.0), (e - 52) as i32)
+            }
+        } else if e >= -1075 {
+            // subnormal: doubles spaced 2**-1074; n = round(d * 2**1074 / 2**m)
+            let m = -k;
+            let n = if m >= 1074 {
+                round_half_even_rat(&d, &(BigInt::from(1i64) << ((m - 1074) as u64)))
+            } else {
+                d << ((1074 - m) as u64)
+            };
+            ldexp_f64(n.to_f64().unwrap_or(0.0), -1074)
+        } else {
+            0.0
+        };
+        sign * r
+    };
+    // A finite hex literal that computes to infinity is an overflow
+    // (0x1p1024, 0X1.fffffffffffff8p1023), not a real inf spelling (which
+    // returned above).
+    if result.is_infinite() {
+        return Err(PyError::overflow_error("hexadecimal value too large to represent as a float"));
+    }
     Ok(py_float(result))
 }
 
