@@ -7338,6 +7338,14 @@ impl VirtualMachine {
                 None
             };
             if let Some(ctor) = native_ctor {
+                // `float()` takes positional-only args (`float(x='3.14')` is
+                // `TypeError: float() takes no keyword arguments`, not a
+                // "not 'dict'" error from the packed kwargs dict it would
+                // otherwise arrive as — test_float's test_keyword_args).
+                let is_float = matches!(&*callable.borrow(), PyObject::Type { name, .. } if name == "float");
+                if is_float && !keywords.is_empty() {
+                    return Err(PyError::type_error("float() takes no keyword arguments"));
+                }
                 return self.call_function(ctor, args, keywords);
             }
         }

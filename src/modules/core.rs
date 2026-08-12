@@ -790,13 +790,70 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
         name: "hex".to_string(),
         func: crate::object::float_class_hex,
     }));
-    float_dict.insert_str("from_number", PyObjectRef::new(PyObject::BuiltinFunction {
+    float_dict.insert_str("from_number", PyObjectRef::new(PyObject::ClassMethod { func: PyObjectRef::imm(PyObject::BuiltinFunction {
         name: "from_number".to_string(),
         func: |args| {
-            if args.is_empty() { return Err(PyError::type_error("float.from_number() takes exactly 1 argument")); }
-            Ok(py_float(args[0].as_f64().unwrap_or(f64::NAN)))
+            // Bound as a classmethod: args[0] is the calling type, args[1]
+            // the number.
+            if args.len() < 2 { return Err(PyError::type_error("float.from_number() takes exactly 1 argument")); }
+            let cls = &args[0];
+            let number = &args[1];
+            let extract = |number: &PyObjectRef| -> PyResult<Option<f64>> {
+                let b = number.borrow();
+                match &*b {
+                    PyObject::Float(f) => Ok(Some(*f)),
+                    PyObject::Int(i) => Ok(Some(crate::object::bigint_to_float(i)?)),
+                    PyObject::Bool(b2) => Ok(Some(if *b2 { 1.0 } else { 0.0 })),
+                    PyObject::Complex(..) | PyObject::Str(_) | PyObject::Bytes(_) | PyObject::ByteArray(_) => Ok(None),
+                    PyObject::Instance { .. } => {
+                        drop(b);
+                        // A transparent float-subclass instance's native
+                        // backing is its value.
+                        if let Some(native) = crate::object::native_backing_of(number) {
+                            if let Some(f) = native.as_f64() { return Ok(Some(f)); }
+                        }
+                        let typ = match &*number.borrow() {
+                            PyObject::Instance { typ, .. } => typ.clone(),
+                            _ => unreachable!(),
+                        };
+                        // __float__, then __index__ (CPython's PyFloat_AsDouble).
+                        if let Some(f) = crate::object::lookup_dunder_via_mro(&typ, "__float__") {
+                            let result = crate::object::call_bound_method(f, number.clone(), vec![])?;
+                            return Ok(Some(result.as_f64().ok_or_else(|| PyError::type_error("__float__ returned non-float"))?));
+                        }
+                        if let Some(f) = crate::object::lookup_dunder_via_mro(&typ, "__index__") {
+                            let result = crate::object::call_bound_method(f, number.clone(), vec![])?;
+                            let v = result.borrow();
+                            if let PyObject::Int(i) = &*v {
+                                return Ok(Some(i.to_f64().unwrap_or(0.0)));
+                            }
+                            return Err(PyError::type_error("__index__ returned non-int"));
+                        }
+                        Ok(None)
+                    }
+                    _ => Ok(None),
+                }
+            };
+            let value = extract(number)?
+                .ok_or_else(|| PyError::type_error(format!("float.from_number() argument must be a number, not '{}'", number.borrow().type_name())))?;
+            let is_plain_float = matches!(&*cls.borrow(), PyObject::Type { name, .. } if name == "float");
+            if is_plain_float {
+                // Exact-float input returns the SAME object (CPython
+                // identity contract: float.from_number(NAN) is NAN).
+                if matches!(&*number.borrow(), PyObject::Float(_)) {
+                    return Ok(number.clone());
+                }
+                return Ok(py_float(value));
+            }
+            // Subclass call: build a float-subclass instance carrying the
+            // value as its native backing (mirrors what `FloatSubclass(3.14)`
+            // produces; done directly here because re-entering the VM via
+            // `with_vm_mut` from inside this already-in-call chain is UB).
+            let mut dict = crate::object::AttrMap::new();
+            dict.insert(crate::object::NATIVE_BACKING_KEY.to_string(), py_float(value));
+            Ok(PyObjectRef::new(PyObject::Instance { typ: cls.clone(), dict }))
         },
-    }));
+    }) }));
     float_dict.insert_str("__init__", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "__init__".to_string(),
         func: crate::object::native_base_init_builtin,

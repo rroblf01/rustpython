@@ -349,7 +349,12 @@ pub fn create_time_dict() -> HashMap<String, PyObjectRef> {
 
     // sleep(seconds) — busy-wait (simplified)
     time_func!("sleep", |args| {
-        let secs = if args.is_empty() { 0.0 } else { args[0].as_f64().unwrap_or(0.0) };
+        // Convert through the full float protocol (__float__/__index__/
+        // errors), so sleep(FloatLike("")) raises TypeError like CPython
+        // instead of silently sleeping 0 seconds.
+        let secs = if args.is_empty() { 0.0 } else {
+            crate::object::builtin_float(&[args[0].clone()])?.as_f64().unwrap_or(0.0)
+        };
         let nanos = (secs * 1e9) as u64;
         let start = SystemTime::now();
         loop {

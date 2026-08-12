@@ -1079,7 +1079,7 @@ impl PyObject {
     }
 }
 
-fn escape_string(s: &str) -> String {
+pub(crate) fn escape_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         // Escape non-ASCII chars that are NOT printable (CPython's repr

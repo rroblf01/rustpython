@@ -629,11 +629,37 @@ pub(crate) fn validate_underscores(s: &str) -> PyResult<String> {
     Ok(s.to_string())
 }
 
+/// Python-style bytes repr (`b'...'`, escaping non-printables) — used in
+/// `float()` conversion error messages, which quote the original bytes.
+fn python_bytes_repr(b: &[u8]) -> String {
+    let s: String = b.iter().map(|&byte| {
+        match byte {
+            b'\\' => "\\\\".to_string(),
+            b'\'' => "\\'".to_string(),
+            b'\n' => "\\n".to_string(),
+            b'\t' => "\\t".to_string(),
+            b'\r' => "\\r".to_string(),
+            0x20..=0x7e => (byte as char).to_string(),
+            _ => format!("\\x{:02x}", byte),
+        }
+    }).collect();
+    s
+}
+
+/// `float(int)`: an int too large to be represented as a double raises
+/// OverflowError (2**2000 -> "int too large to convert to float"), not inf.
+pub(crate) fn bigint_to_float(i: &BigInt) -> PyResult<f64> {
+    match i.to_f64() {
+        Some(f) if f.is_finite() => Ok(f),
+        _ => Err(PyError::overflow_error("int too large to convert to float")),
+    }
+}
+
 pub fn builtin_float(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() { return Ok(py_float(0.0)); }
     let obj = args[0].borrow();
     match &*obj {
-        PyObject::Int(i) => Ok(py_float(i.to_f64().unwrap_or(0.0))),
+        PyObject::Int(i) => Ok(py_float(bigint_to_float(i)?)),
         PyObject::Float(f) => Ok(py_float(*f)),
         PyObject::Str(s) => {
             let s: &str = s;
@@ -648,11 +674,23 @@ pub fn builtin_float(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 }
             }).collect();
             let normalized: String = validate_underscores(&normalized)?.chars().filter(|&c| c != '_').collect();
-            let f: f64 = normalized.parse().map_err(|_| PyError::value_error(format!("could not convert string to float: '{}'", s_orig)))?;
+            // CPython's error quotes the ORIGINAL string with str repr
+            // (%r), so control characters are escaped ('\t \n', '123\x00').
+            let f: f64 = normalized.parse().map_err(|_| PyError::value_error(format!(
+                "could not convert string to float: '{}'", crate::object::escape_string(s_orig)
+            )))?;
             Ok(py_float(f))
         }
         PyObject::Bytes(b) => {
-            let s = std::str::from_utf8(b).map_err(|_| PyError::value_error("could not convert bytes to float: invalid utf-8"))?;
+            // Bytes are scanned as raw ASCII float syntax (CPython does not
+            // require valid UTF-8): a NUL or non-ASCII byte fails the parse
+            // and reports the bytes repr.
+            if b.iter().any(|&x| x >= 0x80) {
+                return Err(PyError::value_error(format!(
+                    "could not convert string to float: b'{}'", python_bytes_repr(b)
+                )));
+            }
+            let s: String = b.iter().map(|&x| x as char).collect();
             let s = s.trim_matches(|c: char| c.is_whitespace());
             let normalized: String = s.chars().map(|c| {
                 match c {
@@ -663,11 +701,20 @@ pub fn builtin_float(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 }
             }).collect();
             let normalized: String = validate_underscores(&normalized)?.chars().filter(|&c| c != '_').collect();
-            let f: f64 = normalized.parse().map_err(|_| PyError::value_error(format!("could not convert string to float: '{}'", s)))?;
+            // CPython's error uses the bytes repr (%r) with the ORIGINAL
+            // content: "could not convert string to float: b'  123 456  '".
+            let f: f64 = normalized.parse().map_err(|_| PyError::value_error(format!(
+                "could not convert string to float: b'{}'", python_bytes_repr(b)
+            )))?;
             Ok(py_float(f))
         }
         PyObject::ByteArray(b) => {
-            let s = std::str::from_utf8(b).map_err(|_| PyError::value_error("could not convert bytearray to float: invalid utf-8"))?;
+            if b.iter().any(|&x| x >= 0x80) {
+                return Err(PyError::value_error(format!(
+                    "could not convert bytearray to float: bytearray(b'{}')", python_bytes_repr(b)
+                )));
+            }
+            let s: String = b.iter().map(|&x| x as char).collect();
             let s = s.trim_matches(|c: char| c.is_whitespace());
             let normalized: String = s.chars().map(|c| {
                 match c {
@@ -678,17 +725,72 @@ pub fn builtin_float(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 }
             }).collect();
             let normalized: String = validate_underscores(&normalized)?.chars().filter(|&c| c != '_').collect();
-            let f: f64 = normalized.parse().map_err(|_| PyError::value_error(format!("could not convert string to float: '{}'", s)))?;
+            let f: f64 = normalized.parse().map_err(|_| PyError::value_error(format!(
+                "could not convert bytearray to float: bytearray(b'{}')", python_bytes_repr(b)
+            )))?;
             Ok(py_float(f))
         }
         PyObject::Instance { typ, .. } => {
-            match lookup_dunder_via_mro(typ, "__float__") {
-                Some(f) => {
-                    drop(obj);
-                    call_bound_method(f, args[0].clone(), vec![])
+            let typ = typ.clone();
+            let arg = args[0].clone();
+            let type_name = get_type_name_for_instance(&typ);
+            drop(obj);
+            // A custom __float__ wins over the native base's string/backing
+            // handling (float(FooStr('8')) calls FooStr.__float__, not the
+            // string parser; float(OtherFloatSubclass(3.14)) falls through
+            // to the float backing below since it defines no __float__).
+            if let Some(f) = lookup_dunder_via_mro(&typ, "__float__") {
+                let result = call_bound_method(f, arg.clone(), vec![])?;
+                // Exact float result: used directly, no warning.
+                if matches!(&result, PyObjectRef::SmallFloat(_))
+                    || matches!(&*result.borrow(), PyObject::Float(_)) {
+                    return Ok(result);
                 }
-                None => Err(PyError::type_error(format!("float() argument must be a string or number, not '{}'", get_type_name_for_instance(typ)))),
+                // A float SUBCLASS result is deprecated but still usable;
+                // any other type is an error (Foo4.__float__ returning int).
+                let is_float_subclass = {
+                    let rt = result.borrow();
+                    matches!(&*rt, PyObject::Instance { typ: rtyp, .. }
+                        if native_base_of_type(rtyp).as_deref() == Some("float"))
+                };
+                if is_float_subclass {
+                    let v = native_backing_of(&result).and_then(|b| b.as_f64()).unwrap_or(f64::NAN);
+                    crate::modules::warnings_emit(
+                        &format!("{}.__float__ returned non-float (type {}).  The ability to return an instance of a strict subclass of float is deprecated, and may be removed in a future version of Python.", type_name, result.borrow().type_name()),
+                        "DeprecationWarning",
+                    );
+                    return Ok(py_float(v));
+                }
+                return Err(PyError::type_error(format!(
+                    "{}.__float__ returned non-float (type {})",
+                    type_name, result.borrow().type_name()
+                )));
             }
+            // Native-base routing for subclasses that define no __float__:
+            // str/bytes/bytearray parse their content; float subclasses are
+            // already their value.
+            let kind = native_base_of_type(&typ);
+            if let Some(kind) = kind {
+                if kind == "str" || kind == "bytes" || kind == "bytearray" {
+                    let backing = native_backing_of(&arg).unwrap_or_else(|| arg.clone());
+                    return builtin_float(&[backing]);
+                }
+                if kind == "float" {
+                    if let Some(backing) = native_backing_of(&arg) {
+                        return Ok(backing);
+                    }
+                }
+            }
+            // __index__ fallback (CPython's PyFloat_AsDouble).
+            if let Some(f) = lookup_dunder_via_mro(&typ, "__index__") {
+                let result = call_bound_method(f, arg.clone(), vec![])?;
+                let v = result.borrow();
+                if let PyObject::Int(i) = &*v {
+                    return Ok(py_float(bigint_to_float(i)?));
+                }
+                return Err(PyError::type_error("__index__ returned non-int"));
+            }
+            Err(PyError::type_error(format!("float() argument must be a string or number, not '{}'", type_name)))
         }
         _ => Err(PyError::type_error(format!("float() argument must be a string or number, not '{}'", obj.type_name()))),
     }
