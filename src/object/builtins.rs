@@ -730,6 +730,23 @@ pub fn builtin_float(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             )))?;
             Ok(py_float(f))
         }
+        PyObject::MemoryView { .. } => {
+            // float(memoryview) parses the memoryview's contiguous bytes as
+            // a float string (float(memoryview(b'12.3')[1:4]) == 2.3).
+            let bytes = crate::object::mv_tobytes(&args[0].clone())?;
+            return builtin_float(&[PyObjectRef::imm(PyObject::Bytes(bytes))]);
+        }
+        PyObject::Array(arr) => {
+            // Byte-typecoded arrays parse their contiguous buffer as a float
+            // string (float(array('B', b' 3.14  ')) == 3.14).
+            if matches!(arr.typecode, 'B' | 'b' | 'u') {
+                let bytes: Vec<u8> = arr.data.iter().map(|&v| v as u8).collect();
+                return builtin_float(&[PyObjectRef::imm(PyObject::Bytes(bytes))]);
+            }
+            return Err(PyError::value_error(format!(
+                "could not convert string to float: array({:?}, ...)", arr.typecode
+            )));
+        }
         PyObject::Instance { typ, .. } => {
             let typ = typ.clone();
             let arg = args[0].clone();

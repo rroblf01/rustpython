@@ -580,9 +580,11 @@ fn py_pow_float(x: f64, y: f64) -> PyResult<PyObjectRef> {
     if x == 0.0 && y < 0.0 && y.is_finite() {
         return Err(PyError::ZeroDivisionError("0.0 cannot be raised to a negative power".to_string()));
     }
-    // A negative base with a NON-INTEGER exponent defers to complex pow
-    // (CPython: (-2.0)**0.5 is complex ~ (8.66e-17+1.41j)).
-    if x < 0.0 && y.fract() != 0.0 && y.is_finite() {
+    // A finite negative base with a NON-INTEGER exponent defers to complex
+    // pow (CPython: (-2.0)**0.5 is complex ~ (8.66e-17+1.41j)). -INF stays
+    // on the real path — IEEE powf(-inf, -0.5) == 0.0, (-inf)**0.5 == +inf,
+    // which the complex path would wrongly turn into a signed zero/NaN.
+    if x < 0.0 && x.is_finite() && y.fract() != 0.0 && y.is_finite() {
         let r = (-x).powf(y);
         let theta = y * std::f64::consts::PI;
         return Ok(PyObjectRef::imm(PyObject::Complex(r * theta.cos(), r * theta.sin())));
