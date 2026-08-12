@@ -658,7 +658,7 @@ pub fn py_pow(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
         {
             let (are, aim) = as_complex_parts(&a_obj).unwrap();
             let (bre, bim) = as_complex_parts(&b_obj).unwrap();
-            Ok(complex_pow(are, aim, bre, bim))
+            complex_pow(are, aim, bre, bim)
         }
         _ => Err(PyError::type_error(format!("unsupported operand type(s) for **: '{}' and '{}'",
             a_obj.type_name(), b_obj.type_name()))),
@@ -687,17 +687,45 @@ fn complex_pow_int(are: f64, aim: f64, n: i64) -> (f64, f64) {
     }
 }
 
-fn complex_pow(are: f64, aim: f64, bre: f64, bim: f64) -> PyObjectRef {
+fn complex_pow(are: f64, aim: f64, bre: f64, bim: f64) -> PyResult<PyObjectRef> {
+    let base_zero = are == 0.0 && aim == 0.0;
+    // A non-finite result computed from FINITE inputs is an overflow
+    // (repeated squaring / exp(w*ln z) spill to inf/nan); NaN inputs legitimately
+    // propagate NaN instead.
+    let inputs_finite = are.is_finite() && aim.is_finite() && bre.is_finite() && bim.is_finite();
+    let overflow = |re: f64, im: f64| -> PyResult<PyObjectRef> {
+        if inputs_finite && (!re.is_finite() || !im.is_finite()) {
+            Err(PyError::overflow_error("complex exponentiation"))
+        } else {
+            Ok(PyObjectRef::imm(PyObject::Complex(re, im)))
+        }
+    };
     if bim == 0.0 && bre.fract() == 0.0 && bre.abs() < 1e15 {
+        // Integer exponent: 0 to a negative power is an error.
+        if base_zero && bre < 0.0 {
+            return Err(PyError::zero_division());
+        }
         let (re, im) = complex_pow_int(are, aim, bre as i64);
-        return PyObjectRef::imm(PyObject::Complex(re, im));
+        return overflow(re, im);
     }
-    // General case: z^w = exp(w * ln z), ln z = ln|z| + i*arg(z).
+    // General case: z^w = exp(w * ln z), ln z = ln|z| + i*arg(z). A zero
+    // base raised to a negative or complex power is a domain error; 0 to a
+    // positive real power is 0; 0 to zero power is 1.
+    if base_zero {
+        if bim != 0.0 || bre < 0.0 {
+            return Err(PyError::zero_division());
+        }
+        if bre == 0.0 {
+            return Ok(PyObjectRef::imm(PyObject::Complex(1.0, 0.0)));
+        }
+        return Ok(PyObjectRef::imm(PyObject::Complex(0.0, 0.0)));
+    }
     let r = (are * are + aim * aim).sqrt();
     let theta = aim.atan2(are);
     let (ere, eim) = complex_mul(bre, bim, r.ln(), theta);
     let exp_re = ere.exp();
-    PyObjectRef::imm(PyObject::Complex(exp_re * eim.cos(), exp_re * eim.sin()))
+    let (re, im) = (exp_re * eim.cos(), exp_re * eim.sin());
+    overflow(re, im)
 }
 
 pub fn py_lshift(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
