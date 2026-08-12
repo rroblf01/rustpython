@@ -496,14 +496,15 @@ fn int_from_digit_string(s: &str, base_obj: Option<&PyObjectRef>, repr_str: &str
     // whether the body came from auto-detected prefix/octal detection.
     let (body2, eff_base, was_auto_detect, had_prefix): (&str, i64, bool, bool) = match base_obj {
         Some(base_val) => {
-            let base = if let PyObject::Int(i) = &*base_val.borrow() {
-                match i.to_i64() {
+            // The base accepts anything indexable (int('101',
+            // base=MyIndexable(2)) == 5).
+            let base = match to_index(base_val) {
+                Ok(n) => match n.to_i64() {
                     Some(n) => n,
-                    // A base too large for i64 (e.g. 2**234) is out of range.
+                    // A base too large for i64 (e.g. 2**100) is out of range.
                     None => return Err(PyError::value_error("int() base must be >= 2 and <= 36")),
-                }
-            } else {
-                return Err(PyError::type_error("int() base must be an integer"));
+                },
+                Err(_) => return Err(PyError::type_error("int() base must be an integer")),
             };
             if !(base == 0 || (2..=36).contains(&base)) {
                 return Err(PyError::value_error("int() base must be >= 2 and <= 36"));
@@ -685,10 +686,33 @@ pub fn builtin_int(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             Err(PyError::type_error(format!("int() argument must be a string or number, not '{}'", obj.type_name())))
         }
         PyObject::Bool(b) => Ok(py_int(if *b { 1 } else { 0 })),
-        PyObject::Instance { dict: _, typ: _ } => {
+        PyObject::Instance { typ, .. } => {
+            let typ = typ.clone();
             drop(obj);
+            // A custom (user-defined) __int__ takes precedence over the
+            // native value — int(MyInt(7)) where MyInt.__int__()==42 is 42.
+            // A bool return (an int subclass) is deprecated but usable.
+            if let Some(int_method) = lookup_dunder_via_mro(&typ, "__int__") {
+                let is_native = matches!(&*int_method.borrow(), PyObject::BuiltinFunction { .. } | PyObject::Closure(_));
+                if !is_native {
+                    let result = call_bound_method(int_method, args_vec[0].clone(), vec![])?;
+                    if let Some(n) = result.as_i64() {
+                        if matches!(result, PyObjectRef::SmallBool(_)) {
+                            crate::modules::warnings_emit("__int__ returned non-int (type bool).  The ability to return an instance of a strict subclass of int is deprecated, and may be removed in a future version of Python.", "DeprecationWarning");
+                        }
+                        return Ok(py_int(n));
+                    }
+                    if matches!(&*result.borrow(), PyObject::Int(_)) {
+                        return Ok(result);
+                    }
+                    return Err(PyError::type_error(format!(
+                        "{}.__int__ returned non-int (type {})",
+                        get_type_name_for_instance(&typ), result.borrow().type_name()
+                    )));
+                }
+            }
             // A class transparently subclassing `int` (e.g. IntEnum
-            // members) with no `__int__` override converts via its native
+            // members) with no custom `__int__` converts via its native
             // backing directly — real Python's `int(x)` for an int
             // subclass instance just IS that underlying int value. A str/
             // bytes/bytearray subclass (CustomStr(b'100')) parses via its
@@ -699,24 +723,26 @@ pub fn builtin_int(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 }
                 return builtin_int(&[native]);
             }
-            // Try calling __int__ method on the instance
-            let args0 = &args_vec[0];
-            if let Ok(int_method) = args0.borrow().get_attribute("__int__") {
-                let instance = args_vec[0].clone();
-                let result = builtin_call(&int_method, &[instance]);
-                if let Ok(val) = result {
-                    if let Some(n) = val.as_i64() {
-                        return Ok(py_int(n));
+            // __index__ fallback (plain objects with __index__, e.g. numpy
+            // scalars / custom index types) — a bool result is deprecated.
+            if let Some(index_method) = lookup_dunder_via_mro(&typ, "__index__") {
+                let result = call_bound_method(index_method, args_vec[0].clone(), vec![])?;
+                if let Some(n) = result.as_i64() {
+                    if matches!(result, PyObjectRef::SmallBool(_)) {
+                        crate::modules::warnings_emit("__index__ returned non-int (type bool).  The ability to return an instance of a strict subclass of int is deprecated, and may be removed in a future version of Python.", "DeprecationWarning");
                     }
-                    // Maybe it returns a BigInt
-                    let is_int = matches!(&*val.borrow(), PyObject::Int(_));
-                    if is_int {
-                        return Ok(val);
-                    }
+                    return Ok(py_int(n));
                 }
+                if matches!(&*result.borrow(), PyObject::Int(_)) {
+                    return Ok(result);
+                }
+                return Err(PyError::type_error(format!(
+                    "{}.__index__ returned non-int (type {})",
+                    get_type_name_for_instance(&typ), result.borrow().type_name()
+                )));
             }
             Err(PyError::type_error(format!("int() argument must be a string or number, not '{}'", 
-                args0.borrow().type_name())))
+                get_type_name_for_instance(&typ))))
         }
         _ => Err(PyError::type_error(format!("int() argument must be a string or number, not '{}'", obj.type_name()))),
     }
