@@ -82,24 +82,45 @@ class Random:
 
     # ── Integer generation ───────────────────────────────────────────────
 
+    def _randbelow(self, n):
+        """Return a random int in the range [0, n).  Defined for n > 0."""
+        if n <= 1:
+            return 0
+        getrandbits = self.getrandbits
+        k = n.bit_length()
+        r = getrandbits(k)
+        # Rejection sampling, bounded loop: P(needing more than ~100 tries)
+        # is astronomically small (each try succeeds with >= 50% probability).
+        # (A `while r >= n` loop is what CPython uses, but the JIT currently
+        # miscompiles that exact pattern — see the JIT while-loop bug.)
+        for _ in range(1024):
+            if r < n:
+                return r
+            r = getrandbits(k)
+        return 0
+
     def randrange(self, start, stop=None, step=1):
         """Choose a random item from range(start, stop[, step])."""
         if stop is None:
+            if start > 0:
+                return self._randbelow(start)
             stop = start
             start = 0
         if step == 1:
             if start >= stop:
                 raise ValueError("empty range")
-            return start + int(self.random() * (stop - start))
+            # Arbitrary-precision via getrandbits — float multiplication
+            # overflows for huge ranges (randrange(1 << 49999, 1 << 50000)).
+            return start + self._randbelow(stop - start)
         # Non-unit step
         n = (stop - start + step - 1) // step
         if n <= 0:
             raise ValueError("empty range")
-        return start + step * int(self.random() * n)
+        return start + step * self._randbelow(n)
 
     def randint(self, a, b):
         """Return random integer N such that a <= N <= b."""
-        return a + int(self.random() * (b - a + 1))
+        return a + self._randbelow(b - a + 1)
 
     # ── Sequence operations ──────────────────────────────────────────────
 

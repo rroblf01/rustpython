@@ -4192,9 +4192,18 @@ pub fn builtin_pow(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         // `pow(a, -1001, m)`-shaped calls, timing out (the giant-bigint
         // path) AND producing wrong results (the float-for-negative-exponent
         // path) simultaneously.
-        let a = to_index(&args[0]).map_err(|_| PyError::value_error("pow() 3rd argument not allowed unless all arguments are integers"))?;
-        let b = to_index(&args[1]).map_err(|_| PyError::value_error("pow() 3rd argument not allowed unless all arguments are integers"))?;
-        let m = to_index(&args[2]).map_err(|_| PyError::value_error("pow() 3rd argument not allowed unless all arguments are integers"))?;
+        // 3-arg pow with a complex argument raises "complex modulo" (from
+        // complex.__pow__'s mod path), NOT the int-only TypeError.
+        if args[..3].iter().any(|a| matches!(&*a.borrow(), PyObject::Complex(..))) {
+            return Err(PyError::value_error("complex modulo"));
+        }
+        // Non-integer (e.g. float) args raise TypeError; CPython: pow(1.5,
+        // 2, 3) -> "pow() 3rd argument not allowed unless all arguments are
+        // integers".
+        let int_err = || PyError::type_error("pow() 3rd argument not allowed unless all arguments are integers");
+        let a = to_index(&args[0]).map_err(|_| int_err())?;
+        let b = to_index(&args[1]).map_err(|_| int_err())?;
+        let m = to_index(&args[2]).map_err(|_| int_err())?;
         if m.is_zero() {
             return Err(PyError::value_error("pow() 3rd argument cannot be 0"));
         }
