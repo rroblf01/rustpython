@@ -6162,8 +6162,12 @@ impl PyObject {
                         func: |args| {
                             if let PyObject::Float(v) = &*args[0].borrow() {
                                 let f = *v;
-                                if f.is_nan() || f.is_infinite() {
-                                    return Err(PyError::value_error(format!("cannot convert {:?} to integer ratio", f)));
+                                // CPython: inf -> OverflowError, nan -> ValueError.
+                                if f.is_infinite() {
+                                    return Err(PyError::overflow_error("cannot convert Infinity to integer ratio"));
+                                }
+                                if f.is_nan() {
+                                    return Err(PyError::value_error("cannot convert NaN to integer ratio"));
                                 }
                                 // Decompose f64 into a reduced fraction
                                 fn float_to_ratio(x: f64) -> (BigInt, BigInt) {
