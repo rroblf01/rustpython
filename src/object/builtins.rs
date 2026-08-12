@@ -465,13 +465,40 @@ fn is_base_digit_char(c: char, base: u32) -> bool {
     }
 }
 
+/// Maps a Unicode DECIMAL digit (any Nd block: Devanagari १२३, Arabic-Indic
+/// ١٢٣, Tamil, Khmer, Fullwidth, ...) to its ASCII equivalent — `int('१२३')`
+/// == 123 in CPython. Rust's `char::to_digit` only handles ASCII, so the Nd
+/// blocks are listed explicitly.
+fn unicode_decimal_digit(c: char) -> Option<char> {
+    let cp = c as u32;
+    const BLOCKS: [u32; 40] = [
+        0x0030, 0x0660, 0x06F0, 0x07C0, 0x0966, 0x09E6, 0x0A66, 0x0AE6,
+        0x0B66, 0x0BE6, 0x0C66, 0x0CE6, 0x0D66, 0x0DE6, 0x0E50, 0x0ED0,
+        0x0F20, 0x1040, 0x1090, 0x17E0, 0x1810, 0x1946, 0x19D0, 0x1A80,
+        0x1A90, 0x1B50, 0x1BB0, 0x1C40, 0x1C50, 0xA620, 0xA8D0, 0xA900,
+        0xA9D0, 0xA9F0, 0xAA50, 0xABF0, 0xFF10, 0x104A0, 0x11066, 0x110F0,
+    ];
+    for &start in &BLOCKS {
+        if cp >= start && cp < start + 10 {
+            return char::from_u32('0' as u32 + (cp - start));
+        }
+    }
+    None
+}
+
 /// Shared `int()` string/bytes parsing: trims, strips underscores, splits the
 /// sign, detects `0x`/`0o`/`0b` prefixes when no base is given, and parses.
 /// `repr_str` is the `%r`-style rendering used in the ValueError message
 /// (`'½'` for a str, `b'123\x00'` for bytes).
 fn int_from_digit_string(s: &str, base_obj: Option<&PyObjectRef>, repr_str: &str) -> PyResult<PyObjectRef> {
     let s_trim = s.trim();
-    let s_clean: String = s_trim.chars().filter(|&c| c != '_').collect();
+    // Normalize Unicode decimal digits (१२३ -> 123, any Nd category) to
+    // ASCII so parsing/validation see plain digits; everything else is kept
+    // for the underscore validation and prefix detection below.
+    let s_norm: String = s_trim.chars().map(|c| {
+        unicode_decimal_digit(c).unwrap_or(c)
+    }).collect();
+    let s_clean: String = s_norm.chars().filter(|&c| c != '_').collect();
     let (sign, body) = match s_clean.as_bytes().first() {
         Some(b'-') => (-1, &s_clean[1..]),
         Some(b'+') => (1, &s_clean[1..]),
@@ -542,7 +569,7 @@ fn int_from_digit_string(s: &str, base_obj: Option<&PyObjectRef>, repr_str: &str
     // (no leading/trailing/double). Validated on the ORIGINAL string, not
     // the underscore-stripped body.
     {
-        let orig = s_trim.trim_start_matches(|c: char| c == '+' || c == '-');
+        let orig = s_norm.trim_start_matches(|c: char| c == '+' || c == '-');
         let (orig, had_prefix) = if let Some(r) = orig.strip_prefix("0x").or_else(|| orig.strip_prefix("0X"))
             .or_else(|| orig.strip_prefix("0o")).or_else(|| orig.strip_prefix("0O"))
             .or_else(|| orig.strip_prefix("0b")).or_else(|| orig.strip_prefix("0B")) {
