@@ -808,6 +808,15 @@ pub(crate) fn float_fromhex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() { return Err(PyError::type_error("float.fromhex() requires exactly 1 argument")); }
     let s = args[0].str();
     let s = s.trim();
+    // At most ONE leading sign ('++0x1.0p-0', '-+0x1.0p0' are invalid).
+    {
+        let mut c = s.chars();
+        let first = c.next();
+        let second = c.next();
+        if matches!(first, Some('+') | Some('-')) && matches!(second, Some('+') | Some('-')) {
+            return Err(PyError::value_error("invalid hexadecimal floating-point literal"));
+        }
+    }
     let lower = s.to_lowercase();
     // nan spellings (with optional sign, case-insensitive) — all produce the
     // same nan.
@@ -819,12 +828,28 @@ pub(crate) fn float_fromhex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let s = s.strip_prefix("+").unwrap_or(s);
     let sign = if s.starts_with('-') { -1.0 } else { 1.0 };
     let s = s.strip_prefix('-').unwrap_or(s.strip_prefix('+').unwrap_or(s));
+    // A second sign ('++0x1.0p-0', '-+0x1.0p0') is invalid.
+    if s.starts_with('+') || s.starts_with('-') {
+        return Err(PyError::value_error("invalid hexadecimal floating-point literal"));
+    }
     let s = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
+    if s.is_empty() {
+        return Err(PyError::value_error("invalid hexadecimal floating-point literal"));
+    }
     // Split off the 'p' exponent FIRST — a mantissa without a dot
     // ('0x1p-1022') otherwise loses its exponent to the dot-split below.
     let (mantissa, exp_part) = s.split_once('p').or_else(|| s.split_once('P'))
         .unwrap_or((s, ""));
+    // A 'p'/'P' present but with no exponent digits after it ('0x0p') is
+    // invalid, not an implicit exponent of 0.
+    if exp_part.is_empty() && (s.contains('p') || s.contains('P')) {
+        return Err(PyError::value_error("invalid hexadecimal floating-point literal"));
+    }
     let (int_part, frac_part) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    // No hex digits before OR after the point ('0x.p0', '0x.') is invalid.
+    if int_part.is_empty() && frac_part.is_empty() {
+        return Err(PyError::value_error("invalid hexadecimal floating-point literal"));
+    }
     // Parse the mantissa EXACTLY: d = int * 16**frac_len + frac (a 17-digit
     // hex int overflows i64 — 0x10000000000000000 must be 2**64, not
     // silently 0); the fractional point is folded into the binary exponent
