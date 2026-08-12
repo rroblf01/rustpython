@@ -461,15 +461,25 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
             }
         },
     }));
-    // __hash__(self): hash based on pointer
+    // __hash__(self): hash based on pointer (identity hash). Inline values
+    // (SmallInt/SmallFloat/SmallStr/None) have no allocation to point at —
+    // `&*args[0].borrow()` would hash a transient stack temporary, unstable
+    // across calls — so those use their stable VALUE hash instead (which is
+    // also what `hash()` reports for them, keeping `test_hash_nan`'s
+    // `hash(nan) == object.__hash__(nan)` invariant intact).
     object_dict.insert_str("__hash__", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "__hash__".to_string(),
         func: |args| {
             if args.is_empty() {
                 return Err(PyError::type_error("__hash__ requires at least 1 argument (self)"));
             }
-            let ptr: *const PyObject = &*args[0].borrow();
-            Ok(py_int(ptr as i64))
+            match &args[0] {
+                PyObjectRef::Mut(_) | PyObjectRef::Imm(_) => {
+                    let ptr: *const PyObject = &*args[0].borrow();
+                    Ok(py_int(ptr as i64))
+                }
+                _ => Ok(py_int(args[0].hash()? as i64)),
+            }
         },
     }));
     // __new__(cls, *extra): creates a new instance of cls. When cls
@@ -790,6 +800,43 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     float_dict.insert_str("__init__", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "__init__".to_string(),
         func: crate::object::native_base_init_builtin,
+    }));
+    // __hash__: float values hash via CPython's mod-2**61-1 double hash.
+    // Present in the type dict so a transparent float SUBCLASS routes here
+    // (MRO finds float.__hash__ before any later base's Python-level
+    // __hash__), and so a subclass nan hashes by object identity — matching
+    // `object.__hash__`'s pointer hash, as CPython 3.13+ requires.
+    float_dict.insert_str("__hash__", PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "__hash__".to_string(),
+        func: |args| {
+            if args.is_empty() { return Err(PyError::type_error("float.__hash__() takes exactly 1 argument")); }
+            // The float VALUE is either the arg itself (SmallFloat/boxed
+            // Float) or the native backing of a transparent subclass
+            // instance.
+            let v = {
+                let b = args[0].borrow();
+                match &*b {
+                    PyObject::Float(f) => *f,
+                    PyObject::Instance { .. } => {
+                        let backing = crate::object::native_backing_of(&args[0]);
+                        match backing {
+                            Some(bk) => match &*bk.borrow() {
+                                PyObject::Float(f) => *f,
+                                _ => return Err(PyError::type_error("float.__hash__() argument has no float backing")),
+                            },
+                            None => return Err(PyError::type_error("float.__hash__() argument has no float backing")),
+                        }
+                    }
+                    _ => return Err(PyError::type_error("float.__hash__() argument must be float")),
+                }
+            };
+            if v.is_nan() {
+                // CPython hashes NaN by object identity.
+                let ptr: *const PyObject = &*args[0].borrow();
+                return Ok(py_int(ptr as i64));
+            }
+            Ok(py_int(crate::object::hash_double(v) as i64))
+        },
     }));
     let float_type = PyObjectRef::new(PyObject::Type {
         name: "float".to_string(),

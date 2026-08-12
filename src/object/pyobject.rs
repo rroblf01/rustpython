@@ -731,12 +731,15 @@ impl PyObject {
             // cross-type-matching — which only matters for fractional
             // int/float equality, impossible for finite non-whole floats).
             PyObject::Float(f) => {
+                // NaN hashes to 0 (see the SmallFloat arm in
+                // `PyObjectRef::hash` — this enum method has no handle to
+                // compute an object-identity hash). Finite values use
+                // CPython's `_Py_HashDouble` so whole-number floats hash
+                // identically to the equal int AND `hash(inf) == 314159`.
                 if f.is_nan() {
                     Ok(0)
-                } else if f.fract() == 0.0 && f.is_finite() && f.abs() < 1e18 {
-                    Ok(hash_bigint(&BigInt::from(*f as i64)))
                 } else {
-                    Ok(f.to_bits() as usize)
+                    Ok(hash_double(*f))
                 }
             }
             PyObject::Complex(re, im) => {

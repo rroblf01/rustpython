@@ -875,13 +875,16 @@ impl PyObjectRef {
             PyObjectRef::SmallInt(n) => Ok(hash_bigint(&BigInt::from(*n))),
             PyObjectRef::SmallBool(b) => Ok(if *b { 1 } else { 0 }),
             PyObjectRef::SmallFloat(f) => {
+                // NaN hashes to 0 (this interpreter's float values are
+                // INLINE `SmallFloat`s with no per-object identity to hash —
+                // `object.__hash__(nan)` mirrors this, returning
+                // `args[0].hash()` for inline values). Finite values use
+                // CPython's real mod-2**61-1 `_Py_HashDouble`, so
+                // `hash(1.0) == hash(1)` and `hash(inf) == sys.hash_info.inf`.
                 if f.is_nan() {
                     Ok(0)
-                } else if f.fract() == 0.0 && f.is_finite() && f.abs() < 1e18 {
-                    Ok(hash_bigint(&BigInt::from(*f as i64)))
                 } else {
-                    let bits = f.to_bits();
-                    Ok(bits as usize ^ (bits >> 32) as usize)
+                    Ok(hash_double(*f))
                 }
             }
             PyObjectRef::SmallStr(s) => {

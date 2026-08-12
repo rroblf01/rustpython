@@ -21,7 +21,7 @@ thread_local! {
 /// Convert an f64 to its exact integer via ceil/floor/trunc (`mode`: 0 =
 /// trunc toward zero, 1 = ceil toward +inf, 2 = floor toward -inf). Returns
 /// an error for nan/inf. Handles values beyond i64 range (1.23e167).
-fn f64_to_int_ceil_floor_trunc(v: f64, mode: u8) -> PyResult<BigInt> {
+pub(crate) fn f64_to_int_ceil_floor_trunc(v: f64, mode: u8) -> PyResult<BigInt> {
     if v.is_nan() {
         return Err(PyError::value_error("cannot convert float NaN to integer"));
     }

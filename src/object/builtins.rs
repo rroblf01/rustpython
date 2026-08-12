@@ -460,7 +460,12 @@ pub fn builtin_int(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let obj = args[0].borrow();
     match &*obj {
         PyObject::Int(_) => Ok(args[0].clone()),
-        PyObject::Float(f) => Ok(py_int(*f as i64)),
+        PyObject::Float(f) => {
+            // Exact float->int truncation (a plain `*f as i64` cast would
+            // silently saturate at i64::MAX for e.g. 1.797e308 instead of
+            // producing the exact 309-digit integer; inf/nan raise).
+            f64_to_int_ceil_floor_trunc(*f, 0).map(py_int)
+        }
         PyObject::Str(s) => {
             let s_trim = s.trim();
             #[cfg(not(feature = "no_int_str_limit"))]
