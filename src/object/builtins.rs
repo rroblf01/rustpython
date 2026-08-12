@@ -804,9 +804,41 @@ pub fn builtin_float(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 /// `NATIVE_VALUE_CTOR_KEY`'s doc comment) — that string-name dispatch never
 /// fires for a real `Type` object, only for the old bare `BuiltinFunction`
 /// shape.
+/// Builds a float-classmethod result (`fromhex`) for the calling type: a
+/// plain float for `float` itself, otherwise a REAL subclass construction so
+/// a custom `__new__`/`__init__` runs (`F.fromhex(...)` where F's __new__
+/// adds 1 yields value+1 as an F — test_float's HexFloatTestCase.
+pub(crate) fn float_subclass_result(cls: &PyObjectRef, value: f64) -> PyResult<PyObjectRef> {
+    let is_plain = matches!(&*cls.borrow(), PyObject::Type { name, .. } if name == "float");
+    if is_plain {
+        return Ok(py_float(value));
+    }
+    // A user-defined __new__ (Python Function) runs the real construction.
+    if let Some(new_fn) = lookup_dunder_via_mro(cls, "__new__") {
+        if matches!(&*new_fn.borrow(), PyObject::Function(_)) {
+            return call_bound_method(new_fn, cls.clone(), vec![py_float(value)]);
+        }
+    }
+    // Native __new__: build the instance with the value as its backing, then
+    // run a custom Python __init__ if present (float's own native init is
+    // skipped — the backing is already populated).
+    let mut dict = AttrMap::new();
+    dict.insert(NATIVE_BACKING_KEY.to_string(), py_float(value));
+    let instance = PyObjectRef::new(PyObject::Instance { typ: cls.clone(), dict });
+    if let Some(init_fn) = lookup_dunder_via_mro(cls, "__init__") {
+        let is_native = matches!(&*init_fn.borrow(), PyObject::BuiltinFunction { .. } | PyObject::Closure(_));
+        if !is_native {
+            call_bound_method(init_fn, instance.clone(), vec![py_float(value)])?;
+        }
+    }
+    Ok(instance)
+}
+
 pub(crate) fn float_fromhex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.is_empty() { return Err(PyError::type_error("float.fromhex() requires exactly 1 argument")); }
-    let s = args[0].str();
+    // Bound as a classmethod: args[0] is the calling type, args[1] the string.
+    if args.len() < 2 { return Err(PyError::type_error("float.fromhex() requires exactly 1 argument")); }
+    let cls = &args[0];
+    let s = args[1].str();
     let s = s.trim();
     // At most ONE leading sign ('++0x1.0p-0', '-+0x1.0p0' are invalid).
     {
@@ -820,10 +852,10 @@ pub(crate) fn float_fromhex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let lower = s.to_lowercase();
     // nan spellings (with optional sign, case-insensitive) — all produce the
     // same nan.
-    if lower == "nan" || lower == "+nan" || lower == "-nan" { return Ok(py_float(f64::NAN)); }
+    if lower == "nan" || lower == "+nan" || lower == "-nan" { return float_subclass_result(cls, f64::NAN); }
     if lower == "inf" || lower == "+inf" || lower == "-inf" || lower == "infinity" || lower == "+infinity" || lower == "-infinity" {
         let sign = if lower.starts_with('-') { -1.0 } else { 1.0 };
-        return Ok(py_float(sign * f64::INFINITY));
+        return float_subclass_result(cls, sign * f64::INFINITY);
     }
     let s = s.strip_prefix("+").unwrap_or(s);
     let sign = if s.starts_with('-') { -1.0 } else { 1.0 };
@@ -929,7 +961,7 @@ pub(crate) fn float_fromhex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if result.is_infinite() {
         return Err(PyError::overflow_error("hexadecimal value too large to represent as a float"));
     }
-    Ok(py_float(result))
+    float_subclass_result(cls, result)
 }
 
 /// `x * 2**exp` without intermediate overflow/underflow — a naive
@@ -977,10 +1009,18 @@ pub(crate) fn float_class_hex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             else { Ok(py_str(&format!("{}nan", sign))) }
         } else if *v == 0.0 { Ok(py_str(&format!("{}0x0.0p+0", sign))) }
         else {
-            let exp = biased_exp - 1023;
             let hex_mantissa = format!("{:013x}", mantissa);
-            let hex_mantissa = hex_mantissa.trim_end_matches('0');
-            Ok(py_str(&format!("{}0x1.{}p{:+}", sign, if hex_mantissa.is_empty() { "0" } else { hex_mantissa }, exp)))
+            if biased_exp == 0 {
+                // Subnormal: same convention as the instance `x.hex()` —
+                // raw 52-bit mantissa after a 0x0. prefix at fixed exponent
+                // -1022 (NOT the 0x1.XXXXp-1023 normal form, which would
+                // misrepresent the exact value).
+                Ok(py_str(&format!("{}0x0.{}p-1022", sign, hex_mantissa)))
+            } else {
+                let exp = biased_exp - 1023;
+                // Keep ALL 13 frac hex digits (CPython never trims them).
+                Ok(py_str(&format!("{}0x1.{}p{:+}", sign, hex_mantissa, exp)))
+            }
         }
     } else { Err(PyError::type_error("hex() argument must be float")) }
 }

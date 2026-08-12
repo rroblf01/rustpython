@@ -782,10 +782,10 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
             }
         },
     }));
-    float_dict.insert_str("fromhex", PyObjectRef::new(PyObject::BuiltinFunction {
+    float_dict.insert_str("fromhex", PyObjectRef::new(PyObject::ClassMethod { func: PyObjectRef::imm(PyObject::BuiltinFunction {
         name: "fromhex".to_string(),
         func: crate::object::float_fromhex,
-    }));
+    }) }));
     float_dict.insert_str("hex", PyObjectRef::new(PyObject::BuiltinFunction {
         name: "hex".to_string(),
         func: crate::object::float_class_hex,
