@@ -8461,17 +8461,21 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
     // --- parse [[fill]align] ---
     let fill_char;
     let align;
+    let align_explicit;
     if idx + 1 < len && matches!(chars[idx + 1], '<' | '>' | '^' | '=') {
         fill_char = chars[idx];
         align = chars[idx + 1];
+        align_explicit = true;
         idx += 2;
     } else if idx < len && matches!(chars[idx], '<' | '>' | '^' | '=') {
         fill_char = ' ';
         align = chars[idx];
+        align_explicit = true;
         idx += 1;
     } else {
         fill_char = ' ';
         align = '>';
+        align_explicit = false;
     }
 
     // --- parse [sign] ---
@@ -8549,37 +8553,34 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
         zero_pad = false;
     }
 
-    // --- parse grouping option [,|_] ---
-    let grouping: Option<char> = if idx < len && (chars[idx] == ',' || chars[idx] == '_') {
+    // --- parse grouping option [,|_] (integer part) ---
+    let int_grouping: Option<char> = if idx < len && (chars[idx] == ',' || chars[idx] == '_') {
         let g = chars[idx];
         idx += 1;
         Some(g)
     } else {
         None
     };
-    // CPython scans the WHOLE spec for grouping chars: both ',' and '_'
-    // anywhere -> mixed error; a repeated char -> repeated error. This also
-    // catches '{:.,_f}' (`.` before `_` wouldn't parse as grouping above).
-    {
-        let commas = spec_str.chars().filter(|&c| c == ',').count();
-        let underscores = spec_str.chars().filter(|&c| c == '_').count();
-        if commas > 0 && underscores > 0 {
-            return Err(PyError::value_error("Cannot specify both ',' and '_'."));
+    // A second grouping char right after the first is a repeat/mix error
+    // ('{:,,}', '{:__}', '{:,_}', '{:_,}').
+    if int_grouping.is_some() && idx < len && (chars[idx] == ',' || chars[idx] == '_') {
+        let g = chars[idx];
+        if int_grouping == Some(g) {
+            return Err(PyError::value_error(format!("Cannot specify '{}' with '{}'.", g, g)));
         }
-        if commas > 1 {
-            return Err(PyError::value_error("Cannot specify ',' with ','."));
-        }
-        if underscores > 1 {
-            return Err(PyError::value_error("Cannot specify '_' with '_'."));
-        }
+        return Err(PyError::value_error("Cannot specify both ',' and '_'."));
     }
 
-    // --- parse [.precision] ---
-    let precision: Option<usize> = if idx < len && chars[idx] == '.' {
+    // --- parse [.precision] and fraction-part grouping ---
+    // CPython splits the grouping option into TWO: one before the precision
+    // (integer part) and one after (fraction part) — format(x, '._f') groups
+    // the digits after the point. A '.' with no digits AND no trailing
+    // grouping char is "Format specifier missing precision".
+    let (precision, frac_grouping): (Option<usize>, Option<char>) = if idx < len && chars[idx] == '.' {
         idx += 1;
         let start = idx;
         while idx < len && chars[idx].is_ascii_digit() { idx += 1; }
-        if idx > start {
+        let p = if idx > start {
             // See the matching `width` comment above — same overflow-panic
             // fix, same real trigger (`test_format.py::test_precision`'s
             // `.%sf % (sys.maxsize + 1)`).
@@ -8602,10 +8603,33 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
             }
             Some(p)
         } else {
-            Some(0) // '.' with no digits means precision 0
+            None
+        };
+        // Fraction-part grouping directly after the '.'/precision digits.
+        let fg: Option<char> = if idx < len && (chars[idx] == ',' || chars[idx] == '_') {
+            let g = chars[idx];
+            idx += 1;
+            Some(g)
+        } else {
+            None
+        };
+        if p.is_none() && fg.is_none() {
+            return Err(PyError::value_error("Format specifier missing precision"));
         }
+        // Repeat/mix check in the fraction position, and mixing the fraction
+        // separator with a DIFFERENT integer-part separator ('{:.,_f}').
+        if fg.is_some() && idx < len && (chars[idx] == ',' || chars[idx] == '_') {
+            if fg == Some(chars[idx]) {
+                return Err(PyError::value_error(format!("Cannot specify '{}' with '{}'.", chars[idx], chars[idx])));
+            }
+            return Err(PyError::value_error("Cannot specify both ',' and '_'."));
+        }
+        if int_grouping.is_some() && fg.is_some() && int_grouping != fg {
+            return Err(PyError::value_error("Cannot specify both ',' and '_'."));
+        }
+        (p, fg)
     } else {
-        None
+        (None, None)
     };
 
     // --- parse [type] ---
@@ -8644,10 +8668,44 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
         }
     }
 
+    // Grouping (','/'_') is only valid with compatible presentation types
+    // ('{:,.3s}' / '{:,,.3f}' raise "Cannot specify ',' with 's'."; '_' is
+    // additionally allowed for b/o/x/X where it groups every four digits).
+    if let Some(sep) = int_grouping {
+        let t = fmt_type.unwrap_or('\0');
+        let allowed = matches!(t, 'd' | 'e' | 'f' | 'g' | 'E' | 'G' | '%' | 'F' | '\0')
+            || (sep == '_' && matches!(t, 'b' | 'o' | 'x' | 'X'));
+        if !allowed {
+            if t > '\u{20}' && t < '\u{80}' {
+                return Err(PyError::value_error(format!("Cannot specify '{}' with '{}'.", sep, t)));
+            }
+            return Err(PyError::value_error(format!("Cannot specify '{}' with '\\x{:x}'.", sep, t as u32)));
+        }
+    }
+    // The fraction-part grouping is incompatible with the 'n' type
+    // ('{:,.3n}' raises "Cannot specify ',' with 'n'.").
+    if let Some(sep) = frac_grouping {
+        if fmt_type == Some('n') {
+            return Err(PyError::value_error(format!("Cannot specify '{}' with 'n'.", sep)));
+        }
+    }
+
     // Determine value type
     let val_borrowed = val.borrow();
     let is_int = matches!(&*val_borrowed, PyObject::Int(_) | PyObject::Bool(_));
     let is_float = matches!(&*val_borrowed, PyObject::Float(_));
+
+    // A float only accepts float presentation types — 's'/'d'/'o'/'x'/'X'/
+    // 'b'/'c' raise ValueError (format(3.0, 's') is an error, not str()).
+    if is_float {
+        if let Some(t) = fmt_type {
+            if !matches!(t, 'e' | 'E' | 'f' | 'F' | 'g' | 'G' | 'n' | '%') {
+                return Err(PyError::value_error(format!(
+                    "Unknown format code '{}' for object of type 'float'", t
+                )));
+            }
+        }
+    }
 
     // Complex formatting: apply the spec to BOTH parts and join
     // (format(1.2+0j, '.0f') == '1+0j').
@@ -8739,8 +8797,20 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
             }
         }
 
-        // Float: default (no type) — use str() for compat
-        (None, _, true) => val.str(),
+        // Float: default (no type) — no precision: str(); with precision it
+        // behaves like 'g' (format(123.456, '.4') == '123.5').
+        (None, _, true) => {
+            if let Some(mut f) = val.as_f64() {
+                if zero_coerce && f == 0.0 { f = 0.0; }
+                match precision {
+                    Some(p) => {
+                        let s = crate::object::format_percent_g(f, p, false, true);
+                        apply_sign(&s, f, sign)
+                    }
+                    None => val.str(),
+                }
+            } else { val.str() }
+        }
         // Float: fixed-point (an int with 'f' converts to float first)
         (Some('f'), _, _) | (Some('F'), _, _) => {
             if let Some(mut f) = val.as_f64() {
@@ -8748,7 +8818,14 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
                 // 'f' defaults to precision 6 (like %f), not str() — real
                 // CPython: format(0.0, 'f') == '0.000000'.
                 let mut s = format_float_with_sign(f, sign, Some(precision.unwrap_or(6)));
-                if alternate && !s.contains('.') {                    s.push('.');
+                // 'F' upper-cases inf/nan (INF/NAN), like %F.
+                if fmt_type == Some('F') && (f.is_nan() || f.is_infinite()) {
+                    s = s.to_uppercase();
+                }
+                // the # flag keeps a trailing point for integral values, but
+                // never for inf/nan (format(inf, '#f') == 'inf').
+                if alternate && !s.contains('.') && !f.is_nan() && !f.is_infinite() {
+                    s.push('.');
                 }
                 s
             } else { val.str() }
@@ -8773,7 +8850,7 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
         (Some('g'), _, _) => {
             if let Some(mut f) = val.as_f64() {
                 if zero_coerce && f == 0.0 { f = 0.0; }
-                let s = crate::object::format_percent_g(f, precision.unwrap_or(6), alternate);
+                let s = crate::object::format_percent_g(f, precision.unwrap_or(6), alternate, false);
                 apply_sign(&s, f, sign)
             } else { val.str() }
         }
@@ -8781,7 +8858,7 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
         (Some('G'), _, _) => {
             if let Some(mut f) = val.as_f64() {
                 if zero_coerce && f == 0.0 { f = 0.0; }
-                let s = crate::object::format_percent_g(f, precision.unwrap_or(6), alternate).to_uppercase();
+                let s = crate::object::format_percent_g(f, precision.unwrap_or(6), alternate, false).to_uppercase();
                 apply_sign(&s, f, sign)
             } else { val.str() }
         }
@@ -8789,10 +8866,9 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
         (Some('%'), _, true) => {
             if let PyObject::Float(f) = &*val_borrowed {
                 let pct = f * 100.0;
-                let s = match precision {
-                    Some(p) => format!("{:.prec$}", pct, prec = p),
-                    None => format!("{}", pct),
-                };
+                // '%' defaults to 6 decimals like 'f' (format(-1.0, '%') ==
+                // '-100.000000%'), not str()-style shortest repr.
+                let s = format_float_with_sign(pct, sign, Some(precision.unwrap_or(6)));
                 format!("{}%", s)
             } else { val.str() }
         }
@@ -8801,12 +8877,39 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
         _ => val.str(),
     };
 
+    // Zero-padding that merges zeros INTO the integer digits ('0' flag with
+    // NO explicit alignment) must group the padded zeros too — CPython
+    // format(x, '021_._f') == '0_000_123_456.123_456', not
+    // '000000123_456.123_456'. Insert zeros one at a time until the grouped
+    // length reaches the width (grouping can add a separator, so a width
+    // like 020 can legitimately render as 21 chars).
+    let zero_pad_group = |base: &str, width: usize| -> String {
+        let mut s = base.to_string();
+        loop {
+            let grouped = apply_grouping(&s, int_grouping, frac_grouping);
+            if grouped.len() >= width {
+                return grouped;
+            }
+            let (sign, rest) = if let Some(r) = s.strip_prefix('-') {
+                ("-", r)
+            } else if let Some(r) = s.strip_prefix('+') {
+                ("+", r)
+            } else if let Some(r) = s.strip_prefix(' ') {
+                (" ", r)
+            } else {
+                ("", s.as_str())
+            };
+            s = format!("{}0{}", sign, rest);
+        }
+    };
+
     // Thousands grouping (',' or '_'): insert the separator every 3 digits
-    // of the integer part (format(1234567, ',') == '1,234,567').
-    let base = if let Some(sep) = grouping {
-        apply_grouping(&base, sep)
+    // of the integer part (format(1234567, ',') == '1,234,567') and/or the
+    // fraction part (format(x, '._f') groups the digits after the point).
+    let base = if zero_pad && !align_explicit && (int_grouping.is_some() || frac_grouping.is_some()) {
+        zero_pad_group(&base, width.unwrap_or(0))
     } else {
-        base
+        apply_grouping(&base, int_grouping, frac_grouping)
     };
 
     // The `z` flag coerces a NEGATIVE ZERO RESULT (after rounding) to
@@ -8824,10 +8927,12 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
         base
     };
 
-    // Apply zero-padding (fill='0', align='=' for numbers)
-    let base = if zero_pad {
-        let effective_align = '=';
-        apply_padding(&base, width, effective_align, '0', true)
+    // Apply zero-padding (fill='0'): with an explicit alignment the fill
+    // chars are padding, not digits (format(x, '>021_._f') ==
+    // '000000123_456.123_456'); the bare '0' flag already merged+grouped
+    // its zeros above.
+    let base = if zero_pad && align_explicit {
+        apply_padding(&base, width, align, '0', false)
     } else {
         base
     };
@@ -8889,6 +8994,15 @@ fn format_int_with_sign(i: &BigInt, sign: char, precision: Option<usize>) -> Str
 
 /// Format a float with sign and precision.
 fn format_float_with_sign(val: f64, sign: char, precision: Option<usize>) -> String {
+    if val.is_nan() {
+        // CPython prints 'nan' (always signless by value; the +/space flags
+        // still apply: format(nan, '+f') == '+nan').
+        return apply_sign("nan", val, sign);
+    }
+    if val.is_infinite() {
+        let s = if val.is_sign_negative() { "-inf" } else { "inf" }.to_string();
+        return apply_sign(&s, val, sign);
+    }
     let s = match precision {
         Some(p) => format!("{:.prec$}", val, prec = p),
         None => format!("{}", val),
@@ -8896,30 +9010,66 @@ fn format_float_with_sign(val: f64, sign: char, precision: Option<usize>) -> Str
     apply_sign(&s, val, sign)
 }
 
-/// Insert ',' or '_' every 3 digits of the integer part of a formatted
-/// number (thousands grouping).
-fn apply_grouping(s: &str, sep: char) -> String {
+/// Insert ',' or '_' every 3 digits of the integer part (from the right) and
+////or of the fraction part (from the left) of a formatted number. Handles
+/// scientific suffixes (`e+05`) and the `%` suffix so the mantissa/percent
+/// fraction can be grouped too.
+fn apply_grouping(s: &str, int_sep: Option<char>, frac_sep: Option<char>) -> String {
+    if int_sep.is_none() && frac_sep.is_none() {
+        return s.to_string();
+    }
     let (sign, rest) = if let Some(r) = s.strip_prefix('-') {
         ("-", r)
     } else if let Some(r) = s.strip_prefix('+') {
         ("+", r)
+    } else if let Some(r) = s.strip_prefix(' ') {
+        (" ", r)
     } else {
         ("", s)
     };
-    let (int_part, frac) = match rest.split_once('.') {
-        Some((i, f)) => (i, Some(f)),
-        None => (rest, None),
+    // Split off any exponent/percent suffix so it isn't grouped.
+    let (body, suffix) = match rest.find(['e', 'E', '%']) {
+        Some(p) => (&rest[..p], &rest[p..]),
+        None => (rest, ""),
     };
-    let mut grouped = String::new();
-    for (i, c) in int_part.chars().enumerate() {
-        if i > 0 && (int_part.len() - i) % 3 == 0 {
-            grouped.push(sep);
+    let (int_part, frac_part) = match body.split_once('.') {
+        Some((i, f)) => (i, Some(f)),
+        None => (body, None),
+    };
+    let group_int = |t: &str| -> String {
+        match int_sep {
+            Some(sep) => {
+                let mut g = String::new();
+                for (i, c) in t.chars().enumerate() {
+                    if i > 0 && (t.len() - i) % 3 == 0 {
+                        g.push(sep);
+                    }
+                    g.push(c);
+                }
+                g
+            }
+            None => t.to_string(),
         }
-        grouped.push(c);
-    }
-    match frac {
-        Some(f) => format!("{}{}.{}", sign, grouped, f),
-        None => format!("{}{}", sign, grouped),
+    };
+    let group_frac = |t: &str| -> String {
+        match frac_sep {
+            Some(sep) => {
+                let mut g = String::new();
+                for (i, c) in t.chars().enumerate() {
+                    if i > 0 && i % 3 == 0 {
+                        g.push(sep);
+                    }
+                    g.push(c);
+                }
+                g
+            }
+            None => t.to_string(),
+        }
+    };
+    let grouped_int = group_int(int_part);
+    match frac_part {
+        Some(f) => format!("{}{}.{}{}", sign, grouped_int, group_frac(f), suffix),
+        None => format!("{}{}{}", sign, grouped_int, suffix),
     }
 }
 

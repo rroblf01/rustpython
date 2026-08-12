@@ -195,6 +195,12 @@ pub fn py_set() -> PyObjectRef {
 /// are exact within ~55 digits, so format at min(prec, 100) and pad with
 /// zeros to `prec`.
 fn format_fixed_padded(f: f64, prec: usize) -> String {
+    if f.is_nan() {
+        return "nan".to_string();
+    }
+    if f.is_infinite() {
+        return if f.is_sign_negative() { "-inf".to_string() } else { "inf".to_string() };
+    }
     if prec <= 100 {
         return format!("{:.prec$}", f, prec = prec);
     }
@@ -213,11 +219,26 @@ fn format_fixed_padded(f: f64, prec: usize) -> String {
     s
 }
 
+/// Apply the `%+` / `% ` sign flags to a float-formatted string (a leading
+/// `+`/space for non-negative values; nans are always "positive" so they get
+/// the sign like CPython).
+fn apply_sign_flag(s: String, flags: &str) -> String {
+    if !s.starts_with('-') && flags.contains('+') {
+        format!("+{}", s)
+    } else if !s.starts_with('-') && flags.contains(' ') {
+        format!(" {}", s)
+    } else {
+        s
+    }
+}
+
 /// `%e`/`%E` scientific-notation formatting: mantissa with `prec` digits
 /// after the point, then `e±NN` (exponent at least 2 digits, `E` for %E).
 /// `alternate` (#) keeps the decimal point when prec == 0.
 pub(crate) fn format_percent_e(f: f64, prec: usize, alternate: bool, upper: bool) -> String {
-    let sign = if f.is_sign_negative() { "-" } else { "" };
+    // nans are always considered positive when formatted (CPython prints
+    // 'nan' even for a -nan whose sign bit is set).
+    let sign = if f.is_nan() { "" } else if f.is_sign_negative() { "-" } else { "" };
     let abs = f.abs();
     if abs == 0.0 {
         let mut s = format!("{:.*}e+00", prec, 0.0f64);
@@ -231,8 +252,13 @@ pub(crate) fn format_percent_e(f: f64, prec: usize, alternate: bool, upper: bool
     let sci = format!("{:e}", abs);
     let (mant_s, exp_s) = match sci.split_once('e') {
         Some(p) => p,
-        // inf/nan have no 'e' in {:e} output
-        None => return format!("{}{}", sign, sci),
+        // inf/nan have no 'e' in {:e} output — Rust prints "NaN"/"inf",
+        // CPython prints "nan"/"inf" for %e (and "NAN"/"INF" for %E).
+        None => {
+            let base = sci.to_ascii_lowercase();
+            let base = if upper { base.to_ascii_uppercase() } else { base };
+            return format!("{}{}", sign, base);
+        }
     };
     let exp: i32 = exp_s.parse().unwrap_or(0);
     // Round the mantissa's DIGITS to `prec` decimals with round-half-even on
@@ -306,9 +332,19 @@ pub(crate) fn format_percent_e(f: f64, prec: usize, alternate: bool, upper: bool
 
 /// `%g`/`%G` general formatting: precision = significant digits; uses
 /// scientific if the exponent is < -4 or >= precision, else fixed; strips
-/// trailing zeros unless `#`.
-pub(crate) fn format_percent_g(f: f64, prec: usize, alternate: bool) -> String {
+/// trailing zeros unless `#`. With `add_dot_0` (CPython's ADD_DOT_0, used by
+/// the EMPTY float presentation type with a precision) the scientific
+/// threshold shifts to `exp >= precision-1` so 1234.56 with precision 4
+/// renders as '1.235e+03' rather than '1235' (and the fixed form always
+/// keeps a fractional digit).
+pub(crate) fn format_percent_g(f: f64, prec: usize, alternate: bool, add_dot_0: bool) -> String {
     let abs = f.abs();
+    if abs.is_nan() {
+        return "nan".to_string();
+    }
+    if abs.is_infinite() {
+        return if f.is_sign_negative() { "-inf".to_string() } else { "inf".to_string() };
+    }
     if abs == 0.0 {
         let sign = if f.is_sign_negative() { "-" } else { "" };
         let mut s = format!("{}{:.*}", sign, prec.saturating_sub(1).max(0), 0.0f64);
@@ -326,7 +362,8 @@ pub(crate) fn format_percent_g(f: f64, prec: usize, alternate: bool) -> String {
     // Precision 0 is treated as 1 significant digit for the sci threshold
     // (CPython: %.0g of 1 is '1', but %.0g of 10 is '1e+01').
     let eff_prec = prec.max(1);
-    let use_sci = exp < -4 || exp >= eff_prec as i32;
+    let sci_threshold = if add_dot_0 { eff_prec as i32 - 1 } else { eff_prec as i32 };
+    let use_sci = exp < -4 || exp >= sci_threshold;
     if use_sci {
         // %g scientific uses precision-1 decimals
         let mut s = format_percent_e(f, prec.saturating_sub(1), alternate, false);
@@ -591,30 +628,33 @@ pub(crate) fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String,
                             // zeros.
                             if prec > 200000 { return Err("precision too big".to_string()); }
                             let mut s = format_fixed_padded(f, prec);
-                            if flags.contains('#') && !s.contains('.') {
+                            // # keeps the decimal point for integral values,
+                            // but never for inf/nan ('%#f' % inf == 'inf').
+                            if flags.contains('#') && !s.contains('.') && !f.is_nan() && !f.is_infinite() {
                                 s.push('.');
                             }
-                            s
+                            apply_sign_flag(s, &flags)
                         }
                         'F' => {
                             let f = raw.as_f64().unwrap_or(0.0);
                             let prec = precision.unwrap_or(6);
                             if prec > 200000 { return Err("precision too big".to_string()); }
-                            let mut s = format_fixed_padded(f, prec);
+                            // %F upper-cases nan/inf (INF/NAN), like %G.
+                            let mut s = format_fixed_padded(f, prec).to_uppercase();
                             if flags.contains('#') && !s.contains('.') {
                                 s.push('.');
                             }
-                            s
+                            apply_sign_flag(s, &flags)
                         }
                         'e' | 'E' => {
                             let f = raw.as_f64().unwrap_or(0.0);
                             let prec = precision.unwrap_or(6);
-                            format_percent_e(f, prec, flags.contains('#'), false)
+                            apply_sign_flag(format_percent_e(f, prec, flags.contains('#'), conv == 'E'), &flags)
                         }
                         'g' | 'G' => {
                             let f = raw.as_f64().unwrap_or(0.0);
                             let prec = precision.unwrap_or(6);
-                            format_percent_g(f, prec, flags.contains('#'))
+                            apply_sign_flag(format_percent_g(f, prec, flags.contains('#'), false), &flags)
                         }
                         'd' | 'i' | 'u' => {
                             // A non-numeric arg must raise ("%d format: a
@@ -1017,12 +1057,14 @@ pub(crate) fn bytes_interpolate(fmt: &[u8], arg: &PyObjectRef) -> Result<Vec<u8>
                 let s = match conv {
                     b'e' | b'E' => crate::object::format_percent_e(f, p, flags_alt, conv == b'E'),
                     b'g' | b'G' => {
-                        let mut s = crate::object::format_percent_g(f, p, flags_alt);
+                        let mut s = crate::object::format_percent_g(f, p, flags_alt, false);
                         if conv == b'G' { s = s.to_uppercase(); }
                         s
                     }
                     _ => {
+                        // b'f' | b'F' — %F upper-cases nan/inf (INF/NAN).
                         let mut s = format_fixed_padded(f, p);
+                        if conv == b'F' { s = s.to_uppercase(); }
                         if flags_alt && !s.contains('.') { s.push('.'); }
                         s
                     }
