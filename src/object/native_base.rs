@@ -199,6 +199,15 @@ pub(crate) fn native_backing_of(obj: &PyObjectRef) -> Option<PyObjectRef> {
     }
 }
 
+/// Builds an instance of `typ` carrying `backing` as its native backing —
+/// used to wrap a computed native value back into the original subclass
+/// (e.g. `-IntSubclass(5)` is an IntSubclass with backing -5).
+pub(crate) fn make_subclass_instance(typ: &PyObjectRef, backing: PyObjectRef) -> PyObjectRef {
+    let mut dict = crate::object::AttrMap::new();
+    dict.insert(NATIVE_BACKING_KEY.to_string(), backing);
+    PyObjectRef::new(PyObject::Instance { typ: typ.clone(), dict })
+}
+
 pub(crate) fn make_native_backing(kind: &str) -> PyObjectRef {
     match kind {
         "list" => py_list(vec![]),

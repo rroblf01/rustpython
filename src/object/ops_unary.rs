@@ -132,7 +132,11 @@ pub(crate) fn as_complex_parts(obj: &PyObject) -> Option<(f64, f64)> {
 
 pub fn py_neg(val: &PyObjectRef) -> PyResult<PyObjectRef> {
     if let Some(i) = val.as_i64() {
-        return Ok(py_int(-i));
+        // -i64::MIN overflows; it is exactly 2**63, a BigInt.
+        return match i.checked_neg() {
+            Some(n) => Ok(py_int(n)),
+            None => Ok(py_int(-BigInt::from(i))),
+        };
     }
     // A boxed BigInt must negate EXACTLY (not via as_f64, which loses
     // precision) — my UNARY_NEGATIVE rework routes big-int negation here.
@@ -141,6 +145,19 @@ pub fn py_neg(val: &PyObjectRef) -> PyResult<PyObjectRef> {
         PyObject::Int(n) => Ok(py_int(-n.clone())),
         PyObject::Float(n) => Ok(py_float(-n)),
         PyObject::Complex(re, im) => Ok(PyObjectRef::imm(PyObject::Complex(-re, -im))),
+        PyObject::Instance { .. } => {
+            // Native-backing subclasses negate their underlying value
+            // (-IntSubclass(5) is -5, an instance).
+            let typ = match &*b {
+                PyObject::Instance { typ, .. } => typ.clone(),
+                _ => unreachable!(),
+            };
+            if let Some(native) = crate::object::native_backing_of(val) {
+                let negated = py_neg(&native)?;
+                return Ok(crate::object::make_subclass_instance(&typ, negated));
+            }
+            Err(PyError::type_error(format!("bad operand type for unary -: '{}'", b.type_name())))
+        }
         _ => {
             drop(b);
             if let Some(f) = val.as_f64() {

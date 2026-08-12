@@ -610,6 +610,34 @@ fn int_from_digit_string(s: &str, base_obj: Option<&PyObjectRef>, repr_str: &str
     Ok(result)
 }
 
+/// CPython's str->int digit limit: enforced for decimal and non-power-of-2
+/// bases (base 3/36 hit it; base 2/4/8/16/32 use a fast binary path that
+/// skips it). Counts DIGITS, excluding underscores and the sign.
+fn check_int_str_digit_limit(s: &str, base_obj: Option<&PyObjectRef>) -> PyResult<()> {
+    #[cfg(not(feature = "no_int_str_limit"))]
+    {
+        let power_of_two = base_obj.as_ref().and_then(|b| to_index(b).ok())
+            .and_then(|n| n.to_u64())
+            .map(|n| n >= 2 && n & (n - 1) == 0)
+            .unwrap_or(false);
+        if !power_of_two {
+            let limit = INT_MAX_STR_DIGITS.with(|d| d.get());
+            if limit > 0 {
+                // Count DIGITS, ignoring the sign and surrounding whitespace.
+                let digit_len = s.trim()
+                    .trim_start_matches(|c: char| c == '+' || c == '-')
+                    .chars().filter(|&c| c != '_').count();
+                if digit_len > limit as usize {
+                    return Err(PyError::value_error(format!(
+                        "Exceeds the limit ({} digits) for integer string conversion; use sys.set_int_max_str_digits()", limit
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn builtin_int(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() { return Ok(py_int(0)); }
     // Keyword arguments: `x` is positional-only and `base` is the only
@@ -665,30 +693,17 @@ pub fn builtin_int(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             f64_to_int_ceil_floor_trunc(*f, 0).map(py_int)
         }
         PyObject::Str(s) => {
-            #[cfg(not(feature = "no_int_str_limit"))]
-            if base_obj.is_none() {
-                let limit = INT_MAX_STR_DIGITS.with(|d| d.get());
-                if limit > 0 {
-                    // Count DIGITS, excluding underscores ('1_11'*n is n*3
-                    // digits regardless of the extra underscore characters —
-                    // test_underscores_ignored).
-                    let digit_len = s.trim_start_matches(|c: char| c == '+' || c == '-')
-                        .chars().filter(|&c| c != '_').count();
-                    if digit_len > limit as usize {
-                        return Err(PyError::value_error(format!(
-                            "Exceeds the limit ({} digits) for integer string conversion; use sys.set_int_max_str_digits()", limit
-                        )));
-                    }
-                }
-            }
+            check_int_str_digit_limit(s, base_obj.as_ref())?;
             int_from_digit_string(s, base_obj.as_ref(), &format!("'{}'", crate::object::escape_string(s)))
         }
         PyObject::Bytes(b) => {
             let latin: String = b.iter().map(|&x| x as char).collect();
+            check_int_str_digit_limit(&latin, base_obj.as_ref())?;
             int_from_digit_string(&latin, base_obj.as_ref(), &format!("b'{}'", python_bytes_repr(b)))
         }
         PyObject::ByteArray(b) => {
             let latin: String = b.iter().map(|&x| x as char).collect();
+            check_int_str_digit_limit(&latin, base_obj.as_ref())?;
             int_from_digit_string(&latin, base_obj.as_ref(), &format!("bytearray(b'{}')", python_bytes_repr(b)))
         }
         PyObject::MemoryView { .. } => {
@@ -1530,7 +1545,55 @@ pub fn builtin_str(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         if is_exc {
             return Ok(py_str(&exception_instance_str(&args[0])));
         }
+        // int->str digit limit (str(10**10000) raises ValueError), also for
+        // int subclass instances (whose native backing is the int).
+        if let Some(i) = int_value_or_backing(&args[0]) {
+            check_int_to_str_limit(&i)?;
+        }
         Ok(py_str(&args[0].str()))
+    }
+}
+
+/// CPython's int->str digit limit: str()/repr()/format() of an int with more
+/// decimal digits than the configured limit raises ValueError (guard against
+/// a DoS from formatting astronomical integers).
+pub(crate) fn check_int_to_str_limit(bi: &BigInt) -> PyResult<()> {
+    let limit = INT_MAX_STR_DIGITS.with(|d| d.get());
+    if limit <= 0 {
+        return Ok(());
+    }
+    // Estimate the decimal digit count from the bit length (log10(2) ≈
+    // 0.30103) so a truly enormous int is rejected without converting it.
+    let est = (bi.bits() as f64 * 0.3010299956639812).ceil() as u64;
+    if est > limit as u64 {
+        return Err(PyError::value_error(format!(
+            "Exceeds the limit ({}) digits for integer string conversion; use sys.set_int_max_str_digits()", limit
+        )));
+    }
+    // Borderline: convert and count exactly.
+    let digits = bi.to_string().trim_start_matches('-').len() as u64;
+    if digits > limit as u64 {
+        return Err(PyError::value_error(format!(
+            "Exceeds the limit ({}) digits for integer string conversion; use sys.set_int_max_str_digits()", limit
+        )));
+    }
+    Ok(())
+}
+
+/// The BigInt value of an `int` (or a transparent int-subclass instance via
+/// its native backing), if any.
+pub(crate) fn int_value_or_backing(obj: &PyObjectRef) -> Option<BigInt> {
+    match &*obj.borrow() {
+        PyObject::Int(i) => Some(i.clone()),
+        PyObject::Instance { .. } => {
+            let native = native_backing_of(obj)?;
+            let nb = native.borrow();
+            match &*nb {
+                PyObject::Int(i) => Some(i.clone()),
+                _ => None,
+            }
+        }
+        _ => None,
     }
 }
 
@@ -1559,6 +1622,9 @@ pub fn builtin_repr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     };
     if let Some(class_name) = class_name {
         return Ok(py_str(&exception_instance_repr(&args[0], &class_name)));
+    }
+    if let Some(i) = int_value_or_backing(&args[0]) {
+        check_int_to_str_limit(&i)?;
     }
     Ok(py_str(&args[0].repr()))
 }
