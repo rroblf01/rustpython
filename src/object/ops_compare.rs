@@ -336,6 +336,8 @@ impl Compare for PyObject {
             (PyObject::Float(a), PyObject::Float(b)) => Ok(a < b),
             (PyObject::Int(a), PyObject::Float(b)) => Ok(a.to_f64().unwrap() < *b),
             (PyObject::Float(a), PyObject::Int(b)) => Ok(*a < b.to_f64().unwrap()),
+            (PyObject::Float(a), PyObject::Bool(b)) => Ok(*a < if *b { 1.0 } else { 0.0 }),
+            (PyObject::Bool(a), PyObject::Float(b)) => Ok(if *a { 1.0 } else { 0.0 } < *b),
             (PyObject::Str(a), PyObject::Str(b)) => Ok(a < b),
             (PyObject::Bool(a), PyObject::Bool(b)) => Ok(a < b),
             (PyObject::Bool(a), PyObject::Int(b)) => Ok((*a as i32) < b.to_i32().unwrap_or(0)),
@@ -403,6 +405,8 @@ impl Compare for PyObject {
             (PyObject::Float(a), PyObject::Float(b)) => Ok(a <= b),
             (PyObject::Int(a), PyObject::Float(b)) => Ok(a.to_f64().unwrap() <= *b),
             (PyObject::Float(a), PyObject::Int(b)) => Ok(*a <= b.to_f64().unwrap()),
+            (PyObject::Float(a), PyObject::Bool(b)) => Ok(*a <= if *b { 1.0 } else { 0.0 }),
+            (PyObject::Bool(a), PyObject::Float(b)) => Ok(if *a { 1.0 } else { 0.0 } <= *b),
             (PyObject::Str(a), PyObject::Str(b)) => Ok(a <= b),
             (PyObject::Bool(a), PyObject::Bool(b)) => Ok(a <= b),
             (PyObject::Set(a), PyObject::Set(b)) => {
@@ -444,6 +448,8 @@ impl Compare for PyObject {
             (PyObject::Float(a), PyObject::Float(b)) => Ok(a > b),
             (PyObject::Int(a), PyObject::Float(b)) => Ok(a.to_f64().unwrap() > *b),
             (PyObject::Float(a), PyObject::Int(b)) => Ok(*a > b.to_f64().unwrap()),
+            (PyObject::Float(a), PyObject::Bool(b)) => Ok(*a > if *b { 1.0 } else { 0.0 }),
+            (PyObject::Bool(a), PyObject::Float(b)) => Ok(if *a { 1.0 } else { 0.0 } > *b),
             (PyObject::Str(a), PyObject::Str(b)) => Ok(a > b),
             (PyObject::Bool(a), PyObject::Bool(b)) => Ok(a > b),
             (PyObject::Set(a), PyObject::Set(b)) => {
@@ -485,6 +491,8 @@ impl Compare for PyObject {
             (PyObject::Float(a), PyObject::Float(b)) => Ok(a >= b),
             (PyObject::Int(a), PyObject::Float(b)) => Ok(a.to_f64().unwrap() >= *b),
             (PyObject::Float(a), PyObject::Int(b)) => Ok(*a >= b.to_f64().unwrap()),
+            (PyObject::Float(a), PyObject::Bool(b)) => Ok(*a >= if *b { 1.0 } else { 0.0 }),
+            (PyObject::Bool(a), PyObject::Float(b)) => Ok(if *a { 1.0 } else { 0.0 } >= *b),
             (PyObject::Str(a), PyObject::Str(b)) => Ok(a >= b),
             (PyObject::Bool(a), PyObject::Bool(b)) => Ok(a >= b),
             (PyObject::Set(a), PyObject::Set(b)) => {

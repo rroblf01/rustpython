@@ -1431,11 +1431,42 @@ fn factor_power_of(n: &num_bigint::BigUint, b: u8) -> u32 {
     k
 }
 
-fn decval_from_f64(f: f64) -> DecValue {    // float -> Decimal must be exact (matching CPython's Decimal(float)),
-    // so go through the float's own repr rather than lossy formatting.
+fn decval_from_f64(f: f64) -> DecValue {
+    float_to_decvalue(f)
+}
+
+/// The EXACT decimal value of an f64 (CPython's `Decimal(float)` and
+/// `Decimal.from_float(f)` both produce the exact binary value, not the
+/// shortest repr): `m * 2**e` written as `m * 5**k / 10**k`, normalized by
+/// removing trailing factors of 10.
+fn float_to_decvalue(f: f64) -> DecValue {
     if f.is_nan() { return DecValue::nan(); }
     if f.is_infinite() { return DecValue::infinity(f < 0.0); }
-    parse_decimal_str(&format!("{:e}", f)).unwrap_or_else(DecValue::zero)
+    if f == 0.0 {
+        return DecValue { special: DecSpecial::Finite, sign: f.is_sign_negative(), coeff: num_bigint::BigInt::from(0), exp: 0 };
+    }
+    let bits = f.to_bits();
+    let sign = (bits >> 63) != 0;
+    let biased = ((bits >> 52) & 0x7ff) as i64;
+    let mantissa = bits & 0x000f_ffff_ffff_ffff;
+    let (m, e) = if biased == 0 {
+        (mantissa, -1074i64)
+    } else {
+        ((1u64 << 52) | mantissa, biased - 1023 - 52)
+    };
+    let coeff0 = num_bigint::BigInt::from(m);
+    let (mut coeff, mut exp) = if e >= 0 {
+        (coeff0 << (e as u32), 0i64)
+    } else {
+        let k = (-e) as u32;
+        (coeff0 * num_bigint::BigInt::from(5u32).pow(k), -(k as i64))
+    };
+    let ten = num_bigint::BigInt::from(10);
+    while coeff != num_bigint::BigInt::zero() && (&coeff % &ten).is_zero() {
+        coeff /= &ten;
+        exp += 1;
+    }
+    DecValue { special: DecSpecial::Finite, sign, coeff, exp }
 }
 
 fn ten_pow(n: i64) -> num_bigint::BigInt {
@@ -1586,21 +1617,23 @@ fn decval_from_pyobject(v: &PyObjectRef) -> PyResult<DecValue> {
                     (false, num.to_biguint().unwrap_or_default())
                 };
                 let den_b = den.to_biguint().unwrap_or_default();
-                // value = coeff/den_b; express as coeff * 10^e with
-                // denominator's 2s/5s factored: e = den_b's excess of 5s
-                // over 2s (or negative).
+                // value = coeff/den_b; express exactly as X * 10**e by
+                // factoring den_b = 2**twos * 5**fives and clearing the
+                // extra 2s/5s against a power of 10:
+                //   fives >= twos: X = coeff * 2**(fives-twos), e = -fives
+                //   twos  >  fives: X = coeff * 5**(twos-fives), e = -twos
                 let (twos, fives) = (factor_power_of(&den_b, 2), factor_power_of(&den_b, 5));
-                let exp = fives as i64 - twos as i64;
-                let mut scaled = coeff;
-                if exp > 0 {
-                    scaled *= num_bigint::BigUint::from(10u8).pow(exp as u32);
-                }
                 let mut den_rem = den_b;
                 for _ in 0..twos { den_rem /= 2u8; }
                 for _ in 0..fives { den_rem /= 5u8; }
                 // den_rem must be 1 now (any 2s/5s removed); remaining
                 // factors make it non-terminating — approximate via float.
                 if den_rem == num_bigint::BigUint::from(1u8) {
+                    let (scaled, exp) = if fives >= twos {
+                        (coeff * num_bigint::BigUint::from(2u8).pow((fives - twos) as u32), -(fives as i64))
+                    } else {
+                        (coeff * num_bigint::BigUint::from(5u8).pow((twos - fives) as u32), -(twos as i64))
+                    };
                     Ok(DecValue { special: DecSpecial::Finite, sign, coeff: scaled.into(), exp })
                 } else {
                     Ok(decval_from_f64(frac_to_f64(&num, &den)))
@@ -1769,10 +1802,30 @@ fn decimal_compare(a: &DecValue, b: &DecValue) -> Option<std::cmp::Ordering> {
         _ => {}
     }
     if a.is_zero() && b.is_zero() { return Some(Ordering::Equal); }
-    let (as_, bs, _) = decval_align(a, b);
-    let a_signed = if a.sign { -as_ } else { as_ };
-    let b_signed = if b.sign { -bs } else { bs };
-    Some(a_signed.cmp(&b_signed))
+    // Different signs decide immediately.
+    if a.sign != b.sign {
+        return Some(if a.sign { Ordering::Less } else { Ordering::Greater });
+    }
+    // Same sign: compare MAGNITUDES. The leading-digit exponent
+    // `digit_count(coeff) + exp` decides when the values don't overlap;
+    // only values with the SAME order of magnitude need exact alignment.
+    // (The previous `decval_align` unconditional scaling blew up on huge
+    // exponents — e.g. D('-1e425000000') < 0 computed 10**425000000.)
+    let a_zero = a.is_zero();
+    let b_zero = b.is_zero();
+    let mag = |v: &DecValue| digit_count(&v.coeff) as i64 + v.exp;
+    let ord = if a_zero { Ordering::Less }       // |a| = 0 < |b| (b nonzero)
+        else if b_zero { Ordering::Greater }
+        else {
+            let (ma, mb) = (mag(a), mag(b));
+            if ma != mb {
+                if ma < mb { Ordering::Less } else { Ordering::Greater }
+            } else {
+                let (as_, bs, _) = decval_align(a, b);
+                as_.cmp(&bs)
+            }
+        };
+    Some(if a.sign { ord.reverse() } else { ord })
 }
 
 fn decval_to_f64(v: &DecValue) -> f64 {    match v.special {
@@ -2126,6 +2179,12 @@ fn build_decimal_type() -> PyObjectRef {
         let result = if v.sign { -magnitude } else { magnitude };
         Ok(py_int(if result == -1 { -2 } else { result }))
     }));
+    type_dict.insert_str("from_float", bf!("from_float", |args| {
+        // Decimal.from_float(f): the exact decimal value of the binary float.
+        if args.is_empty() { return Err(PyError::type_error("from_float() takes exactly 1 argument")); }
+        let f = args[0].as_f64().ok_or_else(|| PyError::type_error("from_float() argument must be float"))?;
+        Ok(decval_to_instance(&float_to_decvalue(f)))
+    }));
     PyObjectRef::new(PyObject::Type { name: "Decimal".to_string(), dict: Box::new(str_map_to_typedict(type_dict)), bases: vec![], mro: vec![] })
 }
 
@@ -2367,8 +2426,17 @@ fn frac_instance_num_den(v: &PyObjectRef) -> Option<(BigInt, BigInt)> {
     if let PyObject::Instance { dict, .. } = &*v.borrow() {
         let num = dict.get_str("numerator")?;
         let den = dict.get_str("denominator")?;
-        if let (PyObject::Int(n), PyObject::Int(d)) = (&*num.borrow(), &*den.borrow()) {
-            return Some((n.clone(), d.clone()));
+        let get = |o: &PyObjectRef| -> Option<BigInt> {
+            match &*o.borrow() {
+                PyObject::Int(n) => Some(n.clone()),
+                // `_from_coprime_ints` stores the raw objects (an int
+                // subclass like DummyIntegral) — read their int backing.
+                PyObject::Instance { .. } => crate::object::int_value_or_backing(o),
+                _ => None,
+            }
+        };
+        if let (Some(n), Some(d)) = (get(&num), get(&den)) {
+            return Some((n, d));
         }
     }
     None
@@ -2446,6 +2514,46 @@ fn frac_binop(
 pub fn create_fractions_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     let mut frac_dict: HashMap<String, PyObjectRef> = HashMap::new();
+
+    // `Fraction.from_float(f)` / `Fraction._from_coprime_ints(n, d)` —
+    // classmethods: LOAD_ATTR binds the calling class as args[0].
+    frac_dict.insert_str("from_float", PyObjectRef::new(PyObject::ClassMethod { func: PyObjectRef::imm(PyObject::BuiltinFunction {
+        name: "from_float".to_string(),
+        func: |args| {
+            if args.len() < 2 { return Err(PyError::type_error("from_float() takes exactly 1 argument")); }
+            let cls = &args[0];
+            let val = &args[1];
+            let vb = val.borrow();
+            if let PyObject::Int(n) = &*vb {
+                // An int argument is just Fraction(int).
+                return frac_make(cls, n.clone(), BigInt::one());
+            }
+            drop(vb);
+            let f = val.as_f64().ok_or_else(|| PyError::type_error("argument should be a float"))?;
+            let (num, den) = frac_float_to_ratio(f)?;
+            frac_make(cls, num, den)
+        },
+    }) }));
+    frac_dict.insert_str("_from_coprime_ints", PyObjectRef::new(PyObject::ClassMethod { func: PyObjectRef::imm(PyObject::BuiltinFunction {
+        name: "_from_coprime_ints".to_string(),
+        func: |args| {
+            if args.len() < 3 { return Err(PyError::type_error("_from_coprime_ints() takes exactly 2 arguments")); }
+            let cls = &args[0];
+            // Store the raw objects (CPython keeps them as-is) so
+            // `x.numerator` is the actual argument — but validate they are
+            // integers (or indexable / int-subclass instances).
+            let _ = crate::object::int_value_or_backing(&args[1])
+                .or_else(|| crate::object::to_index(&args[1]).ok())
+                .ok_or_else(|| PyError::type_error("numerator must be an integer"))?;
+            let _ = crate::object::int_value_or_backing(&args[2])
+                .or_else(|| crate::object::to_index(&args[2]).ok())
+                .ok_or_else(|| PyError::type_error("denominator must be an integer"))?;
+            let mut dict = AttrMap::new();
+            dict.insert_str("numerator", args[1].clone());
+            dict.insert_str("denominator", args[2].clone());
+            Ok(PyObjectRef::new(PyObject::Instance { typ: cls.clone(), dict }))
+        },
+    }) }));
 
     // A plain `__init__`, NOT `NATIVE_VALUE_CTOR_KEY` — the latter is only
     // for types whose direct construction returns a raw NATIVE value
