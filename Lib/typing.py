@@ -62,6 +62,7 @@ ClassVar = _TypingType('ClassVar')
 Final = _TypingType('Final')
 Self = _TypingType('Self')
 NoReturn = _TypingType('NoReturn')
+Never = NoReturn
 NamedTuple = _TypingType('NamedTuple')
 NewType = _TypingType('NewType')
 # PEP 646 (variadic generics) / PEP 692 (`**kwargs: Unpack[...]`) — both
