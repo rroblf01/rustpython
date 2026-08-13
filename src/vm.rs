@@ -6932,7 +6932,7 @@ impl VirtualMachine {
                     // First call: try to compile; set sentinel so we don't retry
                     jit_ptr.set(SENTINEL_FAILED);
                     if let Some(compiled_fn) = self.jit.borrow_mut().compile(code) {
-                        let precomputed = crate::jit::JitCompiler::precompute_with_names(code);
+                        let precomputed = crate::jit::JitCompiler::precompute_for_jit(code, func_globals, &self.builtins);
                         jit_ptr.set(compiled_fn as usize);
                         *jit_consts.borrow_mut() = precomputed;
                     }

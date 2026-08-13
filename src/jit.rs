@@ -317,10 +317,15 @@ extern "C" fn jit_call(func: *const PyObjectRef, nargs: i64, args: *const PyObje
         // `with_vm_mut` reborrowing that same VM here is aliasing UB
         // (hashbrown's copy_nonoverlapping abort in test_shlex).
         let func_val = (*func).clone();
-        let cb_result = crate::object::call_function_disposable(&func_val, v, Vec::new());
+        let cb_result = crate::object::call_function_disposable(&func_val, v.clone(), Vec::new());
         if let Ok(val) = cb_result {
             std::ptr::write(out, val);
             return;
+        }
+        if std::env::var("RPY_DEBUG_JITCALL").is_ok() {
+            use std::io::Write;
+            let _ = writeln!(std::io::stderr(), "JITCALL FAIL func={} nargs={}",
+                func_ref.repr(), nargs);
         }
         std::ptr::write(out, crate::object::py_none());
     }
@@ -398,10 +403,51 @@ extern "C" fn jit_load_attr(obj: *const PyObjectRef, names: *const PyObjectRef, 
             return;
         }
         let result = obj_ref.borrow().get_attribute(&name_str).unwrap_or_else(|_| crate::object::py_none());
-        // Cache for next time
-        ATTR_CACHE.with(|cache| {
-            cache.borrow_mut().insert(cache_key, result.clone());
-        });
+        if std::env::var("RPY_DEBUG_JITATTR").is_ok() {
+            use std::io::Write;
+            let _ = writeln!(std::io::stderr(), "JITATTR obj={} name={} -> {}",
+                obj_ref.repr(), name_str, result.repr());
+        }
+        // Bind the result to the actual object, mirroring the interpreter's
+        // LOAD_ATTR/`resolve_descriptor_attr` — `get_attribute` returns an
+        // UNBOUND template (self_obj = None) for native-type methods like
+        // int.bit_length, which only works once bound to `obj`.
+        let result = {
+            let rb = result.borrow();
+            match &*rb {
+                crate::object::PyObject::BuiltinMethod { name: n, func, .. } => {
+                    let name = n.clone();
+                    let func = *func;
+                    drop(rb);
+                    crate::object::PyObjectRef::imm(crate::object::PyObject::BuiltinMethod {
+                        name,
+                        func,
+                        self_obj: obj_ref.clone(),
+                    })
+                }
+                crate::object::PyObject::BoundMethod { func, .. } => {
+                    let func = func.clone();
+                    drop(rb);
+                    crate::object::PyObjectRef::imm(crate::object::PyObject::BoundMethod {
+                        func,
+                        self_obj: obj_ref.clone(),
+                    })
+                }
+                _ => result.clone(),
+            }
+        };
+        // Only cache the result if it does NOT capture `self` — a bound
+        // method (BuiltinMethod/BoundMethod) embeds the specific object it
+        // was looked up on, so caching by (type, name) alone and reusing it
+        // for a DIFFERENT object of the same type is wrong (`n.bit_length()`
+        // returned a method bound to a previous `n`, calling bit_length on
+        // the wrong int — the JIT loop/`while` bug). Plain values and
+        // unbound class attributes are safe to cache.
+        if !matches!(&*result.borrow(), crate::object::PyObject::BuiltinMethod { .. } | crate::object::PyObject::BoundMethod { .. }) {
+            ATTR_CACHE.with(|cache| {
+                cache.borrow_mut().insert(cache_key, result.clone());
+            });
+        }
         std::ptr::write(out, result);
     }
 }
@@ -1171,6 +1217,35 @@ impl JitCompiler {
         result
     }
 
+    /// Precompute the JIT consts array with the layout
+    /// `[consts (C), global-values (N), name-strings (N)]`:
+    /// - LOAD_GLOBAL indexes past the consts into the global-VALUES region,
+    /// - LOAD_ATTR / STORE_ATTR index past consts + globals into the
+    ///   name-STRING region.
+    /// (The previous `precompute_with_names` stored only the name STRINGS,
+    /// so LOAD_GLOBAL pushed a name string instead of the resolved value —
+    /// every JIT-compiled loop that touched a global got the wrong object.)
+    pub fn precompute_for_jit(
+        code: &CodeObject,
+        globals: &Rc<RefCell<HashMap<crate::interner::StrId, crate::object::PyObjectRef>>>,
+        builtins: &HashMap<crate::interner::StrId, crate::object::PyObjectRef>,
+    ) -> Vec<crate::object::PyObjectRef> {
+        let mut result = Self::precompute_consts(code);
+        let c = result.len();
+        let n = code.names.len();
+        result.resize(c + 2 * n, crate::object::py_none());
+        let g = globals.borrow();
+        for (i, name) in code.names.iter().enumerate() {
+            let name_str = crate::interner::lookup_str(*name);
+            let val = g.get(name).cloned()
+                .or_else(|| builtins.get(name).cloned())
+                .unwrap_or_else(crate::object::py_none);
+            result[c + i] = val;
+            result[c + n + i] = crate::object::py_str(name_str);
+        }
+        result
+    }
+
     /// Build a Cranelift function that implements the given bytecode.
     /// Supports straight-line code, loops (via JUMP_BACKWARD), and conditional branches.
     pub fn compile(
@@ -1849,7 +1924,7 @@ impl JitCompiler {
                     let name_idx = instr.arg as i64;
                     let val = eval_stack.pop().unwrap();
                     let memflags = cranelift::codegen::ir::MemFlags::new();
-                    let names_offset = code.consts.len() as i64;
+                    let names_offset = (code.consts.len() + code.names.len()) as i64;
                     let tmp_val = builder.create_sized_stack_slot(StackSlotData::new(
                         cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
@@ -1988,7 +2063,7 @@ impl JitCompiler {
                     let val = eval_stack.pop().unwrap();
                     let obj = eval_stack.pop().unwrap();
                     let memflags = cranelift::codegen::ir::MemFlags::new();
-                    let names_offset = code.consts.len() as i64;
+                    let names_offset = (code.consts.len() + code.names.len()) as i64;
                     let tmp_obj = builder.create_sized_stack_slot(StackSlotData::new(
                         cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
                     ));
@@ -2044,7 +2119,7 @@ impl JitCompiler {
                 }
                 Opcode::LOAD_NAME => {
                     let name_idx = instr.arg as i64;
-                    let names_offset = code.consts.len() as i64;
+                    let names_offset = (code.consts.len() + code.names.len()) as i64;
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let tmp_locals = builder.create_sized_stack_slot(StackSlotData::new(
                         cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
@@ -2362,7 +2437,7 @@ impl JitCompiler {
                 }
                 Opcode::IMPORT_NAME => {
                     let name_idx = instr.arg as i64;
-                    let names_offset = code.consts.len() as i64;
+                    let names_offset = (code.consts.len() + code.names.len()) as i64;
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
                         cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
@@ -2377,7 +2452,7 @@ impl JitCompiler {
                 }
                 Opcode::IMPORT_FROM => {
                     let name_idx = instr.arg as i64;
-                    let names_offset = code.consts.len() as i64;
+                    let names_offset = (code.consts.len() + code.names.len()) as i64;
                     let module = *eval_stack.last().unwrap(); // peek, don't pop
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let tmp_module = builder.create_sized_stack_slot(StackSlotData::new(

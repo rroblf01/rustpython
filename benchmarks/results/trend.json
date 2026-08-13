@@ -32,5 +32,39 @@
   "rss_membench_kb_cpython": 54936,
   "rss_membench_kb_rustpython": 117800,
   "rss_membench_ratio": 2.144313382845493
+ },
+ {
+  "commit": "cec557e",
+  "timestamp": "2026-08-13 09:20:45",
+  "bench_arith": 12.132393904637064,
+  "bench_call": 19.548722390645302,
+  "bench_dict": 7.088183421516755,
+  "bench_fib": 39.09761120263592,
+  "bench_float": 13.212962962962964,
+  "bench_list": 31.710643889618925,
+  "bench_str_concat": 56.71741573033709,
+  "bench_while": 14.593086419753087,
+  "rss_quickbench_kb_cpython": 17168,
+  "rss_quickbench_kb_rustpython": 17576,
+  "rss_membench_kb_cpython": 54696,
+  "rss_membench_kb_rustpython": 118192,
+  "rss_membench_ratio": 2.1608892789235044
+ },
+ {
+  "commit": "cec557e",
+  "timestamp": "2026-08-13 09:21:07",
+  "bench_arith": 11.104012345679013,
+  "bench_call": 22.53288526164186,
+  "bench_dict": 6.605892722236213,
+  "bench_fib": 40.33446947243628,
+  "bench_float": 11.091674462114124,
+  "bench_list": 24.73729525409492,
+  "bench_str_concat": 55.78939237899073,
+  "bench_while": 14.508364312267659,
+  "rss_quickbench_kb_cpython": 16888,
+  "rss_quickbench_kb_rustpython": 17460,
+  "rss_membench_kb_cpython": 55056,
+  "rss_membench_kb_rustpython": 118376,
+  "rss_membench_ratio": 2.150101714617844
  }
 ]
