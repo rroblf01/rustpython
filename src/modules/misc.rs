@@ -1340,6 +1340,35 @@ pub fn create_collections_abc_dict() -> HashMap<String, PyObjectRef> {
                             Ok(generic_alias_placeholder(format!("{}[{}]", args[0].str(), args[1].str())))
                         },
                     })),
+                    // `isinstance(x, Hashable)` etc. via a method-presence
+                    // check, like CPython's __subclasshook__.
+                    ("__instancecheck__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+                        name: "__instancecheck__".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("__instancecheck__ requires 2 args")); }
+                            let cls_name = match &*args[0].borrow() {
+                                PyObject::Type { name, .. } => name.clone(),
+                                _ => String::new(),
+                            };
+                            let required: &[&str] = match cls_name.as_str() {
+                                "Hashable" => &["__hash__"],
+                                "Iterable" => &["__iter__"],
+                                "Sized" => &["__len__"],
+                                _ => &[],
+                            };
+                            if required.is_empty() {
+                                return Ok(crate::object::py_not_implemented());
+                            }
+                            let typ = crate::object::builtin_type_of(&[args[1].clone()])?;
+                            for m in required {
+                                match crate::object::lookup_dunder_via_mro(&typ, m) {
+                                    Some(f) if !matches!(&*f.borrow(), PyObject::None) => {}
+                                    _ => return Ok(py_bool(false)),
+                                }
+                            }
+                            Ok(py_bool(true))
+                        },
+                    })),
                 ]))),
                 bases: vec![],
                 mro: vec![],

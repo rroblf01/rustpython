@@ -3739,6 +3739,16 @@ pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
     let obj = args[0].borrow();
     let class = args[1].borrow();
+    // A class with a custom `__instancecheck__` (collections.abc ABCs like
+    // Hashable/Iterable/Sized) delegates the check to it.
+    if let PyObject::Type { dict, .. } = &*class {
+        if let Some(ic) = dict.get_str("__instancecheck__") {
+            if !matches!(&*ic.borrow(), PyObject::None) {
+                let result = call_bound_method(ic.clone(), args[1].clone(), vec![args[0].clone()])?;
+                return Ok(result);
+            }
+        }
+    }
     // Handle tuple of types: isinstance(x, (type1, type2, ...))
     if let PyObject::Tuple(types) = &*class {
         let _guard = IsinstanceRecursionGuard::enter()?;
