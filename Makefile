@@ -279,12 +279,13 @@ repl: $(RUSTPYTHON)
 
 # ── Benchmarks ────────────────────────────────────
 bench: release
-	@echo -e "$(CYAN)==> Running benchmarks...$(RESET)"
-	@if [ -f "tests/bench.py" ]; then \
-		./$(RUSTPYTHON_REL) tests/bench.py 2>&1; \
-	else \
-		echo -e "$(YELLOW)⚠  No tests/bench.py found$(RESET)"; \
-	fi
+	@echo -e "$(CYAN)==> Running benchmark trend harness (RustPython vs CPython)...$(RESET)"
+	@python3 benchmarks/bench_trend.py $(BENCH_ARGS)
+
+# Full trend including the CPython suite aggregate (slow).
+bench-full: release
+	@echo -e "$(CYAN)==> Running benchmark trend + CPython suite aggregate...$(RESET)"
+	@python3 benchmarks/bench_trend.py --tests
 
 # ── Clean ──────────────────────────────────────────
 clean:
