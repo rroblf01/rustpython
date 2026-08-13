@@ -7,16 +7,34 @@ use super::*;
 // ---- Descriptor types ----
 
 pub fn builtin_property(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    let getter = if args.len() > 0 { Some(args[0].clone()) } else { None };
-    let setter = if args.len() > 1 { Some(args[1].clone()) } else { None };
-    let deleter = if args.len() > 2 { Some(args[2].clone()) } else { None };
-    let doc = if args.len() > 3 { Some(args[3].str()) } else { None };
-    Ok(PyObjectRef::new(PyObject::Property(Box::new(PropertyData {
-        getter,
-        setter,
-        deleter,
-        doc,
-    }))))
+    let getter = if args.len() > 0 {
+        Some(args[0].clone())
+    } else {
+        None
+    };
+    let setter = if args.len() > 1 {
+        Some(args[1].clone())
+    } else {
+        None
+    };
+    let deleter = if args.len() > 2 {
+        Some(args[2].clone())
+    } else {
+        None
+    };
+    let doc = if args.len() > 3 {
+        Some(args[3].str())
+    } else {
+        None
+    };
+    Ok(PyObjectRef::new(PyObject::Property(Box::new(
+        PropertyData {
+            getter,
+            setter,
+            deleter,
+            doc,
+        },
+    ))))
 }
 
 /// Return a new Property with the given setter (used by @x.setter)
@@ -56,7 +74,9 @@ pub fn property_deleter(prop: &PyObjectRef, new_deleter: PyObjectRef) -> PyObjec
 /// Builtin for property.setter(func) — returns new Property with setter
 pub fn builtin_property_setter_fn(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() < 2 {
-        return Err(PyError::type_error("setter() requires at least the setter function"));
+        return Err(PyError::type_error(
+            "setter() requires at least the setter function",
+        ));
     }
     Ok(property_setter(&args[0], args[1].clone()))
 }
@@ -64,19 +84,33 @@ pub fn builtin_property_setter_fn(args: &[PyObjectRef]) -> PyResult<PyObjectRef>
 /// Builtin for property.deleter(func) — returns new Property with deleter
 pub fn builtin_property_deleter_fn(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() < 2 {
-        return Err(PyError::type_error("deleter() requires at least the deleter function"));
+        return Err(PyError::type_error(
+            "deleter() requires at least the deleter function",
+        ));
     }
     Ok(property_deleter(&args[0], args[1].clone()))
 }
 
 pub fn builtin_staticmethod(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.is_empty() { return Err(PyError::type_error("staticmethod() requires at least 1 argument")); }
-    Ok(PyObjectRef::new(PyObject::StaticMethod { func: args[0].clone() }))
+    if args.is_empty() {
+        return Err(PyError::type_error(
+            "staticmethod() requires at least 1 argument",
+        ));
+    }
+    Ok(PyObjectRef::new(PyObject::StaticMethod {
+        func: args[0].clone(),
+    }))
 }
 
 pub fn builtin_classmethod(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.is_empty() { return Err(PyError::type_error("classmethod() requires at least 1 argument")); }
-    Ok(PyObjectRef::new(PyObject::ClassMethod { func: args[0].clone() }))
+    if args.is_empty() {
+        return Err(PyError::type_error(
+            "classmethod() requires at least 1 argument",
+        ));
+    }
+    Ok(PyObjectRef::new(PyObject::ClassMethod {
+        func: args[0].clone(),
+    }))
 }
 
 // ---- __slots__ helpers ----
@@ -125,7 +159,11 @@ pub(crate) fn extract_slots(slots_val: &PyObjectRef, result: &mut Vec<String>) {
 /// arguments into clamped, in-bounds `[start, end)` CHARACTER indices —
 /// same semantics as slice bounds (negative indices count from the end,
 /// out-of-range values clamp rather than error).
-pub(crate) fn resolve_str_slice_bounds(len: usize, start: Option<i64>, end: Option<i64>) -> (usize, usize) {
+pub(crate) fn resolve_str_slice_bounds(
+    len: usize,
+    start: Option<i64>,
+    end: Option<i64>,
+) -> (usize, usize) {
     let clamp = |v: i64| -> usize {
         let v = if v < 0 { (v + len as i64).max(0) } else { v };
         v.min(len as i64) as usize
@@ -141,7 +179,11 @@ pub(crate) fn resolve_str_slice_bounds(len: usize, start: Option<i64>, end: Opti
 /// "no bound").
 pub(crate) fn opt_i64_arg(a: Option<&PyObjectRef>) -> Option<i64> {
     a.and_then(|v| {
-        if matches!(&*v.borrow(), PyObject::None) { None } else { v.as_i64() }
+        if matches!(&*v.borrow(), PyObject::None) {
+            None
+        } else {
+            v.as_i64()
+        }
     })
 }
 
@@ -169,7 +211,11 @@ pub(crate) fn opt_i64_arg(a: Option<&PyObjectRef>) -> Option<i64> {
 /// check, 1000 checks) time out outright, once `random.choices` (a
 /// separate, previously-missing function that test also depends on) was
 /// added and let the test's real body run for the first time.
-pub(crate) fn char_slice_with_start(s: &str, start: Option<i64>, end: Option<i64>) -> (usize, String) {
+pub(crate) fn char_slice_with_start(
+    s: &str,
+    start: Option<i64>,
+    end: Option<i64>,
+) -> (usize, String) {
     if s.is_ascii() {
         let (st, en) = resolve_str_slice_bounds(s.len(), start, end);
         (st, s[st..en].to_string())
@@ -180,9 +226,19 @@ pub(crate) fn char_slice_with_start(s: &str, start: Option<i64>, end: Option<i64
     }
 }
 
-pub(crate) fn str_find_impl(haystack: &str, needle: &str, start: Option<i64>, end: Option<i64>, reverse: bool) -> Option<usize> {
+pub(crate) fn str_find_impl(
+    haystack: &str,
+    needle: &str,
+    start: Option<i64>,
+    end: Option<i64>,
+    reverse: bool,
+) -> Option<usize> {
     let (s, sub) = char_slice_with_start(haystack, start, end);
-    let found = if reverse { sub.rfind(needle) } else { sub.find(needle) };
+    let found = if reverse {
+        sub.rfind(needle)
+    } else {
+        sub.find(needle)
+    };
     found.map(|byte_idx| s + sub[..byte_idx].chars().count())
 }
 
@@ -197,7 +253,9 @@ pub(crate) fn arg_bytes(v: &PyObjectRef) -> Option<Vec<u8>> {
     match &*v.borrow() {
         PyObject::Bytes(b) => Some(b.clone()),
         PyObject::ByteArray(b) => Some(b.clone()),
-        PyObject::Array(arr) if arr.typecode == 'B' || arr.typecode == 'b' || arr.typecode == 'c' => {
+        PyObject::Array(arr)
+            if arr.typecode == 'B' || arr.typecode == 'b' || arr.typecode == 'c' =>
+        {
             Some(arr.data.iter().map(|&f| f as u8).collect())
         }
         PyObject::MemoryView { .. } => mv_tobytes(v).ok(),
@@ -215,7 +273,12 @@ pub(crate) fn arg_bytes(v: &PyObjectRef) -> Option<Vec<u8>> {
 pub(crate) fn extract_bytes_or_tuple(v: &PyObjectRef) -> Vec<Vec<u8>> {
     let items: Vec<PyObjectRef> = {
         let b = v.borrow();
-        if let PyObject::Tuple(items) = &*b { items.clone() } else { drop(b); vec![v.clone()] }
+        if let PyObject::Tuple(items) = &*b {
+            items.clone()
+        } else {
+            drop(b);
+            vec![v.clone()]
+        }
     };
     items.iter().filter_map(arg_bytes).collect()
 }
@@ -236,8 +299,18 @@ fn bytes_result_to_bytearray(v: PyObjectRef) -> PyObjectRef {
         let b = v.borrow();
         match &*b {
             PyObject::Bytes(bytes) => Some(PyObjectRef::new(PyObject::ByteArray(bytes.clone()))),
-            PyObject::List(items) => Some(py_list(items.iter().map(|i| bytes_result_to_bytearray(i.clone())).collect())),
-            PyObject::Tuple(items) => Some(PyObjectRef::imm(PyObject::Tuple(items.iter().map(|i| bytes_result_to_bytearray(i.clone())).collect()))),
+            PyObject::List(items) => Some(py_list(
+                items
+                    .iter()
+                    .map(|i| bytes_result_to_bytearray(i.clone()))
+                    .collect(),
+            )),
+            PyObject::Tuple(items) => Some(PyObjectRef::imm(PyObject::Tuple(
+                items
+                    .iter()
+                    .map(|i| bytes_result_to_bytearray(i.clone()))
+                    .collect(),
+            ))),
             _ => None,
         }
     };
@@ -258,28 +331,48 @@ pub(crate) fn bytearray_delegate(method_name: &str, args: &[PyObjectRef]) -> PyR
             new_args.extend_from_slice(&args[1..]);
             func(&new_args)?
         } else {
-            return Err(PyError::runtime_error(format!("{}: bad method", method_name)));
+            return Err(PyError::runtime_error(format!(
+                "{}: bad method",
+                method_name
+            )));
         };
         Ok(bytes_result_to_bytearray(result))
     } else {
-        Err(PyError::runtime_error(format!("{} on non-bytearray", method_name)))
+        Err(PyError::runtime_error(format!(
+            "{} on non-bytearray",
+            method_name
+        )))
     }
 }
 
 /// Byte-slice analogue of `str_find_impl` — no unicode decoding needed
 /// since `bytes` operates byte-for-byte.
-pub(crate) fn bytes_find_impl(haystack: &[u8], needle: &[u8], start: Option<i64>, end: Option<i64>, reverse: bool) -> Option<usize> {
+pub(crate) fn bytes_find_impl(
+    haystack: &[u8],
+    needle: &[u8],
+    start: Option<i64>,
+    end: Option<i64>,
+    reverse: bool,
+) -> Option<usize> {
     let (s, e) = resolve_str_slice_bounds(haystack.len(), start, end);
-    if s > e { return None; }
+    if s > e {
+        return None;
+    }
     let sub = &haystack[s..e];
     if needle.is_empty() {
         return Some(if reverse { e } else { s });
     }
-    if needle.len() > sub.len() { return None; }
+    if needle.len() > sub.len() {
+        return None;
+    }
     if reverse {
-        sub.windows(needle.len()).rposition(|w| w == needle).map(|i| s + i)
+        sub.windows(needle.len())
+            .rposition(|w| w == needle)
+            .map(|i| s + i)
     } else {
-        sub.windows(needle.len()).position(|w| w == needle).map(|i| s + i)
+        sub.windows(needle.len())
+            .position(|w| w == needle)
+            .map(|i| s + i)
     }
 }
 
@@ -290,7 +383,12 @@ pub(crate) fn bytes_find_impl(haystack: &[u8], needle: &[u8], start: Option<i64>
 /// defined on a base class, not just the instance's own leaf type.
 pub(crate) fn lookup_dunder_via_mro(typ: &PyObjectRef, name: &str) -> Option<PyObjectRef> {
     let typ_ref = typ.borrow();
-    if let PyObject::Type { dict: type_dict, mro, .. } = &*typ_ref {
+    if let PyObject::Type {
+        dict: type_dict,
+        mro,
+        ..
+    } = &*typ_ref
+    {
         // Every class implicitly inherits `object`'s generic
         // __repr__/__eq__/__hash__/etc. Those must not preempt a class
         // with a native base (`class Foo(str): ...`) from getting the real
@@ -301,7 +399,11 @@ pub(crate) fn lookup_dunder_via_mro(typ: &PyObjectRef, name: &str) -> Option<PyO
         // native-backing fallback each of these call sites adds after a
         // None result gets a chance to run.
         let native_marker = type_dict.contains_key_str(NATIVE_BASE_MARKER);
-        let skip_object_default = native_marker && matches!(name, "__repr__" | "__str__" | "__eq__" | "__ne__" | "__hash__");
+        let skip_object_default = native_marker
+            && matches!(
+                name,
+                "__repr__" | "__str__" | "__eq__" | "__ne__" | "__hash__"
+            );
         // A migrated native type's OWN `__getitem__`/`__setitem__`/
         // `__delitem__` entries (e.g. `dict.__setitem__`, see
         // `NATIVE_VALUE_CTOR_KEY`'s doc comment) exist as an "escape hatch"
@@ -320,7 +422,8 @@ pub(crate) fn lookup_dunder_via_mro(typ: &PyObjectRef, name: &str) -> Option<PyO
         // `KeyError` (bypassing `__missing__` entirely) the instant `dict`
         // became a real `Type` with a real `__getitem__` newly sitting in
         // every dict-subclass's mro.
-        let skip_native_dunder_hatch = native_marker && matches!(name, "__getitem__" | "__setitem__" | "__delitem__");
+        let skip_native_dunder_hatch =
+            native_marker && matches!(name, "__getitem__" | "__setitem__" | "__delitem__");
         // Always check the type's OWN dict first, regardless of whether
         // `mro` is empty. For an ordinary user-defined class this is a
         // no-op (real mro-building always puts the class itself at
@@ -342,7 +445,12 @@ pub(crate) fn lookup_dunder_via_mro(typ: &PyObjectRef, name: &str) -> Option<PyO
             return None;
         }
         for base in mro.iter() {
-            if let PyObject::Type { name: base_name, dict: base_dict, .. } = &*base.borrow() {
+            if let PyObject::Type {
+                name: base_name,
+                dict: base_dict,
+                ..
+            } = &*base.borrow()
+            {
                 if skip_object_default && base_name == "object" {
                     continue;
                 }
@@ -359,4 +467,3 @@ pub(crate) fn lookup_dunder_via_mro(typ: &PyObjectRef, name: &str) -> Option<PyO
         None
     }
 }
-

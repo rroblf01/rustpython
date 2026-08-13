@@ -68,7 +68,7 @@ impl PartialEq<String> for StrId {
 /// Thread-safe string interner with O(1) insert and lookup.
 /// Stores strings in a Vec<Box<str>> for cache-friendly iteration.
 pub struct Interner {
-    strings: Vec<&'static str>,  // Interned strings (leaked — process lifetime)
+    strings: Vec<&'static str>, // Interned strings (leaked — process lifetime)
     lookup: HashMap<&'static str, StrId>,
 }
 
@@ -212,11 +212,17 @@ impl<V: Clone> InternedMap<V> {
         None
     }
 
-    pub fn len(&self) -> usize { self.len }
-    pub fn is_empty(&self) -> bool { self.len == 0 }
+    pub fn len(&self) -> usize {
+        self.len
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
 
     pub fn iter(&self) -> impl Iterator<Item = (StrId, &V)> {
-        self.entries.iter().filter_map(|e| e.as_ref().map(|(k, v)| (*k, v)))
+        self.entries
+            .iter()
+            .filter_map(|e| e.as_ref().map(|(k, v)| (*k, v)))
     }
 
     pub fn keys(&self) -> impl Iterator<Item = StrId> + '_ {
@@ -229,7 +235,9 @@ impl<V: Clone> InternedMap<V> {
 
     /// Convert to a HashMap for compatibility with existing code
     pub fn to_hashmap(&self, interner: &Interner) -> HashMap<String, V>
-    where V: Clone {
+    where
+        V: Clone,
+    {
         let mut map = HashMap::with_capacity(self.len);
         for (id, v) in self.iter() {
             map.insert(interner.lookup(id).to_string(), v.clone());
@@ -244,7 +252,9 @@ impl<V: Clone> InternedMap<V> {
     }
 
     pub fn from_hashmap(map: &HashMap<String, V>, interner: &mut Interner) -> Self
-    where V: Clone {
+    where
+        V: Clone,
+    {
         let mut im = InternedMap::with_capacity(map.len());
         for (k, v) in map {
             im.insert(interner.intern(k), v.clone());

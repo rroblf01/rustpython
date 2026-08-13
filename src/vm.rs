@@ -1,18 +1,18 @@
-use std::collections::HashMap;
-use std::rc::Rc;
-use std::cell::RefCell;
+use crate::bytecode::*;
+use crate::interner::{self, InternedMap, StrId};
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 use smallvec::SmallVec;
-use crate::bytecode::*;
-use crate::interner::{self, StrId, InternedMap};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 
-use crate::modules::*;
-use crate::object::*;
-use crate::parser::Parser;
 use crate::compiler::Compiler;
 #[cfg(feature = "jit")]
 use crate::jit::JitCompiler;
+use crate::modules::*;
+use crate::object::*;
+use crate::parser::Parser;
 
 thread_local! {
     static ATTR_CACHE: std::cell::RefCell<HashMap<(String, String), crate::object::BuiltinFunc>> = std::cell::RefCell::new(HashMap::new());
@@ -36,7 +36,7 @@ pub struct Frame {
     pub active_exception: Option<Box<PyObjectRef>>,
     /// Inline attribute cache — caches LOAD_ATTR results per instruction offset.
     /// Cleared when the frame is created; populated on first attribute access.
-    pub attr_cache: Box<Vec<Option<(u64, PyObjectRef)>>>,  // (type_version_tag, cached_value)
+    pub attr_cache: Box<Vec<Option<(u64, PyObjectRef)>>>, // (type_version_tag, cached_value)
     /// Inline global cache — caches LOAD_GLOBAL results per instruction offset.
     pub global_cache: Box<Vec<Option<PyObjectRef>>>,
     /// Virtual registers for register-based bytecode execution.
@@ -117,9 +117,20 @@ impl Frame {
             } else {
                 "END".to_string()
             };
-            let arg = if instr_ip < self.code.instructions.len() { self.code.instructions[instr_ip].arg } else { 0 };
-            let line_no = if instr_ip < self.code.instructions.len() { self.code.line_number(instr_ip) } else { 0 };
-            PyError::runtime_error(format!("stack underflow at {} arg={} line={} code={} file={}", op_str, arg, line_no, self.code.name, self.code.filename))
+            let arg = if instr_ip < self.code.instructions.len() {
+                self.code.instructions[instr_ip].arg
+            } else {
+                0
+            };
+            let line_no = if instr_ip < self.code.instructions.len() {
+                self.code.line_number(instr_ip)
+            } else {
+                0
+            };
+            PyError::runtime_error(format!(
+                "stack underflow at {} arg={} line={} code={} file={}",
+                op_str, arg, line_no, self.code.name, self.code.filename
+            ))
         })
     }
 
@@ -226,14 +237,27 @@ fn find_lib_dir() -> String {
 /// kwargs.pop('dest', None)` called as `f(dest=...)`) got silently
 /// misrouted into that local's fast-locals slot instead of `**kwargs`,
 /// making it vanish from `kwargs` entirely.
-fn formal_param_index(varnames: &[crate::interner::StrId], arg_count: usize, _posonlyarg_count: usize, kwonlyarg_count: usize, kwonly_start: usize, key: &str) -> Option<usize> {
+fn formal_param_index(
+    varnames: &[crate::interner::StrId],
+    arg_count: usize,
+    _posonlyarg_count: usize,
+    kwonlyarg_count: usize,
+    kwonly_start: usize,
+    key: &str,
+) -> Option<usize> {
     let key_id = crate::interner::intern(key);
-    if let Some(idx) = varnames.get(0..arg_count).and_then(|s| s.iter().position(|&n| n == key_id)) {
+    if let Some(idx) = varnames
+        .get(0..arg_count)
+        .and_then(|s| s.iter().position(|&n| n == key_id))
+    {
         return Some(idx);
     }
     if kwonlyarg_count > 0 {
         let end = kwonly_start + kwonlyarg_count;
-        if let Some(rel) = varnames.get(kwonly_start..end).and_then(|s| s.iter().position(|&n| n == key_id)) {
+        if let Some(rel) = varnames
+            .get(kwonly_start..end)
+            .and_then(|s| s.iter().position(|&n| n == key_id))
+        {
             return Some(kwonly_start + rel);
         }
     }
@@ -259,45 +283,70 @@ pub(crate) fn eval_const_value(const_val: ConstValue) -> PyResult<PyObjectRef> {
             // ('_')` instead (fixed to match, in the same pass as adding
             // its own const-cache use, since both copies must agree).
             let s_clean: String = s.chars().filter(|&c| c != '_').collect();
-            if let Some(oct) = s_clean.strip_prefix("0o").or_else(|| s_clean.strip_prefix("0O")) {
-                if let Ok(n) = i64::from_str_radix(oct, 8) { py_int(n) }
-                else { let n = BigInt::parse_bytes(oct.as_bytes(), 8).ok_or_else(|| PyError::value_error(format!("invalid integer: {}", s)))?; PyObjectRef::imm(PyObject::Int(n)) }
-            } else if let Some(hex) = s_clean.strip_prefix("0x").or_else(|| s_clean.strip_prefix("0X")) {
-                if let Ok(n) = i64::from_str_radix(hex, 16) { py_int(n) }
-                else { let n = BigInt::parse_bytes(hex.as_bytes(), 16).ok_or_else(|| PyError::value_error(format!("invalid integer: {}", s)))?; PyObjectRef::imm(PyObject::Int(n)) }
-            } else if let Some(bin) = s_clean.strip_prefix("0b").or_else(|| s_clean.strip_prefix("0B")) {
-                if let Ok(n) = i64::from_str_radix(bin, 2) { py_int(n) }
-                else { let n = BigInt::parse_bytes(bin.as_bytes(), 2).ok_or_else(|| PyError::value_error(format!("invalid integer: {}", s)))?; PyObjectRef::imm(PyObject::Int(n)) }
+            if let Some(oct) = s_clean
+                .strip_prefix("0o")
+                .or_else(|| s_clean.strip_prefix("0O"))
+            {
+                if let Ok(n) = i64::from_str_radix(oct, 8) {
+                    py_int(n)
+                } else {
+                    let n = BigInt::parse_bytes(oct.as_bytes(), 8)
+                        .ok_or_else(|| PyError::value_error(format!("invalid integer: {}", s)))?;
+                    PyObjectRef::imm(PyObject::Int(n))
+                }
+            } else if let Some(hex) = s_clean
+                .strip_prefix("0x")
+                .or_else(|| s_clean.strip_prefix("0X"))
+            {
+                if let Ok(n) = i64::from_str_radix(hex, 16) {
+                    py_int(n)
+                } else {
+                    let n = BigInt::parse_bytes(hex.as_bytes(), 16)
+                        .ok_or_else(|| PyError::value_error(format!("invalid integer: {}", s)))?;
+                    PyObjectRef::imm(PyObject::Int(n))
+                }
+            } else if let Some(bin) = s_clean
+                .strip_prefix("0b")
+                .or_else(|| s_clean.strip_prefix("0B"))
+            {
+                if let Ok(n) = i64::from_str_radix(bin, 2) {
+                    py_int(n)
+                } else {
+                    let n = BigInt::parse_bytes(bin.as_bytes(), 2)
+                        .ok_or_else(|| PyError::value_error(format!("invalid integer: {}", s)))?;
+                    PyObjectRef::imm(PyObject::Int(n))
+                }
             } else if let Ok(n) = s_clean.parse::<i64>() {
-                py_int(n)  // uses small int cache
+                py_int(n) // uses small int cache
             } else {
-                let n: BigInt = s_clean.parse().map_err(|_| {
-                    PyError::value_error(format!("invalid integer: {}", s))
-                })?;
+                let n: BigInt = s_clean
+                    .parse()
+                    .map_err(|_| PyError::value_error(format!("invalid integer: {}", s)))?;
                 PyObjectRef::imm(PyObject::Int(n))
             }
         }
         ConstValue::Float(s) => {
-            let s_clean: String = crate::object::validate_underscores(&s)?.chars().filter(|&c| c != '_').collect();
-            let f: f64 = s_clean.parse().map_err(|_| {
-                PyError::value_error(format!("invalid float: {}", s))
-            })?;
+            let s_clean: String = crate::object::validate_underscores(&s)?
+                .chars()
+                .filter(|&c| c != '_')
+                .collect();
+            let f: f64 = s_clean
+                .parse()
+                .map_err(|_| PyError::value_error(format!("invalid float: {}", s)))?;
             py_float(f)
         }
         ConstValue::String(s) => py_str(&s),
         ConstValue::Bytes(b) => PyObjectRef::imm(PyObject::Bytes(b)),
         ConstValue::Complex { real, imag } => {
-            let re: f64 = real.parse().map_err(|_| {
-                PyError::value_error(format!("invalid complex literal: {}", real))
-            })?;
-            let im: f64 = imag.parse().map_err(|_| {
-                PyError::value_error(format!("invalid complex literal: {}", imag))
-            })?;
+            let re: f64 = real
+                .parse()
+                .map_err(|_| PyError::value_error(format!("invalid complex literal: {}", real)))?;
+            let im: f64 = imag
+                .parse()
+                .map_err(|_| PyError::value_error(format!("invalid complex literal: {}", imag)))?;
             PyObjectRef::imm(PyObject::Complex(re, im))
         }
-        ConstValue::Code(code) => {
-            PyObjectRef::imm(PyObject::Code(Rc::from(code)))
-        }
+        ConstValue::Code(code) => PyObjectRef::imm(PyObject::Code(Rc::from(code))),
         ConstValue::Tuple(items) => {
             let objs: Vec<PyObjectRef> = items.into_iter().map(|s| py_str(&s)).collect();
             PyObjectRef::imm(PyObject::Tuple(objs))
@@ -350,10 +399,20 @@ impl VirtualMachine {
         thread_local! {
             static VM_STATE_CACHE: RefCell<Option<(Rc<HashMap<StrId, PyObjectRef>>, HashMap<String, PyObjectRef>)>> = RefCell::new(None);
         }
-        if let Some((cached_builtins, cached_modules)) = VM_STATE_CACHE.with(|c| c.borrow().clone()) {
+        if let Some((cached_builtins, cached_modules)) = VM_STATE_CACHE.with(|c| c.borrow().clone())
+        {
             let globals_map: HashMap<StrId, PyObjectRef> = HashMap::from([
                 (interner::intern("__name__"), py_str("__main__")),
-                (interner::intern("__builtins__"), create_module("builtins", cached_builtins.iter().map(|(k, v)| (interner::lookup_str(*k).to_string(), v.clone())).collect::<HashMap<String, PyObjectRef>>())),
+                (
+                    interner::intern("__builtins__"),
+                    create_module(
+                        "builtins",
+                        cached_builtins
+                            .iter()
+                            .map(|(k, v)| (interner::lookup_str(*k).to_string(), v.clone()))
+                            .collect::<HashMap<String, PyObjectRef>>(),
+                    ),
+                ),
             ]);
             let globals = Rc::new(RefCell::new(globals_map));
             let mut vm = VirtualMachine {
@@ -375,825 +434,1008 @@ impl VirtualMachine {
                 recursion_limit: 1000,
             };
             vm.populate_type_registry();
-            vm.install_source_defined_stdlib("collections", crate::modules::COLLECTIONS_USER_TYPES_SOURCE, &["UserList", "UserDict", "UserString", "Counter", "defaultdict", "ChainMap"]);
-            vm.install_source_defined_stdlib("functools", crate::modules::FUNCTOOLS_EXTRA_SOURCE, &["lru_cache", "cache"]);
-            vm.install_source_defined_stdlib("enum", crate::modules::ENUM_SOURCE, &[
-                "auto", "nonmember", "member", "property", "EnumType", "EnumMeta",
-                "Enum", "IntEnum", "StrEnum", "unique",
-            ]);
-            vm.install_source_defined_stdlib("gettext", crate::modules::GETTEXT_SOURCE, &[
-                "NullTranslations", "GNUTranslations", "find", "translation", "install",
-                "textdomain", "bindtextdomain", "gettext", "ngettext", "pgettext", "npgettext",
-                "dgettext", "dngettext", "__all__",
-            ]);
-            vm.install_source_defined_stdlib("json", crate::modules::JSON_EXTRA_SOURCE, &["JSONEncoder", "dumps"]);
+            vm.install_source_defined_stdlib(
+                "collections",
+                crate::modules::COLLECTIONS_USER_TYPES_SOURCE,
+                &[
+                    "UserList",
+                    "UserDict",
+                    "UserString",
+                    "Counter",
+                    "defaultdict",
+                    "ChainMap",
+                ],
+            );
+            vm.install_source_defined_stdlib(
+                "functools",
+                crate::modules::FUNCTOOLS_EXTRA_SOURCE,
+                &["lru_cache", "cache"],
+            );
+            vm.install_source_defined_stdlib(
+                "enum",
+                crate::modules::ENUM_SOURCE,
+                &[
+                    "auto",
+                    "nonmember",
+                    "member",
+                    "property",
+                    "EnumType",
+                    "EnumMeta",
+                    "Enum",
+                    "IntEnum",
+                    "StrEnum",
+                    "unique",
+                ],
+            );
+            vm.install_source_defined_stdlib(
+                "gettext",
+                crate::modules::GETTEXT_SOURCE,
+                &[
+                    "NullTranslations",
+                    "GNUTranslations",
+                    "find",
+                    "translation",
+                    "install",
+                    "textdomain",
+                    "bindtextdomain",
+                    "gettext",
+                    "ngettext",
+                    "pgettext",
+                    "npgettext",
+                    "dgettext",
+                    "dngettext",
+                    "__all__",
+                ],
+            );
+            vm.install_source_defined_stdlib(
+                "json",
+                crate::modules::JSON_EXTRA_SOURCE,
+                &["JSONEncoder", "dumps"],
+            );
             return vm;
         }
 
         let builtins_str_map = create_builtins();
         let mut builtins: HashMap<StrId, PyObjectRef> = str_map_to_strid_map(builtins_str_map);
         let builtins_to_module = |map: &HashMap<StrId, PyObjectRef>| {
-            map.iter().map(|(k,v)| (interner::lookup_str(*k).to_string(), v.clone())).collect::<HashMap<String, PyObjectRef>>()
+            map.iter()
+                .map(|(k, v)| (interner::lookup_str(*k).to_string(), v.clone()))
+                .collect::<HashMap<String, PyObjectRef>>()
         };
         let globals_map: HashMap<StrId, PyObjectRef> = HashMap::from([
             (interner::intern("__name__"), py_str("__main__")),
-            (interner::intern("__builtins__"), create_module("builtins", builtins_to_module(&builtins))),
+            (
+                interner::intern("__builtins__"),
+                create_module("builtins", builtins_to_module(&builtins)),
+            ),
         ]);
         let globals = Rc::new(RefCell::new(globals_map));
 
-         let mut modules: HashMap<String, PyObjectRef> = HashMap::new();
-         modules.insert_str("builtins", create_module("builtins", builtins_to_module(&builtins)));
-         modules.insert_str("math", create_module("math", create_math_dict()));
-         modules.insert_str("_codecs", create_module("_codecs", create_codecs_dict()));
-
-         let mut sys_dict = create_sys_dict(argv);
-         // sys.path is shared (Rc-cloned) across every VirtualMachine
-         // instance in this process/thread, real or disposable — see the
-         // populate-defaults block below for why. `sys.modules` is
-         // deliberately NOT shared this way: it's populated per-VM below
-         // from that VM's own already-built `modules` map, which is the
-         // correct, VM-local behavior for module caching.
-         thread_local! {
-             static SHARED_SYS_PATH: RefCell<Option<PyObjectRef>> = RefCell::new(None);
-         }
-         let reused_shared_path = SHARED_SYS_PATH.with(|c| c.borrow().clone());
-         if let Some(shared_path) = reused_shared_path.clone() {
-             sys_dict.insert_str("path", shared_path);
-         }
-         // sys.meta_path — import hooks
-         if !sys_dict.contains_key("meta_path") {
-             let meta_path = py_list(vec![
-                 PyObjectRef::imm(PyObject::BuiltinFunction {
-                     name: "BuiltinImporter".to_string(),
-                     func: |args| {
-                         if args.len() < 2 { return Err(PyError::type_error("find_spec() requires 2 arguments")); }
-                         Err(PyError::module_not_found_error(format!("No module named '{}'", args[1].str())))
-                     },
-                 }),
-             ]);
-             sys_dict.insert_str("meta_path", meta_path);
-         }
-         if !sys_dict.contains_key("path_hooks") {
-             sys_dict.insert_str("path_hooks", py_list(vec![]));
-         }
-         if !sys_dict.contains_key("path_importer_cache") {
-             sys_dict.insert_str("path_importer_cache", py_dict());
-         }
-          modules.insert_str("sys", create_module("sys", sys_dict.clone()));
-            for (k, v) in sys_dict.clone() { builtins.insert(interner::intern(&k), v); }
-
-         // Share the sys module with native code that must read the CURRENT
-         // `sys.unraisablehook` (atexit's `_run_exitfuncs` reports a raising
-         // callback through it — the hook may have been reassigned by
-         // `catch_warnings`-style contexts like test.support's
-         // `catch_unraisable_exception`, so it must be read live, not
-         // captured at module-creation time).
-         crate::modules::set_sys_module(modules.get("sys").cloned());
-
-         // Native os module
-         let os_mod = create_module("os", create_os_dict());
-         modules.insert_str("os", os_mod.clone());
-         // posix is the C extension behind os — alias it for importlib compatibility
-         modules.insert_str("posix", os_mod.clone());
-
-         // Native os.path submodule (path manipulation functions)
-         let os_path_mod = create_module("os.path", create_os_path_dict());
-         // Wire path as a submodule attribute of the os parent module
-         if let PyObject::Module { dict, .. } = &mut *os_mod.borrow_mut() {
-             dict.insert_str("path", os_path_mod.clone());
-         }
-         modules.insert_str("os.path", os_path_mod.clone());
-         // posixpath is the real module behind os.path on POSIX (CPython's
-         // own os.py does `sys.modules['os.path'] = posixpath`) — code that
-         // imports it directly (`import posixpath`, common in stdlib-ish
-         // path-handling helpers) expects the same functions os.path has.
-         modules.insert_str("posixpath", os_path_mod);
-
-         let pathlib_dict = create_pathlib_dict();
-         modules.insert_str("pathlib", create_module("pathlib", pathlib_dict));
-
-         // Native urllib package (urllib.request, urllib.parse)
-         let urllib_dict = create_urllib_dict();
-         modules.insert_str("urllib", create_module("urllib", urllib_dict));
-
-         let json_dict = create_json_dict();
-         modules.insert_str("json", create_module("json", json_dict));
-
-         let collections_dict = create_collections_dict(builtins.get(&interner::intern("object")).cloned().unwrap_or_else(py_none));
-         modules.insert_str("collections", create_module("collections", collections_dict));
-
-          let functools_dict = create_functools_dict();
-          modules.insert_str("functools", create_module("functools", functools_dict));
-
-          let itertools_dict = create_itertools_dict();
-          modules.insert_str("itertools", create_module("itertools", itertools_dict));
-
-
-          let datetime_dict = create_datetime_dict();
-          modules.insert_str("datetime", create_module("datetime", datetime_dict));
-          // `_datetime` is real CPython's C-accelerated backing module —
-          // `datetime.py` itself does `from _datetime import *` when
-          // available. This interpreter's `datetime` is already a single,
-          // natively-implemented module (no separate accelerated/pure-
-          // Python split), so `_datetime` is just an alias — needed only so
-          // code that imports `_datetime` directly (real trigger: CPython's
-          // own `test_module.py`-style introspection, checking that both
-          // names resolve) doesn't raise `ImportError`.
-          modules.insert_str("_datetime", create_module("_datetime", create_datetime_dict()));
-
-          let zoneinfo_dict = create_zoneinfo_dict();
-          modules.insert_str("zoneinfo", create_module("zoneinfo", zoneinfo_dict));
-
-          let socket_dict = create_socket_dict();
-          modules.insert_str("socket", create_module("socket", socket_dict.clone()));
-          modules.insert_str("_socket", create_module("_socket", socket_dict));
-
-          let select_dict = create_select_dict();
-          modules.insert_str("select", create_module("select", select_dict));
-
-          let re_dict = create_re_dict();
-          modules.insert_str("re", create_module("re", re_dict));
-
-          let subprocess_dict = create_subprocess_dict();
-          modules.insert_str("subprocess", create_module("subprocess", subprocess_dict));
-
-          // Native pickle module (basic stub)
-          modules.insert_str("_pickle", create_module("_pickle", create_pickle_dict()));
-
-          // Native logging module
-          modules.insert_str("_logging", create_module("_logging", create_logging_dict()));
-          modules.insert_str("_logging.config", create_module("_logging.config", create_logging_config_dict()));
-
-          // Native timeit module
-          modules.insert_str("timeit", create_module("timeit", create_timeit_dict()));
-
-          let threading_dict = create_threading_dict();
-          modules.insert_str("threading", create_module("threading", threading_dict));
-
-          // Native _thread module (CPython C extension replacement)
-          modules.insert_str("_thread", create_module("_thread", create_thread_module_dict()));
-
-          // Native signal module (CPython C extension replacement)
-          modules.insert_str("signal", create_module("signal", create_signal_dict()));
-
-          // Native gc module (CPython C extension replacement)
-          modules.insert_str("gc", create_module("gc", create_gc_dict()));
-
-          // Native sysconfig module (CPython stdlib replacement)
-          modules.insert_str("sysconfig", create_module("sysconfig", create_sysconfig_dict()));
-
-          // Native linecache module (CPython stdlib replacement)
-          modules.insert_str("linecache", create_module("linecache", create_linecache_dict()));
-
-          // Native calendar module
-          modules.insert_str("calendar", create_module("calendar", create_calendar_dict()));
-
-          // Native locale module
-          modules.insert_str("locale", create_module("locale", create_locale_dict()));
-          // Native _locale module — in real CPython this IS the C extension
-          // that the pure-Python `locale` module delegates to. Registering it
-          // natively (instead of the Lib/_locale.py stub) makes `setlocale`,
-          // `localeconv`, etc. real shared state (see create_locale_dict).
-          modules.insert_str("_locale", create_module("_locale", create_locale_dict()));
-
-          // gettext module (mostly Python source — see install_source_defined_stdlib below)
-          modules.insert_str("gettext", create_module("gettext", create_gettext_dict()));
-
-          // Native ssl module (CPython C extension replacement for urllib3 compatibility)
-          modules.insert_str("ssl", create_module("ssl", create_ssl_dict()));
-
-          // Native time module
-          modules.insert_str("time", create_module("time", create_time_dict()));
-
-          // Native C extension replacements for CPython stdlib compatibility
-          let weakref_dict = create_weakref_dict();
-          modules.insert_str("_weakref", create_module("_weakref", weakref_dict.clone()));
-
-          let collections_abc_dict = create_collections_abc_dict();
-          modules.insert_str("_collections_abc", create_module("_collections_abc", collections_abc_dict.clone()));
-          // Pre-register collections.abc so the import chain walker finds it without needing __path__
-          modules.insert_str("collections.abc", create_module("collections.abc", collections_abc_dict));
-
-          // Native weakref module (replaces CPython weakref.py)
-          let mut weakref_mod_dict = weakref_dict; // Start from _weakref
-          // Add WeakValueDictionary and WeakKeyDictionary as dict-like stubs
-          weakref_mod_dict.insert_str("WeakValueDictionary", create_weakref_weak_val_dict());
-          weakref_mod_dict.insert_str("WeakKeyDictionary", create_weakref_weak_key_dict());
-          weakref_mod_dict.insert_str("WeakSet", create_weakref_weak_set());
-          modules.insert_str("weakref", create_module("weakref", weakref_mod_dict));
-
-          // Native copy module (replaces CPython copy.py which uses unsupported syntax)
-          modules.insert_str("copy", create_module("copy", create_copy_dict()));
-
-          // Native types module (replaces CPython types.py)
-          modules.insert_str("types", create_module("types", create_types_dict()));
-
-          // Native struct module for binary packing
-          modules.insert_str("struct", create_module("struct", create_struct_dict()));
-
-          // Native bisect module for binary search
-          modules.insert_str("bisect", create_module("bisect", create_bisect_dict()));
-          // `_bisect` — real CPython's C accelerator for `bisect`; CPython's
-          // own `test_bisect.py` builds its C-backed test class via
-          // `import_fresh_module('bisect', fresh=['_bisect'])`, which failed
-          // with `ModuleNotFoundError: No module named '_bisect'`, yielding
-          // `module = None` and `'NoneType' object has no attribute
-          // 'bisect_right'` for every C-class test. Same dict as `bisect`
-          // (this interpreter has no separate pure-Python wrapper).
-          modules.insert_str("_bisect", create_module("_bisect", create_bisect_dict()));
-
-          // Native heapq module for heap queue operations
-          modules.insert_str("heapq", create_module("heapq", create_heapq_dict()));
-
-          // enum module — real Enum/IntEnum/StrEnum/EnumType semantics
-          // (metaclass, real members, auto/unique) are far easier and more
-          // correct expressed as real Python source (see enum_extra.py)
-          // than as hand-written Rust closures; install_source_defined_stdlib
-          // (called below, once builtins/type registry exist) fills this
-          // module's dict in. The empty dict here is just a placeholder
-          // registration so that call finds an existing module to populate.
-          modules.insert_str("enum", create_module("enum", HashMap::new()));
-
-          // Native glob module
-          modules.insert_str("glob", create_module("glob", create_glob_dict()));
-
-          // Native fnmatch module
-          modules.insert_str("fnmatch", create_module("fnmatch", create_fnmatch_dict()));
-
-          // Native textwrap module
-          modules.insert_str("textwrap", create_module("textwrap", create_textwrap_dict()));
-
-          // `pprint` and `reprlib` are loaded from the vendored real CPython
-          // Lib/ modules (their class-based APIs — PrettyPrinter/Repr — are
-          // what test_pprint/test_reprlib exercise, and the native Rust
-          // versions only had the top-level helper functions).
-
-          // Native hashlib module
-          modules.insert_str("hashlib", create_module("hashlib", create_hashlib_dict()));
-
-          // Native secrets module
-          modules.insert_str("secrets", create_module("secrets", create_secrets_dict()));
-
-          // Native hmac module
-          modules.insert_str("hmac", create_module("hmac", create_hmac_dict()));
-
-          // Native base64 module
-          modules.insert_str("base64", create_module("base64", create_base64_dict()));
-
-          // Native binascii module
-          modules.insert_str("binascii", create_module("binascii", create_binascii_dict()));
-
-          // Native uuid module
-          modules.insert_str("uuid", create_module("uuid", create_uuid_dict()));
-
-          // Native string module (with capwords and Formatter)
-          let mut string_dict = create_string_dict();
-          let string_v2 = create_string_dict_v2();
-          for (k, v) in string_v2 { string_dict.insert(k, v); }
-          modules.insert_str("string", create_module("string", string_dict));
-
-          // Native colorsys module
-          modules.insert_str("colorsys", create_module("colorsys", create_colorsys_dict()));
-
-          // Native wave module
-          modules.insert_str("wave", create_module("wave", create_wave_dict()));
-
-          // Native numbers module — DISABLED: was bare STRING placeholders
-          // (`d.insert_str("Number", py_str("Number"))` etc.) instead of
-          // real ABC classes — `isinstance(x, numbers.Number)` may have
-          // worked via some ad hoc string-matching path, but anything
-          // doing real class things with them (`numbers.Number.register
-          // (Decimal)` — needed by `decimal`'s own real implementation,
-          // see its own doc comment above) raised `AttributeError: 'str'
-          // object has no attribute 'register'`. Real CPython's `numbers.
-          // py` is small (427 lines) and pure Python (just `abc.ABCMeta`/
-          // `abstractmethod`) — vendored verbatim instead, same pattern as
-          // `decimal`/`html.parser` above. `create_numbers_dict` (modules/
-          // misc.rs) is now dead code, kept only in case `Lib/numbers.py`
-          // needs to be reverted.
-          // modules.insert_str("numbers", create_module("numbers", create_numbers_dict()));
-
-          // `ast` now loads from Lib/ast.py — needs real (if minimal, marker-
-          // only) node classes for PEP 649 lazy-annotation stringification
-          // (`annotationlib.py`'s `_Stringifier`, needed transitively by
-          // `test.support`), which the old native stub (just `literal_eval`
-          // plus a handful of node NAMES as bare strings, no real classes at
-          // all) couldn't provide. The old stub's actual `literal_eval`
-          // logic is kept and re-exposed under a private native module name
-          // so Lib/ast.py can still delegate to it instead of reimplementing
-          // literal parsing in pure Python.
-          modules.insert_str("_ast_native", create_module("_ast_native", create_ast_dict()));
-
-          // Native sunau module (Sun AU audio format stubs)
-          modules.insert_str("sunau", create_module("sunau", create_sunau_dict()));
-
-          // Native difflib module (with unified_diff)
-          modules.insert_str("difflib", create_module("difflib", create_difflib_dict()));
-
-          // Native csv module
-          modules.insert_str("csv", create_module("csv", create_csv_dict()));
-
-          // Native io module — DISABLED: CPython io.py is used instead (imports from _io)
-          // modules.insert_str("io", create_module("io", create_io_dict()));
-
-          // Native statistics module. Tried vendoring the real CPython
-          // `Lib/statistics.py` (same pattern as `html`/`numbers`/etc.) —
-          // reverted: it hits the same unresolved "native types aren't real
-          // Type objects" architecture gap as `decimal` (`type(5) is int`
-          // is `False` here, breaking `_coerce`'s `T is S`/`T is int`
-          // identity checks throughout `_sum`/`variance`/etc.), AND
-          // `test_statistics.py` timed out (60s+) rather than completing —
-          // an operational risk not worth taking for a module that would
-          // still fail most of its own tests anyway. Several genuinely
-          // general bugs found chasing this ARE kept (not reverted):
-          // `functools.reduce`'s dropped-initial-value bug, `math.fsum`
-          // only handling List/Tuple, `itertools.groupby` (was missing
-          // entirely), `int.as_integer_ratio`/`numerator`/`denominator`/
-          // `real`/`imag`, `call_bound_method` supporting `type` as a
-          // plain callable, and — the most impactful one — `WITH_EXIT`
-          // never recognizing a user-defined exception CLASS instance
-          // (only the native `PyObject::Exception` shape), which broke
-          // `with`-statement `__exit__(exc_type, exc_value, tb)` for any
-          // custom exception (`unittest.assertRaises` reported ANY custom
-          // exception as "not raised" even when it genuinely was).
-          modules.insert_str("statistics", create_module("statistics", create_statistics_dict()));
-
-          // Native contextlib module — DISABLED: real Lib/contextlib.py is used instead
-          // modules.insert_str("contextlib", create_module("contextlib", create_contextlib_dict()));
-
-          // Native decimal module. (Attempted vendoring real CPython's
-          // `decimal.py`/`_pydecimal.py` this session — got as far as
-          // `numbers.Number.register(Decimal)` working [needed the
-          // `numbers` vendor + a new generic `.register()`/`isinstance`-
-          // registry fallback, both kept, see below] before hitting
-          // `int.bit_length` accessed UNBOUND off the `int` type itself
-          // (`_nbits = int.bit_length`) — `int` is a `PyObject::
-          // BuiltinFunction`, not a real `Type`, so it has no attribute
-          // lookup for "what method would an instance's `.bit_length()`
-          // resolve to" at all. That's a deeper, general "unbound method
-          // access on a native-backed type" gap shared with list/dict/str/
-          // etc., not specific to decimal — reverted the vendor rather
-          // than chase it further this session. `Lib/decimal.py`/`Lib/
-          // _pydecimal.py` were removed again; re-attempt once unbound
-          // native-type method access is fixed.)
-          modules.insert_str("decimal", create_module("decimal", create_decimal_dict()));
-
-          // Native fractions module
-          modules.insert_str("fractions", create_module("fractions", create_fractions_dict()));
-
-          // Native platform module
-          modules.insert_str("platform", create_module("platform", create_platform_dict()));
-
-          // `getopt` — the real CPython Lib/getopt.py (vendored) is loaded
-          // from disk instead: it exposes the internals CPython's own
-          // test_getopt.py exercises directly (do_shorts/do_longs/
-          // gnu_getopt/GetoptError/short_has_arg/long_has_args) that the
-          // native Rust version never had, and its algorithm is authoritative.
-
-          // Native getpass module
-          modules.insert_str("getpass", create_module("getpass", create_getpass_dict()));
-
-          // Native errno module
-          modules.insert_str("errno", create_module("errno", create_errno_dict()));
-
-          // Native _random module (C extension stub for CPython's random.py)
-          modules.insert_str("_random", create_module("_random", create_random_cmodule_dict()));
-
-          // Native shutil module
-          modules.insert_str("shutil", create_module("shutil", create_shutil_dict()));
-
-          // Native graphlib module
-          modules.insert_str("graphlib", create_module("graphlib", create_graphlib_dict()));
-
-          // Native pdb module
-          modules.insert_str("pdb", create_module("pdb", create_pdb_dict()));
-
-          // traceback now loads from Lib/traceback.py — the old native stub
-          // (`create_traceback_dict`, kept as dead code) had only
-          // `format_exc`/`print_exc` as no-ops and no `TracebackException`
-          // at all, which real `unittest/result.py` needs to format a
-          // failure/error for display.
-          // modules.insert_str("traceback", create_module("traceback", create_traceback_dict()));
-
-          // Native warnings module
-          modules.insert_str("warnings", create_module("warnings", create_warnings_dict()));
-
-          // Native abc module
-          modules.insert_str("abc", create_module("abc", create_abc_dict()));
-
-          // `_py_abc` — real CPython's separate pure-Python reference
-          // implementation of `ABCMeta` (used by `test_abc.py`'s own
-          // `test_factory(abc.ABCMeta, ...)` / `test_factory(_py_abc.ABCMeta,
-          // ...)` pattern to run its whole suite against both the C and
-          // Python implementations). This codebase has only ONE `ABCMeta`
-          // implementation (native Rust, no separate "C vs Python" split at
-          // all), so `_py_abc` was missing entirely — `import _py_abc`
-          // failed outright, crashing `test_abc.py` at collection before a
-          // single test ran. Aliased to the exact same dict as `abc` itself:
-          // not a literal from-scratch Python reimplementation, but an
-          // honest match for this codebase's actual architecture — it
-          // unblocks the import and lets both `test_factory` calls exercise
-          // real, working `ABCMeta` functionality (just the same
-          // implementation twice under two names, rather than two distinct
-          // ones).
-          modules.insert_str("_py_abc", create_module("_py_abc", create_abc_dict()));
-
-          // Native typing module (type annotation stubs)
-          // Comment out native typing - use Lib/typing.py instead
-          // modules.insert_str("typing", create_module("typing", create_typing_dict()));
-
-          // Native pickle module
-          modules.insert_str("_pickle", create_module("_pickle", create_pickle_dict()));
-
-          // Native logging module
-          modules.insert_str("_logging", create_module("_logging", create_logging_dict()));
-
-          // Native timeit module
-          modules.insert_str("timeit", create_module("timeit", create_timeit_dict()));
-
-          // Native json.tool module
-          modules.insert_str("json.tool", create_module("json.tool", create_json_tool_dict()));
-
-          // Native cmath module (complex math: sqrt, sin, cos)
-          modules.insert_str("cmath", create_module("cmath", create_cmath_dict()));
-
-          // Native gzip module
-          modules.insert_str("gzip", create_module("gzip", create_gzip_dict()));
-
-          // Native zlib module
-          modules.insert_str("zlib", create_module("zlib", create_zlib_dict()));
-
-          // Native tarfile module
-          modules.insert_str("tarfile", create_module("tarfile", create_tarfile_dict()));
-
-          // Native zipfile module (read-only)
-          modules.insert_str("zipfile", create_module("zipfile", create_zipfile_dict()));
-
-          // Native hashlib_extra module
-          modules.insert_str("hashlib_extra", create_module("hashlib_extra", create_hashlib_extra_dict()));
-
-          // dataclasses now loads from Lib/dataclasses.py (a real, if
-          // simplified, implementation — field generation, generated
-          // __init__/__repr__/__eq__, __dataclass_fields__, fields(), etc.)
-          // instead of this native stub, which only ever tagged classes with
-          // a marker attribute and never generated anything.
-          // modules.insert_str("dataclasses", create_module("dataclasses", create_dataclasses_dict()));
-
-          // Native operator module
-          modules.insert_str("operator", create_module("operator", create_operator_dict()));
-          // `_operator` — real CPython's C-accelerated backing module for
-          // `operator.py` (`from _operator import *`); same alias rationale
-          // as `_datetime` above.
-          modules.insert_str("_operator", create_module("_operator", create_operator_dict()));
-
-          // Native reprlib module — REMOVED (reprlib is now loaded from the
-          // vendored real Lib/reprlib.py, which provides the Repr class).
-
-          // Native array module
-          modules.insert_str("array", create_module("array", create_array_dict()));
-
-          // Native shelve module (persistent dict wrapper)
-          modules.insert_str("shelve", create_module("shelve", create_shelve_dict()));
-
-          // Native mimetypes module
-          modules.insert_str("mimetypes", create_module("mimetypes", create_mimetypes_dict()));
-
-          // Native dis module for bytecode disassembly
-          modules.insert_str("dis", create_module("dis", create_dis_dict()));
-
-          // Native http module (HTTPStatus enum)
-          let http_mod = create_module("http", create_http_dict());
-          modules.insert_str("http", http_mod.clone());
-
-          // Native http.client submodule (HTTPConnection, HTTPResponse)
-          let http_client_mod = create_module("http.client", create_http_client_dict());
-          // Wire client as a submodule attribute of the http parent module
-          if let PyObject::Module { dict, .. } = &mut *http_mod.borrow_mut() {
-              dict.insert_str("client", http_client_mod.clone());
-          }
-          modules.insert_str("http.client", http_client_mod);
-
-          // Native smtplib module (SMTP stub)
-          modules.insert_str("smtplib", create_module("smtplib", create_smtplib_dict()));
-
-          // Native html/html.entities/html.parser — DISABLED: `html.parser`
-          // was a near-empty stub (no real tokenizer at all — `feed()` just
-          // accumulated raw text verbatim, none of `handle_starttag`/
-          // `handle_endtag`/`handle_data`/etc. were ever called), and built
-          // as a `PyObject::BuiltinFunction` rather than a real
-          // `PyObject::Type`, so `class EventCollector(html.parser.
-          // HTMLParser): ...` (real subclassing, overriding those handler
-          // methods — CPython's own `test_htmlparser.py`'s entire approach)
-          // couldn't inherit anything from it at all (`AttributeError:
-          // 'EventCollector' object has no attribute 'feed'`). Real
-          // CPython's `html`/`html.entities`/`html.parser` are pure Python
-          // (plus `_markupbase`, `html.parser`'s shared tokenizer-support
-          // base) — vendored verbatim from a real CPython 3.14 install
-          // rather than reimplemented, same "vendor as pure-Python Lib/
-          // module" pattern as `unittest`/`doctest`/`email` above. Resolved
-          // through the normal file-based import path instead —
-          // `Lib/html/__init__.py` (escape/unescape), `Lib/html/
-          // entities.py` (html5/name2codepoint/codepoint2name data),
-          // `Lib/html/parser.py` (the real HTMLParser), `Lib/
-          // _markupbase.py`. `create_html_dict`/`create_html_entities_dict`/
-          // `create_html_parser_dict` (modules/net.rs, modules/text.rs) are
-          // now dead code, kept only in case `Lib/html/` needs to be
-          // reverted.
-          // let html_mod = create_module("html", create_html_dict());
-          // modules.insert_str("html", html_mod.clone());
-          // let html_entities_mod = create_module("html.entities", create_html_entities_dict());
-          // if let PyObject::Module { dict, .. } = &mut *html_mod.borrow_mut() {
-          //     dict.insert_str("entities", html_entities_mod.clone());
-          // }
-          // modules.insert_str("html.entities", html_entities_mod);
-          // let html_parser_mod = create_module("html.parser", create_html_parser_dict());
-          // if let PyObject::Module { dict, .. } = &mut *html_mod.borrow_mut() {
-          //     dict.insert_str("parser", html_parser_mod.clone());
-          // }
-          // modules.insert_str("html.parser", html_parser_mod);
-
-          // Native unittest module — DISABLED: was a complete no-op stub
-          // (every assertX method silently did nothing, `main()` never
-          // discovered or ran a single test) — replaced with the real
-          // CPython pure-Python `unittest` package (Lib/unittest/). Real
-          // CPython/Django test suites are unittest-based; silently
-          // no-op'ing every assertion is actively dangerous for a project
-          // whose goal is being a genuine CPython replacement.
-          // modules.insert_str("unittest", create_module("unittest", create_unittest_dict()));
-
-          // Native doctest module used to be a hollow stub (testmod/testfile
-          // always reported 0 attempted/0 failed regardless of actual
-          // docstring content; DocTestSuite/DocFileSuite didn't exist at all
-          // — real trigger: 16+ CPython test files' own `load_tests` doing
-          // `tests.addTest(doctest.DocTestSuite())`, crashing with
-          // `AttributeError: 'module' object has no attribute
-          // 'DocTestSuite'`). Replaced with a real (if simplified) Python
-          // implementation at `Lib/doctest.py`, resolved through the normal
-          // file-based import path instead — same "vendor/reimplement as a
-          // pure-Python Lib/ module" pattern as `unittest`/`email`.
-          // modules.insert_str("doctest", create_module("doctest", create_doctest_dict()));
-
-          // `email` used to be a thin native stub (EmailMessage/MIMEText/
-          // header/utils only, no real Message class, no submodule files —
-          // couldn't satisfy `import email.message`/`email.mime.multipart`/
-          // etc. at all). Real CPython's own `email` package is pure
-          // Python and self-contained; a full copy now lives at
-          // `Lib/email/` (plus `Lib/quopri.py`, one of its few deps) and is
-          // resolved through the normal file-based import path instead —
-          // no native registration needed anymore. `create_email_dict`/
-          // `create_email_mime_text_dict`/`create_email_header_dict`/
-          // `create_email_utils_dict` (modules/misc.rs) are now dead code,
-          // kept only in case `Lib/email/` needs to be reverted.
-
-          // Native configparser module
-          // `configparser` is loaded from the vendored real CPython
-          // Lib/configparser.py (the native Rust version was missing module
-          // internals like `_default_dict` that test_configparser exercises).
-
-          // Native xml.etree.ElementTree module
-          let xml_etree_mod = create_module("xml.etree.ElementTree", create_xml_etree_dict());
-          modules.insert_str("xml.etree.ElementTree", xml_etree_mod.clone());
-          // `xml.etree` (the bare PACKAGE, distinct from its
-          // `.ElementTree` submodule) previously had no entry of its own in
-          // `vm.modules` at all — only the leaf `xml.etree.ElementTree` was
-          // registered — so `import xml.etree` (without the submodule
-          // suffix, a real, common form — real trigger: several CPython
-          // corpus files) raised `ImportError: No module named 'xml.etree'`
-          // even though the deeper `xml.etree.ElementTree` import worked
-          // fine. Fixed by registering the package itself too, with
-          // `ElementTree` wired as its own attribute (mirroring the
-          // existing `xml`-package-wires-`etree` pattern just below).
-          let xml_etree_pkg = create_module("xml.etree", HashMap::new());
-          if let PyObject::Module { dict: xml_etree_pkg_dict, .. } = &mut *xml_etree_pkg.borrow_mut() {
-              xml_etree_pkg_dict.insert_str("ElementTree", xml_etree_mod.clone());
-          }
-          modules.insert_str("xml.etree", xml_etree_pkg.clone());
-          // Native xml module (empty package)
-          let xml_mod = create_module("xml", create_xml_dict());
-          // Wire etree as a submodule of xml
-          if let PyObject::Module { dict: xml_el_dict, .. } = &mut *xml_mod.borrow_mut() {
-              xml_el_dict.insert_str("etree", xml_etree_pkg.clone());
-          }
-          modules.insert_str("xml", xml_mod);
-
-          // Native this module (Zen of Python)
-          modules.insert_str("this", create_module("this", create_this_dict()));
-
-          // argparse now loads from Lib/argparse.py (real CPython source,
-          // vendored verbatim) instead of the old native stub — the stub's
-          // `add_argument` was a no-op and `parse_args` never populated a
-          // caller-supplied `namespace` object (2nd positional arg), which
-          // is exactly the calling convention `unittest.main()`'s own
-          // `TestProgram.parseArgs` and Django's management-command
-          // machinery both rely on. See `create_argparse_dict` (kept, now
-          // dead code) for the old implementation.
-          // modules.insert_str("argparse", create_module("argparse", create_argparse_dict()));
-
-          // Native _imp module (CPython C extension replacement needed by importlib._bootstrap)
-          modules.insert_str("_imp", create_module("_imp", create_imp_dict()));
-          // Native _opcode module (needed by test.support)
-          modules.insert_str("_opcode", create_module("_opcode", create_opcode_dict()));
-          // Native _warnings module (CPython C extension replacement)
-          modules.insert_str("_warnings", create_module("_warnings", create_warnings_c_dict()));
-          // Native marshal module (CPython C extension replacement)
-          modules.insert_str("marshal", create_module("marshal", create_marshal_dict()));
-          // Native zipimport module stub
-          modules.insert_str("zipimport", create_module("zipimport", create_zipimport_dict()));
-          // Native _io module (CPython C extension replacement needed by importlib._bootstrap_external)
-          modules.insert_str("_io", create_module("_io", create_io_module_dict()));
-          // Native queue module (Queue backed by PyObject::Queue)
-          modules.insert_str("queue", create_module("queue", create_queue_dict()));
-
-          // Native importlib stub module
-          let importlib_mod = create_module("importlib", create_importlib_dict());
-          // Wire importlib.resources as a submodule
-          {
-              let resources_mod = create_module("importlib.resources", create_importlib_resources_dict());
-              if let PyObject::Module { dict, .. } = &mut *importlib_mod.borrow_mut() {
-                  dict.insert_str("resources", resources_mod.clone());
-              }
-              modules.insert_str("importlib.resources", resources_mod);
-          }
-          // Wire importlib.util as a submodule
-          {
-              let util_mod = create_module("importlib.util", create_importlib_util_dict());
-              if let PyObject::Module { dict, .. } = &mut *importlib_mod.borrow_mut() {
-                  dict.insert_str("util", util_mod.clone());
-              }
-              modules.insert_str("importlib.util", util_mod);
-          }
-          // Add __path__ so dotted imports like importlib.machinery can find filesystem submodules
-          {
-              if let PyObject::Module { dict, .. } = &mut *importlib_mod.borrow_mut() {
-                  dict.insert_str("__path__", py_list(vec![py_str(&format!("{}/importlib", find_lib_dir()))]));
-              }
-          }
-          modules.insert_str("importlib", importlib_mod);
-
-          modules.insert_str("inspect", create_module("inspect", create_inspect_dict()));
-
-          // Native __future__ module (needed by requests, etc.)
-          modules.insert_str("__future__", create_module("__future__", create_future_dict()));
-
-          // Native asyncio module (basic event loop)
-          modules.insert_str("asyncio", create_module("asyncio", create_asyncio_dict()));
-
-          // Native atexit module (register/unregister exit callbacks)
-          modules.insert_str("atexit", create_module("atexit", create_atexit_dict()));
-
-          // Native contextvars module (ContextVar with thread-local storage)
-          modules.insert_str("contextvars", create_module("contextvars", create_contextvars_dict()));
-
-          // Native unicodedata module (basic Unicode category/normalize)
-          modules.insert_str("unicodedata", create_module("unicodedata", create_unicodedata_dict()));
-
-          // Native profile module
-          modules.insert_str("profile", create_module("profile", create_profile_dict()));
-
-          // Native cProfile module
-          modules.insert_str("cProfile", create_module("cProfile", create_cprofile_dict()));
-
-          // Native resource module (POSIX resource usage stubs)
-          modules.insert_str("resource", create_module("resource", create_resource_dict()));
-
-          // Native trace module (code tracing / coverage stubs)
-          modules.insert_str("trace", create_module("trace", create_trace_dict()));
-
-          // Native _concurrent module (concurrent.futures backend)
-          let concurrent_futures_mod = create_module("concurrent.futures", create_concurrent_futures_dict());
-          // Create intermediate concurrent package and wire futures under it
-          let concurrent_mod = create_module("concurrent", HashMap::new());
-          {
-              let mut conc_mut = concurrent_mod.borrow_mut();
-              if let PyObject::Module { dict, .. } = &mut *conc_mut {
-                  dict.insert_str("futures", concurrent_futures_mod.clone());
-              }
-          }
-          modules.insert_str("concurrent", concurrent_mod);
-          modules.insert_str("concurrent.futures", concurrent_futures_mod);
-
-          // Native sqlite3 module (requires --features sqlite3)
-          #[cfg(feature = "sqlite3")]
-          {
-              let sqlite3_mod = create_module("sqlite3", create_sqlite3_dict());
-              modules.insert_str("sqlite3", sqlite3_mod.clone());
-              // sqlite3.dbapi2 — real CPython's sqlite3 package re-exports
-              // everything under this name too (the legacy PEP 249 DB-API
-              // 2.0 module alias). Real code: Django's own
-              // `django/db/backends/sqlite3/base.py` does `from sqlite3
-              // import dbapi2 as Database`. Same module object, not a
-              // separate copy — matches how CPython's own `dbapi2.py` is
-              // just `from sqlite3.dbapi2 import *`-equivalent re-exports.
-              modules.insert_str("sqlite3.dbapi2", sqlite3_mod);
-          }
-
-          // Populate sys.path with default search paths — ONLY the first
-          // time this process/thread creates a VM. Every subsequent
-          // VirtualMachine::new() (crucially including the many *disposable*
-          // ones `call_bound_method` spins up per nested Python-level call —
-          // a separate, documented architectural gap) reuses the exact same
-          // list object via `reused_shared_path` above instead of rebuilding
-          // it from scratch. This fixes a real correctness bug (a disposable
-          // VM's sys.path previously reverted to just these hardcoded
-          // defaults, invisible to whatever `sys.path.insert(...)` the
-          // running script had done against the real VM — breaking any
-          // nested call that needed to import a real site-packages module,
-          // confirmed via Django's `django.db.utils.load_backend`) and a
-          // real performance win (this block does venv detection + `.pth`
-          // file filesystem I/O, previously repeated on every one of 2000+
-          // disposable VMs in one observed Django import).
+        let mut modules: HashMap<String, PyObjectRef> = HashMap::new();
+        modules.insert_str(
+            "builtins",
+            create_module("builtins", builtins_to_module(&builtins)),
+        );
+        modules.insert_str("math", create_module("math", create_math_dict()));
+        modules.insert_str("_codecs", create_module("_codecs", create_codecs_dict()));
+
+        let mut sys_dict = create_sys_dict(argv);
+        // sys.path is shared (Rc-cloned) across every VirtualMachine
+        // instance in this process/thread, real or disposable — see the
+        // populate-defaults block below for why. `sys.modules` is
+        // deliberately NOT shared this way: it's populated per-VM below
+        // from that VM's own already-built `modules` map, which is the
+        // correct, VM-local behavior for module caching.
+        thread_local! {
+            static SHARED_SYS_PATH: RefCell<Option<PyObjectRef>> = RefCell::new(None);
+        }
+        let reused_shared_path = SHARED_SYS_PATH.with(|c| c.borrow().clone());
+        if let Some(shared_path) = reused_shared_path.clone() {
+            sys_dict.insert_str("path", shared_path);
+        }
+        // sys.meta_path — import hooks
+        if !sys_dict.contains_key("meta_path") {
+            let meta_path = py_list(vec![PyObjectRef::imm(PyObject::BuiltinFunction {
+                name: "BuiltinImporter".to_string(),
+                func: |args| {
+                    if args.len() < 2 {
+                        return Err(PyError::type_error("find_spec() requires 2 arguments"));
+                    }
+                    Err(PyError::module_not_found_error(format!(
+                        "No module named '{}'",
+                        args[1].str()
+                    )))
+                },
+            })]);
+            sys_dict.insert_str("meta_path", meta_path);
+        }
+        if !sys_dict.contains_key("path_hooks") {
+            sys_dict.insert_str("path_hooks", py_list(vec![]));
+        }
+        if !sys_dict.contains_key("path_importer_cache") {
+            sys_dict.insert_str("path_importer_cache", py_dict());
+        }
+        modules.insert_str("sys", create_module("sys", sys_dict.clone()));
+        for (k, v) in sys_dict.clone() {
+            builtins.insert(interner::intern(&k), v);
+        }
+
+        // Share the sys module with native code that must read the CURRENT
+        // `sys.unraisablehook` (atexit's `_run_exitfuncs` reports a raising
+        // callback through it — the hook may have been reassigned by
+        // `catch_warnings`-style contexts like test.support's
+        // `catch_unraisable_exception`, so it must be read live, not
+        // captured at module-creation time).
+        crate::modules::set_sys_module(modules.get("sys").cloned());
+
+        // Native os module
+        let os_mod = create_module("os", create_os_dict());
+        modules.insert_str("os", os_mod.clone());
+        // posix is the C extension behind os — alias it for importlib compatibility
+        modules.insert_str("posix", os_mod.clone());
+
+        // Native os.path submodule (path manipulation functions)
+        let os_path_mod = create_module("os.path", create_os_path_dict());
+        // Wire path as a submodule attribute of the os parent module
+        if let PyObject::Module { dict, .. } = &mut *os_mod.borrow_mut() {
+            dict.insert_str("path", os_path_mod.clone());
+        }
+        modules.insert_str("os.path", os_path_mod.clone());
+        // posixpath is the real module behind os.path on POSIX (CPython's
+        // own os.py does `sys.modules['os.path'] = posixpath`) — code that
+        // imports it directly (`import posixpath`, common in stdlib-ish
+        // path-handling helpers) expects the same functions os.path has.
+        modules.insert_str("posixpath", os_path_mod);
+
+        let pathlib_dict = create_pathlib_dict();
+        modules.insert_str("pathlib", create_module("pathlib", pathlib_dict));
+
+        // Native urllib package (urllib.request, urllib.parse)
+        let urllib_dict = create_urllib_dict();
+        modules.insert_str("urllib", create_module("urllib", urllib_dict));
+
+        let json_dict = create_json_dict();
+        modules.insert_str("json", create_module("json", json_dict));
+
+        let collections_dict = create_collections_dict(
+            builtins
+                .get(&interner::intern("object"))
+                .cloned()
+                .unwrap_or_else(py_none),
+        );
+        modules.insert_str(
+            "collections",
+            create_module("collections", collections_dict),
+        );
+
+        let functools_dict = create_functools_dict();
+        modules.insert_str("functools", create_module("functools", functools_dict));
+
+        let itertools_dict = create_itertools_dict();
+        modules.insert_str("itertools", create_module("itertools", itertools_dict));
+
+        let datetime_dict = create_datetime_dict();
+        modules.insert_str("datetime", create_module("datetime", datetime_dict));
+        // `_datetime` is real CPython's C-accelerated backing module —
+        // `datetime.py` itself does `from _datetime import *` when
+        // available. This interpreter's `datetime` is already a single,
+        // natively-implemented module (no separate accelerated/pure-
+        // Python split), so `_datetime` is just an alias — needed only so
+        // code that imports `_datetime` directly (real trigger: CPython's
+        // own `test_module.py`-style introspection, checking that both
+        // names resolve) doesn't raise `ImportError`.
+        modules.insert_str(
+            "_datetime",
+            create_module("_datetime", create_datetime_dict()),
+        );
+
+        let zoneinfo_dict = create_zoneinfo_dict();
+        modules.insert_str("zoneinfo", create_module("zoneinfo", zoneinfo_dict));
+
+        let socket_dict = create_socket_dict();
+        modules.insert_str("socket", create_module("socket", socket_dict.clone()));
+        modules.insert_str("_socket", create_module("_socket", socket_dict));
+
+        let select_dict = create_select_dict();
+        modules.insert_str("select", create_module("select", select_dict));
+
+        let re_dict = create_re_dict();
+        modules.insert_str("re", create_module("re", re_dict));
+
+        let subprocess_dict = create_subprocess_dict();
+        modules.insert_str("subprocess", create_module("subprocess", subprocess_dict));
+
+        // Native pickle module (basic stub)
+        modules.insert_str("_pickle", create_module("_pickle", create_pickle_dict()));
+
+        // Native logging module
+        modules.insert_str("_logging", create_module("_logging", create_logging_dict()));
+        modules.insert_str(
+            "_logging.config",
+            create_module("_logging.config", create_logging_config_dict()),
+        );
+
+        // Native timeit module
+        modules.insert_str("timeit", create_module("timeit", create_timeit_dict()));
+
+        let threading_dict = create_threading_dict();
+        modules.insert_str("threading", create_module("threading", threading_dict));
+
+        // Native _thread module (CPython C extension replacement)
+        modules.insert_str(
+            "_thread",
+            create_module("_thread", create_thread_module_dict()),
+        );
+
+        // Native signal module (CPython C extension replacement)
+        modules.insert_str("signal", create_module("signal", create_signal_dict()));
+
+        // Native gc module (CPython C extension replacement)
+        modules.insert_str("gc", create_module("gc", create_gc_dict()));
+
+        // Native sysconfig module (CPython stdlib replacement)
+        modules.insert_str(
+            "sysconfig",
+            create_module("sysconfig", create_sysconfig_dict()),
+        );
+
+        // Native linecache module (CPython stdlib replacement)
+        modules.insert_str(
+            "linecache",
+            create_module("linecache", create_linecache_dict()),
+        );
+
+        // Native calendar module
+        modules.insert_str(
+            "calendar",
+            create_module("calendar", create_calendar_dict()),
+        );
+
+        // Native locale module
+        modules.insert_str("locale", create_module("locale", create_locale_dict()));
+        // Native _locale module — in real CPython this IS the C extension
+        // that the pure-Python `locale` module delegates to. Registering it
+        // natively (instead of the Lib/_locale.py stub) makes `setlocale`,
+        // `localeconv`, etc. real shared state (see create_locale_dict).
+        modules.insert_str("_locale", create_module("_locale", create_locale_dict()));
+
+        // gettext module (mostly Python source — see install_source_defined_stdlib below)
+        modules.insert_str("gettext", create_module("gettext", create_gettext_dict()));
+
+        // Native ssl module (CPython C extension replacement for urllib3 compatibility)
+        modules.insert_str("ssl", create_module("ssl", create_ssl_dict()));
+
+        // Native time module
+        modules.insert_str("time", create_module("time", create_time_dict()));
+
+        // Native C extension replacements for CPython stdlib compatibility
+        let weakref_dict = create_weakref_dict();
+        modules.insert_str("_weakref", create_module("_weakref", weakref_dict.clone()));
+
+        let collections_abc_dict = create_collections_abc_dict();
+        modules.insert_str(
+            "_collections_abc",
+            create_module("_collections_abc", collections_abc_dict.clone()),
+        );
+        // Pre-register collections.abc so the import chain walker finds it without needing __path__
+        modules.insert_str(
+            "collections.abc",
+            create_module("collections.abc", collections_abc_dict),
+        );
+
+        // Native weakref module (replaces CPython weakref.py)
+        let mut weakref_mod_dict = weakref_dict; // Start from _weakref
+                                                 // Add WeakValueDictionary and WeakKeyDictionary as dict-like stubs
+        weakref_mod_dict.insert_str("WeakValueDictionary", create_weakref_weak_val_dict());
+        weakref_mod_dict.insert_str("WeakKeyDictionary", create_weakref_weak_key_dict());
+        weakref_mod_dict.insert_str("WeakSet", create_weakref_weak_set());
+        modules.insert_str("weakref", create_module("weakref", weakref_mod_dict));
+
+        // Native copy module (replaces CPython copy.py which uses unsupported syntax)
+        modules.insert_str("copy", create_module("copy", create_copy_dict()));
+
+        // Native types module (replaces CPython types.py)
+        modules.insert_str("types", create_module("types", create_types_dict()));
+
+        // Native struct module for binary packing
+        modules.insert_str("struct", create_module("struct", create_struct_dict()));
+
+        // Native bisect module for binary search
+        modules.insert_str("bisect", create_module("bisect", create_bisect_dict()));
+        // `_bisect` — real CPython's C accelerator for `bisect`; CPython's
+        // own `test_bisect.py` builds its C-backed test class via
+        // `import_fresh_module('bisect', fresh=['_bisect'])`, which failed
+        // with `ModuleNotFoundError: No module named '_bisect'`, yielding
+        // `module = None` and `'NoneType' object has no attribute
+        // 'bisect_right'` for every C-class test. Same dict as `bisect`
+        // (this interpreter has no separate pure-Python wrapper).
+        modules.insert_str("_bisect", create_module("_bisect", create_bisect_dict()));
+
+        // Native heapq module for heap queue operations
+        modules.insert_str("heapq", create_module("heapq", create_heapq_dict()));
+
+        // enum module — real Enum/IntEnum/StrEnum/EnumType semantics
+        // (metaclass, real members, auto/unique) are far easier and more
+        // correct expressed as real Python source (see enum_extra.py)
+        // than as hand-written Rust closures; install_source_defined_stdlib
+        // (called below, once builtins/type registry exist) fills this
+        // module's dict in. The empty dict here is just a placeholder
+        // registration so that call finds an existing module to populate.
+        modules.insert_str("enum", create_module("enum", HashMap::new()));
+
+        // Native glob module
+        modules.insert_str("glob", create_module("glob", create_glob_dict()));
+
+        // Native fnmatch module
+        modules.insert_str("fnmatch", create_module("fnmatch", create_fnmatch_dict()));
+
+        // Native textwrap module
+        modules.insert_str(
+            "textwrap",
+            create_module("textwrap", create_textwrap_dict()),
+        );
+
+        // `pprint` and `reprlib` are loaded from the vendored real CPython
+        // Lib/ modules (their class-based APIs — PrettyPrinter/Repr — are
+        // what test_pprint/test_reprlib exercise, and the native Rust
+        // versions only had the top-level helper functions).
+
+        // Native hashlib module
+        modules.insert_str("hashlib", create_module("hashlib", create_hashlib_dict()));
+
+        // Native secrets module
+        modules.insert_str("secrets", create_module("secrets", create_secrets_dict()));
+
+        // Native hmac module
+        modules.insert_str("hmac", create_module("hmac", create_hmac_dict()));
+
+        // Native base64 module
+        modules.insert_str("base64", create_module("base64", create_base64_dict()));
+
+        // Native binascii module
+        modules.insert_str(
+            "binascii",
+            create_module("binascii", create_binascii_dict()),
+        );
+
+        // Native uuid module
+        modules.insert_str("uuid", create_module("uuid", create_uuid_dict()));
+
+        // Native string module (with capwords and Formatter)
+        let mut string_dict = create_string_dict();
+        let string_v2 = create_string_dict_v2();
+        for (k, v) in string_v2 {
+            string_dict.insert(k, v);
+        }
+        modules.insert_str("string", create_module("string", string_dict));
+
+        // Native colorsys module
+        modules.insert_str(
+            "colorsys",
+            create_module("colorsys", create_colorsys_dict()),
+        );
+
+        // Native wave module
+        modules.insert_str("wave", create_module("wave", create_wave_dict()));
+
+        // Native numbers module — DISABLED: was bare STRING placeholders
+        // (`d.insert_str("Number", py_str("Number"))` etc.) instead of
+        // real ABC classes — `isinstance(x, numbers.Number)` may have
+        // worked via some ad hoc string-matching path, but anything
+        // doing real class things with them (`numbers.Number.register
+        // (Decimal)` — needed by `decimal`'s own real implementation,
+        // see its own doc comment above) raised `AttributeError: 'str'
+        // object has no attribute 'register'`. Real CPython's `numbers.
+        // py` is small (427 lines) and pure Python (just `abc.ABCMeta`/
+        // `abstractmethod`) — vendored verbatim instead, same pattern as
+        // `decimal`/`html.parser` above. `create_numbers_dict` (modules/
+        // misc.rs) is now dead code, kept only in case `Lib/numbers.py`
+        // needs to be reverted.
+        // modules.insert_str("numbers", create_module("numbers", create_numbers_dict()));
+
+        // `ast` now loads from Lib/ast.py — needs real (if minimal, marker-
+        // only) node classes for PEP 649 lazy-annotation stringification
+        // (`annotationlib.py`'s `_Stringifier`, needed transitively by
+        // `test.support`), which the old native stub (just `literal_eval`
+        // plus a handful of node NAMES as bare strings, no real classes at
+        // all) couldn't provide. The old stub's actual `literal_eval`
+        // logic is kept and re-exposed under a private native module name
+        // so Lib/ast.py can still delegate to it instead of reimplementing
+        // literal parsing in pure Python.
+        modules.insert_str(
+            "_ast_native",
+            create_module("_ast_native", create_ast_dict()),
+        );
+
+        // Native sunau module (Sun AU audio format stubs)
+        modules.insert_str("sunau", create_module("sunau", create_sunau_dict()));
+
+        // Native difflib module (with unified_diff)
+        modules.insert_str("difflib", create_module("difflib", create_difflib_dict()));
+
+        // Native csv module
+        modules.insert_str("csv", create_module("csv", create_csv_dict()));
+
+        // Native io module — DISABLED: CPython io.py is used instead (imports from _io)
+        // modules.insert_str("io", create_module("io", create_io_dict()));
+
+        // Native statistics module. Tried vendoring the real CPython
+        // `Lib/statistics.py` (same pattern as `html`/`numbers`/etc.) —
+        // reverted: it hits the same unresolved "native types aren't real
+        // Type objects" architecture gap as `decimal` (`type(5) is int`
+        // is `False` here, breaking `_coerce`'s `T is S`/`T is int`
+        // identity checks throughout `_sum`/`variance`/etc.), AND
+        // `test_statistics.py` timed out (60s+) rather than completing —
+        // an operational risk not worth taking for a module that would
+        // still fail most of its own tests anyway. Several genuinely
+        // general bugs found chasing this ARE kept (not reverted):
+        // `functools.reduce`'s dropped-initial-value bug, `math.fsum`
+        // only handling List/Tuple, `itertools.groupby` (was missing
+        // entirely), `int.as_integer_ratio`/`numerator`/`denominator`/
+        // `real`/`imag`, `call_bound_method` supporting `type` as a
+        // plain callable, and — the most impactful one — `WITH_EXIT`
+        // never recognizing a user-defined exception CLASS instance
+        // (only the native `PyObject::Exception` shape), which broke
+        // `with`-statement `__exit__(exc_type, exc_value, tb)` for any
+        // custom exception (`unittest.assertRaises` reported ANY custom
+        // exception as "not raised" even when it genuinely was).
+        modules.insert_str(
+            "statistics",
+            create_module("statistics", create_statistics_dict()),
+        );
+
+        // Native contextlib module — DISABLED: real Lib/contextlib.py is used instead
+        // modules.insert_str("contextlib", create_module("contextlib", create_contextlib_dict()));
+
+        // Native decimal module. (Attempted vendoring real CPython's
+        // `decimal.py`/`_pydecimal.py` this session — got as far as
+        // `numbers.Number.register(Decimal)` working [needed the
+        // `numbers` vendor + a new generic `.register()`/`isinstance`-
+        // registry fallback, both kept, see below] before hitting
+        // `int.bit_length` accessed UNBOUND off the `int` type itself
+        // (`_nbits = int.bit_length`) — `int` is a `PyObject::
+        // BuiltinFunction`, not a real `Type`, so it has no attribute
+        // lookup for "what method would an instance's `.bit_length()`
+        // resolve to" at all. That's a deeper, general "unbound method
+        // access on a native-backed type" gap shared with list/dict/str/
+        // etc., not specific to decimal — reverted the vendor rather
+        // than chase it further this session. `Lib/decimal.py`/`Lib/
+        // _pydecimal.py` were removed again; re-attempt once unbound
+        // native-type method access is fixed.)
+        modules.insert_str("decimal", create_module("decimal", create_decimal_dict()));
+
+        // Native fractions module
+        modules.insert_str(
+            "fractions",
+            create_module("fractions", create_fractions_dict()),
+        );
+
+        // Native platform module
+        modules.insert_str(
+            "platform",
+            create_module("platform", create_platform_dict()),
+        );
+
+        // `getopt` — the real CPython Lib/getopt.py (vendored) is loaded
+        // from disk instead: it exposes the internals CPython's own
+        // test_getopt.py exercises directly (do_shorts/do_longs/
+        // gnu_getopt/GetoptError/short_has_arg/long_has_args) that the
+        // native Rust version never had, and its algorithm is authoritative.
+
+        // Native getpass module
+        modules.insert_str("getpass", create_module("getpass", create_getpass_dict()));
+
+        // Native errno module
+        modules.insert_str("errno", create_module("errno", create_errno_dict()));
+
+        // Native _random module (C extension stub for CPython's random.py)
+        modules.insert_str(
+            "_random",
+            create_module("_random", create_random_cmodule_dict()),
+        );
+
+        // Native shutil module
+        modules.insert_str("shutil", create_module("shutil", create_shutil_dict()));
+
+        // Native graphlib module
+        modules.insert_str(
+            "graphlib",
+            create_module("graphlib", create_graphlib_dict()),
+        );
+
+        // Native pdb module
+        modules.insert_str("pdb", create_module("pdb", create_pdb_dict()));
+
+        // traceback now loads from Lib/traceback.py — the old native stub
+        // (`create_traceback_dict`, kept as dead code) had only
+        // `format_exc`/`print_exc` as no-ops and no `TracebackException`
+        // at all, which real `unittest/result.py` needs to format a
+        // failure/error for display.
+        // modules.insert_str("traceback", create_module("traceback", create_traceback_dict()));
+
+        // Native warnings module
+        modules.insert_str(
+            "warnings",
+            create_module("warnings", create_warnings_dict()),
+        );
+
+        // Native abc module
+        modules.insert_str("abc", create_module("abc", create_abc_dict()));
+
+        // `_py_abc` — real CPython's separate pure-Python reference
+        // implementation of `ABCMeta` (used by `test_abc.py`'s own
+        // `test_factory(abc.ABCMeta, ...)` / `test_factory(_py_abc.ABCMeta,
+        // ...)` pattern to run its whole suite against both the C and
+        // Python implementations). This codebase has only ONE `ABCMeta`
+        // implementation (native Rust, no separate "C vs Python" split at
+        // all), so `_py_abc` was missing entirely — `import _py_abc`
+        // failed outright, crashing `test_abc.py` at collection before a
+        // single test ran. Aliased to the exact same dict as `abc` itself:
+        // not a literal from-scratch Python reimplementation, but an
+        // honest match for this codebase's actual architecture — it
+        // unblocks the import and lets both `test_factory` calls exercise
+        // real, working `ABCMeta` functionality (just the same
+        // implementation twice under two names, rather than two distinct
+        // ones).
+        modules.insert_str("_py_abc", create_module("_py_abc", create_abc_dict()));
+
+        // Native typing module (type annotation stubs)
+        // Comment out native typing - use Lib/typing.py instead
+        // modules.insert_str("typing", create_module("typing", create_typing_dict()));
+
+        // Native pickle module
+        modules.insert_str("_pickle", create_module("_pickle", create_pickle_dict()));
+
+        // Native logging module
+        modules.insert_str("_logging", create_module("_logging", create_logging_dict()));
+
+        // Native timeit module
+        modules.insert_str("timeit", create_module("timeit", create_timeit_dict()));
+
+        // Native json.tool module
+        modules.insert_str(
+            "json.tool",
+            create_module("json.tool", create_json_tool_dict()),
+        );
+
+        // Native cmath module (complex math: sqrt, sin, cos)
+        modules.insert_str("cmath", create_module("cmath", create_cmath_dict()));
+
+        // Native gzip module
+        modules.insert_str("gzip", create_module("gzip", create_gzip_dict()));
+
+        // Native zlib module
+        modules.insert_str("zlib", create_module("zlib", create_zlib_dict()));
+
+        // Native tarfile module
+        modules.insert_str("tarfile", create_module("tarfile", create_tarfile_dict()));
+
+        // Native zipfile module (read-only)
+        modules.insert_str("zipfile", create_module("zipfile", create_zipfile_dict()));
+
+        // Native hashlib_extra module
+        modules.insert_str(
+            "hashlib_extra",
+            create_module("hashlib_extra", create_hashlib_extra_dict()),
+        );
+
+        // dataclasses now loads from Lib/dataclasses.py (a real, if
+        // simplified, implementation — field generation, generated
+        // __init__/__repr__/__eq__, __dataclass_fields__, fields(), etc.)
+        // instead of this native stub, which only ever tagged classes with
+        // a marker attribute and never generated anything.
+        // modules.insert_str("dataclasses", create_module("dataclasses", create_dataclasses_dict()));
+
+        // Native operator module
+        modules.insert_str(
+            "operator",
+            create_module("operator", create_operator_dict()),
+        );
+        // `_operator` — real CPython's C-accelerated backing module for
+        // `operator.py` (`from _operator import *`); same alias rationale
+        // as `_datetime` above.
+        modules.insert_str(
+            "_operator",
+            create_module("_operator", create_operator_dict()),
+        );
+
+        // Native reprlib module — REMOVED (reprlib is now loaded from the
+        // vendored real Lib/reprlib.py, which provides the Repr class).
+
+        // Native array module
+        modules.insert_str("array", create_module("array", create_array_dict()));
+
+        // Native shelve module (persistent dict wrapper)
+        modules.insert_str("shelve", create_module("shelve", create_shelve_dict()));
+
+        // Native mimetypes module
+        modules.insert_str(
+            "mimetypes",
+            create_module("mimetypes", create_mimetypes_dict()),
+        );
+
+        // Native dis module for bytecode disassembly
+        modules.insert_str("dis", create_module("dis", create_dis_dict()));
+
+        // Native http module (HTTPStatus enum)
+        let http_mod = create_module("http", create_http_dict());
+        modules.insert_str("http", http_mod.clone());
+
+        // Native http.client submodule (HTTPConnection, HTTPResponse)
+        let http_client_mod = create_module("http.client", create_http_client_dict());
+        // Wire client as a submodule attribute of the http parent module
+        if let PyObject::Module { dict, .. } = &mut *http_mod.borrow_mut() {
+            dict.insert_str("client", http_client_mod.clone());
+        }
+        modules.insert_str("http.client", http_client_mod);
+
+        // Native smtplib module (SMTP stub)
+        modules.insert_str("smtplib", create_module("smtplib", create_smtplib_dict()));
+
+        // Native html/html.entities/html.parser — DISABLED: `html.parser`
+        // was a near-empty stub (no real tokenizer at all — `feed()` just
+        // accumulated raw text verbatim, none of `handle_starttag`/
+        // `handle_endtag`/`handle_data`/etc. were ever called), and built
+        // as a `PyObject::BuiltinFunction` rather than a real
+        // `PyObject::Type`, so `class EventCollector(html.parser.
+        // HTMLParser): ...` (real subclassing, overriding those handler
+        // methods — CPython's own `test_htmlparser.py`'s entire approach)
+        // couldn't inherit anything from it at all (`AttributeError:
+        // 'EventCollector' object has no attribute 'feed'`). Real
+        // CPython's `html`/`html.entities`/`html.parser` are pure Python
+        // (plus `_markupbase`, `html.parser`'s shared tokenizer-support
+        // base) — vendored verbatim from a real CPython 3.14 install
+        // rather than reimplemented, same "vendor as pure-Python Lib/
+        // module" pattern as `unittest`/`doctest`/`email` above. Resolved
+        // through the normal file-based import path instead —
+        // `Lib/html/__init__.py` (escape/unescape), `Lib/html/
+        // entities.py` (html5/name2codepoint/codepoint2name data),
+        // `Lib/html/parser.py` (the real HTMLParser), `Lib/
+        // _markupbase.py`. `create_html_dict`/`create_html_entities_dict`/
+        // `create_html_parser_dict` (modules/net.rs, modules/text.rs) are
+        // now dead code, kept only in case `Lib/html/` needs to be
+        // reverted.
+        // let html_mod = create_module("html", create_html_dict());
+        // modules.insert_str("html", html_mod.clone());
+        // let html_entities_mod = create_module("html.entities", create_html_entities_dict());
+        // if let PyObject::Module { dict, .. } = &mut *html_mod.borrow_mut() {
+        //     dict.insert_str("entities", html_entities_mod.clone());
+        // }
+        // modules.insert_str("html.entities", html_entities_mod);
+        // let html_parser_mod = create_module("html.parser", create_html_parser_dict());
+        // if let PyObject::Module { dict, .. } = &mut *html_mod.borrow_mut() {
+        //     dict.insert_str("parser", html_parser_mod.clone());
+        // }
+        // modules.insert_str("html.parser", html_parser_mod);
+
+        // Native unittest module — DISABLED: was a complete no-op stub
+        // (every assertX method silently did nothing, `main()` never
+        // discovered or ran a single test) — replaced with the real
+        // CPython pure-Python `unittest` package (Lib/unittest/). Real
+        // CPython/Django test suites are unittest-based; silently
+        // no-op'ing every assertion is actively dangerous for a project
+        // whose goal is being a genuine CPython replacement.
+        // modules.insert_str("unittest", create_module("unittest", create_unittest_dict()));
+
+        // Native doctest module used to be a hollow stub (testmod/testfile
+        // always reported 0 attempted/0 failed regardless of actual
+        // docstring content; DocTestSuite/DocFileSuite didn't exist at all
+        // — real trigger: 16+ CPython test files' own `load_tests` doing
+        // `tests.addTest(doctest.DocTestSuite())`, crashing with
+        // `AttributeError: 'module' object has no attribute
+        // 'DocTestSuite'`). Replaced with a real (if simplified) Python
+        // implementation at `Lib/doctest.py`, resolved through the normal
+        // file-based import path instead — same "vendor/reimplement as a
+        // pure-Python Lib/ module" pattern as `unittest`/`email`.
+        // modules.insert_str("doctest", create_module("doctest", create_doctest_dict()));
+
+        // `email` used to be a thin native stub (EmailMessage/MIMEText/
+        // header/utils only, no real Message class, no submodule files —
+        // couldn't satisfy `import email.message`/`email.mime.multipart`/
+        // etc. at all). Real CPython's own `email` package is pure
+        // Python and self-contained; a full copy now lives at
+        // `Lib/email/` (plus `Lib/quopri.py`, one of its few deps) and is
+        // resolved through the normal file-based import path instead —
+        // no native registration needed anymore. `create_email_dict`/
+        // `create_email_mime_text_dict`/`create_email_header_dict`/
+        // `create_email_utils_dict` (modules/misc.rs) are now dead code,
+        // kept only in case `Lib/email/` needs to be reverted.
+
+        // Native configparser module
+        // `configparser` is loaded from the vendored real CPython
+        // Lib/configparser.py (the native Rust version was missing module
+        // internals like `_default_dict` that test_configparser exercises).
+
+        // Native xml.etree.ElementTree module
+        let xml_etree_mod = create_module("xml.etree.ElementTree", create_xml_etree_dict());
+        modules.insert_str("xml.etree.ElementTree", xml_etree_mod.clone());
+        // `xml.etree` (the bare PACKAGE, distinct from its
+        // `.ElementTree` submodule) previously had no entry of its own in
+        // `vm.modules` at all — only the leaf `xml.etree.ElementTree` was
+        // registered — so `import xml.etree` (without the submodule
+        // suffix, a real, common form — real trigger: several CPython
+        // corpus files) raised `ImportError: No module named 'xml.etree'`
+        // even though the deeper `xml.etree.ElementTree` import worked
+        // fine. Fixed by registering the package itself too, with
+        // `ElementTree` wired as its own attribute (mirroring the
+        // existing `xml`-package-wires-`etree` pattern just below).
+        let xml_etree_pkg = create_module("xml.etree", HashMap::new());
+        if let PyObject::Module {
+            dict: xml_etree_pkg_dict,
+            ..
+        } = &mut *xml_etree_pkg.borrow_mut()
+        {
+            xml_etree_pkg_dict.insert_str("ElementTree", xml_etree_mod.clone());
+        }
+        modules.insert_str("xml.etree", xml_etree_pkg.clone());
+        // Native xml module (empty package)
+        let xml_mod = create_module("xml", create_xml_dict());
+        // Wire etree as a submodule of xml
+        if let PyObject::Module {
+            dict: xml_el_dict, ..
+        } = &mut *xml_mod.borrow_mut()
+        {
+            xml_el_dict.insert_str("etree", xml_etree_pkg.clone());
+        }
+        modules.insert_str("xml", xml_mod);
+
+        // Native this module (Zen of Python)
+        modules.insert_str("this", create_module("this", create_this_dict()));
+
+        // argparse now loads from Lib/argparse.py (real CPython source,
+        // vendored verbatim) instead of the old native stub — the stub's
+        // `add_argument` was a no-op and `parse_args` never populated a
+        // caller-supplied `namespace` object (2nd positional arg), which
+        // is exactly the calling convention `unittest.main()`'s own
+        // `TestProgram.parseArgs` and Django's management-command
+        // machinery both rely on. See `create_argparse_dict` (kept, now
+        // dead code) for the old implementation.
+        // modules.insert_str("argparse", create_module("argparse", create_argparse_dict()));
+
+        // Native _imp module (CPython C extension replacement needed by importlib._bootstrap)
+        modules.insert_str("_imp", create_module("_imp", create_imp_dict()));
+        // Native _opcode module (needed by test.support)
+        modules.insert_str("_opcode", create_module("_opcode", create_opcode_dict()));
+        // Native _warnings module (CPython C extension replacement)
+        modules.insert_str(
+            "_warnings",
+            create_module("_warnings", create_warnings_c_dict()),
+        );
+        // Native marshal module (CPython C extension replacement)
+        modules.insert_str("marshal", create_module("marshal", create_marshal_dict()));
+        // Native zipimport module stub
+        modules.insert_str(
+            "zipimport",
+            create_module("zipimport", create_zipimport_dict()),
+        );
+        // Native _io module (CPython C extension replacement needed by importlib._bootstrap_external)
+        modules.insert_str("_io", create_module("_io", create_io_module_dict()));
+        // Native queue module (Queue backed by PyObject::Queue)
+        modules.insert_str("queue", create_module("queue", create_queue_dict()));
+
+        // Native importlib stub module
+        let importlib_mod = create_module("importlib", create_importlib_dict());
+        // Wire importlib.resources as a submodule
+        {
+            let resources_mod =
+                create_module("importlib.resources", create_importlib_resources_dict());
+            if let PyObject::Module { dict, .. } = &mut *importlib_mod.borrow_mut() {
+                dict.insert_str("resources", resources_mod.clone());
+            }
+            modules.insert_str("importlib.resources", resources_mod);
+        }
+        // Wire importlib.util as a submodule
+        {
+            let util_mod = create_module("importlib.util", create_importlib_util_dict());
+            if let PyObject::Module { dict, .. } = &mut *importlib_mod.borrow_mut() {
+                dict.insert_str("util", util_mod.clone());
+            }
+            modules.insert_str("importlib.util", util_mod);
+        }
+        // Add __path__ so dotted imports like importlib.machinery can find filesystem submodules
+        {
+            if let PyObject::Module { dict, .. } = &mut *importlib_mod.borrow_mut() {
+                dict.insert_str(
+                    "__path__",
+                    py_list(vec![py_str(&format!("{}/importlib", find_lib_dir()))]),
+                );
+            }
+        }
+        modules.insert_str("importlib", importlib_mod);
+
+        modules.insert_str("inspect", create_module("inspect", create_inspect_dict()));
+
+        // Native __future__ module (needed by requests, etc.)
+        modules.insert_str(
+            "__future__",
+            create_module("__future__", create_future_dict()),
+        );
+
+        // Native asyncio module (basic event loop)
+        modules.insert_str("asyncio", create_module("asyncio", create_asyncio_dict()));
+
+        // Native atexit module (register/unregister exit callbacks)
+        modules.insert_str("atexit", create_module("atexit", create_atexit_dict()));
+
+        // Native contextvars module (ContextVar with thread-local storage)
+        modules.insert_str(
+            "contextvars",
+            create_module("contextvars", create_contextvars_dict()),
+        );
+
+        // Native unicodedata module (basic Unicode category/normalize)
+        modules.insert_str(
+            "unicodedata",
+            create_module("unicodedata", create_unicodedata_dict()),
+        );
+
+        // Native profile module
+        modules.insert_str("profile", create_module("profile", create_profile_dict()));
+
+        // Native cProfile module
+        modules.insert_str(
+            "cProfile",
+            create_module("cProfile", create_cprofile_dict()),
+        );
+
+        // Native resource module (POSIX resource usage stubs)
+        modules.insert_str(
+            "resource",
+            create_module("resource", create_resource_dict()),
+        );
+
+        // Native trace module (code tracing / coverage stubs)
+        modules.insert_str("trace", create_module("trace", create_trace_dict()));
+
+        // Native _concurrent module (concurrent.futures backend)
+        let concurrent_futures_mod =
+            create_module("concurrent.futures", create_concurrent_futures_dict());
+        // Create intermediate concurrent package and wire futures under it
+        let concurrent_mod = create_module("concurrent", HashMap::new());
+        {
+            let mut conc_mut = concurrent_mod.borrow_mut();
+            if let PyObject::Module { dict, .. } = &mut *conc_mut {
+                dict.insert_str("futures", concurrent_futures_mod.clone());
+            }
+        }
+        modules.insert_str("concurrent", concurrent_mod);
+        modules.insert_str("concurrent.futures", concurrent_futures_mod);
+
+        // Native sqlite3 module (requires --features sqlite3)
+        #[cfg(feature = "sqlite3")]
+        {
+            let sqlite3_mod = create_module("sqlite3", create_sqlite3_dict());
+            modules.insert_str("sqlite3", sqlite3_mod.clone());
+            // sqlite3.dbapi2 — real CPython's sqlite3 package re-exports
+            // everything under this name too (the legacy PEP 249 DB-API
+            // 2.0 module alias). Real code: Django's own
+            // `django/db/backends/sqlite3/base.py` does `from sqlite3
+            // import dbapi2 as Database`. Same module object, not a
+            // separate copy — matches how CPython's own `dbapi2.py` is
+            // just `from sqlite3.dbapi2 import *`-equivalent re-exports.
+            modules.insert_str("sqlite3.dbapi2", sqlite3_mod);
+        }
+
+        // Populate sys.path with default search paths — ONLY the first
+        // time this process/thread creates a VM. Every subsequent
+        // VirtualMachine::new() (crucially including the many *disposable*
+        // ones `call_bound_method` spins up per nested Python-level call —
+        // a separate, documented architectural gap) reuses the exact same
+        // list object via `reused_shared_path` above instead of rebuilding
+        // it from scratch. This fixes a real correctness bug (a disposable
+        // VM's sys.path previously reverted to just these hardcoded
+        // defaults, invisible to whatever `sys.path.insert(...)` the
+        // running script had done against the real VM — breaking any
+        // nested call that needed to import a real site-packages module,
+        // confirmed via Django's `django.db.utils.load_backend`) and a
+        // real performance win (this block does venv detection + `.pth`
+        // file filesystem I/O, previously repeated on every one of 2000+
+        // disposable VMs in one observed Django import).
         if reused_shared_path.is_none() {
-        if let PyObject::List(path_list) = &mut *sys_dict.get("path").unwrap().borrow_mut() {
-            path_list.push(py_str("."));
-            path_list.push(py_str(&find_lib_dir()));
+            if let PyObject::List(path_list) = &mut *sys_dict.get("path").unwrap().borrow_mut() {
+                path_list.push(py_str("."));
+                path_list.push(py_str(&find_lib_dir()));
 
-            // Read PYTHONPATH environment variable
-            if let Ok(pythonpath) = std::env::var("PYTHONPATH") {
-                for p in pythonpath.split(':') {
-                    let trimmed = p.trim();
-                    if !trimmed.is_empty() {
-                        path_list.push(py_str(trimmed));
+                // Read PYTHONPATH environment variable
+                if let Ok(pythonpath) = std::env::var("PYTHONPATH") {
+                    for p in pythonpath.split(':') {
+                        let trimmed = p.trim();
+                        if !trimmed.is_empty() {
+                            path_list.push(py_str(trimmed));
+                        }
                     }
                 }
-            }
 
-            // Detect virtual environment (VIRTUAL_ENV, conda, poetry, pixi, or .venv in CWD)
-            let venv = std::env::var("VIRTUAL_ENV").ok()
-                .or_else(|| std::env::var("CONDA_PREFIX").ok())
-                .or_else(|| {
-                    if std::env::var("POETRY_ACTIVE").is_ok() {
-                        std::env::var("POETRY_VIRTUAL_ENV").ok()
-                    } else {
-                        None
-                    }
-                })
-                .or_else(|| {
-                    std::env::var("PIXI_IN_SHELL").ok().and_then(|_| std::env::var("PIXI_PROJECT_ROOT").ok())
-                })
-                .or_else(|| {
-                    let cwd = std::env::current_dir().ok();
-                    if cfg!(feature = "profile") { eprintln!("DEBUG venv: VIRTUAL_ENV not set, checking CWD .venv"); }
-                    if let Some(ref d) = cwd {
-                        let dotvenv = d.join(".venv");
-                        if cfg!(feature = "profile") { eprintln!("DEBUG venv: checking {}. is_dir={}", dotvenv.display(), dotvenv.is_dir()); }
-                    }
-                    cwd
-                        .filter(|d| d.join(".venv").is_dir())
-                        .map(|d| d.join(".venv").to_string_lossy().to_string())
-                });
-
-            if let Some(ref venv_path) = venv {
-                // Try to read pyvenv.cfg to determine the Python version
-                let py_version = std::fs::read_to_string(format!("{}/pyvenv.cfg", venv_path))
+                // Detect virtual environment (VIRTUAL_ENV, conda, poetry, pixi, or .venv in CWD)
+                let venv = std::env::var("VIRTUAL_ENV")
                     .ok()
-                    .and_then(|cfg| {
-                        for line in cfg.lines() {
-                            if let Some(ver) = line.strip_prefix("version = ") {
-                                // Parse "3.13.2" -> "3.13"
-                                let parts: Vec<&str> = ver.splitn(2, '.').collect();
-                                if parts.len() == 2 {
-                                    let major_minor = if let Some(dot2) = parts[1].find('.') {
-                                        &parts[1][..dot2]
-                                    } else {
-                                        parts[1]
-                                    };
-                                    return Some(format!("{}.{}", parts[0], major_minor));
-                                }
+                    .or_else(|| std::env::var("CONDA_PREFIX").ok())
+                    .or_else(|| {
+                        if std::env::var("POETRY_ACTIVE").is_ok() {
+                            std::env::var("POETRY_VIRTUAL_ENV").ok()
+                        } else {
+                            None
+                        }
+                    })
+                    .or_else(|| {
+                        std::env::var("PIXI_IN_SHELL")
+                            .ok()
+                            .and_then(|_| std::env::var("PIXI_PROJECT_ROOT").ok())
+                    })
+                    .or_else(|| {
+                        let cwd = std::env::current_dir().ok();
+                        if cfg!(feature = "profile") {
+                            eprintln!("DEBUG venv: VIRTUAL_ENV not set, checking CWD .venv");
+                        }
+                        if let Some(ref d) = cwd {
+                            let dotvenv = d.join(".venv");
+                            if cfg!(feature = "profile") {
+                                eprintln!(
+                                    "DEBUG venv: checking {}. is_dir={}",
+                                    dotvenv.display(),
+                                    dotvenv.is_dir()
+                                );
                             }
                         }
-                        None
-                    })
-                    .unwrap_or_else(|| "3.13".to_string());
+                        cwd.filter(|d| d.join(".venv").is_dir())
+                            .map(|d| d.join(".venv").to_string_lossy().to_string())
+                    });
 
-                // Add site-packages directory
-                let site_pkg = format!("{}/lib/python{}/site-packages", venv_path, py_version);
-                if std::path::Path::new(&site_pkg).is_dir() {
-                    path_list.push(py_str(&site_pkg));
+                if let Some(ref venv_path) = venv {
+                    // Try to read pyvenv.cfg to determine the Python version
+                    let py_version = std::fs::read_to_string(format!("{}/pyvenv.cfg", venv_path))
+                        .ok()
+                        .and_then(|cfg| {
+                            for line in cfg.lines() {
+                                if let Some(ver) = line.strip_prefix("version = ") {
+                                    // Parse "3.13.2" -> "3.13"
+                                    let parts: Vec<&str> = ver.splitn(2, '.').collect();
+                                    if parts.len() == 2 {
+                                        let major_minor = if let Some(dot2) = parts[1].find('.') {
+                                            &parts[1][..dot2]
+                                        } else {
+                                            parts[1]
+                                        };
+                                        return Some(format!("{}.{}", parts[0], major_minor));
+                                    }
+                                }
+                            }
+                            None
+                        })
+                        .unwrap_or_else(|| "3.13".to_string());
 
-                    // Process .pth files in site-packages (e.g., easy-install.pth, distutils-precedence.pth)
-                    if let Ok(entries) = std::fs::read_dir(&site_pkg) {
-                        for entry in entries.flatten() {
-                            let entry_path = entry.path();
-                            if entry_path.extension().map_or(false, |e| e == "pth") {
-                                if let Ok(content) = std::fs::read_to_string(&entry_path) {
-                                    for line in content.lines() {
-                                        let trimmed = line.trim();
-                                        if trimmed.is_empty() || trimmed.starts_with('#') {
-                                            continue;
-                                        }
-                                        if trimmed.starts_with('.') || trimmed.starts_with('/') {
-                                            let resolved = if trimmed.starts_with('.') {
-                                                format!("{}/{}", site_pkg, trimmed)
-                                            } else {
-                                                trimmed.to_string()
-                                            };
-                                            if !path_list.iter().any(|p| {
-                                                p.borrow().str() == resolved
-                                            }) {
-                                                path_list.push(py_str(&resolved));
+                    // Add site-packages directory
+                    let site_pkg = format!("{}/lib/python{}/site-packages", venv_path, py_version);
+                    if std::path::Path::new(&site_pkg).is_dir() {
+                        path_list.push(py_str(&site_pkg));
+
+                        // Process .pth files in site-packages (e.g., easy-install.pth, distutils-precedence.pth)
+                        if let Ok(entries) = std::fs::read_dir(&site_pkg) {
+                            for entry in entries.flatten() {
+                                let entry_path = entry.path();
+                                if entry_path.extension().map_or(false, |e| e == "pth") {
+                                    if let Ok(content) = std::fs::read_to_string(&entry_path) {
+                                        for line in content.lines() {
+                                            let trimmed = line.trim();
+                                            if trimmed.is_empty() || trimmed.starts_with('#') {
+                                                continue;
                                             }
+                                            if trimmed.starts_with('.') || trimmed.starts_with('/')
+                                            {
+                                                let resolved = if trimmed.starts_with('.') {
+                                                    format!("{}/{}", site_pkg, trimmed)
+                                                } else {
+                                                    trimmed.to_string()
+                                                };
+                                                if !path_list
+                                                    .iter()
+                                                    .any(|p| p.borrow().str() == resolved)
+                                                {
+                                                    path_list.push(py_str(&resolved));
+                                                }
+                                            }
+                                            // 'import' directives in .pth are skipped for now
                                         }
-                                        // 'import' directives in .pth are skipped for now
                                     }
                                 }
                             }
@@ -1202,71 +1444,116 @@ impl VirtualMachine {
                 }
             }
         }
-        }
         // First VM in this process/thread: publish the freshly-populated
         // path list so every subsequent VirtualMachine::new() reuses it.
         if reused_shared_path.is_none() {
             let path_list = sys_dict.get("path").unwrap().clone();
             SHARED_SYS_PATH.with(|c| *c.borrow_mut() = Some(path_list));
         }
-         // Populate sys.modules with already-loaded modules
-         if let PyObject::Dict(mod_dict) = &mut *sys_dict.get("modules").unwrap().borrow_mut() {
-             for (name, module) in &modules {
-                 mod_dict.set(py_str(name), module.clone()).ok();
-             }
-         }
+        // Populate sys.modules with already-loaded modules
+        if let PyObject::Dict(mod_dict) = &mut *sys_dict.get("modules").unwrap().borrow_mut() {
+            for (name, module) in &modules {
+                mod_dict.set(py_str(name), module.clone()).ok();
+            }
+        }
 
-          // Wrap builtins in Rc for sharing across frames
-          let builtins = Rc::new(builtins);
+        // Wrap builtins in Rc for sharing across frames
+        let builtins = Rc::new(builtins);
 
-          // Share the real builtins map so native code can resolve a builtin
-          // exception CLASS by name (type() of a PyObject::Exception must
-          // return the real ZeroDivisionError & co., not a synthetic Type —
-          // test_atexit's `type(exc_value) == ZeroDivisionError`).
-          crate::modules::set_builtins_ref(Rc::clone(&builtins));
+        // Share the real builtins map so native code can resolve a builtin
+        // exception CLASS by name (type() of a PyObject::Exception must
+        // return the real ZeroDivisionError & co., not a synthetic Type —
+        // test_atexit's `type(exc_value) == ZeroDivisionError`).
+        crate::modules::set_builtins_ref(Rc::clone(&builtins));
 
-          // Populate the disposable-VM fast path's cache (see the doc
-          // comment at the top of this function) — safe to do BEFORE the
-          // `install_source_defined_stdlib` calls below even though those
-          // still mutate module dicts afterward: this clones the `modules`
-          // HashMap's *entries* (Rc-bumps), not the module objects
-          // themselves, so any mutation those calls make lands on the same
-          // shared objects this cache already points to.
-          VM_STATE_CACHE.with(|c| *c.borrow_mut() = Some((Rc::clone(&builtins), modules.clone())));
+        // Populate the disposable-VM fast path's cache (see the doc
+        // comment at the top of this function) — safe to do BEFORE the
+        // `install_source_defined_stdlib` calls below even though those
+        // still mutate module dicts afterward: this clones the `modules`
+        // HashMap's *entries* (Rc-bumps), not the module objects
+        // themselves, so any mutation those calls make lands on the same
+        // shared objects this cache already points to.
+        VM_STATE_CACHE.with(|c| *c.borrow_mut() = Some((Rc::clone(&builtins), modules.clone())));
 
-          let mut vm = VirtualMachine {
-              frames: Vec::new(),
-              builtins: Rc::clone(&builtins),
-              modules,
-              globals,
-              #[cfg(feature = "jit")]
-             jit: RefCell::new(JitCompiler::new()),
-              profile: RefCell::new(HashMap::new()),
-               last_error_line: None,
-               last_error_file: None,
-               last_traceback: Vec::new(),
-               frame_pool: Vec::new(),
-               type_registry: HashMap::new(),
-               exc_type: None,
-               exc_value: None,
-               exc_traceback: None,
-               recursion_limit: 1000,
-           };
-         vm.populate_type_registry();
-         vm.install_source_defined_stdlib("collections", crate::modules::COLLECTIONS_USER_TYPES_SOURCE, &["UserList", "UserDict", "UserString", "Counter", "defaultdict", "ChainMap"]);
-         // contextlib no longer native — real Lib/contextlib.py already defines ContextDecorator
-         vm.install_source_defined_stdlib("functools", crate::modules::FUNCTOOLS_EXTRA_SOURCE, &["lru_cache", "cache"]);
-         vm.install_source_defined_stdlib("enum", crate::modules::ENUM_SOURCE, &[
-             "auto", "nonmember", "member", "property", "EnumType", "EnumMeta",
-             "Enum", "IntEnum", "StrEnum", "unique",
-         ]);
-         vm.install_source_defined_stdlib("gettext", crate::modules::GETTEXT_SOURCE, &[
-             "NullTranslations", "GNUTranslations", "find", "translation", "install",
-             "textdomain", "bindtextdomain", "gettext", "ngettext", "pgettext", "npgettext",
-             "dgettext", "dngettext", "__all__",
-         ]);
-         vm.install_source_defined_stdlib("json", crate::modules::JSON_EXTRA_SOURCE, &["JSONEncoder", "dumps"]);
-         vm
+        let mut vm = VirtualMachine {
+            frames: Vec::new(),
+            builtins: Rc::clone(&builtins),
+            modules,
+            globals,
+            #[cfg(feature = "jit")]
+            jit: RefCell::new(JitCompiler::new()),
+            profile: RefCell::new(HashMap::new()),
+            last_error_line: None,
+            last_error_file: None,
+            last_traceback: Vec::new(),
+            frame_pool: Vec::new(),
+            type_registry: HashMap::new(),
+            exc_type: None,
+            exc_value: None,
+            exc_traceback: None,
+            recursion_limit: 1000,
+        };
+        vm.populate_type_registry();
+        vm.install_source_defined_stdlib(
+            "collections",
+            crate::modules::COLLECTIONS_USER_TYPES_SOURCE,
+            &[
+                "UserList",
+                "UserDict",
+                "UserString",
+                "Counter",
+                "defaultdict",
+                "ChainMap",
+            ],
+        );
+        // contextlib no longer native — real Lib/contextlib.py already defines ContextDecorator
+        vm.install_source_defined_stdlib(
+            "functools",
+            crate::modules::FUNCTOOLS_EXTRA_SOURCE,
+            &["lru_cache", "cache"],
+        );
+        vm.install_source_defined_stdlib(
+            "enum",
+            crate::modules::ENUM_SOURCE,
+            &[
+                "auto",
+                "nonmember",
+                "member",
+                "property",
+                "EnumType",
+                "EnumMeta",
+                "Enum",
+                "IntEnum",
+                "StrEnum",
+                "unique",
+            ],
+        );
+        vm.install_source_defined_stdlib(
+            "gettext",
+            crate::modules::GETTEXT_SOURCE,
+            &[
+                "NullTranslations",
+                "GNUTranslations",
+                "find",
+                "translation",
+                "install",
+                "textdomain",
+                "bindtextdomain",
+                "gettext",
+                "ngettext",
+                "pgettext",
+                "npgettext",
+                "dgettext",
+                "dngettext",
+                "__all__",
+            ],
+        );
+        vm.install_source_defined_stdlib(
+            "json",
+            crate::modules::JSON_EXTRA_SOURCE,
+            &["JSONEncoder", "dumps"],
+        );
+        vm
     }
 
     /// Some stdlib classes are far easier (and more correct) to express as
@@ -1312,7 +1599,9 @@ impl VirtualMachine {
             static COMPILED_STDLIB_CACHE: std::cell::RefCell<HashMap<String, Rc<CodeObject>>> = std::cell::RefCell::new(HashMap::new());
             static EXECUTED_STDLIB_CACHE: std::cell::RefCell<HashMap<String, Rc<Vec<(String, PyObjectRef)>>>> = std::cell::RefCell::new(HashMap::new());
         }
-        if let Some(cached_extracted) = EXECUTED_STDLIB_CACHE.with(|c| c.borrow().get(module_name).cloned()) {
+        if let Some(cached_extracted) =
+            EXECUTED_STDLIB_CACHE.with(|c| c.borrow().get(module_name).cloned())
+        {
             if let Some(module) = self.modules.get(module_name) {
                 if let PyObject::Module { dict, .. } = &mut *module.borrow_mut() {
                     for (name, obj) in cached_extracted.iter() {
@@ -1336,7 +1625,10 @@ impl VirtualMachine {
                     Ok(c) => c,
                     Err(_) => return,
                 };
-                COMPILED_STDLIB_CACHE.with(|c| c.borrow_mut().insert(module_name.to_string(), Rc::new(code.clone())));
+                COMPILED_STDLIB_CACHE.with(|c| {
+                    c.borrow_mut()
+                        .insert(module_name.to_string(), Rc::new(code.clone()))
+                });
                 code
             }
         };
@@ -1345,17 +1637,32 @@ impl VirtualMachine {
         // `class Counter(dict): ...`) now implicitly do `__module__ =
         // __name__` as their first statement (see compile_class_body), which
         // would otherwise NameError here since this dict starts empty.
-        let dedicated_globals = Rc::new(RefCell::new(HashMap::from([
-            (interner::intern("__name__"), py_str(module_name)),
-        ])));
-        if self.exec_code(code, Some(Rc::clone(&dedicated_globals))).is_err() {
+        let dedicated_globals = Rc::new(RefCell::new(HashMap::from([(
+            interner::intern("__name__"),
+            py_str(module_name),
+        )])));
+        if self
+            .exec_code(code, Some(Rc::clone(&dedicated_globals)))
+            .is_err()
+        {
             return;
         }
         let extracted: Vec<(String, PyObjectRef)> = {
             let globals = dedicated_globals.borrow();
-            names.iter().filter_map(|name| globals.get(&interner::intern(name)).cloned().map(|v| (name.to_string(), v))).collect()
+            names
+                .iter()
+                .filter_map(|name| {
+                    globals
+                        .get(&interner::intern(name))
+                        .cloned()
+                        .map(|v| (name.to_string(), v))
+                })
+                .collect()
         };
-        EXECUTED_STDLIB_CACHE.with(|c| c.borrow_mut().insert(module_name.to_string(), Rc::new(extracted.clone())));
+        EXECUTED_STDLIB_CACHE.with(|c| {
+            c.borrow_mut()
+                .insert(module_name.to_string(), Rc::new(extracted.clone()))
+        });
         if let Some(module) = self.modules.get(module_name) {
             if let PyObject::Module { dict, .. } = &mut *module.borrow_mut() {
                 for (name, obj) in extracted {
@@ -1420,7 +1727,9 @@ impl VirtualMachine {
         // regular file-backed module import already uses) so STORE_NAME/
         // DELETE_NAME at top level keep this module's `dict` in sync as the
         // script executes, instead of only registering it once, empty then finished.
-        let main_module = self.modules.entry("__main__".to_string())
+        let main_module = self
+            .modules
+            .entry("__main__".to_string())
             .or_insert_with(|| create_module("__main__", HashMap::new()))
             .clone();
         if let Some(sys_mod) = self.modules.get("sys") {
@@ -1458,7 +1767,11 @@ impl VirtualMachine {
         result
     }
 
-    pub fn exec_code(&mut self, code: CodeObject, globals: Option<Rc<RefCell<HashMap<StrId, PyObjectRef>>>>) -> PyResult<PyObjectRef> {
+    pub fn exec_code(
+        &mut self,
+        code: CodeObject,
+        globals: Option<Rc<RefCell<HashMap<StrId, PyObjectRef>>>>,
+    ) -> PyResult<PyObjectRef> {
         self.exec_code_with_module(code, globals, None)
     }
 
@@ -1467,7 +1780,12 @@ impl VirtualMachine {
     /// own `dict` immediately — not just once execution finishes (see
     /// `Frame::live_module`'s doc comment for why this matters for
     /// circular imports).
-    pub fn exec_code_with_module(&mut self, code: CodeObject, globals: Option<Rc<RefCell<HashMap<StrId, PyObjectRef>>>>, live_module: Option<PyObjectRef>) -> PyResult<PyObjectRef> {
+    pub fn exec_code_with_module(
+        &mut self,
+        code: CodeObject,
+        globals: Option<Rc<RefCell<HashMap<StrId, PyObjectRef>>>>,
+        live_module: Option<PyObjectRef>,
+    ) -> PyResult<PyObjectRef> {
         let g = globals.unwrap_or_else(|| self.globals.clone());
         let mut frame = self.acquire_frame(Rc::new(code), g, Rc::clone(&self.builtins), None);
         frame.live_module = live_module;
@@ -1484,14 +1802,47 @@ impl VirtualMachine {
     /// can return real Type objects instead of string names.
     pub fn populate_type_registry(&mut self) {
         let type_names = [
-            "NoneType", "bool", "int", "float", "str", "bytes", "bytearray",
-            "list", "tuple", "dict", "set", "frozenset", "range", "slice",
-            "function", "builtin_function_or_method", "builtin_method",
-            "module", "type", "cell", "method", "partial", "property",
-            "staticmethod", "classmethod", "generator", "coroutine",
-            "Exception", "super", "lock", "RLock", "Event", "Queue",
-            "Thread", "file", "socket", "capsule", "re.Pattern",
-            "future_await_iterator", "enumerate", "list_iterator",
+            "NoneType",
+            "bool",
+            "int",
+            "float",
+            "str",
+            "bytes",
+            "bytearray",
+            "list",
+            "tuple",
+            "dict",
+            "set",
+            "frozenset",
+            "range",
+            "slice",
+            "function",
+            "builtin_function_or_method",
+            "builtin_method",
+            "module",
+            "type",
+            "cell",
+            "method",
+            "partial",
+            "property",
+            "staticmethod",
+            "classmethod",
+            "generator",
+            "coroutine",
+            "Exception",
+            "super",
+            "lock",
+            "RLock",
+            "Event",
+            "Queue",
+            "Thread",
+            "file",
+            "socket",
+            "capsule",
+            "re.Pattern",
+            "future_await_iterator",
+            "enumerate",
+            "list_iterator",
             "range_iterator",
         ];
         for name in &type_names {
@@ -1520,10 +1871,18 @@ impl VirtualMachine {
                     let md = mod_dict.borrow();
                     if let PyObject::Dict(d) = &*md {
                         d.get(&crate::object::py_str(name)).ok().flatten().is_some()
-                    } else { false }
-                } else { false }
-            } else { false }
-        } else { false };
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
         if in_sys_modules {
             return Some(module);
         }
@@ -1533,7 +1892,9 @@ impl VirtualMachine {
                 let b = module.borrow();
                 if let PyObject::Module { dict, .. } = &*b {
                     dict.clone()
-                } else { Box::new(crate::object::TypeDict::default()) }
+                } else {
+                    Box::new(crate::object::TypeDict::default())
+                }
             },
         });
         self.modules.insert(name.to_string(), fresh.clone());
@@ -1549,7 +1910,8 @@ impl VirtualMachine {
         Some(fresh)
     }
 
-    pub fn import_module_from_file(&mut self, name: &str) -> PyResult<PyObjectRef> {        // Guard against genuine infinite import recursion with a clean
+    pub fn import_module_from_file(&mut self, name: &str) -> PyResult<PyObjectRef> {
+        // Guard against genuine infinite import recursion with a clean
         // error (showing the exact chain) instead of a raw stack overflow —
         // kept permanently (env-gated print is always-on; the depth check
         // itself is cheap) rather than added back by hand each time.
@@ -1559,27 +1921,41 @@ impl VirtualMachine {
         let depth = IMPORT_CHAIN.with(|c| c.borrow().len());
         if depth > 150 {
             let chain = IMPORT_CHAIN.with(|c| c.borrow().join(" -> "));
-            return Err(PyError::ImportError(format!("import recursion too deep, likely a genuine cycle: {} -> {}", chain, name)));
+            return Err(PyError::ImportError(format!(
+                "import recursion too deep, likely a genuine cycle: {} -> {}",
+                chain, name
+            )));
         }
         IMPORT_CHAIN.with(|c| c.borrow_mut().push(name.to_string()));
         if std::env::var("RPY_DEBUG_IMPORT").is_ok() {
-            eprintln!("{}IMPORT_FILE: {} (self.modules.len()={}, sys.path={:?})", "  ".repeat(depth), name, self.modules.len(),
-                self.modules.get("sys").and_then(|m| if let PyObject::Module { dict, .. } = &*m.borrow() {
-                    dict.get_str("path").map(|p| p.str())
-                } else { None }));
+            eprintln!(
+                "{}IMPORT_FILE: {} (self.modules.len()={}, sys.path={:?})",
+                "  ".repeat(depth),
+                name,
+                self.modules.len(),
+                self.modules.get("sys").and_then(|m| {
+                    if let PyObject::Module { dict, .. } = &*m.borrow() {
+                        dict.get_str("path").map(|p| p.str())
+                    } else {
+                        None
+                    }
+                })
+            );
         }
         let result = self.import_module_from_file_inner(name);
-        IMPORT_CHAIN.with(|c| { c.borrow_mut().pop(); });
+        IMPORT_CHAIN.with(|c| {
+            c.borrow_mut().pop();
+        });
         result
     }
 
     fn import_module_from_file_inner(&mut self, name: &str) -> PyResult<PyObjectRef> {
         if cfg!(feature = "profile") {
-            if let Ok(status) = std::fs::read_to_string(format!("/proc/{}/status", std::process::id())) {
-                if let Some(_rss_line) = status.lines().find(|l| l.starts_with("VmRSS:")) {
-                }
-                if let Some(_peak_line) = status.lines().find(|l| l.starts_with("VmPeak:")) {
-                }
+            if let Ok(status) =
+                std::fs::read_to_string(format!("/proc/{}/status", std::process::id()))
+            {
+                if let Some(_rss_line) = status.lines().find(|l| l.starts_with("VmRSS:")) {}
+                if let Some(_peak_line) = status.lines().find(|l| l.starts_with("VmPeak:")) {}
             }
         }
         // Handle dotted names: e.g. "certifi.core" or "django.utils.version"
@@ -1604,7 +1980,9 @@ impl VirtualMachine {
             }
             // Check if we already have the top-level module
             if !self.modules.contains_key(&current_name) {
-                if cfg!(feature = "profile") { eprintln!("DEBUG import: top-level '{}' NOT in modules", current_name); }
+                if cfg!(feature = "profile") {
+                    eprintln!("DEBUG import: top-level '{}' NOT in modules", current_name);
+                }
                 // Not in modules — fall through to regular file search below
             } else {
                 // Walk the chain: for each part after the first, resolve the child
@@ -1628,9 +2006,15 @@ impl VirtualMachine {
                                 let p = dict.get_str("__path__").and_then(|pl| {
                                     if let PyObject::List(items) = &*pl.borrow() {
                                         items.first().and_then(|i| {
-                                            if let PyObject::Str(s) = &*i.borrow() { Some(s.to_string()) } else { None }
+                                            if let PyObject::Str(s) = &*i.borrow() {
+                                                Some(s.to_string())
+                                            } else {
+                                                None
+                                            }
                                         })
-                                    } else { None }
+                                    } else {
+                                        None
+                                    }
                                 });
                                 parent_path = p;
                             } else {
@@ -1653,13 +2037,23 @@ impl VirtualMachine {
                                 found_child = true;
                                 let is_pkg = candidate.ends_with("__init__.py");
                                 let empty_dict = if is_pkg {
-                                    if let Some(pkg_dir) = std::path::Path::new(candidate).parent() {
+                                    if let Some(pkg_dir) = std::path::Path::new(candidate).parent()
+                                    {
                                         HashMap::from([
-                                            ("__path__".to_string(), py_list(vec![py_str(&pkg_dir.to_string_lossy().to_string())])),
+                                            (
+                                                "__path__".to_string(),
+                                                py_list(vec![py_str(
+                                                    &pkg_dir.to_string_lossy().to_string(),
+                                                )]),
+                                            ),
                                             ("__package__".to_string(), py_str(&full_name)),
                                         ])
-                                    } else { HashMap::new() }
-                                } else { HashMap::new() };
+                                    } else {
+                                        HashMap::new()
+                                    }
+                                } else {
+                                    HashMap::new()
+                                };
                                 let empty_mod = create_module(&full_name, empty_dict);
                                 self.modules.insert(full_name.clone(), empty_mod.clone());
                                 // Register in sys.modules BEFORE executing (needed by code that checks sys.modules[__name__])
@@ -1667,7 +2061,9 @@ impl VirtualMachine {
                                 let sys_modules = self.modules.get("sys").and_then(|m| {
                                     let b = m.borrow();
                                     match &*b {
-                                        PyObject::Module { dict, .. } => dict.get_str("modules").cloned(),
+                                        PyObject::Module { dict, .. } => {
+                                            dict.get_str("modules").cloned()
+                                        }
                                         _ => None,
                                     }
                                 });
@@ -1677,7 +2073,8 @@ impl VirtualMachine {
                                         PyObjectRef::Mut(rc) => {
                                             if let Ok(mut guard) = rc.try_borrow_mut() {
                                                 if let PyObject::Dict(ref mut d) = &mut *guard {
-                                                    d.set(py_str(&full_name), empty_mod.clone()).ok();
+                                                    d.set(py_str(&full_name), empty_mod.clone())
+                                                        .ok();
                                                 }
                                             }
                                         }
@@ -1685,14 +2082,19 @@ impl VirtualMachine {
                                     }
                                 }
                                 // Execute the module source
-                                let module = self.exec_module_source(&source, candidate, &full_name)?;
+                                let module =
+                                    self.exec_module_source(&source, candidate, &full_name)?;
                                 self.modules.insert(full_name.clone(), module.clone());
                                 // Wire into parent module namespace
                                 if let Some(dot_pos) = full_name.rfind('.') {
                                     let parent_name = full_name[..dot_pos].to_string();
-                                    let child_name = full_name[dot_pos+1..].to_string();
-                                    if let Some(parent_mod) = self.modules.get(&parent_name).cloned() {
-                                        if let PyObject::Module { dict, .. } = &mut *parent_mod.borrow_mut() {
+                                    let child_name = full_name[dot_pos + 1..].to_string();
+                                    if let Some(parent_mod) =
+                                        self.modules.get(&parent_name).cloned()
+                                    {
+                                        if let PyObject::Module { dict, .. } =
+                                            &mut *parent_mod.borrow_mut()
+                                        {
                                             dict.insert_str(&child_name, module.clone());
                                         }
                                     }
@@ -1750,7 +2152,10 @@ impl VirtualMachine {
                 if let Some(sys_mod) = self.modules.get("sys") {
                     if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
                         if let Some(mod_dict) = dict.get_str("modules").cloned() {
-                            mod_dict.borrow_mut().set_attribute(name, empty_mod.clone()).ok();
+                            mod_dict
+                                .borrow_mut()
+                                .set_attribute(name, empty_mod.clone())
+                                .ok();
                         }
                     }
                 }
@@ -1760,14 +2165,17 @@ impl VirtualMachine {
                 if let Some(sys_mod) = self.modules.get("sys") {
                     if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
                         if let Some(mod_dict) = dict.get_str("modules").cloned() {
-                            mod_dict.borrow_mut().set_attribute(name, module.clone()).ok();
+                            mod_dict
+                                .borrow_mut()
+                                .set_attribute(name, module.clone())
+                                .ok();
                         }
                     }
                 }
                 // Wire submodule into parent module namespace
                 if let Some(dot_pos) = name.rfind('.') {
                     let parent_name = name[..dot_pos].to_string();
-                    let child_name = name[dot_pos+1..].to_string();
+                    let child_name = name[dot_pos + 1..].to_string();
                     if let Some(parent_mod) = self.modules.get(&parent_name).cloned() {
                         if let PyObject::Module { dict, .. } = &mut *parent_mod.borrow_mut() {
                             dict.insert_str(&child_name, module.clone());
@@ -1782,7 +2190,8 @@ impl VirtualMachine {
                 format!("{}/{}/__init__.py", base, py_name)
             };
             if let Some(source) = self.read_module_source(&init_path)? {
-                let pkg_dir = std::path::Path::new(&init_path).parent()
+                let pkg_dir = std::path::Path::new(&init_path)
+                    .parent()
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_default();
                 let mut empty_dict = HashMap::new();
@@ -1793,7 +2202,10 @@ impl VirtualMachine {
                 if let Some(sys_mod) = self.modules.get("sys") {
                     if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
                         if let Some(mod_dict) = dict.get_str("modules").cloned() {
-                            mod_dict.borrow_mut().set_attribute(name, empty_mod.clone()).ok();
+                            mod_dict
+                                .borrow_mut()
+                                .set_attribute(name, empty_mod.clone())
+                                .ok();
                         }
                     }
                 }
@@ -1803,7 +2215,10 @@ impl VirtualMachine {
                 if let Some(sys_mod) = self.modules.get("sys") {
                     if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
                         if let Some(mod_dict) = dict.get_str("modules").cloned() {
-                            mod_dict.borrow_mut().set_attribute(name, module.clone()).ok();
+                            mod_dict
+                                .borrow_mut()
+                                .set_attribute(name, module.clone())
+                                .ok();
                         }
                     }
                 }
@@ -1831,7 +2246,9 @@ impl VirtualMachine {
                             // Try to get the module from the extension registry
                             // SAFETY: see above — same trust boundary, reading
                             // state populated by the load_extension call just above.
-                            if let Some(mod_obj) = unsafe { crate::ffi_bridge::get_extension_module(name) } {
+                            if let Some(mod_obj) =
+                                unsafe { crate::ffi_bridge::get_extension_module(name) }
+                            {
                                 return Ok(mod_obj);
                             }
                         }
@@ -1840,7 +2257,10 @@ impl VirtualMachine {
                 }
             }
         }
-        Err(PyError::module_not_found_error(format!("No module named '{}'", name)))
+        Err(PyError::module_not_found_error(format!(
+            "No module named '{}'",
+            name
+        )))
     }
 
     fn get_sys_path(&self) -> Vec<String> {
@@ -1848,9 +2268,16 @@ impl VirtualMachine {
             if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
                 if let Some(path_list) = dict.get_str("path") {
                     if let PyObject::List(items) = &*path_list.borrow() {
-                        return items.iter().filter_map(|item| {
-                            if let PyObject::Str(s) = &*item.borrow() { Some(s.to_string()) } else { None }
-                        }).collect();
+                        return items
+                            .iter()
+                            .filter_map(|item| {
+                                if let PyObject::Str(s) = &*item.borrow() {
+                                    Some(s.to_string())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
                     }
                 }
             }
@@ -1874,7 +2301,12 @@ impl VirtualMachine {
         crate::object::import_builtin::decode_source_bytes(&bytes).map(Some)
     }
 
-    fn exec_module_source(&mut self, source: &str, path: &str, name: &str) -> PyResult<PyObjectRef> {
+    fn exec_module_source(
+        &mut self,
+        source: &str,
+        path: &str,
+        name: &str,
+    ) -> PyResult<PyObjectRef> {
         // ── .pyc cache support ─────────────────────────────────────────
         // Try to load a previously-compiled .pyc file. If valid (matching
         // magic + version + source timestamp), skip parsing and compilation.
@@ -1902,12 +2334,21 @@ impl VirtualMachine {
                     // Minimum size: magic(4) + version(2) + timestamp(8) = 14 bytes
                     if pyc_data.len() >= 14 {
                         let magic = u32::from_le_bytes([
-                            pyc_data[0], pyc_data[1], pyc_data[2], pyc_data[3],
+                            pyc_data[0],
+                            pyc_data[1],
+                            pyc_data[2],
+                            pyc_data[3],
                         ]);
                         let version = u16::from_le_bytes([pyc_data[4], pyc_data[5]]);
                         let ts = u64::from_le_bytes([
-                            pyc_data[6], pyc_data[7], pyc_data[8], pyc_data[9],
-                            pyc_data[10], pyc_data[11], pyc_data[12], pyc_data[13],
+                            pyc_data[6],
+                            pyc_data[7],
+                            pyc_data[8],
+                            pyc_data[9],
+                            pyc_data[10],
+                            pyc_data[11],
+                            pyc_data[12],
+                            pyc_data[13],
                         ]);
                         if magic == PYC_MAGIC && version == PYC_VERSION && ts == source_mtime {
                             if let Ok(code) = CodeObject::from_bytes(&pyc_data[14..]) {
@@ -1924,15 +2365,17 @@ impl VirtualMachine {
             Some(cached) => cached,
             None => {
                 let mut parser = crate::parser::Parser::new(source);
-                let program = parser.parse_program()
-                    .map_err(|e| PyError::RuntimeError(format!("Parse error in '{}': {}", name, e)))?;
-                drop(parser);  // Free parser memory (AST is now in `program`)
+                let program = parser.parse_program().map_err(|e| {
+                    PyError::RuntimeError(format!("Parse error in '{}': {}", name, e))
+                })?;
+                drop(parser); // Free parser memory (AST is now in `program`)
 
                 let mut compiler = crate::compiler::Compiler::new();
-                let compiled = compiler.compile(&program, path)
+                let compiled = compiler
+                    .compile(&program, path)
                     .map_err(|e| PyError::RuntimeError(format!("Compile error: {}", e)))?;
-                drop(compiler);  // Free compiler internal tables
-                drop(program);   // Free AST — CodeObject is now self-contained
+                drop(compiler); // Free compiler internal tables
+                drop(program); // Free AST — CodeObject is now self-contained
 
                 // Write .pyc cache for future imports (skip for stdlib modules).
                 // Stdlib modules under /usr/ are stable + huge; serialising them
@@ -1965,20 +2408,38 @@ impl VirtualMachine {
         let mut globals_map: HashMap<StrId, PyObjectRef> = HashMap::from([
             (interner::intern("__name__"), py_str(name)),
             (interner::intern("__file__"), py_str(path)),
-            (interner::intern("__builtins__"), create_module("builtins", self.builtins.iter().map(|(k,v)| (interner::lookup_str(*k).to_string(), v.clone())).collect())),
+            (
+                interner::intern("__builtins__"),
+                create_module(
+                    "builtins",
+                    self.builtins
+                        .iter()
+                        .map(|(k, v)| (interner::lookup_str(*k).to_string(), v.clone()))
+                        .collect(),
+                ),
+            ),
         ]);
         if is_package {
             if let Some(pkg_dir) = std::path::Path::new(path).parent() {
                 let pkg_dir_str = pkg_dir.to_string_lossy().to_string();
-                globals_map.insert(interner::intern("__path__"), py_list(vec![py_str(&pkg_dir_str)]));
+                globals_map.insert(
+                    interner::intern("__path__"),
+                    py_list(vec![py_str(&pkg_dir_str)]),
+                );
                 globals_map.insert(interner::intern("__package__"), py_str(name));
             }
         } else {
             // For non-package modules, __package__ should be set to the parent package name
             // (e.g., "django.apps" for "django.apps.registry") so relative imports work
             let pkg = name.rfind('.').map(|dot| &name[..dot]).unwrap_or("");
-            globals_map.insert(interner::intern("__package__"), 
-                if pkg.is_empty() { py_str("") } else { py_str(pkg) });
+            globals_map.insert(
+                interner::intern("__package__"),
+                if pkg.is_empty() {
+                    py_str("")
+                } else {
+                    py_str(pkg)
+                },
+            );
         }
         let module_globals = Rc::new(RefCell::new(globals_map));
         // Register module in sys.modules BEFORE executing (needed for sys.modules[__name__] checks)
@@ -1989,7 +2450,11 @@ impl VirtualMachine {
                         PyObjectRef::Mut(rc) => {
                             if let Ok(mut guard) = rc.try_borrow_mut() {
                                 if let PyObject::Dict(ref mut d) = &mut *guard {
-                                    d.set(py_str(name), py_str(&format!("<module '{}' (loaded)>", name))).ok();
+                                    d.set(
+                                        py_str(name),
+                                        py_str(&format!("<module '{}' (loaded)>", name)),
+                                    )
+                                    .ok();
                                 }
                             }
                         }
@@ -2040,11 +2505,19 @@ impl VirtualMachine {
         // still mid-execution).
         if let Some(existing) = self.modules.get(name).cloned() {
             if let PyObject::Module { dict, .. } = &mut *existing.borrow_mut() {
-                for (k, v) in globals_copy.iter() { dict.insert_str(interner::lookup_str(*k), v.clone()); }
+                for (k, v) in globals_copy.iter() {
+                    dict.insert_str(interner::lookup_str(*k), v.clone());
+                }
             }
             return Ok(existing);
         }
-        Ok(create_module(name, globals_copy.into_iter().map(|(k,v)| (interner::lookup_str(k).to_string(), v)).collect()))
+        Ok(create_module(
+            name,
+            globals_copy
+                .into_iter()
+                .map(|(k, v)| (interner::lookup_str(k).to_string(), v))
+                .collect(),
+        ))
     }
 
     /// Try to execute a simple function without creating a Frame.
@@ -2083,7 +2556,9 @@ impl VirtualMachine {
         let mut ip: usize = 0;
         let n_instrs = instrs.len();
         loop {
-            if ip >= n_instrs { return None; }
+            if ip >= n_instrs {
+                return None;
+            }
             let instr = &instrs[ip];
             ip += 1;
             match instr.op {
@@ -2095,7 +2570,9 @@ impl VirtualMachine {
                 Opcode::STORE_FAST => {
                     let idx = instr.arg as usize;
                     let val = stack.pop()?;
-                    if idx < locals.len() { locals[idx] = Some(val); }
+                    if idx < locals.len() {
+                        locals[idx] = Some(val);
+                    }
                 }
                 Opcode::LOAD_CONST => {
                     // Shares `eval_const_value`/`const_cache` with the main
@@ -2110,7 +2587,11 @@ impl VirtualMachine {
                     // differently depending on which path happened to
                     // execute a given function.
                     let const_idx = instr.arg as usize;
-                    let cached = code.const_cache.borrow().get(const_idx).and_then(|c| c.clone());
+                    let cached = code
+                        .const_cache
+                        .borrow()
+                        .get(const_idx)
+                        .and_then(|c| c.clone());
                     let obj = if let Some(obj) = cached {
                         obj
                     } else {
@@ -2121,7 +2602,14 @@ impl VirtualMachine {
                         // comment — which realistically only ever load
                         // None/Bool/Int/Float/String constants); fall back
                         // to the slow path for anything else via `None`.
-                        if !matches!(const_val, ConstValue::None | ConstValue::Bool(_) | ConstValue::Int(_) | ConstValue::Float(_) | ConstValue::String(_)) {
+                        if !matches!(
+                            const_val,
+                            ConstValue::None
+                                | ConstValue::Bool(_)
+                                | ConstValue::Int(_)
+                                | ConstValue::Float(_)
+                                | ConstValue::String(_)
+                        ) {
                             return None;
                         }
                         let obj = eval_const_value(const_val).ok()?;
@@ -2153,18 +2641,28 @@ impl VirtualMachine {
                         13 => py_getitem(&left, &right),
                         _ => return None,
                     };
-                    match result { Ok(v) => stack.push(v), Err(e) => return Some(Err(e)) }
+                    match result {
+                        Ok(v) => stack.push(v),
+                        Err(e) => return Some(Err(e)),
+                    }
                 }
                 Opcode::COMPARE_OP => {
                     let right = stack.pop()?;
                     let left = stack.pop()?;
                     let result = py_compare(&left, &right, instr.arg);
-                    match result { Ok(v) => stack.push(v), Err(e) => return Some(Err(e)) }
+                    match result {
+                        Ok(v) => stack.push(v),
+                        Err(e) => return Some(Err(e)),
+                    }
                 }
                 Opcode::POP_JUMP_IF_FALSE => {
                     let val = stack.pop()?;
                     match val.try_truthy() {
-                        Ok(t) => { if !t { ip = instr.arg as usize; } }
+                        Ok(t) => {
+                            if !t {
+                                ip = instr.arg as usize;
+                            }
+                        }
                         Err(e) => return Some(Err(e)),
                     }
                 }
@@ -2180,7 +2678,10 @@ impl VirtualMachine {
                     let name_id = code.names[instr.arg as usize];
                     let name = crate::interner::lookup_str(name_id);
                     let val = obj.borrow().get_attribute(name);
-                    match val { Ok(v) => stack.push(v), Err(e) => return Some(Err(e)) }
+                    match val {
+                        Ok(v) => stack.push(v),
+                        Err(e) => return Some(Err(e)),
+                    }
                 }
                 _ => return None,
             }
@@ -2274,7 +2775,12 @@ impl VirtualMachine {
                         return Err(e);
                     }
                     if std::env::var("RPY_DEBUG_EXC").is_ok() {
-                        eprintln!("handle_exception: frame_floor={} frames.len()={} err={}", frame_floor, self.frames.len(), e);
+                        eprintln!(
+                            "handle_exception: frame_floor={} frames.len()={} err={}",
+                            frame_floor,
+                            self.frames.len(),
+                            e
+                        );
                     }
                     if !self.handle_exception(&e, frame_floor) {
                         // This execute() call's own frame has no handler for `e` — it
@@ -2285,7 +2791,9 @@ impl VirtualMachine {
                         // building the traceback outermost-first (only cleared when
                         // some level below DOES catch it — see the `else` branch).
                         if let Some(f) = self.frames.get(frame_floor) {
-                            let idx = f.ip.saturating_sub(1).min(f.code.instructions.len().saturating_sub(1));
+                            let idx =
+                                f.ip.saturating_sub(1)
+                                    .min(f.code.instructions.len().saturating_sub(1));
                             let line = f.code.line_number(idx);
                             // Each enclosing level re-runs this same branch as
                             // the error keeps propagating outward — only the
@@ -2298,9 +2806,17 @@ impl VirtualMachine {
                             // on this first, innermost pass.
                             if self.last_traceback.is_empty() {
                                 self.last_error_line = Some(line);
-                                self.last_error_file = Some(crate::interner::lookup_str(f.code.filename).to_string());
+                                self.last_error_file =
+                                    Some(crate::interner::lookup_str(f.code.filename).to_string());
                             }
-                            self.last_traceback.insert(0, (crate::interner::lookup_str(f.code.filename).to_string(), line, crate::interner::lookup_str(f.code.name).to_string()));
+                            self.last_traceback.insert(
+                                0,
+                                (
+                                    crate::interner::lookup_str(f.code.filename).to_string(),
+                                    line,
+                                    crate::interner::lookup_str(f.code.name).to_string(),
+                                ),
+                            );
                         }
                         return Err(e);
                     } else {
@@ -2310,7 +2826,11 @@ impl VirtualMachine {
                         self.last_traceback.clear();
                     }
                     if std::env::var("RPY_DEBUG_EXC").is_ok() {
-                        eprintln!("  handled: frames.len()={} top_stack_len={}", self.frames.len(), self.frames.last().map(|f| f.stack.len()).unwrap_or(0));
+                        eprintln!(
+                            "  handled: frames.len()={} top_stack_len={}",
+                            self.frames.len(),
+                            self.frames.last().map(|f| f.stack.len()).unwrap_or(0)
+                        );
                     }
                 }
             }
@@ -2339,7 +2859,14 @@ impl VirtualMachine {
         self.frames[fi].ip = ip + 1;
         // Debug: print instruction (only with profile feature)
         if cfg!(feature = "profile") {
-            if matches!(op, Opcode::LOAD_GLOBAL | Opcode::LOAD_FAST | Opcode::CALL | Opcode::LOAD_ATTR | Opcode::RETURN_VALUE) {
+            if matches!(
+                op,
+                Opcode::LOAD_GLOBAL
+                    | Opcode::LOAD_FAST
+                    | Opcode::CALL
+                    | Opcode::LOAD_ATTR
+                    | Opcode::RETURN_VALUE
+            ) {
                 let _frame_name = &self.frames[fi].code.name;
             }
         }
@@ -2349,7 +2876,9 @@ impl VirtualMachine {
         if cfg!(feature = "profile") {
             let func_id = fi; // use frame index as function identifier
             let mut prof = self.profile.borrow_mut();
-            let counters = prof.entry(func_id).or_insert_with(|| vec![0u32; self.frames[fi].code.instructions.len()]);
+            let counters = prof
+                .entry(func_id)
+                .or_insert_with(|| vec![0u32; self.frames[fi].code.instructions.len()]);
             if ip < counters.len() {
                 counters[ip] = counters[ip].saturating_add(1);
             }
@@ -2369,14 +2898,26 @@ impl VirtualMachine {
                 // `CodeObject::const_cache`'s own doc comment for why this
                 // is safe unlike the Frame-level LOAD_ATTR/LOAD_GLOBAL
                 // caches, which read genuinely mutable state).
-                let cached = self.frames[fi].code.const_cache.borrow()
-                    .get(const_idx).and_then(|c| c.clone());
+                let cached = self.frames[fi]
+                    .code
+                    .const_cache
+                    .borrow()
+                    .get(const_idx)
+                    .and_then(|c| c.clone());
                 let obj = if let Some(obj) = cached {
                     obj
                 } else {
-                    let const_val = self.frames[fi].code.consts.get(const_idx).ok_or_else(|| {
-                        PyError::runtime_error(format!("constant index out of range: {}", const_idx))
-                    })?.clone();
+                    let const_val = self.frames[fi]
+                        .code
+                        .consts
+                        .get(const_idx)
+                        .ok_or_else(|| {
+                            PyError::runtime_error(format!(
+                                "constant index out of range: {}",
+                                const_idx
+                            ))
+                        })?
+                        .clone();
                     let obj = eval_const_value(const_val)?;
                     let mut cache = self.frames[fi].code.const_cache.borrow_mut();
                     if cache.len() <= const_idx {
@@ -2393,7 +2934,8 @@ impl VirtualMachine {
                 let name = crate::interner::lookup_str(self.frames[fi].code.names[name_idx]);
                 let val = {
                     let f = &self.frames[self.frames.len() - 1];
-                    f.get_local(name).cloned()
+                    f.get_local(name)
+                        .cloned()
                         .or_else(|| {
                             // A class body's own namespace (checked via get_local
                             // above) takes priority, but if the name isn't defined
@@ -2415,14 +2957,20 @@ impl VirtualMachine {
                         .or_else(|| f.globals.borrow().get(&interner::intern(name)).cloned())
                         .or_else(|| {
                             // Check module_globals (enclosing module scope for class bodies)
-                            f.module_globals.as_ref()
+                            f.module_globals
+                                .as_ref()
                                 .and_then(|mg| mg.borrow().get(&interner::intern(name)).cloned())
                         })
                         .or_else(|| f.builtins.get(&interner::intern(name)).cloned())
                 };
                 match val {
                     Some(v) => self.frames[fi].push(v),
-                    None => return Err(PyError::name_error(format!("name '{}' is not defined", name))),
+                    None => {
+                        return Err(PyError::name_error(format!(
+                            "name '{}' is not defined",
+                            name
+                        )))
+                    }
                 }
             }
 
@@ -2441,7 +2989,10 @@ impl VirtualMachine {
                         dict.insert_str(&name, val.clone());
                     }
                 }
-                self.frames[fi].globals.borrow_mut().insert(interner::intern(&name), val);
+                self.frames[fi]
+                    .globals
+                    .borrow_mut()
+                    .insert(interner::intern(&name), val);
             }
 
             Opcode::LOAD_FAST => {
@@ -2473,10 +3024,15 @@ impl VirtualMachine {
                     Some(v) => self.frames[fi].push(v),
                     None => {
                         if std::env::var("RPY_DEBUG_NAMEERROR").is_ok() {
-                            eprintln!("LOAD_FAST unbound: func={} file={} line={:?} varnames={:?}",
-                                self.frames[fi].code.name, self.frames[fi].code.filename,
-                                self.frames[fi].code.line_number(self.frames[fi].ip.saturating_sub(1)),
-                                self.frames[fi].code.varnames);
+                            eprintln!(
+                                "LOAD_FAST unbound: func={} file={} line={:?} varnames={:?}",
+                                self.frames[fi].code.name,
+                                self.frames[fi].code.filename,
+                                self.frames[fi]
+                                    .code
+                                    .line_number(self.frames[fi].ip.saturating_sub(1)),
+                                self.frames[fi].code.varnames
+                            );
                         }
                         return Err(PyError::unbound_local_error(format!("cannot access local variable '{}' where it is not associated with a value",
                             self.frames[fi].code.varnames.get(var_idx).map_or("?", |&s| crate::interner::lookup_str(s)))));
@@ -2518,18 +3074,29 @@ impl VirtualMachine {
             }
 
             Opcode::LOAD_GLOBAL => {
-                let instr_ip = self.frames[fi].ip - 1;  // already incremented
-                // Check inline cache first
-                if let Some(cached) = self.frames[fi].global_cache.get(instr_ip).and_then(|c| c.clone()) {
+                let instr_ip = self.frames[fi].ip - 1; // already incremented
+                                                       // Check inline cache first
+                if let Some(cached) = self.frames[fi]
+                    .global_cache
+                    .get(instr_ip)
+                    .and_then(|c| c.clone())
+                {
                     self.frames[fi].push(cached);
                 } else {
                     let name_idx = arg as usize;
                     let name = crate::interner::lookup_str(self.frames[fi].code.names[name_idx]);
                     let val = {
                         let f = &self.frames[self.frames.len() - 1];
-                        let v = f.globals.borrow().get(&interner::intern(name)).cloned()
-                            .or_else(|| f.module_globals.as_ref()
-                                .and_then(|mg| mg.borrow().get(&interner::intern(name)).cloned()))
+                        let v = f
+                            .globals
+                            .borrow()
+                            .get(&interner::intern(name))
+                            .cloned()
+                            .or_else(|| {
+                                f.module_globals.as_ref().and_then(|mg| {
+                                    mg.borrow().get(&interner::intern(name)).cloned()
+                                })
+                            })
                             .or_else(|| f.builtins.get(&interner::intern(name)).cloned());
                         v
                     };
@@ -2541,7 +3108,12 @@ impl VirtualMachine {
                             }
                             self.frames[fi].push(v);
                         }
-                        None => return Err(PyError::name_error(format!("name '{}' is not defined", name))),
+                        None => {
+                            return Err(PyError::name_error(format!(
+                                "name '{}' is not defined",
+                                name
+                            )))
+                        }
                     }
                 }
             }
@@ -2550,7 +3122,10 @@ impl VirtualMachine {
                 let name_idx = arg as usize;
                 let name = crate::interner::lookup(self.frames[fi].code.names[name_idx]);
                 let val = self.frames[fi].pop()?;
-                self.frames[fi].globals.borrow_mut().insert(interner::intern(&name), val);
+                self.frames[fi]
+                    .globals
+                    .borrow_mut()
+                    .insert(interner::intern(&name), val);
             }
 
             Opcode::LOAD_DEREF => {
@@ -2560,12 +3135,19 @@ impl VirtualMachine {
                     let code = &f.code;
                     if idx < code.cellvars.len() {
                         let name = &code.cellvars[idx];
-                        let var_idx = code.varnames.iter().position(|&n| crate::interner::intern_eq(n, name))
-                            .ok_or_else(|| PyError::name_error(format!("variable '{}' not found", name)))?;
+                        let var_idx = code
+                            .varnames
+                            .iter()
+                            .position(|&n| crate::interner::intern_eq(n, name))
+                            .ok_or_else(|| {
+                                PyError::name_error(format!("variable '{}' not found", name))
+                            })?;
                         (f.fast_locals[var_idx].clone(), false, name.clone())
                     } else {
                         let fv_idx = idx - code.cellvars.len();
-                        let name = code.freevars.get(fv_idx)
+                        let name = code
+                            .freevars
+                            .get(fv_idx)
                             .ok_or_else(|| PyError::runtime_error("freevar index out of range"))?;
                         (f.closure.get(fv_idx).cloned(), true, name.clone())
                     }
@@ -2576,7 +3158,10 @@ impl VirtualMachine {
                         match &*obj {
                             PyObject::Cell { value: Some(inner) } => inner.clone(),
                             PyObject::Cell { value: None } => {
-                                return Err(PyError::name_error(format!("variable '{}' referenced before assignment", name_str)));
+                                return Err(PyError::name_error(format!(
+                                    "variable '{}' referenced before assignment",
+                                    name_str
+                                )));
                             }
                             _ => cell.clone(),
                         }
@@ -2590,15 +3175,24 @@ impl VirtualMachine {
                     if let Some(v) = val {
                         self.frames[fi].push(v);
                     } else {
-                        let val = self.frames[fi].builtins.get(&interner::intern(&name_str)).cloned();
+                        let val = self.frames[fi]
+                            .builtins
+                            .get(&interner::intern(&name_str))
+                            .cloned();
                         if let Some(v) = val {
                             self.frames[fi].push(v);
                         } else {
-                            return Err(PyError::name_error(format!("variable '{}' not found", name_str)));
+                            return Err(PyError::name_error(format!(
+                                "variable '{}' not found",
+                                name_str
+                            )));
                         }
                     }
                 } else {
-                    return Err(PyError::name_error(format!("variable '{}' not found", name_str)));
+                    return Err(PyError::name_error(format!(
+                        "variable '{}' not found",
+                        name_str
+                    )));
                 }
             }
 
@@ -2608,7 +3202,11 @@ impl VirtualMachine {
                 let has_cellvars = idx < self.frames[fi].code.cellvars.len();
                 if has_cellvars {
                     let name = &self.frames[fi].code.cellvars[idx];
-                    let var_idx = self.frames[fi].code.varnames.iter().position(|&n| crate::interner::intern_eq(n, name))
+                    let var_idx = self.frames[fi]
+                        .code
+                        .varnames
+                        .iter()
+                        .position(|&n| crate::interner::intern_eq(n, name))
                         .ok_or_else(|| PyError::runtime_error("variable not found"))?;
                     if var_idx < self.frames[fi].fast_locals.len() {
                         // Defensive: only treat the existing slot value as
@@ -2644,10 +3242,15 @@ impl VirtualMachine {
                             *value = Some(val);
                         }
                     } else {
-                        return Err(PyError::name_error(
-                            format!("variable '{}' not found", 
-                                self.frames[fi].code.freevars.get(fv_idx).map(|s| s.as_str()).unwrap_or("?"))
-                        ));
+                        return Err(PyError::name_error(format!(
+                            "variable '{}' not found",
+                            self.frames[fi]
+                                .code
+                                .freevars
+                                .get(fv_idx)
+                                .map(|s| s.as_str())
+                                .unwrap_or("?")
+                        )));
                     }
                 }
             }
@@ -2666,7 +3269,10 @@ impl VirtualMachine {
                         dict.remove(&interner::intern(&name));
                     }
                 }
-                self.frames[fi].globals.borrow_mut().remove(&interner::intern(&name));
+                self.frames[fi]
+                    .globals
+                    .borrow_mut()
+                    .remove(&interner::intern(&name));
             }
 
             Opcode::POP_TOP => {
@@ -2714,12 +3320,22 @@ impl VirtualMachine {
             }
             Opcode::MATCH_MAPPING => {
                 let subject = self.frames[fi].peek(0)?;
-                let is_map = matches!(&*subject.borrow(), PyObject::Dict(_) | PyObject::Instance { .. });
+                let is_map = matches!(
+                    &*subject.borrow(),
+                    PyObject::Dict(_) | PyObject::Instance { .. }
+                );
                 self.frames[fi].push(py_bool(is_map));
             }
             Opcode::MATCH_SEQUENCE => {
                 let subject = self.frames[fi].peek(0)?;
-                let is_seq = matches!(&*subject.borrow(), PyObject::List(_) | PyObject::Tuple(_) | PyObject::Str(_) | PyObject::Bytes(_) | PyObject::ByteArray(_));
+                let is_seq = matches!(
+                    &*subject.borrow(),
+                    PyObject::List(_)
+                        | PyObject::Tuple(_)
+                        | PyObject::Str(_)
+                        | PyObject::Bytes(_)
+                        | PyObject::ByteArray(_)
+                );
                 self.frames[fi].push(py_bool(is_seq));
             }
             Opcode::MATCH_KEYS => {
@@ -2730,10 +3346,12 @@ impl VirtualMachine {
             Opcode::CALL_INTRINSIC_1 => {
                 let intrinsic = arg;
                 match intrinsic {
-                    1 => { // INTRINSIC_1_INVALIDATION_COUNTER
+                    1 => {
+                        // INTRINSIC_1_INVALIDATION_COUNTER
                         self.frames[fi].push(py_int(0));
                     }
-                    2 => { // INTRINSIC_1_PRINT
+                    2 => {
+                        // INTRINSIC_1_PRINT
                         let val = self.frames[fi].pop()?;
                         let _ = print!("{}", val.str());
                         self.frames[fi].push(py_none());
@@ -2782,7 +3400,8 @@ impl VirtualMachine {
                 }
                 let dst = (arg >> 4) as usize;
                 let src = (arg & 0xF) as usize;
-                let val = self.frames[fi].registers[src].clone()
+                let val = self.frames[fi].registers[src]
+                    .clone()
                     .ok_or_else(|| PyError::runtime_error("REG_MOV: source register is empty"))?;
                 if dst < self.frames[fi].registers.len() {
                     self.frames[fi].registers[dst] = Some(val);
@@ -2791,27 +3410,43 @@ impl VirtualMachine {
             Opcode::REG_LOAD_CONST => {
                 let dst = (arg >> 4) as usize;
                 let const_idx = (arg & 0xFF) as usize;
-                let const_val = self.frames[fi].code.consts.get(const_idx).ok_or_else(|| {
-                    PyError::runtime_error("REG_LOAD_CONST: index out of range")
-                })?.clone();
+                let const_val = self.frames[fi]
+                    .code
+                    .consts
+                    .get(const_idx)
+                    .ok_or_else(|| PyError::runtime_error("REG_LOAD_CONST: index out of range"))?
+                    .clone();
                 let obj = match const_val {
                     ConstValue::None => py_none(),
                     ConstValue::Bool(b) => py_bool(b),
                     ConstValue::Int(s) => {
-                        if let Ok(n) = s.parse::<i64>() { py_int(n) }
-                        else { let n: BigInt = s.parse().map_err(|_| PyError::value_error("invalid int"))?; PyObjectRef::imm(PyObject::Int(n)) }
+                        if let Ok(n) = s.parse::<i64>() {
+                            py_int(n)
+                        } else {
+                            let n: BigInt =
+                                s.parse().map_err(|_| PyError::value_error("invalid int"))?;
+                            PyObjectRef::imm(PyObject::Int(n))
+                        }
                     }
-                    ConstValue::Float(s) => py_float(s.parse().map_err(|_| PyError::value_error("invalid float"))?),
+                    ConstValue::Float(s) => py_float(
+                        s.parse()
+                            .map_err(|_| PyError::value_error("invalid float"))?,
+                    ),
                     ConstValue::String(s) => py_str(&s),
                     ConstValue::Bytes(b) => PyObjectRef::imm(PyObject::Bytes(b)),
                     ConstValue::Complex { real, imag } => {
-                        let re: f64 = real.parse().map_err(|_| PyError::value_error("invalid complex literal"))?;
-                        let im: f64 = imag.parse().map_err(|_| PyError::value_error("invalid complex literal"))?;
+                        let re: f64 = real
+                            .parse()
+                            .map_err(|_| PyError::value_error("invalid complex literal"))?;
+                        let im: f64 = imag
+                            .parse()
+                            .map_err(|_| PyError::value_error("invalid complex literal"))?;
                         PyObjectRef::imm(PyObject::Complex(re, im))
                     }
                     ConstValue::Code(code) => PyObjectRef::imm(PyObject::Code(Rc::from(code))),
                     ConstValue::Tuple(items) => {
-                        let objs: Vec<PyObjectRef> = items.into_iter().map(|s| py_str(&s)).collect();
+                        let objs: Vec<PyObjectRef> =
+                            items.into_iter().map(|s| py_str(&s)).collect();
                         PyObjectRef::imm(PyObject::Tuple(objs))
                     }
                 };
@@ -2832,14 +3467,17 @@ impl VirtualMachine {
             Opcode::REG_STORE_FAST => {
                 let src = (arg >> 4) as usize;
                 let var_idx = (arg & 0xFF) as usize;
-                let val = self.frames[fi].registers[src].clone()
-                    .ok_or_else(|| PyError::runtime_error("REG_STORE_FAST: source register is empty"))?;
+                let val = self.frames[fi].registers[src].clone().ok_or_else(|| {
+                    PyError::runtime_error("REG_STORE_FAST: source register is empty")
+                })?;
                 if var_idx < self.frames[fi].fast_locals.len() {
                     self.frames[fi].fast_locals[var_idx] = Some(val.clone());
                 }
-                let name = Some(crate::interner::lookup_str(self.frames[fi].code.varnames[var_idx])).ok_or_else(|| {
-                    PyError::runtime_error("varname index out of range")
-                })?.clone();
+                let name = Some(crate::interner::lookup_str(
+                    self.frames[fi].code.varnames[var_idx],
+                ))
+                .ok_or_else(|| PyError::runtime_error("varname index out of range"))?
+                .clone();
                 self.frames[fi].insert_local(&name, val);
             }
             Opcode::REG_BINARY_OP => {
@@ -2847,9 +3485,11 @@ impl VirtualMachine {
                 let a_reg = ((arg >> 2) & 0x3) as usize;
                 let b_reg = (arg & 0x3) as usize;
                 let op = (arg >> 8) as u32;
-                let a = self.frames[fi].registers[a_reg].clone()
+                let a = self.frames[fi].registers[a_reg]
+                    .clone()
                     .ok_or_else(|| PyError::runtime_error("REG_BINARY_OP: a is empty"))?;
-                let b = self.frames[fi].registers[b_reg].clone()
+                let b = self.frames[fi].registers[b_reg]
+                    .clone()
                     .ok_or_else(|| PyError::runtime_error("REG_BINARY_OP: b is empty"))?;
                 let result = match op {
                     0 => py_add(&a, &b),
@@ -2865,7 +3505,12 @@ impl VirtualMachine {
                     10 => py_bit_xor(&a, &b),
                     11 => py_bit_and(&a, &b),
                     13 => py_getitem(&a, &b),
-                    _ => return Err(PyError::runtime_error(format!("unknown reg binary op: {}", op))),
+                    _ => {
+                        return Err(PyError::runtime_error(format!(
+                            "unknown reg binary op: {}",
+                            op
+                        )))
+                    }
                 }?;
                 if dst < self.frames[fi].registers.len() {
                     self.frames[fi].registers[dst] = Some(result);
@@ -2877,13 +3522,26 @@ impl VirtualMachine {
                 let name = crate::interner::lookup_str(self.frames[fi].code.names[name_idx]);
                 // Check inline cache first
                 let instr_ip = self.frames[fi].ip - 1;
-                if let Some(cached) = self.frames[fi].global_cache.get(instr_ip).and_then(|c| c.clone()) {
+                if let Some(cached) = self.frames[fi]
+                    .global_cache
+                    .get(instr_ip)
+                    .and_then(|c| c.clone())
+                {
                     if dst < self.frames[fi].registers.len() {
                         self.frames[fi].registers[dst] = Some(cached);
                     }
                 } else {
-                    let val = self.frames[fi].globals.borrow().get(&interner::intern(name)).cloned()
-                        .or_else(|| self.frames[fi].builtins.get(&interner::intern(name)).cloned());
+                    let val = self.frames[fi]
+                        .globals
+                        .borrow()
+                        .get(&interner::intern(name))
+                        .cloned()
+                        .or_else(|| {
+                            self.frames[fi]
+                                .builtins
+                                .get(&interner::intern(name))
+                                .cloned()
+                        });
                     if let Some(v) = val {
                         if instr_ip < self.frames[fi].global_cache.len() {
                             self.frames[fi].global_cache[instr_ip] = Some(v.clone());
@@ -2892,13 +3550,17 @@ impl VirtualMachine {
                             self.frames[fi].registers[dst] = Some(v);
                         }
                     } else {
-                        return Err(PyError::name_error(format!("name '{}' is not defined", name)));
+                        return Err(PyError::name_error(format!(
+                            "name '{}' is not defined",
+                            name
+                        )));
                     }
                 }
             }
             Opcode::REG_RETURN => {
                 let src = (arg & 0xFF) as usize;
-                let val = self.frames[fi].registers[src].clone()
+                let val = self.frames[fi].registers[src]
+                    .clone()
                     .ok_or_else(|| PyError::runtime_error("REG_RETURN: register is empty"))?;
                 return Ok(Some(val));
             }
@@ -2953,7 +3615,7 @@ impl VirtualMachine {
                 // Remaining items are keyword name+value pairs or **kwargs dict
                 while i + 1 < items.len() {
                     if let PyObject::Str(name) = &*items[i].borrow() {
-                        keywords.push((name.to_string(), items[i+1].clone()));
+                        keywords.push((name.to_string(), items[i + 1].clone()));
                         i += 2;
                     } else {
                         // **kwargs dict or packed arg
@@ -3015,7 +3677,11 @@ impl VirtualMachine {
                 // read repeatedly.
                 let code = match &*code_obj.borrow() {
                     PyObject::Code(c) => c.clone(),
-                    _ => return Err(PyError::runtime_error("MAKE_FUNCTION: expected code object")),
+                    _ => {
+                        return Err(PyError::runtime_error(
+                            "MAKE_FUNCTION: expected code object",
+                        ))
+                    }
                 };
                 let closure = if has_closure {
                     let closure_tuple = self.frames[fi].pop()?;
@@ -3033,7 +3699,9 @@ impl VirtualMachine {
                 // (e.g. 'empty' from django.utils.functional) rather than the class
                 // namespace. Falls back to the frame's globals for module-level code
                 // and regular function calls.
-                let globals = self.frames[fi].module_globals.clone()
+                let globals = self.frames[fi]
+                    .module_globals
+                    .clone()
                     .unwrap_or_else(|| self.frames[fi].globals.clone());
                 let code_obj = code.clone();
                 let func = PyObjectRef::new(PyObject::Function(Box::new(PyFunction {
@@ -3047,7 +3715,7 @@ impl VirtualMachine {
                 })));
                 // Set __code__ and __module__ on the function
                 if let PyObject::Function(ref mut inner_f) = &mut *func.borrow_mut() {
-                let dict = &mut inner_f.dict;
+                    let dict = &mut inner_f.dict;
                     dict.insert_str("__code__", PyObjectRef::imm(PyObject::Code(code_obj)));
                 }
                 if let Some(ref mg) = self.frames[fi].module_globals {
@@ -3055,7 +3723,7 @@ impl VirtualMachine {
                     if let Some(module_name) = mg.get(&interner::intern("__name__")) {
                         if let PyObject::Str(s) = &*module_name.borrow() {
                             if let PyObject::Function(ref mut inner_f) = &mut *func.borrow_mut() {
-                let dict = &mut inner_f.dict;
+                                let dict = &mut inner_f.dict;
                                 dict.insert_str("__module__", py_str(s));
                             }
                         }
@@ -3110,9 +3778,21 @@ impl VirtualMachine {
 
             Opcode::BUILD_SLICE => {
                 let nargs = arg as usize;
-                let step = if nargs >= 3 { Some(self.frames[fi].pop()?) } else { None };
-                let stop = if nargs >= 2 { Some(self.frames[fi].pop()?) } else { None };
-                let start = if nargs >= 1 { Some(self.frames[fi].pop()?) } else { None };
+                let step = if nargs >= 3 {
+                    Some(self.frames[fi].pop()?)
+                } else {
+                    None
+                };
+                let stop = if nargs >= 2 {
+                    Some(self.frames[fi].pop()?)
+                } else {
+                    None
+                };
+                let start = if nargs >= 1 {
+                    Some(self.frames[fi].pop()?)
+                } else {
+                    None
+                };
                 self.frames[fi].push(PyObjectRef::imm(PyObject::Slice {
                     start: start.unwrap_or(py_none()),
                     stop: stop.unwrap_or(py_none()),
@@ -3136,25 +3816,38 @@ impl VirtualMachine {
                 // semantics) was silently unreachable for every user class
                 // in the interpreter's history. Confirmed general via
                 // CPython's own `test_augassign.py`.
-                let (op, in_place) = if arg >= 100 { (arg - 100, true) } else { (arg, false) };
+                let (op, in_place) = if arg >= 100 {
+                    (arg - 100, true)
+                } else {
+                    (arg, false)
+                };
                 let right = self.frames[fi].pop()?;
                 let left = self.frames[fi].pop()?;
                 if in_place {
                     let idunder = match op {
-                        0 => Some("__iadd__"), 1 => Some("__isub__"), 2 => Some("__imul__"),
-                        3 => Some("__itruediv__"), 4 => Some("__ifloordiv__"), 5 => Some("__imod__"),
-                        6 => Some("__ipow__"), 7 => Some("__ilshift__"), 8 => Some("__irshift__"),
-                        9 => Some("__ior__"), 10 => Some("__ixor__"), 11 => Some("__iand__"),
-                        12 => Some("__imatmul__"), _ => None,
+                        0 => Some("__iadd__"),
+                        1 => Some("__isub__"),
+                        2 => Some("__imul__"),
+                        3 => Some("__itruediv__"),
+                        4 => Some("__ifloordiv__"),
+                        5 => Some("__imod__"),
+                        6 => Some("__ipow__"),
+                        7 => Some("__ilshift__"),
+                        8 => Some("__irshift__"),
+                        9 => Some("__ior__"),
+                        10 => Some("__ixor__"),
+                        11 => Some("__iand__"),
+                        12 => Some("__imatmul__"),
+                        _ => None,
                     };
-                if let Some(name) = idunder {
-                    if matches!(&*left.borrow(), PyObject::Instance { .. }) {
-                        if let Some(r) = crate::object::try_dunder_binop(&left, &right, name)? {
-                            self.frames[fi].push(r);
-                            return Ok(None);
+                    if let Some(name) = idunder {
+                        if matches!(&*left.borrow(), PyObject::Instance { .. }) {
+                            if let Some(r) = crate::object::try_dunder_binop(&left, &right, name)? {
+                                self.frames[fi].push(r);
+                                return Ok(None);
+                            }
                         }
                     }
-                }
                 }
                 // Native `deque` has no real Python-callable `__iadd__`/
                 // `__imul__` dunder in its type dict (native methods are
@@ -3186,11 +3879,15 @@ impl VirtualMachine {
                                     }
                                 }
                                 {
-                                    if let PyObject::Deque { data, maxlen } = &mut *left.borrow_mut() {
+                                    if let PyObject::Deque { data, maxlen } =
+                                        &mut *left.borrow_mut()
+                                    {
                                         for item in items {
                                             data.push_back(item);
                                             if let Some(maxlen) = maxlen {
-                                                while data.len() > *maxlen { data.pop_front(); }
+                                                while data.len() > *maxlen {
+                                                    data.pop_front();
+                                                }
                                             }
                                         }
                                     }
@@ -3200,16 +3897,21 @@ impl VirtualMachine {
                             }
                             // `d *= n` — repeat in place, truncated to maxlen.
                             2 => {
-                                let n = right.as_i64().ok_or_else(|| PyError::type_error("an integer is required"))?;
+                                let n = right
+                                    .as_i64()
+                                    .ok_or_else(|| PyError::type_error("an integer is required"))?;
                                 if let PyObject::Deque { data, maxlen } = &mut *left.borrow_mut() {
                                     let n = n.max(0) as usize;
-                                    let items: Vec<crate::object::PyObjectRef> = data.iter().cloned().collect();
+                                    let items: Vec<crate::object::PyObjectRef> =
+                                        data.iter().cloned().collect();
                                     data.clear();
                                     for _ in 0..n {
                                         for item in &items {
                                             data.push_back(item.clone());
                                             if let Some(maxlen) = maxlen {
-                                                while data.len() > *maxlen { data.pop_front(); }
+                                                while data.len() > *maxlen {
+                                                    data.pop_front();
+                                                }
                                             }
                                         }
                                     }
@@ -3233,21 +3935,26 @@ impl VirtualMachine {
                     8 => py_rshift(&left, &right),
                     9 => py_bit_or(&left, &right),
                     10 => py_bit_xor(&left, &right),
-                     11 => py_bit_and(&left, &right),
-                     12 => {
-                         (|| -> PyResult<PyObjectRef> {
-                             if let Some(r) = crate::object::try_dunder_binop(&left, &right, "__matmul__")? {
-                                 return Ok(r);
-                             }
-                             if let Some(r) = crate::object::try_dunder_binop(&right, &left, "__rmatmul__")? {
-                                 return Ok(r);
-                             }
-                             Err(PyError::type_error(format!("unsupported operand type(s) for @: '{}' and '{}'",
-                                 left.borrow().type_name(), right.borrow().type_name())))
-                         })()
-                     }
-                     13 => py_getitem(&left, &right),
-                     _ => return Err(PyError::runtime_error(format!("unknown binary op: {}", op))),
+                    11 => py_bit_and(&left, &right),
+                    12 => (|| -> PyResult<PyObjectRef> {
+                        if let Some(r) =
+                            crate::object::try_dunder_binop(&left, &right, "__matmul__")?
+                        {
+                            return Ok(r);
+                        }
+                        if let Some(r) =
+                            crate::object::try_dunder_binop(&right, &left, "__rmatmul__")?
+                        {
+                            return Ok(r);
+                        }
+                        Err(PyError::type_error(format!(
+                            "unsupported operand type(s) for @: '{}' and '{}'",
+                            left.borrow().type_name(),
+                            right.borrow().type_name()
+                        )))
+                    })(),
+                    13 => py_getitem(&left, &right),
+                    _ => return Err(PyError::runtime_error(format!("unknown binary op: {}", op))),
                 }?;
                 self.frames[fi].push(result);
             }
@@ -3338,7 +4045,7 @@ impl VirtualMachine {
 
             Opcode::JUMP_FORWARD | Opcode::JUMP | Opcode::JUMP_BACKWARD => {
                 let offset = arg as usize;
-        match op {
+                match op {
                     Opcode::JUMP_FORWARD => {
                         self.frames[fi].ip += offset;
                     }
@@ -3369,9 +4076,7 @@ impl VirtualMachine {
 
             Opcode::POP_JUMP_IF_NONE => {
                 let val = self.frames[fi].pop()?;
-                let is_none = {
-                    matches!(&*val.borrow(), PyObject::None)
-                };
+                let is_none = { matches!(&*val.borrow(), PyObject::None) };
                 if is_none {
                     self.frames[fi].ip = arg as usize;
                 }
@@ -3379,9 +4084,7 @@ impl VirtualMachine {
 
             Opcode::POP_JUMP_IF_NOT_NONE => {
                 let val = self.frames[fi].pop()?;
-                let is_not_none = {
-                    !matches!(&*val.borrow(), PyObject::None)
-                };
+                let is_not_none = { !matches!(&*val.borrow(), PyObject::None) };
                 if is_not_none {
                     self.frames[fi].ip = arg as usize;
                 }
@@ -3402,7 +4105,9 @@ impl VirtualMachine {
                     // fall into the unrelated dict-like-instance fallback.
                     let has_override = if let PyObject::Instance { typ, .. } = &*val.borrow() {
                         crate::object::lookup_dunder_via_mro(typ, "__iter__").is_some()
-                    } else { false };
+                    } else {
+                        false
+                    };
                     if !has_override {
                         if let Some(native) = crate::object::native_backing_of(&val) {
                             let iterator = crate::object::builtin_iter(&[native])?;
@@ -3429,8 +4134,12 @@ impl VirtualMachine {
                         return Ok(None);
                     }
                     use crate::object::ObjectAccess;
-                    let raw_method = val.borrow().get_attribute("__iter__")
-                        .map_err(|_| PyError::type_error(format!("'{}' object is not iterable", val.borrow().type_name())))?;
+                    let raw_method = val.borrow().get_attribute("__iter__").map_err(|_| {
+                        PyError::type_error(format!(
+                            "'{}' object is not iterable",
+                            val.borrow().type_name()
+                        ))
+                    })?;
                     let val_clone = val.clone();
                     let iter_method = PyObjectRef::imm(PyObject::BoundMethod {
                         func: raw_method,
@@ -3450,142 +4159,205 @@ impl VirtualMachine {
                             Err(e) => return Err(e),
                         }
                     }
-                    self.frames[fi].push(PyObjectRef::new(PyObject::ListIter { list: items, index: 0 }));
+                    self.frames[fi].push(PyObjectRef::new(PyObject::ListIter {
+                        list: items,
+                        index: 0,
+                    }));
                 } else {
-                let obj = val.borrow();
-                match &*obj {
-                    PyObject::List(v) => {
-                        self.frames[fi].push(PyObjectRef::new(PyObject::ListIter { list: v.clone(), index: 0 }));
-                    }
-                    PyObject::Deque { data, .. } => {
-                        self.frames[fi].push(PyObjectRef::new(PyObject::DequeIter { deque: val.clone(), index: 0, start_len: data.len() }));
-                    }
-                    PyObject::Tuple(v) => {
-                        self.frames[fi].push(PyObjectRef::new(PyObject::ListIter { list: v.clone(), index: 0 }));
-                    }
-                    PyObject::Str(s) => {
-                        let chars: Vec<PyObjectRef> = s.chars().map(|c| py_str(&c.to_string())).collect();
-                        self.frames[fi].push(PyObjectRef::new(PyObject::ListIter { list: chars, index: 0 }));
-                    }
-                    // `FrozenSet` was missing from this match entirely
-                    // (only mutable `Set` was handled) — `for x in
-                    // frozenset(...):`/`for x in some_frozenset:` fell to
-                    // the `_` catch-all below and raised `TypeError:
-                    // 'frozenset' object is not iterable` outright, a
-                    // foundational gap for one of Python's basic builtin
-                    // container types. `builtin_iter`'s OWN, separate
-                    // FrozenSet handling (used by `iter()`/`list()`/etc.,
-                    // not by a `for` STATEMENT, which compiles to this
-                    // opcode instead) had the identical gap, fixed
-                    // alongside this one.
-                    PyObject::Set(s) | PyObject::FrozenSet(s) => {
-                        self.frames[fi].push(PyObjectRef::new(PyObject::ListIter { list: s.to_vec(), index: 0 }));
-                    }
-                    PyObject::Bytes(b) => {
-                        let items: Vec<PyObjectRef> = b.iter().map(|byte| py_int(*byte as i64)).collect();
-                        self.frames[fi].push(PyObjectRef::new(PyObject::ListIter { list: items, index: 0 }));
-                    }
-                    PyObject::ByteArray(b) => {
-                        let items: Vec<PyObjectRef> = b.iter().map(|byte| py_int(*byte as i64)).collect();
-                        self.frames[fi].push(PyObjectRef::new(PyObject::ListIter { list: items, index: 0 }));
-                    }
-                    PyObject::MemoryView { .. } => {
-                        drop(obj);
-                        let iterator = crate::object::builtin_iter(&[val.clone()])?;
-                        self.frames[fi].push(iterator);
-                    }
-                    PyObject::Generator { .. } => {
-                        drop(obj);
-                        self.frames[fi].push(val);
-                    }
-                    PyObject::Range { start, stop, step } => {
-                        self.frames[fi].push(PyObjectRef::new(PyObject::RangeIter { current: *start, stop: *stop, step: *step }));
-                    }
-                    PyObject::Dict(ref pydict) => {
-                        let keys: Vec<PyObjectRef> = pydict.keys();
-                        self.frames[fi].push(PyObjectRef::new(PyObject::ListIter { list: keys, index: 0 }));
-                    }
-                    PyObject::EnumerateIter { .. } => {
-                        drop(obj);
-                        self.frames[fi].push(val);
-                    }
-                    // Iterators are their own iterator (matching CPython's
-                    // `__iter__` returning self) — `for x in iter(y):` or
-                    // `for x in itertools.tee(y)[0]:` must work the same as
-                    // iterating the original iterable directly.
-                    PyObject::ListIter { .. } | PyObject::RangeIter { .. }
-                    | PyObject::MapIterator { .. } | PyObject::FilterIterator { .. }
-                    | PyObject::ZipIterator { .. } | PyObject::CycleIter { .. }
-                    | PyObject::GroupByIter { .. } | PyObject::GetItemIter { .. }
-                    | PyObject::CallSentinelIter { .. } => {
-                        drop(obj);
-                        self.frames[fi].push(val);
-                    }
-                    // A class object itself can be iterable via its
-                    // metaclass's `__iter__` (e.g. `for member in
-                    // SomeEnum:` — `SomeEnum` is a `PyObject::Type`, and
-                    // `__iter__` lives on its metaclass, not on `SomeEnum`
-                    // own dict/mro, which is why this needs metatype_of
-                    // rather than the ordinary Type attribute lookup above).
-                    PyObject::Type { .. } => {
-                        let iter_fn = crate::object::metatype_of(&val).and_then(|mt| {
-                            if let PyObject::Type { mro, .. } = &*mt.borrow() {
-                                for base in mro.iter() {
-                                    if let PyObject::Type { dict, .. } = &*base.borrow() {
-                                        if let Some(v) = dict.get_str("__iter__") {
-                                            return Some(v.clone());
+                    let obj = val.borrow();
+                    match &*obj {
+                        PyObject::List(v) => {
+                            self.frames[fi].push(PyObjectRef::new(PyObject::ListIter {
+                                list: v.clone(),
+                                index: 0,
+                            }));
+                        }
+                        PyObject::Deque { data, .. } => {
+                            self.frames[fi].push(PyObjectRef::new(PyObject::DequeIter {
+                                deque: val.clone(),
+                                index: 0,
+                                start_len: data.len(),
+                            }));
+                        }
+                        PyObject::Tuple(v) => {
+                            self.frames[fi].push(PyObjectRef::new(PyObject::ListIter {
+                                list: v.clone(),
+                                index: 0,
+                            }));
+                        }
+                        PyObject::Str(s) => {
+                            let chars: Vec<PyObjectRef> =
+                                s.chars().map(|c| py_str(&c.to_string())).collect();
+                            self.frames[fi].push(PyObjectRef::new(PyObject::ListIter {
+                                list: chars,
+                                index: 0,
+                            }));
+                        }
+                        // `FrozenSet` was missing from this match entirely
+                        // (only mutable `Set` was handled) — `for x in
+                        // frozenset(...):`/`for x in some_frozenset:` fell to
+                        // the `_` catch-all below and raised `TypeError:
+                        // 'frozenset' object is not iterable` outright, a
+                        // foundational gap for one of Python's basic builtin
+                        // container types. `builtin_iter`'s OWN, separate
+                        // FrozenSet handling (used by `iter()`/`list()`/etc.,
+                        // not by a `for` STATEMENT, which compiles to this
+                        // opcode instead) had the identical gap, fixed
+                        // alongside this one.
+                        PyObject::Set(s) | PyObject::FrozenSet(s) => {
+                            self.frames[fi].push(PyObjectRef::new(PyObject::ListIter {
+                                list: s.to_vec(),
+                                index: 0,
+                            }));
+                        }
+                        PyObject::Bytes(b) => {
+                            let items: Vec<PyObjectRef> =
+                                b.iter().map(|byte| py_int(*byte as i64)).collect();
+                            self.frames[fi].push(PyObjectRef::new(PyObject::ListIter {
+                                list: items,
+                                index: 0,
+                            }));
+                        }
+                        PyObject::ByteArray(b) => {
+                            let items: Vec<PyObjectRef> =
+                                b.iter().map(|byte| py_int(*byte as i64)).collect();
+                            self.frames[fi].push(PyObjectRef::new(PyObject::ListIter {
+                                list: items,
+                                index: 0,
+                            }));
+                        }
+                        PyObject::MemoryView { .. } => {
+                            drop(obj);
+                            let iterator = crate::object::builtin_iter(&[val.clone()])?;
+                            self.frames[fi].push(iterator);
+                        }
+                        PyObject::Generator { .. } => {
+                            drop(obj);
+                            self.frames[fi].push(val);
+                        }
+                        PyObject::Range { start, stop, step } => {
+                            self.frames[fi].push(PyObjectRef::new(PyObject::RangeIter {
+                                current: *start,
+                                stop: *stop,
+                                step: *step,
+                            }));
+                        }
+                        PyObject::Dict(ref pydict) => {
+                            let keys: Vec<PyObjectRef> = pydict.keys();
+                            self.frames[fi].push(PyObjectRef::new(PyObject::ListIter {
+                                list: keys,
+                                index: 0,
+                            }));
+                        }
+                        PyObject::EnumerateIter { .. } => {
+                            drop(obj);
+                            self.frames[fi].push(val);
+                        }
+                        // Iterators are their own iterator (matching CPython's
+                        // `__iter__` returning self) — `for x in iter(y):` or
+                        // `for x in itertools.tee(y)[0]:` must work the same as
+                        // iterating the original iterable directly.
+                        PyObject::ListIter { .. }
+                        | PyObject::RangeIter { .. }
+                        | PyObject::MapIterator { .. }
+                        | PyObject::FilterIterator { .. }
+                        | PyObject::ZipIterator { .. }
+                        | PyObject::CycleIter { .. }
+                        | PyObject::GroupByIter { .. }
+                        | PyObject::GetItemIter { .. }
+                        | PyObject::CallSentinelIter { .. } => {
+                            drop(obj);
+                            self.frames[fi].push(val);
+                        }
+                        // A class object itself can be iterable via its
+                        // metaclass's `__iter__` (e.g. `for member in
+                        // SomeEnum:` — `SomeEnum` is a `PyObject::Type`, and
+                        // `__iter__` lives on its metaclass, not on `SomeEnum`
+                        // own dict/mro, which is why this needs metatype_of
+                        // rather than the ordinary Type attribute lookup above).
+                        PyObject::Type { .. } => {
+                            let iter_fn = crate::object::metatype_of(&val).and_then(|mt| {
+                                if let PyObject::Type { mro, .. } = &*mt.borrow() {
+                                    for base in mro.iter() {
+                                        if let PyObject::Type { dict, .. } = &*base.borrow() {
+                                            if let Some(v) = dict.get_str("__iter__") {
+                                                return Some(v.clone());
+                                            }
                                         }
                                     }
                                 }
+                                None
+                            });
+                            drop(obj);
+                            match iter_fn {
+                                Some(f) => {
+                                    let iterator =
+                                        self.call_function(f, vec![val.clone()], vec![])?;
+                                    self.frames[fi].push(iterator);
+                                }
+                                None => {
+                                    return Err(PyError::type_error(format!(
+                                        "'{}' object is not iterable",
+                                        val.get_type_name()
+                                    )))
+                                }
                             }
-                            None
-                        });
-                        drop(obj);
-                        match iter_fn {
-                            Some(f) => {
-                                let iterator = self.call_function(f, vec![val.clone()], vec![])?;
-                                self.frames[fi].push(iterator);
+                        }
+                        // `for line in open(path):` — one of the single most
+                        // common real-Python file-reading idioms — was entirely
+                        // unhandled (`TypeError: 'file' object is not
+                        // iterable`), confirmed via `Lib/dbm/dumb.py`'s own
+                        // `_update` (`for line in f:` over its index file), but
+                        // the gap is completely general, not dbm-specific.
+                        // Reads the whole remaining content and splits it into
+                        // lines (keeping each line's own trailing `\n`, matching
+                        // real `readline()`/iteration semantics) — eager,
+                        // matching every other native-type arm in this same
+                        // match (`List`/`Tuple`/`Str`/...), not the lazy
+                        // `CallSentinelIter` `readline()`-driven approach used
+                        // by this project's OWN `readline`/`__next__` methods
+                        // (added alongside this fix, `attrs.rs`) for direct
+                        // `f.readline()`/`next(f)` calls.
+                        PyObject::File { file, binary, .. } => {
+                            use std::io::Read;
+                            let binary = *binary;
+                            let mut rest = Vec::new();
+                            file.borrow_mut()
+                                .read_to_end(&mut rest)
+                                .map_err(|e| PyError::os_error_from_io(&e))?;
+                            drop(obj);
+                            let mut lines: Vec<PyObjectRef> = Vec::new();
+                            let mut current: Vec<u8> = Vec::new();
+                            for byte in rest {
+                                current.push(byte);
+                                if byte == b'\n' {
+                                    lines.push(if binary {
+                                        PyObjectRef::imm(PyObject::Bytes(current.clone()))
+                                    } else {
+                                        py_str(&String::from_utf8_lossy(&current))
+                                    });
+                                    current.clear();
+                                }
                             }
-                            None => return Err(PyError::type_error(format!("'{}' object is not iterable", val.get_type_name()))),
+                            if !current.is_empty() {
+                                lines.push(if binary {
+                                    PyObjectRef::imm(PyObject::Bytes(current.clone()))
+                                } else {
+                                    py_str(&String::from_utf8_lossy(&current))
+                                });
+                            }
+                            self.frames[fi].push(PyObjectRef::new(PyObject::ListIter {
+                                list: lines,
+                                index: 0,
+                            }));
+                        }
+                        _ => {
+                            return Err(PyError::type_error(format!(
+                                "'{}' object is not iterable",
+                                obj.type_name()
+                            )))
                         }
                     }
-                    // `for line in open(path):` — one of the single most
-                    // common real-Python file-reading idioms — was entirely
-                    // unhandled (`TypeError: 'file' object is not
-                    // iterable`), confirmed via `Lib/dbm/dumb.py`'s own
-                    // `_update` (`for line in f:` over its index file), but
-                    // the gap is completely general, not dbm-specific.
-                    // Reads the whole remaining content and splits it into
-                    // lines (keeping each line's own trailing `\n`, matching
-                    // real `readline()`/iteration semantics) — eager,
-                    // matching every other native-type arm in this same
-                    // match (`List`/`Tuple`/`Str`/...), not the lazy
-                    // `CallSentinelIter` `readline()`-driven approach used
-                    // by this project's OWN `readline`/`__next__` methods
-                    // (added alongside this fix, `attrs.rs`) for direct
-                    // `f.readline()`/`next(f)` calls.
-                    PyObject::File { file, binary, .. } => {
-                        use std::io::Read;
-                        let binary = *binary;
-                        let mut rest = Vec::new();
-                        file.borrow_mut().read_to_end(&mut rest).map_err(|e| PyError::os_error_from_io(&e))?;
-                        drop(obj);
-                        let mut lines: Vec<PyObjectRef> = Vec::new();
-                        let mut current: Vec<u8> = Vec::new();
-                        for byte in rest {
-                            current.push(byte);
-                            if byte == b'\n' {
-                                lines.push(if binary { PyObjectRef::imm(PyObject::Bytes(current.clone())) } else { py_str(&String::from_utf8_lossy(&current)) });
-                                current.clear();
-                            }
-                        }
-                        if !current.is_empty() {
-                            lines.push(if binary { PyObjectRef::imm(PyObject::Bytes(current.clone())) } else { py_str(&String::from_utf8_lossy(&current)) });
-                        }
-                        self.frames[fi].push(PyObjectRef::new(PyObject::ListIter { list: lines, index: 0 }));
-                    }
-                    _ => return Err(PyError::type_error(format!("'{}' object is not iterable", obj.type_name()))),
-                }
                 }
             }
 
@@ -3602,7 +4374,9 @@ impl VirtualMachine {
                             let b = next_func.borrow();
                             if let PyObject::BuiltinMethod { name, func, .. } = &*b {
                                 (name.clone(), *func)
-                            } else { return Err(PyError::runtime_error("expected __next__ method")) }
+                            } else {
+                                return Err(PyError::runtime_error("expected __next__ method"));
+                            }
                         };
                         let fixed = PyObjectRef::imm(PyObject::BuiltinMethod {
                             name: n,
@@ -3631,100 +4405,130 @@ impl VirtualMachine {
                         self.frames[fi].ip = arg as usize;
                     }
                 } else {
-                let is_exhausted = {
-                    let obj = iter_val.borrow();
-                    match &*obj {
-                        PyObject::List(v) => v.is_empty(),
-                        PyObject::ListIter { list, index } => *index >= list.len(),
-                        PyObject::RangeIter { current, stop, step } => {
-                            if *step > 0 { *current >= *stop } else { *current <= *stop }
-                        }
-                        // ZipIterator/MapIterator/FilterIterator don't fit
-                        // this branch's exhausted-check-then-advance shape
-                        // (advancing several sub-iterators, e.g. zip's, in
-                        // lockstep isn't a simple index/length compare) —
-                        // `builtin_next` already implements all of that
-                        // correctly (it's what list()/sum()/etc. already go
-                        // through), so drop straight into it here instead
-                        // of duplicating that logic. Previously these three
-                        // fell to the `_` arm below and raised "for_iter on
-                        // non-iterable" — i.e. `for x in zip(a, b):` (or
-                        // map/filter) used directly as a for-loop target,
-                        // as opposed to being wrapped in `list(...)` first,
-                        // has never worked.
-                        // `CycleIter` (`itertools.cycle`) shares the same
-                        // "doesn't fit index/length exhaustion" shape —
-                        // genuinely infinite (wraps via modulo), so there's
-                        // no `len()` to compare against at all; delegate to
-                        // `builtin_next` exactly like Zip/Map/Filter above.
-                        // `EnumerateIter` moved here too — it no longer
-                        // holds a materialized `items`/`len()` to compare
-                        // against now that it's a lazy wrapper around a
-                        // `source` iterator (see its own doc comment).
-                        PyObject::ZipIterator { .. } | PyObject::MapIterator { .. } | PyObject::FilterIterator { .. } | PyObject::CycleIter { .. } | PyObject::EnumerateIter { .. } | PyObject::GroupByIter { .. } | PyObject::GetItemIter { .. } | PyObject::CallSentinelIter { .. } | PyObject::DequeIter { .. } => {
-                            drop(obj);
-                            match crate::object::builtin_next(&[iter_val.clone()]) {
-                                Ok(val) => {
-                                    self.frames[fi].push(val);
+                    let is_exhausted = {
+                        let obj = iter_val.borrow();
+                        match &*obj {
+                            PyObject::List(v) => v.is_empty(),
+                            PyObject::ListIter { list, index } => *index >= list.len(),
+                            PyObject::RangeIter {
+                                current,
+                                stop,
+                                step,
+                            } => {
+                                if *step > 0 {
+                                    *current >= *stop
+                                } else {
+                                    *current <= *stop
                                 }
-                                Err(e) if crate::object::is_stop_iteration_error(&e) => {
-                                    self.frames[fi].ip = arg as usize;
+                            }
+                            // ZipIterator/MapIterator/FilterIterator don't fit
+                            // this branch's exhausted-check-then-advance shape
+                            // (advancing several sub-iterators, e.g. zip's, in
+                            // lockstep isn't a simple index/length compare) —
+                            // `builtin_next` already implements all of that
+                            // correctly (it's what list()/sum()/etc. already go
+                            // through), so drop straight into it here instead
+                            // of duplicating that logic. Previously these three
+                            // fell to the `_` arm below and raised "for_iter on
+                            // non-iterable" — i.e. `for x in zip(a, b):` (or
+                            // map/filter) used directly as a for-loop target,
+                            // as opposed to being wrapped in `list(...)` first,
+                            // has never worked.
+                            // `CycleIter` (`itertools.cycle`) shares the same
+                            // "doesn't fit index/length exhaustion" shape —
+                            // genuinely infinite (wraps via modulo), so there's
+                            // no `len()` to compare against at all; delegate to
+                            // `builtin_next` exactly like Zip/Map/Filter above.
+                            // `EnumerateIter` moved here too — it no longer
+                            // holds a materialized `items`/`len()` to compare
+                            // against now that it's a lazy wrapper around a
+                            // `source` iterator (see its own doc comment).
+                            PyObject::ZipIterator { .. }
+                            | PyObject::MapIterator { .. }
+                            | PyObject::FilterIterator { .. }
+                            | PyObject::CycleIter { .. }
+                            | PyObject::EnumerateIter { .. }
+                            | PyObject::GroupByIter { .. }
+                            | PyObject::GetItemIter { .. }
+                            | PyObject::CallSentinelIter { .. }
+                            | PyObject::DequeIter { .. } => {
+                                drop(obj);
+                                match crate::object::builtin_next(&[iter_val.clone()]) {
+                                    Ok(val) => {
+                                        self.frames[fi].push(val);
+                                    }
+                                    Err(e) if crate::object::is_stop_iteration_error(&e) => {
+                                        self.frames[fi].ip = arg as usize;
+                                    }
+                                    Err(e) => return Err(e),
                                 }
-                                Err(e) => return Err(e),
+                                return Ok(None);
                             }
-                            return Ok(None);
-                        }
-                        _ => {
-                            // Not a built-in iterator — check for __next__ protocol
-                            if obj.type_name() == "instance" {
-                                return self.for_iter_next(iter_val.clone(), arg);
+                            _ => {
+                                // Not a built-in iterator — check for __next__ protocol
+                                if obj.type_name() == "instance" {
+                                    return self.for_iter_next(iter_val.clone(), arg);
+                                }
+                                return Err(PyError::type_error("for_iter on non-iterable"));
                             }
-                            return Err(PyError::type_error("for_iter on non-iterable"))
-                        },
-                    }
-                };
-                if is_exhausted {
-                    self.frames[fi].ip = arg as usize;
-                } else {
-                    let val = self.frames[fi].pop()?;
-                    let item = {
-                        // Convert plain List to ListIter for O(1) iteration
-                        let is_plain_list = matches!(&*val.borrow(), PyObject::List(..));
-                        if is_plain_list {
-                            let list_clone = {
-                                let obj = val.borrow();
-                                if let PyObject::List(v) = &*obj { v.clone() } else { unreachable!() }
-                            };
-                            *val.borrow_mut() = PyObject::ListIter { list: list_clone, index: 0 };
-                        }
-                        let mut obj = val.borrow_mut();
-                        match &mut *obj {
-                            PyObject::ListIter { list, index } => {
-                                let v = list[*index].clone();
-                                *index += 1;
-                                v
-                            }
-                            PyObject::RangeIter { current, stop: _, step } => {
-                                let v = py_int(*current);
-                                // See the matching fix in `object.rs`'s
-                                // `builtin_next` `RangeIter` arm — plain
-                                // `+=` panics near i64::MAX/MIN.
-                                *current = current.checked_add(*step).unwrap_or(if *step > 0 { i64::MAX } else { i64::MIN });
-                                v
-                            }
-                            // `EnumerateIter` no longer reaches this arm at
-                            // all — it moved to the earlier "delegate to
-                            // builtin_next, return early" bucket above
-                            // (alongside Zip/Map/Filter/Cycle) once it
-                            // became a lazy `source`-wrapper instead of a
-                            // materialized `items` list with no `len()` to
-                            // compare against.
-                            _ => unreachable!()
                         }
                     };
-                    self.frames[fi].push(val);
-                    self.frames[fi].push(item);
-                }
+                    if is_exhausted {
+                        self.frames[fi].ip = arg as usize;
+                    } else {
+                        let val = self.frames[fi].pop()?;
+                        let item =
+                            {
+                                // Convert plain List to ListIter for O(1) iteration
+                                let is_plain_list = matches!(&*val.borrow(), PyObject::List(..));
+                                if is_plain_list {
+                                    let list_clone = {
+                                        let obj = val.borrow();
+                                        if let PyObject::List(v) = &*obj {
+                                            v.clone()
+                                        } else {
+                                            unreachable!()
+                                        }
+                                    };
+                                    *val.borrow_mut() = PyObject::ListIter {
+                                        list: list_clone,
+                                        index: 0,
+                                    };
+                                }
+                                let mut obj = val.borrow_mut();
+                                match &mut *obj {
+                                    PyObject::ListIter { list, index } => {
+                                        let v = list[*index].clone();
+                                        *index += 1;
+                                        v
+                                    }
+                                    PyObject::RangeIter {
+                                        current,
+                                        stop: _,
+                                        step,
+                                    } => {
+                                        let v = py_int(*current);
+                                        // See the matching fix in `object.rs`'s
+                                        // `builtin_next` `RangeIter` arm — plain
+                                        // `+=` panics near i64::MAX/MIN.
+                                        *current = current
+                                            .checked_add(*step)
+                                            .unwrap_or(if *step > 0 { i64::MAX } else { i64::MIN });
+                                        v
+                                    }
+                                    // `EnumerateIter` no longer reaches this arm at
+                                    // all — it moved to the earlier "delegate to
+                                    // builtin_next, return early" bucket above
+                                    // (alongside Zip/Map/Filter/Cycle) once it
+                                    // became a lazy `source`-wrapper instead of a
+                                    // materialized `items` list with no `len()` to
+                                    // compare against.
+                                    _ => unreachable!(),
+                                }
+                            };
+                        self.frames[fi].push(val);
+                        self.frames[fi].push(item);
+                    }
                 }
             }
 
@@ -3752,10 +4556,18 @@ impl VirtualMachine {
                         // — same fix shape as `GET_AWAITABLE`'s own
                         // `self_obj`-rebind elsewhere in this file, for the
                         // identical underlying limitation.
-                        PyObject::ListIter { .. } | PyObject::RangeIter { .. } | PyObject::MapIterator { .. }
-                        | PyObject::FilterIterator { .. } | PyObject::ZipIterator { .. } | PyObject::CycleIter { .. }
-                        | PyObject::GroupByIter { .. } | PyObject::EnumerateIter { .. } | PyObject::GetItemIter { .. }
-                        | PyObject::CallSentinelIter { .. } if name == "__next__" || name == "__iter__" => {
+                        PyObject::ListIter { .. }
+                        | PyObject::RangeIter { .. }
+                        | PyObject::MapIterator { .. }
+                        | PyObject::FilterIterator { .. }
+                        | PyObject::ZipIterator { .. }
+                        | PyObject::CycleIter { .. }
+                        | PyObject::GroupByIter { .. }
+                        | PyObject::EnumerateIter { .. }
+                        | PyObject::GetItemIter { .. }
+                        | PyObject::CallSentinelIter { .. }
+                            if name == "__next__" || name == "__iter__" =>
+                        {
                             let func: crate::object::BuiltinFunc = if name == "__next__" {
                                 crate::object::builtin_next
                             } else {
@@ -3789,7 +4601,10 @@ impl VirtualMachine {
                                 self_obj: obj.clone(),
                             }))
                         }
-                        PyObject::Super { cls: _, obj: _super_obj } => {
+                        PyObject::Super {
+                            cls: _,
+                            obj: _super_obj,
+                        } => {
                             // super(cls, obj).attr: walk MRO of obj's type, starting after cls
                             drop(obj_borrowed);
                             let attr = obj.borrow().get_attribute(&name)?;
@@ -3807,7 +4622,9 @@ impl VirtualMachine {
                             let mut pd = crate::object::PyDict::new();
                             if let PyObject::Function(f) = &*obj.borrow() {
                                 for (k, v) in f.dict.iter() {
-                                    if k.starts_with("__") && k.ends_with("__") { continue; }
+                                    if k.starts_with("__") && k.ends_with("__") {
+                                        continue;
+                                    }
                                     let _ = pd.set(py_str(k), v.clone());
                                 }
                             }
@@ -3829,8 +4646,12 @@ impl VirtualMachine {
                             // override (see the caching-site comment below for
                             // the matching write-side half of this fix).
                             let type_tag = typ.get_id() as u64;
-                            let cached = if dict.contains_key(&name) { None } else {
-                                self.frames[fi].attr_cache.get(name_idx)
+                            let cached = if dict.contains_key(&name) {
+                                None
+                            } else {
+                                self.frames[fi]
+                                    .attr_cache
+                                    .get(name_idx)
                                     .and_then(|entry| entry.as_ref())
                                     .filter(|(tag, _)| *tag == type_tag)
                                     .map(|(_, val)| val.clone())
@@ -3874,15 +4695,22 @@ impl VirtualMachine {
                                 // real native-backing dict rather than the
                                 // wrapper `Instance`).
                                 let rebound = match &*cached_val.borrow() {
-                                    PyObject::BuiltinMethod { name: n, func, self_obj }
-                                        if matches!(&*self_obj.borrow(), PyObject::Instance { typ: t, .. } if t.is(typ)) =>
-                                    {
-                                        PyObjectRef::imm(PyObject::BuiltinMethod { name: n.clone(), func: *func, self_obj: obj.clone() })
+                                    PyObject::BuiltinMethod {
+                                        name: n,
+                                        func,
+                                        self_obj,
+                                    } if matches!(&*self_obj.borrow(), PyObject::Instance { typ: t, .. } if t.is(typ)) => {
+                                        PyObjectRef::imm(PyObject::BuiltinMethod {
+                                            name: n.clone(),
+                                            func: *func,
+                                            self_obj: obj.clone(),
+                                        })
                                     }
-                                    PyObject::BoundMethod { func, self_obj }
-                                        if matches!(&*self_obj.borrow(), PyObject::Instance { typ: t, .. } if t.is(typ)) =>
-                                    {
-                                        PyObjectRef::imm(PyObject::BoundMethod { func: func.clone(), self_obj: obj.clone() })
+                                    PyObject::BoundMethod { func, self_obj } if matches!(&*self_obj.borrow(), PyObject::Instance { typ: t, .. } if t.is(typ)) => {
+                                        PyObjectRef::imm(PyObject::BoundMethod {
+                                            func: func.clone(),
+                                            self_obj: obj.clone(),
+                                        })
                                     }
                                     _ => cached_val.clone(),
                                 };
@@ -3896,13 +4724,16 @@ impl VirtualMachine {
                                 // into user-visible introspection.
                                 let mut pd = crate::object::PyDict::new();
                                 for (k, v) in dict.iter() {
-                                    if k == crate::object::NATIVE_BACKING_KEY { continue; }
+                                    if k == crate::object::NATIVE_BACKING_KEY {
+                                        continue;
+                                    }
                                     let key = py_str(k);
                                     pd.set(key, v.clone())?;
                                 }
                                 drop(obj_borrowed);
                                 pd.instance_ref = Some(obj.clone());
-                                self.frames[fi].push(PyObjectRef::new(PyObject::Dict(Box::new(pd))));
+                                self.frames[fi]
+                                    .push(PyObjectRef::new(PyObject::Dict(Box::new(pd))));
                                 return Ok(None);
                             }
                             if name == "__class__" {
@@ -4116,24 +4947,40 @@ impl VirtualMachine {
                                 // (not a raw deque) — build that closure here,
                                 // since this inline resolution path mirrors
                                 // `get_attribute_impl`'s own handling.
-                                if matches!(&*native.borrow(), PyObject::Deque { .. }) && (name == "__copy__" || name == "copy") {
+                                if matches!(&*native.borrow(), PyObject::Deque { .. })
+                                    && (name == "__copy__" || name == "copy")
+                                {
                                     let typ_clone = typ.clone();
                                     let new_native = {
                                         let b = native.borrow();
                                         if let PyObject::Deque { data, maxlen } = &*b {
                                             py_deque(data.clone(), *maxlen)
-                                        } else { unreachable!() }
+                                        } else {
+                                            unreachable!()
+                                        }
                                     };
-                                    return Some(PyObjectRef::new(PyObject::Closure(Rc::new(move |_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
-                                        let mut new_dict = crate::object::AttrMap::new();
-                                        new_dict.insert(crate::object::NATIVE_BACKING_KEY.to_string(), new_native.clone());
-                                        Ok(PyObjectRef::new(PyObject::Instance { typ: typ_clone.clone(), dict: new_dict }))
-                                    }))));
+                                    return Some(PyObjectRef::new(PyObject::Closure(Rc::new(
+                                        move |_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                                            let mut new_dict = crate::object::AttrMap::new();
+                                            new_dict.insert(
+                                                crate::object::NATIVE_BACKING_KEY.to_string(),
+                                                new_native.clone(),
+                                            );
+                                            Ok(PyObjectRef::new(PyObject::Instance {
+                                                typ: typ_clone.clone(),
+                                                dict: new_dict,
+                                            }))
+                                        },
+                                    ))));
                                 }
                                 let val = native.borrow().get_attribute(&name).ok()?;
                                 let rebound = match &*val.borrow() {
                                     PyObject::BuiltinMethod { name: n, func, .. } => {
-                                        Some(PyObjectRef::imm(PyObject::BuiltinMethod { name: n.clone(), func: *func, self_obj: native.clone() }))
+                                        Some(PyObjectRef::imm(PyObject::BuiltinMethod {
+                                            name: n.clone(),
+                                            func: *func,
+                                            self_obj: native.clone(),
+                                        }))
                                     }
                                     _ => None,
                                 };
@@ -4141,7 +4988,12 @@ impl VirtualMachine {
                             });
                             // Fallback for dict methods on dict-derived instances
                             let attr = attr.or_else(|| {
-                                if name == "__iter__" || name == "items" || name == "keys" || name == "values" || name == "get" {
+                                if name == "__iter__"
+                                    || name == "items"
+                                    || name == "keys"
+                                    || name == "values"
+                                    || name == "get"
+                                {
                                     let func: crate::object::BuiltinFunc = match name.as_str() {
                                         "__iter__" => crate::object::dict_method_iter,
                                         "items" => crate::object::dict_method_items,
@@ -4240,15 +5092,31 @@ impl VirtualMachine {
                                     // — `b.x` returned `a.x`'s value.
                                     let is_property_result = {
                                         let typ_ref = typ.borrow();
-                                        if let PyObject::Type { dict: type_dict, mro, .. } = &*typ_ref {
-                                            let found_val: Option<PyObjectRef> = type_dict.get_str(&name).cloned().or_else(|| {
-                                                mro.iter().skip(1).find_map(|base| {
-                                                    if let PyObject::Type { dict: base_dict, .. } = &*base.borrow() {
-                                                        base_dict.get_str(&name).cloned()
-                                                    } else { None }
+                                        if let PyObject::Type {
+                                            dict: type_dict,
+                                            mro,
+                                            ..
+                                        } = &*typ_ref
+                                        {
+                                            let found_val: Option<PyObjectRef> =
+                                                type_dict.get_str(&name).cloned().or_else(|| {
+                                                    mro.iter().skip(1).find_map(|base| {
+                                                        if let PyObject::Type {
+                                                            dict: base_dict,
+                                                            ..
+                                                        } = &*base.borrow()
+                                                        {
+                                                            base_dict.get_str(&name).cloned()
+                                                        } else {
+                                                            None
+                                                        }
+                                                    })
+                                                });
+                                            found_val
+                                                .map(|v| {
+                                                    matches!(&*v.borrow(), PyObject::Property(_))
                                                 })
-                                            });
-                                            found_val.map(|v| matches!(&*v.borrow(), PyObject::Property(_))).unwrap_or(false)
+                                                .unwrap_or(false)
                                         } else {
                                             false
                                         }
@@ -4275,8 +5143,13 @@ impl VirtualMachine {
                                     let is_native_backing_bound = matches!(&*val.borrow(), PyObject::BuiltinMethod { self_obj, .. }
                                         if !matches!(&*self_obj.borrow(), PyObject::Instance { .. } | PyObject::None))
                                         || matches!(&*val.borrow(), PyObject::Closure(_));
-                                    if !dict.contains_key(&name) && !is_property_result && !is_native_backing_bound && name_idx < self.frames[fi].attr_cache.len() {
-                                        self.frames[fi].attr_cache[name_idx] = Some((type_tag, val.clone()));
+                                    if !dict.contains_key(&name)
+                                        && !is_property_result
+                                        && !is_native_backing_bound
+                                        && name_idx < self.frames[fi].attr_cache.len()
+                                    {
+                                        self.frames[fi].attr_cache[name_idx] =
+                                            Some((type_tag, val.clone()));
                                     }
                                     Ok(val)
                                 }
@@ -4291,16 +5164,25 @@ impl VirtualMachine {
                                     // redeclared on every subclass, and the
                                     // instance's own exact class rarely
                                     // defines it directly.
-                                    let getattr_method = crate::object::lookup_dunder_via_mro(typ, "__getattr__");
+                                    let getattr_method =
+                                        crate::object::lookup_dunder_via_mro(typ, "__getattr__");
                                     if let Some(getattr_method) = getattr_method {
-                                        self.call_function(getattr_method, vec![obj.clone(), py_str(&name)], vec![])
+                                        self.call_function(
+                                            getattr_method,
+                                            vec![obj.clone(), py_str(&name)],
+                                            vec![],
+                                        )
                                     } else if name == "__doc__" {
                                         // Every real object has __doc__ (defaults to
                                         // None) — see the matching fallback in
                                         // object.rs's ObjectAccess::get_attribute.
                                         Ok(py_none())
                                     } else {
-                                        Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", crate::object::get_type_name_for_instance(typ), name)))
+                                        Err(PyError::attribute_error(format!(
+                                            "'{}' object has no attribute '{}'",
+                                            crate::object::get_type_name_for_instance(typ),
+                                            name
+                                        )))
                                     }
                                 }
                             }
@@ -4324,7 +5206,9 @@ impl VirtualMachine {
                             let cached = if is_type_obj {
                                 None
                             } else {
-                                ATTR_CACHE.with(|c| c.borrow().get(&(type_name.clone(), name.clone())).copied())
+                                ATTR_CACHE.with(|c| {
+                                    c.borrow().get(&(type_name.clone(), name.clone())).copied()
+                                })
                             };
                             if let Some(func) = cached {
                                 drop(obj_borrowed);
@@ -4355,7 +5239,9 @@ impl VirtualMachine {
                                             crate::object::metatype_of(&obj).and_then(|mt| {
                                                 if let PyObject::Type { mro, .. } = &*mt.borrow() {
                                                     for base in mro.iter() {
-                                                        if let PyObject::Type { dict, .. } = &*base.borrow() {
+                                                        if let PyObject::Type { dict, .. } =
+                                                            &*base.borrow()
+                                                        {
                                                             if let Some(val) = dict.get_str(&name) {
                                                                 return Some(val.clone());
                                                             }
@@ -4369,11 +5255,27 @@ impl VirtualMachine {
                                         };
                                         match metatype_hit {
                                             Some(val) => {
-                                                let is_property = if let PyObject::Property(ref d) = &*val.borrow() { d.getter.is_some() } else { false };
+                                                let is_property = if let PyObject::Property(ref d) =
+                                                    &*val.borrow()
+                                                {
+                                                    d.getter.is_some()
+                                                } else {
+                                                    false
+                                                };
                                                 if is_property {
-                                                    let getter = if let PyObject::Property(ref d) = &*val.borrow() { d.getter.clone().unwrap() } else { unreachable!() };
+                                                    let getter = if let PyObject::Property(ref d) =
+                                                        &*val.borrow()
+                                                    {
+                                                        d.getter.clone().unwrap()
+                                                    } else {
+                                                        unreachable!()
+                                                    };
                                                     drop(obj_borrowed);
-                                                    let result = self.call_function(getter, vec![obj.clone()], vec![])?;
+                                                    let result = self.call_function(
+                                                        getter,
+                                                        vec![obj.clone()],
+                                                        vec![],
+                                                    )?;
                                                     self.frames[fi].push(result);
                                                     return Ok(None);
                                                 }
@@ -4394,10 +5296,12 @@ impl VirtualMachine {
                                                 // below), which correctly stays unbound.
                                                 if matches!(&*val.borrow(), PyObject::Function(_)) {
                                                     drop(obj_borrowed);
-                                                    self.frames[fi].push(PyObjectRef::imm(PyObject::BoundMethod {
-                                                        func: val,
-                                                        self_obj: obj.clone(),
-                                                    }));
+                                                    self.frames[fi].push(PyObjectRef::imm(
+                                                        PyObject::BoundMethod {
+                                                            func: val,
+                                                            self_obj: obj.clone(),
+                                                        },
+                                                    ));
                                                     return Ok(None);
                                                 }
                                                 val
@@ -4420,19 +5324,31 @@ impl VirtualMachine {
                                                 // module-level `__getattr__`)
                                                 // must have it invoked before
                                                 // erroring.
-                                                if matches!(&*obj.borrow(), PyObject::Module { .. }) {
-                                                    let g = obj.borrow().get_attribute("__getattr__");
+                                                if matches!(&*obj.borrow(), PyObject::Module { .. })
+                                                {
+                                                    let g =
+                                                        obj.borrow().get_attribute("__getattr__");
                                                     if let Ok(getattr_method) = g {
-                                                        if !matches!(&*getattr_method.borrow(), PyObject::None) {
+                                                        if !matches!(
+                                                            &*getattr_method.borrow(),
+                                                            PyObject::None
+                                                        ) {
                                                             // Module __getattr__ takes ONLY the attribute name —
                                                             // the module itself is NOT bound as self.
-                                                            let result = self.call_function(getattr_method, vec![py_str(&name)], vec![])?;
+                                                            let result = self.call_function(
+                                                                getattr_method,
+                                                                vec![py_str(&name)],
+                                                                vec![],
+                                                            )?;
                                                             self.frames[fi].push(result);
                                                             return Ok(None);
                                                         }
                                                     }
                                                 }
-                                                return Err(PyError::attribute_error(format!("'{}' object has no attribute '{}'", obj_type_name_for_err, name)));
+                                                return Err(PyError::attribute_error(format!(
+                                                    "'{}' object has no attribute '{}'",
+                                                    obj_type_name_for_err, name
+                                                )));
                                             }
                                         }
                                     }
@@ -4457,7 +5373,11 @@ impl VirtualMachine {
                                             if std::env::var("RPY_DEBUG_DESCRIPTOR2").is_ok() {
                                                 eprintln!("CLASS-LEVEL __get__: attr_name={} obj_type={:?}", name, obj.borrow().type_name());
                                             }
-                                            let result = self.call_function(get_fn, vec![attr.clone(), py_none(), obj.clone()], vec![])?;
+                                            let result = self.call_function(
+                                                get_fn,
+                                                vec![attr.clone(), py_none(), obj.clone()],
+                                                vec![],
+                                            )?;
                                             self.frames[fi].push(result);
                                             return Ok(None);
                                         }
@@ -4511,7 +5431,9 @@ impl VirtualMachine {
                                         let b = attr.borrow();
                                         if let PyObject::BuiltinMethod { name: n, func, .. } = &*b {
                                             (n.clone(), *func)
-                                        } else { unreachable!() }
+                                        } else {
+                                            unreachable!()
+                                        }
                                     };
                                     // Cache for next time — but NOT
                                     // `__init__` (nor `__new__`): a native
@@ -4526,7 +5448,10 @@ impl VirtualMachine {
                                     // silently return the wrong function after
                                     // any `d.__init__(...)` call.
                                     if n != "__init__" && n != "__new__" {
-                                        ATTR_CACHE.with(|c| { c.borrow_mut().insert((type_name.clone(), n.clone()), func); });
+                                        ATTR_CACHE.with(|c| {
+                                            c.borrow_mut()
+                                                .insert((type_name.clone(), n.clone()), func);
+                                        });
                                     }
                                     Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                                         name: n,
@@ -4565,12 +5490,20 @@ impl VirtualMachine {
                     let obj_borrowed = obj.borrow();
                     if let PyObject::Instance { typ, .. } = &*obj_borrowed {
                         let typ_ref = typ.borrow();
-                        if let PyObject::Type { dict: type_dict, .. } = &*typ_ref {
-                            if let Some(setattr_method) = type_dict.get_str("__setattr__").cloned() {
+                        if let PyObject::Type {
+                            dict: type_dict, ..
+                        } = &*typ_ref
+                        {
+                            if let Some(setattr_method) = type_dict.get_str("__setattr__").cloned()
+                            {
                                 drop(typ_ref);
                                 drop(obj_borrowed);
                                 // Call __setattr__ for side effects (validation, clearing caches)
-                                let result = self.call_function(setattr_method, vec![obj.clone(), py_str(&name), val.clone()], vec![]);
+                                let result = self.call_function(
+                                    setattr_method,
+                                    vec![obj.clone(), py_str(&name), val.clone()],
+                                    vec![],
+                                );
                                 // Also set the attribute directly in the instance dict, since
                                 // __dict__ returns a COPY and self.__dict__[key] = value inside
                                 // __setattr__ would modify the copy, not the original.
@@ -4589,10 +5522,17 @@ impl VirtualMachine {
                     let obj_borrowed = obj.borrow();
                     if let PyObject::Instance { typ, .. } = &*obj_borrowed {
                         let typ_ref = typ.borrow();
-                        if let PyObject::Type { dict: type_dict, .. } = &*typ_ref {
+                        if let PyObject::Type {
+                            dict: type_dict, ..
+                        } = &*typ_ref
+                        {
                             type_dict.get_str(&name).cloned()
-                        } else { None }
-                    } else { None }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
                 };
                 if let Some(descriptor) = descriptor_clone {
                     // Property is special-cased directly (matching how LOAD_ATTR's
@@ -4610,17 +5550,23 @@ impl VirtualMachine {
                     // instead of seeing what's already loaded.
                     let property_setter = {
                         let d = descriptor.borrow();
-                        if let PyObject::Property(ref data) = &*d { data.setter.clone() } else { None }
+                        if let PyObject::Property(ref data) = &*d {
+                            data.setter.clone()
+                        } else {
+                            None
+                        }
                     };
                     if let Some(setter_fn) = property_setter {
                         self.call_function(setter_fn, vec![obj.clone(), val.clone()], vec![])?;
                         return Ok(None);
                     }
-                    let setter_method = {
-                        descriptor.borrow().get_attribute("__set__").ok()
-                    };
+                    let setter_method = { descriptor.borrow().get_attribute("__set__").ok() };
                     if let Some(setter_method) = setter_method {
-                        let result = self.call_function(setter_method, vec![descriptor, obj.clone(), val.clone()], vec![]);
+                        let result = self.call_function(
+                            setter_method,
+                            vec![descriptor, obj.clone(), val.clone()],
+                            vec![],
+                        );
                         match result {
                             Ok(_) => return Ok(None),
                             Err(e) => return Err(e),
@@ -4646,7 +5592,9 @@ impl VirtualMachine {
                 // `self.assertRaises(AttributeError, setattr, x, 'attr', v)`.
                 if !matches!(&obj, PyObjectRef::Mut(_)) {
                     return Err(PyError::attribute_error(format!(
-                        "'{}' object has no attribute '{}'", obj.borrow().type_name(), name
+                        "'{}' object has no attribute '{}'",
+                        obj.borrow().type_name(),
+                        name
                     )));
                 }
                 obj.borrow_mut().set_attribute(&name, val)?;
@@ -4701,11 +5649,19 @@ impl VirtualMachine {
                     let obj_borrowed = obj.borrow();
                     if let PyObject::Instance { typ, .. } = &*obj_borrowed {
                         let typ_ref = typ.borrow();
-                        if let PyObject::Type { dict: type_dict, .. } = &*typ_ref {
-                            if let Some(delattr_method) = type_dict.get_str("__delattr__").cloned() {
+                        if let PyObject::Type {
+                            dict: type_dict, ..
+                        } = &*typ_ref
+                        {
+                            if let Some(delattr_method) = type_dict.get_str("__delattr__").cloned()
+                            {
                                 drop(typ_ref);
                                 drop(obj_borrowed);
-                                self.call_function(delattr_method, vec![obj.clone(), py_str(&name)], vec![])?;
+                                self.call_function(
+                                    delattr_method,
+                                    vec![obj.clone(), py_str(&name)],
+                                    vec![],
+                                )?;
                                 return Ok(None);
                             }
                         }
@@ -4716,14 +5672,22 @@ impl VirtualMachine {
                     let obj_borrowed = obj.borrow();
                     if let PyObject::Instance { typ, .. } = &*obj_borrowed {
                         let typ_ref = typ.borrow();
-                        if let PyObject::Type { dict: type_dict, .. } = &*typ_ref {
+                        if let PyObject::Type {
+                            dict: type_dict, ..
+                        } = &*typ_ref
+                        {
                             type_dict.get_str(&name).cloned()
-                        } else { None }
-                    } else { None }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
                 };
                 if let Some(ref desc) = descriptor {
                     if let Ok(deleter) = desc.borrow().get_attribute("__delete__") {
-                        let result = self.call_function(deleter, vec![desc.clone(), obj.clone()], vec![]);
+                        let result =
+                            self.call_function(deleter, vec![desc.clone(), obj.clone()], vec![]);
                         match result {
                             Ok(_) => return Ok(None),
                             Err(e) => return Err(e),
@@ -4741,7 +5705,9 @@ impl VirtualMachine {
                 // already applies for `setattr()`.
                 if !matches!(obj, PyObjectRef::Mut(_)) {
                     return Err(PyError::attribute_error(format!(
-                        "'{}' object attribute '{}' is read-only", obj.borrow().type_name(), name
+                        "'{}' object attribute '{}' is read-only",
+                        obj.borrow().type_name(),
+                        name
                     )));
                 }
                 obj.borrow_mut().del_attribute(&name)?;
@@ -4767,8 +5733,10 @@ impl VirtualMachine {
                         PyObject::Tuple(v) => v.clone(),
                         _ => {
                             drop(val_ref);
-                            let iterator = crate::object::builtin_iter(&[val.clone()])
-                                .map_err(|_| PyError::runtime_error("LIST_EXTEND requires an iterable"))?;
+                            let iterator =
+                                crate::object::builtin_iter(&[val.clone()]).map_err(|_| {
+                                    PyError::runtime_error("LIST_EXTEND requires an iterable")
+                                })?;
                             let mut result = Vec::new();
                             loop {
                                 match crate::object::builtin_next(&[iterator.clone()]) {
@@ -4856,11 +5824,17 @@ impl VirtualMachine {
                         // work with or without a bound self).
                         _ => {
                             let mut out: Vec<(PyObjectRef, PyObjectRef)> = Vec::new();
-                            let keys_obj = crate::object::call_method_rebound(self, &source, "keys", vec![])?;
+                            let keys_obj =
+                                crate::object::call_method_rebound(self, &source, "keys", vec![])?;
                             if let PyObject::List(items) = &*keys_obj.borrow() {
                                 let keys: Vec<PyObjectRef> = items.clone();
                                 for k in keys {
-                                    let v = crate::object::call_method_rebound(self, &source, "__getitem__", vec![k.clone()])?;
+                                    let v = crate::object::call_method_rebound(
+                                        self,
+                                        &source,
+                                        "__getitem__",
+                                        vec![k.clone()],
+                                    )?;
                                     out.push((k, v));
                                 }
                             }
@@ -4906,8 +5880,13 @@ impl VirtualMachine {
                 let items = match list_items {
                     Some(v) => v,
                     None => {
-                        let iterator = crate::object::builtin_iter(&[seq.clone()])
-                            .map_err(|_| PyError::type_error(format!("cannot unpack non-iterable '{}' object", seq.borrow().type_name())))?;
+                        let iterator =
+                            crate::object::builtin_iter(&[seq.clone()]).map_err(|_| {
+                                PyError::type_error(format!(
+                                    "cannot unpack non-iterable '{}' object",
+                                    seq.borrow().type_name()
+                                ))
+                            })?;
                         let mut v = Vec::new();
                         loop {
                             match crate::object::builtin_next(&[iterator.clone()]) {
@@ -4925,7 +5904,11 @@ impl VirtualMachine {
                     // unpack N items into M values" message matched neither
                     // phrasing CPython actually uses.
                     return Err(PyError::value_error(if items.len() < count {
-                        format!("not enough values to unpack (expected {}, got {})", count, items.len())
+                        format!(
+                            "not enough values to unpack (expected {}, got {})",
+                            count,
+                            items.len()
+                        )
                     } else {
                         format!("too many values to unpack (expected {})", count)
                     }));
@@ -4953,8 +5936,13 @@ impl VirtualMachine {
                 let items = match list_items {
                     Some(v) => v,
                     None => {
-                        let iterator = crate::object::builtin_iter(&[seq.clone()])
-                            .map_err(|_| PyError::type_error(format!("cannot unpack non-iterable '{}' object", seq.borrow().type_name())))?;
+                        let iterator =
+                            crate::object::builtin_iter(&[seq.clone()]).map_err(|_| {
+                                PyError::type_error(format!(
+                                    "cannot unpack non-iterable '{}' object",
+                                    seq.borrow().type_name()
+                                ))
+                            })?;
                         let mut v = Vec::new();
                         loop {
                             match crate::object::builtin_next(&[iterator.clone()]) {
@@ -4973,7 +5961,9 @@ impl VirtualMachine {
                     // minimum (`before + after`), unlike plain
                     // `UNPACK_SEQUENCE`'s exact-count requirement.
                     return Err(PyError::value_error(format!(
-                        "not enough values to unpack (expected at least {}, got {})", before + after, items.len()
+                        "not enough values to unpack (expected at least {}, got {})",
+                        before + after,
+                        items.len()
                     )));
                 }
                 let _ = total;
@@ -5056,7 +6046,9 @@ impl VirtualMachine {
             Opcode::GET_AITER => {
                 // async for: call __aiter__ on the top of stack
                 let obj = self.frames[fi].peek(0)?;
-                let aiter_method = obj.borrow().get_attribute("__aiter__")
+                let aiter_method = obj
+                    .borrow()
+                    .get_attribute("__aiter__")
                     .map_err(|_| PyError::type_error("object does not support async iteration"))?;
                 let result = self.call_function(aiter_method, vec![], vec![])?;
                 let _ = self.frames[fi].pop();
@@ -5066,7 +6058,9 @@ impl VirtualMachine {
             Opcode::GET_ANEXT => {
                 // async for: get __anext__ method from the async iterator
                 let obj = self.frames[fi].peek(0)?;
-                let anext_method = obj.borrow().get_attribute("__anext__")
+                let anext_method = obj
+                    .borrow()
+                    .get_attribute("__anext__")
                     .map_err(|_| PyError::type_error("async iterator has no __anext__"))?;
                 let _ = self.frames[fi].pop();
                 self.frames[fi].push(anext_method);
@@ -5080,8 +6074,9 @@ impl VirtualMachine {
             Opcode::BEFORE_ASYNC_WITH => {
                 // async with: call __aenter__ and push __aexit__ for later
                 let mgr = self.frames[fi].pop()?;
-                let aenter_method = mgr.borrow().get_attribute("__aenter__")
-                    .map_err(|_| PyError::attribute_error("async context manager has no __aenter__"))?;
+                let aenter_method = mgr.borrow().get_attribute("__aenter__").map_err(|_| {
+                    PyError::attribute_error("async context manager has no __aenter__")
+                })?;
                 let result = self.call_function(aenter_method, vec![], vec![])?;
                 self.frames[fi].push(mgr);
                 self.frames[fi].push(result);
@@ -5144,7 +6139,11 @@ impl VirtualMachine {
                     let (typ, args, matched, unmatched) = {
                         let eg = &*exc_dup.borrow();
                         let (typ, args, exceptions) = match eg {
-                            PyObject::ExceptionGroup { typ, args, exceptions } => (typ.clone(), args.clone(), exceptions.clone()),
+                            PyObject::ExceptionGroup {
+                                typ,
+                                args,
+                                exceptions,
+                            } => (typ.clone(), args.clone(), exceptions.clone()),
                             _ => unreachable!(),
                         };
                         let mut matched = Vec::new();
@@ -5229,8 +6228,12 @@ impl VirtualMachine {
                         Ok(exc) => exc,
                         Err(_) => {
                             if std::env::var("RPY_DEBUG_RERAISE").is_ok() {
-                                eprintln!("RERAISE FAIL: func={} file={} stack_len={}",
-                                    self.frames[fi].code.name, self.frames[fi].code.filename, self.frames[fi].stack.len());
+                                eprintln!(
+                                    "RERAISE FAIL: func={} file={} stack_len={}",
+                                    self.frames[fi].code.name,
+                                    self.frames[fi].code.filename,
+                                    self.frames[fi].stack.len()
+                                );
                             }
                             return Err(PyError::runtime_error("No active exception to re-raise"));
                         }
@@ -5243,7 +6246,11 @@ impl VirtualMachine {
                 };
                 if !is_empty_eg {
                     if std::env::var("RPY_DEBUG_RERAISE").is_ok() {
-                        eprintln!("RERAISE: kind={:?} repr={}", std::mem::discriminant(&*reraise_exc.borrow()), reraise_exc.borrow().repr());
+                        eprintln!(
+                            "RERAISE: kind={:?} repr={}",
+                            std::mem::discriminant(&*reraise_exc.borrow()),
+                            reraise_exc.borrow().repr()
+                        );
                     }
                     return Err(PyError::Exception("re-raise".to_string(), reraise_exc));
                 }
@@ -5268,7 +6275,8 @@ impl VirtualMachine {
                         // though the real exception was still available via
                         // `active_exception` (set by PUSH_EXC_INFO exactly
                         // for this purpose, per its own doc comment).
-                        let reraise_exc = if let Some(exc) = self.frames[fi].active_exception.take() {
+                        let reraise_exc = if let Some(exc) = self.frames[fi].active_exception.take()
+                        {
                             Some(*exc)
                         } else {
                             self.frames[fi].stack.pop()
@@ -5277,7 +6285,11 @@ impl VirtualMachine {
                             Some(exc) => {
                                 return Err(PyError::Exception(format!("re-raise"), exc));
                             }
-                            None => return Err(PyError::runtime_error("No active exception to re-raise")),
+                            None => {
+                                return Err(PyError::runtime_error(
+                                    "No active exception to re-raise",
+                                ))
+                            }
                         }
                     }
                     1 => {
@@ -5286,14 +6298,21 @@ impl VirtualMachine {
                         // representation, use it directly — `PyObject::Str`
                         // deliberately NOT included here (see below): a bare
                         // string is never a valid thing to raise in Python 3.
-                        let is_callable = !matches!(&*exc.borrow(),
-                            PyObject::Exception { .. } | PyObject::ExceptionGroup { .. } | PyObject::Instance { .. }
+                        let is_callable = !matches!(
+                            &*exc.borrow(),
+                            PyObject::Exception { .. }
+                                | PyObject::ExceptionGroup { .. }
+                                | PyObject::Instance { .. }
                         );
                         let exc = if is_callable {
                             let exc_clone = exc.clone();
                             match self.call_function(exc_clone, vec![], vec![]) {
                                 Ok(instance) => instance,
-                                Err(_) => return Err(PyError::type_error("exceptions must derive from BaseException")),
+                                Err(_) => {
+                                    return Err(PyError::type_error(
+                                        "exceptions must derive from BaseException",
+                                    ))
+                                }
                             }
                         } else {
                             exc
@@ -5320,16 +6339,26 @@ impl VirtualMachine {
                         // its class hierarchy actually checked here.
                         if let PyObject::Instance { typ, .. } = &*exc.borrow() {
                             if crate::object::find_exception_base_name(typ).is_none() {
-                                return Err(PyError::type_error("exceptions must derive from BaseException"));
+                                return Err(PyError::type_error(
+                                    "exceptions must derive from BaseException",
+                                ));
                             }
                         }
                         let msg = match &*exc.borrow() {
                             PyObject::Str(s) => s.to_string(),
                             PyObject::Exception { args, .. } => {
-                                if !args.is_empty() { args[0].str() } else { "".to_string() }
+                                if !args.is_empty() {
+                                    args[0].str()
+                                } else {
+                                    "".to_string()
+                                }
                             }
                             PyObject::ExceptionGroup { args, .. } => {
-                                if !args.is_empty() { args[0].str() } else { "".to_string() }
+                                if !args.is_empty() {
+                                    args[0].str()
+                                } else {
+                                    "".to_string()
+                                }
                             }
                             PyObject::Instance { dict, .. } => {
                                 // Extract error message from the instance
@@ -5338,21 +6367,32 @@ impl VirtualMachine {
                                 if let Some(a) = args {
                                     let b = a.borrow();
                                     if let PyObject::Tuple(t) = &*b {
-                                        if !t.is_empty() { t[0].str() }
-                                        else { exc.repr() }
-                                    } else { exc.repr() }
+                                        if !t.is_empty() {
+                                            t[0].str()
+                                        } else {
+                                            exc.repr()
+                                        }
+                                    } else {
+                                        exc.repr()
+                                    }
                                 } else {
                                     // Fallback: repr of the exception object
                                     exc.repr()
                                 }
                             }
-                            _ => return Err(PyError::type_error("exceptions must be str or Exception instances")),
+                            _ => {
+                                return Err(PyError::type_error(
+                                    "exceptions must be str or Exception instances",
+                                ))
+                            }
                         };
                         // raise StopIteration → PyError::StopIteration (needed by for_iter/next protocol)
                         if msg.is_empty() {
                             let exc_borrowed = exc.borrow();
                             let is_stop = match &*exc_borrowed {
-                                PyObject::Exception { ref typ, .. } if typ == "StopIteration" => true,
+                                PyObject::Exception { ref typ, .. } if typ == "StopIteration" => {
+                                    true
+                                }
                                 PyObject::Type { name, .. } if name == "StopIteration" => true,
                                 _ => false,
                             };
@@ -5377,7 +6417,11 @@ impl VirtualMachine {
                         self.exc_value = Some(exc.clone());
                         self.exc_traceback = Some(py_none());
                         if std::env::var("RPY_DEBUG_EXCINFO").is_ok() {
-                            eprintln!("RAISE set exc_type={} exc_value={}", self.exc_type.as_ref().unwrap().repr(), self.exc_value.as_ref().unwrap().repr());
+                            eprintln!(
+                                "RAISE set exc_type={} exc_value={}",
+                                self.exc_type.as_ref().unwrap().repr(),
+                                self.exc_value.as_ref().unwrap().repr()
+                            );
                         }
                         return Err(PyError::Exception(msg, exc));
                     }
@@ -5386,13 +6430,21 @@ impl VirtualMachine {
                         let exc = self.frames[fi].pop()?;
                         let exc_msg = match &*exc.borrow() {
                             PyObject::Exception { args, .. } => {
-                                if !args.is_empty() { args[0].str() } else { exc.str() }
+                                if !args.is_empty() {
+                                    args[0].str()
+                                } else {
+                                    exc.str()
+                                }
                             }
                             _ => exc.str(),
                         };
                         let cause_msg = match &*cause.borrow() {
                             PyObject::Exception { args, .. } => {
-                                if !args.is_empty() { args[0].str() } else { cause.str() }
+                                if !args.is_empty() {
+                                    args[0].str()
+                                } else {
+                                    cause.str()
+                                }
                             }
                             _ => cause.str(),
                         };
@@ -5411,7 +6463,10 @@ impl VirtualMachine {
                         // reading it back (`get_attribute_impl`'s Instance
                         // arm) already checks the instance's own dict first.
                         match &mut *exc.borrow_mut() {
-                            PyObject::Exception { cause: ref mut cause_field, .. } => {
+                            PyObject::Exception {
+                                cause: ref mut cause_field,
+                                ..
+                            } => {
                                 *cause_field = Some(cause.clone());
                             }
                             PyObject::Instance { dict, .. } => {
@@ -5419,7 +6474,10 @@ impl VirtualMachine {
                             }
                             _ => {}
                         }
-                        return Err(PyError::Exception(format!("{} (caused by: {})", exc_msg, cause_msg), exc));
+                        return Err(PyError::Exception(
+                            format!("{} (caused by: {})", exc_msg, cause_msg),
+                            exc,
+                        ));
                     }
                     _ => return Err(PyError::runtime_error("invalid RAISE_VARARGS count")),
                 }
@@ -5441,11 +6499,18 @@ impl VirtualMachine {
                         }
                     };
                     if level > 0 {
-                        let pkg = self.frames[fi].globals.borrow()
-                            .get(&interner::intern("__package__")).cloned()
+                        let pkg = self.frames[fi]
+                            .globals
+                            .borrow()
+                            .get(&interner::intern("__package__"))
+                            .cloned()
                             .and_then(|p| {
                                 let p = p.borrow();
-                                if let PyObject::Str(s) = &*p { Some(s.to_string()) } else { None }
+                                if let PyObject::Str(s) = &*p {
+                                    Some(s.to_string())
+                                } else {
+                                    None
+                                }
                             });
                         // level=1 (`from . import x`) resolves relative to
                         // __package__ itself; each additional dot
@@ -5459,25 +6524,47 @@ impl VirtualMachine {
                         let pkg = pkg.map(|p| {
                             let mut segs: Vec<&str> = p.split('.').collect();
                             let strip = level.saturating_sub(1);
-                            if strip >= segs.len() { segs.clear(); } else { segs.truncate(segs.len() - strip); }
+                            if strip >= segs.len() {
+                                segs.clear();
+                            } else {
+                                segs.truncate(segs.len() - strip);
+                            }
                             segs.join(".")
                         });
                         let resolved_name = match pkg {
                             Some(p) if !p.is_empty() => {
-                                if name.is_empty() { p } else { format!("{}.{}", p, name) }
+                                if name.is_empty() {
+                                    p
+                                } else {
+                                    format!("{}.{}", p, name)
+                                }
                             }
                             // Fallback: use __name__ up to last dot as package
                             _ => {
-                                let n = self.frames[fi].globals.borrow()
-                                    .get(&interner::intern("__name__")).cloned()
+                                let n = self.frames[fi]
+                                    .globals
+                                    .borrow()
+                                    .get(&interner::intern("__name__"))
+                                    .cloned()
                                     .and_then(|n| {
                                         let n = n.borrow();
-                                        if let PyObject::Str(s) = &*n { Some(s.to_string()) } else { None }
-                                    }).unwrap_or_default();
+                                        if let PyObject::Str(s) = &*n {
+                                            Some(s.to_string())
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .unwrap_or_default();
                                 if let Some(dot) = n.rfind('.') {
                                     let base = &n[..dot];
-                                    if name.is_empty() { base.to_string() } else { format!("{}.{}", base, name) }
-                                } else { name.clone() }
+                                    if name.is_empty() {
+                                        base.to_string()
+                                    } else {
+                                        format!("{}.{}", base, name)
+                                    }
+                                } else {
+                                    name.clone()
+                                }
                             }
                         };
                         resolved_name
@@ -5486,7 +6573,11 @@ impl VirtualMachine {
                     }
                 };
                 if std::env::var("RPY_DEBUG_IMPORT").is_ok() {
-                    eprintln!("IMPORT_NAME: resolved={} cached={}", resolved, self.modules.contains_key(&resolved));
+                    eprintln!(
+                        "IMPORT_NAME: resolved={} cached={}",
+                        resolved,
+                        self.modules.contains_key(&resolved)
+                    );
                 }
                 if let Some(module) = self.import_cached_or_fresh(&resolved) {
                     // For 'import a.b.c' where fromlist is empty (regular import, not 'from a.b import X'),
@@ -5499,9 +6590,11 @@ impl VirtualMachine {
                         // Set sub-module as attribute on parent module (e.g. logging.config = <module>)
                         if let Some(dot_pos) = resolved.rfind('.') {
                             let parent_name = &resolved[..dot_pos];
-                            let child_name = &resolved[dot_pos+1..];
+                            let child_name = &resolved[dot_pos + 1..];
                             if let Some(parent_mod) = self.modules.get(parent_name) {
-                                let _ = parent_mod.borrow_mut().set_attribute(child_name, module.clone());
+                                let _ = parent_mod
+                                    .borrow_mut()
+                                    .set_attribute(child_name, module.clone());
                             }
                         }
                         if let Some(top) = resolved.split('.').next() {
@@ -5528,7 +6621,8 @@ impl VirtualMachine {
                                             PyObjectRef::Mut(rc) => {
                                                 if let Ok(mut guard) = rc.try_borrow_mut() {
                                                     if let PyObject::Dict(ref mut d) = &mut *guard {
-                                                        d.set(py_str(&resolved), module.clone()).ok();
+                                                        d.set(py_str(&resolved), module.clone())
+                                                            .ok();
                                                     }
                                                 }
                                             }
@@ -5568,22 +6662,40 @@ impl VirtualMachine {
                     let module_borrowed = module.borrow();
                     if let PyObject::Module { dict, .. } = &*module_borrowed {
                         // Use __all__ if present, otherwise all non-underscore names
-                        let names_to_import: Vec<String> = if let Some(all_val) = dict.get_str("__all__") {
-                            let all_borrowed = all_val.borrow();
-                            match &*all_borrowed {
-                                PyObject::Tuple(items) | PyObject::List(items) => {
-                                    items.iter().filter_map(|n| {
-                                        if let PyObject::Str(s) = &*n.borrow() { Some(s.to_string()) } else { None }
-                                    }).collect()
+                        let names_to_import: Vec<String> =
+                            if let Some(all_val) = dict.get_str("__all__") {
+                                let all_borrowed = all_val.borrow();
+                                match &*all_borrowed {
+                                    PyObject::Tuple(items) | PyObject::List(items) => items
+                                        .iter()
+                                        .filter_map(|n| {
+                                            if let PyObject::Str(s) = &*n.borrow() {
+                                                Some(s.to_string())
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                        .collect(),
+                                    _ => dict
+                                        .keys()
+                                        .map(|k| interner::lookup_str(*k))
+                                        .filter(|k| !k.starts_with('_'))
+                                        .map(|k| k.to_string())
+                                        .collect(),
                                 }
-                                _ => dict.keys().map(|k| interner::lookup_str(*k)).filter(|k| !k.starts_with('_')).map(|k| k.to_string()).collect(),
-                            }
-                        } else {
-                            dict.keys().map(|k| interner::lookup_str(*k)).filter(|k| !k.starts_with('_')).map(|k| k.to_string()).collect()
-                        };
+                            } else {
+                                dict.keys()
+                                    .map(|k| interner::lookup_str(*k))
+                                    .filter(|k| !k.starts_with('_'))
+                                    .map(|k| k.to_string())
+                                    .collect()
+                            };
                         // Collect name-value pairs before dropping borrow
-                        let imports: Vec<(String, PyObjectRef)> = names_to_import.iter()
-                            .filter_map(|name| dict.get_str(&name).map(|val| (name.clone(), val.clone())))
+                        let imports: Vec<(String, PyObjectRef)> = names_to_import
+                            .iter()
+                            .filter_map(|name| {
+                                dict.get_str(&name).map(|val| (name.clone(), val.clone()))
+                            })
                             .collect();
                         drop(module_borrowed);
                         let live_module = self.frames[fi].live_module.clone();
@@ -5599,7 +6711,10 @@ impl VirtualMachine {
                                     dict.insert_str(import_name, val.clone());
                                 }
                             }
-                            self.frames[fi].globals.borrow_mut().insert(interner::intern(&import_name), val.clone());
+                            self.frames[fi]
+                                .globals
+                                .borrow_mut()
+                                .insert(interner::intern(&import_name), val.clone());
                         }
                         // Push placeholder module result (the loop above already pushed values)
                         // The POP_TOP after IMPORT_FROM loop will clean up
@@ -5635,7 +6750,11 @@ impl VirtualMachine {
                 let found = found.or_else(|| {
                     self.frames.iter().find_map(|f| {
                         let g = f.globals.borrow();
-                        if g.get(&interner::intern("__name__")).map(|n| n.str()).as_deref() == Some(module_name.as_str()) {
+                        if g.get(&interner::intern("__name__"))
+                            .map(|n| n.str())
+                            .as_deref()
+                            == Some(module_name.as_str())
+                        {
                             g.get(&interner::intern(&name)).cloned()
                         } else {
                             None
@@ -5643,7 +6762,13 @@ impl VirtualMachine {
                     })
                 });
                 if std::env::var("RPY_DEBUG_IMPORT").is_ok() {
-                    eprintln!("IMPORT_FROM: name={} module={} found_direct={} found_after_ancestor={}", name, module_name, found_direct, found.is_some());
+                    eprintln!(
+                        "IMPORT_FROM: name={} module={} found_direct={} found_after_ancestor={}",
+                        name,
+                        module_name,
+                        found_direct,
+                        found.is_some()
+                    );
                 }
                 if let Some(val) = found {
                     self.frames[fi].push(val);
@@ -5651,7 +6776,11 @@ impl VirtualMachine {
                     // Try importing as sub-module (for dotted names like os.path)
                     let submodule_name = format!("{}.{}", module_name, name);
                     if std::env::var("RPY_DEBUG_IMPORT").is_ok() {
-                        eprintln!("IMPORT_FROM fallback: submodule_name={} already_cached={}", submodule_name, self.modules.contains_key(&submodule_name));
+                        eprintln!(
+                            "IMPORT_FROM fallback: submodule_name={} already_cached={}",
+                            submodule_name,
+                            self.modules.contains_key(&submodule_name)
+                        );
                     }
                     if submodule_name.contains('.') {
                         match self.import_module_from_file(&submodule_name) {
@@ -5668,7 +6797,10 @@ impl VirtualMachine {
                                 // into the generic message below (kept
                                 // permanently per user request, 2026-07-19).
                                 if std::env::var("RPY_DEBUG_IMPORT").is_ok() {
-                                    eprintln!("IMPORT_FROM_FAIL: name={} module={} err={}", name, module_name, e);
+                                    eprintln!(
+                                        "IMPORT_FROM_FAIL: name={} module={} err={}",
+                                        name, module_name, e
+                                    );
                                 }
                                 // Only "the submodule doesn't exist" collapses
                                 // to CPython's generic "cannot import name"
@@ -5681,13 +6813,19 @@ impl VirtualMachine {
                                 // imported submodule was indistinguishable
                                 // from the name simply not existing.
                                 if matches!(e, PyError::ImportError(_)) {
-                                    return Err(PyError::ImportError(format!("cannot import name '{}' from '{}'", name, module_name)));
+                                    return Err(PyError::ImportError(format!(
+                                        "cannot import name '{}' from '{}'",
+                                        name, module_name
+                                    )));
                                 }
                                 return Err(e);
                             }
                         }
                     } else {
-                        return Err(PyError::ImportError(format!("cannot import name '{}' from '{}'", name, module_name)));
+                        return Err(PyError::ImportError(format!(
+                            "cannot import name '{}' from '{}'",
+                            name, module_name
+                        )));
                     }
                 }
             }
@@ -5702,7 +6840,12 @@ impl VirtualMachine {
                     let f = &self.frames[self.frames.len() - 1];
                     if idx < f.code.cellvars.len() {
                         let name = &f.code.cellvars[idx];
-                        if let Some(var_idx) = f.code.varnames.iter().position(|&n| crate::interner::intern_eq(n, name)) {
+                        if let Some(var_idx) = f
+                            .code
+                            .varnames
+                            .iter()
+                            .position(|&n| crate::interner::intern_eq(n, name))
+                        {
                             if let Some(val) = f.fast_locals.get(var_idx).and_then(|v| v.clone()) {
                                 val
                             } else {
@@ -5745,13 +6888,16 @@ impl VirtualMachine {
                     3 => {
                         // !a (ascii) conversion: repr() with non-ASCII escaped
                         let s = val.repr();
-                        let escaped: String = s.chars().flat_map(|c| {
-                            if c.is_ascii() {
-                                c.to_string().chars().collect::<Vec<_>>()
-                            } else {
-                                c.escape_unicode().collect::<Vec<_>>()
-                            }
-                        }).collect();
+                        let escaped: String = s
+                            .chars()
+                            .flat_map(|c| {
+                                if c.is_ascii() {
+                                    c.to_string().chars().collect::<Vec<_>>()
+                                } else {
+                                    c.escape_unicode().collect::<Vec<_>>()
+                                }
+                            })
+                            .collect();
                         py_str(&escaped)
                     }
                     _ => return Err(PyError::runtime_error("unknown conversion type")),
@@ -5814,7 +6960,10 @@ impl VirtualMachine {
                     let exc_borrowed = exc.borrow();
                     match &*exc_borrowed {
                         PyObject::Exception { typ, .. } => {
-                            let typ_obj = self.frames[fi].builtins.get(&interner::intern(&typ)).cloned()
+                            let typ_obj = self.frames[fi]
+                                .builtins
+                                .get(&interner::intern(&typ))
+                                .cloned()
                                 .unwrap_or_else(|| py_str(typ));
                             (typ_obj, exc.clone())
                         }
@@ -5841,7 +6990,9 @@ impl VirtualMachine {
                         _ => (py_none(), py_none()),
                     }
                 };
-                let exit_raw = mgr.borrow().get_attribute("__exit__")
+                let exit_raw = mgr
+                    .borrow()
+                    .get_attribute("__exit__")
                     .map_err(|_| PyError::attribute_error("context manager has no __exit__"))?;
                 // A method found directly on a native type (e.g. `lock.
                 // __exit__`, `Lock`'s attribute lookup in `attrs.rs`) comes
@@ -5909,7 +7060,9 @@ impl VirtualMachine {
             Opcode::GET_AWAITABLE => {
                 // Call __await__ on the object to get an iterator
                 let obj = self.frames[fi].pop()?;
-                let await_method = obj.borrow().get_attribute("__await__")
+                let await_method = obj
+                    .borrow()
+                    .get_attribute("__await__")
                     .map_err(|_| PyError::type_error("object does not support __await__"))?;
                 // `get_attribute` on a `Coroutine`/`Generator` returns
                 // `__await__` as a `BuiltinMethod` with a `None` PLACEHOLDER
@@ -5932,7 +7085,11 @@ impl VirtualMachine {
                 // (the established fix for this exact class of gap).
                 let await_method = match &*await_method.borrow() {
                     PyObject::BuiltinMethod { name, func, .. } => {
-                        PyObjectRef::imm(PyObject::BuiltinMethod { name: name.clone(), func: *func, self_obj: obj.clone() })
+                        PyObjectRef::imm(PyObject::BuiltinMethod {
+                            name: name.clone(),
+                            func: *func,
+                            self_obj: obj.clone(),
+                        })
                     }
                     _ => await_method.clone(),
                 };
@@ -5960,7 +7117,11 @@ impl VirtualMachine {
                                             self_obj: iter_val.clone(),
                                         })
                                     }
-                                    _ => return Err(PyError::runtime_error("expected BuiltinMethod for send")),
+                                    _ => {
+                                        return Err(PyError::runtime_error(
+                                            "expected BuiltinMethod for send",
+                                        ))
+                                    }
                                 };
                                 self.call_function(bound, vec![val], vec![])
                             }
@@ -5978,13 +7139,19 @@ impl VirtualMachine {
                                             self_obj: iter_val.clone(),
                                         })
                                     }
-                                    _ => return Err(PyError::runtime_error("expected BuiltinMethod for send")),
+                                    _ => {
+                                        return Err(PyError::runtime_error(
+                                            "expected BuiltinMethod for send",
+                                        ))
+                                    }
                                 };
                                 self.call_function(bound, vec![val], vec![])
                             }
                             Err(_) => {
                                 // No send method — try __next__ (for simple iterators used with await)
-                                Err(PyError::type_error("SEND on non-generator/coroutine/instance"))
+                                Err(PyError::type_error(
+                                    "SEND on non-generator/coroutine/instance",
+                                ))
                             }
                         }
                     }
@@ -6078,7 +7245,12 @@ impl VirtualMachine {
                 self.frames[fi].push(result);
             }
 
-            _ => return Err(PyError::runtime_error(format!("unimplemented opcode: {:?}", op))),
+            _ => {
+                return Err(PyError::runtime_error(format!(
+                    "unimplemented opcode: {:?}",
+                    op
+                )))
+            }
         }
         Ok(None)
     }
@@ -6094,14 +7266,30 @@ impl VirtualMachine {
     /// special-case below so it stops returning raw, un-invoked descriptors
     /// (confirmed general: `getattr(obj, 'some_property')` returned the
     /// `property` object itself instead of calling its getter).
-    pub(crate) fn resolve_descriptor_attr(&mut self, obj: &PyObjectRef, name: &str) -> Option<PyObjectRef> {
-        let typ = if let PyObject::Instance { typ, .. } = &*obj.borrow() { typ.clone() } else { return None; };
+    pub(crate) fn resolve_descriptor_attr(
+        &mut self,
+        obj: &PyObjectRef,
+        name: &str,
+    ) -> Option<PyObjectRef> {
+        let typ = if let PyObject::Instance { typ, .. } = &*obj.borrow() {
+            typ.clone()
+        } else {
+            return None;
+        };
         let found = {
             let typ_ref = typ.borrow();
-            if let PyObject::Type { dict: type_dict, mro, .. } = &*typ_ref {
+            if let PyObject::Type {
+                dict: type_dict,
+                mro,
+                ..
+            } = &*typ_ref
+            {
                 type_dict.get_str(name).cloned().or_else(|| {
                     for base in mro.iter().skip(1) {
-                        if let PyObject::Type { dict: base_dict, .. } = &*base.borrow() {
+                        if let PyObject::Type {
+                            dict: base_dict, ..
+                        } = &*base.borrow()
+                        {
                             if let Some(val) = base_dict.get_str(name) {
                                 return Some(val.clone());
                             }
@@ -6118,16 +7306,23 @@ impl VirtualMachine {
             PyObject::Property(ref d) if d.getter.is_some() => {
                 let g = d.getter.clone().unwrap();
                 drop(val_borrowed);
-                Some(self.call_function(g, vec![obj.clone()], vec![]).unwrap_or_else(|_| found.clone()))
+                Some(
+                    self.call_function(g, vec![obj.clone()], vec![])
+                        .unwrap_or_else(|_| found.clone()),
+                )
             }
             PyObject::StaticMethod { func } => Some(func.clone()),
             PyObject::ClassMethod { func } => {
                 let func_clone = func.clone();
-                Some(PyObjectRef::imm(PyObject::BoundMethod { func: func_clone, self_obj: typ.clone() }))
+                Some(PyObjectRef::imm(PyObject::BoundMethod {
+                    func: func_clone,
+                    self_obj: typ.clone(),
+                }))
             }
-            PyObject::Function(_) => {
-                Some(PyObjectRef::imm(PyObject::BoundMethod { func: found.clone(), self_obj: obj.clone() }))
-            }
+            PyObject::Function(_) => Some(PyObjectRef::imm(PyObject::BoundMethod {
+                func: found.clone(),
+                self_obj: obj.clone(),
+            })),
             // NOTE: deliberately NOT auto-binding a bare `PyObject::Closure`
             // here — see the matching (much longer) comment on this same
             // decision at the `LOAD_ATTR` opcode's own copy of this logic.
@@ -6137,16 +7332,26 @@ impl VirtualMachine {
             // closures capturing their own state directly and expecting NO
             // `self` prepended (`io.BytesIO`'s `read`/`write`/`seek`, ...) —
             // auto-binding unconditionally broke the latter.
-            PyObject::BuiltinFunction { name: n, .. } if crate::object::is_builtin_exception_class_name(n) => {
+            PyObject::BuiltinFunction { name: n, .. }
+                if crate::object::is_builtin_exception_class_name(n) =>
+            {
                 // Don't auto-bind a builtin exception "class" — see the
                 // matching LOAD_ATTR fix's own (much longer) comment.
                 Some(found.clone())
             }
             PyObject::BuiltinFunction { name: n, func } => {
-                Some(PyObjectRef::imm(PyObject::BuiltinMethod { name: n.clone(), func: *func, self_obj: obj.clone() }))
+                Some(PyObjectRef::imm(PyObject::BuiltinMethod {
+                    name: n.clone(),
+                    func: *func,
+                    self_obj: obj.clone(),
+                }))
             }
             PyObject::BuiltinMethod { name: n, func, .. } => {
-                Some(PyObjectRef::imm(PyObject::BuiltinMethod { name: n.clone(), func: *func, self_obj: obj.clone() }))
+                Some(PyObjectRef::imm(PyObject::BuiltinMethod {
+                    name: n.clone(),
+                    func: *func,
+                    self_obj: obj.clone(),
+                }))
             }
             _ => {
                 drop(val_borrowed);
@@ -6163,9 +7368,20 @@ impl VirtualMachine {
         }
     }
 
-    pub(crate) fn call_function(&mut self, callable: PyObjectRef, args: Vec<PyObjectRef>, keywords: Vec<(String, PyObjectRef)>) -> PyResult<PyObjectRef> {
+    pub(crate) fn call_function(
+        &mut self,
+        callable: PyObjectRef,
+        args: Vec<PyObjectRef>,
+        keywords: Vec<(String, PyObjectRef)>,
+    ) -> PyResult<PyObjectRef> {
         let type_name = callable.borrow().type_name();
-        if cfg!(feature = "profile") { eprintln!("DEBUG call_function: type={} name={:?}", type_name, callable.repr()); }
+        if cfg!(feature = "profile") {
+            eprintln!(
+                "DEBUG call_function: type={} name={:?}",
+                type_name,
+                callable.repr()
+            );
+        }
         if std::env::var("RPY_DEBUG_CALL").is_ok() {
             eprintln!("CALL_FUNCTION: type={} repr={}", type_name, callable.repr());
         }
@@ -6223,7 +7439,11 @@ impl VirtualMachine {
                 let attr_name = args[1].str();
                 if std::env::var("RPY_DEBUG_GETATTR").is_ok() {
                     let type_name = if let PyObject::Instance { typ, .. } = &*obj.borrow() {
-                        if let PyObject::Type { name, .. } = &*typ.borrow() { name.clone() } else { "?".to_string() }
+                        if let PyObject::Type { name, .. } = &*typ.borrow() {
+                            name.clone()
+                        } else {
+                            "?".to_string()
+                        }
                     } else {
                         obj.borrow().type_name().to_string()
                     };
@@ -6270,7 +7490,10 @@ impl VirtualMachine {
                         let is_instance_obj = matches!(&*obj.borrow(), PyObject::Instance { .. });
                         let is_function = matches!(&*v.borrow(), PyObject::Function(_));
                         if is_instance_obj && is_function {
-                            return Ok(PyObjectRef::imm(PyObject::BoundMethod { func: v, self_obj: obj.clone() }));
+                            return Ok(PyObjectRef::imm(PyObject::BoundMethod {
+                                func: v,
+                                self_obj: obj.clone(),
+                            }));
                         }
                         // `@classmethod`-decorated attributes found on a
                         // class (`obj` a `PyObject::Type`) come back from
@@ -6292,7 +7515,10 @@ impl VirtualMachine {
                         let is_type_obj = matches!(&*obj.borrow(), PyObject::Type { .. });
                         if is_type_obj {
                             if let PyObject::ClassMethod { func } = &*v.borrow() {
-                                return Ok(PyObjectRef::imm(PyObject::BoundMethod { func: func.clone(), self_obj: obj.clone() }));
+                                return Ok(PyObjectRef::imm(PyObject::BoundMethod {
+                                    func: func.clone(),
+                                    self_obj: obj.clone(),
+                                }));
                             }
                         }
                         // Native (non-Instance) types — File, List, Dict,
@@ -6309,7 +7535,12 @@ impl VirtualMachine {
                         // `getattr(self.stream, attr)`) returned a `write`
                         // method still bound to that placeholder `None`,
                         // so calling it failed with "write on non-file".
-                        let rebind_builtin_method = if let PyObject::BuiltinMethod { name, func, self_obj } = &*v.borrow() {
+                        let rebind_builtin_method = if let PyObject::BuiltinMethod {
+                            name,
+                            func,
+                            self_obj,
+                        } = &*v.borrow()
+                        {
                             let placeholder = matches!(&*self_obj.borrow(), PyObject::None);
                             if placeholder && !matches!(&*obj.borrow(), PyObject::Instance { .. }) {
                                 Some((name.clone(), *func))
@@ -6320,7 +7551,11 @@ impl VirtualMachine {
                             None
                         };
                         if let Some((name, func)) = rebind_builtin_method {
-                            return Ok(PyObjectRef::imm(PyObject::BuiltinMethod { name, func, self_obj: obj.clone() }));
+                            return Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                                name,
+                                func,
+                                self_obj: obj.clone(),
+                            }));
                         }
                         return Ok(v);
                     }
@@ -6331,7 +7566,11 @@ impl VirtualMachine {
                             None
                         };
                         if let Some(f) = getattr_fn {
-                            match self.call_function(f, vec![obj.clone(), crate::object::py_str(&attr_name)], vec![]) {
+                            match self.call_function(
+                                f,
+                                vec![obj.clone(), crate::object::py_str(&attr_name)],
+                                vec![],
+                            ) {
                                 Ok(v) => return Ok(v),
                                 Err(_) if args.len() == 3 => return Ok(args[2].clone()),
                                 Err(e) => return Err(e),
@@ -6382,7 +7621,11 @@ impl VirtualMachine {
             let is_exc_info = matches!(&*callable.borrow(), PyObject::BuiltinFunction { func, .. } if std::ptr::fn_addr_eq(*func, crate::modules::sys_exc_info_builtin as crate::object::BuiltinFunc));
             if is_exc_info {
                 if std::env::var("RPY_DEBUG_EXCINFO").is_ok() {
-                    eprintln!("READ exc_info: type={:?} value={:?}", self.exc_type.as_ref().map(|v| v.repr()), self.exc_value.as_ref().map(|v| v.repr()));
+                    eprintln!(
+                        "READ exc_info: type={:?} value={:?}",
+                        self.exc_type.as_ref().map(|v| v.repr()),
+                        self.exc_value.as_ref().map(|v| v.repr())
+                    );
                 }
                 return Ok(py_tuple(vec![
                     self.exc_type.clone().unwrap_or_else(py_none),
@@ -6416,8 +7659,14 @@ impl VirtualMachine {
             }
             let is_setrecursionlimit = matches!(&*callable.borrow(), PyObject::BuiltinFunction { func, .. } if std::ptr::fn_addr_eq(*func, crate::modules::sys_setrecursionlimit_builtin as crate::object::BuiltinFunc));
             if is_setrecursionlimit {
-                let n = args.get(0).and_then(|a| a.as_i64()).ok_or_else(|| PyError::type_error("setrecursionlimit() requires an integer argument"))?;
-                if n < 1 { return Err(PyError::value_error("recursion limit must be greater or equal than 1")); }
+                let n = args.get(0).and_then(|a| a.as_i64()).ok_or_else(|| {
+                    PyError::type_error("setrecursionlimit() requires an integer argument")
+                })?;
+                if n < 1 {
+                    return Err(PyError::value_error(
+                        "recursion limit must be greater or equal than 1",
+                    ));
+                }
                 self.recursion_limit = n as usize;
                 return Ok(py_none());
             }
@@ -6432,7 +7681,8 @@ impl VirtualMachine {
         // one more thing to print, since the old implementation just joined
         // every element of `args` unconditionally. See `print_with_vm`'s
         // own doc comment for the full story.
-        if matches!(&*callable.borrow(), PyObject::BuiltinFunction { func, .. } if std::ptr::fn_addr_eq(*func, crate::object::builtin_print as crate::object::BuiltinFunc)) {
+        if matches!(&*callable.borrow(), PyObject::BuiltinFunction { func, .. } if std::ptr::fn_addr_eq(*func, crate::object::builtin_print as crate::object::BuiltinFunc))
+        {
             return crate::object::print_with_vm(self, &args, &keywords);
         }
 
@@ -6446,7 +7696,10 @@ impl VirtualMachine {
             let is_globals = matches!(&*callable.borrow(), PyObject::BuiltinFunction { func, .. } if std::ptr::fn_addr_eq(*func, crate::object::builtin_globals as crate::object::BuiltinFunc));
             let is_locals = matches!(&*callable.borrow(), PyObject::BuiltinFunction { func, .. } if std::ptr::fn_addr_eq(*func, crate::object::builtin_locals as crate::object::BuiltinFunc));
             if is_globals || is_locals {
-                let frame = self.frames.last().ok_or_else(|| PyError::runtime_error("no frame"))?;
+                let frame = self
+                    .frames
+                    .last()
+                    .ok_or_else(|| PyError::runtime_error("no frame"))?;
                 let mut d = crate::object::PyDict::new();
                 if is_globals {
                     for (k, v) in frame.globals.borrow().iter() {
@@ -6516,15 +7769,24 @@ impl VirtualMachine {
                 } else {
                     self.frames.first()
                 };
-                let frame = frame.ok_or_else(|| PyError::value_error("call stack is not deep enough"))?;
+                let frame =
+                    frame.ok_or_else(|| PyError::value_error("call stack is not deep enough"))?;
                 let mut fg = crate::object::PyDict::new();
                 for (k, v) in frame.globals.borrow().iter() {
                     fg.set(py_str(interner::lookup_str(*k)), v.clone())?;
                 }
                 let mut attrs = crate::object::AttrMap::new();
                 attrs.insert_str("f_globals", PyObjectRef::new(PyObject::Dict(Box::new(fg))));
-                attrs.insert_str("f_code", PyObjectRef::imm(PyObject::Code(frame.code.clone())));
-                let typ = PyObjectRef::new(PyObject::Type { name: "frame".to_string(), dict: Box::new(crate::object::TypeDict::default()), bases: vec![], mro: vec![] });
+                attrs.insert_str(
+                    "f_code",
+                    PyObjectRef::imm(PyObject::Code(frame.code.clone())),
+                );
+                let typ = PyObjectRef::new(PyObject::Type {
+                    name: "frame".to_string(),
+                    dict: Box::new(crate::object::TypeDict::default()),
+                    bases: vec![],
+                    mro: vec![],
+                });
                 return Ok(PyObjectRef::new(PyObject::Instance { typ, dict: attrs }));
             }
         }
@@ -6551,11 +7813,21 @@ impl VirtualMachine {
             let is_isinstance = matches!(&*callable.borrow(), PyObject::BuiltinFunction { func, .. } if std::ptr::fn_addr_eq(*func, crate::object::builtin_isinstance as crate::object::BuiltinFunc));
             let is_issubclass = matches!(&*callable.borrow(), PyObject::BuiltinFunction { func, .. } if std::ptr::fn_addr_eq(*func, crate::object::builtin_issubclass as crate::object::BuiltinFunc));
             if (is_isinstance || is_issubclass) && args.len() == 2 {
-                let hook_name = if is_isinstance { "__instancecheck__" } else { "__subclasscheck__" };
+                let hook_name = if is_isinstance {
+                    "__instancecheck__"
+                } else {
+                    "__subclasscheck__"
+                };
                 let find_hook = |cls: &PyObjectRef| -> Option<PyObjectRef> {
-                    if !matches!(&*cls.borrow(), PyObject::Type { .. }) { return None; }
+                    if !matches!(&*cls.borrow(), PyObject::Type { .. }) {
+                        return None;
+                    }
                     let mt = crate::object::metatype_of(cls)?;
-                    let hook = if let PyObject::Type { dict, .. } = &*mt.borrow() { dict.get_str(hook_name).cloned() } else { None };
+                    let hook = if let PyObject::Type { dict, .. } = &*mt.borrow() {
+                        dict.get_str(hook_name).cloned()
+                    } else {
+                        None
+                    };
                     hook
                 };
                 let classes: Vec<PyObjectRef> = match &*args[1].borrow() {
@@ -6565,16 +7837,27 @@ impl VirtualMachine {
                 if classes.iter().any(|c| find_hook(c).is_some()) {
                     for cls in &classes {
                         if let Some(hook) = find_hook(cls) {
-                            let bound = PyObjectRef::imm(PyObject::BoundMethod { func: hook, self_obj: cls.clone() });
-                            let result = self.call_function(bound, vec![args[0].clone()], vec![])?;
+                            let bound = PyObjectRef::imm(PyObject::BoundMethod {
+                                func: hook,
+                                self_obj: cls.clone(),
+                            });
+                            let result =
+                                self.call_function(bound, vec![args[0].clone()], vec![])?;
                             if result.truthy() {
                                 return Ok(py_bool(true));
                             }
                         } else if is_isinstance {
-                            if crate::object::builtin_isinstance(&[args[0].clone(), cls.clone()])?.truthy() {
+                            if crate::object::builtin_isinstance(&[args[0].clone(), cls.clone()])?
+                                .truthy()
+                            {
                                 return Ok(py_bool(true));
                             }
-                        } else if crate::object::builtin_issubclass(&[args[0].clone(), cls.clone()])?.truthy() {
+                        } else if crate::object::builtin_issubclass(&[
+                            args[0].clone(),
+                            cls.clone(),
+                        ])?
+                        .truthy()
+                        {
                             return Ok(py_bool(true));
                         }
                     }
@@ -6609,14 +7892,19 @@ impl VirtualMachine {
             // call in `get_sys_path`, reached via the very same
             // `with_vm_mut` raw-pointer-aliasing UB class documented
             // throughout this function) rather than raising a clean error.
-            let name_kw = keywords.iter().find(|(k, _)| k == "name").map(|(_, v)| v.clone());
+            let name_kw = keywords
+                .iter()
+                .find(|(k, _)| k == "name")
+                .map(|(_, v)| v.clone());
             if is_import && (!args.is_empty() || name_kw.is_some()) {
                 // Real CPython rejects `name` given BOTH positionally and by
                 // keyword (`__import__('sys', name='sys')`) with a
                 // `TypeError` — `test_builtin.py::BuiltinTest.test_import`
                 // checks this exact case too.
                 if !args.is_empty() && name_kw.is_some() {
-                    return Err(PyError::type_error("argument for __import__() given by name ('name') and position (1)"));
+                    return Err(PyError::type_error(
+                        "argument for __import__() given by name ('name') and position (1)",
+                    ));
                 }
                 let name_obj = args.get(0).cloned().or(name_kw).unwrap();
                 // Real `__import__` requires `name` to actually be a `str`
@@ -6625,7 +7913,9 @@ impl VirtualMachine {
                 // `TypeError`, not silently coerce the int via `.str()` and
                 // go looking for a module literally named `"1"`).
                 if !matches!(&*name_obj.borrow(), PyObject::Str(_)) {
-                    return Err(PyError::type_error("__import__() argument 'name' must be str"));
+                    return Err(PyError::type_error(
+                        "__import__() argument 'name' must be str",
+                    ));
                 }
                 let name = name_obj.str();
                 // `__import__('')` (empty module name) is a real
@@ -6639,8 +7929,16 @@ impl VirtualMachine {
                 // ValueError) and a `level=1` call with fromlist (expects
                 // ImportError from the relative-import-with-no-package
                 // check, not ValueError).
-                let level_kw = keywords.iter().find(|(k, _)| k == "level").map(|(_, v)| v.clone());
-                let level = args.get(4).cloned().or(level_kw).and_then(|v| v.as_i64()).unwrap_or(0);
+                let level_kw = keywords
+                    .iter()
+                    .find(|(k, _)| k == "level")
+                    .map(|(_, v)| v.clone());
+                let level = args
+                    .get(4)
+                    .cloned()
+                    .or(level_kw)
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
                 if name.is_empty() && level == 0 {
                     return Err(PyError::value_error("Empty module name"));
                 }
@@ -6655,17 +7953,20 @@ impl VirtualMachine {
                 // submodule, an infinite-recursion trap for callers that
                 // then call `.open`/etc. on what they assumed was the
                 // specific submodule).
-                let kwargs_fromlist = keywords.iter().find(|(k, _)| k == "fromlist").map(|(_, v)| v.clone());
+                let kwargs_fromlist = keywords
+                    .iter()
+                    .find(|(k, _)| k == "fromlist")
+                    .map(|(_, v)| v.clone());
                 let fromlist_arg = kwargs_fromlist.or_else(|| args.get(3).cloned());
-                let fromlist = fromlist_arg.and_then(|fl| {
-                    match &*fl.borrow() {
-                        PyObject::List(items) => Some(items.clone()),
-                        PyObject::Tuple(items) => Some(items.iter().cloned().collect::<Vec<_>>()),
-                        _ => None,
-                    }
+                let fromlist = fromlist_arg.and_then(|fl| match &*fl.borrow() {
+                    PyObject::List(items) => Some(items.clone()),
+                    PyObject::Tuple(items) => Some(items.iter().cloned().collect::<Vec<_>>()),
+                    _ => None,
                 });
                 let has_dots = name.contains('.');
-                let has_fromlist = fromlist.as_ref().map_or(false, |fl: &Vec<PyObjectRef>| !fl.is_empty());
+                let has_fromlist = fromlist
+                    .as_ref()
+                    .map_or(false, |fl: &Vec<PyObjectRef>| !fl.is_empty());
                 return crate::object::import_impl(self, &name, has_dots, has_fromlist);
             }
         }
@@ -6694,13 +7995,17 @@ impl VirtualMachine {
         {
             let is_raise_signal = matches!(&*callable.borrow(), PyObject::BuiltinFunction { func, .. } if std::ptr::fn_addr_eq(*func, crate::modules::signal_raise_signal_builtin as crate::object::BuiltinFunc));
             if is_raise_signal && !args.is_empty() {
-                let signum = args[0].as_i64().ok_or_else(|| PyError::type_error("signalnum must be an int"))?;
+                let signum = args[0]
+                    .as_i64()
+                    .ok_or_else(|| PyError::type_error("signalnum must be an int"))?;
                 return crate::modules::signal_raise_signal_impl(self, signum);
             }
             let is_os_kill = matches!(&*callable.borrow(), PyObject::BuiltinFunction { func, .. } if std::ptr::fn_addr_eq(*func, crate::modules::os_kill_builtin as crate::object::BuiltinFunc));
             if is_os_kill && args.len() >= 2 {
                 let pid = args[0].as_i64().unwrap_or(-1);
-                let signum = args[1].as_i64().ok_or_else(|| PyError::type_error("signalnum must be an int"))?;
+                let signum = args[1]
+                    .as_i64()
+                    .ok_or_else(|| PyError::type_error("signalnum must be an int"))?;
                 if pid == std::process::id() as i64 {
                     crate::modules::invoke_signal_handler_impl(self, signum)?;
                 }
@@ -6745,25 +8050,41 @@ impl VirtualMachine {
                         // `PyError::syntax_error`'s own doc comment; same
                         // fix as `builtin_compile`'s equivalent parse sites.
                         let program = if is_eval {
-                            crate::parser::try_parse_as_expression(&source).map_err(PyError::syntax_error)?
+                            crate::parser::try_parse_as_expression(&source)
+                                .map_err(PyError::syntax_error)?
                         } else {
                             let mut parser = crate::parser::Parser::new(&source);
                             parser.parse_program().map_err(PyError::syntax_error)?
                         };
                         let mut compiler = crate::compiler::Compiler::new();
-                        compiler.compile(&program, &format!("<{}>", mode_name)).map_err(PyError::syntax_error)?
+                        compiler
+                            .compile(&program, &format!("<{}>", mode_name))
+                            .map_err(PyError::syntax_error)?
                     }
                 };
                 // Merge an explicit globals dict (reads) with an explicit
                 // locals dict (reads take precedence, writes land here) into
                 // one flat namespace — this interpreter's frames don't model
                 // separate globals/locals scopes for top-level-style exec.
-                let globals_dict = args.get(1).filter(|g| matches!(&*g.borrow(), PyObject::Dict(_)));
-                let locals_dict = args.get(2).filter(|l| matches!(&*l.borrow(), PyObject::Dict(_))).or(globals_dict);
+                let globals_dict = args
+                    .get(1)
+                    .filter(|g| matches!(&*g.borrow(), PyObject::Dict(_)));
+                let locals_dict = args
+                    .get(2)
+                    .filter(|l| matches!(&*l.borrow(), PyObject::Dict(_)))
+                    .or(globals_dict);
                 let namespace = if let Some(g) = globals_dict {
-                    let mut hm: HashMap<StrId, PyObjectRef> = str_map_to_strid_map(crate::object::dict_arg_to_hashmap(g, "exec() globals must be a dict")?);
-                    if let Some(l) = args.get(2).filter(|l| matches!(&*l.borrow(), PyObject::Dict(_))) {
-                        hm.extend(str_map_to_strid_map(crate::object::dict_arg_to_hashmap(l, "exec() locals must be a dict")?));
+                    let mut hm: HashMap<StrId, PyObjectRef> = str_map_to_strid_map(
+                        crate::object::dict_arg_to_hashmap(g, "exec() globals must be a dict")?,
+                    );
+                    if let Some(l) = args
+                        .get(2)
+                        .filter(|l| matches!(&*l.borrow(), PyObject::Dict(_)))
+                    {
+                        hm.extend(str_map_to_strid_map(crate::object::dict_arg_to_hashmap(
+                            l,
+                            "exec() locals must be a dict",
+                        )?));
                     }
                     Some(Rc::new(RefCell::new(hm)))
                 } else if is_eval {
@@ -6776,8 +8097,12 @@ impl VirtualMachine {
                     // Build a read-only snapshot: the frame's globals merged
                     // with its fast-locals by varname.
                     if let Some(f) = self.frames.last() {
-                        let mut hm: HashMap<StrId, PyObjectRef> =
-                            f.globals.borrow().iter().map(|(k, v)| (*k, v.clone())).collect();
+                        let mut hm: HashMap<StrId, PyObjectRef> = f
+                            .globals
+                            .borrow()
+                            .iter()
+                            .map(|(k, v)| (*k, v.clone()))
+                            .collect();
                         for (i, name) in f.code.varnames.iter().enumerate() {
                             if let Some(v) = f.fast_locals.get(i).and_then(|v| v.clone()) {
                                 hm.insert(*name, v);
@@ -6790,7 +8115,12 @@ impl VirtualMachine {
                 } else {
                     None
                 };
-                let globals_rc = namespace.clone().unwrap_or_else(|| self.frames.last().map(|f| f.globals.clone()).unwrap_or_else(|| self.globals.clone()));
+                let globals_rc = namespace.clone().unwrap_or_else(|| {
+                    self.frames
+                        .last()
+                        .map(|f| f.globals.clone())
+                        .unwrap_or_else(|| self.globals.clone())
+                });
                 let result = self.exec_code(code, Some(globals_rc.clone()));
                 if let Some(target) = locals_dict {
                     if let PyObject::Dict(d) = &mut *target.borrow_mut() {
@@ -6821,8 +8151,14 @@ impl VirtualMachine {
                 let name = args[0].str();
                 let package = if args.len() >= 2 {
                     let pkg = args[1].str();
-                    if pkg.is_empty() { None } else { Some(pkg) }
-                } else { None };
+                    if pkg.is_empty() {
+                        None
+                    } else {
+                        Some(pkg)
+                    }
+                } else {
+                    None
+                };
                 return crate::modules::import_module_with_vm(self, &name, package.as_deref());
             }
         }
@@ -6843,8 +8179,14 @@ impl VirtualMachine {
                 let name = args[0].str();
                 let package = if args.len() >= 2 {
                     let pkg = args[1].str();
-                    if pkg.is_empty() { None } else { Some(pkg) }
-                } else { None };
+                    if pkg.is_empty() {
+                        None
+                    } else {
+                        Some(pkg)
+                    }
+                } else {
+                    None
+                };
                 return crate::modules::find_spec_with_vm(self, &name, package.as_deref());
             }
         }
@@ -6864,6 +8206,29 @@ impl VirtualMachine {
 
         if let PyObject::BuiltinFunction { func, .. } = &*callable.borrow() {
             let func = *func;
+            // `Fraction(...)` construction needs a live `&mut self` so it can
+            // invoke user-provided `as_integer_ratio()` methods (same pattern
+            // as getmembers/find_spec above: avoids reborrowing a disposable
+            // VM over the live one from inside an active call chain).
+            let is_fraction_init = std::ptr::fn_addr_eq(
+                func,
+                crate::modules::fraction_init_fallback as crate::object::BuiltinFunc,
+            );
+            if is_fraction_init {
+                return crate::modules::fraction_init_with_vm(self, &args);
+            }
+            if std::ptr::fn_addr_eq(
+                func,
+                crate::modules::fraction_from_number_fallback as crate::object::BuiltinFunc,
+            ) {
+                return crate::modules::fraction_from_number_with_vm(self, &args);
+            }
+            if std::ptr::fn_addr_eq(
+                func,
+                crate::modules::fraction_from_decimal_fallback as crate::object::BuiltinFunc,
+            ) {
+                return crate::modules::fraction_from_decimal_with_vm(self, &args);
+            }
             // Pack keyword arguments into a dict and append as last arg
             if !keywords.is_empty() {
                 let mut dict = crate::object::PyDict::new();
@@ -6871,7 +8236,9 @@ impl VirtualMachine {
                     let _ = dict.set(crate::object::py_str(k), v.clone());
                 }
                 let mut new_args = args;
-                new_args.push(crate::object::PyObjectRef::new(crate::object::PyObject::Dict(Box::new(dict))));
+                new_args.push(crate::object::PyObjectRef::new(
+                    crate::object::PyObject::Dict(Box::new(dict)),
+                ));
                 return func(&new_args);
             }
             return func(&args);
@@ -6887,15 +8254,29 @@ impl VirtualMachine {
                 for (k, v) in keywords {
                     let _ = dict.set(crate::object::py_str(&k), v);
                 }
-                new_args.push(crate::object::PyObjectRef::new(crate::object::PyObject::Dict(Box::new(dict))));
+                new_args.push(crate::object::PyObjectRef::new(
+                    crate::object::PyObject::Dict(Box::new(dict)),
+                ));
             }
             // `generator.throw()` needs real `&mut self` access so the
             // resumed generator body's `sys.exc_info()` sees THIS VM's
             // exc_type/exc_value (set moments earlier by the original
             // `raise`) instead of a disposable VM's blank ones — see
             // `generator_throw_with_vm`'s own doc comment.
-            if std::ptr::fn_addr_eq(func, crate::object::generator_throw_fallback as crate::object::BuiltinFunc) {
+            if std::ptr::fn_addr_eq(
+                func,
+                crate::object::generator_throw_fallback as crate::object::BuiltinFunc,
+            ) {
                 return crate::object::generator_throw_with_vm(self, &new_args);
+            }
+            // `Fraction.__init__` bound to an instance (reached via the
+            // type-call machinery's BoundMethod path) — same VM-routing as
+            // the BuiltinFunction arm above.
+            if std::ptr::fn_addr_eq(
+                func,
+                crate::modules::fraction_init_fallback as crate::object::BuiltinFunc,
+            ) {
+                return crate::modules::fraction_init_with_vm(self, &new_args);
             }
             return func(&new_args);
         }
@@ -6908,7 +8289,11 @@ impl VirtualMachine {
             return self.call_function(func, new_args, keywords);
         }
 
-        if let PyObject::Partial { func, args: partial_args } = &*callable.borrow() {
+        if let PyObject::Partial {
+            func,
+            args: partial_args,
+        } = &*callable.borrow()
+        {
             let func = func.clone();
             let mut all_args = partial_args.clone();
             all_args.extend(args);
@@ -6932,7 +8317,11 @@ impl VirtualMachine {
                     // First call: try to compile; set sentinel so we don't retry
                     jit_ptr.set(SENTINEL_FAILED);
                     if let Some(compiled_fn) = self.jit.borrow_mut().compile(code) {
-                        let precomputed = crate::jit::JitCompiler::precompute_for_jit(code, func_globals, &self.builtins);
+                        let precomputed = crate::jit::JitCompiler::precompute_for_jit(
+                            code,
+                            func_globals,
+                            &self.builtins,
+                        );
                         jit_ptr.set(compiled_fn as usize);
                         *jit_consts.borrow_mut() = precomputed;
                     }
@@ -6941,8 +8330,12 @@ impl VirtualMachine {
                     // above (or on a prior call for the same `code`), which only ever emits
                     // machine code matching this exact `extern "C"` signature — the JIT
                     // codegen in jit.rs is the sole producer of values stored in `jit_ptr`.
-                    let func_ptr: extern "C" fn(*const PyObjectRef, usize, *const PyObjectRef, *mut PyObjectRef) =
-                        unsafe { std::mem::transmute(jp) };
+                    let func_ptr: extern "C" fn(
+                        *const PyObjectRef,
+                        usize,
+                        *const PyObjectRef,
+                        *mut PyObjectRef,
+                    ) = unsafe { std::mem::transmute(jp) };
                     let n = args.len().min(code.arg_count as usize);
                     let mut fast_locals: Vec<PyObjectRef> = Vec::with_capacity(n);
                     for i in 0..n {
@@ -6951,7 +8344,12 @@ impl VirtualMachine {
                     let consts = jit_consts.borrow();
                     let mut result = PyObjectRef::None;
                     let _guard = crate::jit::set_jit_globals(func_globals.clone());
-                    func_ptr(fast_locals.as_ptr(), fast_locals.len(), consts.as_ptr(), &mut result);
+                    func_ptr(
+                        fast_locals.as_ptr(),
+                        fast_locals.len(),
+                        consts.as_ptr(),
+                        &mut result,
+                    );
                     return Ok(result);
                 }
             }
@@ -6986,7 +8384,12 @@ impl VirtualMachine {
             let func_globals = func_globals.clone();
             let defaults = defaults.clone();
             let code_rc = Rc::new(code.clone());
-            let mut new_frame = self.acquire_frame(Rc::clone(&code_rc), func_globals, Rc::clone(&self.builtins), None);
+            let mut new_frame = self.acquire_frame(
+                Rc::clone(&code_rc),
+                func_globals,
+                Rc::clone(&self.builtins),
+                None,
+            );
             new_frame.closure = Box::new(closure.clone());
             let code = code;
 
@@ -7001,7 +8404,11 @@ impl VirtualMachine {
                     2 => format!("'{}' and '{}'", names[0], names[1]),
                     _ => {
                         let (last, rest) = names.split_last().unwrap();
-                        let joined = rest.iter().map(|n| format!("'{}'", n)).collect::<Vec<_>>().join(", ");
+                        let joined = rest
+                            .iter()
+                            .map(|n| format!("'{}'", n))
+                            .collect::<Vec<_>>()
+                            .join(", ");
                         format!("{}, and '{}'", joined, last)
                     }
                 }
@@ -7038,12 +8445,20 @@ impl VirtualMachine {
                             fname, named_params, if named_params == 1 { "" } else { "s" },
                             npos, code.kwonlyarg_count, if code.kwonlyarg_count == 1 { "" } else { "s" }, verb)
                     } else {
-                        format!("{}() takes {} positional argument{} but {} {} given",
-                            fname, named_params, if named_params == 1 { "" } else { "s" }, npos, verb)
+                        format!(
+                            "{}() takes {} positional argument{} but {} {} given",
+                            fname,
+                            named_params,
+                            if named_params == 1 { "" } else { "s" },
+                            npos,
+                            verb
+                        )
                     }
                 } else {
-                    format!("{}() takes from {} to {} positional arguments but {} {} given",
-                        fname, min_required, named_params, npos, verb)
+                    format!(
+                        "{}() takes from {} to {} positional arguments but {} {} given",
+                        fname, min_required, named_params, npos, verb
+                    )
                 };
                 return Err(PyError::type_error(msg));
             }
@@ -7064,7 +8479,12 @@ impl VirtualMachine {
                     extra.push(args[i].clone());
                 }
                 let vararg_val = py_tuple(extra);
-                if let Some(idx) = new_frame.code.varnames.iter().position(|&n| crate::interner::intern_eq(n, vararg_name)) {
+                if let Some(idx) = new_frame
+                    .code
+                    .varnames
+                    .iter()
+                    .position(|&n| crate::interner::intern_eq(n, vararg_name))
+                {
                     if idx < new_frame.fast_locals.len() {
                         new_frame.fast_locals[idx] = Some(vararg_val.clone());
                     }
@@ -7102,7 +8522,14 @@ impl VirtualMachine {
             if let Some(kwarg_name) = &code.kwarg_name {
                 let kw_dict = py_dict();
                 for (key, value) in &keywords {
-                    if let Some(idx) = formal_param_index(&new_frame.code.varnames, code.arg_count, code.posonlyarg_count, code.kwonlyarg_count, kwonly_start, key) {
+                    if let Some(idx) = formal_param_index(
+                        &new_frame.code.varnames,
+                        code.arg_count,
+                        code.posonlyarg_count,
+                        code.kwonlyarg_count,
+                        kwonly_start,
+                        key,
+                    ) {
                         // A keyword targeting a positional-only param goes
                         // into **kwargs (real Python: `f(42, a=1)` with `a`
                         // posonly lands in kwargs, never on the param).
@@ -7118,7 +8545,10 @@ impl VirtualMachine {
                         // '...'`, previously silently overwritten.
                         if idx < positional_filled {
                             self.release_frame(new_frame);
-                            return Err(PyError::type_error(format!("{}() got multiple values for argument '{}'", fname, key)));
+                            return Err(PyError::type_error(format!(
+                                "{}() got multiple values for argument '{}'",
+                                fname, key
+                            )));
                         }
                         new_frame.insert_local(&key, value.clone());
                         if idx < new_frame.fast_locals.len() {
@@ -7130,7 +8560,12 @@ impl VirtualMachine {
                         }
                     }
                 }
-                if let Some(idx) = new_frame.code.varnames.iter().position(|n| crate::interner::lookup_str(*n) == kwarg_name.as_str()) {
+                if let Some(idx) = new_frame
+                    .code
+                    .varnames
+                    .iter()
+                    .position(|n| crate::interner::lookup_str(*n) == kwarg_name.as_str())
+                {
                     if idx < new_frame.fast_locals.len() {
                         new_frame.fast_locals[idx] = Some(kw_dict.clone());
                     }
@@ -7152,16 +8587,42 @@ impl VirtualMachine {
                 // params are reported together (real Python's
                 // "got some positional-only arguments passed as keyword
                 // arguments: 'a, b'").
-                let posonly_keywords: Vec<&String> = keywords.iter()
-                    .filter_map(|(k, _)| formal_param_index(&new_frame.code.varnames, code.arg_count, code.posonlyarg_count, code.kwonlyarg_count, kwonly_start, k)
-                        .filter(|idx| *idx < code.posonlyarg_count).map(|_| k))
+                let posonly_keywords: Vec<&String> = keywords
+                    .iter()
+                    .filter_map(|(k, _)| {
+                        formal_param_index(
+                            &new_frame.code.varnames,
+                            code.arg_count,
+                            code.posonlyarg_count,
+                            code.kwonlyarg_count,
+                            kwonly_start,
+                            k,
+                        )
+                        .filter(|idx| *idx < code.posonlyarg_count)
+                        .map(|_| k)
+                    })
                     .collect();
                 if !posonly_keywords.is_empty() {
                     self.release_frame(new_frame);
-                    let names = posonly_keywords.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", ");
-                    return Err(PyError::type_error(format!("{}() got some positional-only arguments passed as keyword arguments: '{}'", fname, names)));
-                }                for (key, value) in &keywords {
-                    match formal_param_index(&new_frame.code.varnames, code.arg_count, code.posonlyarg_count, code.kwonlyarg_count, kwonly_start, key) {
+                    let names = posonly_keywords
+                        .iter()
+                        .map(|k| k.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Err(PyError::type_error(format!(
+                        "{}() got some positional-only arguments passed as keyword arguments: '{}'",
+                        fname, names
+                    )));
+                }
+                for (key, value) in &keywords {
+                    match formal_param_index(
+                        &new_frame.code.varnames,
+                        code.arg_count,
+                        code.posonlyarg_count,
+                        code.kwonlyarg_count,
+                        kwonly_start,
+                        key,
+                    ) {
                         Some(idx) if idx < code.posonlyarg_count => {
                             // Unreachable (pre-scanned above) — keep for safety.
                             self.release_frame(new_frame);
@@ -7169,7 +8630,10 @@ impl VirtualMachine {
                         }
                         Some(idx) if idx < positional_filled => {
                             self.release_frame(new_frame);
-                            return Err(PyError::type_error(format!("{}() got multiple values for argument '{}'", fname, key)));
+                            return Err(PyError::type_error(format!(
+                                "{}() got multiple values for argument '{}'",
+                                fname, key
+                            )));
                         }
                         Some(idx) => {
                             if idx < new_frame.fast_locals.len() {
@@ -7179,7 +8643,10 @@ impl VirtualMachine {
                         }
                         None => {
                             self.release_frame(new_frame);
-                            return Err(PyError::type_error(format!("{}() got an unexpected keyword argument '{}'", fname, key)));
+                            return Err(PyError::type_error(format!(
+                                "{}() got an unexpected keyword argument '{}'",
+                                fname, key
+                            )));
                         }
                     }
                 }
@@ -7197,9 +8664,14 @@ impl VirtualMachine {
                 // must affect subsequent calls, test_keywordonlyarg's
                 // testKwDefaults) is the source of truth for kwonly defaults,
                 // overriding the compiled-in ones.
-                let live_kwdefaults: Option<Box<crate::object::PyDict>> = inner_f.dict.get("__kwdefaults__").and_then(|v| {
-                    if let PyObject::Dict(d) = &*v.borrow() { Some(d.clone()) } else { None }
-                });
+                let live_kwdefaults: Option<Box<crate::object::PyDict>> =
+                    inner_f.dict.get("__kwdefaults__").and_then(|v| {
+                        if let PyObject::Dict(d) = &*v.borrow() {
+                            Some(d.clone())
+                        } else {
+                            None
+                        }
+                    });
                 let kwonly_start = code.arg_count + if code.vararg_name.is_some() { 1 } else { 0 };
                 let mut kwdefault_idx = code.num_defaults;
                 for (k, &has_default) in code.kwonly_defaults_mask.iter().enumerate() {
@@ -7211,7 +8683,9 @@ impl VirtualMachine {
                     let default_val = match &live_kwdefaults {
                         Some(d) => d.get(&py_str(&name_str)).ok().flatten(),
                         None => {
-                            if !has_default { continue; }
+                            if !has_default {
+                                continue;
+                            }
                             let v = defaults.get(kwdefault_idx).cloned();
                             kwdefault_idx += 1;
                             v
@@ -7235,8 +8709,13 @@ impl VirtualMachine {
             if !missing_positional.is_empty() {
                 self.release_frame(new_frame);
                 let n = missing_positional.len();
-                return Err(PyError::type_error(format!("{}() missing {} required positional argument{}: {}",
-                    fname, n, if n == 1 { "" } else { "s" }, format_missing_names(&missing_positional))));
+                return Err(PyError::type_error(format!(
+                    "{}() missing {} required positional argument{}: {}",
+                    fname,
+                    n,
+                    if n == 1 { "" } else { "s" },
+                    format_missing_names(&missing_positional)
+                )));
             }
             let missing_kwonly: Vec<String> = (kwonly_start..kwonly_start + code.kwonlyarg_count)
                 .filter(|&i| i >= new_frame.fast_locals.len() || new_frame.fast_locals[i].is_none())
@@ -7245,8 +8724,13 @@ impl VirtualMachine {
             if !missing_kwonly.is_empty() {
                 self.release_frame(new_frame);
                 let n = missing_kwonly.len();
-                return Err(PyError::type_error(format!("{}() missing {} required keyword-only argument{}: {}",
-                    fname, n, if n == 1 { "" } else { "s" }, format_missing_names(&missing_kwonly))));
+                return Err(PyError::type_error(format!(
+                    "{}() missing {} required keyword-only argument{}: {}",
+                    fname,
+                    n,
+                    if n == 1 { "" } else { "s" },
+                    format_missing_names(&missing_kwonly)
+                )));
             }
 
             self.frames.push(new_frame);
@@ -7263,7 +8747,12 @@ impl VirtualMachine {
         // before the generic Type-calling convention below, which would
         // otherwise build a plain Instance (wrong: `type(x)` must return a
         // real class/type object, not an instance of `type`).
-        if self.builtins.get(&interner::intern("type")).map(|t| t.is(&callable)).unwrap_or(false) {
+        if self
+            .builtins
+            .get(&interner::intern("type"))
+            .map(|t| t.is(&callable))
+            .unwrap_or(false)
+        {
             if !keywords.is_empty() {
                 return Err(PyError::type_error("type() takes no keyword arguments"));
             }
@@ -7293,8 +8782,17 @@ impl VirtualMachine {
                     PyObject::None => vec![],
                     _ => vec![args[1].clone()],
                 };
-                let namespace_dict = crate::object::dict_arg_to_hashmap(&args[2], "type() third argument must be a dict")?;
-                return self.default_build_class(args[0].str(), bases_vec, namespace_dict, vec![], None);
+                let namespace_dict = crate::object::dict_arg_to_hashmap(
+                    &args[2],
+                    "type() third argument must be a dict",
+                )?;
+                return self.default_build_class(
+                    args[0].str(),
+                    bases_vec,
+                    namespace_dict,
+                    vec![],
+                    None,
+                );
             }
             return crate::object::builtin_type_of(&args);
         }
@@ -7314,7 +8812,11 @@ impl VirtualMachine {
             let mt = crate::object::metatype_of(&callable);
             if let Some(mt) = mt {
                 if let Some(call_fn) = crate::object::lookup_dunder_via_mro(&mt, "__call__") {
-                    let unwrapped = if let PyObject::StaticMethod { func } = &*call_fn.borrow() { Some(func.clone()) } else { None };
+                    let unwrapped = if let PyObject::StaticMethod { func } = &*call_fn.borrow() {
+                        Some(func.clone())
+                    } else {
+                        None
+                    };
                     let call_fn = unwrapped.unwrap_or(call_fn);
                     let mut call_args = vec![callable.clone()];
                     call_args.extend(args);
@@ -7342,7 +8844,8 @@ impl VirtualMachine {
                 // `TypeError: float() takes no keyword arguments`, not a
                 // "not 'dict'" error from the packed kwargs dict it would
                 // otherwise arrive as — test_float's test_keyword_args).
-                let is_float = matches!(&*callable.borrow(), PyObject::Type { name, .. } if name == "float");
+                let is_float =
+                    matches!(&*callable.borrow(), PyObject::Type { name, .. } if name == "float");
                 if is_float && !keywords.is_empty() {
                     return Err(PyError::type_error("float() takes no keyword arguments"));
                 }
@@ -7351,10 +8854,17 @@ impl VirtualMachine {
         }
 
         let type_construct_info = if let PyObject::Type { dict, mro, .. } = &*callable.borrow() {
-            let native_kind = dict.get_str(crate::object::NATIVE_BASE_MARKER).map(|v| v.str());
+            let native_kind = dict
+                .get_str(crate::object::NATIVE_BASE_MARKER)
+                .map(|v| v.str());
             let init_func = dict.get_str("__init__").cloned().or_else(|| {
                 for base in mro.iter().skip(1) {
-                    if let PyObject::Type { name: base_name, dict: base_dict, .. } = &*base.borrow() {
+                    if let PyObject::Type {
+                        name: base_name,
+                        dict: base_dict,
+                        ..
+                    } = &*base.borrow()
+                    {
                         // Every class implicitly inherits from `object`,
                         // whose own __init__ is a universal no-op. For a
                         // class that also has a native base (e.g.
@@ -7404,7 +8914,10 @@ impl VirtualMachine {
             }
             let mut instance_dict = AttrMap::new();
             if let Some(kind) = &native_kind {
-                instance_dict.insert(crate::object::NATIVE_BACKING_KEY.to_string(), crate::object::make_native_backing(kind));
+                instance_dict.insert(
+                    crate::object::NATIVE_BACKING_KEY.to_string(),
+                    crate::object::make_native_backing(kind),
+                );
             }
             let instance = PyObjectRef::new(PyObject::Instance {
                 typ: callable.clone(),
@@ -7422,7 +8935,9 @@ impl VirtualMachine {
                 if let PyObject::Instance { dict, .. } = &mut *instance.borrow_mut() {
                     dict.insert(crate::object::NATIVE_BACKING_KEY.to_string(), native);
                 }
-            } else if init_func.is_none() && crate::object::find_exception_base_name(&callable).is_some() {
+            } else if init_func.is_none()
+                && crate::object::find_exception_base_name(&callable).is_some()
+            {
                 // `class MyError(Exception): pass` (no explicit __init__) —
                 // real Python's `BaseException.__init__` always stores
                 // `self.args = args`, which is what `str(exc)`/`repr(exc)`
@@ -7458,7 +8973,9 @@ impl VirtualMachine {
 
         if let PyObject::BuildClass = &*callable.borrow() {
             if args.len() < 3 {
-                return Err(PyError::type_error("__build_class__: need at least 3 arguments"));
+                return Err(PyError::type_error(
+                    "__build_class__: need at least 3 arguments",
+                ));
             }
             let func = args[0].clone();
             let name = args[1].clone();
@@ -7479,7 +8996,8 @@ impl VirtualMachine {
             // `ChoicesType` to see a real `_member_names` list) has to
             // exist as the body's own namespace target from the very
             // start, not spliced in afterward.
-            let explicit_metaclass = keywords.iter()
+            let explicit_metaclass = keywords
+                .iter()
                 .find(|(k, _)| k == "metaclass")
                 .map(|(_, v)| v.clone());
 
@@ -7493,18 +9011,30 @@ impl VirtualMachine {
             // Classes without explicit bases implicitly inherit from object
             let bases_vec = if bases_vec.is_empty() {
                 // Look up 'object' type from builtins
-                let object_type = self.builtins.get(&interner::intern("object")).cloned()
+                let object_type = self
+                    .builtins
+                    .get(&interner::intern("object"))
+                    .cloned()
                     .unwrap_or_else(|| {
                         // Fallback: create a minimal object type
                         let mut obj_dict: TypeDict = Default::default();
-                        obj_dict.insert_str("__setattr__", PyObjectRef::new(PyObject::BuiltinFunction {
-                            name: "__setattr__".to_string(),
-                            func: |args| {
-                                if args.len() < 3 { return Err(PyError::type_error("__setattr__ needs 3 args")); }
-                                args[0].borrow_mut().set_attribute(&args[1].str(), args[2].clone())?;
-                                Ok(py_none())
-                            },
-                        }));
+                        obj_dict.insert_str(
+                            "__setattr__",
+                            PyObjectRef::new(PyObject::BuiltinFunction {
+                                name: "__setattr__".to_string(),
+                                func: |args| {
+                                    if args.len() < 3 {
+                                        return Err(PyError::type_error(
+                                            "__setattr__ needs 3 args",
+                                        ));
+                                    }
+                                    args[0]
+                                        .borrow_mut()
+                                        .set_attribute(&args[1].str(), args[2].clone())?;
+                                    Ok(py_none())
+                                },
+                            }),
+                        );
                         PyObjectRef::new(PyObject::Type {
                             name: "object".to_string(),
                             dict: Box::new(obj_dict),
@@ -7519,7 +9049,8 @@ impl VirtualMachine {
 
             // __init_subclass__ (and any custom metaclass __new__/__init__)
             // only ever see the non-`metaclass` keywords.
-            let init_subclass_kwargs: Vec<(String, PyObjectRef)> = keywords.iter()
+            let init_subclass_kwargs: Vec<(String, PyObjectRef)> = keywords
+                .iter()
                 .filter(|(k, _)| k != "metaclass")
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
@@ -7561,14 +9092,17 @@ impl VirtualMachine {
                 None
             };
 
-            let namespace: Rc<RefCell<HashMap<StrId, PyObjectRef>>> = Rc::new(RefCell::new(HashMap::new()));
+            let namespace: Rc<RefCell<HashMap<StrId, PyObjectRef>>> =
+                Rc::new(RefCell::new(HashMap::new()));
             let name_order = Rc::new(RefCell::new(Vec::new()));
 
             // Capture the calling frame's module_globals (or globals as fallback)
             // so that LOAD_NAME inside the class body can resolve module-level names.
             let caller_module_globals = if self.frames.len() >= 1 {
                 let caller_frame = &self.frames[self.frames.len() - 1];
-                caller_frame.module_globals.clone()
+                caller_frame
+                    .module_globals
+                    .clone()
                     .or_else(|| Some(caller_frame.globals.clone()))
             } else {
                 None
@@ -7577,11 +9111,16 @@ impl VirtualMachine {
             let mut class_cell: Option<PyObjectRef> = None;
             match &*func.borrow() {
                 PyObject::Function(ref f) => {
-            let code = &f.code;
-            let closure = &f.closure;
+                    let code = &f.code;
+                    let closure = &f.closure;
                     let code = code.clone();
                     let closure = closure.clone();
-                    let mut new_frame = self.acquire_frame(code, namespace.clone(), Rc::clone(&self.builtins), caller_module_globals);
+                    let mut new_frame = self.acquire_frame(
+                        code,
+                        namespace.clone(),
+                        Rc::clone(&self.builtins),
+                        caller_module_globals,
+                    );
                     new_frame.closure = Box::new(closure);
                     new_frame.name_order = Some(name_order.clone());
                     self.frames.push(new_frame);
@@ -7609,7 +9148,11 @@ impl VirtualMachine {
                     class_cell = {
                         let popped = self.frames.pop();
                         let cell = popped.as_ref().and_then(|fr| {
-                            let idx = fr.code.varnames.iter().position(|&n| crate::interner::lookup_str(n) == "__class__");
+                            let idx = fr
+                                .code
+                                .varnames
+                                .iter()
+                                .position(|&n| crate::interner::lookup_str(n) == "__class__");
                             idx.and_then(|i| fr.fast_locals.get(i).and_then(|v| v.clone()))
                         });
                         if let Some(frame) = popped {
@@ -7622,7 +9165,11 @@ impl VirtualMachine {
                 _ => return Err(PyError::type_error("class body must be a function")),
             }
 
-            let namespace_dict: HashMap<String, PyObjectRef> = namespace.borrow().iter().map(|(k,v)| (interner::lookup_str(*k).to_string(), v.clone())).collect();
+            let namespace_dict: HashMap<String, PyObjectRef> = namespace
+                .borrow()
+                .iter()
+                .map(|(k, v)| (interner::lookup_str(*k).to_string(), v.clone()))
+                .collect();
             let order = name_order.borrow().clone();
 
             // If `__prepare__` produced a namespace object, replay the body's
@@ -7658,7 +9205,12 @@ impl VirtualMachine {
                     None
                 };
                 if std::env::var("RPY_DEBUG_METACLASS").is_ok() {
-                    eprintln!("prepare-replay: name={} order={:?} has_setitem={}", name_str, order, setitem_fn.is_some());
+                    eprintln!(
+                        "prepare-replay: name={} order={:?} has_setitem={}",
+                        name_str,
+                        order,
+                        setitem_fn.is_some()
+                    );
                 }
                 for k in &order {
                     if let Some(v) = namespace_dict.get(k) {
@@ -7666,7 +9218,11 @@ impl VirtualMachine {
                             eprintln!("  replaying key={} value={}", k, v.repr());
                         }
                         if let Some(f) = &setitem_fn {
-                            self.call_function(f.clone(), vec![prepared.clone(), py_str(k), v.clone()], vec![])?;
+                            self.call_function(
+                                f.clone(),
+                                vec![prepared.clone(), py_str(k), v.clone()],
+                                vec![],
+                            )?;
                         } else if let Some(native) = crate::object::native_backing_of(prepared) {
                             if let PyObject::Dict(pd) = &mut *native.borrow_mut() {
                                 pd.set(py_str(k), v.clone())?;
@@ -7677,16 +9233,34 @@ impl VirtualMachine {
                 if std::env::var("RPY_DEBUG_METACLASS").is_ok() {
                     if let Some(native) = crate::object::native_backing_of(prepared) {
                         if let PyObject::Dict(pd) = &*native.borrow() {
-                            eprintln!("  final native dict keys: {:?}", pd.keys().iter().map(|k| k.str()).collect::<Vec<_>>());
+                            eprintln!(
+                                "  final native dict keys: {:?}",
+                                pd.keys().iter().map(|k| k.str()).collect::<Vec<_>>()
+                            );
                         }
                     }
                 }
             }
 
             let class_result = if let Some(mc) = effective_metaclass {
-                self.build_class_with_metaclass(name_str, name.clone(), bases_vec, namespace_dict, order, mc, init_subclass_kwargs, prepared_namespace)
+                self.build_class_with_metaclass(
+                    name_str,
+                    name.clone(),
+                    bases_vec,
+                    namespace_dict,
+                    order,
+                    mc,
+                    init_subclass_kwargs,
+                    prepared_namespace,
+                )
             } else {
-                self.default_build_class(name_str, bases_vec, namespace_dict, init_subclass_kwargs, None)
+                self.default_build_class(
+                    name_str,
+                    bases_vec,
+                    namespace_dict,
+                    init_subclass_kwargs,
+                    None,
+                )
             };
             let class_obj = class_result?;
             // PEP 3135: populate the class body's `__class__` cell with the
@@ -7721,7 +9295,9 @@ impl VirtualMachine {
                     let _ = dict.set(crate::object::py_str(k), v.clone());
                 }
                 let mut new_args = args;
-                new_args.push(crate::object::PyObjectRef::new(crate::object::PyObject::Dict(Box::new(dict))));
+                new_args.push(crate::object::PyObjectRef::new(
+                    crate::object::PyObject::Dict(Box::new(dict)),
+                ));
                 return c(&new_args);
             }
             return c(&args);
@@ -7760,7 +9336,10 @@ impl VirtualMachine {
             return self.call_function(f, call_args, keywords);
         }
 
-        Err(PyError::type_error(format!("'{}' object is not callable", type_name)))
+        Err(PyError::type_error(format!(
+            "'{}' object is not callable",
+            type_name
+        )))
     }
 
     fn synth_exception(typ: &str, error: &PyError) -> PyObjectRef {
@@ -7849,8 +9428,9 @@ impl VirtualMachine {
             // response to `.throw()`. Build a real `StopIteration` instance
             // instead, carrying the return value as its arg (matching real
             // CPython's `StopIteration(value)`).
-            PyError::Exception(msg, exc) if msg == "StopIteration"
-                && !matches!(&*exc.borrow(), PyObject::Exception { typ, .. } if typ == "StopIteration") =>
+            PyError::Exception(msg, exc)
+                if msg == "StopIteration"
+                    && !matches!(&*exc.borrow(), PyObject::Exception { typ, .. } if typ == "StopIteration") =>
             {
                 // Same `Mut`-not-`Imm` fix, same reason, as `synth_exception`
                 // just above — a synthesized exception object must support
@@ -7985,7 +9565,7 @@ fn c3_linearize(bases: &[PyObjectRef]) -> PyResult<Vec<PyObjectRef>> {
 
         if !found {
             return Err(PyError::type_error(
-                "Cannot create a consistent method resolution order (MRO)"
+                "Cannot create a consistent method resolution order (MRO)",
             ));
         }
     }
@@ -7999,10 +9579,17 @@ impl VirtualMachine {
     /// without needing `with_vm_mut`'s thread-local re-entrant VM lookup.
     fn type_new_impl(&mut self, args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         if args.len() < 4 {
-            return Err(PyError::type_error("type.__new__() takes at least 4 arguments (metacls, name, bases, namespace)"));
+            return Err(PyError::type_error(
+                "type.__new__() takes at least 4 arguments (metacls, name, bases, namespace)",
+            ));
         }
         if std::env::var("RPY_DEBUG_METACLASS").is_ok() {
-            eprintln!("type_new_impl: args={:?}", args.iter().map(|a| format!("{}:{}", a.get_type_name(), a.repr())).collect::<Vec<_>>());
+            eprintln!(
+                "type_new_impl: args={:?}",
+                args.iter()
+                    .map(|a| format!("{}:{}", a.get_type_name(), a.repr()))
+                    .collect::<Vec<_>>()
+            );
         }
         let metacls = args[0].clone();
         let name_str = args[1].str();
@@ -8011,7 +9598,10 @@ impl VirtualMachine {
             PyObject::None => vec![],
             _ => vec![args[2].clone()],
         };
-        let namespace_dict = crate::object::dict_arg_to_hashmap(&args[3], "type.__new__(): namespace must be a dict")?;
+        let namespace_dict = crate::object::dict_arg_to_hashmap(
+            &args[3],
+            "type.__new__(): namespace must be a dict",
+        )?;
         let kwargs: Vec<(String, PyObjectRef)> = match args.get(4) {
             Some(d) => match &*d.borrow() {
                 PyObject::Dict(d) => d.items().into_iter().map(|(k, v)| (k.str(), v)).collect(),
@@ -8019,7 +9609,11 @@ impl VirtualMachine {
             },
             None => vec![],
         };
-        let is_bare_type = self.builtins.get(&interner::intern("type")).map(|t| t.is(&metacls)).unwrap_or(false);
+        let is_bare_type = self
+            .builtins
+            .get(&interner::intern("type"))
+            .map(|t| t.is(&metacls))
+            .unwrap_or(false);
         let metatype = if is_bare_type { None } else { Some(metacls) };
         self.default_build_class(name_str, bases_vec, namespace_dict, kwargs, metatype)
     }
@@ -8055,7 +9649,9 @@ impl VirtualMachine {
         if let Some(bool_type) = self.builtins.get(&interner::intern("bool")) {
             for base in &bases_vec {
                 if base.is(bool_type) {
-                    return Err(PyError::type_error("type 'bool' is not an acceptable base type"));
+                    return Err(PyError::type_error(
+                        "type 'bool' is not an acceptable base type",
+                    ));
                 }
             }
         }
@@ -8067,7 +9663,11 @@ impl VirtualMachine {
         // again at instantiation or dispatch time).
         for base in &bases_vec {
             let native_name = match &*base.borrow() {
-                PyObject::BuiltinFunction { name, .. } if crate::object::is_recognized_native_base_name(name) => Some(name.clone()),
+                PyObject::BuiltinFunction { name, .. }
+                    if crate::object::is_recognized_native_base_name(name) =>
+                {
+                    Some(name.clone())
+                }
                 // A native value type that's been migrated to a real
                 // `PyObject::Type` (see `NATIVE_VALUE_CTOR_KEY`'s doc
                 // comment — `int` as of this writing) is a second
@@ -8075,11 +9675,18 @@ impl VirtualMachine {
                 // `BuiltinFunction` case above — `class MyInt(int): ...`
                 // must keep working through this exact same
                 // `NATIVE_BASE_MARKER`/native-backing machinery, unchanged.
-                PyObject::Type { name, dict, .. } if dict.contains_key_str(crate::object::NATIVE_VALUE_CTOR_KEY) => Some(name.clone()),
+                PyObject::Type { name, dict, .. }
+                    if dict.contains_key_str(crate::object::NATIVE_VALUE_CTOR_KEY) =>
+                {
+                    Some(name.clone())
+                }
                 _ => crate::object::native_base_of_type(base),
             };
             if let Some(native_name) = native_name {
-                namespace_dict.insert(crate::object::NATIVE_BASE_MARKER.to_string(), py_str(&native_name));
+                namespace_dict.insert(
+                    crate::object::NATIVE_BASE_MARKER.to_string(),
+                    py_str(&native_name),
+                );
                 break;
             }
         }
@@ -8127,7 +9734,11 @@ impl VirtualMachine {
                 if let Some(t) = typ {
                     let set_name_method = t.borrow().get_attribute("__set_name__").unwrap();
                     // Call with explicit self=value, then owner=class, name=attr_name
-                    let _ = self.call_function(set_name_method, vec![value.clone(), class.clone(), py_str(attr_name)], vec![]);
+                    let _ = self.call_function(
+                        set_name_method,
+                        vec![value.clone(), class.clone(), py_str(attr_name)],
+                        vec![],
+                    );
                 }
             }
         }
@@ -8150,7 +9761,11 @@ impl VirtualMachine {
         // reentrant recursion at worst (confirmed via a real repro: a
         // single `class MyModel(models.Model): pass` triggered 10+ nested
         // `AltersData.__init_subclass__` frames before failing).
-        let self_mro = if let PyObject::Type { mro, .. } = &*class.borrow() { mro.clone() } else { vec![] };
+        let self_mro = if let PyObject::Type { mro, .. } = &*class.borrow() {
+            mro.clone()
+        } else {
+            vec![]
+        };
         // Check each MRO entry's OWN direct dict (`get_str`), NOT the
         // recursive `get_attribute` (which re-walks THAT base's own MRO
         // from scratch and can resolve all the way down to `object`'s
@@ -8180,10 +9795,18 @@ impl VirtualMachine {
         });
         if let Some(init_subclass) = init_subclass {
             if std::env::var("RPY_DEBUG_INITSUBCLASS").is_ok() {
-                let class_name = if let PyObject::Type { name, .. } = &*class.borrow() { name.clone() } else { "?".to_string() };
+                let class_name = if let PyObject::Type { name, .. } = &*class.borrow() {
+                    name.clone()
+                } else {
+                    "?".to_string()
+                };
                 eprintln!("INIT_SUBCLASS: class={}", class_name);
             }
-            let _ = self.call_function(init_subclass, vec![class.clone()], init_subclass_kwargs.clone());
+            let _ = self.call_function(
+                init_subclass,
+                vec![class.clone()],
+                init_subclass_kwargs.clone(),
+            );
         }
 
         Ok(class)
@@ -8243,37 +9866,69 @@ impl VirtualMachine {
         // unwrap before calling, same as Type's own get_attribute does for
         // plain class-attribute access.
         let new_fn = crate::object::lookup_dunder_via_mro(&metaclass, "__new__").map(|v| {
-            let unwrapped = if let PyObject::StaticMethod { func } = &*v.borrow() { Some(func.clone()) } else { None };
+            let unwrapped = if let PyObject::StaticMethod { func } = &*v.borrow() {
+                Some(func.clone())
+            } else {
+                None
+            };
             unwrapped.unwrap_or(v)
         });
 
         let cls = if let Some(new_fn) = new_fn {
             if std::env::var("RPY_DEBUG_METACLASS").is_ok() {
-                eprintln!("build_class_with_metaclass: name={} metaclass={} new_fn={}", name_str, metaclass.repr(), new_fn.repr());
+                eprintln!(
+                    "build_class_with_metaclass: name={} metaclass={} new_fn={}",
+                    name_str,
+                    metaclass.repr(),
+                    new_fn.repr()
+                );
             }
             self.call_function(
                 new_fn,
-                vec![metaclass.clone(), name_obj.clone(), bases_tuple.clone(), namespace_py_dict.clone()],
+                vec![
+                    metaclass.clone(),
+                    name_obj.clone(),
+                    bases_tuple.clone(),
+                    namespace_py_dict.clone(),
+                ],
                 init_subclass_kwargs.clone(),
             )?
         } else {
             // No __new__ anywhere in the metaclass's own mro (shouldn't
             // normally happen once `type` is registered with one) — fall
             // back to plain construction, still tagged with this metaclass.
-            self.default_build_class(name_str, bases_vec, namespace_dict, init_subclass_kwargs.clone(), Some(metaclass.clone()))?
+            self.default_build_class(
+                name_str,
+                bases_vec,
+                namespace_dict,
+                init_subclass_kwargs.clone(),
+                Some(metaclass.clone()),
+            )?
         };
 
         if let Some(init_fn) = crate::object::lookup_dunder_via_mro(&metaclass, "__init__") {
-            let unwrapped = if let PyObject::StaticMethod { func } = &*init_fn.borrow() { Some(func.clone()) } else { None };
+            let unwrapped = if let PyObject::StaticMethod { func } = &*init_fn.borrow() {
+                Some(func.clone())
+            } else {
+                None
+            };
             let init_fn = unwrapped.unwrap_or(init_fn);
-            let _ = self.call_function(init_fn, vec![cls.clone(), name_obj, bases_tuple, namespace_py_dict], init_subclass_kwargs);
+            let _ = self.call_function(
+                init_fn,
+                vec![cls.clone(), name_obj, bases_tuple, namespace_py_dict],
+                init_subclass_kwargs,
+            );
         }
 
         Ok(cls)
     }
 
     /// Call __next__ on a user-class iterator. Used by FOR_ITER for Instance types.
-    fn for_iter_next(&mut self, iter_val: PyObjectRef, jump_offset: u32) -> PyResult<Option<PyObjectRef>> {
+    fn for_iter_next(
+        &mut self,
+        iter_val: PyObjectRef,
+        jump_offset: u32,
+    ) -> PyResult<Option<PyObjectRef>> {
         use crate::object::ObjectAccess;
         let next_method = iter_val.borrow().get_attribute("__next__");
         if let Ok(func) = next_method {
@@ -8315,7 +9970,9 @@ fn exc_type_matches(expected: &PyObjectRef, exc_type_name: &str) -> PyResult<boo
         // instead of silently doing a by-name comparison (confirmed via
         // CPython's own `test_baseexception.py`'s
         // `UsageTests.test_catch_string`).
-        PyObject::Str(s) if is_builtin_exception_class_name(s) => Ok(is_exception_subclass(exc_type_name, s)),
+        PyObject::Str(s) if is_builtin_exception_class_name(s) => {
+            Ok(is_exception_subclass(exc_type_name, s))
+        }
         PyObject::Type { name, bases, .. } => {
             // Real Python raises `TypeError: catching classes that do not
             // inherit from BaseException is not allowed` the moment an
@@ -8354,7 +10011,9 @@ fn exc_type_matches(expected: &PyObjectRef, exc_type_name: &str) -> PyResult<boo
             // the_hash_seed` (uses `script_helper.assert_python_ok`, which
             // catches `subprocess.CalledProcessError`).
             if !bases.is_empty() && crate::object::find_exception_base_name(expected).is_none() {
-                return Err(PyError::type_error("catching classes that do not inherit from BaseException is not allowed"));
+                return Err(PyError::type_error(
+                    "catching classes that do not inherit from BaseException is not allowed",
+                ));
             }
             Ok(is_exception_subclass(exc_type_name, name))
         }
@@ -8367,7 +10026,9 @@ fn exc_type_matches(expected: &PyObjectRef, exc_type_name: &str) -> PyResult<boo
             }
             Ok(false)
         }
-        _ => Err(PyError::type_error("catching classes that do not inherit from BaseException is not allowed")),
+        _ => Err(PyError::type_error(
+            "catching classes that do not inherit from BaseException is not allowed",
+        )),
     }
 }
 
@@ -8379,15 +10040,15 @@ pub(crate) fn is_exception_subclass(child_type: &str, parent_type: &str) -> bool
     // BaseException is the root — it has no parent.
     let parent: Option<&str> = match child_type {
         "BaseException" => None,
-        "Exception" | "SystemExit" | "KeyboardInterrupt" | "GeneratorExit" |
-        "BaseExceptionGroup" => Some("BaseException"),
+        "Exception" | "SystemExit" | "KeyboardInterrupt" | "GeneratorExit"
+        | "BaseExceptionGroup" => Some("BaseException"),
         // Sub-hierarchy parents (intermediate nodes in the tree)
-        "ArithmeticError" | "LookupError" | "ImportError" | "RuntimeError" |
-        "Warning" | "OSError" | "ValueError" => Some("Exception"),
+        "ArithmeticError" | "LookupError" | "ImportError" | "RuntimeError" | "Warning"
+        | "OSError" | "ValueError" => Some("Exception"),
         "CycleError" => Some("ValueError"),
         "DecimalException" => Some("ArithmeticError"),
-        "InvalidOperation" | "DivisionByZero" | "Inexact" | "Rounded" |
-        "Clamped" | "Overflow" | "Underflow" | "FloatOperation" => Some("DecimalException"),
+        "InvalidOperation" | "DivisionByZero" | "Inexact" | "Rounded" | "Clamped" | "Overflow"
+        | "Underflow" | "FloatOperation" => Some("DecimalException"),
         "PickleError" => Some("Exception"),
         "PicklingError" | "UnpicklingError" => Some("PickleError"),
         // ExceptionGroup inherits from Exception
@@ -8399,15 +10060,19 @@ pub(crate) fn is_exception_subclass(child_type: &str, parent_type: &str) -> bool
         "IndexError" | "KeyError" => Some("LookupError"),
         // Children of OSError
         "EnvironmentError" | "IOError" => Some("OSError"),
-        "FileNotFoundError" | "PermissionError" | "NotADirectoryError" |
-        "IsADirectoryError" | "FileExistsError" => Some("OSError"),
+        "FileNotFoundError" | "PermissionError" | "NotADirectoryError" | "IsADirectoryError"
+        | "FileExistsError" => Some("OSError"),
         "ConnectionError" => Some("OSError"),
-        "BrokenPipeError" | "ConnectionAbortedError" | "ConnectionRefusedError" |
-        "ConnectionResetError" => Some("ConnectionError"),
-        "BlockingIOError" | "ChildProcessError" | "InterruptedError" |
-        "ProcessLookupError" | "TimeoutError" => Some("OSError"),
+        "BrokenPipeError"
+        | "ConnectionAbortedError"
+        | "ConnectionRefusedError"
+        | "ConnectionResetError" => Some("ConnectionError"),
+        "BlockingIOError" | "ChildProcessError" | "InterruptedError" | "ProcessLookupError"
+        | "TimeoutError" => Some("OSError"),
         // Children of RuntimeError
-        "NotImplementedError" | "RecursionError" | "PythonFinalizationError" => Some("RuntimeError"),
+        "NotImplementedError" | "RecursionError" | "PythonFinalizationError" => {
+            Some("RuntimeError")
+        }
         // Children of ImportError
         "ModuleNotFoundError" => Some("ImportError"),
         // Children of NameError
@@ -8423,8 +10088,9 @@ pub(crate) fn is_exception_subclass(child_type: &str, parent_type: &str) -> bool
         "_IncompleteInputError" => Some("SyntaxError"),
         // Children of ValueError
         "UnicodeError" => Some("ValueError"),
-        "UnicodeEncodeError" | "UnicodeDecodeError" |
-        "UnicodeTranslateError" => Some("UnicodeError"),
+        "UnicodeEncodeError" | "UnicodeDecodeError" | "UnicodeTranslateError" => {
+            Some("UnicodeError")
+        }
         // `binascii.Error` — real CPython subclasses `ValueError` (checked
         // via `issubclass(binascii.Error, ValueError)`), found missing while
         // fixing `base64.b32decode`'s error validation (its own tests do
@@ -8433,15 +10099,21 @@ pub(crate) fn is_exception_subclass(child_type: &str, parent_type: &str) -> bool
         // matching real CPython would).
         "Error" => Some("ValueError"),
         // Children of Warning
-        "UserWarning" | "DeprecationWarning" | "PendingDeprecationWarning" | "EncodingWarning" |
-        "SyntaxWarning" | "RuntimeWarning" | "FutureWarning" |
-        "ImportWarning" | "UnicodeWarning" | "BytesWarning" |
-        "ResourceWarning" => Some("Warning"),
+        "UserWarning"
+        | "DeprecationWarning"
+        | "PendingDeprecationWarning"
+        | "EncodingWarning"
+        | "SyntaxWarning"
+        | "RuntimeWarning"
+        | "FutureWarning"
+        | "ImportWarning"
+        | "UnicodeWarning"
+        | "BytesWarning"
+        | "ResourceWarning" => Some("Warning"),
         // Leaf exception types — directly under Exception, no subclasses
-        "TypeError" | "NameError" | "AttributeError" |
-        "StopIteration" | "StopAsyncIteration" | "AssertionError" |
-        "BufferError" | "EOFError" | "MatchError" | "ReferenceError" |
-        "MemoryError" => Some("Exception"),
+        "TypeError" | "NameError" | "AttributeError" | "StopIteration" | "StopAsyncIteration"
+        | "AssertionError" | "BufferError" | "EOFError" | "MatchError" | "ReferenceError"
+        | "MemoryError" => Some("Exception"),
         // Unknown types default to Exception (users can define subclasses)
         _ => Some("Exception"),
     };
@@ -8465,6 +10137,21 @@ pub(crate) fn is_exception_subclass(child_type: &str, parent_type: &str) -> bool
 ///
 /// See: https://docs.python.org/3/library/string.html#formatspec
 pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
+    // An Instance with a custom `__format__` (Fraction, Decimal, a user
+    // class) formats via its dunder — format(Fraction(1,3), '.2f') must
+    // reach Fraction.__format__, not fall through to str().
+    let instance_format = {
+        let v = val.borrow();
+        if let PyObject::Instance { typ, .. } = &*v {
+            lookup_dunder_via_mro(typ, "__format__")
+        } else {
+            None
+        }
+    };
+    if let Some(f) = instance_format {
+        let result = call_bound_method(f, val.clone(), vec![py_str(spec_str)])?;
+        return Ok(result.str());
+    }
     if spec_str.is_empty() {
         return Ok(val.str());
     }
@@ -8499,7 +10186,7 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
         idx += 1;
         s
     } else {
-        '-'  // default: show sign only for negatives
+        '-' // default: show sign only for negatives
     };
 
     // --- parse [z] (3.11+ float zero-coercion flag) ---
@@ -8513,7 +10200,12 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
         false
     };
     // --- parse [#] ---
-    let alternate = if idx < len && chars[idx] == '#' { idx += 1; true } else { false };
+    let alternate = if idx < len && chars[idx] == '#' {
+        idx += 1;
+        true
+    } else {
+        false
+    };
 
     // --- parse [0] (zero-pad flag) ---
     // Note: '0' after width means just a digit, not zero-pad.
@@ -8533,7 +10225,9 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
     // --- parse [width] ---
     let width: Option<usize> = {
         let start = idx;
-        while idx < len && chars[idx].is_ascii_digit() { idx += 1; }
+        while idx < len && chars[idx].is_ascii_digit() {
+            idx += 1;
+        }
         if idx > start {
             // A format spec width this large (more digits than fit in a
             // `usize`) is nonsensical for any real display — real CPython
@@ -8542,7 +10236,10 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
             // a `.%sf % (sys.maxsize + 1)` spec specifically to check this)
             // rather than crashing. Bare `.unwrap()` here panicked the whole
             // process on `ParseIntError` instead.
-            let w = chars[start..idx].iter().collect::<String>().parse::<usize>()
+            let w = chars[start..idx]
+                .iter()
+                .collect::<String>()
+                .parse::<usize>()
                 .map_err(|_| PyError::value_error("Format specifier width too large"))?;
             // Unlike the overflow case above, a width of e.g. `sys.maxsize +
             // 1` (2**63) parses into a `usize` just fine — but actually
@@ -8581,7 +10278,10 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
     if int_grouping.is_some() && idx < len && (chars[idx] == ',' || chars[idx] == '_') {
         let g = chars[idx];
         if int_grouping == Some(g) {
-            return Err(PyError::value_error(format!("Cannot specify '{}' with '{}'.", g, g)));
+            return Err(PyError::value_error(format!(
+                "Cannot specify '{}' with '{}'.",
+                g, g
+            )));
         }
         return Err(PyError::value_error("Cannot specify both ',' and '_'."));
     }
@@ -8591,68 +10291,79 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
     // (integer part) and one after (fraction part) — format(x, '._f') groups
     // the digits after the point. A '.' with no digits AND no trailing
     // grouping char is "Format specifier missing precision".
-    let (precision, frac_grouping): (Option<usize>, Option<char>) = if idx < len && chars[idx] == '.' {
-        idx += 1;
-        let start = idx;
-        while idx < len && chars[idx].is_ascii_digit() { idx += 1; }
-        let p = if idx > start {
-            // See the matching `width` comment above — same overflow-panic
-            // fix, same real trigger (`test_format.py::test_precision`'s
-            // `.%sf % (sys.maxsize + 1)`).
-            let p = chars[start..idx].iter().collect::<String>().parse::<usize>()
-                .map_err(|_| PyError::value_error("Format specifier precision too large"))?;
-            // A precision this large parses fine as a `usize` (e.g.
-            // `sys.maxsize + 1` == 2**63, well within range) but Rust's own
-            // `format!("{:.prec$}", ...)` panics with "argument out of
-            // range" trying to render it (asking for ~9*10^18 decimal
-            // digits of a float is obviously never actually intended) —
-            // confirmed via CPython's own `test_format.py::test_precision`,
-            // which deliberately builds `.%sf % (sys.maxsize + 1)`
-            // expecting a catchable `ValueError`, not a process crash.
-            // 1000 decimal digits is already far beyond any real
-            // formatting need (a `f64`'s own precision exhausts after ~17
-            // significant digits) but comfortably below wherever Rust's
-            // internal limit actually sits.
-            if p > 1000 {
-                return Err(PyError::value_error("precision too big"));
-            }
-            Some(p)
-        } else {
-            None
-        };
-        // Fraction-part grouping directly after the '.'/precision digits.
-        let fg: Option<char> = if idx < len && (chars[idx] == ',' || chars[idx] == '_') {
-            let g = chars[idx];
+    let (precision, frac_grouping): (Option<usize>, Option<char>) =
+        if idx < len && chars[idx] == '.' {
             idx += 1;
-            Some(g)
-        } else {
-            None
-        };
-        if p.is_none() && fg.is_none() {
-            return Err(PyError::value_error("Format specifier missing precision"));
-        }
-        // Repeat/mix check in the fraction position, and mixing the fraction
-        // separator with a DIFFERENT integer-part separator ('{:.,_f}').
-        if fg.is_some() && idx < len && (chars[idx] == ',' || chars[idx] == '_') {
-            if fg == Some(chars[idx]) {
-                return Err(PyError::value_error(format!("Cannot specify '{}' with '{}'.", chars[idx], chars[idx])));
+            let start = idx;
+            while idx < len && chars[idx].is_ascii_digit() {
+                idx += 1;
             }
-            return Err(PyError::value_error("Cannot specify both ',' and '_'."));
-        }
-        if int_grouping.is_some() && fg.is_some() && int_grouping != fg {
-            return Err(PyError::value_error("Cannot specify both ',' and '_'."));
-        }
-        (p, fg)
-    } else {
-        (None, None)
-    };
+            let p = if idx > start {
+                // See the matching `width` comment above — same overflow-panic
+                // fix, same real trigger (`test_format.py::test_precision`'s
+                // `.%sf % (sys.maxsize + 1)`).
+                let p = chars[start..idx]
+                    .iter()
+                    .collect::<String>()
+                    .parse::<usize>()
+                    .map_err(|_| PyError::value_error("Format specifier precision too large"))?;
+                // A precision this large parses fine as a `usize` (e.g.
+                // `sys.maxsize + 1` == 2**63, well within range) but Rust's own
+                // `format!("{:.prec$}", ...)` panics with "argument out of
+                // range" trying to render it (asking for ~9*10^18 decimal
+                // digits of a float is obviously never actually intended) —
+                // confirmed via CPython's own `test_format.py::test_precision`,
+                // which deliberately builds `.%sf % (sys.maxsize + 1)`
+                // expecting a catchable `ValueError`, not a process crash.
+                // 1000 decimal digits is already far beyond any real
+                // formatting need (a `f64`'s own precision exhausts after ~17
+                // significant digits) but comfortably below wherever Rust's
+                // internal limit actually sits.
+                if p > 1000 {
+                    return Err(PyError::value_error("precision too big"));
+                }
+                Some(p)
+            } else {
+                None
+            };
+            // Fraction-part grouping directly after the '.'/precision digits.
+            let fg: Option<char> = if idx < len && (chars[idx] == ',' || chars[idx] == '_') {
+                let g = chars[idx];
+                idx += 1;
+                Some(g)
+            } else {
+                None
+            };
+            if p.is_none() && fg.is_none() {
+                return Err(PyError::value_error("Format specifier missing precision"));
+            }
+            // Repeat/mix check in the fraction position, and mixing the fraction
+            // separator with a DIFFERENT integer-part separator ('{:.,_f}').
+            if fg.is_some() && idx < len && (chars[idx] == ',' || chars[idx] == '_') {
+                if fg == Some(chars[idx]) {
+                    return Err(PyError::value_error(format!(
+                        "Cannot specify '{}' with '{}'.",
+                        chars[idx], chars[idx]
+                    )));
+                }
+                return Err(PyError::value_error("Cannot specify both ',' and '_'."));
+            }
+            if int_grouping.is_some() && fg.is_some() && int_grouping != fg {
+                return Err(PyError::value_error("Cannot specify both ',' and '_'."));
+            }
+            (p, fg)
+        } else {
+            (None, None)
+        };
 
     // --- parse [type] ---
     let fmt_type = if idx < len {
         let t = chars[idx];
         idx += 1;
         Some(t)
-    } else { None };
+    } else {
+        None
+    };
 
     // Any characters left unconsumed mean an invalid specifier — real
     // CPython raises `ValueError: Invalid format specifier '<spec>' for
@@ -8676,10 +10387,13 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
         // z is allowed with a FLOAT presentation (f/e/g/%) for any numeric
         // value (an int with z.1f is fine), and with the DEFAULT type only
         // for an actual float. Non-float presentations (d/s/x...) reject it.
-        let is_float_present = t == 'f' || t == 'F' || t == 'e' || t == 'E' || t == 'g' || t == 'G' || t == '%';
+        let is_float_present =
+            t == 'f' || t == 'F' || t == 'e' || t == 'E' || t == 'g' || t == 'G' || t == '%';
         let is_default_float = t == '\0' && matches!(&*val.borrow(), PyObject::Float(_));
         if !(is_float_present || is_default_float) {
-            return Err(PyError::value_error("Negative zero coercion (z) not allowed"));
+            return Err(PyError::value_error(
+                "Negative zero coercion (z) not allowed",
+            ));
         }
     }
 
@@ -8692,16 +10406,25 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
             || (sep == '_' && matches!(t, 'b' | 'o' | 'x' | 'X'));
         if !allowed {
             if t > '\u{20}' && t < '\u{80}' {
-                return Err(PyError::value_error(format!("Cannot specify '{}' with '{}'.", sep, t)));
+                return Err(PyError::value_error(format!(
+                    "Cannot specify '{}' with '{}'.",
+                    sep, t
+                )));
             }
-            return Err(PyError::value_error(format!("Cannot specify '{}' with '\\x{:x}'.", sep, t as u32)));
+            return Err(PyError::value_error(format!(
+                "Cannot specify '{}' with '\\x{:x}'.",
+                sep, t as u32
+            )));
         }
     }
     // The fraction-part grouping is incompatible with the 'n' type
     // ('{:,.3n}' raises "Cannot specify ',' with 'n'.").
     if let Some(sep) = frac_grouping {
         if fmt_type == Some('n') {
-            return Err(PyError::value_error(format!("Cannot specify '{}' with 'n'.", sep)));
+            return Err(PyError::value_error(format!(
+                "Cannot specify '{}' with 'n'.",
+                sep
+            )));
         }
     }
 
@@ -8716,7 +10439,8 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
         if let Some(t) = fmt_type {
             if !matches!(t, 'e' | 'E' | 'f' | 'F' | 'g' | 'G' | 'n' | '%') {
                 return Err(PyError::value_error(format!(
-                    "Unknown format code '{}' for object of type 'float'", t
+                    "Unknown format code '{}' for object of type 'float'",
+                    t
                 )));
             }
         }
@@ -8734,8 +10458,10 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
         // A spec with a numeric TYPE (f/e/g/%/n) applies to EACH part
         // (format(1+2j, '.1f') == '1.0+2.0j'); width/align-only specs apply
         // to the whole complex string (format(1+2j, '<8') == '(1+2j)  ').
-        let has_numeric_type = spec_str.trim_end_matches(|c: char| c.is_ascii_digit())
-            .chars().last()
+        let has_numeric_type = spec_str
+            .trim_end_matches(|c: char| c.is_ascii_digit())
+            .chars()
+            .last()
             .map(|c| matches!(c, 'f' | 'F' | 'e' | 'E' | 'g' | 'G' | '%' | 'n'))
             .unwrap_or(false);
         if !has_numeric_type {
@@ -8774,26 +10500,50 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
         // Integer: hex lowercase
         (Some('x'), true, _) => {
             if let PyObject::Int(i) = &*val_borrowed {
-                if alternate { format!("0x{:x}", i) } else { format!("{:x}", i) }
-            } else { val.str() }
+                if alternate {
+                    format!("0x{:x}", i)
+                } else {
+                    format!("{:x}", i)
+                }
+            } else {
+                val.str()
+            }
         }
         // Integer: hex uppercase
         (Some('X'), true, _) => {
             if let PyObject::Int(i) = &*val_borrowed {
-                if alternate { format!("0X{:X}", i) } else { format!("{:X}", i) }
-            } else { val.str() }
+                if alternate {
+                    format!("0X{:X}", i)
+                } else {
+                    format!("{:X}", i)
+                }
+            } else {
+                val.str()
+            }
         }
         // Integer: binary
         (Some('b'), true, _) => {
             if let PyObject::Int(i) = &*val_borrowed {
-                if alternate { format!("0b{:b}", i) } else { format!("{:b}", i) }
-            } else { val.str() }
+                if alternate {
+                    format!("0b{:b}", i)
+                } else {
+                    format!("{:b}", i)
+                }
+            } else {
+                val.str()
+            }
         }
         // Integer: octal
         (Some('o'), true, _) => {
             if let PyObject::Int(i) = &*val_borrowed {
-                if alternate { format!("0o{:o}", i) } else { format!("{:o}", i) }
-            } else { val.str() }
+                if alternate {
+                    format!("0o{:o}", i)
+                } else {
+                    format!("{:o}", i)
+                }
+            } else {
+                val.str()
+            }
         }
         // Integer: character
         (Some('c'), true, _) => {
@@ -8816,7 +10566,9 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
         // behaves like 'g' (format(123.456, '.4') == '123.5').
         (None, _, true) => {
             if let Some(mut f) = val.as_f64() {
-                if zero_coerce && f == 0.0 { f = 0.0; }
+                if zero_coerce && f == 0.0 {
+                    f = 0.0;
+                }
                 match precision {
                     Some(p) => {
                         let s = crate::object::format_percent_g(f, p, false, true);
@@ -8824,12 +10576,16 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
                     }
                     None => val.str(),
                 }
-            } else { val.str() }
+            } else {
+                val.str()
+            }
         }
         // Float: fixed-point (an int with 'f' converts to float first)
         (Some('f'), _, _) | (Some('F'), _, _) => {
             if let Some(mut f) = val.as_f64() {
-                if zero_coerce && f == 0.0 { f = 0.0; }
+                if zero_coerce && f == 0.0 {
+                    f = 0.0;
+                }
                 // 'f' defaults to precision 6 (like %f), not str() — real
                 // CPython: format(0.0, 'f') == '0.000000'.
                 let mut s = format_float_with_sign(f, sign, Some(precision.unwrap_or(6)));
@@ -8843,39 +10599,61 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
                     s.push('.');
                 }
                 s
-            } else { val.str() }
+            } else {
+                val.str()
+            }
         }
         // Float: scientific lowercase
         (Some('e'), _, _) => {
             if let Some(mut f) = val.as_f64() {
-                if zero_coerce && f == 0.0 { f = 0.0; }
-                let s = crate::object::format_percent_e(f, precision.unwrap_or(6), alternate, false);
+                if zero_coerce && f == 0.0 {
+                    f = 0.0;
+                }
+                let s =
+                    crate::object::format_percent_e(f, precision.unwrap_or(6), alternate, false);
                 apply_sign(&s, f, sign)
-            } else { val.str() }
+            } else {
+                val.str()
+            }
         }
         // Float: scientific uppercase
         (Some('E'), _, _) => {
             if let Some(mut f) = val.as_f64() {
-                if zero_coerce && f == 0.0 { f = 0.0; }
+                if zero_coerce && f == 0.0 {
+                    f = 0.0;
+                }
                 let s = crate::object::format_percent_e(f, precision.unwrap_or(6), alternate, true);
                 apply_sign(&s, f, sign)
-            } else { val.str() }
+            } else {
+                val.str()
+            }
         }
         // Float: general lowercase
         (Some('g'), _, _) => {
             if let Some(mut f) = val.as_f64() {
-                if zero_coerce && f == 0.0 { f = 0.0; }
-                let s = crate::object::format_percent_g(f, precision.unwrap_or(6), alternate, false);
+                if zero_coerce && f == 0.0 {
+                    f = 0.0;
+                }
+                let s =
+                    crate::object::format_percent_g(f, precision.unwrap_or(6), alternate, false);
                 apply_sign(&s, f, sign)
-            } else { val.str() }
+            } else {
+                val.str()
+            }
         }
         // Float: general uppercase
         (Some('G'), _, _) => {
             if let Some(mut f) = val.as_f64() {
-                if zero_coerce && f == 0.0 { f = 0.0; }
-                let s = crate::object::format_percent_g(f, precision.unwrap_or(6), alternate, false).to_uppercase();
+                if zero_coerce && f == 0.0 {
+                    f = 0.0;
+                }
+                let s =
+                    crate::object::format_percent_g(f, precision.unwrap_or(6), alternate, false)
+                        .to_uppercase();
                 apply_sign(&s, f, sign)
-            } else { val.str() }
+            } else {
+                val.str()
+            }
         }
         // Float: percentage
         (Some('%'), _, true) => {
@@ -8885,7 +10663,9 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
                 // '-100.000000%'), not str()-style shortest repr.
                 let s = format_float_with_sign(pct, sign, Some(precision.unwrap_or(6)));
                 format!("{}%", s)
-            } else { val.str() }
+            } else {
+                val.str()
+            }
         }
 
         // Default for string or any other type: str() representation
@@ -8921,7 +10701,8 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
     // Thousands grouping (',' or '_'): insert the separator every 3 digits
     // of the integer part (format(1234567, ',') == '1,234,567') and/or the
     // fraction part (format(x, '._f') groups the digits after the point).
-    let base = if zero_pad && !align_explicit && (int_grouping.is_some() || frac_grouping.is_some()) {
+    let base = if zero_pad && !align_explicit && (int_grouping.is_some() || frac_grouping.is_some())
+    {
         zero_pad_group(&base, width.unwrap_or(0))
     } else {
         apply_grouping(&base, int_grouping, frac_grouping)
@@ -9015,7 +10796,12 @@ fn format_float_with_sign(val: f64, sign: char, precision: Option<usize>) -> Str
         return apply_sign("nan", val, sign);
     }
     if val.is_infinite() {
-        let s = if val.is_sign_negative() { "-inf" } else { "inf" }.to_string();
+        let s = if val.is_sign_negative() {
+            "-inf"
+        } else {
+            "inf"
+        }
+        .to_string();
         return apply_sign(&s, val, sign);
     }
     let s = match precision {
@@ -9089,7 +10875,13 @@ fn apply_grouping(s: &str, int_sep: Option<char>, frac_sep: Option<char>) -> Str
 }
 
 /// Apply padding/alignment to a base string.
-fn apply_padding(s: &str, width: Option<usize>, align: char, fill: char, zero_mode: bool) -> String {
+fn apply_padding(
+    s: &str,
+    width: Option<usize>,
+    align: char,
+    fill: char,
+    zero_mode: bool,
+) -> String {
     let w = match width {
         Some(w) => w,
         None => return s.to_string(),
@@ -9106,7 +10898,12 @@ fn apply_padding(s: &str, width: Option<usize>, align: char, fill: char, zero_mo
         '^' => {
             let left = padding / 2;
             let right = padding - left;
-            format!("{}{}{}", fill.to_string().repeat(left), s, fill.to_string().repeat(right))
+            format!(
+                "{}{}{}",
+                fill.to_string().repeat(left),
+                s,
+                fill.to_string().repeat(right)
+            )
         }
         '=' => {
             // Insert padding after sign (if any) but before digits

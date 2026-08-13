@@ -38,29 +38,47 @@ pub struct PyDict {
 
 impl PyDict {
     pub fn new() -> Self {
-        PyDict { entries: Vec::new(), indices: Vec::new(), size: 0, instance_ref: None, version: 0 }
+        PyDict {
+            entries: Vec::new(),
+            indices: Vec::new(),
+            size: 0,
+            instance_ref: None,
+            version: 0,
+        }
     }
-    pub fn is_empty(&self) -> bool { self.size == 0 }
-    pub fn len(&self) -> usize { self.size }
+    pub fn is_empty(&self) -> bool {
+        self.size == 0
+    }
+    pub fn len(&self) -> usize {
+        self.size
+    }
     pub fn clear(&mut self) {
         self.entries.clear();
         self.indices.clear();
         self.size = 0;
         self.version = self.version.wrapping_add(1);
     }
-    pub(crate) fn version(&self) -> u64 { self.version }
+    pub(crate) fn version(&self) -> u64 {
+        self.version
+    }
 
-    fn mask(&self) -> usize { self.indices.len() - 1 }
+    fn mask(&self) -> usize {
+        self.indices.len() - 1
+    }
 
     /// Find the entry index for `key` via linear probing, or None.
     fn find(&self, key: &PyObjectRef, h: usize) -> Option<usize> {
-        if self.indices.is_empty() { return None; }
+        if self.indices.is_empty() {
+            return None;
+        }
         let mask = self.mask();
         let start = h & mask;
         let mut i = start;
         loop {
             let idx_val = self.indices[i];
-            if idx_val == 0 { return None; }
+            if idx_val == 0 {
+                return None;
+            }
             let entry_idx = (idx_val - 1) as usize;
             if let Some((k, _)) = &self.entries[entry_idx] {
                 if k.is(key) || k.equals(key).unwrap_or(false) {
@@ -68,14 +86,18 @@ impl PyDict {
                 }
             }
             i = (i + 1) & mask;
-            if i == start { return None; }
+            if i == start {
+                return None;
+            }
         }
     }
 
     /// Probe for the key: returns (index_slot, Some(entry_index)) if found,
     /// or (first_empty_or_tombstone_slot, None) if not found.
     fn probe(&self, key: &PyObjectRef, h: usize) -> (usize, Option<usize>) {
-        if self.indices.is_empty() { return (0, None); }
+        if self.indices.is_empty() {
+            return (0, None);
+        }
         let mask = self.mask();
         let start = h & mask;
         let mut first_tomb = None;
@@ -87,14 +109,18 @@ impl PyDict {
             }
             let entry_idx = (idx_val - 1) as usize;
             if self.entries[entry_idx].is_none() {
-                if first_tomb.is_none() { first_tomb = Some(i); }
+                if first_tomb.is_none() {
+                    first_tomb = Some(i);
+                }
             } else if let Some((k, _)) = &self.entries[entry_idx] {
                 if k.equals(key).unwrap_or(false) {
                     return (i, Some(entry_idx));
                 }
             }
             i = (i + 1) & mask;
-            if i == start { return (first_tomb.unwrap_or(i), None); }
+            if i == start {
+                return (first_tomb.unwrap_or(i), None);
+            }
         }
     }
 
@@ -107,8 +133,14 @@ impl PyDict {
     /// single-borrow path for the overwhelmingly common case (native keys)
     /// and fall back to the slower reentrancy-safe snapshot path (see
     /// `pydict_safe_set`) only when genuinely necessary.
-    fn probe_no_reentry_risk(&self, key: &PyObjectRef, h: usize) -> Result<(usize, Option<usize>), ()> {
-        if self.indices.is_empty() { return Ok((0, None)); }
+    fn probe_no_reentry_risk(
+        &self,
+        key: &PyObjectRef,
+        h: usize,
+    ) -> Result<(usize, Option<usize>), ()> {
+        if self.indices.is_empty() {
+            return Ok((0, None));
+        }
         let mask = self.mask();
         let start = h & mask;
         let mut first_tomb = None;
@@ -120,12 +152,16 @@ impl PyDict {
             }
             let entry_idx = (idx_val - 1) as usize;
             if self.entries[entry_idx].is_none() {
-                if first_tomb.is_none() { first_tomb = Some(i); }
+                if first_tomb.is_none() {
+                    first_tomb = Some(i);
+                }
             } else if let Some((k, _)) = &self.entries[entry_idx] {
                 if k.is(key) {
                     return Ok((i, Some(entry_idx)));
                 }
-                if matches!(&*k.borrow(), PyObject::Instance { .. }) || matches!(&*key.borrow(), PyObject::Instance { .. }) {
+                if matches!(&*k.borrow(), PyObject::Instance { .. })
+                    || matches!(&*key.borrow(), PyObject::Instance { .. })
+                {
                     return Err(());
                 }
                 if k.equals(key).unwrap_or(false) {
@@ -133,7 +169,9 @@ impl PyDict {
                 }
             }
             i = (i + 1) & mask;
-            if i == start { return Ok((first_tomb.unwrap_or(i), None)); }
+            if i == start {
+                return Ok((first_tomb.unwrap_or(i), None));
+            }
         }
     }
 
@@ -153,7 +191,9 @@ impl PyDict {
             if let Some((key, _)) = entry {
                 if let Ok(h) = key.hash() {
                     let mut i = h & mask;
-                    while new_idx[i] != 0 { i = (i + 1) & mask; }
+                    while new_idx[i] != 0 {
+                        i = (i + 1) & mask;
+                    }
                     new_idx[i] = (ei + 1) as u32;
                 }
             }
@@ -175,7 +215,8 @@ impl PyDict {
     /// `set_with_hash`'s doc comment) BEFORE taking any borrow that would
     /// alias with that reentrant call.
     pub fn get_with_hash(&self, key: &PyObjectRef, h: usize) -> Option<PyObjectRef> {
-        self.find(key, h).map(|i| self.entries[i].as_ref().unwrap().1.clone())
+        self.find(key, h)
+            .map(|i| self.entries[i].as_ref().unwrap().1.clone())
     }
     pub fn set(&mut self, key: PyObjectRef, value: PyObjectRef) -> PyResult<()> {
         let h = key.hash()?;
@@ -193,7 +234,12 @@ impl PyDict {
     /// identical `RefCell` and panic ("already borrowed"), unlike CPython's
     /// refcounted object model, which has no equivalent static aliasing
     /// restriction.
-    pub fn set_with_hash(&mut self, key: PyObjectRef, value: PyObjectRef, h: usize) -> PyResult<()> {
+    pub fn set_with_hash(
+        &mut self,
+        key: PyObjectRef,
+        value: PyObjectRef,
+        h: usize,
+    ) -> PyResult<()> {
         self.ensure_capacity(1);
         let (slot, existing) = self.probe(&key, h);
         self.apply_probed_set(slot, existing, key, value);
@@ -205,7 +251,13 @@ impl PyDict {
     /// consistent snapshot of it — see `pydict_safe_set`'s doc comment).
     /// Never calls `.equals()`/`.hash()` itself, so it's always safe to run
     /// under a live borrow.
-    pub(crate) fn apply_probed_set(&mut self, slot: usize, existing: Option<usize>, key: PyObjectRef, value: PyObjectRef) {
+    pub(crate) fn apply_probed_set(
+        &mut self,
+        slot: usize,
+        existing: Option<usize>,
+        key: PyObjectRef,
+        value: PyObjectRef,
+    ) {
         self.version = self.version.wrapping_add(1);
         let val_for_instance = value.clone();
         if let Some(entry_idx) = existing {
@@ -242,14 +294,18 @@ impl PyDict {
     /// `set_with_hash`'s doc comment for why a caller holding `obj`'s own
     /// mutable borrow must compute the hash before taking it.
     pub fn remove_with_hash(&mut self, key: &PyObjectRef, h: usize) -> PyResult<PyObjectRef> {
-        let existing = self.find(key, h).ok_or_else(|| PyError::key_error(key.str()))?;
+        let existing = self
+            .find(key, h)
+            .ok_or_else(|| PyError::key_error(key.str()))?;
         let removed = self.entries[existing].take().unwrap().1;
         self.size -= 1;
         self.version = self.version.wrapping_add(1);
         Ok(removed)
     }
     pub fn iter(&self) -> impl Iterator<Item = (&PyObjectRef, &PyObjectRef)> {
-        self.entries.iter().filter_map(|e| e.as_ref().map(|(k, v)| (k, v)))
+        self.entries
+            .iter()
+            .filter_map(|e| e.as_ref().map(|(k, v)| (k, v)))
     }
     pub fn keys(&self) -> Vec<PyObjectRef> {
         self.iter().map(|(k, _)| k.clone()).collect()
@@ -325,7 +381,11 @@ impl PyDict {
 /// committing, retrying against fresh state if it did (matching CPython's
 /// own fix for this same bug: restart the lookup rather than trusting
 /// now-stale indices).
-pub(crate) fn pydict_safe_set(target: &PyObjectRef, key: PyObjectRef, value: PyObjectRef) -> PyResult<()> {
+pub(crate) fn pydict_safe_set(
+    target: &PyObjectRef,
+    key: PyObjectRef,
+    value: PyObjectRef,
+) -> PyResult<()> {
     let h = key.hash()?;
     {
         let mut obj = target.borrow_mut();
@@ -344,7 +404,10 @@ pub(crate) fn pydict_safe_set(target: &PyObjectRef, key: PyObjectRef, value: PyO
         let snap_version = {
             let mut obj = target.borrow_mut();
             match &mut *obj {
-                PyObject::Dict(d) => { d.ensure_capacity(1); d.version() }
+                PyObject::Dict(d) => {
+                    d.ensure_capacity(1);
+                    d.version()
+                }
                 _ => return Err(PyError::runtime_error("setitem on non-dict")),
             }
         };
@@ -362,7 +425,10 @@ pub(crate) fn pydict_safe_set(target: &PyObjectRef, key: PyObjectRef, value: PyO
                 d.apply_probed_set(slot, existing, key, value);
                 return Ok(());
             }
-            PyObject::Dict(_) => { drop(obj); continue; }
+            PyObject::Dict(_) => {
+                drop(obj);
+                continue;
+            }
             _ => return Err(PyError::runtime_error("setitem on non-dict")),
         }
     }
@@ -373,7 +439,11 @@ pub(crate) fn pydict_safe_set(target: &PyObjectRef, key: PyObjectRef, value: PyO
 /// `pydict_safe_set` (probing can run an existing key's `__eq__`, which may
 /// reentrantly mutate this same dict), just returning the found-or-inserted
 /// value instead of `()`.
-pub(crate) fn pydict_safe_get_or_insert(target: &PyObjectRef, key: PyObjectRef, default: PyObjectRef) -> PyResult<PyObjectRef> {
+pub(crate) fn pydict_safe_get_or_insert(
+    target: &PyObjectRef,
+    key: PyObjectRef,
+    default: PyObjectRef,
+) -> PyResult<PyObjectRef> {
     let h = key.hash()?;
     {
         let mut obj = target.borrow_mut();
@@ -395,7 +465,10 @@ pub(crate) fn pydict_safe_get_or_insert(target: &PyObjectRef, key: PyObjectRef, 
         let snap_version = {
             let mut obj = target.borrow_mut();
             match &mut *obj {
-                PyObject::Dict(d) => { d.ensure_capacity(1); d.version() }
+                PyObject::Dict(d) => {
+                    d.ensure_capacity(1);
+                    d.version()
+                }
                 _ => return Err(PyError::runtime_error("setdefault on non-dict")),
             }
         };
@@ -416,7 +489,10 @@ pub(crate) fn pydict_safe_get_or_insert(target: &PyObjectRef, key: PyObjectRef, 
                 d.apply_probed_set(slot, None, key, default.clone());
                 return Ok(default);
             }
-            PyObject::Dict(_) => { drop(obj); continue; }
+            PyObject::Dict(_) => {
+                drop(obj);
+                continue;
+            }
             _ => return Err(PyError::runtime_error("setdefault on non-dict")),
         }
     }
@@ -424,31 +500,43 @@ pub(crate) fn pydict_safe_get_or_insert(target: &PyObjectRef, key: PyObjectRef, 
 
 /// Helper: provide dict methods (items, keys, values, __iter__) for Instance objects
 /// that inherit from dict but can't access the built-in dict methods.
-pub(crate) fn instance_builtin_dict_method(name: &str, dict_snapshot: Vec<(String, PyObjectRef)>) -> Option<PyObjectRef> {
+pub(crate) fn instance_builtin_dict_method(
+    name: &str,
+    dict_snapshot: Vec<(String, PyObjectRef)>,
+) -> Option<PyObjectRef> {
     let method_name = name.to_string();
-    Some(PyObjectRef::new(PyObject::Closure(Rc::new(move |_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
-        match method_name.as_str() {
-            "__iter__" => {
-                let keys: Vec<PyObjectRef> = dict_snapshot.iter().map(|(k, _)| py_str(k)).collect();
-                Ok(PyObjectRef::new(PyObject::List(keys)))
+    Some(PyObjectRef::new(PyObject::Closure(Rc::new(
+        move |_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+            match method_name.as_str() {
+                "__iter__" => {
+                    let keys: Vec<PyObjectRef> =
+                        dict_snapshot.iter().map(|(k, _)| py_str(k)).collect();
+                    Ok(PyObjectRef::new(PyObject::List(keys)))
+                }
+                "items" => {
+                    let items: Vec<PyObjectRef> = dict_snapshot
+                        .iter()
+                        .map(|(k, v)| py_tuple(vec![py_str(k), v.clone()]))
+                        .collect();
+                    Ok(PyObjectRef::new(PyObject::List(items)))
+                }
+                "keys" => {
+                    let keys: Vec<PyObjectRef> =
+                        dict_snapshot.iter().map(|(k, _)| py_str(k)).collect();
+                    Ok(PyObjectRef::new(PyObject::List(keys)))
+                }
+                "values" => {
+                    let values: Vec<PyObjectRef> =
+                        dict_snapshot.iter().map(|(_, v)| v.clone()).collect();
+                    Ok(PyObjectRef::new(PyObject::List(values)))
+                }
+                _ => Err(PyError::type_error(format!(
+                    "unsupported dict method: {}",
+                    method_name
+                ))),
             }
-            "items" => {
-                let items: Vec<PyObjectRef> = dict_snapshot.iter().map(|(k, v)| {
-                    py_tuple(vec![py_str(k), v.clone()])
-                }).collect();
-                Ok(PyObjectRef::new(PyObject::List(items)))
-            }
-            "keys" => {
-                let keys: Vec<PyObjectRef> = dict_snapshot.iter().map(|(k, _)| py_str(k)).collect();
-                Ok(PyObjectRef::new(PyObject::List(keys)))
-            }
-            "values" => {
-                let values: Vec<PyObjectRef> = dict_snapshot.iter().map(|(_, v)| v.clone()).collect();
-                Ok(PyObjectRef::new(PyObject::List(values)))
-            }
-            _ => Err(PyError::type_error(format!("unsupported dict method: {}", method_name))),
-        }
-    }))))
+        },
+    ))))
 }
 
 /// Resolves the REAL underlying `PyDict` data behind an "unbound-style" dict
@@ -471,19 +559,28 @@ fn resolve_dict_like(obj: &PyObjectRef) -> Option<PyObjectRef> {
     if matches!(&*obj.borrow(), PyObject::Dict(_)) {
         return Some(obj.clone());
     }
-    crate::object::native_backing_of(obj).filter(|native| matches!(&*native.borrow(), PyObject::Dict(_)))
+    crate::object::native_backing_of(obj)
+        .filter(|native| matches!(&*native.borrow(), PyObject::Dict(_)))
 }
 
 /// Static dict method: get
 pub fn dict_method_get(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.len() < 2 { return Err(PyError::type_error("get() requires at least 1 argument")); }
+    if args.len() < 2 {
+        return Err(PyError::type_error("get() requires at least 1 argument"));
+    }
     match resolve_dict_like(&args[0]) {
         Some(d) => {
             if let PyObject::Dict(pd) = &*d.borrow() {
                 Ok(pd.get(&args[1])?.unwrap_or_else(|| {
-                    if args.len() > 2 { args[2].clone() } else { py_none() }
+                    if args.len() > 2 {
+                        args[2].clone()
+                    } else {
+                        py_none()
+                    }
                 }))
-            } else { unreachable!() }
+            } else {
+                unreachable!()
+            }
         }
         None => Err(PyError::type_error("get() requires a dict-like instance")),
     }
@@ -491,23 +588,45 @@ pub fn dict_method_get(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 
 /// Static dict method: __iter__
 pub fn dict_method_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.is_empty() { return Err(PyError::type_error("__iter__ requires self")); }
+    if args.is_empty() {
+        return Err(PyError::type_error("__iter__ requires self"));
+    }
     match resolve_dict_like(&args[0]) {
         Some(d) => {
-            let keys = if let PyObject::Dict(pd) = &*d.borrow() { pd.keys() } else { unreachable!() };
-            Ok(PyObjectRef::new(PyObject::ListIter { list: keys, index: 0 }))
+            let keys = if let PyObject::Dict(pd) = &*d.borrow() {
+                pd.keys()
+            } else {
+                unreachable!()
+            };
+            Ok(PyObjectRef::new(PyObject::ListIter {
+                list: keys,
+                index: 0,
+            }))
         }
-        None => Err(PyError::type_error("__iter__ requires a dict-like instance")),
+        None => Err(PyError::type_error(
+            "__iter__ requires a dict-like instance",
+        )),
     }
 }
 
 /// Static dict method: items
 pub fn dict_method_items(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.is_empty() { return Err(PyError::type_error("items() requires self")); }
+    if args.is_empty() {
+        return Err(PyError::type_error("items() requires self"));
+    }
     match resolve_dict_like(&args[0]) {
         Some(d) => {
-            let items = if let PyObject::Dict(pd) = &*d.borrow() { pd.items() } else { unreachable!() };
-            Ok(py_list(items.into_iter().map(|(k, v)| py_tuple(vec![k, v])).collect()))
+            let items = if let PyObject::Dict(pd) = &*d.borrow() {
+                pd.items()
+            } else {
+                unreachable!()
+            };
+            Ok(py_list(
+                items
+                    .into_iter()
+                    .map(|(k, v)| py_tuple(vec![k, v]))
+                    .collect(),
+            ))
         }
         None => Err(PyError::type_error("items() requires a dict-like instance")),
     }
@@ -515,10 +634,16 @@ pub fn dict_method_items(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 
 /// Static dict method: keys
 pub fn dict_method_keys(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.is_empty() { return Err(PyError::type_error("keys() requires self")); }
+    if args.is_empty() {
+        return Err(PyError::type_error("keys() requires self"));
+    }
     match resolve_dict_like(&args[0]) {
         Some(d) => {
-            let keys = if let PyObject::Dict(pd) = &*d.borrow() { pd.keys() } else { unreachable!() };
+            let keys = if let PyObject::Dict(pd) = &*d.borrow() {
+                pd.keys()
+            } else {
+                unreachable!()
+            };
             Ok(py_list(keys))
         }
         None => Err(PyError::type_error("keys() requires a dict-like instance")),
@@ -527,13 +652,21 @@ pub fn dict_method_keys(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 
 /// Static dict method: values
 pub fn dict_method_values(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.is_empty() { return Err(PyError::type_error("values() requires self")); }
+    if args.is_empty() {
+        return Err(PyError::type_error("values() requires self"));
+    }
     match resolve_dict_like(&args[0]) {
         Some(d) => {
-            let values = if let PyObject::Dict(pd) = &*d.borrow() { pd.values() } else { unreachable!() };
+            let values = if let PyObject::Dict(pd) = &*d.borrow() {
+                pd.values()
+            } else {
+                unreachable!()
+            };
             Ok(py_list(values))
         }
-        None => Err(PyError::type_error("values() requires a dict-like instance")),
+        None => Err(PyError::type_error(
+            "values() requires a dict-like instance",
+        )),
     }
 }
 
@@ -542,14 +675,32 @@ pub fn builtin_dict_setitem(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // Handle both calling conventions:
     // - Direct: [instance, key, value] (3 args)
     // - Via BuiltinMethod: [py_none(), instance, key, value] (4 args)
-    let instance = if args.len() >= 4 { &args[1] } else if args.len() >= 3 { &args[0] } else {
-        return Err(PyError::type_error("dict.__setitem__() requires at least 2 arguments"));
+    let instance = if args.len() >= 4 {
+        &args[1]
+    } else if args.len() >= 3 {
+        &args[0]
+    } else {
+        return Err(PyError::type_error(
+            "dict.__setitem__() requires at least 2 arguments",
+        ));
     };
-    let key = if args.len() >= 4 { args[2].str() } else if args.len() >= 3 { args[1].str() } else {
-        return Err(PyError::type_error("dict.__setitem__() requires at least 2 arguments"));
+    let key = if args.len() >= 4 {
+        args[2].str()
+    } else if args.len() >= 3 {
+        args[1].str()
+    } else {
+        return Err(PyError::type_error(
+            "dict.__setitem__() requires at least 2 arguments",
+        ));
     };
-    let value = if args.len() >= 4 { args[3].clone() } else if args.len() >= 3 { args[2].clone() } else {
-        return Err(PyError::type_error("dict.__setitem__() requires at least 2 arguments"));
+    let value = if args.len() >= 4 {
+        args[3].clone()
+    } else if args.len() >= 3 {
+        args[2].clone()
+    } else {
+        return Err(PyError::type_error(
+            "dict.__setitem__() requires at least 2 arguments",
+        ));
     };
     // A real dict subclass instance (e.g. `class _EnumDict(dict): ...`,
     // used to give enum.EnumType.__prepare__'s namespace object a place to
@@ -571,7 +722,11 @@ pub fn builtin_dict_setitem(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     } else {
         drop(obj);
         // Fall back to py_setitem for non-Instance types
-        py_setitem(instance, &args[if args.len() >= 4 { 2 } else { 1 }], args[if args.len() >= 4 { 3 } else { 2 }].clone())?;
+        py_setitem(
+            instance,
+            &args[if args.len() >= 4 { 2 } else { 1 }],
+            args[if args.len() >= 4 { 3 } else { 2 }].clone(),
+        )?;
     }
     Ok(py_none())
 }
@@ -581,11 +736,23 @@ pub fn builtin_dict_getitem(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // Handle both calling conventions:
     // - Direct: [instance, key] (2 args)
     // - Via BuiltinMethod: [py_none(), instance, key] (3 args)
-    let instance = if args.len() >= 3 { &args[1] } else if args.len() >= 2 { &args[0] } else {
-        return Err(PyError::type_error("dict.__getitem__() requires at least 1 argument"));
+    let instance = if args.len() >= 3 {
+        &args[1]
+    } else if args.len() >= 2 {
+        &args[0]
+    } else {
+        return Err(PyError::type_error(
+            "dict.__getitem__() requires at least 1 argument",
+        ));
     };
-    let key_ref = if args.len() >= 3 { &args[2] } else if args.len() >= 2 { &args[1] } else {
-        return Err(PyError::type_error("dict.__getitem__() requires at least 1 argument"));
+    let key_ref = if args.len() >= 3 {
+        &args[2]
+    } else if args.len() >= 2 {
+        &args[1]
+    } else {
+        return Err(PyError::type_error(
+            "dict.__getitem__() requires at least 1 argument",
+        ));
     };
     let key = key_ref.str();
     // Check for __missing__ first (dict subclass support, e.g. Counter).
@@ -597,7 +764,10 @@ pub fn builtin_dict_getitem(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // that this whole call then silently swallowed via `.ok()`, making the
     // `__missing__` lookup appear to fail even when it was genuinely
     // defined. Only `key_ref` needs to be passed explicitly.
-    let missing_result = instance.borrow().get_attribute("__missing__").ok()
+    let missing_result = instance
+        .borrow()
+        .get_attribute("__missing__")
+        .ok()
         .and_then(|missing| crate::object::call_function(&missing, vec![key_ref.clone()]).ok());
     if let Some(val) = missing_result {
         return Ok(val);
@@ -610,9 +780,10 @@ pub fn builtin_dict_getitem(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // Directly read from the Instance's dict, bypassing py_getitem (which would recurse)
     let obj = instance.borrow();
     if let PyObject::Instance { dict, .. } = &*obj {
-        let val = dict.get(&key).cloned().ok_or_else(|| {
-            PyError::key_error(format!("'{}'", key))
-        })?;
+        let val = dict
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| PyError::key_error(format!("'{}'", key)))?;
         drop(obj);
         Ok(val)
     } else if let PyObject::Dict(pd) = &*obj {

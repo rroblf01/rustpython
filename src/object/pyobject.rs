@@ -360,10 +360,13 @@ pub enum SocketInner {
 }
 
 fn format_py_float(f: f64) -> String {
-    if f.is_nan() { "nan".to_string() }
-    else if f.is_infinite() && f.is_sign_positive() { "inf".to_string() }
-    else if f.is_infinite() { "-inf".to_string() }
-    else {
+    if f.is_nan() {
+        "nan".to_string()
+    } else if f.is_infinite() && f.is_sign_positive() {
+        "inf".to_string()
+    } else if f.is_infinite() {
+        "-inf".to_string()
+    } else {
         // Rust's `{:?}` on f64 is the SHORTEST round-trip representation
         // (Ryu) — the same unique digit string CPython's repr uses, where the
         // old `{:.17}` form always emitted 17 significant digits (1.3 became
@@ -394,10 +397,13 @@ fn format_py_float(f: f64) -> String {
 /// `'2j'`, not `'2.0j'`; `repr(complex(3,4))` == `'(3+4j)'`, not
 /// `'(3.0+4.0j)'`).
 fn format_complex_part(f: f64) -> String {
-    if f.is_nan() { "nan".to_string() }
-    else if f.is_infinite() && f.is_sign_positive() { "inf".to_string() }
-    else if f.is_infinite() { "-inf".to_string() }
-    else {
+    if f.is_nan() {
+        "nan".to_string()
+    } else if f.is_infinite() && f.is_sign_positive() {
+        "inf".to_string()
+    } else if f.is_infinite() {
+        "-inf".to_string()
+    } else {
         let s = format_py_float(f);
         // A whole-number part loses its ".0" (`repr(2j)` == "2j", not
         // "2.0j") — Rust's shortest repr emits "2.0" for 2.0.
@@ -472,7 +478,8 @@ impl PyObject {
             PyObject::Process { .. } => "Popen",
             PyObject::CycleIter { .. } => "itertools.cycle",
             PyObject::GroupByIter { .. } => "itertools.groupby",
-        }.to_string()
+        }
+        .to_string()
     }
 
     pub fn repr(&self) -> String {
@@ -489,13 +496,19 @@ impl PyObject {
                     format!("{}j", format_complex_part(*im))
                 } else {
                     let sign = if im.is_sign_negative() { "-" } else { "+" };
-                    format!("({}{}{}j)", format_complex_part(*re), sign, format_complex_part(im.abs()))
+                    format!(
+                        "({}{}{}j)",
+                        format_complex_part(*re),
+                        sign,
+                        format_complex_part(im.abs())
+                    )
                 }
             }
             PyObject::Str(s) => format!("'{}'", escape_string(s)),
             PyObject::Bytes(b) => {
-                let s: String = b.iter().map(|&byte| {
-                    match byte {
+                let s: String = b
+                    .iter()
+                    .map(|&byte| match byte {
                         b'\\' => "\\\\".to_string(),
                         b'\'' => "\\'".to_string(),
                         b'\n' => "\\n".to_string(),
@@ -503,13 +516,14 @@ impl PyObject {
                         b'\r' => "\\r".to_string(),
                         0x20..=0x7e => (byte as char).to_string(),
                         _ => format!("\\x{:02x}", byte),
-                    }
-                }).collect();
+                    })
+                    .collect();
                 format!("b'{}'", s)
             }
             PyObject::ByteArray(b) => {
-                let s: String = b.iter().map(|&byte| {
-                    match byte {
+                let s: String = b
+                    .iter()
+                    .map(|&byte| match byte {
                         b'\\' => "\\\\".to_string(),
                         b'\'' => "\\'".to_string(),
                         b'\n' => "\\n".to_string(),
@@ -517,8 +531,8 @@ impl PyObject {
                         b'\r' => "\\r".to_string(),
                         0x20..=0x7e => (byte as char).to_string(),
                         _ => format!("\\x{:02x}", byte),
-                    }
-                }).collect();
+                    })
+                    .collect();
                 format!("bytearray(b'{}')", s)
             }
             PyObject::List(items) => {
@@ -541,7 +555,9 @@ impl PyObject {
                 }
             }
             PyObject::Dict(d) => {
-                let items: Vec<String> = d.items().iter()
+                let items: Vec<String> = d
+                    .items()
+                    .iter()
                     .map(|(k, v)| format!("{}: {}", k.repr(), v.repr()))
                     .collect();
                 format!("{{{}}}", items.join(", "))
@@ -557,8 +573,11 @@ impl PyObject {
                 format!("frozenset({{{}}})", items.join(", "))
             }
             PyObject::Range { start, stop, step } => {
-                if *step == 1 { format!("range({}, {})", start, stop) }
-                else { format!("range({}, {}, {})", start, stop, step) }
+                if *step == 1 {
+                    format!("range({}, {})", start, stop)
+                } else {
+                    format!("range({}, {}, {})", start, stop, step)
+                }
             }
             PyObject::RangeIter { .. } => "<range_iterator object>".to_string(),
             PyObject::ListIter { .. } => "<list_iterator object>".to_string(),
@@ -584,17 +603,27 @@ impl PyObject {
             PyObject::Cell { value: Some(v) } => v.repr(),
             PyObject::Cell { value: None } => "None".to_string(),
             PyObject::Capsule { name, .. } => format!("<capsule object '{}'>", name),
-            PyObject::Exception { typ, args, cause: _ } => {
+            PyObject::Exception {
+                typ,
+                args,
+                cause: _,
+            } => {
                 let args_str: Vec<String> = args.iter().map(|a| a.repr()).collect();
                 format!("{}({})", typ, args_str.join(", "))
             }
-            PyObject::ExceptionGroup { typ, args, exceptions } => {
+            PyObject::ExceptionGroup {
+                typ,
+                args,
+                exceptions,
+            } => {
                 let args_str: Vec<String> = args.iter().map(|a| a.repr()).collect();
                 let exc_str: Vec<String> = exceptions.iter().map(|e| e.repr()).collect();
                 format!("{}({}, {})", typ, args_str.join(", "), exc_str.join(", "))
             }
             PyObject::BuildClass => "<builtin function __build_class__>".to_string(),
-            PyObject::BoundMethod { func, .. } => format!("<bound method {}>", func.borrow().type_name()),
+            PyObject::BoundMethod { func, .. } => {
+                format!("<bound method {}>", func.borrow().type_name())
+            }
             PyObject::Partial { func, .. } => format!("<partial {}>", func.borrow().type_name()),
             PyObject::File { name, .. } => format!("<_io.FileIO '{}'>", name),
             PyObject::Socket { .. } => format!("<socket object>"),
@@ -610,23 +639,42 @@ impl PyObject {
             PyObject::Generator { .. } => format!("<generator object>"),
             PyObject::Coroutine { .. } => format!("<coroutine object>"),
             PyObject::Array(arr) => {
-                let items: Vec<String> = arr.data.iter().map(|v| {
-                    if array_typecode_is_float(arr.typecode) {
-                        py_float(*v).repr()
-                    } else {
-                        py_int(*v as i64).repr()
-                    }
-                }).collect();
+                let items: Vec<String> = arr
+                    .data
+                    .iter()
+                    .map(|v| {
+                        if array_typecode_is_float(arr.typecode) {
+                            py_float(*v).repr()
+                        } else {
+                            py_int(*v as i64).repr()
+                        }
+                    })
+                    .collect();
                 format!("array('{}', [{}])", arr.typecode, items.join(", "))
-            },
-            PyObject::MemoryView { .. } => format!("<memory at 0x{:012x}>", self as *const PyObject as usize),
+            }
+            PyObject::MemoryView { .. } => {
+                format!("<memory at 0x{:012x}>", self as *const PyObject as usize)
+            }
             PyObject::CompiledRegex { pattern, .. } => format!("re.compile('{}')", pattern),
             PyObject::Closure(_) => "<builtin function>".to_string(),
             PyObject::FutureAwaitIterator { future, yielded } => {
-                format!("<future_await_iterator future={} yielded={}>", future.repr(), yielded)
+                format!(
+                    "<future_await_iterator future={} yielded={}>",
+                    future.repr(),
+                    yielded
+                )
             }
-            PyObject::Process { pid, returncode, .. } => {
-                format!("<Popen: returncode: {} args: [pid {}]>", returncode.borrow().map(|r| r.to_string()).unwrap_or_else(|| "None".to_string()), pid)
+            PyObject::Process {
+                pid, returncode, ..
+            } => {
+                format!(
+                    "<Popen: returncode: {} args: [pid {}]>",
+                    returncode
+                        .borrow()
+                        .map(|r| r.to_string())
+                        .unwrap_or_else(|| "None".to_string()),
+                    pid
+                )
             }
             PyObject::CycleIter { .. } => "<itertools.cycle object>".to_string(),
             PyObject::GroupByIter { .. } => "<itertools.groupby object>".to_string(),
@@ -648,7 +696,10 @@ impl PyObject {
             PyObject::Exception { args, .. } => match args.as_slice() {
                 [] => String::new(),
                 [one] => one.str(),
-                many => format!("({})", many.iter().map(|a| a.repr()).collect::<Vec<_>>().join(", ")),
+                many => format!(
+                    "({})",
+                    many.iter().map(|a| a.repr()).collect::<Vec<_>>().join(", ")
+                ),
             },
             _ => self.repr(),
         }
@@ -667,8 +718,14 @@ impl PyObject {
             PyObject::Dict(d) => !d.is_empty(),
             PyObject::Set(s) => !s.is_empty(),
             PyObject::FrozenSet(s) => !s.is_empty(),
-            PyObject::Range { start, stop, step } => *step > 0 && *start < *stop || *step < 0 && *start > *stop,
-            PyObject::RangeIter { current, stop, step } => *step > 0 && *current < *stop || *step < 0 && *current > *stop,
+            PyObject::Range { start, stop, step } => {
+                *step > 0 && *start < *stop || *step < 0 && *start > *stop
+            }
+            PyObject::RangeIter {
+                current,
+                stop,
+                step,
+            } => *step > 0 && *current < *stop || *step < 0 && *current > *stop,
             // Real CPython's `enumerate` object has no `__bool__`/`__len__`
             // at all — it's always truthy regardless of remaining items
             // (matches the default object truthiness rule). The previous
@@ -680,7 +737,14 @@ impl PyObject {
             PyObject::Instance { typ, dict } => {
                 let f = lookup_dunder_via_mro(typ, "__bool__");
                 if let Some(f) = f {
-                    if let Ok(result) = call_bound_method(f, PyObjectRef::new(PyObject::Instance { typ: typ.clone(), dict: dict.clone() }), vec![]) {
+                    if let Ok(result) = call_bound_method(
+                        f,
+                        PyObjectRef::new(PyObject::Instance {
+                            typ: typ.clone(),
+                            dict: dict.clone(),
+                        }),
+                        vec![],
+                    ) {
                         // See the matching comment in `PyObjectRef::truthy()`:
                         // a non-bool `__bool__` return (e.g. `return self`)
                         // must not recurse into `.truthy()` again — that
@@ -748,12 +812,13 @@ impl PyObject {
                     Ok(real_hash)
                 } else {
                     let imag_hash = PyObject::Float(*im).hash()?;
-                    let combined = (real_hash as i64).wrapping_add(1000003i64.wrapping_mul(imag_hash as i64));
+                    let combined =
+                        (real_hash as i64).wrapping_add(1000003i64.wrapping_mul(imag_hash as i64));
                     Ok((if combined == -1 { -2 } else { combined }) as usize)
                 }
             }
-             PyObject::Str(s) => Ok(py_hash_str(s)),
-             PyObject::Bytes(b) => Ok(py_hash_bytes(b)),
+            PyObject::Str(s) => Ok(py_hash_str(s)),
+            PyObject::Bytes(b) => Ok(py_hash_bytes(b)),
             PyObject::Range { start, stop, step } => {
                 let mut h: usize = 0x123456;
                 h = h.wrapping_mul(1000003).wrapping_add(*start as usize);
@@ -779,7 +844,14 @@ impl PyObject {
                 // Check for __hash__ method (walking the MRO)
                 let f = lookup_dunder_via_mro(typ, "__hash__");
                 if let Some(f) = f {
-                    let result = call_bound_method(f, PyObjectRef::new(PyObject::Instance { typ: typ.clone(), dict: dict.clone() }), vec![])?;
+                    let result = call_bound_method(
+                        f,
+                        PyObjectRef::new(PyObject::Instance {
+                            typ: typ.clone(),
+                            dict: dict.clone(),
+                        }),
+                        vec![],
+                    )?;
                     let n = result.borrow();
                     if let PyObject::Int(i) = &*n {
                         let bytes = i.to_signed_bytes_le();
@@ -794,7 +866,10 @@ impl PyObject {
                 } else if let Some(native) = dict.get(NATIVE_BACKING_KEY) {
                     native.hash()
                 } else {
-                    Err(PyError::type_error(format!("unhashable type: '{}'", self.type_name())))
+                    Err(PyError::type_error(format!(
+                        "unhashable type: '{}'",
+                        self.type_name()
+                    )))
                 }
             }
             PyObject::Array(arr) => {
@@ -840,14 +915,23 @@ impl PyObject {
             // object_with_only___getitem__)` (this interpreter's own
             // `GetItemIter`), and `iter(callable, sentinel)` (`
             // CallSentinelIter`).
-            PyObject::Function(_) | PyObject::BuiltinFunction { .. } | PyObject::BuiltinMethod { .. }
-            | PyObject::Type { .. } | PyObject::Module { .. } | PyObject::BoundMethod { .. }
-            | PyObject::EnumerateIter { .. } | PyObject::GetItemIter { .. } | PyObject::CallSentinelIter { .. }
-            | PyObject::ListIter { .. } | PyObject::RangeIter { .. } | PyObject::MapIterator { .. }
-            | PyObject::FilterIterator { .. } | PyObject::ZipIterator { .. } | PyObject::CycleIter { .. }
-            | PyObject::GroupByIter { .. } | PyObject::Socket { .. } => {
-                Ok(self as *const PyObject as usize)
-            }
+            PyObject::Function(_)
+            | PyObject::BuiltinFunction { .. }
+            | PyObject::BuiltinMethod { .. }
+            | PyObject::Type { .. }
+            | PyObject::Module { .. }
+            | PyObject::BoundMethod { .. }
+            | PyObject::EnumerateIter { .. }
+            | PyObject::GetItemIter { .. }
+            | PyObject::CallSentinelIter { .. }
+            | PyObject::ListIter { .. }
+            | PyObject::RangeIter { .. }
+            | PyObject::MapIterator { .. }
+            | PyObject::FilterIterator { .. }
+            | PyObject::ZipIterator { .. }
+            | PyObject::CycleIter { .. }
+            | PyObject::GroupByIter { .. }
+            | PyObject::Socket { .. } => Ok(self as *const PyObject as usize),
             // A READ-ONLY `memoryview` (over `bytes`) IS hashable in real
             // Python, hashing exactly like the equivalent `bytes` content
             // (`hash(memoryview(b'x')) == hash(b'x')`) — a WRITABLE one
@@ -863,14 +947,22 @@ impl PyObject {
                     // writable memoryview object"), it's specifically
                     // disallowed because a live view over mutable memory
                     // would violate hash-stability if the buffer changed.
-                    return Err(PyError::value_error("cannot hash writable memoryview object"));
+                    return Err(PyError::value_error(
+                        "cannot hash writable memoryview object",
+                    ));
                 }
                 let self_ref = PyObjectRef::new(self.clone());
                 let bytes = mv_tobytes(&self_ref)?;
                 PyObject::Bytes(bytes).hash()
             }
-            PyObject::Closure(_) => Err(PyError::type_error(format!("unhashable type: '{}'", self.type_name()))),
-            _ => Err(PyError::type_error(format!("unhashable type: '{}'", self.type_name()))),
+            PyObject::Closure(_) => Err(PyError::type_error(format!(
+                "unhashable type: '{}'",
+                self.type_name()
+            ))),
+            _ => Err(PyError::type_error(format!(
+                "unhashable type: '{}'",
+                self.type_name()
+            ))),
         }
     }
 
@@ -929,9 +1021,12 @@ impl PyObject {
                 return Ok(a == b);
             }
         }
-        let both_plain_ints = matches!(self, PyObject::Int(_)) && matches!(&*other, PyObject::Int(_));
+        let both_plain_ints =
+            matches!(self, PyObject::Int(_)) && matches!(&*other, PyObject::Int(_));
         if !both_plain_ints {
-            if let (Some(a_parts), Some(b_parts)) = (as_complex_parts(self), as_complex_parts(&*other)) {
+            if let (Some(a_parts), Some(b_parts)) =
+                (as_complex_parts(self), as_complex_parts(&*other))
+            {
                 return Ok(a_parts == b_parts);
             }
         }
@@ -943,7 +1038,8 @@ impl PyObject {
         // differently-tagged variants regardless of content — confirmed via
         // CPython's own `test_base64.py`.
         match (self, &*other) {
-            (PyObject::Bytes(a), PyObject::ByteArray(b)) | (PyObject::ByteArray(b), PyObject::Bytes(a)) => {
+            (PyObject::Bytes(a), PyObject::ByteArray(b))
+            | (PyObject::ByteArray(b), PyObject::Bytes(a)) => {
                 return Ok(a.as_slice() == b.as_slice());
             }
             _ => {}
@@ -973,13 +1069,22 @@ impl PyObject {
             (PyObject::Bytes(a), PyObject::Bytes(b)) => a == b,
             (PyObject::ByteArray(a), PyObject::ByteArray(b)) => a == b,
             (PyObject::Dict(a), PyObject::Dict(b)) => {
-                if a.len() != b.len() { false }
-                else {
+                if a.len() != b.len() {
+                    false
+                } else {
                     let mut eq = true;
                     for (k, va) in a.items() {
                         match b.get(&k) {
-                            Ok(Some(vb)) => { if !va.equals(&vb)? { eq = false; break; } }
-                            _ => { eq = false; break; }
+                            Ok(Some(vb)) => {
+                                if !va.equals(&vb)? {
+                                    eq = false;
+                                    break;
+                                }
+                            }
+                            _ => {
+                                eq = false;
+                                break;
+                            }
                         }
                     }
                     eq
@@ -987,10 +1092,15 @@ impl PyObject {
             }
             (PyObject::List(a), PyObject::List(b)) => {
                 let mut eq = true;
-                if a.len() != b.len() { eq = false; }
+                if a.len() != b.len() {
+                    eq = false;
+                }
                 if eq {
                     for (x, y) in a.iter().zip(b.iter()) {
-                        if !(x.is(y) || x.equals(y)?) { eq = false; break; }
+                        if !(x.is(y) || x.equals(y)?) {
+                            eq = false;
+                            break;
+                        }
                     }
                 }
                 eq
@@ -1001,52 +1111,101 @@ impl PyObject {
                 // True) and returns NotImplemented for non-deques (so
                 // `deque('abc') == ['a','b','c']` is False).
                 let mut eq = true;
-                if a.len() != b.len() { eq = false; }
+                if a.len() != b.len() {
+                    eq = false;
+                }
                 if eq {
                     for (x, y) in a.iter().zip(b.iter()) {
-                        if !(x.is(y) || x.equals(y)?) { eq = false; break; }
+                        if !(x.is(y) || x.equals(y)?) {
+                            eq = false;
+                            break;
+                        }
                     }
                 }
                 eq
             }
             (PyObject::Tuple(a), PyObject::Tuple(b)) => {
                 let mut eq = true;
-                if a.len() != b.len() { eq = false; }
+                if a.len() != b.len() {
+                    eq = false;
+                }
                 if eq {
                     for (x, y) in a.iter().zip(b.iter()) {
-                        if !(x.is(y) || x.equals(y)?) { eq = false; break; }
+                        if !(x.is(y) || x.equals(y)?) {
+                            eq = false;
+                            break;
+                        }
                     }
                 }
                 eq
             }
             (PyObject::Set(a), PyObject::Set(b)) => {
-                if a.len() != b.len() { false }
-                else {
+                if a.len() != b.len() {
+                    false
+                } else {
                     let mut eq = true;
                     for item in a.to_vec() {
-                        if !b.contains(&item).unwrap_or(false) { eq = false; break; }
+                        if !b.contains(&item).unwrap_or(false) {
+                            eq = false;
+                            break;
+                        }
                     }
                     eq
                 }
             }
             (PyObject::FrozenSet(a), PyObject::FrozenSet(b)) => {
-                if a.len() != b.len() { false }
-                else {
+                if a.len() != b.len() {
+                    false
+                } else {
                     let mut eq = true;
                     for item in a.to_vec() {
-                        if !b.contains(&item).unwrap_or(false) { eq = false; break; }
+                        if !b.contains(&item).unwrap_or(false) {
+                            eq = false;
+                            break;
+                        }
                     }
                     eq
                 }
             }
-            (PyObject::Array(a), PyObject::Array(b)) => a.typecode == b.typecode && a.data == b.data,
-            (PyObject::Slice { start: as_, stop: ae, step: ap }, PyObject::Slice { start: bs, stop: be, step: bp }) => {
-                as_.equals(bs)? && ae.equals(be)? && ap.equals(bp)?
+            (PyObject::Array(a), PyObject::Array(b)) => {
+                a.typecode == b.typecode && a.data == b.data
             }
-            (PyObject::Range { start: a, stop: ae, step: ap }, PyObject::Range { start: b, stop: be, step: bp }) => {
-                a == b && ae == be && ap == bp
-            }
-            (PyObject::CompiledRegex { pattern: a, flags: af, .. }, PyObject::CompiledRegex { pattern: b, flags: bf, .. }) => a == b && af == bf,
+            (
+                PyObject::Slice {
+                    start: as_,
+                    stop: ae,
+                    step: ap,
+                },
+                PyObject::Slice {
+                    start: bs,
+                    stop: be,
+                    step: bp,
+                },
+            ) => as_.equals(bs)? && ae.equals(be)? && ap.equals(bp)?,
+            (
+                PyObject::Range {
+                    start: a,
+                    stop: ae,
+                    step: ap,
+                },
+                PyObject::Range {
+                    start: b,
+                    stop: be,
+                    step: bp,
+                },
+            ) => a == b && ae == be && ap == bp,
+            (
+                PyObject::CompiledRegex {
+                    pattern: a,
+                    flags: af,
+                    ..
+                },
+                PyObject::CompiledRegex {
+                    pattern: b,
+                    flags: bf,
+                    ..
+                },
+            ) => a == b && af == bf,
             // Code objects compare structurally — real CPython's
             // `code.__eq__` does (test_codeop asserts `compile_command(src)
             // == compile(src, ...)`). Two separately compiled-but-identical

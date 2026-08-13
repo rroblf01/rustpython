@@ -202,7 +202,11 @@ impl Compiler {
     /// decided after this scope's body — and any further-nested scope — has
     /// already been compiled), so they must be listed explicitly here.
     fn enclosing_snapshot(code: &CodeObject) -> Vec<String> {
-        let mut names: Vec<String> = code.varnames.iter().map(|&id| crate::interner::lookup(id)).collect();
+        let mut names: Vec<String> = code
+            .varnames
+            .iter()
+            .map(|&id| crate::interner::lookup(id))
+            .collect();
         names.extend(code.freevars.iter().cloned());
         names
     }
@@ -303,7 +307,6 @@ impl Compiler {
 
     // ---- Closure analysis ----
 
-
     fn collect_names_expr(expr: &Expr, names: &mut HashSet<String>) {
         match expr {
             Expr::Name(n) => {
@@ -323,7 +326,10 @@ impl Compiler {
             // triggered by a different AST shape.
             Expr::FString(parts) => {
                 for part in parts {
-                    if let FStringPart::Expr { expr, format_spec, .. } = part {
+                    if let FStringPart::Expr {
+                        expr, format_spec, ..
+                    } = part
+                    {
                         Self::collect_names_expr(expr, names);
                         if let Some(fs) = format_spec {
                             Self::collect_names_expr(fs, names);
@@ -657,7 +663,13 @@ impl Compiler {
                     Self::collect_own_referenced_names_inner(body, names);
                     Self::collect_own_referenced_names_inner(orelse, names);
                 }
-                Stmt::For { target, iter, body, orelse, .. } => {
+                Stmt::For {
+                    target,
+                    iter,
+                    body,
+                    orelse,
+                    ..
+                } => {
                     Self::collect_names_expr(target, names);
                     Self::collect_names_expr(iter, names);
                     Self::collect_own_referenced_names_inner(body, names);
@@ -672,7 +684,13 @@ impl Compiler {
                     }
                     Self::collect_own_referenced_names_inner(body, names);
                 }
-                Stmt::Try { body, handlers, handlers_star, orelse, finalbody } => {
+                Stmt::Try {
+                    body,
+                    handlers,
+                    handlers_star,
+                    orelse,
+                    finalbody,
+                } => {
                     Self::collect_own_referenced_names_inner(body, names);
                     for h in handlers {
                         if let Some(t) = &h.typ {
@@ -719,7 +737,8 @@ impl Compiler {
                 }
                 Stmt::TypeAlias { value, .. } => Self::collect_names_expr(value, names),
                 Stmt::FunctionDef { .. } | Stmt::ClassDef { .. } => {}
-                Stmt::Import(_) | Stmt::ImportFrom { .. } | Stmt::Global(_) | Stmt::Nonlocal(_) => {}
+                Stmt::Import(_) | Stmt::ImportFrom { .. } | Stmt::Global(_) | Stmt::Nonlocal(_) => {
+                }
             }
         }
     }
@@ -772,7 +791,9 @@ impl Compiler {
         // must NOT be dragged in here.
         let mut all_outer_refs: HashSet<String> = nested_refs
             .iter()
-            .filter(|n| local_names.contains(*n) || enclosing_names.map_or(true, |en| en.contains(*n)))
+            .filter(|n| {
+                local_names.contains(*n) || enclosing_names.map_or(true, |en| en.contains(*n))
+            })
             .cloned()
             .collect();
         for name in &own_refs {
@@ -810,7 +831,10 @@ impl Compiler {
             .cloned()
             .collect();
         for name in all_outer_refs.intersection(&nested_refs) {
-            if !local_names.contains(name) && !effective_global.contains(name) && !cell_vars.contains(name) {
+            if !local_names.contains(name)
+                && !effective_global.contains(name)
+                && !cell_vars.contains(name)
+            {
                 cell_vars.push(name.clone());
             }
         }
@@ -917,7 +941,13 @@ impl Compiler {
                 // over the function's locals (Python skips class scopes when
                 // resolving enclosing references), so keep looking inside
                 // using the same local_names as our caller.
-                Stmt::ClassDef { bases, keywords, decorator_list, body, .. } => {
+                Stmt::ClassDef {
+                    bases,
+                    keywords,
+                    decorator_list,
+                    body,
+                    ..
+                } => {
                     // `bases`/`keywords`/`decorator_list` are ordinary
                     // expressions evaluated in the ENCLOSING scope at the
                     // point of the `class` statement itself (NOT inside the
@@ -990,30 +1020,108 @@ impl Compiler {
                 // took the same path regardless of the free var's real
                 // value, because index 0 pointed at a *cell* var instead.)
                 Stmt::If { body, orelse, .. } => {
-                    Self::collect_nested_refs_inner(body, local_names, global_names, nonlocal_names, refs);
-                    Self::collect_nested_refs_inner(orelse, local_names, global_names, nonlocal_names, refs);
+                    Self::collect_nested_refs_inner(
+                        body,
+                        local_names,
+                        global_names,
+                        nonlocal_names,
+                        refs,
+                    );
+                    Self::collect_nested_refs_inner(
+                        orelse,
+                        local_names,
+                        global_names,
+                        nonlocal_names,
+                        refs,
+                    );
                 }
                 Stmt::While { body, orelse, .. } => {
-                    Self::collect_nested_refs_inner(body, local_names, global_names, nonlocal_names, refs);
-                    Self::collect_nested_refs_inner(orelse, local_names, global_names, nonlocal_names, refs);
+                    Self::collect_nested_refs_inner(
+                        body,
+                        local_names,
+                        global_names,
+                        nonlocal_names,
+                        refs,
+                    );
+                    Self::collect_nested_refs_inner(
+                        orelse,
+                        local_names,
+                        global_names,
+                        nonlocal_names,
+                        refs,
+                    );
                 }
                 Stmt::For { body, orelse, .. } => {
-                    Self::collect_nested_refs_inner(body, local_names, global_names, nonlocal_names, refs);
-                    Self::collect_nested_refs_inner(orelse, local_names, global_names, nonlocal_names, refs);
+                    Self::collect_nested_refs_inner(
+                        body,
+                        local_names,
+                        global_names,
+                        nonlocal_names,
+                        refs,
+                    );
+                    Self::collect_nested_refs_inner(
+                        orelse,
+                        local_names,
+                        global_names,
+                        nonlocal_names,
+                        refs,
+                    );
                 }
                 Stmt::With { body, .. } => {
-                    Self::collect_nested_refs_inner(body, local_names, global_names, nonlocal_names, refs);
+                    Self::collect_nested_refs_inner(
+                        body,
+                        local_names,
+                        global_names,
+                        nonlocal_names,
+                        refs,
+                    );
                 }
-                Stmt::Try { body, handlers, handlers_star, orelse, finalbody } => {
-                    Self::collect_nested_refs_inner(body, local_names, global_names, nonlocal_names, refs);
+                Stmt::Try {
+                    body,
+                    handlers,
+                    handlers_star,
+                    orelse,
+                    finalbody,
+                } => {
+                    Self::collect_nested_refs_inner(
+                        body,
+                        local_names,
+                        global_names,
+                        nonlocal_names,
+                        refs,
+                    );
                     for h in handlers {
-                        Self::collect_nested_refs_inner(&h.body, local_names, global_names, nonlocal_names, refs);
+                        Self::collect_nested_refs_inner(
+                            &h.body,
+                            local_names,
+                            global_names,
+                            nonlocal_names,
+                            refs,
+                        );
                     }
                     for h in handlers_star {
-                        Self::collect_nested_refs_inner(&h.body, local_names, global_names, nonlocal_names, refs);
+                        Self::collect_nested_refs_inner(
+                            &h.body,
+                            local_names,
+                            global_names,
+                            nonlocal_names,
+                            refs,
+                        );
                     }
-                    Self::collect_nested_refs_inner(orelse, local_names, global_names, nonlocal_names, refs);
-                    Self::collect_nested_refs_inner(finalbody, local_names, global_names, nonlocal_names, refs);
+                    Self::collect_nested_refs_inner(
+                        orelse,
+                        local_names,
+                        global_names,
+                        nonlocal_names,
+                        refs,
+                    );
+                    Self::collect_nested_refs_inner(
+                        finalbody,
+                        local_names,
+                        global_names,
+                        nonlocal_names,
+                        refs,
+                    );
                 }
                 _ => {}
             }
@@ -1084,7 +1192,11 @@ impl Compiler {
             Stmt::Pass => {}
             Stmt::Break => {
                 let (end_label, is_for, cleanup) = if let Some(loop_info) = self.loop_stack.last() {
-                    (loop_info.end_label, loop_info.is_for, self.pending_cleanup[loop_info.cleanup_start..].to_vec())
+                    (
+                        loop_info.end_label,
+                        loop_info.is_for,
+                        self.pending_cleanup[loop_info.cleanup_start..].to_vec(),
+                    )
                 } else {
                     return Err("'break' outside loop".to_string());
                 };
@@ -1125,7 +1237,10 @@ impl Compiler {
             }
             Stmt::Continue => {
                 let (start_label, cleanup) = if let Some(loop_info) = self.loop_stack.last() {
-                    (loop_info.start_label, self.pending_cleanup[loop_info.cleanup_start..].to_vec())
+                    (
+                        loop_info.start_label,
+                        self.pending_cleanup[loop_info.cleanup_start..].to_vec(),
+                    )
                 } else {
                     return Err("'continue' outside loop".to_string());
                 };
@@ -1149,8 +1264,7 @@ impl Compiler {
                             // result (continue keeps the for-iterator).
                             self.emit(Opcode::POP_TOP, 0);
                         }
-                        PendingCleanup::Finally(_) => {
-                        }
+                        PendingCleanup::Finally(_) => {}
                     }
                 }
                 self.emit_backward_jump(start_label);
@@ -1312,12 +1426,12 @@ impl Compiler {
                             Operator::MatMult => 12,
                         };
                         self.emit(Opcode::BINARY_OP, bin_op + 100); // +100: in-place (see BINARY_OP's own doc comment)
-                        // Stack here is already [obj, sum] (obj pushed once,
-                        // duplicated for LOAD_ATTR, sum computed on top) —
-                        // exactly what STORE_ATTR expects. No SWAP needed;
-                        // unlike plain `x.attr = value` assignment (see
-                        // compile_assign_target), which pushes obj AFTER the
-                        // value and so must swap.
+                                                                    // Stack here is already [obj, sum] (obj pushed once,
+                                                                    // duplicated for LOAD_ATTR, sum computed on top) —
+                                                                    // exactly what STORE_ATTR expects. No SWAP needed;
+                                                                    // unlike plain `x.attr = value` assignment (see
+                                                                    // compile_assign_target), which pushes obj AFTER the
+                                                                    // value and so must swap.
                         self.emit(Opcode::STORE_ATTR, attr_idx);
                     }
                     Expr::Name(_) => {
@@ -1419,7 +1533,14 @@ impl Compiler {
                     is_for: true,
                 });
                 self.mark_label(start_label);
-                self.emit_jump(if *is_async { Opcode::FOR_ITER } else { Opcode::FOR_ITER }, else_label);
+                self.emit_jump(
+                    if *is_async {
+                        Opcode::FOR_ITER
+                    } else {
+                        Opcode::FOR_ITER
+                    },
+                    else_label,
+                );
                 self.compile_assign_target(target)?;
                 self.compile_stmts(body)?;
                 self.emit_backward_jump(start_label);
@@ -1538,9 +1659,9 @@ impl Compiler {
                 let kw_count = kw.len();
                 for k in kw {
                     // Push keyword name as a string constant
-                    let name_idx = self.get_const_index(
-                        ConstValue::String(k.arg.clone().unwrap_or_default())
-                    ) as u32;
+                    let name_idx = self
+                        .get_const_index(ConstValue::String(k.arg.clone().unwrap_or_default()))
+                        as u32;
                     self.emit(Opcode::LOAD_CONST, name_idx);
                     self.compile_expr(&k.value)?;
                 }
@@ -1716,7 +1837,8 @@ impl Compiler {
                                     }
                                     Expr::Attribute { value, attr } => {
                                         self.compile_expr(value)?;
-                                        let name_idx = self.get_name_index(&self.mangle_name(attr)) as u32;
+                                        let name_idx =
+                                            self.get_name_index(&self.mangle_name(attr)) as u32;
                                         self.emit(Opcode::DELETE_ATTR, name_idx);
                                     }
                                     Expr::Name(name) => {
@@ -1782,7 +1904,11 @@ impl Compiler {
                 orelse,
                 finalbody,
             } => {
-                if !finalbody.is_empty() && handlers.is_empty() && handlers_star.is_empty() && orelse.is_empty() {
+                if !finalbody.is_empty()
+                    && handlers.is_empty()
+                    && handlers_star.is_empty()
+                    && orelse.is_empty()
+                {
                     // Simple try/finally
                     let finally_label = self.new_label();
                     let end_label = self.new_label();
@@ -1790,7 +1916,8 @@ impl Compiler {
                     // Tracked so a `return` compiled inside `body` knows to
                     // inline a copy of `finalbody` first — see
                     // `pending_cleanup`'s doc comment.
-                    self.pending_cleanup.push(PendingCleanup::Finally(finalbody.clone()));
+                    self.pending_cleanup
+                        .push(PendingCleanup::Finally(finalbody.clone()));
                     let body_result = self.compile_stmts(body);
                     self.pending_cleanup.pop();
                     body_result?;
@@ -1816,7 +1943,8 @@ impl Compiler {
                     // Tracked so a `return` compiled inside `body`, any
                     // `handler.body`, or `orelse` knows to inline a copy of
                     // `finalbody` first — see `pending_cleanup`'s doc comment.
-                    self.pending_cleanup.push(PendingCleanup::Finally(finalbody.clone()));
+                    self.pending_cleanup
+                        .push(PendingCleanup::Finally(finalbody.clone()));
                     let body_result = self.compile_stmts(body);
                     body_result?;
                     self.emit(Opcode::POP_BLOCK, 0);
@@ -1919,10 +2047,10 @@ impl Compiler {
                         }
                     }
                     self.pending_cleanup.pop(); // PopExcept
-                    // except*: re-raise only the UNMATCHED exceptions. The
-                    // unmatched ExceptionGroup is on the value stack (pushed
-                    // by CHECK_EXC_MATCH_STAR); RERAISE must use it, not the
-                    // original exception still held in active_exception.
+                                                // except*: re-raise only the UNMATCHED exceptions. The
+                                                // unmatched ExceptionGroup is on the value stack (pushed
+                                                // by CHECK_EXC_MATCH_STAR); RERAISE must use it, not the
+                                                // original exception still held in active_exception.
                     self.emit(Opcode::CLEAR_EXCEPTION_INFO, 0);
                     self.emit(Opcode::RERAISE, 0);
                     self.fix_label(handler_done);
@@ -2057,8 +2185,8 @@ impl Compiler {
                         }
                     }
                     self.pending_cleanup.pop(); // PopExcept
-                    // except*: re-raise only the UNMATCHED exceptions (see
-                    // the sibling except* block's comment).
+                                                // except*: re-raise only the UNMATCHED exceptions (see
+                                                // the sibling except* block's comment).
                     self.emit(Opcode::CLEAR_EXCEPTION_INFO, 0);
                     self.emit(Opcode::RERAISE, 0);
                     self.fix_label(handler_done);
@@ -2091,8 +2219,7 @@ impl Compiler {
                 }
             }
             Stmt::Assert { test, msg } => {
-                let assertion_error_idx =
-                    self.get_name_index("AssertionError") as u32;
+                let assertion_error_idx = self.get_name_index("AssertionError") as u32;
                 self.emit(Opcode::LOAD_GLOBAL, assertion_error_idx);
                 self.compile_expr(test)?;
                 let ok_label = self.new_label();
@@ -2107,7 +2234,11 @@ impl Compiler {
                 self.fix_label(ok_label);
                 self.emit(Opcode::POP_TOP, 0);
             }
-            Stmt::With { items, body, is_async } => {
+            Stmt::With {
+                items,
+                body,
+                is_async,
+            } => {
                 // `with a, b, c: BODY` is exactly equivalent to nested
                 // single-item withs (`with a:\n with b:\n  with c:\n
                 // BODY`) — CPython desugars it the same way. Previously this
@@ -2125,8 +2256,16 @@ impl Compiler {
                 if items.len() > 1 {
                     let mut rest = items.clone();
                     let first = rest.remove(0);
-                    let inner = Stmt::With { items: rest, body: body.clone(), is_async: *is_async };
-                    self.compile_stmt(&Stmt::With { items: vec![first], body: vec![inner], is_async: *is_async })?;
+                    let inner = Stmt::With {
+                        items: rest,
+                        body: body.clone(),
+                        is_async: *is_async,
+                    };
+                    self.compile_stmt(&Stmt::With {
+                        items: vec![first],
+                        body: vec![inner],
+                        is_async: *is_async,
+                    })?;
                     return Ok(());
                 }
                 for (_i, item) in items.iter().enumerate() {
@@ -2224,7 +2363,8 @@ impl Compiler {
                         }
                         let ann_idx = self.get_name_index("__annotations__") as u32;
                         self.emit(Opcode::LOAD_NAME, ann_idx);
-                        let name_const = self.get_const_index(ConstValue::String(name.clone())) as u32;
+                        let name_const =
+                            self.get_const_index(ConstValue::String(name.clone())) as u32;
                         self.emit(Opcode::LOAD_CONST, name_const);
                         // Evaluating the annotation eagerly (this
                         // interpreter doesn't implement PEP 649/749's real
@@ -2330,7 +2470,9 @@ impl Compiler {
                         }
                         Pattern::MatchSequence(patterns) => {
                             // MatchSequence: check length and match elements
-                            let star_index = patterns.iter().position(|p| matches!(p, Pattern::MatchStar { .. }));
+                            let star_index = patterns
+                                .iter()
+                                .position(|p| matches!(p, Pattern::MatchStar { .. }));
                             self.emit(Opcode::DUP_TOP, 0);
                             // Get length of subject
                             let len_name_idx = self.get_name_index("len") as u32;
@@ -2340,7 +2482,9 @@ impl Compiler {
                             if let Some(si) = star_index {
                                 // With MatchStar: require len(subject) >= patterns.len() - 1
                                 let min_len = patterns.len() - 1;
-                                let length_const = self.get_const_index(ConstValue::Int(min_len.to_string())) as u32;
+                                let length_const = self
+                                    .get_const_index(ConstValue::Int(min_len.to_string()))
+                                    as u32;
                                 self.emit(Opcode::LOAD_CONST, length_const);
                                 self.emit(Opcode::COMPARE_OP, 5); // >=
                                 self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_case);
@@ -2371,33 +2515,37 @@ impl Compiler {
                                                 "True" => ConstValue::Bool(true),
                                                 "False" => ConstValue::Bool(false),
                                                 _ => ConstValue::String(s.clone()),
-                                            }) as u32;
+                                            })
+                                                as u32;
                                             self.emit(Opcode::LOAD_CONST, const_idx);
                                             self.emit(Opcode::COMPARE_OP, 8); // IS
                                             self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_case);
                                         }
-                                        Pattern::MatchStar { name } => {
-                                            match name {
-                                                Some(n) => {
-                                                    let idx = self.add_varname(n) as u32;
-                                                    self.emit(Opcode::STORE_FAST, idx);
-                                                }
-                                                None => {
-                                                    self.emit(Opcode::POP_TOP, 0);
-                                                }
+                                        Pattern::MatchStar { name } => match name {
+                                            Some(n) => {
+                                                let idx = self.add_varname(n) as u32;
+                                                self.emit(Opcode::STORE_FAST, idx);
                                             }
+                                            None => {
+                                                self.emit(Opcode::POP_TOP, 0);
+                                            }
+                                        },
+                                        _ => {
+                                            self.emit(Opcode::POP_TOP, 0);
                                         }
-                                        _ => { self.emit(Opcode::POP_TOP, 0); }
                                     }
                                 }
                             } else {
                                 // No MatchStar: exact length check + sequential extraction
-                                let length_const = self.get_const_index(ConstValue::Int(patterns.len().to_string())) as u32;
+                                let length_const = self
+                                    .get_const_index(ConstValue::Int(patterns.len().to_string()))
+                                    as u32;
                                 self.emit(Opcode::LOAD_CONST, length_const);
                                 self.emit(Opcode::COMPARE_OP, 2); // ==
                                 self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_case);
                                 for (i, pat) in patterns.iter().enumerate() {
-                                    let idx_const = self.get_const_index(ConstValue::Int(i.to_string())) as u32;
+                                    let idx_const =
+                                        self.get_const_index(ConstValue::Int(i.to_string())) as u32;
                                     self.emit(Opcode::DUP_TOP, 0);
                                     self.emit(Opcode::LOAD_CONST, idx_const);
                                     self.emit(Opcode::BINARY_OP, 13); // BINARY_SUBSCR
@@ -2420,12 +2568,15 @@ impl Compiler {
                                                 "True" => ConstValue::Bool(true),
                                                 "False" => ConstValue::Bool(false),
                                                 _ => ConstValue::String(s.clone()),
-                                            }) as u32;
+                                            })
+                                                as u32;
                                             self.emit(Opcode::LOAD_CONST, const_idx);
                                             self.emit(Opcode::COMPARE_OP, 8); // IS
                                             self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_case);
                                         }
-                                        _ => { self.emit(Opcode::POP_TOP, 0); }
+                                        _ => {
+                                            self.emit(Opcode::POP_TOP, 0);
+                                        }
                                     }
                                 }
                             }
@@ -2442,7 +2593,12 @@ impl Compiler {
                                     // Key must be a literal value
                                     let key_expr = match key_pat {
                                         Pattern::MatchValue(expr) => expr,
-                                        _ => return Err("Mapping pattern keys must be literal values".to_string()),
+                                        _ => {
+                                            return Err(
+                                                "Mapping pattern keys must be literal values"
+                                                    .to_string(),
+                                            )
+                                        }
                                     };
                                     // Check key in subject
                                     self.emit(Opcode::DUP_TOP, 0);
@@ -2453,7 +2609,7 @@ impl Compiler {
                                     self.emit(Opcode::DUP_TOP, 0);
                                     self.compile_expr(key_expr)?;
                                     self.emit(Opcode::BINARY_OP, 13); // BINARY_SUBSCR
-                                    // Match value against pattern
+                                                                      // Match value against pattern
                                     match val_pat {
                                         Pattern::MatchValue(val) => {
                                             self.compile_expr(val)?;
@@ -2473,19 +2629,26 @@ impl Compiler {
                                                 "True" => ConstValue::Bool(true),
                                                 "False" => ConstValue::Bool(false),
                                                 _ => ConstValue::String(s.clone()),
-                                            }) as u32;
+                                            })
+                                                as u32;
                                             self.emit(Opcode::LOAD_CONST, const_idx);
                                             self.emit(Opcode::COMPARE_OP, 8); // IS
                                             self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_case);
                                         }
                                         Pattern::MatchSequence(..) => {
                                             self.emit(Opcode::DUP_TOP, 0);
-                                            let list_idx = self.get_const_index(ConstValue::String("list".to_string())) as u32;
+                                            let list_idx = self.get_const_index(ConstValue::String(
+                                                "list".to_string(),
+                                            ))
+                                                as u32;
                                             self.emit(Opcode::LOAD_CONST, list_idx);
                                             self.emit(Opcode::CONTAINS_OP, 1);
                                             let seq_ok = self.new_label();
                                             self.emit_jump(Opcode::POP_JUMP_IF_TRUE, seq_ok);
-                                            let tuple_idx = self.get_const_index(ConstValue::String("tuple".to_string())) as u32;
+                                            let tuple_idx = self.get_const_index(
+                                                ConstValue::String("tuple".to_string()),
+                                            )
+                                                as u32;
                                             self.emit(Opcode::LOAD_CONST, tuple_idx);
                                             self.emit(Opcode::CONTAINS_OP, 1);
                                             self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_case);
@@ -2494,7 +2657,10 @@ impl Compiler {
                                         }
                                         Pattern::MatchMapping { .. } => {
                                             self.emit(Opcode::DUP_TOP, 0);
-                                            let dict_idx = self.get_const_index(ConstValue::String("dict".to_string())) as u32;
+                                            let dict_idx = self.get_const_index(ConstValue::String(
+                                                "dict".to_string(),
+                                            ))
+                                                as u32;
                                             self.emit(Opcode::LOAD_CONST, dict_idx);
                                             self.emit(Opcode::CONTAINS_OP, 1);
                                             self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_case);
@@ -2509,7 +2675,10 @@ impl Compiler {
                                                     Pattern::MatchValue(val) => {
                                                         self.compile_expr(val)?;
                                                         self.emit(Opcode::COMPARE_OP, 2);
-                                                        self.emit_jump(Opcode::POP_JUMP_IF_FALSE, try_next);
+                                                        self.emit_jump(
+                                                            Opcode::POP_JUMP_IF_FALSE,
+                                                            try_next,
+                                                        );
                                                         self.emit_jump(Opcode::JUMP, or_matched);
                                                     }
                                                     Pattern::MatchAs { name: Some(n), .. } => {
@@ -2517,7 +2686,9 @@ impl Compiler {
                                                         self.emit(Opcode::STORE_FAST, idx);
                                                         self.emit_jump(Opcode::JUMP, or_matched);
                                                     }
-                                                    _ => { self.emit(Opcode::POP_TOP, 0); }
+                                                    _ => {
+                                                        self.emit(Opcode::POP_TOP, 0);
+                                                    }
                                                 }
                                                 self.emit_label(try_next);
                                             }
@@ -2525,7 +2696,11 @@ impl Compiler {
                                             self.emit_label(or_matched);
                                             self.emit(Opcode::POP_TOP, 0);
                                         }
-                                        _ => return Err("Mapping sub-pattern not supported".to_string()),
+                                        _ => {
+                                            return Err(
+                                                "Mapping sub-pattern not supported".to_string()
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -2590,21 +2765,28 @@ impl Compiler {
                                             "True" => ConstValue::Bool(true),
                                             "False" => ConstValue::Bool(false),
                                             _ => ConstValue::String(s.clone()),
-                                        }) as u32;
+                                        })
+                                            as u32;
                                         self.emit(Opcode::LOAD_CONST, const_idx);
                                         self.emit(Opcode::COMPARE_OP, 8); // IS
                                         self.emit_jump(Opcode::POP_JUMP_IF_FALSE, try_next);
                                         self.emit_jump(Opcode::JUMP, or_matched);
                                         self.fix_label(try_next);
                                     }
-                                    Pattern::MatchClass { cls, patterns, kwd_attrs, kwd_patterns } => {
+                                    Pattern::MatchClass {
+                                        cls,
+                                        patterns,
+                                        kwd_attrs,
+                                        kwd_patterns,
+                                    } => {
                                         // Same isinstance-then-subpattern check as the
                                         // plain (non-Or) MatchClass arm below, but a
                                         // failure falls through to the next alternative
                                         // (try_next) instead of the next case.
                                         self.emit(Opcode::DUP_TOP, 0);
                                         let try_next = self.new_label();
-                                        let isinstance_idx = self.get_name_index("isinstance") as u32;
+                                        let isinstance_idx =
+                                            self.get_name_index("isinstance") as u32;
                                         self.emit(Opcode::LOAD_GLOBAL, isinstance_idx);
                                         self.emit(Opcode::SWAP, 1);
                                         self.compile_expr(cls)?;
@@ -2616,7 +2798,10 @@ impl Compiler {
                                                 Pattern::MatchValue(val) => {
                                                     self.compile_expr(val)?;
                                                     self.emit(Opcode::COMPARE_OP, 2);
-                                                    self.emit_jump(Opcode::POP_JUMP_IF_FALSE, try_next);
+                                                    self.emit_jump(
+                                                        Opcode::POP_JUMP_IF_FALSE,
+                                                        try_next,
+                                                    );
                                                 }
                                                 Pattern::MatchAs { name: Some(n), .. } => {
                                                     let idx = self.add_varname(n) as u32;
@@ -2625,10 +2810,14 @@ impl Compiler {
                                                 Pattern::MatchAs { name: None, .. } => {
                                                     self.emit(Opcode::POP_TOP, 0);
                                                 }
-                                                _ => { self.emit(Opcode::POP_TOP, 0); }
+                                                _ => {
+                                                    self.emit(Opcode::POP_TOP, 0);
+                                                }
                                             }
                                         }
-                                        for (kwd_attr, kwd_pat) in kwd_attrs.iter().zip(kwd_patterns.iter()) {
+                                        for (kwd_attr, kwd_pat) in
+                                            kwd_attrs.iter().zip(kwd_patterns.iter())
+                                        {
                                             self.emit(Opcode::DUP_TOP, 0);
                                             let attr_idx = self.get_name_index(kwd_attr) as u32;
                                             self.emit(Opcode::LOAD_ATTR, attr_idx);
@@ -2636,7 +2825,10 @@ impl Compiler {
                                                 Pattern::MatchValue(val) => {
                                                     self.compile_expr(val)?;
                                                     self.emit(Opcode::COMPARE_OP, 2);
-                                                    self.emit_jump(Opcode::POP_JUMP_IF_FALSE, try_next);
+                                                    self.emit_jump(
+                                                        Opcode::POP_JUMP_IF_FALSE,
+                                                        try_next,
+                                                    );
                                                 }
                                                 Pattern::MatchAs { name: Some(n), .. } => {
                                                     let idx = self.add_varname(n) as u32;
@@ -2645,7 +2837,9 @@ impl Compiler {
                                                 Pattern::MatchAs { name: None, .. } => {
                                                     self.emit(Opcode::POP_TOP, 0);
                                                 }
-                                                _ => { self.emit(Opcode::POP_TOP, 0); }
+                                                _ => {
+                                                    self.emit(Opcode::POP_TOP, 0);
+                                                }
                                             }
                                         }
                                         self.emit_jump(Opcode::JUMP, or_matched);
@@ -2668,7 +2862,12 @@ impl Compiler {
                             }
                             // Fall through to POP_TOP subject, body, JUMP end_label
                         }
-                        Pattern::MatchClass { cls, patterns, kwd_attrs, kwd_patterns } => {
+                        Pattern::MatchClass {
+                            cls,
+                            patterns,
+                            kwd_attrs,
+                            kwd_patterns,
+                        } => {
                             // MatchClass: check isinstance(subject, cls) then check attributes.
                             // isinstance(subject, cls) consumes its `subject` argument off the
                             // stack (CALL pops callable + args) — without this DUP_TOP first,
@@ -2708,7 +2907,8 @@ impl Compiler {
                                             "True" => ConstValue::Bool(true),
                                             "False" => ConstValue::Bool(false),
                                             _ => ConstValue::String(s.clone()),
-                                        }) as u32;
+                                        })
+                                            as u32;
                                         self.emit(Opcode::LOAD_CONST, const_idx);
                                         self.emit(Opcode::COMPARE_OP, 8); // IS
                                         self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_case);
@@ -2741,7 +2941,8 @@ impl Compiler {
                                             "True" => ConstValue::Bool(true),
                                             "False" => ConstValue::Bool(false),
                                             _ => ConstValue::String(s.clone()),
-                                        }) as u32;
+                                        })
+                                            as u32;
                                         self.emit(Opcode::LOAD_CONST, const_idx);
                                         self.emit(Opcode::COMPARE_OP, 8); // IS
                                         self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_case);
@@ -2901,12 +3102,10 @@ impl Compiler {
         });
 
         let body = if docstring.is_some() {
-            
             &body[1..]
         } else {
             body
         };
-        
 
         // Save outer code BEFORE enter_scope (which takes cellvars/freevars from self.code)
         let mut new_code = CodeObject::new(&name);
@@ -2922,7 +3121,8 @@ impl Compiler {
         self.annotations_initialized = false;
 
         self.enter_scope(ScopeType::Function);
-        self.varnames_stack.push(Self::enclosing_snapshot(&old_code));
+        self.varnames_stack
+            .push(Self::enclosing_snapshot(&old_code));
 
         // Pre-analyze the function to determine cell vars and free vars.
         // Use the nearest REAL enclosing function's varnames (skipping over
@@ -2942,8 +3142,13 @@ impl Compiler {
                 }
             }
         }
-        let (cell_vars, free_vars, local_names) =
-            Self::analyze_function(args, body, &self.global_names, &self.nonlocal_names, Some(&enclosing_varnames));
+        let (cell_vars, free_vars, local_names) = Self::analyze_function(
+            args,
+            body,
+            &self.global_names,
+            &self.nonlocal_names,
+            Some(&enclosing_varnames),
+        );
         self.code.cellvars = Box::new(cell_vars);
         self.code.freevars = Box::new(free_vars);
 
@@ -2996,7 +3201,10 @@ impl Compiler {
         self.code.kwonly_defaults_mask = Box::new(kwonly_defaults_mask);
         // Positional-only params (before `/` in the signature) are the FIRST
         // `posonlyarg_count` positional params.
-        self.code.posonlyarg_count = args.iter().take_while(|a| a.is_posonlyarg && !a.is_vararg && !a.is_kwarg && !a.is_kwonly).count();
+        self.code.posonlyarg_count = args
+            .iter()
+            .take_while(|a| a.is_posonlyarg && !a.is_vararg && !a.is_kwarg && !a.is_kwonly)
+            .count();
 
         // Add all args to varnames (including vararg/kwarg at the end) —
         // private names mangled so they match the body's mangled references.
@@ -3056,9 +3264,7 @@ impl Compiler {
             self.code.flags |= 0x100;
         }
 
-        
         self.compile_stmts(body)?;
-        
 
         // Implicit return None
         let has_return = body.iter().any(|s| matches!(s, Stmt::Return(_)));
@@ -3071,8 +3277,15 @@ impl Compiler {
         // Remember inner function's free vars for closure building
         let inner_free_vars = self.code.freevars.clone();
         let inner_cell_vars = self.code.cellvars.clone();
-        if std::env::var("RPY_DEBUG_COMPILE").is_ok() && std::env::var("RPY_DEBUG_COMPILE_NAME").map(|n| n == name).unwrap_or(false) {
-            eprintln!("  == {} instructions (cellvars={:?} freevars={:?} varnames={:?}) ==", name, inner_cell_vars, inner_free_vars, self.code.varnames);
+        if std::env::var("RPY_DEBUG_COMPILE").is_ok()
+            && std::env::var("RPY_DEBUG_COMPILE_NAME")
+                .map(|n| n == name)
+                .unwrap_or(false)
+        {
+            eprintln!(
+                "  == {} instructions (cellvars={:?} freevars={:?} varnames={:?}) ==",
+                name, inner_cell_vars, inner_free_vars, self.code.varnames
+            );
             for (i, instr) in self.code.instructions.iter().enumerate() {
                 eprintln!("    [{}] {:?} arg={}", i, instr.op, instr.arg);
             }
@@ -3115,18 +3328,18 @@ impl Compiler {
                     if self.get_var_index(fv_name).is_none() {
                         self.add_varname(fv_name);
                     }
-                }                // A name relayed from further out that we (as the
-                // intervening scope) also expose as one of our *own*
-                // cellvars purely so a nested function can see it (see
-                // `analyze_function`'s cell_vars doc comment) is present in
-                // BOTH lists here — but only the freevar slot actually
-                // holds the real, already-populated cell (received via our
-                // own closure); the cellvar slot is a fresh, empty one
-                // `MAKE_CELL` created at our own scope's start, never
-                // written to, since we only ever *read* the relayed value
-                // via the freevar path ourselves. Check freevars first so
-                // relaying threads the same real cell through, instead of
-                // handing a nested function an uninitialized one.
+                } // A name relayed from further out that we (as the
+                  // intervening scope) also expose as one of our *own*
+                  // cellvars purely so a nested function can see it (see
+                  // `analyze_function`'s cell_vars doc comment) is present in
+                  // BOTH lists here — but only the freevar slot actually
+                  // holds the real, already-populated cell (received via our
+                  // own closure); the cellvar slot is a fresh, empty one
+                  // `MAKE_CELL` created at our own scope's start, never
+                  // written to, since we only ever *read* the relayed value
+                  // via the freevar path ourselves. Check freevars first so
+                  // relaying threads the same real cell through, instead of
+                  // handing a nested function an uninitialized one.
                 if let Some(idx) = self.code.freevars.iter().position(|n| n == fv_name) {
                     let idx = self.code.cellvars.len() + idx;
                     self.emit(Opcode::LOAD_CLOSURE, idx as u32);
@@ -3140,7 +3353,10 @@ impl Compiler {
             self.emit(Opcode::BUILD_TUPLE, nfree as u32);
         }
 
-        let kwonly_defaults_count = args.iter().filter(|a| a.is_kwonly && a.default.is_some()).count();
+        let kwonly_defaults_count = args
+            .iter()
+            .filter(|a| a.is_kwonly && a.default.is_some())
+            .count();
         let mut make_func_arg = defaults_count as u32;
         if nfree > 0 {
             make_func_arg |= 1 << 8;
@@ -3190,7 +3406,9 @@ impl Compiler {
             let mut values: Vec<Expr> = Vec::new();
             for arg in args.iter() {
                 if let Some(annotation) = &arg.annotation {
-                    keys.push(Some(Expr::Constant(Constant::String(self.mangle_name(&arg.arg)))));
+                    keys.push(Some(Expr::Constant(Constant::String(
+                        self.mangle_name(&arg.arg),
+                    ))));
                     values.push((**annotation).clone());
                 }
             }
@@ -3257,8 +3475,6 @@ impl Compiler {
     }
 
     fn compile_class_body(&mut self, name: String, body: &[Stmt]) -> Result<(), String> {
-        
-
         // Skip docstring if first statement is a string literal
         let body = if let Some(Stmt::Expr(expr)) = body.first().map(Self::unwrap_located) {
             if matches!(expr.as_ref(), Expr::Constant(Constant::String(_))) {
@@ -3276,7 +3492,8 @@ impl Compiler {
         let mut new_class_code = CodeObject::new(&name);
         new_class_code.filename = self.code.filename.clone();
         let old_code = std::mem::replace(&mut self.code, new_class_code);
-        self.varnames_stack.push(Self::enclosing_snapshot(&old_code));
+        self.varnames_stack
+            .push(Self::enclosing_snapshot(&old_code));
 
         let old_labels = std::mem::replace(&mut self.labels, Vec::new());
         let old_label_stack = std::mem::replace(&mut self.label_stack, Vec::new());
@@ -3371,7 +3588,6 @@ impl Compiler {
 
         let inner_free_vars = self.code.freevars.clone();
 
-
         let func_code = std::mem::replace(&mut self.code, old_code);
         self.labels = old_labels;
         self.label_stack = old_label_stack;
@@ -3443,7 +3659,10 @@ impl Compiler {
                     Constant::String(s) => ConstValue::String(s.clone()),
                     Constant::Ellipsis => ConstValue::String("...".to_string()),
                     Constant::Bytes(b) => ConstValue::Bytes(b.clone()),
-                    Constant::Complex { real, imag } => ConstValue::Complex { real: real.clone(), imag: imag.clone() },
+                    Constant::Complex { real, imag } => ConstValue::Complex {
+                        real: real.clone(),
+                        imag: imag.clone(),
+                    },
                 };
                 let idx = self.get_const_index(const_value) as u32;
                 self.emit(Opcode::LOAD_CONST, idx);
@@ -3469,7 +3688,11 @@ impl Compiler {
                 // is a no-op outside a class body / for non-private names,
                 // so this is safe everywhere else.
                 let name = &self.mangle_name(name);
-                if std::env::var("RPY_DEBUG_COMPILE_NAME_RESOLVE").ok().as_deref() == Some(name.as_str()) {
+                if std::env::var("RPY_DEBUG_COMPILE_NAME_RESOLVE")
+                    .ok()
+                    .as_deref()
+                    == Some(name.as_str())
+                {
                     eprintln!("NAME_RESOLVE: name={} scope={:?} in_global_names={} freevars={:?} cellvars={:?}", name, self.scope, self.global_names.contains(name), self.code.freevars, self.code.cellvars);
                 }
                 if self.scope == ScopeType::Module
@@ -3477,38 +3700,52 @@ impl Compiler {
                     || self.global_names.contains(name)
                 {
                     let name_idx = self.get_name_index(name) as u32;
-                    
+
                     self.emit(Opcode::LOAD_NAME, name_idx);
                 } else if self.scope == ScopeType::Function && self.code.freevars.contains(name) {
                     let fv_idx = self.code.freevars.iter().position(|n| n == name).unwrap();
                     let idx = self.code.cellvars.len() + fv_idx;
-                    
+
                     self.emit(Opcode::LOAD_DEREF, idx as u32);
                 } else if self.scope == ScopeType::Function && self.code.cellvars.contains(name) {
                     let idx = self.code.cellvars.iter().position(|n| n == name).unwrap() as u32;
-                    
+
                     self.emit(Opcode::LOAD_DEREF, idx);
                 } else if self.scope == ScopeType::Function && self.get_var_index(name).is_some() {
                     let idx = self.get_var_index(name).unwrap() as u32;
-                    
+
                     self.emit(Opcode::LOAD_FAST, idx);
                 } else if self.scope == ScopeType::Function {
                     let name_idx = self.get_name_index(name) as u32;
-                    
+
                     self.emit(Opcode::LOAD_GLOBAL, name_idx);
                 } else {
                     let name_idx = self.get_name_index(name) as u32;
-                    
+
                     self.emit(Opcode::LOAD_NAME, name_idx);
                 }
             }
             Expr::BinOp { left, op, right } => {
                 // Constant folding: compute 3+4 etc. at compile time
-                if let (Expr::Constant(Constant::Int(a)), Expr::Constant(Constant::Int(b))) = (&**left, &**right) {
+                if let (Expr::Constant(Constant::Int(a)), Expr::Constant(Constant::Int(b))) =
+                    (&**left, &**right)
+                {
                     let result = match op {
-                        Operator::Add => a.parse::<i64>().ok().zip(b.parse::<i64>().ok()).map(|(x,y)| x + y),
-                        Operator::Sub => a.parse::<i64>().ok().zip(b.parse::<i64>().ok()).map(|(x,y)| x - y),
-                        Operator::Mult => a.parse::<i64>().ok().zip(b.parse::<i64>().ok()).map(|(x,y)| x * y),
+                        Operator::Add => a
+                            .parse::<i64>()
+                            .ok()
+                            .zip(b.parse::<i64>().ok())
+                            .map(|(x, y)| x + y),
+                        Operator::Sub => a
+                            .parse::<i64>()
+                            .ok()
+                            .zip(b.parse::<i64>().ok())
+                            .map(|(x, y)| x - y),
+                        Operator::Mult => a
+                            .parse::<i64>()
+                            .ok()
+                            .zip(b.parse::<i64>().ok())
+                            .map(|(x, y)| x * y),
                         _ => None,
                     };
                     if let Some(val) = result {
@@ -3542,7 +3779,12 @@ impl Compiler {
                 // test_annotations_constant_fold asserts exactly this in the
                 // __annotate__ code. Fold the same for `not (a is not b)`.
                 if let UnaryOp::Not = op {
-                    if let Expr::Compare { left, ops, comparators } = operand.as_ref() {
+                    if let Expr::Compare {
+                        left,
+                        ops,
+                        comparators,
+                    } = operand.as_ref()
+                    {
                         if ops.len() == 1 && comparators.len() == 1 {
                             match ops[0] {
                                 CmpOp::Is | CmpOp::IsNot => {
@@ -3681,7 +3923,8 @@ impl Compiler {
                     // vararg, which also supplies a usable first positional)
                     // is the real signal for "does this function have an
                     // actual first parameter to bind".
-                    let has_first_param = self.code.arg_count > 0 || self.code.vararg_name.is_some();
+                    let has_first_param =
+                        self.code.arg_count > 0 || self.code.vararg_name.is_some();
                     if self.scope == ScopeType::Function && has_first_param {
                         if let Some(class_name) = self.class_name_stack.last().cloned() {
                             self.compile_expr(func)?;
@@ -3691,7 +3934,8 @@ impl Compiler {
                             // LOAD_GLOBAL of the class name, which fails
                             // for a class defined inside a function (its
                             // name is a local there, not a global).
-                            let class_idx = self.code.freevars.iter().position(|n| n == "__class__");
+                            let class_idx =
+                                self.code.freevars.iter().position(|n| n == "__class__");
                             if let Some(fv_idx) = class_idx {
                                 let deref_idx = self.code.cellvars.len() + fv_idx;
                                 if std::env::var("RPY_DEBUG_SUPER").is_ok() {
@@ -3762,7 +4006,8 @@ impl Compiler {
                     self.emit(Opcode::BUILD_MAP, 0);
                     for kw in keywords {
                         if let Some(name) = &kw.arg {
-                            let name_idx = self.get_const_index(ConstValue::String(name.clone())) as u32;
+                            let name_idx =
+                                self.get_const_index(ConstValue::String(name.clone())) as u32;
                             self.emit(Opcode::LOAD_CONST, name_idx);
                             self.compile_expr(&kw.value)?;
                             self.emit(Opcode::MAP_ADD, 0);
@@ -3965,7 +4210,11 @@ impl Compiler {
                             self.compile_expr(&Expr::Constant(Constant::String(s.clone())))?;
                             count += 1;
                         }
-                        FStringPart::Expr { expr, conversion, format_spec } => {
+                        FStringPart::Expr {
+                            expr,
+                            conversion,
+                            format_spec,
+                        } => {
                             self.compile_expr(&expr)?;
                             if *conversion != 0 {
                                 self.emit(Opcode::CONVERT_VALUE, *conversion as u32);
@@ -4229,9 +4478,11 @@ fn contains_yield_in_stmts(stmts: &[Stmt]) -> bool {
             orelse,
             finalbody,
         } => {
-                contains_yield_in_stmts(body)
+            contains_yield_in_stmts(body)
                 || handlers.iter().any(|h| contains_yield_in_stmts(&h.body))
-                || handlers_star.iter().any(|h| contains_yield_in_stmts(&h.body))
+                || handlers_star
+                    .iter()
+                    .any(|h| contains_yield_in_stmts(&h.body))
                 || contains_yield_in_stmts(orelse)
                 || contains_yield_in_stmts(finalbody)
         }
@@ -4328,9 +4579,13 @@ fn contains_yield_in_expr(expr: &Expr) -> bool {
         // `collect_names_expr` for why treating the whole f-string as
         // opaque is wrong in general.
         Expr::FString(parts) => parts.iter().any(|p| match p {
-            FStringPart::Expr { expr, format_spec, .. } => {
+            FStringPart::Expr {
+                expr, format_spec, ..
+            } => {
                 contains_yield_in_expr(expr)
-                    || format_spec.as_ref().is_some_and(|fs| contains_yield_in_expr(fs))
+                    || format_spec
+                        .as_ref()
+                        .is_some_and(|fs| contains_yield_in_expr(fs))
             }
             FStringPart::String(_) => false,
         }),

@@ -7,7 +7,13 @@ pub fn create_select_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! sel_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
 
@@ -25,7 +31,11 @@ pub fn create_select_dict() -> HashMap<String, PyObjectRef> {
                 readable.push(item.clone());
             }
         }
-        Ok(py_tuple(vec![py_list(readable), py_list(vec![]), py_list(vec![])]))
+        Ok(py_tuple(vec![
+            py_list(readable),
+            py_list(vec![]),
+            py_list(vec![]),
+        ]))
     });
 
     d
@@ -35,14 +45,32 @@ pub fn create_socket_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! sock_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
 
     sock_func!("socket", |args| {
-        let family = if args.len() > 0 { args[0].as_i64().unwrap_or(2) } else { 2 };
-        let _sock_type = if args.len() > 1 { args[1].as_i64().unwrap_or(1) } else { 1 };
-        let _proto = if args.len() > 2 { args[2].as_i64().unwrap_or(0) } else { 0 };
+        let family = if args.len() > 0 {
+            args[0].as_i64().unwrap_or(2)
+        } else {
+            2
+        };
+        let _sock_type = if args.len() > 1 {
+            args[1].as_i64().unwrap_or(1)
+        } else {
+            1
+        };
+        let _proto = if args.len() > 2 {
+            args[2].as_i64().unwrap_or(0)
+        } else {
+            0
+        };
         if family != 2 {
             return Err(PyError::runtime_error("Only AF_INET sockets are supported"));
         }
@@ -76,7 +104,9 @@ pub fn create_socket_dict() -> HashMap<String, PyObjectRef> {
 
     sock_func!("gethostbyname", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("gethostbyname() missing required argument"));
+            return Err(PyError::type_error(
+                "gethostbyname() missing required argument",
+            ));
         }
         let hostname = args[0].str();
         if hostname == "localhost" || hostname == "127.0.0.1" {
@@ -111,25 +141,43 @@ thread_local! {
 /// `.stderr` as real instance attributes, matching real CPython's shape.
 fn get_called_process_error_type() -> PyObjectRef {
     let existing = CALLED_PROCESS_ERROR_TYPE.with(|c| c.borrow().clone());
-    if let Some(t) = existing { return t; }
+    if let Some(t) = existing {
+        return t;
+    }
     let mut type_dict: HashMap<String, PyObjectRef> = HashMap::new();
-    type_dict.insert_str("__str__", PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "__str__".to_string(),
-        func: |args| {
-            if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
-                let rc = dict.get_str("returncode").and_then(|v| v.as_i64()).unwrap_or(-1);
-                let cmd = dict.get_str("cmd").map(|v| v.str()).unwrap_or_default();
-                Ok(py_str(&format!("Command '{}' returned non-zero exit status {}.", cmd, rc)))
-            } else { Ok(py_str("")) }
-        },
-    }));
+    type_dict.insert_str(
+        "__str__",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__str__".to_string(),
+            func: |args| {
+                if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+                    let rc = dict
+                        .get_str("returncode")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(-1);
+                    let cmd = dict.get_str("cmd").map(|v| v.str()).unwrap_or_default();
+                    Ok(py_str(&format!(
+                        "Command '{}' returned non-zero exit status {}.",
+                        cmd, rc
+                    )))
+                } else {
+                    Ok(py_str(""))
+                }
+            },
+        }),
+    );
     // No native `Exception` PyObject::Type exists to list as a real base
     // here (builtin exceptions are represented as `BuiltinFunction`
     // markers elsewhere, not `Type`s) — `except CalledProcessError:`
     // matches by exact class identity via the normal Instance/Type MRO
     // walk regardless, so this is enough for the common case, just not
     // also catchable via a bare `except Exception:`.
-    let typ = PyObjectRef::new(PyObject::Type { name: "CalledProcessError".to_string(), dict: Box::new(str_map_to_typedict(type_dict)), bases: vec![], mro: vec![] });
+    let typ = PyObjectRef::new(PyObject::Type {
+        name: "CalledProcessError".to_string(),
+        dict: Box::new(str_map_to_typedict(type_dict)),
+        bases: vec![],
+        mro: vec![],
+    });
     // A class's own `mro` must include ITSELF (real Python: `C.__mro__[0]
     // is C`) — `except CalledProcessError as e:`'s matching walks
     // `instance.typ`'s `mro` looking for the `except` clause's referenced
@@ -139,18 +187,28 @@ fn get_called_process_error_type() -> PyObjectRef {
     if let PyObject::Type { mro, .. } = &mut *typ.borrow_mut() {
         *mro = vec![typ.clone()];
     }
-    CALLED_PROCESS_ERROR_TYPE.with(|c| { *c.borrow_mut() = Some(typ.clone()); });
+    CALLED_PROCESS_ERROR_TYPE.with(|c| {
+        *c.borrow_mut() = Some(typ.clone());
+    });
     typ
 }
 
-fn make_called_process_error(returncode: i64, cmd: &str, output: Vec<u8>, stderr: Vec<u8>) -> PyObjectRef {
+fn make_called_process_error(
+    returncode: i64,
+    cmd: &str,
+    output: Vec<u8>,
+    stderr: Vec<u8>,
+) -> PyObjectRef {
     let mut dict = crate::object::AttrMap::new();
     dict.insert_str("returncode", py_int(returncode));
     dict.insert_str("cmd", py_str(cmd));
     dict.insert_str("output", PyObjectRef::imm(PyObject::Bytes(output.clone())));
     dict.insert_str("stdout", PyObjectRef::imm(PyObject::Bytes(output)));
     dict.insert_str("stderr", PyObjectRef::imm(PyObject::Bytes(stderr)));
-    PyObjectRef::new(PyObject::Instance { typ: get_called_process_error_type(), dict })
+    PyObjectRef::new(PyObject::Instance {
+        typ: get_called_process_error_type(),
+        dict,
+    })
 }
 
 thread_local! {
@@ -168,56 +226,102 @@ thread_local! {
 /// not a plain marker.
 fn get_completed_process_type() -> PyObjectRef {
     let existing = COMPLETED_PROCESS_TYPE.with(|c| c.borrow().clone());
-    if let Some(t) = existing { return t; }
+    if let Some(t) = existing {
+        return t;
+    }
     let mut type_dict: HashMap<String, PyObjectRef> = HashMap::new();
-    type_dict.insert_str("__repr__", PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "__repr__".to_string(),
-        func: |args| {
-            if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
-                let rc = dict.get_str("returncode").and_then(|v| v.as_i64()).unwrap_or(0);
-                let args_repr = dict.get_str("args").map(|v| v.repr()).unwrap_or_default();
-                Ok(py_str(&format!("CompletedProcess(args={}, returncode={})", args_repr, rc)))
-            } else { Ok(py_str("CompletedProcess(...)")) }
-        },
-    }));
-    type_dict.insert_str("check_returncode", PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "check_returncode".to_string(),
-        func: |args| {
-            if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
-                let rc = dict.get_str("returncode").and_then(|v| v.as_i64()).unwrap_or(0);
-                if rc != 0 {
-                    let cmd = dict.get_str("args").map(|v| v.str()).unwrap_or_default();
-                    let stdout = dict.get_str("stdout").map(|v| v.str().into_bytes()).unwrap_or_default();
-                    let stderr = dict.get_str("stderr").map(|v| v.str().into_bytes()).unwrap_or_default();
-                    let err = make_called_process_error(rc, &cmd, stdout, stderr);
-                    return Err(PyError::Exception("CalledProcessError".to_string(), err));
+    type_dict.insert_str(
+        "__repr__",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__repr__".to_string(),
+            func: |args| {
+                if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+                    let rc = dict
+                        .get_str("returncode")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+                    let args_repr = dict.get_str("args").map(|v| v.repr()).unwrap_or_default();
+                    Ok(py_str(&format!(
+                        "CompletedProcess(args={}, returncode={})",
+                        args_repr, rc
+                    )))
+                } else {
+                    Ok(py_str("CompletedProcess(...)"))
                 }
-            }
-            Ok(py_none())
-        },
-    }));
-    let typ = PyObjectRef::new(PyObject::Type { name: "CompletedProcess".to_string(), dict: Box::new(str_map_to_typedict(type_dict)), bases: vec![], mro: vec![] });
+            },
+        }),
+    );
+    type_dict.insert_str(
+        "check_returncode",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "check_returncode".to_string(),
+            func: |args| {
+                if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+                    let rc = dict
+                        .get_str("returncode")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+                    if rc != 0 {
+                        let cmd = dict.get_str("args").map(|v| v.str()).unwrap_or_default();
+                        let stdout = dict
+                            .get_str("stdout")
+                            .map(|v| v.str().into_bytes())
+                            .unwrap_or_default();
+                        let stderr = dict
+                            .get_str("stderr")
+                            .map(|v| v.str().into_bytes())
+                            .unwrap_or_default();
+                        let err = make_called_process_error(rc, &cmd, stdout, stderr);
+                        return Err(PyError::Exception("CalledProcessError".to_string(), err));
+                    }
+                }
+                Ok(py_none())
+            },
+        }),
+    );
+    let typ = PyObjectRef::new(PyObject::Type {
+        name: "CompletedProcess".to_string(),
+        dict: Box::new(str_map_to_typedict(type_dict)),
+        bases: vec![],
+        mro: vec![],
+    });
     if let PyObject::Type { mro, .. } = &mut *typ.borrow_mut() {
         *mro = vec![typ.clone()];
     }
-    COMPLETED_PROCESS_TYPE.with(|c| { *c.borrow_mut() = Some(typ.clone()); });
+    COMPLETED_PROCESS_TYPE.with(|c| {
+        *c.borrow_mut() = Some(typ.clone());
+    });
     typ
 }
 
-fn make_completed_process(cmd_args: PyObjectRef, returncode: i64, stdout: PyObjectRef, stderr: PyObjectRef) -> PyObjectRef {
+fn make_completed_process(
+    cmd_args: PyObjectRef,
+    returncode: i64,
+    stdout: PyObjectRef,
+    stderr: PyObjectRef,
+) -> PyObjectRef {
     let mut dict = crate::object::AttrMap::new();
     dict.insert_str("args", cmd_args);
     dict.insert_str("returncode", py_int(returncode));
     dict.insert_str("stdout", stdout);
     dict.insert_str("stderr", stderr);
-    PyObjectRef::new(PyObject::Instance { typ: get_completed_process_type(), dict })
+    PyObjectRef::new(PyObject::Instance {
+        typ: get_completed_process_type(),
+        dict,
+    })
 }
 
 pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! sub_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
     d.insert_str("CalledProcessError", get_called_process_error_type());
@@ -242,8 +346,14 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
         match args.last() {
             Some(last) if matches!(&*last.borrow(), PyObject::Dict(_)) => {
                 if let PyObject::Dict(d) = &*last.borrow() {
-                    d.get(&py_str(name)).ok().flatten().map(|v| v.truthy()).unwrap_or(false)
-                } else { false }
+                    d.get(&py_str(name))
+                        .ok()
+                        .flatten()
+                        .map(|v| v.truthy())
+                        .unwrap_or(false)
+                } else {
+                    false
+                }
             }
             _ => false,
         }
@@ -251,7 +361,10 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
 
     // Extract a keyword dict argument (e.g. `env=`) from the trailing
     // kwargs pack.
-    fn kwarg_dict(args: &[PyObjectRef], name: &str) -> Option<std::collections::HashMap<String, String>> {
+    fn kwarg_dict(
+        args: &[PyObjectRef],
+        name: &str,
+    ) -> Option<std::collections::HashMap<String, String>> {
         match args.last() {
             Some(last) if matches!(&*last.borrow(), PyObject::Dict(_)) => {
                 if let PyObject::Dict(d) = &*last.borrow() {
@@ -313,13 +426,20 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
         let returncode = output.status.code().unwrap_or(-1) as i64;
         let stdout_str = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr_str = String::from_utf8_lossy(&output.stderr).to_string();
-        Ok(make_completed_process(args[0].clone(), returncode, py_str(&stdout_str), py_str(&stderr_str)))
+        Ok(make_completed_process(
+            args[0].clone(),
+            returncode,
+            py_str(&stdout_str),
+            py_str(&stderr_str),
+        ))
     });
 
     sub_func!("check_call", |args| {
         // Run a command and check return code
         if args.is_empty() {
-            return Err(PyError::type_error("check_call() missing required argument"));
+            return Err(PyError::type_error(
+                "check_call() missing required argument",
+            ));
         }
         let cmd_str = args[0].str();
         let shell = kwarg_bool(args, "shell");
@@ -343,7 +463,9 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
                 cmd_str.split_whitespace().map(|s| s.to_string()).collect()
             };
             if cmd_args.is_empty() {
-                return Err(PyError::type_error("check_call() requires a non-empty command"));
+                return Err(PyError::type_error(
+                    "check_call() requires a non-empty command",
+                ));
             }
             let mut cmd = std::process::Command::new(&cmd_args[0]);
             cmd.args(&cmd_args[1..]);
@@ -352,14 +474,19 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
         };
         let returncode = output.status.code().unwrap_or(-1);
         if returncode != 0 {
-            return Err(PyError::runtime_error(format!("Command returned non-zero exit status {}", returncode)));
+            return Err(PyError::runtime_error(format!(
+                "Command returned non-zero exit status {}",
+                returncode
+            )));
         }
         Ok(py_none())
     });
 
     sub_func!("check_output", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("check_output() missing required argument"));
+            return Err(PyError::type_error(
+                "check_output() missing required argument",
+            ));
         }
         let shell = kwarg_bool(args, "shell");
         let cmd_str = args[0].str();
@@ -387,8 +514,12 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
         };
         if !output.status.success() {
             let rc = output.status.code().unwrap_or(-1) as i64;
-            let instance = make_called_process_error(rc, &args[0].str(), output.stdout, output.stderr);
-            return Err(PyError::Exception("CalledProcessError".to_string(), instance));
+            let instance =
+                make_called_process_error(rc, &args[0].str(), output.stdout, output.stderr);
+            return Err(PyError::Exception(
+                "CalledProcessError".to_string(),
+                instance,
+            ));
         }
         // Return stdout as bytes
         Ok(PyObjectRef::imm(PyObject::Bytes(output.stdout)))
@@ -424,10 +555,22 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
     // inherited (matching real Python's own `None` default).
     sub_func!("Popen", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("Popen() missing required argument 'args'"));
+            return Err(PyError::type_error(
+                "Popen() missing required argument 'args'",
+            ));
         }
-        let kwargs = args.last().and_then(|a| if let PyObject::Dict(d) = &*a.borrow() { Some(d.clone()) } else { None });
-        let get_kw = |name: &str| kwargs.as_ref().and_then(|d| d.get(&py_str(name)).ok().flatten());
+        let kwargs = args.last().and_then(|a| {
+            if let PyObject::Dict(d) = &*a.borrow() {
+                Some(d.clone())
+            } else {
+                None
+            }
+        });
+        let get_kw = |name: &str| {
+            kwargs
+                .as_ref()
+                .and_then(|d| d.get(&py_str(name)).ok().flatten())
+        };
         let shell = get_kw("shell").map(|v| v.truthy()).unwrap_or(false);
         let cmd_arg = &args[0];
 
@@ -438,7 +581,9 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
             c
         } else {
             let cmd_args: Vec<String> = match &*cmd_arg.borrow() {
-                PyObject::List(items) | PyObject::Tuple(items) => items.iter().map(|a| a.str()).collect(),
+                PyObject::List(items) | PyObject::Tuple(items) => {
+                    items.iter().map(|a| a.str()).collect()
+                }
                 _ => vec![cmd_arg.str()],
             };
             if cmd_args.is_empty() {
@@ -482,7 +627,9 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
         // "stderr = stdout" `Stdio`, so build a socketpair, hand BOTH the
         // child's stdout and stderr the same write end, and expose the read
         // end as both `.stdout` and `.stderr`.
-        let stderr_is_stdout = get_kw("stderr").map(|v| v.as_i64() == Some(-2)).unwrap_or(false);
+        let stderr_is_stdout = get_kw("stderr")
+            .map(|v| v.as_i64() == Some(-2))
+            .unwrap_or(false);
         let mut merged_read_end: Option<std::rc::Rc<std::cell::RefCell<std::fs::File>>> = None;
         if stderr_is_stdout {
             use std::os::fd::OwnedFd;
@@ -491,21 +638,33 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
                 let write2 = write_sock.try_clone();
                 let read_file = unsafe { std::fs::File::from_raw_fd(read_sock.into_raw_fd()) };
                 merged_read_end = Some(std::rc::Rc::new(std::cell::RefCell::new(read_file)));
-                command.stdout(std::process::Stdio::from(unsafe { OwnedFd::from_raw_fd(write_sock.into_raw_fd()) }));
+                command.stdout(std::process::Stdio::from(unsafe {
+                    OwnedFd::from_raw_fd(write_sock.into_raw_fd())
+                }));
                 if let Ok(w2) = write2 {
-                    command.stderr(std::process::Stdio::from(unsafe { OwnedFd::from_raw_fd(w2.into_raw_fd()) }));
+                    command.stderr(std::process::Stdio::from(unsafe {
+                        OwnedFd::from_raw_fd(w2.into_raw_fd())
+                    }));
                 } else {
                     command.stderr(std::process::Stdio::null());
                 }
             }
         }
-        if let Some(v) = get_kw("stdin") { command.stdin(stdio_for(&v)); }
+        if let Some(v) = get_kw("stdin") {
+            command.stdin(stdio_for(&v));
+        }
         if !stderr_is_stdout {
-            if let Some(v) = get_kw("stdout") { command.stdout(stdio_for(&v)); }
+            if let Some(v) = get_kw("stdout") {
+                command.stdout(stdio_for(&v));
+            }
             if let Some(v) = get_kw("stderr") {
                 match v.as_i64() {
-                    Some(-2) => { command.stderr(std::process::Stdio::piped()); }
-                    _ => { command.stderr(stdio_for(&v)); }
+                    Some(-2) => {
+                        command.stderr(std::process::Stdio::piped());
+                    }
+                    _ => {
+                        command.stderr(stdio_for(&v));
+                    }
                 }
             }
         }
@@ -516,7 +675,7 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
         // `.stderr` expose real, readable/writable file objects (not dummy
         // /dev/null — the interactive REPL tests write a statement then
         // read the prompt back, which needs the actual pipe).
-        use std::os::unix::io::{IntoRawFd, FromRawFd};
+        use std::os::unix::io::{FromRawFd, IntoRawFd};
         let wrap_pipe = |p: Option<std::process::ChildStdout>| -> Option<std::rc::Rc<std::cell::RefCell<std::fs::File>>> {
             p.map(|s| std::rc::Rc::new(std::cell::RefCell::new(unsafe { std::fs::File::from_raw_fd(s.into_raw_fd()) })))
         };
@@ -529,7 +688,10 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
         let (stdout_pipe, stderr_pipe) = if let Some(m) = merged_read_end {
             (Some(m.clone()), Some(m))
         } else {
-            (wrap_pipe(child.stdout.take()), wrap_pipe_err(child.stderr.take()))
+            (
+                wrap_pipe(child.stdout.take()),
+                wrap_pipe_err(child.stderr.take()),
+            )
         };
         let stdin_pipe = wrap_pipe_in(child.stdin.take());
         Ok(PyObjectRef::new(PyObject::Process {
@@ -569,7 +731,13 @@ pub fn create_html_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! html_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
 
@@ -605,7 +773,7 @@ pub fn create_html_dict() -> HashMap<String, PyObjectRef> {
             if chars[i] == '&' {
                 // Find the closing semicolon
                 if let Some(end) = chars[i..].iter().position(|&c| c == ';') {
-                    let entity: String = chars[i+1..i+end].iter().collect();
+                    let entity: String = chars[i + 1..i + end].iter().collect();
                     let decoded: Option<String> = match entity.as_str() {
                         "amp" => Some("&".to_string()),
                         "lt" => Some("<".to_string()),
@@ -616,12 +784,15 @@ pub fn create_html_dict() -> HashMap<String, PyObjectRef> {
                         _ => {
                             // Try numeric character reference
                             if entity.starts_with('#') {
-                                let codepoint: Option<u32> = if entity.starts_with("#x") || entity.starts_with("#X") {
-                                    u32::from_str_radix(&entity[2..], 16).ok()
-                                } else {
-                                    entity[1..].parse().ok()
-                                };
-                                codepoint.and_then(|cp| char::from_u32(cp)).map(|c| c.to_string())
+                                let codepoint: Option<u32> =
+                                    if entity.starts_with("#x") || entity.starts_with("#X") {
+                                        u32::from_str_radix(&entity[2..], 16).ok()
+                                    } else {
+                                        entity[1..].parse().ok()
+                                    };
+                                codepoint
+                                    .and_then(|cp| char::from_u32(cp))
+                                    .map(|c| c.to_string())
                             } else {
                                 None
                             }
@@ -648,69 +819,197 @@ pub fn create_html_entities_dict() -> HashMap<String, PyObjectRef> {
 
     // Build the html5 dict of entity name -> character
     let pairs: &[(&str, &str)] = &[
-        ("amp", "&"), ("lt", "<"), ("gt", ">"), ("quot", "\""), ("apos", "'"),
-        ("nbsp", "\u{00A0}"), ("iexcl", "\u{00A1}"), ("cent", "\u{00A2}"),
-        ("pound", "\u{00A3}"), ("curren", "\u{00A4}"), ("yen", "\u{00A5}"),
-        ("brvbar", "\u{00A6}"), ("sect", "\u{00A7}"), ("uml", "\u{00A8}"),
-        ("copy", "\u{00A9}"), ("ordf", "\u{00AA}"), ("laquo", "\u{00AB}"),
-        ("not", "\u{00AC}"), ("shy", "\u{00AD}"), ("reg", "\u{00AE}"),
-        ("macr", "\u{00AF}"), ("deg", "\u{00B0}"), ("plusmn", "\u{00B1}"),
-        ("sup2", "\u{00B2}"), ("sup3", "\u{00B3}"), ("acute", "\u{00B4}"),
-        ("micro", "\u{00B5}"), ("para", "\u{00B6}"), ("middot", "\u{00B7}"),
-        ("cedil", "\u{00B8}"), ("sup1", "\u{00B9}"), ("ordm", "\u{00BA}"),
-        ("raquo", "\u{00BB}"), ("frac14", "\u{00BC}"), ("frac12", "\u{00BD}"),
-        ("frac34", "\u{00BE}"), ("iquest", "\u{00BF}"), ("times", "\u{00D7}"),
-        ("divide", "\u{00F7}"), ("OElig", "\u{0152}"), ("oelig", "\u{0153}"),
-        ("Scaron", "\u{0160}"), ("scaron", "\u{0161}"), ("Yuml", "\u{0178}"),
-        ("fnof", "\u{0192}"), ("circ", "\u{02C6}"), ("tilde", "\u{02DC}"),
-        ("Alpha", "\u{0391}"), ("Beta", "\u{0392}"), ("Gamma", "\u{0393}"),
-        ("Delta", "\u{0394}"), ("Epsilon", "\u{0395}"), ("Zeta", "\u{0396}"),
-        ("Eta", "\u{0397}"), ("Theta", "\u{0398}"), ("Iota", "\u{0399}"),
-        ("Kappa", "\u{039A}"), ("Lambda", "\u{039B}"), ("Mu", "\u{039C}"),
-        ("Nu", "\u{039D}"), ("Xi", "\u{039E}"), ("Omicron", "\u{039F}"),
-        ("Pi", "\u{03A0}"), ("Rho", "\u{03A1}"), ("Sigma", "\u{03A3}"),
-        ("Tau", "\u{03A4}"), ("Upsilon", "\u{03A5}"), ("Phi", "\u{03A6}"),
-        ("Chi", "\u{03A7}"), ("Psi", "\u{03A8}"), ("Omega", "\u{03A9}"),
-        ("alpha", "\u{03B1}"), ("beta", "\u{03B2}"), ("gamma", "\u{03B3}"),
-        ("delta", "\u{03B4}"), ("epsilon", "\u{03B5}"), ("zeta", "\u{03B6}"),
-        ("eta", "\u{03B7}"), ("theta", "\u{03B8}"), ("iota", "\u{03B9}"),
-        ("kappa", "\u{03BA}"), ("lambda", "\u{03BB}"), ("mu", "\u{03BC}"),
-        ("nu", "\u{03BD}"), ("xi", "\u{03BE}"), ("omicron", "\u{03BF}"),
-        ("pi", "\u{03C0}"), ("rho", "\u{03C1}"), ("sigmaf", "\u{03C2}"),
-        ("sigma", "\u{03C3}"), ("tau", "\u{03C4}"), ("upsilon", "\u{03C5}"),
-        ("phi", "\u{03C6}"), ("chi", "\u{03C7}"), ("psi", "\u{03C8}"),
-        ("omega", "\u{03C9}"), ("thetasym", "\u{03D1}"), ("upsih", "\u{03D2}"),
-        ("piv", "\u{03D6}"), ("ensp", "\u{2002}"), ("emsp", "\u{2003}"),
-        ("thinsp", "\u{2009}"), ("zwnj", "\u{200C}"), ("zwj", "\u{200D}"),
-        ("lrm", "\u{200E}"), ("rlm", "\u{200F}"), ("ndash", "\u{2013}"),
-        ("mdash", "\u{2014}"), ("lsquo", "\u{2018}"), ("rsquo", "\u{2019}"),
-        ("sbquo", "\u{201A}"), ("ldquo", "\u{201C}"), ("rdquo", "\u{201D}"),
-        ("bdquo", "\u{201E}"), ("dagger", "\u{2020}"), ("Dagger", "\u{2021}"),
-        ("bull", "\u{2022}"), ("hellip", "\u{2026}"), ("permil", "\u{2030}"),
-        ("prime", "\u{2032}"), ("Prime", "\u{2033}"), ("lsaquo", "\u{2039}"),
-        ("rsaquo", "\u{203A}"), ("oline", "\u{203E}"), ("frasl", "\u{2044}"),
-        ("euro", "\u{20AC}"), ("image", "\u{2111}"), ("weierp", "\u{2118}"),
-        ("real", "\u{211C}"), ("trade", "\u{2122}"), ("alefsym", "\u{2135}"),
-        ("larr", "\u{2190}"), ("uarr", "\u{2191}"), ("rarr", "\u{2192}"),
-        ("darr", "\u{2193}"), ("harr", "\u{2194}"), ("crarr", "\u{21B5}"),
-        ("lArr", "\u{21D0}"), ("uArr", "\u{21D1}"), ("rArr", "\u{21D2}"),
-        ("dArr", "\u{21D3}"), ("hArr", "\u{21D4}"), ("forall", "\u{2200}"),
-        ("part", "\u{2202}"), ("exist", "\u{2203}"), ("empty", "\u{2205}"),
-        ("nabla", "\u{2207}"), ("isin", "\u{2208}"), ("notin", "\u{2209}"),
-        ("ni", "\u{220B}"), ("prod", "\u{220F}"), ("sum", "\u{2211}"),
-        ("minus", "\u{2212}"), ("lowast", "\u{2217}"), ("radic", "\u{221A}"),
-        ("prop", "\u{221D}"), ("infin", "\u{221E}"), ("ang", "\u{2220}"),
-        ("and", "\u{2227}"), ("or", "\u{2228}"), ("cap", "\u{2229}"),
-        ("cup", "\u{222A}"), ("int", "\u{222B}"), ("there4", "\u{2234}"),
-        ("sim", "\u{223C}"), ("cong", "\u{2245}"), ("asymp", "\u{2248}"),
-        ("ne", "\u{2260}"), ("equiv", "\u{2261}"), ("le", "\u{2264}"),
-        ("ge", "\u{2265}"), ("sub", "\u{2282}"), ("sup", "\u{2283}"),
-        ("nsub", "\u{2284}"), ("sube", "\u{2286}"), ("supe", "\u{2287}"),
-        ("oplus", "\u{2295}"), ("otimes", "\u{2297}"), ("perp", "\u{22A5}"),
-        ("sdot", "\u{22C5}"), ("lceil", "\u{2308}"), ("rceil", "\u{2309}"),
-        ("lfloor", "\u{230A}"), ("rfloor", "\u{230B}"), ("lang", "\u{2329}"),
-        ("rang", "\u{232A}"), ("loz", "\u{25CA}"), ("spades", "\u{2660}"),
-        ("clubs", "\u{2663}"), ("hearts", "\u{2665}"), ("diams", "\u{2666}"),
+        ("amp", "&"),
+        ("lt", "<"),
+        ("gt", ">"),
+        ("quot", "\""),
+        ("apos", "'"),
+        ("nbsp", "\u{00A0}"),
+        ("iexcl", "\u{00A1}"),
+        ("cent", "\u{00A2}"),
+        ("pound", "\u{00A3}"),
+        ("curren", "\u{00A4}"),
+        ("yen", "\u{00A5}"),
+        ("brvbar", "\u{00A6}"),
+        ("sect", "\u{00A7}"),
+        ("uml", "\u{00A8}"),
+        ("copy", "\u{00A9}"),
+        ("ordf", "\u{00AA}"),
+        ("laquo", "\u{00AB}"),
+        ("not", "\u{00AC}"),
+        ("shy", "\u{00AD}"),
+        ("reg", "\u{00AE}"),
+        ("macr", "\u{00AF}"),
+        ("deg", "\u{00B0}"),
+        ("plusmn", "\u{00B1}"),
+        ("sup2", "\u{00B2}"),
+        ("sup3", "\u{00B3}"),
+        ("acute", "\u{00B4}"),
+        ("micro", "\u{00B5}"),
+        ("para", "\u{00B6}"),
+        ("middot", "\u{00B7}"),
+        ("cedil", "\u{00B8}"),
+        ("sup1", "\u{00B9}"),
+        ("ordm", "\u{00BA}"),
+        ("raquo", "\u{00BB}"),
+        ("frac14", "\u{00BC}"),
+        ("frac12", "\u{00BD}"),
+        ("frac34", "\u{00BE}"),
+        ("iquest", "\u{00BF}"),
+        ("times", "\u{00D7}"),
+        ("divide", "\u{00F7}"),
+        ("OElig", "\u{0152}"),
+        ("oelig", "\u{0153}"),
+        ("Scaron", "\u{0160}"),
+        ("scaron", "\u{0161}"),
+        ("Yuml", "\u{0178}"),
+        ("fnof", "\u{0192}"),
+        ("circ", "\u{02C6}"),
+        ("tilde", "\u{02DC}"),
+        ("Alpha", "\u{0391}"),
+        ("Beta", "\u{0392}"),
+        ("Gamma", "\u{0393}"),
+        ("Delta", "\u{0394}"),
+        ("Epsilon", "\u{0395}"),
+        ("Zeta", "\u{0396}"),
+        ("Eta", "\u{0397}"),
+        ("Theta", "\u{0398}"),
+        ("Iota", "\u{0399}"),
+        ("Kappa", "\u{039A}"),
+        ("Lambda", "\u{039B}"),
+        ("Mu", "\u{039C}"),
+        ("Nu", "\u{039D}"),
+        ("Xi", "\u{039E}"),
+        ("Omicron", "\u{039F}"),
+        ("Pi", "\u{03A0}"),
+        ("Rho", "\u{03A1}"),
+        ("Sigma", "\u{03A3}"),
+        ("Tau", "\u{03A4}"),
+        ("Upsilon", "\u{03A5}"),
+        ("Phi", "\u{03A6}"),
+        ("Chi", "\u{03A7}"),
+        ("Psi", "\u{03A8}"),
+        ("Omega", "\u{03A9}"),
+        ("alpha", "\u{03B1}"),
+        ("beta", "\u{03B2}"),
+        ("gamma", "\u{03B3}"),
+        ("delta", "\u{03B4}"),
+        ("epsilon", "\u{03B5}"),
+        ("zeta", "\u{03B6}"),
+        ("eta", "\u{03B7}"),
+        ("theta", "\u{03B8}"),
+        ("iota", "\u{03B9}"),
+        ("kappa", "\u{03BA}"),
+        ("lambda", "\u{03BB}"),
+        ("mu", "\u{03BC}"),
+        ("nu", "\u{03BD}"),
+        ("xi", "\u{03BE}"),
+        ("omicron", "\u{03BF}"),
+        ("pi", "\u{03C0}"),
+        ("rho", "\u{03C1}"),
+        ("sigmaf", "\u{03C2}"),
+        ("sigma", "\u{03C3}"),
+        ("tau", "\u{03C4}"),
+        ("upsilon", "\u{03C5}"),
+        ("phi", "\u{03C6}"),
+        ("chi", "\u{03C7}"),
+        ("psi", "\u{03C8}"),
+        ("omega", "\u{03C9}"),
+        ("thetasym", "\u{03D1}"),
+        ("upsih", "\u{03D2}"),
+        ("piv", "\u{03D6}"),
+        ("ensp", "\u{2002}"),
+        ("emsp", "\u{2003}"),
+        ("thinsp", "\u{2009}"),
+        ("zwnj", "\u{200C}"),
+        ("zwj", "\u{200D}"),
+        ("lrm", "\u{200E}"),
+        ("rlm", "\u{200F}"),
+        ("ndash", "\u{2013}"),
+        ("mdash", "\u{2014}"),
+        ("lsquo", "\u{2018}"),
+        ("rsquo", "\u{2019}"),
+        ("sbquo", "\u{201A}"),
+        ("ldquo", "\u{201C}"),
+        ("rdquo", "\u{201D}"),
+        ("bdquo", "\u{201E}"),
+        ("dagger", "\u{2020}"),
+        ("Dagger", "\u{2021}"),
+        ("bull", "\u{2022}"),
+        ("hellip", "\u{2026}"),
+        ("permil", "\u{2030}"),
+        ("prime", "\u{2032}"),
+        ("Prime", "\u{2033}"),
+        ("lsaquo", "\u{2039}"),
+        ("rsaquo", "\u{203A}"),
+        ("oline", "\u{203E}"),
+        ("frasl", "\u{2044}"),
+        ("euro", "\u{20AC}"),
+        ("image", "\u{2111}"),
+        ("weierp", "\u{2118}"),
+        ("real", "\u{211C}"),
+        ("trade", "\u{2122}"),
+        ("alefsym", "\u{2135}"),
+        ("larr", "\u{2190}"),
+        ("uarr", "\u{2191}"),
+        ("rarr", "\u{2192}"),
+        ("darr", "\u{2193}"),
+        ("harr", "\u{2194}"),
+        ("crarr", "\u{21B5}"),
+        ("lArr", "\u{21D0}"),
+        ("uArr", "\u{21D1}"),
+        ("rArr", "\u{21D2}"),
+        ("dArr", "\u{21D3}"),
+        ("hArr", "\u{21D4}"),
+        ("forall", "\u{2200}"),
+        ("part", "\u{2202}"),
+        ("exist", "\u{2203}"),
+        ("empty", "\u{2205}"),
+        ("nabla", "\u{2207}"),
+        ("isin", "\u{2208}"),
+        ("notin", "\u{2209}"),
+        ("ni", "\u{220B}"),
+        ("prod", "\u{220F}"),
+        ("sum", "\u{2211}"),
+        ("minus", "\u{2212}"),
+        ("lowast", "\u{2217}"),
+        ("radic", "\u{221A}"),
+        ("prop", "\u{221D}"),
+        ("infin", "\u{221E}"),
+        ("ang", "\u{2220}"),
+        ("and", "\u{2227}"),
+        ("or", "\u{2228}"),
+        ("cap", "\u{2229}"),
+        ("cup", "\u{222A}"),
+        ("int", "\u{222B}"),
+        ("there4", "\u{2234}"),
+        ("sim", "\u{223C}"),
+        ("cong", "\u{2245}"),
+        ("asymp", "\u{2248}"),
+        ("ne", "\u{2260}"),
+        ("equiv", "\u{2261}"),
+        ("le", "\u{2264}"),
+        ("ge", "\u{2265}"),
+        ("sub", "\u{2282}"),
+        ("sup", "\u{2283}"),
+        ("nsub", "\u{2284}"),
+        ("sube", "\u{2286}"),
+        ("supe", "\u{2287}"),
+        ("oplus", "\u{2295}"),
+        ("otimes", "\u{2297}"),
+        ("perp", "\u{22A5}"),
+        ("sdot", "\u{22C5}"),
+        ("lceil", "\u{2308}"),
+        ("rceil", "\u{2309}"),
+        ("lfloor", "\u{230A}"),
+        ("rfloor", "\u{230B}"),
+        ("lang", "\u{2329}"),
+        ("rang", "\u{232A}"),
+        ("loz", "\u{25CA}"),
+        ("spades", "\u{2660}"),
+        ("clubs", "\u{2663}"),
+        ("hearts", "\u{2665}"),
+        ("diams", "\u{2666}"),
     ];
 
     let py_dict_obj = py_dict();
@@ -734,21 +1033,24 @@ fn create_urlopen_response(body: Vec<u8>) -> PyObjectRef {
 
     // Create the response type with a read() method
     let mut type_dict = HashMap::new();
-    type_dict.insert("read".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "read".to_string(),
-        func: |args| {
-            if args.is_empty() {
-                return Err(PyError::type_error("read() missing argument"));
-            }
-            let body = args[0].borrow();
-            if let PyObject::Instance { dict, .. } = &*body {
-                if let Some(body_val) = dict.get("_body") {
-                    return Ok(body_val.clone());
+    type_dict.insert(
+        "read".to_string(),
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "read".to_string(),
+            func: |args| {
+                if args.is_empty() {
+                    return Err(PyError::type_error("read() missing argument"));
                 }
-            }
-            Ok(PyObjectRef::imm(PyObject::Bytes(Vec::new())))
-        },
-    }));
+                let body = args[0].borrow();
+                if let PyObject::Instance { dict, .. } = &*body {
+                    if let Some(body_val) = dict.get("_body") {
+                        return Ok(body_val.clone());
+                    }
+                }
+                Ok(PyObjectRef::imm(PyObject::Bytes(Vec::new())))
+            },
+        }),
+    );
 
     let resp_type = PyObjectRef::new(PyObject::Type {
         name: "HTTPResponse".to_string(),
@@ -769,19 +1071,30 @@ pub fn create_urllib_request_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! request_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
 
     request_func!("urlopen", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("urlopen() missing required argument 'url'"));
+            return Err(PyError::type_error(
+                "urlopen() missing required argument 'url'",
+            ));
         }
         let url_str = args[0].str();
 
         // Only support http:// URLs with a simple GET
         if !url_str.starts_with("http://") {
-            return Err(PyError::type_error(format!("urlopen() only supports http:// URLs, got: {}", url_str)));
+            return Err(PyError::type_error(format!(
+                "urlopen() only supports http:// URLs, got: {}",
+                url_str
+            )));
         }
 
         let rest = url_str.trim_start_matches("http://");
@@ -791,7 +1104,10 @@ pub fn create_urllib_request_dict() -> HashMap<String, PyObjectRef> {
         };
 
         let (host, port) = if let Some(colon_pos) = host_port.find(':') {
-            (&host_port[..colon_pos], host_port[colon_pos+1..].parse::<u16>().unwrap_or(80))
+            (
+                &host_port[..colon_pos],
+                host_port[colon_pos + 1..].parse::<u16>().unwrap_or(80),
+            )
         } else {
             (host_port, 80u16)
         };
@@ -804,15 +1120,26 @@ pub fn create_urllib_request_dict() -> HashMap<String, PyObjectRef> {
         let addr = format!("{}:{}", host, port);
         let stream = match std::net::TcpStream::connect(&addr) {
             Ok(s) => s,
-            Err(e) => return Err(PyError::runtime_error(format!("urlopen() failed to connect: {}", e))),
+            Err(e) => {
+                return Err(PyError::runtime_error(format!(
+                    "urlopen() failed to connect: {}",
+                    e
+                )))
+            }
         };
 
         // Send HTTP GET request
-        let request = format!("GET {} HTTP/1.0\r\nHost: {}\r\nConnection: close\r\n\r\n", path, host);
+        let request = format!(
+            "GET {} HTTP/1.0\r\nHost: {}\r\nConnection: close\r\n\r\n",
+            path, host
+        );
         {
             use std::io::Write;
             if let Err(e) = (&stream).write_all(request.as_bytes()) {
-                return Err(PyError::runtime_error(format!("urlopen() write error: {}", e)));
+                return Err(PyError::runtime_error(format!(
+                    "urlopen() write error: {}",
+                    e
+                )));
             }
         }
 
@@ -821,7 +1148,10 @@ pub fn create_urllib_request_dict() -> HashMap<String, PyObjectRef> {
         {
             use std::io::Read;
             if let Err(e) = (&stream).read_to_end(&mut response) {
-                return Err(PyError::runtime_error(format!("urlopen() read error: {}", e)));
+                return Err(PyError::runtime_error(format!(
+                    "urlopen() read error: {}",
+                    e
+                )));
             }
         }
 
@@ -905,14 +1235,30 @@ pub fn create_urllib_parse_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! parse_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
 
     // urlparse(url, scheme='', allow_fragments=True)
     parse_func!("urlparse", |args| {
-        let url = if args.len() > 0 { args[0].str() } else { return Err(PyError::type_error("urlparse() missing required argument 'url'")); };
-        let scheme_default = if args.len() > 1 { args[1].str() } else { String::new() };
+        let url = if args.len() > 0 {
+            args[0].str()
+        } else {
+            return Err(PyError::type_error(
+                "urlparse() missing required argument 'url'",
+            ));
+        };
+        let scheme_default = if args.len() > 1 {
+            args[1].str()
+        } else {
+            String::new()
+        };
 
         let mut scheme = scheme_default;
         let mut netloc = String::new();
@@ -922,10 +1268,14 @@ pub fn create_urllib_parse_dict() -> HashMap<String, PyObjectRef> {
         let mut path = String::new();
 
         // Split fragment (allow_fragments defaults to true)
-        let allow_fragments = if args.len() > 2 { args[2].truthy() } else { true };
+        let allow_fragments = if args.len() > 2 {
+            args[2].truthy()
+        } else {
+            true
+        };
         let remaining = if allow_fragments {
             if let Some(pos) = url.find('#') {
-                fragment = url[pos+1..].to_string();
+                fragment = url[pos + 1..].to_string();
                 url[..pos].to_string()
             } else {
                 url.clone()
@@ -936,7 +1286,7 @@ pub fn create_urllib_parse_dict() -> HashMap<String, PyObjectRef> {
 
         // Split query
         let remaining = if let Some(pos) = remaining.find('?') {
-            query = remaining[pos+1..].to_string();
+            query = remaining[pos + 1..].to_string();
             remaining[..pos].to_string()
         } else {
             remaining
@@ -945,7 +1295,7 @@ pub fn create_urllib_parse_dict() -> HashMap<String, PyObjectRef> {
         // Extract scheme
         if let Some(pos) = remaining.find("://") {
             scheme = remaining[..pos].to_string();
-            let after_scheme = &remaining[pos+3..];
+            let after_scheme = &remaining[pos + 3..];
             // Extract netloc (host:port or host)
             if let Some(slash_pos) = after_scheme.find('/') {
                 netloc = after_scheme[..slash_pos].to_string();
@@ -959,7 +1309,7 @@ pub fn create_urllib_parse_dict() -> HashMap<String, PyObjectRef> {
 
         // Split params from path (last semicolon in path segment)
         if let Some(pos) = path.rfind(';') {
-            params = path[pos+1..].to_string();
+            params = path[pos + 1..].to_string();
             path = path[..pos].to_string();
         }
 
@@ -988,9 +1338,15 @@ pub fn create_urllib_parse_dict() -> HashMap<String, PyObjectRef> {
     // urlencode(query, doseq=False)
     parse_func!("urlencode", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("urlencode() missing required argument 'query'"));
+            return Err(PyError::type_error(
+                "urlencode() missing required argument 'query'",
+            ));
         }
-        let _doseq = if args.len() > 1 { args[1].truthy() } else { false };
+        let _doseq = if args.len() > 1 {
+            args[1].truthy()
+        } else {
+            false
+        };
 
         let obj = args[0].borrow();
         let mut pairs: Vec<(String, String)> = Vec::new();
@@ -1026,22 +1382,41 @@ pub fn create_urllib_parse_dict() -> HashMap<String, PyObjectRef> {
                 }
             }
             _ => {
-                return Err(PyError::type_error("urlencode() argument must be dict, list of tuples, or list of lists"));
+                return Err(PyError::type_error(
+                    "urlencode() argument must be dict, list of tuples, or list of lists",
+                ));
             }
         }
 
         // Percent-encode both keys and values
-        let encoded: Vec<String> = pairs.into_iter().map(|(k, v)| {
-            let enc_key: String = k.bytes().map(|b| {
-                if needs_percent_encode(b, "") { percent_encode_byte(b) }
-                else { (b as char).to_string() }
-            }).collect::<Vec<_>>().concat();
-            let enc_val: String = v.bytes().map(|b| {
-                if needs_percent_encode(b, "") { percent_encode_byte(b) }
-                else { (b as char).to_string() }
-            }).collect::<Vec<_>>().concat();
-            format!("{}={}", enc_key, enc_val)
-        }).collect();
+        let encoded: Vec<String> = pairs
+            .into_iter()
+            .map(|(k, v)| {
+                let enc_key: String = k
+                    .bytes()
+                    .map(|b| {
+                        if needs_percent_encode(b, "") {
+                            percent_encode_byte(b)
+                        } else {
+                            (b as char).to_string()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .concat();
+                let enc_val: String = v
+                    .bytes()
+                    .map(|b| {
+                        if needs_percent_encode(b, "") {
+                            percent_encode_byte(b)
+                        } else {
+                            (b as char).to_string()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .concat();
+                format!("{}={}", enc_key, enc_val)
+            })
+            .collect();
 
         Ok(py_str(&encoded.join("&")))
     });
@@ -1049,15 +1424,28 @@ pub fn create_urllib_parse_dict() -> HashMap<String, PyObjectRef> {
     // quote(string, safe='/')
     parse_func!("quote", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("quote() missing required argument 'string'"));
+            return Err(PyError::type_error(
+                "quote() missing required argument 'string'",
+            ));
         }
         let s = args[0].str();
-        let safe = if args.len() > 1 { args[1].str() } else { "/".to_string() };
+        let safe = if args.len() > 1 {
+            args[1].str()
+        } else {
+            "/".to_string()
+        };
 
-        let encoded: String = s.bytes().map(|b| {
-            if needs_percent_encode(b, &safe) { percent_encode_byte(b) }
-            else { (b as char).to_string() }
-        }).collect::<Vec<_>>().concat();
+        let encoded: String = s
+            .bytes()
+            .map(|b| {
+                if needs_percent_encode(b, &safe) {
+                    percent_encode_byte(b)
+                } else {
+                    (b as char).to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .concat();
 
         Ok(py_str(&encoded))
     });
@@ -1065,7 +1453,9 @@ pub fn create_urllib_parse_dict() -> HashMap<String, PyObjectRef> {
     // unquote(string, encoding='utf-8', errors='replace')
     parse_func!("unquote", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("unquote() missing required argument 'string'"));
+            return Err(PyError::type_error(
+                "unquote() missing required argument 'string'",
+            ));
         }
         let s = args[0].str();
         Ok(py_str(&percent_decode(&s)))
@@ -1076,13 +1466,19 @@ pub fn create_urllib_parse_dict() -> HashMap<String, PyObjectRef> {
 
 pub fn create_urllib_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
-    d.insert_str("request", create_module("urllib.request", create_urllib_request_dict()));
-    d.insert_str("parse", create_module("urllib.parse", create_urllib_parse_dict()));
+    d.insert_str(
+        "request",
+        create_module("urllib.request", create_urllib_request_dict()),
+    );
+    d.insert_str(
+        "parse",
+        create_module("urllib.parse", create_urllib_parse_dict()),
+    );
     d
 }
 
-use std::rc::Rc;
 use std::cell::RefCell;
+use std::rc::Rc;
 
 // ---------------------------------------------------------------------------
 // http.client module - HTTPConnection class
@@ -1092,7 +1488,9 @@ use std::cell::RefCell;
 /// `args[0]` is the HTTPResponse instance (auto-bound by BuiltinMethod).
 fn http_response_read(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
-        return Err(PyError::type_error("read() missing required 'self' argument"));
+        return Err(PyError::type_error(
+            "read() missing required 'self' argument",
+        ));
     }
     let borrowed = args[0].borrow();
     if let PyObject::Instance { dict, .. } = &*borrowed {
@@ -1119,32 +1517,60 @@ pub fn create_http_client_dict() -> HashMap<String, PyObjectRef> {
     fn make_http_exc(name: &str, base: Option<PyObjectRef>) -> PyObjectRef {
         let bases = base.map(|b| vec![b]).unwrap_or_default();
         PyObjectRef::new(crate::object::PyObject::Type {
-            name: name.to_string(), dict: Box::new(str_map_to_typedict(HashMap::new())), bases: bases.clone(), mro: bases,
+            name: name.to_string(),
+            dict: Box::new(str_map_to_typedict(HashMap::new())),
+            bases: bases.clone(),
+            mro: bases,
         })
     }
     let http_exception = make_http_exc("HTTPException", None);
     d.insert_str("HTTPException", http_exception.clone());
-    for name in ["NotConnected", "InvalidURL", "UnknownProtocol", "UnknownTransferEncoding",
-                 "UnimplementedFileMode", "IncompleteRead", "ImproperConnectionState",
-                 "CannotSendRequest", "CannotSendHeader", "ResponseNotReady",
-                 "BadStatusLine", "LineTooLong", "RemoteDisconnected"] {
-        d.insert(name.to_string(), make_http_exc(name, Some(http_exception.clone())));
+    for name in [
+        "NotConnected",
+        "InvalidURL",
+        "UnknownProtocol",
+        "UnknownTransferEncoding",
+        "UnimplementedFileMode",
+        "IncompleteRead",
+        "ImproperConnectionState",
+        "CannotSendRequest",
+        "CannotSendHeader",
+        "ResponseNotReady",
+        "BadStatusLine",
+        "LineTooLong",
+        "RemoteDisconnected",
+    ] {
+        d.insert(
+            name.to_string(),
+            make_http_exc(name, Some(http_exception.clone())),
+        );
     }
 
     // HTTP status code to phrase mapping
     let responses = crate::object::py_dict();
     if let crate::object::PyObject::Dict(ref mut resp_dict) = &mut *responses.borrow_mut() {
         let codes = [
-            (200, "OK"), (201, "Created"), (202, "Accepted"),
-            (204, "No Content"), (301, "Moved Permanently"),
-            (302, "Found"), (303, "See Other"),
-            (304, "Not Modified"), (307, "Temporary Redirect"),
-            (400, "Bad Request"), (401, "Unauthorized"),
-            (403, "Forbidden"), (404, "Not Found"),
-            (405, "Method Not Allowed"), (408, "Request Timeout"),
-            (418, "I'm a Teapot"), (429, "Too Many Requests"),
-            (500, "Internal Server Error"), (502, "Bad Gateway"),
-            (503, "Service Unavailable"), (504, "Gateway Timeout"),
+            (200, "OK"),
+            (201, "Created"),
+            (202, "Accepted"),
+            (204, "No Content"),
+            (301, "Moved Permanently"),
+            (302, "Found"),
+            (303, "See Other"),
+            (304, "Not Modified"),
+            (307, "Temporary Redirect"),
+            (400, "Bad Request"),
+            (401, "Unauthorized"),
+            (403, "Forbidden"),
+            (404, "Not Found"),
+            (405, "Method Not Allowed"),
+            (408, "Request Timeout"),
+            (418, "I'm a Teapot"),
+            (429, "Too Many Requests"),
+            (500, "Internal Server Error"),
+            (502, "Bad Gateway"),
+            (503, "Service Unavailable"),
+            (504, "Gateway Timeout"),
         ];
         for (code, phrase) in &codes {
             let _ = resp_dict.set(crate::object::py_int(*code), crate::object::py_str(phrase));
@@ -1250,10 +1676,7 @@ pub fn create_http_client_dict() -> HashMap<String, PyObjectRef> {
                             .get("_host")
                             .map(|h| h.str())
                             .unwrap_or_else(|| "localhost".to_string());
-                        let port = dict
-                            .get("_port")
-                            .and_then(|p| p.as_i64())
-                            .unwrap_or(80) as u16;
+                        let port = dict.get("_port").and_then(|p| p.as_i64()).unwrap_or(80) as u16;
                         (host, port)
                     } else {
                         return Err(PyError::runtime_error("invalid HTTPConnection instance"));
@@ -1274,13 +1697,23 @@ pub fn create_http_client_dict() -> HashMap<String, PyObjectRef> {
                     match addr.to_socket_addrs() {
                         Ok(addrs) => {
                             for sock_addr in addrs {
-                                match TcpStream::connect_timeout(&sock_addr, std::time::Duration::from_secs(10)) {
-                                    Ok(s) => { connected = Some(s); break; }
-                                    Err(e) => { last_err = Some(e); }
+                                match TcpStream::connect_timeout(
+                                    &sock_addr,
+                                    std::time::Duration::from_secs(10),
+                                ) {
+                                    Ok(s) => {
+                                        connected = Some(s);
+                                        break;
+                                    }
+                                    Err(e) => {
+                                        last_err = Some(e);
+                                    }
                                 }
                             }
                         }
-                        Err(e) => { last_err = Some(e); }
+                        Err(e) => {
+                            last_err = Some(e);
+                        }
                     }
                     match connected {
                         Some(s) => s,
@@ -1288,7 +1721,9 @@ pub fn create_http_client_dict() -> HashMap<String, PyObjectRef> {
                             return Err(PyError::OsError(format!(
                                 "Could not connect to {}: {}",
                                 addr,
-                                last_err.map(|e| e.to_string()).unwrap_or_else(|| "unknown error".to_string())
+                                last_err
+                                    .map(|e| e.to_string())
+                                    .unwrap_or_else(|| "unknown error".to_string())
                             )));
                         }
                     }
@@ -1310,10 +1745,7 @@ pub fn create_http_client_dict() -> HashMap<String, PyObjectRef> {
                     url.as_str()
                 };
 
-                let mut request = format!(
-                    "{} {} HTTP/1.1\r\nHost: {}\r\n",
-                    method, path, host
-                );
+                let mut request = format!("{} {} HTTP/1.1\r\nHost: {}\r\n", method, path, host);
                 for (k, v) in &headers {
                     request.push_str(&format!("{}: {}\r\n", k, v));
                 }
@@ -1362,16 +1794,11 @@ pub fn create_http_client_dict() -> HashMap<String, PyObjectRef> {
                 let sock = {
                     let mut borrowed = self_obj.borrow_mut();
                     if let PyObject::Instance { dict, .. } = &mut *borrowed {
-                        dict.remove("_stream")
-                            .ok_or_else(|| {
-                                PyError::runtime_error(
-                                    "no request made yet - call request() first",
-                                )
-                            })?
+                        dict.remove("_stream").ok_or_else(|| {
+                            PyError::runtime_error("no request made yet - call request() first")
+                        })?
                     } else {
-                        return Err(PyError::runtime_error(
-                            "invalid HTTPConnection instance",
-                        ));
+                        return Err(PyError::runtime_error("invalid HTTPConnection instance"));
                     }
                 };
 
@@ -1381,15 +1808,11 @@ pub fn create_http_client_dict() -> HashMap<String, PyObjectRef> {
                     if let PyObject::Socket { inner } = &*sock_borrowed {
                         let inner_borrowed = inner.borrow();
                         match &*inner_borrowed {
-                            SocketInner::TcpStream(s) => s
-                                .try_clone()
-                                .map_err(|e| {
-                                    PyError::OsError(format!("Failed to clone stream: {}", e))
-                                })?,
+                            SocketInner::TcpStream(s) => s.try_clone().map_err(|e| {
+                                PyError::OsError(format!("Failed to clone stream: {}", e))
+                            })?,
                             _ => {
-                                return Err(PyError::runtime_error(
-                                    "no active HTTP connection",
-                                ));
+                                return Err(PyError::runtime_error("no active HTTP connection"));
                             }
                         }
                     } else {

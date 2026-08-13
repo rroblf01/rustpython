@@ -3,16 +3,16 @@
 // Without this feature, all Python code runs purely in the interpreter.
 #![cfg(feature = "jit")]
 
-use std::collections::HashSet;
-use std::collections::HashMap;
-use std::cell::RefCell;
-use std::rc::Rc;
+use crate::bytecode::*;
 use crate::interner::StrId;
+use crate::object::PyObjectRef;
 use cranelift::prelude::*;
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module};
-use crate::object::PyObjectRef;
-use crate::bytecode::*;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::rc::Rc;
 
 // The current JIT-executing function's globals, set by the VM right before
 // it invokes a compiled function's `func_ptr`. `jit_make_function` (the
@@ -56,7 +56,12 @@ extern "C" fn jit_py_add(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut
             }
         }
     }
-    unsafe { std::ptr::write(out, crate::object::py_add(&*a, &*b).unwrap_or_else(|_| crate::object::py_none())); }
+    unsafe {
+        std::ptr::write(
+            out,
+            crate::object::py_add(&*a, &*b).unwrap_or_else(|_| crate::object::py_none()),
+        );
+    }
 }
 extern "C" fn jit_py_sub(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
     unsafe {
@@ -67,7 +72,12 @@ extern "C" fn jit_py_sub(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut
             }
         }
     }
-    unsafe { std::ptr::write(out, crate::object::py_sub(&*a, &*b).unwrap_or_else(|_| crate::object::py_none())); }
+    unsafe {
+        std::ptr::write(
+            out,
+            crate::object::py_sub(&*a, &*b).unwrap_or_else(|_| crate::object::py_none()),
+        );
+    }
 }
 extern "C" fn jit_py_mul(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
     unsafe {
@@ -78,7 +88,12 @@ extern "C" fn jit_py_mul(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut
             }
         }
     }
-    unsafe { std::ptr::write(out, crate::object::py_mul(&*a, &*b).unwrap_or_else(|_| crate::object::py_none())); }
+    unsafe {
+        std::ptr::write(
+            out,
+            crate::object::py_mul(&*a, &*b).unwrap_or_else(|_| crate::object::py_none()),
+        );
+    }
 }
 extern "C" fn jit_py_div(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
     unsafe {
@@ -90,21 +105,39 @@ extern "C" fn jit_py_div(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut
             }
         }
     }
-    unsafe { std::ptr::write(out, crate::object::py_div(&*a, &*b).unwrap_or_else(|_| crate::object::py_none())); }
+    unsafe {
+        std::ptr::write(
+            out,
+            crate::object::py_div(&*a, &*b).unwrap_or_else(|_| crate::object::py_none()),
+        );
+    }
 }
-extern "C" fn jit_py_floor_div(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
+extern "C" fn jit_py_floor_div(
+    a: *const PyObjectRef,
+    b: *const PyObjectRef,
+    out: *mut PyObjectRef,
+) {
     unsafe {
         if let (PyObjectRef::SmallInt(av), PyObjectRef::SmallInt(bv)) = (&*a, &*b) {
             if let Some(q) = av.checked_div(*bv) {
                 // Rust's / on i64 truncates toward zero; Python floor-div truncates toward -inf.
                 // Adjust when signs differ and there's a remainder.
-                let adjusted = if (av ^ bv) < 0 && av % *bv != 0 { q - 1 } else { q };
+                let adjusted = if (av ^ bv) < 0 && av % *bv != 0 {
+                    q - 1
+                } else {
+                    q
+                };
                 std::ptr::write(out, PyObjectRef::SmallInt(adjusted));
                 return;
             }
         }
     }
-    unsafe { std::ptr::write(out, crate::object::py_floor_div(&*a, &*b).unwrap_or_else(|_| crate::object::py_none())); }
+    unsafe {
+        std::ptr::write(
+            out,
+            crate::object::py_floor_div(&*a, &*b).unwrap_or_else(|_| crate::object::py_none()),
+        );
+    }
 }
 extern "C" fn jit_py_mod(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
     unsafe {
@@ -118,7 +151,12 @@ extern "C" fn jit_py_mod(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut
             }
         }
     }
-    unsafe { std::ptr::write(out, crate::object::py_mod(&*a, &*b).unwrap_or_else(|_| crate::object::py_none())); }
+    unsafe {
+        std::ptr::write(
+            out,
+            crate::object::py_mod(&*a, &*b).unwrap_or_else(|_| crate::object::py_none()),
+        );
+    }
 }
 extern "C" fn jit_py_pow(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
     unsafe {
@@ -131,7 +169,12 @@ extern "C" fn jit_py_pow(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut
             }
         }
     }
-    unsafe { std::ptr::write(out, crate::object::py_pow(&*a, &*b).unwrap_or_else(|_| crate::object::py_none())); }
+    unsafe {
+        std::ptr::write(
+            out,
+            crate::object::py_pow(&*a, &*b).unwrap_or_else(|_| crate::object::py_none()),
+        );
+    }
 }
 extern "C" fn jit_py_lshift(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
     unsafe {
@@ -144,7 +187,12 @@ extern "C" fn jit_py_lshift(a: *const PyObjectRef, b: *const PyObjectRef, out: *
             }
         }
     }
-    unsafe { std::ptr::write(out, crate::object::py_lshift(&*a, &*b).unwrap_or_else(|_| crate::object::py_none())); }
+    unsafe {
+        std::ptr::write(
+            out,
+            crate::object::py_lshift(&*a, &*b).unwrap_or_else(|_| crate::object::py_none()),
+        );
+    }
 }
 extern "C" fn jit_py_rshift(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
     unsafe {
@@ -156,7 +204,12 @@ extern "C" fn jit_py_rshift(a: *const PyObjectRef, b: *const PyObjectRef, out: *
             }
         }
     }
-    unsafe { std::ptr::write(out, crate::object::py_rshift(&*a, &*b).unwrap_or_else(|_| crate::object::py_none())); }
+    unsafe {
+        std::ptr::write(
+            out,
+            crate::object::py_rshift(&*a, &*b).unwrap_or_else(|_| crate::object::py_none()),
+        );
+    }
 }
 extern "C" fn jit_py_bit_and(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
     unsafe {
@@ -165,7 +218,12 @@ extern "C" fn jit_py_bit_and(a: *const PyObjectRef, b: *const PyObjectRef, out: 
             return;
         }
     }
-    unsafe { std::ptr::write(out, crate::object::py_bit_and(&*a, &*b).unwrap_or_else(|_| crate::object::py_none())); }
+    unsafe {
+        std::ptr::write(
+            out,
+            crate::object::py_bit_and(&*a, &*b).unwrap_or_else(|_| crate::object::py_none()),
+        );
+    }
 }
 extern "C" fn jit_py_bit_or(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
     unsafe {
@@ -174,7 +232,12 @@ extern "C" fn jit_py_bit_or(a: *const PyObjectRef, b: *const PyObjectRef, out: *
             return;
         }
     }
-    unsafe { std::ptr::write(out, crate::object::py_bit_or(&*a, &*b).unwrap_or_else(|_| crate::object::py_none())); }
+    unsafe {
+        std::ptr::write(
+            out,
+            crate::object::py_bit_or(&*a, &*b).unwrap_or_else(|_| crate::object::py_none()),
+        );
+    }
 }
 extern "C" fn jit_py_bit_xor(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
     unsafe {
@@ -183,10 +246,26 @@ extern "C" fn jit_py_bit_xor(a: *const PyObjectRef, b: *const PyObjectRef, out: 
             return;
         }
     }
-    unsafe { std::ptr::write(out, crate::object::py_bit_xor(&*a, &*b).unwrap_or_else(|_| crate::object::py_none())); }
+    unsafe {
+        std::ptr::write(
+            out,
+            crate::object::py_bit_xor(&*a, &*b).unwrap_or_else(|_| crate::object::py_none()),
+        );
+    }
 }
-extern "C" fn jit_py_compare(a: *const PyObjectRef, b: *const PyObjectRef, op: i64, out: *mut PyObjectRef) {
-    unsafe { std::ptr::write(out, crate::object::py_compare(&*a, &*b, op as u32).unwrap_or_else(|_| crate::object::py_bool(false))); }
+extern "C" fn jit_py_compare(
+    a: *const PyObjectRef,
+    b: *const PyObjectRef,
+    op: i64,
+    out: *mut PyObjectRef,
+) {
+    unsafe {
+        std::ptr::write(
+            out,
+            crate::object::py_compare(&*a, &*b, op as u32)
+                .unwrap_or_else(|_| crate::object::py_bool(false)),
+        );
+    }
 }
 /// Mirrors `vm.rs`'s `BINARY_OP` handler for `arg >= 100` (the in-place
 /// variant emitted by `AugAssign`, e.g. `x += y`): try `__iadd__`/`__isub__`/
@@ -196,16 +275,30 @@ extern "C" fn jit_py_compare(a: *const PyObjectRef, b: *const PyObjectRef, op: i
 /// `matches!(&*left.borrow(), PyObject::Instance { .. })` guard), then fall
 /// back to the exact same op dispatch as the plain (non-augmented) operator.
 /// `op` uses the same 0..=12 encoding as `BINARY_OP`'s non-in-place arg.
-extern "C" fn jit_py_inplace_binop(a: *const PyObjectRef, b: *const PyObjectRef, op: i64, out: *mut PyObjectRef) {
+extern "C" fn jit_py_inplace_binop(
+    a: *const PyObjectRef,
+    b: *const PyObjectRef,
+    op: i64,
+    out: *mut PyObjectRef,
+) {
     unsafe {
         let left = &*a;
         let right = &*b;
         let idunder = match op {
-            0 => Some("__iadd__"), 1 => Some("__isub__"), 2 => Some("__imul__"),
-            3 => Some("__itruediv__"), 4 => Some("__ifloordiv__"), 5 => Some("__imod__"),
-            6 => Some("__ipow__"), 7 => Some("__ilshift__"), 8 => Some("__irshift__"),
-            9 => Some("__ior__"), 10 => Some("__ixor__"), 11 => Some("__iand__"),
-            12 => Some("__imatmul__"), _ => None,
+            0 => Some("__iadd__"),
+            1 => Some("__isub__"),
+            2 => Some("__imul__"),
+            3 => Some("__itruediv__"),
+            4 => Some("__ifloordiv__"),
+            5 => Some("__imod__"),
+            6 => Some("__ipow__"),
+            7 => Some("__ilshift__"),
+            8 => Some("__irshift__"),
+            9 => Some("__ior__"),
+            10 => Some("__ixor__"),
+            11 => Some("__iand__"),
+            12 => Some("__imatmul__"),
+            _ => None,
         };
         if let Some(name) = idunder {
             if matches!(&*left.borrow(), crate::object::PyObject::Instance { .. }) {
@@ -228,12 +321,20 @@ extern "C" fn jit_py_inplace_binop(a: *const PyObjectRef, b: *const PyObjectRef,
             9 => crate::object::py_bit_or(left, right),
             10 => crate::object::py_bit_xor(left, right),
             11 => crate::object::py_bit_and(left, right),
-            12 => crate::object::try_dunder_binop(left, right, "__matmul__").and_then(|r| match r {
-                Some(v) => Ok(v),
-                None => crate::object::try_dunder_binop(right, left, "__rmatmul__").and_then(|r2| {
-                    r2.ok_or_else(|| crate::object::PyError::type_error("unsupported operand type(s) for @"))
-                }),
-            }),
+            12 => {
+                crate::object::try_dunder_binop(left, right, "__matmul__").and_then(|r| match r {
+                    Some(v) => Ok(v),
+                    None => {
+                        crate::object::try_dunder_binop(right, left, "__rmatmul__").and_then(|r2| {
+                            r2.ok_or_else(|| {
+                                crate::object::PyError::type_error(
+                                    "unsupported operand type(s) for @",
+                                )
+                            })
+                        })
+                    }
+                })
+            }
             _ => Err(crate::object::PyError::runtime_error("unknown binary op")),
         };
         std::ptr::write(out, result.unwrap_or_else(|_| crate::object::py_none()));
@@ -243,10 +344,17 @@ extern "C" fn jit_is_true(val: *const PyObjectRef) -> i64 {
     unsafe { (*val).truthy() as i64 }
 }
 extern "C" fn jit_neg(val: *const PyObjectRef, out: *mut PyObjectRef) {
-    unsafe { std::ptr::write(out, crate::object::py_neg(&*val).unwrap_or_else(|_| crate::object::py_none())); }
+    unsafe {
+        std::ptr::write(
+            out,
+            crate::object::py_neg(&*val).unwrap_or_else(|_| crate::object::py_none()),
+        );
+    }
 }
 extern "C" fn jit_not(val: *const PyObjectRef, out: *mut PyObjectRef) {
-    unsafe { std::ptr::write(out, crate::object::py_not(&*val)); }
+    unsafe {
+        std::ptr::write(out, crate::object::py_not(&*val));
+    }
 }
 extern "C" fn jit_build_list(n: i64, items: *const PyObjectRef, out: *mut PyObjectRef) {
     unsafe {
@@ -266,7 +374,11 @@ extern "C" fn jit_build_tuple(n: i64, items: *const PyObjectRef, out: *mut PyObj
         std::ptr::write(out, crate::object::py_tuple(v));
     }
 }
-extern "C" fn jit_list_append(lst: *const PyObjectRef, val: *const PyObjectRef, out: *mut PyObjectRef) {
+extern "C" fn jit_list_append(
+    lst: *const PyObjectRef,
+    val: *const PyObjectRef,
+    out: *mut PyObjectRef,
+) {
     unsafe {
         if let crate::object::PyObject::List(v) = &mut *(*lst).borrow_mut() {
             v.push((*val).clone());
@@ -276,13 +388,15 @@ extern "C" fn jit_list_append(lst: *const PyObjectRef, val: *const PyObjectRef, 
 }
 extern "C" fn jit_contains(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
     unsafe {
-        let result = crate::object::py_contains(&*a, &*b).unwrap_or_else(|_| crate::object::py_bool(false));
+        let result =
+            crate::object::py_contains(&*a, &*b).unwrap_or_else(|_| crate::object::py_bool(false));
         std::ptr::write(out, result);
     }
 }
 extern "C" fn jit_getitem(obj: *const PyObjectRef, idx: *const PyObjectRef, out: *mut PyObjectRef) {
     unsafe {
-        let result = crate::object::py_getitem(&*obj, &*idx).unwrap_or_else(|_| crate::object::py_none());
+        let result =
+            crate::object::py_getitem(&*obj, &*idx).unwrap_or_else(|_| crate::object::py_none());
         std::ptr::write(out, result);
     }
 }
@@ -292,7 +406,8 @@ extern "C" fn jit_get_iter(val: *const PyObjectRef, out: *mut PyObjectRef) {
         let obj = &*val;
         let iter_method = obj.borrow().get_attribute("__iter__").ok();
         let result = if let Some(method) = iter_method {
-            crate::object::call_bound_method(method, (*val).clone(), vec![]).unwrap_or_else(|_| (*val).clone())
+            crate::object::call_bound_method(method, (*val).clone(), vec![])
+                .unwrap_or_else(|_| (*val).clone())
         } else {
             (*val).clone()
         };
@@ -300,7 +415,12 @@ extern "C" fn jit_get_iter(val: *const PyObjectRef, out: *mut PyObjectRef) {
     }
 }
 
-extern "C" fn jit_call(func: *const PyObjectRef, nargs: i64, args: *const PyObjectRef, out: *mut PyObjectRef) {
+extern "C" fn jit_call(
+    func: *const PyObjectRef,
+    nargs: i64,
+    args: *const PyObjectRef,
+    out: *mut PyObjectRef,
+) {
     unsafe {
         let func_ref = &*func;
         let mut v: Vec<PyObjectRef> = Vec::with_capacity(nargs as usize);
@@ -324,8 +444,12 @@ extern "C" fn jit_call(func: *const PyObjectRef, nargs: i64, args: *const PyObje
         }
         if std::env::var("RPY_DEBUG_JITCALL").is_ok() {
             use std::io::Write;
-            let _ = writeln!(std::io::stderr(), "JITCALL FAIL func={} nargs={}",
-                func_ref.repr(), nargs);
+            let _ = writeln!(
+                std::io::stderr(),
+                "JITCALL FAIL func={} nargs={}",
+                func_ref.repr(),
+                nargs
+            );
         }
         std::ptr::write(out, crate::object::py_none());
     }
@@ -345,7 +469,13 @@ extern "C" fn jit_call(func: *const PyObjectRef, nargs: i64, args: *const PyObje
 /// underflowing and panicking "called `Option::unwrap()` on a `None`
 /// value"). Any keyword-argument call reaching a JIT-eligible function
 /// was broken this way.
-extern "C" fn jit_call_kw(func: *const PyObjectRef, npos: i64, nkw: i64, items: *const PyObjectRef, out: *mut PyObjectRef) {
+extern "C" fn jit_call_kw(
+    func: *const PyObjectRef,
+    npos: i64,
+    nkw: i64,
+    items: *const PyObjectRef,
+    out: *mut PyObjectRef,
+) {
     unsafe {
         let npos = npos as usize;
         let nkw = nkw as usize;
@@ -386,7 +516,12 @@ thread_local! {
         std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
-extern "C" fn jit_load_attr(obj: *const PyObjectRef, names: *const PyObjectRef, name_idx: i64, out: *mut PyObjectRef) {
+extern "C" fn jit_load_attr(
+    obj: *const PyObjectRef,
+    names: *const PyObjectRef,
+    name_idx: i64,
+    out: *mut PyObjectRef,
+) {
     unsafe {
         use crate::object::ObjectAccess;
         let name_obj = &*names.offset(name_idx as isize);
@@ -395,18 +530,24 @@ extern "C" fn jit_load_attr(obj: *const PyObjectRef, names: *const PyObjectRef, 
         let type_name = obj_ref.borrow().type_name();
         let cache_key = (type_name.clone(), name_str.clone());
         // Check thread-local cache first (type-aware)
-        let cached = ATTR_CACHE.with(|cache| {
-            cache.borrow().get(&cache_key).cloned()
-        });
+        let cached = ATTR_CACHE.with(|cache| cache.borrow().get(&cache_key).cloned());
         if let Some(val) = cached {
             std::ptr::write(out, val);
             return;
         }
-        let result = obj_ref.borrow().get_attribute(&name_str).unwrap_or_else(|_| crate::object::py_none());
+        let result = obj_ref
+            .borrow()
+            .get_attribute(&name_str)
+            .unwrap_or_else(|_| crate::object::py_none());
         if std::env::var("RPY_DEBUG_JITATTR").is_ok() {
             use std::io::Write;
-            let _ = writeln!(std::io::stderr(), "JITATTR obj={} name={} -> {}",
-                obj_ref.repr(), name_str, result.repr());
+            let _ = writeln!(
+                std::io::stderr(),
+                "JITATTR obj={} name={} -> {}",
+                obj_ref.repr(),
+                name_str,
+                result.repr()
+            );
         }
         // Bind the result to the actual object, mirroring the interpreter's
         // LOAD_ATTR/`resolve_descriptor_attr` — `get_attribute` returns an
@@ -443,7 +584,11 @@ extern "C" fn jit_load_attr(obj: *const PyObjectRef, names: *const PyObjectRef, 
         // returned a method bound to a previous `n`, calling bit_length on
         // the wrong int — the JIT loop/`while` bug). Plain values and
         // unbound class attributes are safe to cache.
-        if !matches!(&*result.borrow(), crate::object::PyObject::BuiltinMethod { .. } | crate::object::PyObject::BoundMethod { .. }) {
+        if !matches!(
+            &*result.borrow(),
+            crate::object::PyObject::BuiltinMethod { .. }
+                | crate::object::PyObject::BoundMethod { .. }
+        ) {
             ATTR_CACHE.with(|cache| {
                 cache.borrow_mut().insert(cache_key, result.clone());
             });
@@ -460,11 +605,18 @@ extern "C" fn jit_for_iter(iter: *const PyObjectRef, out: *mut PyObjectRef) -> i
         let next_method = iter_ref.borrow().get_attribute("__next__").ok();
         if let Some(method) = next_method {
             match crate::object::call_bound_method(method, (*iter).clone(), vec![]) {
-                Ok(val) => { std::ptr::write(out, val); 0 }
-                Err(_) => { std::ptr::write(out, crate::object::py_none()); 1 }
+                Ok(val) => {
+                    std::ptr::write(out, val);
+                    0
+                }
+                Err(_) => {
+                    std::ptr::write(out, crate::object::py_none());
+                    1
+                }
             }
         } else {
-            std::ptr::write(out, crate::object::py_none()); 1
+            std::ptr::write(out, crate::object::py_none());
+            1
         }
     }
 }
@@ -478,37 +630,57 @@ extern "C" fn jit_build_map(n: i64, items: *const PyObjectRef, out: *mut PyObjec
             let val = &*items.offset(i * 2 + 1);
             let _ = d.set(key.clone(), val.clone());
         }
-        std::ptr::write(out, crate::object::PyObjectRef::new(crate::object::PyObject::Dict(Box::new(d))));
+        std::ptr::write(
+            out,
+            crate::object::PyObjectRef::new(crate::object::PyObject::Dict(Box::new(d))),
+        );
     }
 }
 
 // STORE_ATTR: obj.name = val
-extern "C" fn jit_store_attr(obj: *const PyObjectRef, names: *const PyObjectRef, name_idx: i64, val: *const PyObjectRef, out: *mut PyObjectRef) {
+extern "C" fn jit_store_attr(
+    obj: *const PyObjectRef,
+    names: *const PyObjectRef,
+    name_idx: i64,
+    val: *const PyObjectRef,
+    out: *mut PyObjectRef,
+) {
     unsafe {
         use crate::object::ObjectAccess;
         let name_obj = &*names.offset(name_idx as isize);
         let name_str = name_obj.str();
         let obj_ref = &*obj;
         let val_ref = &*val;
-        let _ = obj_ref.borrow_mut().set_attribute(&name_str, val_ref.clone());
+        let _ = obj_ref
+            .borrow_mut()
+            .set_attribute(&name_str, val_ref.clone());
         std::ptr::write(out, (*val).clone());
     }
 }
 
 // UNPACK_SEQUENCE: unpack iterable into n items, returns 0 on success
-extern "C" fn jit_unpack_sequence(seq: *const PyObjectRef, n: i64, items: *mut PyObjectRef, out: *mut PyObjectRef) -> i64 {
+extern "C" fn jit_unpack_sequence(
+    seq: *const PyObjectRef,
+    n: i64,
+    items: *mut PyObjectRef,
+    out: *mut PyObjectRef,
+) -> i64 {
     unsafe {
         let seq_ref = &*seq;
         let mut collected: Vec<PyObjectRef> = Vec::new();
         // Try sequence protocol: __getitem__
-        if let Ok(len) = crate::object::builtin_len(&[seq_ref.clone()]).map(|l| l.as_i64().unwrap_or(0)) {
+        if let Ok(len) =
+            crate::object::builtin_len(&[seq_ref.clone()]).map(|l| l.as_i64().unwrap_or(0))
+        {
             if len == n {
                 for i in 0..n as isize {
                     let idx = crate::object::py_int(i as i64);
                     let item = crate::object::py_getitem(seq_ref, &idx);
                     if let Ok(item) = item {
                         collected.push(item);
-                    } else { return 1; }
+                    } else {
+                        return 1;
+                    }
                 }
                 for (i, item) in collected.iter().enumerate() {
                     std::ptr::write(items.offset(i as isize), item.clone());
@@ -522,7 +694,12 @@ extern "C" fn jit_unpack_sequence(seq: *const PyObjectRef, n: i64, items: *mut P
 }
 
 // IMPORT_NAME: import a module by name
-extern "C" fn jit_import_name(consts: *const PyObjectRef, names_offset: i64, name_idx: i64, out: *mut PyObjectRef) {
+extern "C" fn jit_import_name(
+    consts: *const PyObjectRef,
+    names_offset: i64,
+    name_idx: i64,
+    out: *mut PyObjectRef,
+) {
     unsafe {
         let name_obj = &*consts.offset((names_offset + name_idx) as isize);
         let name = name_obj.str();
@@ -545,10 +722,16 @@ extern "C" fn jit_import_name(consts: *const PyObjectRef, names_offset: i64, nam
 }
 
 // IMPORT_FROM: import an attribute from a module
-extern "C" fn jit_import_from(module_ptr: *const PyObjectRef, consts: *const PyObjectRef, names_offset: i64, name_idx: i64, out: *mut PyObjectRef) {
+extern "C" fn jit_import_from(
+    module_ptr: *const PyObjectRef,
+    consts: *const PyObjectRef,
+    names_offset: i64,
+    name_idx: i64,
+    out: *mut PyObjectRef,
+) {
     unsafe {
-        use crate::object::ObjectAccess;
         use crate::object::DictMap;
+        use crate::object::ObjectAccess;
         let name_obj = &*consts.offset((names_offset + name_idx) as isize);
         let name = name_obj.str();
         let module_ref = &*module_ptr;
@@ -570,11 +753,19 @@ extern "C" fn jit_import_from(module_ptr: *const PyObjectRef, consts: *const PyO
 }
 
 // UNPACK_EX: unpack iterable with starred target (a, *b, c = seq)
-extern "C" fn jit_unpack_ex(seq: *const PyObjectRef, n_before: i64, n_after: i64, items: *mut PyObjectRef, out: *mut PyObjectRef) -> i64 {
+extern "C" fn jit_unpack_ex(
+    seq: *const PyObjectRef,
+    n_before: i64,
+    n_after: i64,
+    items: *mut PyObjectRef,
+    out: *mut PyObjectRef,
+) -> i64 {
     unsafe {
         let seq_ref = &*seq;
         let mut collected: Vec<PyObjectRef> = Vec::new();
-        if let Ok(len) = crate::object::builtin_len(&[seq_ref.clone()]).map(|l| l.as_i64().unwrap_or(0)) {
+        if let Ok(len) =
+            crate::object::builtin_len(&[seq_ref.clone()]).map(|l| l.as_i64().unwrap_or(0))
+        {
             let nb = n_before as usize;
             let na = n_after as usize;
             let total = len as usize;
@@ -585,7 +776,9 @@ extern "C" fn jit_unpack_ex(seq: *const PyObjectRef, n_before: i64, n_after: i64
                     let idx = crate::object::py_int(i as i64);
                     if let Ok(item) = crate::object::py_getitem(seq_ref, &idx) {
                         collected.push(item);
-                    } else { return 1; }
+                    } else {
+                        return 1;
+                    }
                 }
                 // Starred portion as a list
                 let mut star_items = Vec::with_capacity(star_count);
@@ -593,7 +786,9 @@ extern "C" fn jit_unpack_ex(seq: *const PyObjectRef, n_before: i64, n_after: i64
                     let idx = crate::object::py_int(i as i64);
                     if let Ok(item) = crate::object::py_getitem(seq_ref, &idx) {
                         star_items.push(item);
-                    } else { return 1; }
+                    } else {
+                        return 1;
+                    }
                 }
                 collected.push(crate::object::py_list(star_items));
                 // Collect items after *
@@ -601,7 +796,9 @@ extern "C" fn jit_unpack_ex(seq: *const PyObjectRef, n_before: i64, n_after: i64
                     let idx = crate::object::py_int(i as i64);
                     if let Ok(item) = crate::object::py_getitem(seq_ref, &idx) {
                         collected.push(item);
-                    } else { return 1; }
+                    } else {
+                        return 1;
+                    }
                 }
                 for (i, item) in collected.iter().enumerate() {
                     std::ptr::write(items.offset(i as isize), item.clone());
@@ -621,7 +818,10 @@ extern "C" fn jit_setup_with(mgr: *const PyObjectRef, out: *mut PyObjectRef) {
         let mgr_ref = &*mgr;
         let enter_raw = mgr_ref.borrow().get_attribute("__enter__").ok();
         if let Some(enter_raw) = enter_raw {
-            let is_builtin = matches!(&*enter_raw.borrow(), crate::object::PyObject::BuiltinMethod { .. });
+            let is_builtin = matches!(
+                &*enter_raw.borrow(),
+                crate::object::PyObject::BuiltinMethod { .. }
+            );
             let enter = if is_builtin {
                 let b = enter_raw.borrow();
                 match &*b {
@@ -656,7 +856,10 @@ extern "C" fn jit_with_exit(mgr: *const PyObjectRef, out: *mut PyObjectRef) {
         let mgr_ref = &*mgr;
         let exit_raw = mgr_ref.borrow().get_attribute("__exit__").ok();
         if let Some(exit_raw) = exit_raw {
-            let is_builtin = matches!(&*exit_raw.borrow(), crate::object::PyObject::BuiltinMethod { .. });
+            let is_builtin = matches!(
+                &*exit_raw.borrow(),
+                crate::object::PyObject::BuiltinMethod { .. }
+            );
             let exit = if is_builtin {
                 let b = exit_raw.borrow();
                 match &*b {
@@ -676,8 +879,12 @@ extern "C" fn jit_with_exit(mgr: *const PyObjectRef, out: *mut PyObjectRef) {
                 })
             };
             let none = crate::object::py_none();
-            let result = crate::object::call_bound_method(exit, mgr_ref.clone(), vec![none.clone(), none.clone(), none.clone()])
-                .unwrap_or_else(|_| crate::object::py_none());
+            let result = crate::object::call_bound_method(
+                exit,
+                mgr_ref.clone(),
+                vec![none.clone(), none.clone(), none.clone()],
+            )
+            .unwrap_or_else(|_| crate::object::py_none());
             std::ptr::write(out, result);
         } else {
             std::ptr::write(out, crate::object::py_none());
@@ -686,7 +893,13 @@ extern "C" fn jit_with_exit(mgr: *const PyObjectRef, out: *mut PyObjectRef) {
 }
 
 // LOAD_NAME: lookup in locals, globals, builtins
-extern "C" fn jit_load_name(names: *const PyObjectRef, name_idx: i64, locals: *const PyObjectRef, globals: *const PyObjectRef, out: *mut PyObjectRef) {
+extern "C" fn jit_load_name(
+    names: *const PyObjectRef,
+    name_idx: i64,
+    locals: *const PyObjectRef,
+    globals: *const PyObjectRef,
+    out: *mut PyObjectRef,
+) {
     unsafe {
         use crate::object::ObjectAccess;
         let name_obj = &*names.offset(name_idx as isize);
@@ -694,14 +907,15 @@ extern "C" fn jit_load_name(names: *const PyObjectRef, name_idx: i64, locals: *c
         // Try locals first (as a dict), then globals, then builtins
         // Locals reference
         let locals_ref = &*locals;
-        let result = locals_ref.borrow().get_attribute(&name_str).ok()
+        let result = locals_ref
+            .borrow()
+            .get_attribute(&name_str)
+            .ok()
             .or_else(|| {
                 let globals_ref = &*globals;
                 globals_ref.borrow().get_attribute(&name_str).ok()
             })
-            .unwrap_or_else(|| {
-                crate::object::py_none()
-            });
+            .unwrap_or_else(|| crate::object::py_none());
         std::ptr::write(out, result);
     }
 }
@@ -712,7 +926,10 @@ extern "C" fn jit_build_set(n: i64, items: *const PyObjectRef, out: *mut PyObjec
         for i in 0..n as isize {
             let _ = s.add((*items.offset(i)).clone());
         }
-        std::ptr::write(out, crate::object::PyObjectRef::new(crate::object::PyObject::Set(s)));
+        std::ptr::write(
+            out,
+            crate::object::PyObjectRef::new(crate::object::PyObject::Set(s)),
+        );
     }
 }
 
@@ -728,25 +945,50 @@ extern "C" fn jit_build_string(n: i64, items: *const PyObjectRef, out: *mut PyOb
 
 extern "C" fn jit_build_slice(n: i64, items: *const PyObjectRef, out: *mut PyObjectRef) {
     unsafe {
-        let start = if n >= 1 { Some((*items.offset(0)).clone()) } else { None };
-        let stop = if n >= 2 { Some((*items.offset(1)).clone()) } else { None };
-        let step = if n >= 3 { Some((*items.offset(2)).clone()) } else { None };
-        std::ptr::write(out, crate::object::PyObjectRef::imm(crate::object::PyObject::Slice {
-            start: start.unwrap_or_else(|| crate::object::py_none()),
-            stop: stop.unwrap_or_else(|| crate::object::py_none()),
-            step: step.unwrap_or_else(|| crate::object::py_none()),
-        }));
+        let start = if n >= 1 {
+            Some((*items.offset(0)).clone())
+        } else {
+            None
+        };
+        let stop = if n >= 2 {
+            Some((*items.offset(1)).clone())
+        } else {
+            None
+        };
+        let step = if n >= 3 {
+            Some((*items.offset(2)).clone())
+        } else {
+            None
+        };
+        std::ptr::write(
+            out,
+            crate::object::PyObjectRef::imm(crate::object::PyObject::Slice {
+                start: start.unwrap_or_else(|| crate::object::py_none()),
+                stop: stop.unwrap_or_else(|| crate::object::py_none()),
+                step: step.unwrap_or_else(|| crate::object::py_none()),
+            }),
+        );
     }
 }
 
-extern "C" fn jit_store_subscr(obj: *const PyObjectRef, idx: *const PyObjectRef, val: *const PyObjectRef, out: *mut PyObjectRef) {
+extern "C" fn jit_store_subscr(
+    obj: *const PyObjectRef,
+    idx: *const PyObjectRef,
+    val: *const PyObjectRef,
+    out: *mut PyObjectRef,
+) {
     unsafe {
         let _ = crate::object::py_setitem(&*obj, &*idx, (*val).clone());
         std::ptr::write(out, crate::object::py_none());
     }
 }
 
-extern "C" fn jit_is_op(a: *const PyObjectRef, b: *const PyObjectRef, invert: i64, out: *mut PyObjectRef) {
+extern "C" fn jit_is_op(
+    a: *const PyObjectRef,
+    b: *const PyObjectRef,
+    invert: i64,
+    out: *mut PyObjectRef,
+) {
     unsafe {
         let result = (*a).is(&*b);
         let result = if invert != 0 { !result } else { result };
@@ -754,8 +996,11 @@ extern "C" fn jit_is_op(a: *const PyObjectRef, b: *const PyObjectRef, invert: i6
     }
 }
 
-
-extern "C" fn jit_make_function(items: *const crate::object::PyObjectRef, arg: i64, out: *mut crate::object::PyObjectRef) {
+extern "C" fn jit_make_function(
+    items: *const crate::object::PyObjectRef,
+    arg: i64,
+    out: *mut crate::object::PyObjectRef,
+) {
     unsafe {
         let has_closure = (arg & 0x100) != 0;
         let n_defaults = (arg & 0xFF) as usize;
@@ -778,7 +1023,10 @@ extern "C" fn jit_make_function(items: *const crate::object::PyObjectRef, arg: i
         total -= 1;
         let code = match &*code_obj.borrow() {
             crate::object::PyObject::Code(c) => c.clone(),
-            _ => { std::ptr::write(out, crate::object::py_none()); return; }
+            _ => {
+                std::ptr::write(out, crate::object::py_none());
+                return;
+            }
         };
         let closure = if has_closure {
             let closure_tuple = (*items.offset(total as isize - 1)).clone();
@@ -786,11 +1034,15 @@ extern "C" fn jit_make_function(items: *const crate::object::PyObjectRef, arg: i
             let items_b = closure_tuple.borrow();
             if let crate::object::PyObject::Tuple(items_v) = &*items_b {
                 items_v.clone()
-            } else { Vec::new() }
-        } else { Vec::new() };
-         let globals = CURRENT_JIT_GLOBALS.with(|g| g.borrow().clone());
-         let func_obj = match globals {
-             Some(g) => {
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+        let globals = CURRENT_JIT_GLOBALS.with(|g| g.borrow().clone());
+        let func_obj = match globals {
+            Some(g) => {
                 let code_rc = code.clone();
                 let func = crate::object::PyObject::Function(Box::new(crate::object::PyFunction {
                     code,
@@ -803,9 +1055,14 @@ extern "C" fn jit_make_function(items: *const crate::object::PyObjectRef, arg: i
                 }));
                 let func_ref = crate::object::PyObjectRef::new(func);
                 // Set __code__ and __module__
-                if let crate::object::PyObject::Function(ref mut inner_f) = &mut *func_ref.borrow_mut() {
+                if let crate::object::PyObject::Function(ref mut inner_f) =
+                    &mut *func_ref.borrow_mut()
+                {
                     let dict = &mut inner_f.dict;
-                    dict.insert("__code__".to_string(), crate::object::PyObjectRef::imm(crate::object::PyObject::Code(code_rc)));
+                    dict.insert(
+                        "__code__".to_string(),
+                        crate::object::PyObjectRef::imm(crate::object::PyObject::Code(code_rc)),
+                    );
                     let mg_name = CURRENT_JIT_GLOBALS.with(|g| {
                         g.borrow().as_ref().and_then(|g| {
                             let b = g.borrow();
@@ -824,12 +1081,13 @@ extern "C" fn jit_make_function(items: *const crate::object::PyObjectRef, arg: i
     }
 }
 
-
 extern "C" fn jit_invert(val: *const PyObjectRef, out: *mut PyObjectRef) {
     unsafe {
         let borrowed = (*val).borrow();
         match &*borrowed {
-            crate::object::PyObject::Int(i) => std::ptr::write(out, crate::object::py_int(!(i.clone()))),
+            crate::object::PyObject::Int(i) => {
+                std::ptr::write(out, crate::object::py_int(!(i.clone())))
+            }
             _ => std::ptr::write(out, crate::object::py_none()),
         }
     }
@@ -889,7 +1147,9 @@ impl JitCompiler {
         #[cfg(debug_assertions)]
         let flag_builder = settings::builder();
         let isa_builder = cranelift_native::builder().unwrap();
-        let isa = isa_builder.finish(settings::Flags::new(flag_builder)).unwrap();
+        let isa = isa_builder
+            .finish(settings::Flags::new(flag_builder))
+            .unwrap();
         let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
         builder.symbol("jit_py_add", jit_py_add as *const u8);
         builder.symbol("jit_py_sub", jit_py_sub as *const u8);
@@ -948,50 +1208,136 @@ impl JitCompiler {
         let unpack_ex_sig = Self::make_unpack_ex_sig();
         let context_sig = Self::make_context_sig();
         let make_function_sig = Self::make_make_function_sig();
-        let add_func = module.declare_function("jit_py_add", Linkage::Import, &binop_sig).unwrap();
-        let sub_func = module.declare_function("jit_py_sub", Linkage::Import, &binop_sig).unwrap();
-        let mul_func = module.declare_function("jit_py_mul", Linkage::Import, &binop_sig).unwrap();
-        let div_func = module.declare_function("jit_py_div", Linkage::Import, &binop_sig).unwrap();
-        let floor_div_func = module.declare_function("jit_py_floor_div", Linkage::Import, &binop_sig).unwrap();
-        let mod_func = module.declare_function("jit_py_mod", Linkage::Import, &binop_sig).unwrap();
-        let pow_func = module.declare_function("jit_py_pow", Linkage::Import, &binop_sig).unwrap();
-        let lshift_func = module.declare_function("jit_py_lshift", Linkage::Import, &binop_sig).unwrap();
-        let rshift_func = module.declare_function("jit_py_rshift", Linkage::Import, &binop_sig).unwrap();
-        let bit_and_func = module.declare_function("jit_py_bit_and", Linkage::Import, &binop_sig).unwrap();
-        let bit_or_func = module.declare_function("jit_py_bit_or", Linkage::Import, &binop_sig).unwrap();
-        let bit_xor_func = module.declare_function("jit_py_bit_xor", Linkage::Import, &binop_sig).unwrap();
-        let inplace_binop_func = module.declare_function("jit_py_inplace_binop", Linkage::Import, &cmp_sig).unwrap();
-        let getitem_func = module.declare_function("jit_getitem", Linkage::Import, &binop_sig).unwrap();
-        let cmp_func = module.declare_function("jit_py_compare", Linkage::Import, &cmp_sig).unwrap();
-        let truthy_func = module.declare_function("jit_is_true", Linkage::Import, &truthy_sig).unwrap();
-        let neg_func = module.declare_function("jit_neg", Linkage::Import, &unary_sig).unwrap();
-        let not_func = module.declare_function("jit_not", Linkage::Import, &unary_sig).unwrap();
-        let build_list_func = module.declare_function("jit_build_list", Linkage::Import, &binop_sig).unwrap();
-        let build_tuple_func = module.declare_function("jit_build_tuple", Linkage::Import, &binop_sig).unwrap();
-        let list_append_func = module.declare_function("jit_list_append", Linkage::Import, &binop_sig).unwrap();
-        let contains_func = module.declare_function("jit_contains", Linkage::Import, &binop_sig).unwrap();
-        let get_iter_func = module.declare_function("jit_get_iter", Linkage::Import, &unary_sig).unwrap();
-        let call_func = module.declare_function("jit_call", Linkage::Import, &call_sig).unwrap();
+        let add_func = module
+            .declare_function("jit_py_add", Linkage::Import, &binop_sig)
+            .unwrap();
+        let sub_func = module
+            .declare_function("jit_py_sub", Linkage::Import, &binop_sig)
+            .unwrap();
+        let mul_func = module
+            .declare_function("jit_py_mul", Linkage::Import, &binop_sig)
+            .unwrap();
+        let div_func = module
+            .declare_function("jit_py_div", Linkage::Import, &binop_sig)
+            .unwrap();
+        let floor_div_func = module
+            .declare_function("jit_py_floor_div", Linkage::Import, &binop_sig)
+            .unwrap();
+        let mod_func = module
+            .declare_function("jit_py_mod", Linkage::Import, &binop_sig)
+            .unwrap();
+        let pow_func = module
+            .declare_function("jit_py_pow", Linkage::Import, &binop_sig)
+            .unwrap();
+        let lshift_func = module
+            .declare_function("jit_py_lshift", Linkage::Import, &binop_sig)
+            .unwrap();
+        let rshift_func = module
+            .declare_function("jit_py_rshift", Linkage::Import, &binop_sig)
+            .unwrap();
+        let bit_and_func = module
+            .declare_function("jit_py_bit_and", Linkage::Import, &binop_sig)
+            .unwrap();
+        let bit_or_func = module
+            .declare_function("jit_py_bit_or", Linkage::Import, &binop_sig)
+            .unwrap();
+        let bit_xor_func = module
+            .declare_function("jit_py_bit_xor", Linkage::Import, &binop_sig)
+            .unwrap();
+        let inplace_binop_func = module
+            .declare_function("jit_py_inplace_binop", Linkage::Import, &cmp_sig)
+            .unwrap();
+        let getitem_func = module
+            .declare_function("jit_getitem", Linkage::Import, &binop_sig)
+            .unwrap();
+        let cmp_func = module
+            .declare_function("jit_py_compare", Linkage::Import, &cmp_sig)
+            .unwrap();
+        let truthy_func = module
+            .declare_function("jit_is_true", Linkage::Import, &truthy_sig)
+            .unwrap();
+        let neg_func = module
+            .declare_function("jit_neg", Linkage::Import, &unary_sig)
+            .unwrap();
+        let not_func = module
+            .declare_function("jit_not", Linkage::Import, &unary_sig)
+            .unwrap();
+        let build_list_func = module
+            .declare_function("jit_build_list", Linkage::Import, &binop_sig)
+            .unwrap();
+        let build_tuple_func = module
+            .declare_function("jit_build_tuple", Linkage::Import, &binop_sig)
+            .unwrap();
+        let list_append_func = module
+            .declare_function("jit_list_append", Linkage::Import, &binop_sig)
+            .unwrap();
+        let contains_func = module
+            .declare_function("jit_contains", Linkage::Import, &binop_sig)
+            .unwrap();
+        let get_iter_func = module
+            .declare_function("jit_get_iter", Linkage::Import, &unary_sig)
+            .unwrap();
+        let call_func = module
+            .declare_function("jit_call", Linkage::Import, &call_sig)
+            .unwrap();
         let call_kw_sig = Self::make_call_kw_sig();
-        let call_kw_func = module.declare_function("jit_call_kw", Linkage::Import, &call_kw_sig).unwrap();
-        let load_attr_func = module.declare_function("jit_load_attr", Linkage::Import, &load_attr_sig).unwrap();
-        let for_iter_func = module.declare_function("jit_for_iter", Linkage::Import, &truthy_sig).unwrap();
-        let build_map_func = module.declare_function("jit_build_map", Linkage::Import, &call_sig).unwrap();
-        let store_attr_func = module.declare_function("jit_store_attr", Linkage::Import, &store_attr_sig).unwrap();
-        let unpack_sequence_func = module.declare_function("jit_unpack_sequence", Linkage::Import, &unpack_sig).unwrap();
-        let load_name_func = module.declare_function("jit_load_name", Linkage::Import, &store_attr_sig).unwrap();
-        let build_set_func = module.declare_function("jit_build_set", Linkage::Import, &binop_sig).unwrap();
-        let build_string_func = module.declare_function("jit_build_string", Linkage::Import, &binop_sig).unwrap();
-        let build_slice_func = module.declare_function("jit_build_slice", Linkage::Import, &binop_sig).unwrap();
-        let store_subscr_func = module.declare_function("jit_store_subscr", Linkage::Import, &call_sig).unwrap();
-        let is_op_func = module.declare_function("jit_is_op", Linkage::Import, &call_sig).unwrap();
-        let invert_func = module.declare_function("jit_invert", Linkage::Import, &unary_sig).unwrap();
-        let import_name_func = module.declare_function("jit_import_name", Linkage::Import, &import_sig).unwrap();
-        let import_from_func = module.declare_function("jit_import_from", Linkage::Import, &import_from_sig).unwrap();
-        let unpack_ex_func = module.declare_function("jit_unpack_ex", Linkage::Import, &unpack_ex_sig).unwrap();
-        let setup_with_func = module.declare_function("jit_setup_with", Linkage::Import, &context_sig).unwrap();
-        let with_exit_func = module.declare_function("jit_with_exit", Linkage::Import, &context_sig).unwrap();
-        let make_function_func = module.declare_function("jit_make_function", Linkage::Import, &make_function_sig).unwrap();
+        let call_kw_func = module
+            .declare_function("jit_call_kw", Linkage::Import, &call_kw_sig)
+            .unwrap();
+        let load_attr_func = module
+            .declare_function("jit_load_attr", Linkage::Import, &load_attr_sig)
+            .unwrap();
+        let for_iter_func = module
+            .declare_function("jit_for_iter", Linkage::Import, &truthy_sig)
+            .unwrap();
+        let build_map_func = module
+            .declare_function("jit_build_map", Linkage::Import, &call_sig)
+            .unwrap();
+        let store_attr_func = module
+            .declare_function("jit_store_attr", Linkage::Import, &store_attr_sig)
+            .unwrap();
+        let unpack_sequence_func = module
+            .declare_function("jit_unpack_sequence", Linkage::Import, &unpack_sig)
+            .unwrap();
+        let load_name_func = module
+            .declare_function("jit_load_name", Linkage::Import, &store_attr_sig)
+            .unwrap();
+        let build_set_func = module
+            .declare_function("jit_build_set", Linkage::Import, &binop_sig)
+            .unwrap();
+        let build_string_func = module
+            .declare_function("jit_build_string", Linkage::Import, &binop_sig)
+            .unwrap();
+        let build_slice_func = module
+            .declare_function("jit_build_slice", Linkage::Import, &binop_sig)
+            .unwrap();
+        let store_subscr_func = module
+            .declare_function("jit_store_subscr", Linkage::Import, &call_sig)
+            .unwrap();
+        let is_op_func = module
+            .declare_function("jit_is_op", Linkage::Import, &call_sig)
+            .unwrap();
+        let invert_func = module
+            .declare_function("jit_invert", Linkage::Import, &unary_sig)
+            .unwrap();
+        let import_name_func = module
+            .declare_function("jit_import_name", Linkage::Import, &import_sig)
+            .unwrap();
+        let import_from_func = module
+            .declare_function("jit_import_from", Linkage::Import, &import_from_sig)
+            .unwrap();
+        let unpack_ex_func = module
+            .declare_function("jit_unpack_ex", Linkage::Import, &unpack_ex_sig)
+            .unwrap();
+        let setup_with_func = module
+            .declare_function("jit_setup_with", Linkage::Import, &context_sig)
+            .unwrap();
+        let with_exit_func = module
+            .declare_function("jit_with_exit", Linkage::Import, &context_sig)
+            .unwrap();
+        let make_function_func = module
+            .declare_function("jit_make_function", Linkage::Import, &make_function_sig)
+            .unwrap();
         JitCompiler {
             builder_context: FunctionBuilderContext::new(),
             module,
@@ -1042,7 +1388,8 @@ impl JitCompiler {
     }
 
     fn make_binop_sig() -> cranelift::codegen::ir::Signature {
-        let mut s = cranelift::codegen::ir::Signature::new(cranelift::codegen::isa::CallConv::SystemV);
+        let mut s =
+            cranelift::codegen::ir::Signature::new(cranelift::codegen::isa::CallConv::SystemV);
         s.params.push(AbiParam::new(types::I64));
         s.params.push(AbiParam::new(types::I64));
         s.params.push(AbiParam::new(types::I64));
@@ -1050,7 +1397,8 @@ impl JitCompiler {
     }
 
     fn make_cmp_sig() -> cranelift::codegen::ir::Signature {
-        let mut s = cranelift::codegen::ir::Signature::new(cranelift::codegen::isa::CallConv::SystemV);
+        let mut s =
+            cranelift::codegen::ir::Signature::new(cranelift::codegen::isa::CallConv::SystemV);
         s.params.push(AbiParam::new(types::I64));
         s.params.push(AbiParam::new(types::I64));
         s.params.push(AbiParam::new(types::I64));
@@ -1059,7 +1407,8 @@ impl JitCompiler {
     }
 
     fn make_call_kw_sig() -> cranelift::codegen::ir::Signature {
-        let mut s = cranelift::codegen::ir::Signature::new(cranelift::codegen::isa::CallConv::SystemV);
+        let mut s =
+            cranelift::codegen::ir::Signature::new(cranelift::codegen::isa::CallConv::SystemV);
         s.params.push(AbiParam::new(types::I64)); // func ptr
         s.params.push(AbiParam::new(types::I64)); // npos
         s.params.push(AbiParam::new(types::I64)); // nkw
@@ -1069,21 +1418,24 @@ impl JitCompiler {
     }
 
     fn make_truthy_sig() -> cranelift::codegen::ir::Signature {
-        let mut s = cranelift::codegen::ir::Signature::new(cranelift::codegen::isa::CallConv::SystemV);
+        let mut s =
+            cranelift::codegen::ir::Signature::new(cranelift::codegen::isa::CallConv::SystemV);
         s.params.push(AbiParam::new(types::I64));
         s.returns.push(AbiParam::new(types::I64));
         s
     }
 
     fn make_unary_sig() -> cranelift::codegen::ir::Signature {
-        let mut s = cranelift::codegen::ir::Signature::new(cranelift::codegen::isa::CallConv::SystemV);
+        let mut s =
+            cranelift::codegen::ir::Signature::new(cranelift::codegen::isa::CallConv::SystemV);
         s.params.push(AbiParam::new(types::I64));
         s.params.push(AbiParam::new(types::I64));
         s
     }
 
     fn make_call_sig() -> cranelift::codegen::ir::Signature {
-        let mut s = cranelift::codegen::ir::Signature::new(cranelift::codegen::isa::CallConv::SystemV);
+        let mut s =
+            cranelift::codegen::ir::Signature::new(cranelift::codegen::isa::CallConv::SystemV);
         s.params.push(AbiParam::new(types::I64)); // func ptr
         s.params.push(AbiParam::new(types::I64)); // nargs
         s.params.push(AbiParam::new(types::I64)); // args array ptr
@@ -1092,7 +1444,8 @@ impl JitCompiler {
     }
 
     fn make_load_attr_sig() -> cranelift::codegen::ir::Signature {
-        let mut s = cranelift::codegen::ir::Signature::new(cranelift::codegen::isa::CallConv::SystemV);
+        let mut s =
+            cranelift::codegen::ir::Signature::new(cranelift::codegen::isa::CallConv::SystemV);
         s.params.push(AbiParam::new(types::I64)); // obj ptr
         s.params.push(AbiParam::new(types::I64)); // names array ptr
         s.params.push(AbiParam::new(types::I64)); // name_idx
@@ -1101,7 +1454,8 @@ impl JitCompiler {
     }
 
     fn make_store_attr_sig() -> cranelift::codegen::ir::Signature {
-        let mut s = cranelift::codegen::ir::Signature::new(cranelift::codegen::isa::CallConv::SystemV);
+        let mut s =
+            cranelift::codegen::ir::Signature::new(cranelift::codegen::isa::CallConv::SystemV);
         s.params.push(AbiParam::new(types::I64));
         s.params.push(AbiParam::new(types::I64));
         s.params.push(AbiParam::new(types::I64));
@@ -1111,7 +1465,8 @@ impl JitCompiler {
     }
 
     fn make_unpack_sig() -> cranelift::codegen::ir::Signature {
-        let mut s = cranelift::codegen::ir::Signature::new(cranelift::codegen::isa::CallConv::SystemV);
+        let mut s =
+            cranelift::codegen::ir::Signature::new(cranelift::codegen::isa::CallConv::SystemV);
         s.params.push(AbiParam::new(types::I64));
         s.params.push(AbiParam::new(types::I64));
         s.params.push(AbiParam::new(types::I64));
@@ -1122,7 +1477,8 @@ impl JitCompiler {
 
     // make_import_sig: consts ptr, names_offset, name_idx, out ptr
     fn make_import_sig() -> cranelift::codegen::ir::Signature {
-        let mut s = cranelift::codegen::ir::Signature::new(cranelift::codegen::isa::CallConv::SystemV);
+        let mut s =
+            cranelift::codegen::ir::Signature::new(cranelift::codegen::isa::CallConv::SystemV);
         s.params.push(AbiParam::new(types::I64));
         s.params.push(AbiParam::new(types::I64));
         s.params.push(AbiParam::new(types::I64));
@@ -1132,7 +1488,8 @@ impl JitCompiler {
 
     // make_import_from_sig: module ptr, consts ptr, names_offset, name_idx, out ptr
     fn make_import_from_sig() -> cranelift::codegen::ir::Signature {
-        let mut s = cranelift::codegen::ir::Signature::new(cranelift::codegen::isa::CallConv::SystemV);
+        let mut s =
+            cranelift::codegen::ir::Signature::new(cranelift::codegen::isa::CallConv::SystemV);
         s.params.push(AbiParam::new(types::I64));
         s.params.push(AbiParam::new(types::I64));
         s.params.push(AbiParam::new(types::I64));
@@ -1143,7 +1500,8 @@ impl JitCompiler {
 
     // make_unpack_ex_sig: seq ptr, n_before, n_after, items ptr, out ptr -> i64
     fn make_unpack_ex_sig() -> cranelift::codegen::ir::Signature {
-        let mut s = cranelift::codegen::ir::Signature::new(cranelift::codegen::isa::CallConv::SystemV);
+        let mut s =
+            cranelift::codegen::ir::Signature::new(cranelift::codegen::isa::CallConv::SystemV);
         s.params.push(AbiParam::new(types::I64));
         s.params.push(AbiParam::new(types::I64));
         s.params.push(AbiParam::new(types::I64));
@@ -1155,7 +1513,8 @@ impl JitCompiler {
 
     // make_context_sig: mgr ptr, out ptr
     fn make_make_function_sig() -> cranelift::codegen::ir::Signature {
-        let mut s = cranelift::codegen::ir::Signature::new(cranelift::codegen::isa::CallConv::SystemV);
+        let mut s =
+            cranelift::codegen::ir::Signature::new(cranelift::codegen::isa::CallConv::SystemV);
         s.params.push(AbiParam::new(types::I64));
         s.params.push(AbiParam::new(types::I64));
         s.params.push(AbiParam::new(types::I64));
@@ -1164,13 +1523,16 @@ impl JitCompiler {
     }
 
     fn make_context_sig() -> cranelift::codegen::ir::Signature {
-        let mut s = cranelift::codegen::ir::Signature::new(cranelift::codegen::isa::CallConv::SystemV);
+        let mut s =
+            cranelift::codegen::ir::Signature::new(cranelift::codegen::isa::CallConv::SystemV);
         s.params.push(AbiParam::new(types::I64));
         s.params.push(AbiParam::new(types::I64));
         s
     }
 
-    pub fn is_enabled() -> bool { true }
+    pub fn is_enabled() -> bool {
+        true
+    }
 
     pub fn precompute_consts(code: &CodeObject) -> Vec<PyObjectRef> {
         // Delegates to `vm::eval_const_value` — the interpreter's own,
@@ -1183,9 +1545,12 @@ impl JitCompiler {
         // containing) function panicked via `.unwrap()` on the fallback
         // BigInt parse — dormant until a loop happened to also contain
         // such a literal.
-        code.consts.iter().map(|cv| {
-            crate::vm::eval_const_value(cv.clone()).unwrap_or_else(|_| crate::object::py_none())
-        }).collect()
+        code.consts
+            .iter()
+            .map(|cv| {
+                crate::vm::eval_const_value(cv.clone()).unwrap_or_else(|_| crate::object::py_none())
+            })
+            .collect()
     }
 
     /// Precompute constants AND resolve globals for JIT.
@@ -1200,7 +1565,8 @@ impl JitCompiler {
         result.resize(base + code.names.len(), crate::object::py_none());
         for (i, name) in code.names.iter().enumerate() {
             let name_str = crate::interner::lookup_str(*name);
-            let val = globals.get(name_str)
+            let val = globals
+                .get(name_str)
                 .or_else(|| builtins.get(name_str))
                 .cloned()
                 .unwrap_or_else(crate::object::py_none);
@@ -1237,7 +1603,9 @@ impl JitCompiler {
         let g = globals.borrow();
         for (i, name) in code.names.iter().enumerate() {
             let name_str = crate::interner::lookup_str(*name);
-            let val = g.get(name).cloned()
+            let val = g
+                .get(name)
+                .cloned()
                 .or_else(|| builtins.get(name).cloned())
                 .unwrap_or_else(crate::object::py_none);
             result[c + i] = val;
@@ -1251,28 +1619,51 @@ impl JitCompiler {
     pub fn compile(
         &mut self,
         code: &CodeObject,
-    ) -> Option<extern "C" fn(*const PyObjectRef, usize, *const PyObjectRef, *mut PyObjectRef)> {
-        if !Self::is_enabled() { return None; }
-        if code.vararg_name.is_some() || code.kwarg_name.is_some() || code.kwonlyarg_count > 0 || code.num_defaults > 0 { return None; }
+    ) -> Option<extern "C" fn(*const PyObjectRef, usize, *const PyObjectRef, *mut PyObjectRef)>
+    {
+        if !Self::is_enabled() {
+            return None;
+        }
+        if code.vararg_name.is_some()
+            || code.kwarg_name.is_some()
+            || code.kwonlyarg_count > 0
+            || code.num_defaults > 0
+        {
+            return None;
+        }
         if code.instructions.is_empty() || code.instructions.len() > 200 {
             return None;
         }
         // Only compile functions with loops (back edges) — JIT shines for loops
-        let has_loop = code.instructions.iter().any(|i| matches!(i.op, Opcode::JUMP_BACKWARD | Opcode::FOR_ITER));
-        if !has_loop { return None; }
+        let has_loop = code
+            .instructions
+            .iter()
+            .any(|i| matches!(i.op, Opcode::JUMP_BACKWARD | Opcode::FOR_ITER));
+        if !has_loop {
+            return None;
+        }
 
         // Check all opcodes are supported
         let supported: &[Opcode] = &[
-            Opcode::LOAD_FAST, Opcode::LOAD_CONST,
-            Opcode::BINARY_OP, Opcode::RETURN_VALUE,
-            Opcode::STORE_FAST, Opcode::DUP_TOP,
-            Opcode::POP_TOP, Opcode::COMPARE_OP,
-            Opcode::POP_JUMP_IF_FALSE, Opcode::JUMP_BACKWARD,
-            Opcode::JUMP_FORWARD, Opcode::JUMP,
+            Opcode::LOAD_FAST,
+            Opcode::LOAD_CONST,
+            Opcode::BINARY_OP,
+            Opcode::RETURN_VALUE,
+            Opcode::STORE_FAST,
+            Opcode::DUP_TOP,
+            Opcode::POP_TOP,
+            Opcode::COMPARE_OP,
+            Opcode::POP_JUMP_IF_FALSE,
+            Opcode::JUMP_BACKWARD,
+            Opcode::JUMP_FORWARD,
+            Opcode::JUMP,
             Opcode::LOAD_GLOBAL,
-            Opcode::UNARY_NEGATIVE, Opcode::UNARY_NOT,
-            Opcode::BUILD_LIST, Opcode::BUILD_TUPLE,
-            Opcode::LIST_APPEND, Opcode::CONTAINS_OP,
+            Opcode::UNARY_NEGATIVE,
+            Opcode::UNARY_NOT,
+            Opcode::BUILD_LIST,
+            Opcode::BUILD_TUPLE,
+            Opcode::LIST_APPEND,
+            Opcode::CONTAINS_OP,
             Opcode::CALL,
             Opcode::PUSH_NULL,
             Opcode::LOAD_ATTR,
@@ -1282,18 +1673,31 @@ impl JitCompiler {
             Opcode::STORE_ATTR,
             Opcode::UNPACK_SEQUENCE,
             Opcode::LOAD_NAME,
-            Opcode::POP_JUMP_IF_TRUE, Opcode::POP_JUMP_IF_NONE, Opcode::POP_JUMP_IF_NOT_NONE,
-            Opcode::COPY, Opcode::SWAP,
-            Opcode::BUILD_SET, Opcode::BUILD_SLICE, Opcode::BUILD_STRING,
-            Opcode::STORE_SUBSCR, Opcode::IS_OP, Opcode::UNARY_INVERT,
-            Opcode::IMPORT_NAME, Opcode::IMPORT_FROM, Opcode::UNPACK_EX,
-            Opcode::SETUP_WITH, Opcode::WITH_EXIT,
+            Opcode::POP_JUMP_IF_TRUE,
+            Opcode::POP_JUMP_IF_NONE,
+            Opcode::POP_JUMP_IF_NOT_NONE,
+            Opcode::COPY,
+            Opcode::SWAP,
+            Opcode::BUILD_SET,
+            Opcode::BUILD_SLICE,
+            Opcode::BUILD_STRING,
+            Opcode::STORE_SUBSCR,
+            Opcode::IS_OP,
+            Opcode::UNARY_INVERT,
+            Opcode::IMPORT_NAME,
+            Opcode::IMPORT_FROM,
+            Opcode::UNPACK_EX,
+            Opcode::SETUP_WITH,
+            Opcode::WITH_EXIT,
             Opcode::MAKE_FUNCTION,
             Opcode::END_FOR,
             Opcode::MAP_ADD,
         ];
         for instr in &code.instructions {
-            if !supported.contains(&instr.op) { eprintln!("JIT: unsupported opcode {:?} in '{}'", instr.op, code.name); return None; }
+            if !supported.contains(&instr.op) {
+                eprintln!("JIT: unsupported opcode {:?} in '{}'", instr.op, code.name);
+                return None;
+            }
             // BINARY_OP's arg encodes: 0..=12 a plain operator (see
             // compile_expr's Expr::BinOp), 13 = BINARY_SUBSCR (see
             // compiler.rs's `self.emit(Opcode::BINARY_OP, 13)` call sites),
@@ -1309,13 +1713,17 @@ impl JitCompiler {
                 // dispatch — since AugAssign is the only realistic emitter
                 // of `@` in JIT-eligible hot loops).
                 let valid = arg <= 11 || arg == 13 || (100..=112).contains(&arg);
-                if !valid { eprintln!("JIT: unsupported BINARY_OP arg {} in '{}'", arg, code.name); return None; }
+                if !valid {
+                    eprintln!("JIT: unsupported BINARY_OP arg {} in '{}'", arg, code.name);
+                    return None;
+                }
             }
         }
 
         let _consts = Self::precompute_with_names(code);
 
-        let mut sig = cranelift::codegen::ir::Signature::new(cranelift::codegen::isa::CallConv::SystemV);
+        let mut sig =
+            cranelift::codegen::ir::Signature::new(cranelift::codegen::isa::CallConv::SystemV);
         sig.params.push(AbiParam::new(types::I64));
         sig.params.push(AbiParam::new(types::I64));
         sig.params.push(AbiParam::new(types::I64));
@@ -1323,51 +1731,140 @@ impl JitCompiler {
 
         let mut ctx = cranelift::codegen::Context::new();
         ctx.func.signature = sig.clone();
-        let func = self.module.declare_function("jit_fn", Linkage::Local, &sig).ok()?;
+        let func = self
+            .module
+            .declare_function("jit_fn", Linkage::Local, &sig)
+            .ok()?;
 
-        let add_func_ref = self.module.declare_func_in_func(self.add_func, &mut ctx.func);
-        let sub_func_ref = self.module.declare_func_in_func(self.sub_func, &mut ctx.func);
-        let mul_func_ref = self.module.declare_func_in_func(self.mul_func, &mut ctx.func);
-        let div_func_ref = self.module.declare_func_in_func(self.div_func, &mut ctx.func);
-        let floor_div_func_ref = self.module.declare_func_in_func(self.floor_div_func, &mut ctx.func);
-        let mod_func_ref = self.module.declare_func_in_func(self.mod_func, &mut ctx.func);
-        let pow_func_ref = self.module.declare_func_in_func(self.pow_func, &mut ctx.func);
-        let lshift_func_ref = self.module.declare_func_in_func(self.lshift_func, &mut ctx.func);
-        let rshift_func_ref = self.module.declare_func_in_func(self.rshift_func, &mut ctx.func);
-        let bit_and_func_ref = self.module.declare_func_in_func(self.bit_and_func, &mut ctx.func);
-        let bit_or_func_ref = self.module.declare_func_in_func(self.bit_or_func, &mut ctx.func);
-        let bit_xor_func_ref = self.module.declare_func_in_func(self.bit_xor_func, &mut ctx.func);
-        let inplace_binop_func_ref = self.module.declare_func_in_func(self.inplace_binop_func, &mut ctx.func);
-        let getitem_func_ref = self.module.declare_func_in_func(self.getitem_func, &mut ctx.func);
-        let cmp_func_ref = self.module.declare_func_in_func(self.cmp_func, &mut ctx.func);
-        let truthy_func_ref = self.module.declare_func_in_func(self.truthy_func, &mut ctx.func);
-        let neg_func_ref = self.module.declare_func_in_func(self.neg_func, &mut ctx.func);
-        let not_func_ref = self.module.declare_func_in_func(self.not_func, &mut ctx.func);
-        let build_list_func_ref = self.module.declare_func_in_func(self.build_list_func, &mut ctx.func);
-        let build_tuple_func_ref = self.module.declare_func_in_func(self.build_tuple_func, &mut ctx.func);
-        let list_append_func_ref = self.module.declare_func_in_func(self.list_append_func, &mut ctx.func);
-        let contains_func_ref = self.module.declare_func_in_func(self.contains_func, &mut ctx.func);
-        let get_iter_func_ref = self.module.declare_func_in_func(self.get_iter_func, &mut ctx.func);
-        let call_func_ref = self.module.declare_func_in_func(self.call_func, &mut ctx.func);
-        let call_kw_func_ref = self.module.declare_func_in_func(self.call_kw_func, &mut ctx.func);
-        let load_attr_func_ref = self.module.declare_func_in_func(self.load_attr_func, &mut ctx.func);
-        let for_iter_func_ref = self.module.declare_func_in_func(self.for_iter_func, &mut ctx.func);
-        let build_map_func_ref = self.module.declare_func_in_func(self.build_map_func, &mut ctx.func);
-        let store_attr_func_ref = self.module.declare_func_in_func(self.store_attr_func, &mut ctx.func);
-        let unpack_sequence_func_ref = self.module.declare_func_in_func(self.unpack_sequence_func, &mut ctx.func);
-        let load_name_func_ref = self.module.declare_func_in_func(self.load_name_func, &mut ctx.func);
-        let build_set_func_ref = self.module.declare_func_in_func(self.build_set_func, &mut ctx.func);
-        let build_string_func_ref = self.module.declare_func_in_func(self.build_string_func, &mut ctx.func);
-        let build_slice_func_ref = self.module.declare_func_in_func(self.build_slice_func, &mut ctx.func);
-        let store_subscr_func_ref = self.module.declare_func_in_func(self.store_subscr_func, &mut ctx.func);
-        let is_op_func_ref = self.module.declare_func_in_func(self.is_op_func, &mut ctx.func);
-        let invert_func_ref = self.module.declare_func_in_func(self.invert_func, &mut ctx.func);
-        let import_name_func_ref = self.module.declare_func_in_func(self.import_name_func, &mut ctx.func);
-        let import_from_func_ref = self.module.declare_func_in_func(self.import_from_func, &mut ctx.func);
-        let unpack_ex_func_ref = self.module.declare_func_in_func(self.unpack_ex_func, &mut ctx.func);
-        let setup_with_func_ref = self.module.declare_func_in_func(self.setup_with_func, &mut ctx.func);
-        let with_exit_func_ref = self.module.declare_func_in_func(self.with_exit_func, &mut ctx.func);
-        let make_function_func_ref = self.module.declare_func_in_func(self.make_function_func, &mut ctx.func);
+        let add_func_ref = self
+            .module
+            .declare_func_in_func(self.add_func, &mut ctx.func);
+        let sub_func_ref = self
+            .module
+            .declare_func_in_func(self.sub_func, &mut ctx.func);
+        let mul_func_ref = self
+            .module
+            .declare_func_in_func(self.mul_func, &mut ctx.func);
+        let div_func_ref = self
+            .module
+            .declare_func_in_func(self.div_func, &mut ctx.func);
+        let floor_div_func_ref = self
+            .module
+            .declare_func_in_func(self.floor_div_func, &mut ctx.func);
+        let mod_func_ref = self
+            .module
+            .declare_func_in_func(self.mod_func, &mut ctx.func);
+        let pow_func_ref = self
+            .module
+            .declare_func_in_func(self.pow_func, &mut ctx.func);
+        let lshift_func_ref = self
+            .module
+            .declare_func_in_func(self.lshift_func, &mut ctx.func);
+        let rshift_func_ref = self
+            .module
+            .declare_func_in_func(self.rshift_func, &mut ctx.func);
+        let bit_and_func_ref = self
+            .module
+            .declare_func_in_func(self.bit_and_func, &mut ctx.func);
+        let bit_or_func_ref = self
+            .module
+            .declare_func_in_func(self.bit_or_func, &mut ctx.func);
+        let bit_xor_func_ref = self
+            .module
+            .declare_func_in_func(self.bit_xor_func, &mut ctx.func);
+        let inplace_binop_func_ref = self
+            .module
+            .declare_func_in_func(self.inplace_binop_func, &mut ctx.func);
+        let getitem_func_ref = self
+            .module
+            .declare_func_in_func(self.getitem_func, &mut ctx.func);
+        let cmp_func_ref = self
+            .module
+            .declare_func_in_func(self.cmp_func, &mut ctx.func);
+        let truthy_func_ref = self
+            .module
+            .declare_func_in_func(self.truthy_func, &mut ctx.func);
+        let neg_func_ref = self
+            .module
+            .declare_func_in_func(self.neg_func, &mut ctx.func);
+        let not_func_ref = self
+            .module
+            .declare_func_in_func(self.not_func, &mut ctx.func);
+        let build_list_func_ref = self
+            .module
+            .declare_func_in_func(self.build_list_func, &mut ctx.func);
+        let build_tuple_func_ref = self
+            .module
+            .declare_func_in_func(self.build_tuple_func, &mut ctx.func);
+        let list_append_func_ref = self
+            .module
+            .declare_func_in_func(self.list_append_func, &mut ctx.func);
+        let contains_func_ref = self
+            .module
+            .declare_func_in_func(self.contains_func, &mut ctx.func);
+        let get_iter_func_ref = self
+            .module
+            .declare_func_in_func(self.get_iter_func, &mut ctx.func);
+        let call_func_ref = self
+            .module
+            .declare_func_in_func(self.call_func, &mut ctx.func);
+        let call_kw_func_ref = self
+            .module
+            .declare_func_in_func(self.call_kw_func, &mut ctx.func);
+        let load_attr_func_ref = self
+            .module
+            .declare_func_in_func(self.load_attr_func, &mut ctx.func);
+        let for_iter_func_ref = self
+            .module
+            .declare_func_in_func(self.for_iter_func, &mut ctx.func);
+        let build_map_func_ref = self
+            .module
+            .declare_func_in_func(self.build_map_func, &mut ctx.func);
+        let store_attr_func_ref = self
+            .module
+            .declare_func_in_func(self.store_attr_func, &mut ctx.func);
+        let unpack_sequence_func_ref = self
+            .module
+            .declare_func_in_func(self.unpack_sequence_func, &mut ctx.func);
+        let load_name_func_ref = self
+            .module
+            .declare_func_in_func(self.load_name_func, &mut ctx.func);
+        let build_set_func_ref = self
+            .module
+            .declare_func_in_func(self.build_set_func, &mut ctx.func);
+        let build_string_func_ref = self
+            .module
+            .declare_func_in_func(self.build_string_func, &mut ctx.func);
+        let build_slice_func_ref = self
+            .module
+            .declare_func_in_func(self.build_slice_func, &mut ctx.func);
+        let store_subscr_func_ref = self
+            .module
+            .declare_func_in_func(self.store_subscr_func, &mut ctx.func);
+        let is_op_func_ref = self
+            .module
+            .declare_func_in_func(self.is_op_func, &mut ctx.func);
+        let invert_func_ref = self
+            .module
+            .declare_func_in_func(self.invert_func, &mut ctx.func);
+        let import_name_func_ref = self
+            .module
+            .declare_func_in_func(self.import_name_func, &mut ctx.func);
+        let import_from_func_ref = self
+            .module
+            .declare_func_in_func(self.import_from_func, &mut ctx.func);
+        let unpack_ex_func_ref = self
+            .module
+            .declare_func_in_func(self.unpack_ex_func, &mut ctx.func);
+        let setup_with_func_ref = self
+            .module
+            .declare_func_in_func(self.setup_with_func, &mut ctx.func);
+        let with_exit_func_ref = self
+            .module
+            .declare_func_in_func(self.with_exit_func, &mut ctx.func);
+        let make_function_func_ref = self
+            .module
+            .declare_func_in_func(self.make_function_func, &mut ctx.func);
 
         // Pre-scan for branch targets
         let mut targets: HashSet<usize> = HashSet::new();
@@ -1391,7 +1888,9 @@ impl JitCompiler {
                     targets.insert(target);
                     targets.insert(i + 1);
                 }
-                Opcode::POP_JUMP_IF_TRUE | Opcode::POP_JUMP_IF_NONE | Opcode::POP_JUMP_IF_NOT_NONE => {
+                Opcode::POP_JUMP_IF_TRUE
+                | Opcode::POP_JUMP_IF_NONE
+                | Opcode::POP_JUMP_IF_NOT_NONE => {
                     if instr.arg as usize != i + 1 {
                         targets.insert(instr.arg as usize);
                     }
@@ -1455,19 +1954,35 @@ impl JitCompiler {
         // Allocate locals array on stack
         let locals_size = (code.nlocals.max(1) * 24) as u32;
         let locals_slot = builder.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot, locals_size, 0,
+            StackSlotKind::ExplicitSlot,
+            locals_size,
+            0,
         ));
 
         // Copy args to locals
         for i in 0..code.arg_count.min(code.nlocals) {
             let src = builder.ins().iadd_imm(args_ptr, (i * 24) as i64);
-            let dst = builder.ins().stack_addr(types::I64, locals_slot, (i * 24) as i32);
+            let dst = builder
+                .ins()
+                .stack_addr(types::I64, locals_slot, (i * 24) as i32);
             let zero = builder.ins().iconst(types::I64, 0);
-            let lo = builder.ins().load(types::I64, cranelift::codegen::ir::MemFlags::new(), src, 0);
-            let hi = builder.ins().load(types::I64, cranelift::codegen::ir::MemFlags::new(), src, 8);
-            builder.ins().store(cranelift::codegen::ir::MemFlags::new(), lo, dst, 0);
-            builder.ins().store(cranelift::codegen::ir::MemFlags::new(), hi, dst, 8);
-            builder.ins().store(cranelift::codegen::ir::MemFlags::new(), zero, dst, 16);
+            let lo =
+                builder
+                    .ins()
+                    .load(types::I64, cranelift::codegen::ir::MemFlags::new(), src, 0);
+            let hi =
+                builder
+                    .ins()
+                    .load(types::I64, cranelift::codegen::ir::MemFlags::new(), src, 8);
+            builder
+                .ins()
+                .store(cranelift::codegen::ir::MemFlags::new(), lo, dst, 0);
+            builder
+                .ins()
+                .store(cranelift::codegen::ir::MemFlags::new(), hi, dst, 8);
+            builder
+                .ins()
+                .store(cranelift::codegen::ir::MemFlags::new(), zero, dst, 16);
         }
 
         // Evaluation stack
@@ -1475,16 +1990,27 @@ impl JitCompiler {
 
         // Pre-allocate temp stack slots for BINARY_OP, CALL, STORE_ATTR, etc.
         let tmp_slot1 = builder.create_sized_stack_slot(StackSlotData::new(
-            cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+            cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+            24,
+            0,
         ));
         let tmp_slot2 = builder.create_sized_stack_slot(StackSlotData::new(
-            cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+            cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+            24,
+            0,
         ));
         let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-            cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+            cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+            24,
+            0,
         ));
 
-        if cfg!(feature = "profile") { eprintln!("JIT_DEBUG: starting codegen for {} instructions", code.instructions.len()); }
+        if cfg!(feature = "profile") {
+            eprintln!(
+                "JIT_DEBUG: starting codegen for {} instructions",
+                code.instructions.len()
+            );
+        }
         // Track whether current block has been terminated (needs jump for fallthrough)
         let mut terminated = false;
         // Generate code for each instruction
@@ -1553,13 +2079,19 @@ impl JitCompiler {
                     let a = eval_stack.pop().unwrap();
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let tmp_a = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let tmp_b = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let a_addr = builder.ins().stack_addr(types::I64, tmp_a, 0);
                     let b_addr = builder.ins().stack_addr(types::I64, tmp_b, 0);
@@ -1576,16 +2108,28 @@ impl JitCompiler {
                     // native numeric type implements `@`) and is excluded
                     // from the `supported` gate's arg range on purpose.
                     if instr.arg == 13 {
-                        builder.ins().call(getitem_func_ref, &[a_addr, b_addr, out_addr]);
+                        builder
+                            .ins()
+                            .call(getitem_func_ref, &[a_addr, b_addr, out_addr]);
                     } else if instr.arg >= 100 {
                         let op_val = builder.ins().iconst(types::I64, (instr.arg - 100) as i64);
-                        builder.ins().call(inplace_binop_func_ref, &[a_addr, b_addr, op_val, out_addr]);
+                        builder
+                            .ins()
+                            .call(inplace_binop_func_ref, &[a_addr, b_addr, op_val, out_addr]);
                     } else {
                         let func_ref = match instr.arg {
-                            0 => add_func_ref, 1 => sub_func_ref, 2 => mul_func_ref,
-                            3 => div_func_ref, 4 => floor_div_func_ref, 5 => mod_func_ref,
-                            6 => pow_func_ref, 7 => lshift_func_ref, 8 => rshift_func_ref,
-                            9 => bit_or_func_ref, 10 => bit_xor_func_ref, 11 => bit_and_func_ref,
+                            0 => add_func_ref,
+                            1 => sub_func_ref,
+                            2 => mul_func_ref,
+                            3 => div_func_ref,
+                            4 => floor_div_func_ref,
+                            5 => mod_func_ref,
+                            6 => pow_func_ref,
+                            7 => lshift_func_ref,
+                            8 => rshift_func_ref,
+                            9 => bit_or_func_ref,
+                            10 => bit_xor_func_ref,
+                            11 => bit_and_func_ref,
                             _ => unreachable!(),
                         };
                         builder.ins().call(func_ref, &[a_addr, b_addr, out_addr]);
@@ -1600,13 +2144,19 @@ impl JitCompiler {
                     let memflags = cranelift::codegen::ir::MemFlags::new();
 
                     let tmp_a = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let tmp_b = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
 
                     let a_addr = builder.ins().stack_addr(types::I64, tmp_a, 0);
@@ -1619,7 +2169,9 @@ impl JitCompiler {
                     builder.ins().store(memflags, b[1], b_addr, 8);
 
                     let op_val = builder.ins().iconst(types::I64, instr.arg as i64);
-                    builder.ins().call(cmp_func_ref, &[a_addr, b_addr, op_val, out_addr]);
+                    builder
+                        .ins()
+                        .call(cmp_func_ref, &[a_addr, b_addr, op_val, out_addr]);
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
                     eval_stack.push([res_lo, res_hi]);
@@ -1654,7 +2206,9 @@ impl JitCompiler {
                     let memflags = cranelift::codegen::ir::MemFlags::new();
 
                     let tmp_val = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
 
                     let val_addr = builder.ins().stack_addr(types::I64, tmp_val, 0);
@@ -1673,12 +2227,16 @@ impl JitCompiler {
                     builder.ins().brif(cmp, target_block, &[], next_block, &[]);
                     terminated = true;
                 }
-                Opcode::POP_JUMP_IF_TRUE | Opcode::POP_JUMP_IF_NONE | Opcode::POP_JUMP_IF_NOT_NONE => {
+                Opcode::POP_JUMP_IF_TRUE
+                | Opcode::POP_JUMP_IF_NONE
+                | Opcode::POP_JUMP_IF_NOT_NONE => {
                     let val = eval_stack.pop().unwrap();
                     let memflags = cranelift::codegen::ir::MemFlags::new();
 
                     let tmp_val = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
 
                     let val_addr = builder.ins().stack_addr(types::I64, tmp_val, 0);
@@ -1713,10 +2271,14 @@ impl JitCompiler {
                     let val = eval_stack.pop().unwrap();
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let tmp_val = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let val_addr = builder.ins().stack_addr(types::I64, tmp_val, 0);
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
@@ -1731,10 +2293,14 @@ impl JitCompiler {
                     let val = eval_stack.pop().unwrap();
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let tmp_val = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let val_addr = builder.ins().stack_addr(types::I64, tmp_val, 0);
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
@@ -1749,14 +2315,20 @@ impl JitCompiler {
                     let n = instr.arg as usize;
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let mut items: Vec<[Value; 2]> = Vec::with_capacity(n);
-                    for _ in 0..n { items.push(eval_stack.pop().unwrap()); }
+                    for _ in 0..n {
+                        items.push(eval_stack.pop().unwrap());
+                    }
                     items.reverse();
                     let array_size = ((n * 24).max(16)) as u32;
                     let array_slot = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, array_size, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        array_size,
+                        0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let array_addr = builder.ins().stack_addr(types::I64, array_slot, 0);
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
@@ -1767,7 +2339,9 @@ impl JitCompiler {
                         builder.ins().store(memflags, item[1], item_addr, 8);
                     }
                     let n_val = builder.ins().iconst(types::I64, n as i64);
-                    builder.ins().call(build_list_func_ref, &[n_val, array_addr, out_addr]);
+                    builder
+                        .ins()
+                        .call(build_list_func_ref, &[n_val, array_addr, out_addr]);
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
                     eval_stack.push([res_lo, res_hi]);
@@ -1776,14 +2350,20 @@ impl JitCompiler {
                     let n = instr.arg as usize;
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let mut items: Vec<[Value; 2]> = Vec::with_capacity(n);
-                    for _ in 0..n { items.push(eval_stack.pop().unwrap()); }
+                    for _ in 0..n {
+                        items.push(eval_stack.pop().unwrap());
+                    }
                     items.reverse();
                     let array_size = ((n * 24).max(16)) as u32;
                     let array_slot = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, array_size, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        array_size,
+                        0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let array_addr = builder.ins().stack_addr(types::I64, array_slot, 0);
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
@@ -1794,7 +2374,9 @@ impl JitCompiler {
                         builder.ins().store(memflags, item[1], item_addr, 8);
                     }
                     let n_val = builder.ins().iconst(types::I64, n as i64);
-                    builder.ins().call(build_tuple_func_ref, &[n_val, array_addr, out_addr]);
+                    builder
+                        .ins()
+                        .call(build_tuple_func_ref, &[n_val, array_addr, out_addr]);
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
                     eval_stack.push([res_lo, res_hi]);
@@ -1804,13 +2386,19 @@ impl JitCompiler {
                     let lst = eval_stack.pop().unwrap();
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let tmp_lst = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let tmp_val = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let lst_addr = builder.ins().stack_addr(types::I64, tmp_lst, 0);
                     let val_addr = builder.ins().stack_addr(types::I64, tmp_val, 0);
@@ -1819,20 +2407,28 @@ impl JitCompiler {
                     builder.ins().store(memflags, lst[1], lst_addr, 8);
                     builder.ins().store(memflags, val[0], val_addr, 0);
                     builder.ins().store(memflags, val[1], val_addr, 8);
-                    builder.ins().call(list_append_func_ref, &[lst_addr, val_addr, out_addr]);
+                    builder
+                        .ins()
+                        .call(list_append_func_ref, &[lst_addr, val_addr, out_addr]);
                 }
                 Opcode::CONTAINS_OP => {
                     let b = eval_stack.pop().unwrap();
                     let a = eval_stack.pop().unwrap();
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let tmp_a = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let tmp_b = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let a_addr = builder.ins().stack_addr(types::I64, tmp_a, 0);
                     let b_addr = builder.ins().stack_addr(types::I64, tmp_b, 0);
@@ -1841,7 +2437,9 @@ impl JitCompiler {
                     builder.ins().store(memflags, a[1], a_addr, 8);
                     builder.ins().store(memflags, b[0], b_addr, 0);
                     builder.ins().store(memflags, b[1], b_addr, 8);
-                    builder.ins().call(contains_func_ref, &[a_addr, b_addr, out_addr]);
+                    builder
+                        .ins()
+                        .call(contains_func_ref, &[a_addr, b_addr, out_addr]);
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
                     eval_stack.push([res_lo, res_hi]);
@@ -1850,10 +2448,14 @@ impl JitCompiler {
                     let val = eval_stack.pop().unwrap();
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let tmp_val = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let val_addr = builder.ins().stack_addr(types::I64, tmp_val, 0);
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
@@ -1884,18 +2486,26 @@ impl JitCompiler {
                     let total = npos + 2 * nkw;
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let mut args: Vec<[Value; 2]> = Vec::with_capacity(total);
-                    for _ in 0..total { args.push(eval_stack.pop().unwrap()); }
+                    for _ in 0..total {
+                        args.push(eval_stack.pop().unwrap());
+                    }
                     let func = eval_stack.pop().unwrap();
                     args.reverse();
                     let array_size = ((total * 24).max(16)) as u32;
                     let tmp_func = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let array_slot = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, array_size, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        array_size,
+                        0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let func_addr = builder.ins().stack_addr(types::I64, tmp_func, 0);
                     let array_addr = builder.ins().stack_addr(types::I64, array_slot, 0);
@@ -1910,11 +2520,16 @@ impl JitCompiler {
                     }
                     if nkw == 0 {
                         let nargs_val = builder.ins().iconst(types::I64, npos as i64);
-                        builder.ins().call(call_func_ref, &[func_addr, nargs_val, array_addr, out_addr]);
+                        builder
+                            .ins()
+                            .call(call_func_ref, &[func_addr, nargs_val, array_addr, out_addr]);
                     } else {
                         let npos_val = builder.ins().iconst(types::I64, npos as i64);
                         let nkw_val = builder.ins().iconst(types::I64, nkw as i64);
-                        builder.ins().call(call_kw_func_ref, &[func_addr, npos_val, nkw_val, array_addr, out_addr]);
+                        builder.ins().call(
+                            call_kw_func_ref,
+                            &[func_addr, npos_val, nkw_val, array_addr, out_addr],
+                        );
                     }
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
@@ -1926,10 +2541,14 @@ impl JitCompiler {
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let names_offset = (code.consts.len() + code.names.len()) as i64;
                     let tmp_val = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let val_addr = builder.ins().stack_addr(types::I64, tmp_val, 0);
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
@@ -1937,7 +2556,10 @@ impl JitCompiler {
                     builder.ins().store(memflags, val[1], val_addr, 8);
                     let names_ptr = builder.ins().iadd_imm(consts_ptr, names_offset * 24);
                     let name_idx_val = builder.ins().iconst(types::I64, name_idx);
-                    builder.ins().call(load_attr_func_ref, &[val_addr, names_ptr, name_idx_val, out_addr]);
+                    builder.ins().call(
+                        load_attr_func_ref,
+                        &[val_addr, names_ptr, name_idx_val, out_addr],
+                    );
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
                     eval_stack.push([res_lo, res_hi]);
@@ -1950,14 +2572,20 @@ impl JitCompiler {
                     let n_items = n_defaults + n_kwdefaults + 1 + if has_closure { 1 } else { 0 };
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let mut items: Vec<[Value; 2]> = Vec::with_capacity(n_items);
-                    for _ in 0..n_items { items.push(eval_stack.pop().unwrap()); }
+                    for _ in 0..n_items {
+                        items.push(eval_stack.pop().unwrap());
+                    }
                     items.reverse();
                     let array_size = ((n_items * 24).max(16)) as u32;
                     let array_slot = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, array_size, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        array_size,
+                        0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let array_addr = builder.ins().stack_addr(types::I64, array_slot, 0);
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
@@ -1968,7 +2596,9 @@ impl JitCompiler {
                         builder.ins().store(memflags, item[1], item_addr, 8);
                     }
                     let arg_val = builder.ins().iconst(types::I64, instr.arg as i64);
-                    builder.ins().call(make_function_func_ref, &[array_addr, arg_val, out_addr]);
+                    builder
+                        .ins()
+                        .call(make_function_func_ref, &[array_addr, arg_val, out_addr]);
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
                     eval_stack.push([res_lo, res_hi]);
@@ -1998,23 +2628,31 @@ impl JitCompiler {
                     let iter = *eval_stack.last().unwrap();
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let tmp_iter = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let iter_addr = builder.ins().stack_addr(types::I64, tmp_iter, 0);
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
                     builder.ins().store(memflags, iter[0], iter_addr, 0);
                     builder.ins().store(memflags, iter[1], iter_addr, 8);
-                    let iter_result = builder.ins().call(for_iter_func_ref, &[iter_addr, out_addr]);
+                    let iter_result = builder
+                        .ins()
+                        .call(for_iter_func_ref, &[iter_addr, out_addr]);
                     let status = builder.inst_results(iter_result)[0];
                     let zero = builder.ins().iconst(types::I64, 0);
                     let has_value = builder.ins().icmp(IntCC::Equal, status, zero);
                     let target = instr.arg as usize;
                     let target_block = block_of[&target];
                     let next_block = block_of[&(i + 1)];
-                    builder.ins().brif(has_value, next_block, &[], target_block, &[]);
+                    builder
+                        .ins()
+                        .brif(has_value, next_block, &[], target_block, &[]);
                     // `brif` terminates the CURRENT block — the loads below
                     // belong to the "has a value" continuation, which is a
                     // SEPARATE block (`next_block`) that must be switched
@@ -2035,14 +2673,20 @@ impl JitCompiler {
                     let n = instr.arg as usize;
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let mut items: Vec<[Value; 2]> = Vec::with_capacity(n * 2);
-                    for _ in 0..n * 2 { items.push(eval_stack.pop().unwrap()); }
+                    for _ in 0..n * 2 {
+                        items.push(eval_stack.pop().unwrap());
+                    }
                     items.reverse();
                     let array_size = ((n * 2 * 24).max(16)) as u32;
                     let array_slot = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, array_size, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        array_size,
+                        0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let array_addr = builder.ins().stack_addr(types::I64, array_slot, 0);
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
@@ -2053,7 +2697,9 @@ impl JitCompiler {
                         builder.ins().store(memflags, item[1], item_addr, 8);
                     }
                     let n_val = builder.ins().iconst(types::I64, n as i64);
-                    builder.ins().call(build_map_func_ref, &[n_val, array_addr, out_addr]);
+                    builder
+                        .ins()
+                        .call(build_map_func_ref, &[n_val, array_addr, out_addr]);
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
                     eval_stack.push([res_lo, res_hi]);
@@ -2065,13 +2711,19 @@ impl JitCompiler {
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let names_offset = (code.consts.len() + code.names.len()) as i64;
                     let tmp_obj = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let tmp_val = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let obj_addr = builder.ins().stack_addr(types::I64, tmp_obj, 0);
                     let val_addr = builder.ins().stack_addr(types::I64, tmp_val, 0);
@@ -2082,7 +2734,10 @@ impl JitCompiler {
                     builder.ins().store(memflags, val[1], val_addr, 8);
                     let names_ptr = builder.ins().iadd_imm(consts_ptr, names_offset * 24);
                     let name_idx_val = builder.ins().iconst(types::I64, name_idx);
-                    builder.ins().call(store_attr_func_ref, &[obj_addr, names_ptr, name_idx_val, val_addr, out_addr]);
+                    builder.ins().call(
+                        store_attr_func_ref,
+                        &[obj_addr, names_ptr, name_idx_val, val_addr, out_addr],
+                    );
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
                     eval_stack.push([res_lo, res_hi]);
@@ -2092,14 +2747,20 @@ impl JitCompiler {
                     let seq = eval_stack.pop().unwrap();
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let tmp_seq = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let array_size = ((n * 24).max(16)) as u32;
                     let array_slot = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, array_size, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        array_size,
+                        0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let seq_addr = builder.ins().stack_addr(types::I64, tmp_seq, 0);
                     let array_addr = builder.ins().stack_addr(types::I64, array_slot, 0);
@@ -2107,7 +2768,10 @@ impl JitCompiler {
                     builder.ins().store(memflags, seq[0], seq_addr, 0);
                     builder.ins().store(memflags, seq[1], seq_addr, 8);
                     let n_val = builder.ins().iconst(types::I64, n as i64);
-                    builder.ins().call(unpack_sequence_func_ref, &[seq_addr, n_val, array_addr, out_addr]);
+                    builder.ins().call(
+                        unpack_sequence_func_ref,
+                        &[seq_addr, n_val, array_addr, out_addr],
+                    );
                     // Push unpacked items onto stack in order
                     for i in 0..n {
                         let offset = (i * 24) as i32;
@@ -2122,17 +2786,23 @@ impl JitCompiler {
                     let names_offset = (code.consts.len() + code.names.len()) as i64;
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let tmp_locals = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let tmp_globals = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     // For simplicity, use the result_ptr as the "globals" reference
                     // In a real JIT we'd need the actual globals dict
-                    // Store locals array as a dict-like proxy  
+                    // Store locals array as a dict-like proxy
                     let locals_addr = builder.ins().stack_addr(types::I64, tmp_locals, 0);
                     let globals_addr = builder.ins().stack_addr(types::I64, tmp_globals, 0);
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
@@ -2144,7 +2814,10 @@ impl JitCompiler {
                     builder.ins().store(memflags, consts_ptr, globals_addr, 8);
                     let names_ptr = builder.ins().iadd_imm(consts_ptr, names_offset * 24);
                     let name_idx_val = builder.ins().iconst(types::I64, name_idx);
-                    builder.ins().call(load_name_func_ref, &[names_ptr, name_idx_val, locals_addr, globals_addr, out_addr]);
+                    builder.ins().call(
+                        load_name_func_ref,
+                        &[names_ptr, name_idx_val, locals_addr, globals_addr, out_addr],
+                    );
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
                     eval_stack.push([res_lo, res_hi]);
@@ -2184,7 +2857,9 @@ impl JitCompiler {
                     let val = eval_stack.pop().unwrap();
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let tmp_val = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let val_addr = builder.ins().stack_addr(types::I64, tmp_val, 0);
                     builder.ins().store(memflags, val[0], val_addr, 0);
@@ -2202,7 +2877,9 @@ impl JitCompiler {
                     let val = eval_stack.pop().unwrap();
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let tmp_val = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let val_addr = builder.ins().stack_addr(types::I64, tmp_val, 0);
                     builder.ins().store(memflags, val[0], val_addr, 0);
@@ -2214,13 +2891,17 @@ impl JitCompiler {
                     let target = instr.arg as usize;
                     let target_block = block_of[&target];
                     let next_block = block_of[&(i + 1)];
-                    builder.ins().brif(is_none, target_block, &[], next_block, &[]);
+                    builder
+                        .ins()
+                        .brif(is_none, target_block, &[], next_block, &[]);
                 }
                 Opcode::POP_JUMP_IF_NOT_NONE => {
                     let val = eval_stack.pop().unwrap();
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let tmp_val = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let val_addr = builder.ins().stack_addr(types::I64, tmp_val, 0);
                     builder.ins().store(memflags, val[0], val_addr, 0);
@@ -2232,20 +2913,28 @@ impl JitCompiler {
                     let target = instr.arg as usize;
                     let target_block = block_of[&target];
                     let next_block = block_of[&(i + 1)];
-                    builder.ins().brif(is_not_none, target_block, &[], next_block, &[]);
+                    builder
+                        .ins()
+                        .brif(is_not_none, target_block, &[], next_block, &[]);
                 }
                 Opcode::BUILD_SET => {
                     let n = instr.arg as usize;
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let mut items: Vec<[Value; 2]> = Vec::with_capacity(n);
-                    for _ in 0..n { items.push(eval_stack.pop().unwrap()); }
+                    for _ in 0..n {
+                        items.push(eval_stack.pop().unwrap());
+                    }
                     items.reverse();
                     let array_size = ((n * 24).max(16)) as u32;
                     let array_slot = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, array_size, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        array_size,
+                        0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let array_addr = builder.ins().stack_addr(types::I64, array_slot, 0);
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
@@ -2256,7 +2945,9 @@ impl JitCompiler {
                         builder.ins().store(memflags, item[1], item_addr, 8);
                     }
                     let n_val = builder.ins().iconst(types::I64, n as i64);
-                    builder.ins().call(build_set_func_ref, &[n_val, array_addr, out_addr]);
+                    builder
+                        .ins()
+                        .call(build_set_func_ref, &[n_val, array_addr, out_addr]);
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
                     eval_stack.push([res_lo, res_hi]);
@@ -2265,14 +2956,20 @@ impl JitCompiler {
                     let n = instr.arg as usize;
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let mut items: Vec<[Value; 2]> = Vec::with_capacity(n);
-                    for _ in 0..n { items.push(eval_stack.pop().unwrap()); }
+                    for _ in 0..n {
+                        items.push(eval_stack.pop().unwrap());
+                    }
                     items.reverse();
                     let array_size = ((n * 24).max(16)) as u32;
                     let array_slot = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, array_size, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        array_size,
+                        0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let array_addr = builder.ins().stack_addr(types::I64, array_slot, 0);
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
@@ -2283,17 +2980,23 @@ impl JitCompiler {
                         builder.ins().store(memflags, item[1], item_addr, 8);
                     }
                     let n_val = builder.ins().iconst(types::I64, n as i64);
-                    builder.ins().call(build_string_func_ref, &[n_val, array_addr, out_addr]);
+                    builder
+                        .ins()
+                        .call(build_string_func_ref, &[n_val, array_addr, out_addr]);
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
                     eval_stack.push([res_lo, res_hi]);
                 }
                 Opcode::BUILD_SLICE => {
                     let nargs = instr.arg as usize;
-                    if nargs < 2 || nargs > 3 { return None; }
+                    if nargs < 2 || nargs > 3 {
+                        return None;
+                    }
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let mut items: Vec<[Value; 2]> = Vec::with_capacity(3);
-                    if nargs >= 3 { items.push(eval_stack.pop().unwrap()); }
+                    if nargs >= 3 {
+                        items.push(eval_stack.pop().unwrap());
+                    }
                     items.push(eval_stack.pop().unwrap());
                     items.push(eval_stack.pop().unwrap());
                     // items now has [start, stop, step_or_none] but we need [start, stop, step]
@@ -2301,10 +3004,14 @@ impl JitCompiler {
                     items.reverse();
                     let array_size = ((3 * 24).max(16)) as u32;
                     let array_slot = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, array_size, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        array_size,
+                        0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let array_addr = builder.ins().stack_addr(types::I64, array_slot, 0);
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
@@ -2315,7 +3022,9 @@ impl JitCompiler {
                         builder.ins().store(memflags, item[1], item_addr, 8);
                     }
                     let n_val = builder.ins().iconst(types::I64, nargs as i64);
-                    builder.ins().call(build_slice_func_ref, &[n_val, array_addr, out_addr]);
+                    builder
+                        .ins()
+                        .call(build_slice_func_ref, &[n_val, array_addr, out_addr]);
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
                     eval_stack.push([res_lo, res_hi]);
@@ -2326,16 +3035,24 @@ impl JitCompiler {
                     let obj = eval_stack.pop().unwrap();
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let tmp_obj = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let tmp_idx = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let tmp_val = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let obj_addr = builder.ins().stack_addr(types::I64, tmp_obj, 0);
                     let idx_addr = builder.ins().stack_addr(types::I64, tmp_idx, 0);
@@ -2347,7 +3064,10 @@ impl JitCompiler {
                     builder.ins().store(memflags, idx[1], idx_addr, 8);
                     builder.ins().store(memflags, val[0], val_addr, 0);
                     builder.ins().store(memflags, val[1], val_addr, 8);
-                    builder.ins().call(store_subscr_func_ref, &[obj_addr, idx_addr, val_addr, out_addr]);
+                    builder.ins().call(
+                        store_subscr_func_ref,
+                        &[obj_addr, idx_addr, val_addr, out_addr],
+                    );
                 }
                 Opcode::MAP_ADD => {
                     // vm.rs's MAP_ADD: pop val, pop key, PEEK (not pop) the
@@ -2367,16 +3087,24 @@ impl JitCompiler {
                     let map = eval_stack[eval_stack.len() - 1 - instr.arg as usize];
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let tmp_map = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let tmp_key = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let tmp_val = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let map_addr = builder.ins().stack_addr(types::I64, tmp_map, 0);
                     let key_addr = builder.ins().stack_addr(types::I64, tmp_key, 0);
@@ -2388,7 +3116,10 @@ impl JitCompiler {
                     builder.ins().store(memflags, key[1], key_addr, 8);
                     builder.ins().store(memflags, val[0], val_addr, 0);
                     builder.ins().store(memflags, val[1], val_addr, 8);
-                    builder.ins().call(store_subscr_func_ref, &[map_addr, key_addr, val_addr, out_addr]);
+                    builder.ins().call(
+                        store_subscr_func_ref,
+                        &[map_addr, key_addr, val_addr, out_addr],
+                    );
                 }
                 Opcode::IS_OP => {
                     let invert = instr.arg as i64;
@@ -2396,13 +3127,19 @@ impl JitCompiler {
                     let a = eval_stack.pop().unwrap();
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let tmp_a = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let tmp_b = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let a_addr = builder.ins().stack_addr(types::I64, tmp_a, 0);
                     let b_addr = builder.ins().stack_addr(types::I64, tmp_b, 0);
@@ -2412,7 +3149,9 @@ impl JitCompiler {
                     builder.ins().store(memflags, b[0], b_addr, 0);
                     builder.ins().store(memflags, b[1], b_addr, 8);
                     let invert_val = builder.ins().iconst(types::I64, invert);
-                    builder.ins().call(is_op_func_ref, &[a_addr, b_addr, invert_val, out_addr]);
+                    builder
+                        .ins()
+                        .call(is_op_func_ref, &[a_addr, b_addr, invert_val, out_addr]);
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
                     eval_stack.push([res_lo, res_hi]);
@@ -2421,10 +3160,14 @@ impl JitCompiler {
                     let val = eval_stack.pop().unwrap();
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let tmp_val = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let val_addr = builder.ins().stack_addr(types::I64, tmp_val, 0);
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
@@ -2440,12 +3183,17 @@ impl JitCompiler {
                     let names_offset = (code.consts.len() + code.names.len()) as i64;
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
                     let names_offset_val = builder.ins().iconst(types::I64, names_offset);
                     let name_idx_val = builder.ins().iconst(types::I64, name_idx);
-                    builder.ins().call(import_name_func_ref, &[consts_ptr, names_offset_val, name_idx_val, out_addr]);
+                    builder.ins().call(
+                        import_name_func_ref,
+                        &[consts_ptr, names_offset_val, name_idx_val, out_addr],
+                    );
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
                     eval_stack.push([res_lo, res_hi]);
@@ -2456,10 +3204,14 @@ impl JitCompiler {
                     let module = *eval_stack.last().unwrap(); // peek, don't pop
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let tmp_module = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let module_addr = builder.ins().stack_addr(types::I64, tmp_module, 0);
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
@@ -2467,7 +3219,16 @@ impl JitCompiler {
                     builder.ins().store(memflags, module[1], module_addr, 8);
                     let names_offset_val = builder.ins().iconst(types::I64, names_offset);
                     let name_idx_val = builder.ins().iconst(types::I64, name_idx);
-                    builder.ins().call(import_from_func_ref, &[module_addr, consts_ptr, names_offset_val, name_idx_val, out_addr]);
+                    builder.ins().call(
+                        import_from_func_ref,
+                        &[
+                            module_addr,
+                            consts_ptr,
+                            names_offset_val,
+                            name_idx_val,
+                            out_addr,
+                        ],
+                    );
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
                     eval_stack.push([res_lo, res_hi]);
@@ -2479,14 +3240,20 @@ impl JitCompiler {
                     let seq = eval_stack.pop().unwrap();
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let tmp_seq = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let array_size = ((n_total as usize * 24).max(16)) as u32;
                     let array_slot = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, array_size, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        array_size,
+                        0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let seq_addr = builder.ins().stack_addr(types::I64, tmp_seq, 0);
                     let array_addr = builder.ins().stack_addr(types::I64, array_slot, 0);
@@ -2495,7 +3262,10 @@ impl JitCompiler {
                     builder.ins().store(memflags, seq[1], seq_addr, 8);
                     let n_before_val = builder.ins().iconst(types::I64, n_before as i64);
                     let n_after_val = builder.ins().iconst(types::I64, n_after as i64);
-                    builder.ins().call(unpack_ex_func_ref, &[seq_addr, n_before_val, n_after_val, array_addr, out_addr]);
+                    builder.ins().call(
+                        unpack_ex_func_ref,
+                        &[seq_addr, n_before_val, n_after_val, array_addr, out_addr],
+                    );
                     // Push unpacked items onto stack: items before *, starred list, items after *
                     for i in 0..n_total {
                         let offset = (i as i32 * 24) as i32;
@@ -2509,16 +3279,22 @@ impl JitCompiler {
                     let mgr = eval_stack.last().unwrap(); // peek, don't pop
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let tmp_mgr = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let mgr_addr = builder.ins().stack_addr(types::I64, tmp_mgr, 0);
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
                     builder.ins().store(memflags, mgr[0], mgr_addr, 0);
                     builder.ins().store(memflags, mgr[1], mgr_addr, 8);
-                    builder.ins().call(setup_with_func_ref, &[mgr_addr, out_addr]);
+                    builder
+                        .ins()
+                        .call(setup_with_func_ref, &[mgr_addr, out_addr]);
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
                     eval_stack.push([res_lo, res_hi]);
@@ -2527,28 +3303,39 @@ impl JitCompiler {
                     let mgr = eval_stack.pop().unwrap();
                     let memflags = cranelift::codegen::ir::MemFlags::new();
                     let tmp_mgr = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let tmp_out = builder.create_sized_stack_slot(StackSlotData::new(
-                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot, 24, 0,
+                        cranelift::codegen::ir::StackSlotKind::ExplicitSlot,
+                        24,
+                        0,
                     ));
                     let mgr_addr = builder.ins().stack_addr(types::I64, tmp_mgr, 0);
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
                     builder.ins().store(memflags, mgr[0], mgr_addr, 0);
                     builder.ins().store(memflags, mgr[1], mgr_addr, 8);
-                    builder.ins().call(with_exit_func_ref, &[mgr_addr, out_addr]);
+                    builder
+                        .ins()
+                        .call(with_exit_func_ref, &[mgr_addr, out_addr]);
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
                     eval_stack.push([res_lo, res_hi]);
                 }
-                _ => { eprintln!("JIT: codegen unsupported {:?} at instr {}", instr.op, i); return None; },
+                _ => {
+                    eprintln!("JIT: codegen unsupported {:?} at instr {}", instr.op, i);
+                    return None;
+                }
             }
         }
         builder.seal_all_blocks();
         builder.finalize();
         match self.module.define_function(func, &mut ctx) {
             Ok(_) => {}
-            Err(_) => { return None; }
+            Err(_) => {
+                return None;
+            }
         }
         self.module.finalize_definitions().ok()?;
         let code_ptr = self.module.get_finalized_function(func);

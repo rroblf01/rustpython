@@ -11,21 +11,41 @@ pub struct PySet {
 }
 
 impl PySet {
-    pub fn new() -> Self { PySet { entries: Vec::new(), indices: Vec::new(), size: 0 } }
-    pub fn is_empty(&self) -> bool { self.size == 0 }
-    pub fn len(&self) -> usize { self.size }
-    pub fn clear(&mut self) { self.entries.clear(); self.indices.clear(); self.size = 0; }
+    pub fn new() -> Self {
+        PySet {
+            entries: Vec::new(),
+            indices: Vec::new(),
+            size: 0,
+        }
+    }
+    pub fn is_empty(&self) -> bool {
+        self.size == 0
+    }
+    pub fn len(&self) -> usize {
+        self.size
+    }
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.indices.clear();
+        self.size = 0;
+    }
 
-    fn mask(&self) -> usize { self.indices.len() - 1 }
+    fn mask(&self) -> usize {
+        self.indices.len() - 1
+    }
 
     fn find(&self, key: &PyObjectRef, h: usize) -> Option<usize> {
-        if self.indices.is_empty() { return None; }
+        if self.indices.is_empty() {
+            return None;
+        }
         let mask = self.mask();
         let start = h & mask;
         let mut i = start;
         loop {
             let idx_val = self.indices[i];
-            if idx_val == 0 { return None; }
+            if idx_val == 0 {
+                return None;
+            }
             let entry_idx = (idx_val - 1) as usize;
             if let Some(k) = &self.entries[entry_idx] {
                 if k.is(key) || k.equals(key).unwrap_or(false) {
@@ -33,29 +53,39 @@ impl PySet {
                 }
             }
             i = (i + 1) & mask;
-            if i == start { return None; }
+            if i == start {
+                return None;
+            }
         }
     }
 
     fn probe(&self, key: &PyObjectRef, h: usize) -> (usize, Option<usize>) {
-        if self.indices.is_empty() { return (0, None); }
+        if self.indices.is_empty() {
+            return (0, None);
+        }
         let mask = self.mask();
         let start = h & mask;
         let mut first_tomb = None;
         let mut i = start;
         loop {
             let idx_val = self.indices[i];
-            if idx_val == 0 { return (first_tomb.unwrap_or(i), None); }
+            if idx_val == 0 {
+                return (first_tomb.unwrap_or(i), None);
+            }
             let entry_idx = (idx_val - 1) as usize;
             if self.entries[entry_idx].is_none() {
-                if first_tomb.is_none() { first_tomb = Some(i); }
+                if first_tomb.is_none() {
+                    first_tomb = Some(i);
+                }
             } else if let Some(k) = &self.entries[entry_idx] {
                 if k.equals(key).unwrap_or(false) {
                     return (i, Some(entry_idx));
                 }
             }
             i = (i + 1) & mask;
-            if i == start { return (first_tomb.unwrap_or(i), None); }
+            if i == start {
+                return (first_tomb.unwrap_or(i), None);
+            }
         }
     }
 
@@ -75,7 +105,9 @@ impl PySet {
             if let Some(key) = entry {
                 if let Ok(h) = key.hash() {
                     let mut i = h & mask;
-                    while new_idx[i] != 0 { i = (i + 1) & mask; }
+                    while new_idx[i] != 0 {
+                        i = (i + 1) & mask;
+                    }
                     new_idx[i] = (ei + 1) as u32;
                 }
             }
@@ -92,7 +124,9 @@ impl PySet {
         let h = key.hash()?;
         self.ensure_capacity(1);
         let (slot, existing) = self.probe(&key, h);
-        if existing.is_some() { return Ok(()); }
+        if existing.is_some() {
+            return Ok(());
+        }
         let entry_idx = self.entries.len();
         self.entries.push(Some(key));
         self.indices[slot] = (entry_idx + 1) as u32;
@@ -114,13 +148,17 @@ impl PySet {
         let mut first_tomb = None;
         let slot = loop {
             let idx_val = self.indices[i];
-            if idx_val == 0 { break first_tomb.unwrap_or(i); }
+            if idx_val == 0 {
+                break first_tomb.unwrap_or(i);
+            }
             let entry_idx = (idx_val - 1) as usize;
             if self.entries[entry_idx].is_none() && first_tomb.is_none() {
                 first_tomb = Some(i);
             }
             i = (i + 1) & mask;
-            if i == start { break first_tomb.unwrap_or(i); }
+            if i == start {
+                break first_tomb.unwrap_or(i);
+            }
         };
         let entry_idx = self.entries.len();
         self.entries.push(Some(key));
@@ -130,7 +168,9 @@ impl PySet {
 
     pub fn remove(&mut self, key: &PyObjectRef) -> PyResult<PyObjectRef> {
         let h = key.hash()?;
-        let existing = self.find(key, h).ok_or_else(|| PyError::key_error(key.str()))?;
+        let existing = self
+            .find(key, h)
+            .ok_or_else(|| PyError::key_error(key.str()))?;
         let removed = self.entries[existing].take().unwrap();
         self.size -= 1;
         Ok(removed)
@@ -156,13 +196,17 @@ impl PySet {
 
     pub fn from_vec(vec: Vec<PyObjectRef>) -> PyResult<Self> {
         let mut set = PySet::new();
-        for item in vec { set.add(item)?; }
+        for item in vec {
+            set.add(item)?;
+        }
         Ok(set)
     }
 
     pub fn is_superset(&self, other: &PySet) -> bool {
         for item in other.iter() {
-            if self.contains(item).unwrap_or(false) == false { return false; }
+            if self.contains(item).unwrap_or(false) == false {
+                return false;
+            }
         }
         true
     }

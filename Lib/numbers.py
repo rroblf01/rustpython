@@ -425,3 +425,11 @@ class Integral(Rational):
         return 1
 
 Integral.register(int)
+
+# `fractions.Fraction` is a Rational/Real (native type, no Python-level
+# inheritance) — register it so `isinstance(x, numbers.Rational)` etc. work.
+# Imported here (rather than in fractions.py) so the numbers ABCs always
+# know about Fraction regardless of import order.
+import fractions as _fractions
+Rational.register(_fractions.Fraction)
+Real.register(_fractions.Fraction)

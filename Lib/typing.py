@@ -89,6 +89,68 @@ def get_type_hints(obj, globalns=None, localns=None, include_extras=False):
 import collections
 OrderedDict = collections.OrderedDict
 
+class _ProtocolMeta(type):
+    """Metaclass for the structural `Supports*` protocols: isinstance()
+    checks for the required methods via __subclasshook__."""
+    def __instancecheck__(cls, inst):
+        return cls.__subclasshook__(type(inst))
+    def __subclasscheck__(cls, sub):
+        return cls.__subclasshook__(sub)
+
+def _check_methods(C, *methods):
+    mro = C.__mro__
+    for method in methods:
+        for B in mro:
+            if method in B.__dict__:
+                if B.__dict__[method] is None:
+                    return NotImplemented
+                break
+        else:
+            return NotImplemented
+    return True
+
+class SupportsInt(metaclass=_ProtocolMeta):
+    @classmethod
+    def __subclasshook__(cls, C):
+        if cls is SupportsInt:
+            return _check_methods(C, '__int__')
+        return NotImplemented
+
+class SupportsFloat(metaclass=_ProtocolMeta):
+    @classmethod
+    def __subclasshook__(cls, C):
+        if cls is SupportsFloat:
+            return _check_methods(C, '__float__')
+        return NotImplemented
+
+class SupportsComplex(metaclass=_ProtocolMeta):
+    @classmethod
+    def __subclasshook__(cls, C):
+        if cls is SupportsComplex:
+            return _check_methods(C, '__complex__')
+        return NotImplemented
+
+class SupportsRound(metaclass=_ProtocolMeta):
+    @classmethod
+    def __subclasshook__(cls, C):
+        if cls is SupportsRound:
+            return _check_methods(C, '__round__')
+        return NotImplemented
+
+class SupportsIndex(metaclass=_ProtocolMeta):
+    @classmethod
+    def __subclasshook__(cls, C):
+        if cls is SupportsIndex:
+            return _check_methods(C, '__index__')
+        return NotImplemented
+
+class SupportsAbs(metaclass=_ProtocolMeta):
+    @classmethod
+    def __subclasshook__(cls, C):
+        if cls is SupportsAbs:
+            return _check_methods(C, '__abs__')
+        return NotImplemented
+
 __all__ = [
     'TYPE_CHECKING', 'Any', 'Awaitable', 'Callable', 'Coroutine',
     'Generic', 'Optional', 'TypeVar', 'Union', 'Dict', 'List',
@@ -96,5 +158,7 @@ __all__ = [
     'Mapping', 'MutableMapping', 'Generator', 'ParamSpec', 'Protocol',
     'Literal', 'TypedDict', 'ClassVar', 'Final', 'Self', 'overload',
     'cast', 'NoReturn', 'NamedTuple', 'NewType', 'TypeVarTuple', 'Unpack',
+    'SupportsInt', 'SupportsFloat', 'SupportsComplex', 'SupportsRound',
+    'SupportsIndex', 'SupportsAbs',
     'get_type_hints',
 ]

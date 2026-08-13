@@ -30,7 +30,10 @@ pub fn to_index(obj: &PyObjectRef) -> PyResult<BigInt> {
                 _ => Err(PyError::type_error("__index__ must return int")),
             }
         } else {
-            Err(PyError::type_error(format!("'{}' object cannot be interpreted as an integer", type_name)))
+            Err(PyError::type_error(format!(
+                "'{}' object cannot be interpreted as an integer",
+                type_name
+            )))
         }
     } else {
         let o = obj.borrow();
@@ -40,7 +43,10 @@ pub fn to_index(obj: &PyObjectRef) -> PyResult<BigInt> {
             // range(1)`, `[10, 20][False]`, etc.) — found via `range()`'s
             // own `__index__`-protocol fix above surfacing this same gap.
             PyObject::Bool(b) => Ok(BigInt::from(*b as i64)),
-            _ => Err(PyError::type_error(format!("'{}' object cannot be interpreted as an integer", type_name))),
+            _ => Err(PyError::type_error(format!(
+                "'{}' object cannot be interpreted as an integer",
+                type_name
+            ))),
         }
     }
 }
@@ -82,7 +88,12 @@ fn sequence_index_int(idx: &PyObject) -> Option<BigInt> {
 /// crashed the whole process). Negative slice bounds are one of the most
 /// common idioms in all of Python (`seq[:-1]`, `seq[-n:]`) — this was a
 /// severe, high-blast-radius bug hiding in plain sight.
-pub(crate) fn normalize_slice_bounds(start: Option<isize>, stop: Option<isize>, step: isize, len: usize) -> (isize, isize) {
+pub(crate) fn normalize_slice_bounds(
+    start: Option<isize>,
+    stop: Option<isize>,
+    step: isize,
+    len: usize,
+) -> (isize, isize) {
     let len = len as isize;
     if step > 0 {
         let start = match start {
@@ -123,13 +134,29 @@ pub(crate) fn normalize_slice_bounds(start: Option<isize>, stop: Option<isize>, 
 /// an infinite loop — confirmed via the simplest repro, `[1,2,3][::0]`).
 /// Real CPython raises `ValueError: slice step cannot be zero` at the point
 /// a zero-step slice is actually USED for indexing, matched here.
-pub(crate) fn extract_slice_fields(start: &PyObjectRef, stop: &PyObjectRef, step: &PyObjectRef) -> PyResult<(Option<isize>, Option<isize>, isize)> {
-    let step_val = if let PyObject::Int(i) = &*step.borrow() { i.to_isize().unwrap_or(1) } else { 1 };
+pub(crate) fn extract_slice_fields(
+    start: &PyObjectRef,
+    stop: &PyObjectRef,
+    step: &PyObjectRef,
+) -> PyResult<(Option<isize>, Option<isize>, isize)> {
+    let step_val = if let PyObject::Int(i) = &*step.borrow() {
+        i.to_isize().unwrap_or(1)
+    } else {
+        1
+    };
     if step_val == 0 {
         return Err(PyError::value_error("slice step cannot be zero"));
     }
-    let start_val = if let PyObject::Int(i) = &*start.borrow() { i.to_isize() } else { None };
-    let stop_val = if let PyObject::Int(i) = &*stop.borrow() { i.to_isize() } else { None };
+    let start_val = if let PyObject::Int(i) = &*start.borrow() {
+        i.to_isize()
+    } else {
+        None
+    };
+    let stop_val = if let PyObject::Int(i) = &*stop.borrow() {
+        i.to_isize()
+    } else {
+        None
+    };
     Ok((start_val, stop_val, step_val))
 }
 
@@ -138,7 +165,11 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
     let f = {
         let o = obj.borrow();
         match &*o {
-            PyObject::Type { dict: type_dict, mro, .. } => {
+            PyObject::Type {
+                dict: type_dict,
+                mro,
+                ..
+            } => {
                 // Real Python checks the metaclass's `__getitem__` first
                 // (subscripting a class object is, at bottom, calling
                 // `type(cls).__getitem__(cls, key)`) — e.g. enum's
@@ -146,11 +177,15 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                 // `__class_getitem__` (PEP 560, `list[int]`-style generic
                 // aliasing) is the fallback for classes with no such
                 // metaclass method.
-                let metatype_getitem = metatype_of(obj).and_then(|mt| lookup_dunder_via_mro(&mt, "__getitem__"));
+                let metatype_getitem =
+                    metatype_of(obj).and_then(|mt| lookup_dunder_via_mro(&mt, "__getitem__"));
                 metatype_getitem.or_else(|| {
                     type_dict.get_str("__class_getitem__").cloned().or_else(|| {
                         for base in mro.iter().skip(1) {
-                            if let PyObject::Type { dict: base_dict, .. } = &*base.borrow() {
+                            if let PyObject::Type {
+                                dict: base_dict, ..
+                            } = &*base.borrow()
+                            {
                                 if let Some(val) = base_dict.get_str("__class_getitem__") {
                                     return Some(val.clone());
                                 }
@@ -163,7 +198,11 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
             PyObject::Instance { typ, .. } => {
                 let typ_ref = typ.borrow();
                 match &*typ_ref {
-                    PyObject::Type { dict: type_dict, mro, .. } => {
+                    PyObject::Type {
+                        dict: type_dict,
+                        mro,
+                        ..
+                    } => {
                         type_dict.get_str("__getitem__").cloned().or_else(|| {
                             // Skip a migrated native type's OWN `__getitem__`
                             // "escape hatch" entry when scanning ANCESTORS —
@@ -176,10 +215,16 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                             // delegation + `__missing__`), which is what the
                             // fallback below this closure already handles
                             // correctly.
-                            let skip_native_dunder_hatch = type_dict.contains_key_str(NATIVE_BASE_MARKER);
+                            let skip_native_dunder_hatch =
+                                type_dict.contains_key_str(NATIVE_BASE_MARKER);
                             for base in mro.iter().skip(1) {
-                                if let PyObject::Type { dict: base_dict, .. } = &*base.borrow() {
-                                    if skip_native_dunder_hatch && base_dict.contains_key_str(NATIVE_VALUE_CTOR_KEY) {
+                                if let PyObject::Type {
+                                    dict: base_dict, ..
+                                } = &*base.borrow()
+                                {
+                                    if skip_native_dunder_hatch
+                                        && base_dict.contains_key_str(NATIVE_VALUE_CTOR_KEY)
+                                    {
                                         continue;
                                     }
                                     if let Some(val) = base_dict.get_str("__getitem__") {
@@ -242,7 +287,9 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
         PyObject::List(items) => {
             let idx = index.borrow();
             if let Some(i) = sequence_index_int(&idx) {
-                let i = i.to_isize().ok_or_else(|| PyError::index_error("list index out of range"))?;
+                let i = i
+                    .to_isize()
+                    .ok_or_else(|| PyError::index_error("list index out of range"))?;
                 let len = items.len() as isize;
                 let i = if i < 0 { len + i } else { i };
                 if i < 0 || i >= len {
@@ -255,28 +302,40 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                     let mut result = Vec::new();
                     let len = items.len();
                     let (start_val, stop_val, step_val) = extract_slice_fields(start, stop, step)?;
-                    let (start_n, stop_n) = normalize_slice_bounds(start_val, stop_val, step_val, len);
+                    let (start_n, stop_n) =
+                        normalize_slice_bounds(start_val, stop_val, step_val, len);
                     let mut i = start_n;
                     if step_val > 0 {
                         while i < stop_n {
                             result.push(items[i as usize].clone());
-                            match i.checked_add(step_val) { Some(next) => i = next, None => break };
+                            match i.checked_add(step_val) {
+                                Some(next) => i = next,
+                                None => break,
+                            };
                         }
                     } else {
                         while i > stop_n {
                             result.push(items[i as usize].clone());
-                            match i.checked_add(step_val) { Some(next) => i = next, None => break };
+                            match i.checked_add(step_val) {
+                                Some(next) => i = next,
+                                None => break,
+                            };
                         }
                     }
                     Ok(py_list(result))
                 }
-                _ => Err(PyError::type_error(format!("list indices must be integers or slices, not {}", idx.type_name()))),
+                _ => Err(PyError::type_error(format!(
+                    "list indices must be integers or slices, not {}",
+                    idx.type_name()
+                ))),
             }
         }
         PyObject::Deque { data, .. } => {
             let idx = index.borrow();
             if let Some(i) = sequence_index_int(&idx) {
-                let i = i.to_isize().ok_or_else(|| PyError::index_error("deque index out of range"))?;
+                let i = i
+                    .to_isize()
+                    .ok_or_else(|| PyError::index_error("deque index out of range"))?;
                 let len = data.len() as isize;
                 let i = if i < 0 { len + i } else { i };
                 if i < 0 || i >= len {
@@ -289,30 +348,42 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                     let mut result = VecDeque::new();
                     let len = data.len();
                     let (start_val, stop_val, step_val) = extract_slice_fields(start, stop, step)?;
-                    let (start_n, stop_n) = normalize_slice_bounds(start_val, stop_val, step_val, len);
+                    let (start_n, stop_n) =
+                        normalize_slice_bounds(start_val, stop_val, step_val, len);
                     let mut i = start_n;
                     if step_val > 0 {
                         while i < stop_n {
                             result.push_back(data[i as usize].clone());
-                            match i.checked_add(step_val) { Some(next) => i = next, None => break };
+                            match i.checked_add(step_val) {
+                                Some(next) => i = next,
+                                None => break,
+                            };
                         }
                     } else {
                         while i > stop_n {
                             result.push_back(data[i as usize].clone());
-                            match i.checked_add(step_val) { Some(next) => i = next, None => break };
+                            match i.checked_add(step_val) {
+                                Some(next) => i = next,
+                                None => break,
+                            };
                         }
                     }
                     // Real CPython's `deque.__getitem__(slice)` returns a
                     // plain (maxlen=None) deque.
                     Ok(py_deque(result, None))
                 }
-                _ => Err(PyError::type_error(format!("deque indices must be integers or slices, not {}", idx.type_name()))),
+                _ => Err(PyError::type_error(format!(
+                    "deque indices must be integers or slices, not {}",
+                    idx.type_name()
+                ))),
             }
         }
         PyObject::Tuple(items) => {
             let idx = index.borrow();
             if let Some(i) = sequence_index_int(&idx) {
-                let i = i.to_isize().ok_or_else(|| PyError::index_error("tuple index out of range"))?;
+                let i = i
+                    .to_isize()
+                    .ok_or_else(|| PyError::index_error("tuple index out of range"))?;
                 let len = items.len() as isize;
                 let i = if i < 0 { len + i } else { i };
                 if i < 0 || i >= len {
@@ -325,31 +396,41 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                     let mut result = Vec::new();
                     let len = items.len();
                     let (start_val, stop_val, step_val) = extract_slice_fields(start, stop, step)?;
-                    let (start_n, stop_n) = normalize_slice_bounds(start_val, stop_val, step_val, len);
+                    let (start_n, stop_n) =
+                        normalize_slice_bounds(start_val, stop_val, step_val, len);
                     let mut i = start_n;
                     if step_val > 0 {
                         while i < stop_n {
                             result.push(items[i as usize].clone());
-                            match i.checked_add(step_val) { Some(next) => i = next, None => break };
+                            match i.checked_add(step_val) {
+                                Some(next) => i = next,
+                                None => break,
+                            };
                         }
                     } else {
                         while i > stop_n {
                             result.push(items[i as usize].clone());
-                            match i.checked_add(step_val) { Some(next) => i = next, None => break };
+                            match i.checked_add(step_val) {
+                                Some(next) => i = next,
+                                None => break,
+                            };
                         }
                     }
                     Ok(py_tuple(result))
                 }
-                _ => {
-                    Err(PyError::type_error(format!("tuple indices must be integers or slices, not {}", idx.type_name())))
-                }
+                _ => Err(PyError::type_error(format!(
+                    "tuple indices must be integers or slices, not {}",
+                    idx.type_name()
+                ))),
             }
         }
         PyObject::Str(s) => {
             let idx = index.borrow();
             if let Some(i) = sequence_index_int(&idx) {
                 let chars: Vec<char> = s.chars().collect();
-                let i = i.to_isize().ok_or_else(|| PyError::index_error("string index out of range"))?;
+                let i = i
+                    .to_isize()
+                    .ok_or_else(|| PyError::index_error("string index out of range"))?;
                 let len = chars.len() as isize;
                 let i = if i < 0 { len + i } else { i };
                 if i < 0 || i >= len {
@@ -362,30 +443,42 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                     let chars: Vec<char> = s.chars().collect();
                     let len = chars.len();
                     let (start_val, stop_val, step_val) = extract_slice_fields(start, stop, step)?;
-                    let (start_n, stop_n) = normalize_slice_bounds(start_val, stop_val, step_val, len);
+                    let (start_n, stop_n) =
+                        normalize_slice_bounds(start_val, stop_val, step_val, len);
                     let mut result = String::new();
                     let mut i = start_n;
                     if step_val > 0 {
                         while i < stop_n {
                             result.push(chars[i as usize]);
-                            match i.checked_add(step_val) { Some(next) => i = next, None => break };
+                            match i.checked_add(step_val) {
+                                Some(next) => i = next,
+                                None => break,
+                            };
                         }
                     } else {
                         while i > stop_n {
                             result.push(chars[i as usize]);
-                            match i.checked_add(step_val) { Some(next) => i = next, None => break };
+                            match i.checked_add(step_val) {
+                                Some(next) => i = next,
+                                None => break,
+                            };
                         }
                     }
                     Ok(py_str(&result))
                 }
-                _ => Err(PyError::type_error(format!("string indices must be integers or slices, not {}", idx.type_name()))),
+                _ => Err(PyError::type_error(format!(
+                    "string indices must be integers or slices, not {}",
+                    idx.type_name()
+                ))),
             }
         }
         // PyObject::Dict is handled above, before this borrow is taken.
         PyObject::Bytes(b) => {
             let idx = index.borrow();
             if let Some(i) = sequence_index_int(&idx) {
-                let i = i.to_isize().ok_or_else(|| PyError::index_error("bytes index out of range"))?;
+                let i = i
+                    .to_isize()
+                    .ok_or_else(|| PyError::index_error("bytes index out of range"))?;
                 let len = b.len() as isize;
                 let i = if i < 0 { len + i } else { i };
                 if i < 0 || i >= len {
@@ -403,29 +496,41 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                 PyObject::Slice { start, stop, step } => {
                     let len = b.len();
                     let (start_val, stop_val, step_val) = extract_slice_fields(start, stop, step)?;
-                    let (start_n, stop_n) = normalize_slice_bounds(start_val, stop_val, step_val, len);
+                    let (start_n, stop_n) =
+                        normalize_slice_bounds(start_val, stop_val, step_val, len);
                     let mut result = Vec::new();
                     let mut i = start_n;
                     if step_val > 0 {
                         while i < stop_n {
                             result.push(b[i as usize]);
-                            match i.checked_add(step_val) { Some(next) => i = next, None => break };
+                            match i.checked_add(step_val) {
+                                Some(next) => i = next,
+                                None => break,
+                            };
                         }
                     } else {
                         while i > stop_n {
                             result.push(b[i as usize]);
-                            match i.checked_add(step_val) { Some(next) => i = next, None => break };
+                            match i.checked_add(step_val) {
+                                Some(next) => i = next,
+                                None => break,
+                            };
                         }
                     }
                     Ok(PyObjectRef::imm(PyObject::Bytes(result)))
                 }
-                _ => Err(PyError::type_error(format!("bytes indices must be integers or slices, not {}", idx.type_name()))),
+                _ => Err(PyError::type_error(format!(
+                    "bytes indices must be integers or slices, not {}",
+                    idx.type_name()
+                ))),
             }
         }
         PyObject::ByteArray(b) => {
             let idx = index.borrow();
             if let Some(i) = sequence_index_int(&idx) {
-                let i = i.to_isize().ok_or_else(|| PyError::index_error("bytearray index out of range"))?;
+                let i = i
+                    .to_isize()
+                    .ok_or_else(|| PyError::index_error("bytearray index out of range"))?;
                 let len = b.len() as isize;
                 let i = if i < 0 { len + i } else { i };
                 if i < 0 || i >= len {
@@ -439,29 +544,41 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                 PyObject::Slice { start, stop, step } => {
                     let len = b.len();
                     let (start_val, stop_val, step_val) = extract_slice_fields(start, stop, step)?;
-                    let (start_n, stop_n) = normalize_slice_bounds(start_val, stop_val, step_val, len);
+                    let (start_n, stop_n) =
+                        normalize_slice_bounds(start_val, stop_val, step_val, len);
                     let mut result = Vec::new();
                     let mut i = start_n;
                     if step_val > 0 {
                         while i < stop_n {
                             result.push(b[i as usize]);
-                            match i.checked_add(step_val) { Some(next) => i = next, None => break };
+                            match i.checked_add(step_val) {
+                                Some(next) => i = next,
+                                None => break,
+                            };
                         }
                     } else {
                         while i > stop_n {
                             result.push(b[i as usize]);
-                            match i.checked_add(step_val) { Some(next) => i = next, None => break };
+                            match i.checked_add(step_val) {
+                                Some(next) => i = next,
+                                None => break,
+                            };
                         }
                     }
                     Ok(PyObjectRef::new(PyObject::ByteArray(result)))
                 }
-                _ => Err(PyError::type_error(format!("bytearray indices must be integers or slices, not {}", idx.type_name()))),
+                _ => Err(PyError::type_error(format!(
+                    "bytearray indices must be integers or slices, not {}",
+                    idx.type_name()
+                ))),
             }
         }
         PyObject::Array(arr) => {
             let idx = index.borrow();
             if let Some(i) = sequence_index_int(&idx) {
-                let i = i.to_isize().ok_or_else(|| PyError::index_error("array index out of range"))?;
+                let i = i
+                    .to_isize()
+                    .ok_or_else(|| PyError::index_error("array index out of range"))?;
                 let len = arr.data.len() as isize;
                 let i = if i < 0 { len + i } else { i };
                 if i < 0 || i >= len {
@@ -474,19 +591,28 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                     Ok(py_int(v as i64))
                 }
             } else {
-                Err(PyError::type_error(format!("array indices must be integers, not {}", idx.type_name())))
+                Err(PyError::type_error(format!(
+                    "array indices must be integers, not {}",
+                    idx.type_name()
+                )))
             }
         }
         PyObject::Range { start, stop, step } => {
             let idx = index.borrow();
             if let Some(i) = sequence_index_int(&idx) {
-                let len = if *step > 0 && *start >= *stop { 0 }
-                    else if *step < 0 && *start <= *stop { 0 }
-                    else {
-                        let raw_len = stop.checked_sub(*start).unwrap_or(i64::MAX);
-                        let l = raw_len.checked_div(*step).unwrap_or(0);
-                        if raw_len % *step != 0 { l.abs() + 1 } else { l.abs() }
-                    };
+                let len = if *step > 0 && *start >= *stop {
+                    0
+                } else if *step < 0 && *start <= *stop {
+                    0
+                } else {
+                    let raw_len = stop.checked_sub(*start).unwrap_or(i64::MAX);
+                    let l = raw_len.checked_div(*step).unwrap_or(0);
+                    if raw_len % *step != 0 {
+                        l.abs() + 1
+                    } else {
+                        l.abs()
+                    }
+                };
                 let i64_val = i.to_i64().unwrap_or(0);
                 let pos = if i64_val < 0 { len + i64_val } else { i64_val };
                 if pos < 0 || pos >= len {
@@ -495,26 +621,69 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                 return Ok(py_int(*start + *step * pos));
             }
             match &*idx {
-                PyObject::Slice { start: s, stop: e, step: p } => {
-                    let len = if *step > 0 && *start >= *stop { 0 }
-                        else if *step < 0 && *start <= *stop { 0 }
-                        else {
-                            let raw_len = stop.checked_sub(*start).unwrap_or(i64::MAX);
-                            let l = raw_len.checked_div(*step).unwrap_or(0);
-                            if raw_len % *step != 0 { l.abs() + 1 } else { l.abs() }
-                        };
+                PyObject::Slice {
+                    start: s,
+                    stop: e,
+                    step: p,
+                } => {
+                    let len = if *step > 0 && *start >= *stop {
+                        0
+                    } else if *step < 0 && *start <= *stop {
+                        0
+                    } else {
+                        let raw_len = stop.checked_sub(*start).unwrap_or(i64::MAX);
+                        let l = raw_len.checked_div(*step).unwrap_or(0);
+                        if raw_len % *step != 0 {
+                            l.abs() + 1
+                        } else {
+                            l.abs()
+                        }
+                    };
                     let sp = p.as_i64().unwrap_or(1);
-                    let s_start = match &*s.borrow() { PyObject::None => if sp > 0 { 0 } else { len - 1 }, _ => s.as_i64().unwrap_or(0) };
-                    let s_stop = match &*e.borrow() { PyObject::None => if sp > 0 { len } else { -len - 1 }, _ => e.as_i64().unwrap_or(0) };
+                    let s_start = match &*s.borrow() {
+                        PyObject::None => {
+                            if sp > 0 {
+                                0
+                            } else {
+                                len - 1
+                            }
+                        }
+                        _ => s.as_i64().unwrap_or(0),
+                    };
+                    let s_stop = match &*e.borrow() {
+                        PyObject::None => {
+                            if sp > 0 {
+                                len
+                            } else {
+                                -len - 1
+                            }
+                        }
+                        _ => e.as_i64().unwrap_or(0),
+                    };
                     let s_step = if sp == 0 { 1 } else { sp };
-                    let norm_start = if s_start < 0 { (len + s_start).max(0) } else { s_start.min(len) };
-                    let norm_stop = if s_stop < 0 { (len + s_stop).max(0) } else { s_stop.min(len) };
+                    let norm_start = if s_start < 0 {
+                        (len + s_start).max(0)
+                    } else {
+                        s_start.min(len)
+                    };
+                    let norm_stop = if s_stop < 0 {
+                        (len + s_stop).max(0)
+                    } else {
+                        s_stop.min(len)
+                    };
                     let new_start = *start + norm_start * *step;
                     let new_step = *step * s_step;
                     let new_stop = *start + norm_stop * *step;
-                    Ok(PyObjectRef::imm(PyObject::Range { start: new_start, stop: new_stop, step: new_step }))
+                    Ok(PyObjectRef::imm(PyObject::Range {
+                        start: new_start,
+                        stop: new_stop,
+                        step: new_step,
+                    }))
                 }
-                _ => Err(PyError::type_error(format!("range indices must be integers or slices, not {}", idx.type_name()))),
+                _ => Err(PyError::type_error(format!(
+                    "range indices must be integers or slices, not {}",
+                    idx.type_name()
+                ))),
             }
         }
         // A plain Instance with no `__getitem__` anywhere in its MRO and no
@@ -526,9 +695,15 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
         // a KeyError instead of the required TypeError.)
         PyObject::Instance { typ, .. } => {
             let type_name = get_type_name_for_instance(typ);
-            Err(PyError::type_error(format!("'{}' object is not subscriptable", type_name)))
+            Err(PyError::type_error(format!(
+                "'{}' object is not subscriptable",
+                type_name
+            )))
         }
-        _ => Err(PyError::type_error(format!("'{}' object is not subscriptable", o.type_name()))),
+        _ => Err(PyError::type_error(format!(
+            "'{}' object is not subscriptable",
+            o.type_name()
+        ))),
     }
 }
 
@@ -572,7 +747,8 @@ pub fn py_setitem(obj: &PyObjectRef, index: &PyObjectRef, value: PyObjectRef) ->
     // Slice assignment on a list: collect the replacement items BEFORE taking
     // a mutable borrow below — `value` may alias `obj` (e.g. `lst[:] = lst`),
     // which would otherwise double-borrow when we iterate it.
-    let is_list_slice = matches!(&*obj.borrow(), PyObject::List(_)) && matches!(&*index.borrow(), PyObject::Slice { .. });
+    let is_list_slice = matches!(&*obj.borrow(), PyObject::List(_))
+        && matches!(&*index.borrow(), PyObject::Slice { .. });
     if is_list_slice {
         let new_items: Vec<PyObjectRef> = {
             let it = builtin_iter(&[value.clone()])?;
@@ -616,18 +792,25 @@ pub fn py_setitem(obj: &PyObjectRef, index: &PyObjectRef, value: PyObjectRef) ->
             if step_val > 0 {
                 while i < stop_n {
                     indices.push(i as usize);
-                    match i.checked_add(step_val) { Some(next) => i = next, None => break }
+                    match i.checked_add(step_val) {
+                        Some(next) => i = next,
+                        None => break,
+                    }
                 }
             } else {
                 while i > stop_n {
                     indices.push(i as usize);
-                    match i.checked_add(step_val) { Some(next) => i = next, None => break }
+                    match i.checked_add(step_val) {
+                        Some(next) => i = next,
+                        None => break,
+                    }
                 }
             }
             if indices.len() != new_items.len() {
                 return Err(PyError::value_error(format!(
                     "attempt to assign sequence of size {} to extended slice of size {}",
-                    new_items.len(), indices.len()
+                    new_items.len(),
+                    indices.len()
                 )));
             }
             for (idx, val) in indices.into_iter().zip(new_items) {
@@ -652,7 +835,9 @@ pub fn py_setitem(obj: &PyObjectRef, index: &PyObjectRef, value: PyObjectRef) ->
         PyObject::List(items) => {
             let idx = index.borrow();
             if let Some(i) = sequence_index_int(&idx) {
-                let i = i.to_isize().ok_or_else(|| PyError::index_error("list index out of range"))?;
+                let i = i
+                    .to_isize()
+                    .ok_or_else(|| PyError::index_error("list index out of range"))?;
                 let len = items.len() as isize;
                 let i = if i < 0 { len + i } else { i };
                 if i < 0 || i >= len {
@@ -661,12 +846,17 @@ pub fn py_setitem(obj: &PyObjectRef, index: &PyObjectRef, value: PyObjectRef) ->
                 items[i as usize] = value;
                 return Ok(());
             }
-            Err(PyError::type_error(format!("list indices must be integers or slices, not {}", idx.type_name())))
+            Err(PyError::type_error(format!(
+                "list indices must be integers or slices, not {}",
+                idx.type_name()
+            )))
         }
         PyObject::Deque { data, .. } => {
             let idx = index.borrow();
             if let Some(i) = sequence_index_int(&idx) {
-                let i = i.to_isize().ok_or_else(|| PyError::index_error("deque index out of range"))?;
+                let i = i
+                    .to_isize()
+                    .ok_or_else(|| PyError::index_error("deque index out of range"))?;
                 let len = data.len() as isize;
                 let i = if i < 0 { len + i } else { i };
                 if i < 0 || i >= len {
@@ -675,10 +865,16 @@ pub fn py_setitem(obj: &PyObjectRef, index: &PyObjectRef, value: PyObjectRef) ->
                 data[i as usize] = value;
                 return Ok(());
             }
-            Err(PyError::type_error(format!("deque indices must be integers or slices, not {}", idx.type_name())))
+            Err(PyError::type_error(format!(
+                "deque indices must be integers or slices, not {}",
+                idx.type_name()
+            )))
         }
         // PyObject::Dict is handled above, before this borrow is taken.
-        _ => Err(PyError::type_error(format!("'{}' object does not support item assignment", o.type_name()))),
+        _ => Err(PyError::type_error(format!(
+            "'{}' object does not support item assignment",
+            o.type_name()
+        ))),
     }
 }
 
@@ -716,7 +912,9 @@ pub fn py_delitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<()> {
         PyObject::List(items) => {
             let idx = index.borrow();
             if let Some(i) = sequence_index_int(&idx) {
-                let i = i.to_isize().ok_or_else(|| PyError::index_error("list index out of range"))?;
+                let i = i
+                    .to_isize()
+                    .ok_or_else(|| PyError::index_error("list index out of range"))?;
                 let len = items.len() as isize;
                 let i = if i < 0 { len + i } else { i };
                 if i < 0 || i >= len {
@@ -725,13 +923,18 @@ pub fn py_delitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<()> {
                 items.remove(i as usize);
                 Ok(())
             } else {
-                Err(PyError::type_error(format!("list indices must be integers or slices, not {}", idx.type_name())))
+                Err(PyError::type_error(format!(
+                    "list indices must be integers or slices, not {}",
+                    idx.type_name()
+                )))
             }
         }
         PyObject::Deque { data, .. } => {
             let idx = index.borrow();
             if let Some(i) = sequence_index_int(&idx) {
-                let i = i.to_isize().ok_or_else(|| PyError::index_error("deque index out of range"))?;
+                let i = i
+                    .to_isize()
+                    .ok_or_else(|| PyError::index_error("deque index out of range"))?;
                 let len = data.len() as isize;
                 let i = if i < 0 { len + i } else { i };
                 if i < 0 || i >= len {
@@ -740,11 +943,16 @@ pub fn py_delitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<()> {
                 data.remove(i as usize);
                 Ok(())
             } else {
-                Err(PyError::type_error(format!("deque indices must be integers or slices, not {}", idx.type_name())))
+                Err(PyError::type_error(format!(
+                    "deque indices must be integers or slices, not {}",
+                    idx.type_name()
+                )))
             }
         }
         // PyObject::Dict is handled above, before this borrow is taken.
-        _ => Err(PyError::type_error(format!("'{}' object does not support item deletion", o.type_name()))),
+        _ => Err(PyError::type_error(format!(
+            "'{}' object does not support item deletion",
+            o.type_name()
+        ))),
     }
 }
-

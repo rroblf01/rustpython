@@ -9,7 +9,11 @@ use super::*;
 macro_rules! make_exception_func {
     ($name:ident, $typ:expr) => {
         pub fn $name(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-            Ok(PyObjectRef::new(PyObject::Exception { typ: $typ.to_string(), args: args.to_vec(), cause: None }))
+            Ok(PyObjectRef::new(PyObject::Exception {
+                typ: $typ.to_string(),
+                args: args.to_vec(),
+                cause: None,
+            }))
         }
     };
 }
@@ -18,9 +22,15 @@ make_exception_func!(builtin_make_exception_baseexception, "BaseException");
 make_exception_func!(builtin_make_exception_exception, "Exception");
 make_exception_func!(builtin_make_exception_typeerror, "TypeError");
 make_exception_func!(builtin_make_exception_valueerror, "ValueError");
-make_exception_func!(builtin_make_exception_zerodivisionerror, "ZeroDivisionError");
+make_exception_func!(
+    builtin_make_exception_zerodivisionerror,
+    "ZeroDivisionError"
+);
 make_exception_func!(builtin_make_exception_nameerror, "NameError");
-make_exception_func!(builtin_make_exception_unboundlocalerror, "UnboundLocalError");
+make_exception_func!(
+    builtin_make_exception_unboundlocalerror,
+    "UnboundLocalError"
+);
 make_exception_func!(builtin_make_exception_attributeerror, "AttributeError");
 make_exception_func!(builtin_make_exception_indexerror, "IndexError");
 make_exception_func!(builtin_make_exception_keyerror, "KeyError");
@@ -35,26 +45,50 @@ make_exception_func!(builtin_make_exception_unpicklingerror, "UnpicklingError");
 // Additional exception types for full CPython hierarchy
 make_exception_func!(builtin_make_exception_lookuperror, "LookupError");
 make_exception_func!(builtin_make_exception_arithmeticerror, "ArithmeticError");
-make_exception_func!(builtin_make_exception_floatingpointerror, "FloatingPointError");
+make_exception_func!(
+    builtin_make_exception_floatingpointerror,
+    "FloatingPointError"
+);
 make_exception_func!(builtin_make_exception_overflowerror, "OverflowError");
 make_exception_func!(builtin_make_exception_environmenterror, "EnvironmentError");
 make_exception_func!(builtin_make_exception_ioerror, "IOError");
-make_exception_func!(builtin_make_exception_filenotfounderror, "FileNotFoundError");
+make_exception_func!(
+    builtin_make_exception_filenotfounderror,
+    "FileNotFoundError"
+);
 make_exception_func!(builtin_make_exception_permissionerror, "PermissionError");
-make_exception_func!(builtin_make_exception_notimplementederror, "NotImplementedError");
+make_exception_func!(
+    builtin_make_exception_notimplementederror,
+    "NotImplementedError"
+);
 make_exception_func!(builtin_make_exception_recursionerror, "RecursionError");
-make_exception_func!(builtin_make_exception_keyboardinterrupt, "KeyboardInterrupt");
+make_exception_func!(
+    builtin_make_exception_keyboardinterrupt,
+    "KeyboardInterrupt"
+);
 make_exception_func!(builtin_make_exception_generatorexit, "GeneratorExit");
 make_exception_func!(builtin_make_exception_systemexit, "SystemExit");
-make_exception_func!(builtin_make_exception_modulenotfounderror, "ModuleNotFoundError");
-make_exception_func!(builtin_make_exception_stopasynciteration, "StopAsyncIteration");
+make_exception_func!(
+    builtin_make_exception_modulenotfounderror,
+    "ModuleNotFoundError"
+);
+make_exception_func!(
+    builtin_make_exception_stopasynciteration,
+    "StopAsyncIteration"
+);
 make_exception_func!(builtin_make_exception_eoferror, "EOFError");
 make_exception_func!(builtin_make_exception_syntaxerror, "SyntaxError");
 make_exception_func!(builtin_make_exception_cycleerror, "CycleError");
-make_exception_func!(builtin_make_exception_incompleteinputerror, "_IncompleteInputError");
+make_exception_func!(
+    builtin_make_exception_incompleteinputerror,
+    "_IncompleteInputError"
+);
 make_exception_func!(builtin_make_exception_decimalexception, "DecimalException");
 make_exception_func!(builtin_make_exception_invalidoperation, "InvalidOperation");
-make_exception_func!(builtin_make_exception_decimaldivisionbyzero, "DivisionByZero");
+make_exception_func!(
+    builtin_make_exception_decimaldivisionbyzero,
+    "DivisionByZero"
+);
 make_exception_func!(builtin_make_exception_inexact, "Inexact");
 make_exception_func!(builtin_make_exception_rounded, "Rounded");
 make_exception_func!(builtin_make_exception_clamped, "Clamped");
@@ -63,19 +97,37 @@ make_exception_func!(builtin_make_exception_decimalunderflow, "Underflow");
 make_exception_func!(builtin_make_exception_floatoperation, "FloatOperation");
 make_exception_func!(builtin_make_exception_connectionerror, "ConnectionError");
 make_exception_func!(builtin_make_exception_brokenpipeerror, "BrokenPipeError");
-make_exception_func!(builtin_make_exception_connectionrefusederror, "ConnectionRefusedError");
+make_exception_func!(
+    builtin_make_exception_connectionrefusederror,
+    "ConnectionRefusedError"
+);
 make_exception_func!(builtin_make_exception_blockingioerror, "BlockingIOError");
-make_exception_func!(builtin_make_exception_childprocesserror, "ChildProcessError");
+make_exception_func!(
+    builtin_make_exception_childprocesserror,
+    "ChildProcessError"
+);
 make_exception_func!(builtin_make_exception_interruptederror, "InterruptedError");
 make_exception_func!(builtin_make_exception_timeouterror, "TimeoutError");
 make_exception_func!(builtin_make_exception_unicodeerror, "UnicodeError");
-make_exception_func!(builtin_make_exception_unicodedecodeerror, "UnicodeDecodeError");
-make_exception_func!(builtin_make_exception_unicodeencodeerror, "UnicodeEncodeError");
+make_exception_func!(
+    builtin_make_exception_unicodedecodeerror,
+    "UnicodeDecodeError"
+);
+make_exception_func!(
+    builtin_make_exception_unicodeencodeerror,
+    "UnicodeEncodeError"
+);
 make_exception_func!(builtin_make_exception_systemerror, "SystemError");
 make_exception_func!(builtin_make_exception_warning, "Warning");
 make_exception_func!(builtin_make_exception_userwarning, "UserWarning");
-make_exception_func!(builtin_make_exception_deprecationwarning, "DeprecationWarning");
-make_exception_func!(builtin_make_exception_pendingdeprecationwarning, "PendingDeprecationWarning");
+make_exception_func!(
+    builtin_make_exception_deprecationwarning,
+    "DeprecationWarning"
+);
+make_exception_func!(
+    builtin_make_exception_pendingdeprecationwarning,
+    "PendingDeprecationWarning"
+);
 make_exception_func!(builtin_make_exception_syntaxwarning, "SyntaxWarning");
 make_exception_func!(builtin_make_exception_runtimewarning, "RuntimeWarning");
 make_exception_func!(builtin_make_exception_futurewarning, "FutureWarning");
@@ -86,19 +138,41 @@ make_exception_func!(builtin_make_exception_resourcewarning, "ResourceWarning");
 make_exception_func!(builtin_make_exception_referenceerror, "ReferenceError");
 make_exception_func!(builtin_make_exception_buffererror, "BufferError");
 make_exception_func!(builtin_make_exception_memoryerror, "MemoryError");
-make_exception_func!(builtin_make_exception_notadirectoryerror, "NotADirectoryError");
-make_exception_func!(builtin_make_exception_isadirectoryerror, "IsADirectoryError");
+make_exception_func!(
+    builtin_make_exception_notadirectoryerror,
+    "NotADirectoryError"
+);
+make_exception_func!(
+    builtin_make_exception_isadirectoryerror,
+    "IsADirectoryError"
+);
 make_exception_func!(builtin_make_exception_fileexistserror, "FileExistsError");
-make_exception_func!(builtin_make_exception_connectionabortederror, "ConnectionAbortedError");
-make_exception_func!(builtin_make_exception_connectionreseterror, "ConnectionResetError");
-make_exception_func!(builtin_make_exception_processlookuperror, "ProcessLookupError");
-make_exception_func!(builtin_make_exception_unicodetranslateerror, "UnicodeTranslateError");
+make_exception_func!(
+    builtin_make_exception_connectionabortederror,
+    "ConnectionAbortedError"
+);
+make_exception_func!(
+    builtin_make_exception_connectionreseterror,
+    "ConnectionResetError"
+);
+make_exception_func!(
+    builtin_make_exception_processlookuperror,
+    "ProcessLookupError"
+);
+make_exception_func!(
+    builtin_make_exception_unicodetranslateerror,
+    "UnicodeTranslateError"
+);
 make_exception_func!(builtin_make_exception_indentationerror, "IndentationError");
 make_exception_func!(builtin_make_exception_taberror, "TabError");
 
 // ExceptionGroup and BaseExceptionGroup factory functions (PEP 654)
 pub fn builtin_make_exception_exceptiongroup(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    let _message = if !args.is_empty() { args[0].str() } else { "".to_string() };
+    let _message = if !args.is_empty() {
+        args[0].str()
+    } else {
+        "".to_string()
+    };
     let exceptions = if args.len() > 1 {
         match &*args[1].borrow() {
             PyObject::List(items) => items.clone(),
@@ -116,7 +190,11 @@ pub fn builtin_make_exception_exceptiongroup(args: &[PyObjectRef]) -> PyResult<P
 }
 
 pub fn builtin_make_exception_baseexceptiongroup(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    let _message = if !args.is_empty() { args[0].str() } else { "".to_string() };
+    let _message = if !args.is_empty() {
+        args[0].str()
+    } else {
+        "".to_string()
+    };
     let exceptions = if args.len() > 1 {
         match &*args[1].borrow() {
             PyObject::List(items) => items.clone(),
@@ -159,10 +237,14 @@ pub fn json_decode(s: &str) -> PyResult<PyObjectRef> {
     json_parse_value(&mut chars)
 }
 
-fn json_parse_value<I: Iterator<Item = char>>(chars: &mut std::iter::Peekable<I>) -> PyResult<PyObjectRef> {
+fn json_parse_value<I: Iterator<Item = char>>(
+    chars: &mut std::iter::Peekable<I>,
+) -> PyResult<PyObjectRef> {
     json_skip_ws(chars);
     match chars.peek() {
-        None => Err(PyError::ValueError("Unexpected end of JSON input".to_string())),
+        None => Err(PyError::ValueError(
+            "Unexpected end of JSON input".to_string(),
+        )),
         Some('"') => json_parse_string(chars),
         Some('t') | Some('f') => json_parse_bool(chars),
         Some('n') => json_parse_null(chars),
@@ -175,136 +257,211 @@ fn json_parse_value<I: Iterator<Item = char>>(chars: &mut std::iter::Peekable<I>
 
 fn json_skip_ws<I: Iterator<Item = char>>(chars: &mut std::iter::Peekable<I>) {
     while let Some(&c) = chars.peek() {
-        if c.is_ascii_whitespace() { chars.next(); }
-        else { break; }
+        if c.is_ascii_whitespace() {
+            chars.next();
+        } else {
+            break;
+        }
     }
 }
 
-fn json_parse_string<I: Iterator<Item = char>>(chars: &mut std::iter::Peekable<I>) -> PyResult<PyObjectRef> {
+fn json_parse_string<I: Iterator<Item = char>>(
+    chars: &mut std::iter::Peekable<I>,
+) -> PyResult<PyObjectRef> {
     chars.next();
     let mut s = String::new();
     loop {
         match chars.next() {
             None => return Err(PyError::ValueError("Unterminated JSON string".to_string())),
             Some('"') => return Ok(py_str(&s)),
-            Some('\\') => {
-                match chars.next() {
-                    None => return Err(PyError::ValueError("Unexpected end of JSON string".to_string())),
-                    Some('"') => s.push('"'),
-                    Some('\\') => s.push('\\'),
-                    Some('/') => s.push('/'),
-                    Some('n') => s.push('\n'),
-                    Some('r') => s.push('\r'),
-                    Some('t') => s.push('\t'),
-                    Some('b') => s.push('\x08'),
-                    Some('f') => s.push('\x0c'),
-                    Some('u') => {
-                        let hex: String = (0..4).filter_map(|_| chars.next()).collect();
-                        if hex.len() < 4 { return Err(PyError::ValueError("Invalid Unicode escape".to_string())); }
-                        if let Ok(code) = u32::from_str_radix(&hex, 16) {
-                            if let Some(c) = char::from_u32(code) {
-                                s.push(c);
-                            }
+            Some('\\') => match chars.next() {
+                None => {
+                    return Err(PyError::ValueError(
+                        "Unexpected end of JSON string".to_string(),
+                    ))
+                }
+                Some('"') => s.push('"'),
+                Some('\\') => s.push('\\'),
+                Some('/') => s.push('/'),
+                Some('n') => s.push('\n'),
+                Some('r') => s.push('\r'),
+                Some('t') => s.push('\t'),
+                Some('b') => s.push('\x08'),
+                Some('f') => s.push('\x0c'),
+                Some('u') => {
+                    let hex: String = (0..4).filter_map(|_| chars.next()).collect();
+                    if hex.len() < 4 {
+                        return Err(PyError::ValueError("Invalid Unicode escape".to_string()));
+                    }
+                    if let Ok(code) = u32::from_str_radix(&hex, 16) {
+                        if let Some(c) = char::from_u32(code) {
+                            s.push(c);
                         }
                     }
-                    Some(c) => s.push(c),
                 }
-            }
+                Some(c) => s.push(c),
+            },
             Some(c) => s.push(c),
         }
     }
 }
 
-fn json_parse_bool<I: Iterator<Item = char>>(chars: &mut std::iter::Peekable<I>) -> PyResult<PyObjectRef> {
+fn json_parse_bool<I: Iterator<Item = char>>(
+    chars: &mut std::iter::Peekable<I>,
+) -> PyResult<PyObjectRef> {
     let s: String = chars.by_ref().take(5).collect();
-    if s.starts_with("true") { Ok(py_bool(true)) }
-    else if s.starts_with("false") { Ok(py_bool(false)) }
-    else { Err(PyError::ValueError(format!("Unexpected token '{}'", s))) }
+    if s.starts_with("true") {
+        Ok(py_bool(true))
+    } else if s.starts_with("false") {
+        Ok(py_bool(false))
+    } else {
+        Err(PyError::ValueError(format!("Unexpected token '{}'", s)))
+    }
 }
 
-fn json_parse_null<I: Iterator<Item = char>>(chars: &mut std::iter::Peekable<I>) -> PyResult<PyObjectRef> {
+fn json_parse_null<I: Iterator<Item = char>>(
+    chars: &mut std::iter::Peekable<I>,
+) -> PyResult<PyObjectRef> {
     let s: String = chars.by_ref().take(4).collect();
-    if s.starts_with("null") { Ok(py_none()) }
-    else { Err(PyError::ValueError(format!("Unexpected token '{}'", s))) }
+    if s.starts_with("null") {
+        Ok(py_none())
+    } else {
+        Err(PyError::ValueError(format!("Unexpected token '{}'", s)))
+    }
 }
 
-fn json_parse_number<I: Iterator<Item = char>>(chars: &mut std::iter::Peekable<I>) -> PyResult<PyObjectRef> {
+fn json_parse_number<I: Iterator<Item = char>>(
+    chars: &mut std::iter::Peekable<I>,
+) -> PyResult<PyObjectRef> {
     let mut num = String::new();
-    if let Some(&'-') = chars.peek() { num.push(chars.next().unwrap()); }
+    if let Some(&'-') = chars.peek() {
+        num.push(chars.next().unwrap());
+    }
     while let Some(&c) = chars.peek() {
-        if c.is_ascii_digit() { num.push(chars.next().unwrap()); }
-        else { break; }
+        if c.is_ascii_digit() {
+            num.push(chars.next().unwrap());
+        } else {
+            break;
+        }
     }
     if let Some(&'.') = chars.peek() {
         num.push(chars.next().unwrap());
         while let Some(&c) = chars.peek() {
-            if c.is_ascii_digit() { num.push(chars.next().unwrap()); }
-            else { break; }
+            if c.is_ascii_digit() {
+                num.push(chars.next().unwrap());
+            } else {
+                break;
+            }
         }
         let peek_lower = chars.peek().map(|c| c.to_ascii_lowercase());
         if peek_lower == Some('e') {
             num.push(chars.next().unwrap());
-            if let Some(&'+') | Some(&'-') = chars.peek() { num.push(chars.next().unwrap()); }
+            if let Some(&'+') | Some(&'-') = chars.peek() {
+                num.push(chars.next().unwrap());
+            }
             while let Some(&c) = chars.peek() {
-                if c.is_ascii_digit() { num.push(chars.next().unwrap()); }
-                else { break; }
+                if c.is_ascii_digit() {
+                    num.push(chars.next().unwrap());
+                } else {
+                    break;
+                }
             }
         }
-        Ok(py_float(num.parse::<f64>().map_err(|_| PyError::ValueError(format!("Invalid number: {}", num)))?))
+        Ok(py_float(num.parse::<f64>().map_err(|_| {
+            PyError::ValueError(format!("Invalid number: {}", num))
+        })?))
     } else {
-        Ok(py_int(num.parse::<i64>().map_err(|_| PyError::ValueError(format!("Invalid integer: {}", num)))?))
+        Ok(py_int(num.parse::<i64>().map_err(|_| {
+            PyError::ValueError(format!("Invalid integer: {}", num))
+        })?))
     }
 }
 
-fn json_parse_array<I: Iterator<Item = char>>(chars: &mut std::iter::Peekable<I>) -> PyResult<PyObjectRef> {
+fn json_parse_array<I: Iterator<Item = char>>(
+    chars: &mut std::iter::Peekable<I>,
+) -> PyResult<PyObjectRef> {
     chars.next();
     let mut items = Vec::new();
     loop {
         json_skip_ws(chars);
         match chars.peek() {
             None => return Err(PyError::ValueError("Unterminated JSON array".to_string())),
-            Some(&']') => { chars.next(); return Ok(py_list(items)); }
-            Some(&',') => { chars.next(); continue; }
-            _ => { items.push(json_parse_value(chars)?); }
+            Some(&']') => {
+                chars.next();
+                return Ok(py_list(items));
+            }
+            Some(&',') => {
+                chars.next();
+                continue;
+            }
+            _ => {
+                items.push(json_parse_value(chars)?);
+            }
         }
     }
 }
 
-fn json_parse_object<I: Iterator<Item = char>>(chars: &mut std::iter::Peekable<I>) -> PyResult<PyObjectRef> {
+fn json_parse_object<I: Iterator<Item = char>>(
+    chars: &mut std::iter::Peekable<I>,
+) -> PyResult<PyObjectRef> {
     chars.next();
     let dict = py_dict();
     loop {
         json_skip_ws(chars);
         match chars.peek() {
             None => return Err(PyError::ValueError("Unterminated JSON object".to_string())),
-            Some(&'}') => { chars.next(); return Ok(dict); }
-            Some(&',') => { chars.next(); continue; }
+            Some(&'}') => {
+                chars.next();
+                return Ok(dict);
+            }
+            Some(&',') => {
+                chars.next();
+                continue;
+            }
             Some(&'"') => {
                 let key = json_parse_string(chars)?;
                 json_skip_ws(chars);
                 match chars.next() {
                     Some(':') => {}
-                    Some(c) => return Err(PyError::ValueError(format!("Expected ':' got '{}'", c))),
-                    None => return Err(PyError::ValueError("Unexpected end of JSON object".to_string())),
+                    Some(c) => {
+                        return Err(PyError::ValueError(format!("Expected ':' got '{}'", c)))
+                    }
+                    None => {
+                        return Err(PyError::ValueError(
+                            "Unexpected end of JSON object".to_string(),
+                        ))
+                    }
                 }
                 let val = json_parse_value(chars)?;
                 if let PyObject::Dict(d) = &mut *dict.borrow_mut() {
                     d.set(key, val)?;
                 }
             }
-            Some(c) => return Err(PyError::ValueError(format!("Unexpected token '{}' in object", c))),
+            Some(c) => {
+                return Err(PyError::ValueError(format!(
+                    "Unexpected token '{}' in object",
+                    c
+                )))
+            }
         }
     }
 }
 
-pub fn json_encode_full(val: &PyObjectRef, indent: Option<usize>, sort_keys: bool, level: usize) -> PyResult<PyObjectRef> {
+pub fn json_encode_full(
+    val: &PyObjectRef,
+    indent: Option<usize>,
+    sort_keys: bool,
+    level: usize,
+) -> PyResult<PyObjectRef> {
     match &*val.borrow() {
         PyObject::None => Ok(py_str("null")),
         PyObject::Bool(b) => Ok(py_str(if *b { "true" } else { "false" })),
         PyObject::Int(i) => Ok(py_str(&i.to_string())),
         PyObject::Float(f) => {
             if f.is_nan() || f.is_infinite() {
-                return Err(PyError::ValueError("Out of range float values are not JSON compliant".to_string()));
+                return Err(PyError::ValueError(
+                    "Out of range float values are not JSON compliant".to_string(),
+                ));
             }
             Ok(py_str(&f.to_string()))
         }
@@ -335,7 +492,9 @@ pub fn json_encode_full(val: &PyObjectRef, indent: Option<usize>, sort_keys: boo
         }
         PyObject::Dict(d) => {
             let pairs: Vec<(String, String)> = if sort_keys {
-                let mut sorted: Vec<(String, String)> = d.items().iter()
+                let mut sorted: Vec<(String, String)> = d
+                    .items()
+                    .iter()
                     .map(|(k, v)| {
                         let key_obj = json_encode_full(k, indent, sort_keys, level + 1)
                             .unwrap_or_else(|_| py_str("\"?\""));
@@ -347,19 +506,28 @@ pub fn json_encode_full(val: &PyObjectRef, indent: Option<usize>, sort_keys: boo
                 sorted.sort_by(|a, b| a.0.cmp(&b.0));
                 sorted
             } else {
-                d.items().iter().map(|(k, v)| {
-                    let key_obj = json_encode_full(k, indent, sort_keys, level + 1)
-                        .unwrap_or_else(|_| py_str("\"?\""));
-                    let val_obj = json_encode_full(v, indent, sort_keys, level + 1)
-                        .unwrap_or_else(|_| py_str("null"));
-                    (String::new(), format!("{}: {}", key_obj.str(), val_obj.str()))
-                }).collect()
+                d.items()
+                    .iter()
+                    .map(|(k, v)| {
+                        let key_obj = json_encode_full(k, indent, sort_keys, level + 1)
+                            .unwrap_or_else(|_| py_str("\"?\""));
+                        let val_obj = json_encode_full(v, indent, sort_keys, level + 1)
+                            .unwrap_or_else(|_| py_str("null"));
+                        (
+                            String::new(),
+                            format!("{}: {}", key_obj.str(), val_obj.str()),
+                        )
+                    })
+                    .collect()
             };
             if indent.is_some() {
                 let inner_indent = indent.unwrap_or(4);
                 let pad = " ".repeat(inner_indent * (level + 1));
                 let close_pad = " ".repeat(inner_indent * level);
-                let items: Vec<String> = pairs.iter().map(|(_, v)| format!("\n{}{}", pad, v)).collect();
+                let items: Vec<String> = pairs
+                    .iter()
+                    .map(|(_, v)| format!("\n{}{}", pad, v))
+                    .collect();
                 if items.is_empty() {
                     Ok(py_str("{}"))
                 } else {
@@ -370,7 +538,10 @@ pub fn json_encode_full(val: &PyObjectRef, indent: Option<usize>, sort_keys: boo
                 Ok(py_str(&format!("{{{}}}", items.join(", "))))
             }
         }
-        _ => Err(PyError::type_error(format!("Object of type '{}' is not JSON serializable", val.borrow().type_name()))),
+        _ => Err(PyError::type_error(format!(
+            "Object of type '{}' is not JSON serializable",
+            val.borrow().type_name()
+        ))),
     }
 }
 
@@ -386,13 +557,17 @@ pub fn call_function(func: &PyObjectRef, args: Vec<PyObjectRef>) -> PyResult<PyO
         _ => {}
     }
     drop(f);
-    Err(PyError::type_error(format!("'{}' object is not callable", func.borrow().type_name())))
+    Err(PyError::type_error(format!(
+        "'{}' object is not callable",
+        func.borrow().type_name()
+    )))
 }
 
 static RNG_STATE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 pub fn fast_random_u64() -> u64 {
-    RNG_STATE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    RNG_STATE
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         .wrapping_mul(6364136223846793005)
         .wrapping_add(1442695040888963407)
 }
@@ -402,7 +577,9 @@ pub(crate) fn socket_addr_to_string(addr: &PyObjectRef) -> PyResult<String> {
     match &*borrowed {
         PyObject::Tuple(items) if items.len() == 2 => {
             let host = items[0].str();
-            let port = items[1].as_i64().ok_or_else(|| PyError::type_error("port must be int"))?;
+            let port = items[1]
+                .as_i64()
+                .ok_or_else(|| PyError::type_error("port must be int"))?;
             Ok(format!("{}:{}", host, port))
         }
         PyObject::Str(s) => Ok(s.to_string()),
@@ -417,7 +594,10 @@ pub(crate) fn socket_addr_to_string(addr: &PyObjectRef) -> PyResult<String> {
 /// return a `(host, port)` tuple for AF_INET/AF_INET6, matching CPython —
 /// the inverse of `socket_addr_to_string` above.
 pub(crate) fn socket_addr_to_py_tuple(addr: std::net::SocketAddr) -> PyObjectRef {
-    py_tuple(vec![py_str(&addr.ip().to_string()), py_int(addr.port() as i64)])
+    py_tuple(vec![
+        py_str(&addr.ip().to_string()),
+        py_int(addr.port() as i64),
+    ])
 }
 
 pub struct ThreadInner {
@@ -507,11 +687,20 @@ pub fn deepcopy_one(obj: &PyObjectRef, memo: &PyObjectRef) -> Result<PyObjectRef
     // recursing without end and overflowing the native stack (confirmed via
     // CPython's own `test_copy.py::test_deepcopy_reflexive_dict`).
     match &*obj.borrow() {
-        PyObject::Int(_) | PyObject::Float(_) | PyObject::Str(_) | PyObject::Bool(_) | PyObject::None | PyObject::Bytes(_) => Ok(obj.clone()),
+        PyObject::Int(_)
+        | PyObject::Float(_)
+        | PyObject::Str(_)
+        | PyObject::Bool(_)
+        | PyObject::None
+        | PyObject::Bytes(_) => Ok(obj.clone()),
         PyObject::List(_) => {
             let new_list = py_list(Vec::new());
             remember(memo, obj, &new_list);
-            let items = if let PyObject::List(items) = &*obj.borrow() { items.clone() } else { unreachable!() };
+            let items = if let PyObject::List(items) = &*obj.borrow() {
+                items.clone()
+            } else {
+                unreachable!()
+            };
             let mut new_items = Vec::with_capacity(items.len());
             for item in &items {
                 new_items.push(deepcopy_one(item, memo)?);
@@ -526,7 +715,9 @@ pub fn deepcopy_one(obj: &PyObjectRef, memo: &PyObjectRef) -> Result<PyObjectRef
             remember(memo, obj, &new_deque);
             let (items, maxlen) = if let PyObject::Deque { data, maxlen } = &*obj.borrow() {
                 (data.iter().cloned().collect::<Vec<_>>(), *maxlen)
-            } else { unreachable!() };
+            } else {
+                unreachable!()
+            };
             let mut new_data = std::collections::VecDeque::new();
             for item in &items {
                 new_data.push_back(deepcopy_one(item, memo)?);
@@ -540,7 +731,11 @@ pub fn deepcopy_one(obj: &PyObjectRef, memo: &PyObjectRef) -> Result<PyObjectRef
         PyObject::Dict(_) => {
             let new_dict = PyObjectRef::new(PyObject::Dict(Box::new(PyDict::new())));
             remember(memo, obj, &new_dict);
-            let items = if let PyObject::Dict(d) = &*obj.borrow() { d.items() } else { unreachable!() };
+            let items = if let PyObject::Dict(d) = &*obj.borrow() {
+                d.items()
+            } else {
+                unreachable!()
+            };
             for (k, v) in items {
                 let new_k = deepcopy_one(&k, memo)?;
                 let new_v = deepcopy_one(&v, memo)?;
@@ -581,7 +776,11 @@ pub fn deepcopy_one(obj: &PyObjectRef, memo: &PyObjectRef) -> Result<PyObjectRef
             let new_start = deepcopy_one(&start, memo)?;
             let new_stop = deepcopy_one(&stop, memo)?;
             let new_step = deepcopy_one(&step, memo)?;
-            let result = PyObjectRef::imm(PyObject::Slice { start: new_start, stop: new_stop, step: new_step });
+            let result = PyObjectRef::imm(PyObject::Slice {
+                start: new_start,
+                stop: new_stop,
+                step: new_step,
+            });
             remember(memo, obj, &result);
             Ok(result)
         }
@@ -615,7 +814,10 @@ pub fn deepcopy_one(obj: &PyObjectRef, memo: &PyObjectRef) -> Result<PyObjectRef
                 };
                 let mut new_dict = dict;
                 new_dict.insert(NATIVE_BACKING_KEY.to_string(), new_native);
-                let result = PyObjectRef::new(PyObject::Instance { typ, dict: new_dict });
+                let result = PyObjectRef::new(PyObject::Instance {
+                    typ,
+                    dict: new_dict,
+                });
                 if let PyObject::Dict(memo_dict) = &mut *memo.borrow_mut() {
                     memo_dict.set_by_identity(obj.clone(), result.clone());
                 }
@@ -633,6 +835,8 @@ pub fn deepcopy_one(obj: &PyObjectRef, memo: &PyObjectRef) -> Result<PyObjectRef
 // here entirely, so `issubclass(EncodingWarning, Warning)`/`issubclass(
 // PythonFinalizationError, RuntimeError)` (test_baseexception's
 // exception-hierarchy audit) found nothing to resolve.
-make_exception_func!(builtin_make_exception_pythonfinalizationerror, "PythonFinalizationError");
+make_exception_func!(
+    builtin_make_exception_pythonfinalizationerror,
+    "PythonFinalizationError"
+);
 make_exception_func!(builtin_make_exception_encodingwarning, "EncodingWarning");
-

@@ -26,9 +26,9 @@ const MIN_HEAP_SIZE: usize = 64 * 1024;
 /// GC colour for tri-colour marking
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Colour {
-    White,  // Unreachable (candidate for sweep)
-    Grey,   // Reachable, not yet scanned
-    Black,  // Reachable, scanned
+    White, // Unreachable (candidate for sweep)
+    Grey,  // Reachable, not yet scanned
+    Black, // Reachable, scanned
 }
 
 /// Header stored before every GC-allocated object.
@@ -37,8 +37,8 @@ enum Colour {
 struct GcHeader {
     colour: Colour,
     kind: ObjectKind,
-    next: *mut GcHeader,   // Free list / allocation list link
-    size: u32,             // Size of T in bytes
+    next: *mut GcHeader, // Free list / allocation list link
+    size: u32,           // Size of T in bytes
 }
 
 /// Discriminant for GC tracing

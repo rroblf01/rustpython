@@ -1,22 +1,34 @@
 use crate::object::*;
-use std::collections::HashMap;
 use num_bigint::BigInt;
+use std::collections::HashMap;
 
 pub fn create_hashlib_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! hl_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
 
     hl_func!("sha256", |args| {
-        if args.len() != 1 { return Err(PyError::type_error("sha256() takes exactly one argument")); }
+        if args.len() != 1 {
+            return Err(PyError::type_error("sha256() takes exactly one argument"));
+        }
         let data = args[0].borrow();
         let bytes = match &*data {
             PyObject::Bytes(b) => b.clone(),
             PyObject::Str(s) => s.as_bytes().to_vec(),
-            _ => return Err(PyError::type_error("sha256() argument must be bytes or str")),
+            _ => {
+                return Err(PyError::type_error(
+                    "sha256() argument must be bytes or str",
+                ))
+            }
         };
         use sha2::Digest;
         let hash = sha2::Sha256::digest(&bytes);
@@ -30,12 +42,18 @@ pub fn create_hashlib_dict() -> HashMap<String, PyObjectRef> {
     // sqlite3/base.py`'s `_sqlite_...` helpers` chain, plus general hashlib
     // completeness).
     hl_func!("sha224", |args| {
-        if args.len() != 1 { return Err(PyError::type_error("sha224() takes exactly one argument")); }
+        if args.len() != 1 {
+            return Err(PyError::type_error("sha224() takes exactly one argument"));
+        }
         let data = args[0].borrow();
         let bytes = match &*data {
             PyObject::Bytes(b) => b.clone(),
             PyObject::Str(s) => s.as_bytes().to_vec(),
-            _ => return Err(PyError::type_error("sha224() argument must be bytes or str")),
+            _ => {
+                return Err(PyError::type_error(
+                    "sha224() argument must be bytes or str",
+                ))
+            }
         };
         use sha2::Digest;
         let hash = sha2::Sha224::digest(&bytes);
@@ -43,12 +61,18 @@ pub fn create_hashlib_dict() -> HashMap<String, PyObjectRef> {
     });
 
     hl_func!("sha384", |args| {
-        if args.len() != 1 { return Err(PyError::type_error("sha384() takes exactly one argument")); }
+        if args.len() != 1 {
+            return Err(PyError::type_error("sha384() takes exactly one argument"));
+        }
         let data = args[0].borrow();
         let bytes = match &*data {
             PyObject::Bytes(b) => b.clone(),
             PyObject::Str(s) => s.as_bytes().to_vec(),
-            _ => return Err(PyError::type_error("sha384() argument must be bytes or str")),
+            _ => {
+                return Err(PyError::type_error(
+                    "sha384() argument must be bytes or str",
+                ))
+            }
         };
         use sha2::Digest;
         let hash = sha2::Sha384::digest(&bytes);
@@ -56,12 +80,18 @@ pub fn create_hashlib_dict() -> HashMap<String, PyObjectRef> {
     });
 
     hl_func!("sha512", |args| {
-        if args.len() != 1 { return Err(PyError::type_error("sha512() takes exactly one argument")); }
+        if args.len() != 1 {
+            return Err(PyError::type_error("sha512() takes exactly one argument"));
+        }
         let data = args[0].borrow();
         let bytes = match &*data {
             PyObject::Bytes(b) => b.clone(),
             PyObject::Str(s) => s.as_bytes().to_vec(),
-            _ => return Err(PyError::type_error("sha512() argument must be bytes or str")),
+            _ => {
+                return Err(PyError::type_error(
+                    "sha512() argument must be bytes or str",
+                ))
+            }
         };
         use sha2::Digest;
         let hash = sha2::Sha512::digest(&bytes);
@@ -69,7 +99,9 @@ pub fn create_hashlib_dict() -> HashMap<String, PyObjectRef> {
     });
 
     hl_func!("sha1", |args| {
-        if args.len() != 1 { return Err(PyError::type_error("sha1() takes exactly one argument")); }
+        if args.len() != 1 {
+            return Err(PyError::type_error("sha1() takes exactly one argument"));
+        }
         let data = args[0].borrow();
         let bytes = match &*data {
             PyObject::Bytes(b) => b.clone(),
@@ -82,7 +114,9 @@ pub fn create_hashlib_dict() -> HashMap<String, PyObjectRef> {
     });
 
     hl_func!("md5", |args| {
-        if args.len() != 1 { return Err(PyError::type_error("md5() takes exactly one argument")); }
+        if args.len() != 1 {
+            return Err(PyError::type_error("md5() takes exactly one argument"));
+        }
         let data = args[0].borrow();
         let bytes = match &*data {
             PyObject::Bytes(b) => b.clone(),
@@ -101,7 +135,13 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! b64_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
 
@@ -173,13 +213,20 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
     // `AttributeError: 'str' object has no attribute 'decode'` here, since
     // there was already a `str` where a real `bytes` was expected.
     b64_func!("b64encode", |args| {
-        if args.len() != 1 { return Err(PyError::type_error("b64encode() takes exactly one argument")); }
+        if args.len() != 1 {
+            return Err(PyError::type_error(
+                "b64encode() takes exactly one argument",
+            ));
+        }
         // Accepts any bytes-like buffer (`bytes`/`bytearray`/a `'B'`-typecode
         // `array.array`) — matching real Python's buffer-protocol argument
         // convention (found via `test_base64.py`'s own `check_other_types`
         // helper, which exercises exactly this with `array.array('B', ...)`).
-        let bytes = arg_bytes(&args[0]).ok_or_else(|| PyError::type_error("b64encode() argument must be bytes"))?;
-        Ok(PyObjectRef::imm(PyObject::Bytes(b64_encode(&bytes).into_bytes())))
+        let bytes = arg_bytes(&args[0])
+            .ok_or_else(|| PyError::type_error("b64encode() argument must be bytes"))?;
+        Ok(PyObjectRef::imm(PyObject::Bytes(
+            b64_encode(&bytes).into_bytes(),
+        )))
     });
 
     // encodebytes/decodebytes: the legacy MIME-oriented form base64.b64encode
@@ -190,8 +237,13 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
     // ordinary use of the real stdlib `base64` module, not anything
     // email-specific about the encoding itself.
     b64_func!("encodebytes", |args| {
-        if args.len() != 1 { return Err(PyError::type_error("encodebytes() takes exactly one argument")); }
-        let bytes = arg_bytes(&args[0]).ok_or_else(|| PyError::type_error("encodebytes() argument must be bytes"))?;
+        if args.len() != 1 {
+            return Err(PyError::type_error(
+                "encodebytes() takes exactly one argument",
+            ));
+        }
+        let bytes = arg_bytes(&args[0])
+            .ok_or_else(|| PyError::type_error("encodebytes() argument must be bytes"))?;
         let mut out = String::new();
         for chunk in bytes.chunks(57) {
             out.push_str(&b64_encode(chunk));
@@ -201,14 +253,22 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
     });
 
     b64_func!("decodebytes", |args| {
-        if args.len() != 1 { return Err(PyError::type_error("decodebytes() takes exactly one argument")); }
+        if args.len() != 1 {
+            return Err(PyError::type_error(
+                "decodebytes() takes exactly one argument",
+            ));
+        }
         let data = args[0].borrow();
         let bytes = match &*data {
             PyObject::Bytes(b) => b.clone(),
             PyObject::ByteArray(b) => b.clone(),
             _ => return Err(PyError::type_error("decodebytes() argument must be bytes")),
         };
-        let s: String = bytes.iter().filter(|b| !b.is_ascii_whitespace()).map(|b| *b as char).collect();
+        let s: String = bytes
+            .iter()
+            .filter(|b| !b.is_ascii_whitespace())
+            .map(|b| *b as char)
+            .collect();
         match b64_decode(&s) {
             Ok(bytes) => Ok(PyObjectRef::imm(PyObject::Bytes(bytes))),
             Err(e) => Err(PyError::value_error(e)),
@@ -220,13 +280,21 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
     // `b64decode(b64encode(x))` must round-trip without the caller having
     // to manually `.decode('ascii')` in between.
     b64_func!("b64decode", |args| {
-        if args.len() != 1 { return Err(PyError::type_error("b64decode() takes exactly one argument")); }
+        if args.len() != 1 {
+            return Err(PyError::type_error(
+                "b64decode() takes exactly one argument",
+            ));
+        }
         let data = args[0].borrow();
         let s = match &*data {
             PyObject::Str(s) => s.to_string(),
             PyObject::Bytes(b) => String::from_utf8_lossy(b).to_string(),
             PyObject::ByteArray(b) => String::from_utf8_lossy(b).to_string(),
-            _ => return Err(PyError::type_error("b64decode() argument must be a string or bytes")),
+            _ => {
+                return Err(PyError::type_error(
+                    "b64decode() argument must be a string or bytes",
+                ))
+            }
         };
         match b64_decode(&s) {
             Ok(bytes) => Ok(PyObjectRef::imm(PyObject::Bytes(bytes))),
@@ -251,10 +319,20 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
         for chunk in data.chunks(5) {
             let mut buf = [0u8; 5];
             buf[..chunk.len()].copy_from_slice(chunk);
-            let n = ((buf[0] as u64) << 32) | ((buf[1] as u64) << 24) | ((buf[2] as u64) << 16) | ((buf[3] as u64) << 8) | (buf[4] as u64);
+            let n = ((buf[0] as u64) << 32)
+                | ((buf[1] as u64) << 24)
+                | ((buf[2] as u64) << 16)
+                | ((buf[3] as u64) << 8)
+                | (buf[4] as u64);
             // Number of valid output characters (before padding) for a
             // partial final chunk, per RFC 4648's own table.
-            let out_chars = match chunk.len() { 1 => 2, 2 => 4, 3 => 5, 4 => 7, _ => 8 };
+            let out_chars = match chunk.len() {
+                1 => 2,
+                2 => 4,
+                3 => 5,
+                4 => 7,
+                _ => 8,
+            };
             for i in 0..8 {
                 if i < out_chars {
                     let shift = 35 - i * 5;
@@ -267,7 +345,9 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
         }
         out
     }
-    fn b32_encode(data: &[u8]) -> String { b32_encode_with(data, B32_ALPHABET) }
+    fn b32_encode(data: &[u8]) -> String {
+        b32_encode_with(data, B32_ALPHABET)
+    }
 
     // Raises a REAL `binascii.Error` (not a plain `ValueError`) — matters
     // because CPython's own `test_base64.py` uses `assertRaises(binascii.
@@ -279,11 +359,14 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
     // constructor uses.
     fn binascii_error(msg: impl Into<String>) -> PyError {
         let msg = msg.into();
-        PyError::Exception("Error".to_string(), PyObjectRef::new(PyObject::Exception {
-            typ: "Error".to_string(),
-            args: vec![py_str(&msg)],
-            cause: None,
-        }))
+        PyError::Exception(
+            "Error".to_string(),
+            PyObjectRef::new(PyObject::Exception {
+                typ: "Error".to_string(),
+                args: vec![py_str(&msg)],
+                cause: None,
+            }),
+        )
     }
 
     // Real `base64.b32decode`/`b32hexdecode` strictly validate padding —
@@ -331,7 +414,9 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
             let mut valid_bits = 0;
             for &c in chunk {
                 let v = rev[c as usize];
-                if v == 255 { return Err("Non-base32 digit found".to_string()); }
+                if v == 255 {
+                    return Err("Non-base32 digit found".to_string());
+                }
                 n = (n << 5) | v as u64;
                 valid_bits += 5;
             }
@@ -345,20 +430,37 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
         }
         Ok(out)
     }
-    fn b32_decode(s: &str) -> Result<Vec<u8>, String> { b32_decode_with(s, B32_ALPHABET) }
+    fn b32_decode(s: &str) -> Result<Vec<u8>, String> {
+        b32_decode_with(s, B32_ALPHABET)
+    }
 
     b64_func!("b32encode", |args| {
-        if args.len() != 1 { return Err(PyError::type_error("b32encode() takes exactly one argument")); }
-        let data = arg_bytes(&args[0]).ok_or_else(|| PyError::type_error("b32encode() argument must be bytes"))?;
-        Ok(PyObjectRef::imm(PyObject::Bytes(b32_encode(&data).into_bytes())))
+        if args.len() != 1 {
+            return Err(PyError::type_error(
+                "b32encode() takes exactly one argument",
+            ));
+        }
+        let data = arg_bytes(&args[0])
+            .ok_or_else(|| PyError::type_error("b32encode() argument must be bytes"))?;
+        Ok(PyObjectRef::imm(PyObject::Bytes(
+            b32_encode(&data).into_bytes(),
+        )))
     });
 
     b64_func!("b32decode", |args| {
-        if args.len() != 1 { return Err(PyError::type_error("b32decode() takes exactly one argument")); }
+        if args.len() != 1 {
+            return Err(PyError::type_error(
+                "b32decode() takes exactly one argument",
+            ));
+        }
         let s = match &*args[0].borrow() {
             PyObject::Str(s) => s.to_string(),
             PyObject::Bytes(b) => String::from_utf8_lossy(b).to_string(),
-            _ => return Err(PyError::type_error("b32decode() argument must be a string or bytes")),
+            _ => {
+                return Err(PyError::type_error(
+                    "b32decode() argument must be a string or bytes",
+                ))
+            }
         };
         match b32_decode(&s) {
             Ok(bytes) => Ok(PyObjectRef::imm(PyObject::Bytes(bytes))),
@@ -374,51 +476,98 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
     // §7). Found via CPython's own `test_base64.py`, which exercises all
     // of these directly.
     b64_func!("standard_b64encode", |args| {
-        if args.len() != 1 { return Err(PyError::type_error("standard_b64encode() takes exactly one argument")); }
-        let bytes = arg_bytes(&args[0]).ok_or_else(|| PyError::type_error("standard_b64encode() argument must be bytes"))?;
-        Ok(PyObjectRef::imm(PyObject::Bytes(b64_encode(&bytes).into_bytes())))
+        if args.len() != 1 {
+            return Err(PyError::type_error(
+                "standard_b64encode() takes exactly one argument",
+            ));
+        }
+        let bytes = arg_bytes(&args[0])
+            .ok_or_else(|| PyError::type_error("standard_b64encode() argument must be bytes"))?;
+        Ok(PyObjectRef::imm(PyObject::Bytes(
+            b64_encode(&bytes).into_bytes(),
+        )))
     });
     b64_func!("standard_b64decode", |args| {
-        if args.len() != 1 { return Err(PyError::type_error("standard_b64decode() takes exactly one argument")); }
+        if args.len() != 1 {
+            return Err(PyError::type_error(
+                "standard_b64decode() takes exactly one argument",
+            ));
+        }
         let s = match &*args[0].borrow() {
             PyObject::Str(s) => s.to_string(),
             PyObject::Bytes(b) => String::from_utf8_lossy(b).to_string(),
             PyObject::ByteArray(b) => String::from_utf8_lossy(b).to_string(),
-            _ => return Err(PyError::type_error("standard_b64decode() argument must be a string or bytes")),
+            _ => {
+                return Err(PyError::type_error(
+                    "standard_b64decode() argument must be a string or bytes",
+                ))
+            }
         };
-        b64_decode(&s).map(|b| PyObjectRef::imm(PyObject::Bytes(b))).map_err(PyError::value_error)
+        b64_decode(&s)
+            .map(|b| PyObjectRef::imm(PyObject::Bytes(b)))
+            .map_err(PyError::value_error)
     });
     b64_func!("urlsafe_b64encode", |args| {
-        if args.len() != 1 { return Err(PyError::type_error("urlsafe_b64encode() takes exactly one argument")); }
-        let bytes = arg_bytes(&args[0]).ok_or_else(|| PyError::type_error("urlsafe_b64encode() argument must be bytes"))?;
+        if args.len() != 1 {
+            return Err(PyError::type_error(
+                "urlsafe_b64encode() takes exactly one argument",
+            ));
+        }
+        let bytes = arg_bytes(&args[0])
+            .ok_or_else(|| PyError::type_error("urlsafe_b64encode() argument must be bytes"))?;
         let s = b64_encode(&bytes).replace('+', "-").replace('/', "_");
         Ok(PyObjectRef::imm(PyObject::Bytes(s.into_bytes())))
     });
     b64_func!("urlsafe_b64decode", |args| {
-        if args.len() != 1 { return Err(PyError::type_error("urlsafe_b64decode() takes exactly one argument")); }
+        if args.len() != 1 {
+            return Err(PyError::type_error(
+                "urlsafe_b64decode() takes exactly one argument",
+            ));
+        }
         let s = match &*args[0].borrow() {
             PyObject::Str(s) => s.to_string(),
             PyObject::Bytes(b) => String::from_utf8_lossy(b).to_string(),
             PyObject::ByteArray(b) => String::from_utf8_lossy(b).to_string(),
-            _ => return Err(PyError::type_error("urlsafe_b64decode() argument must be a string or bytes")),
+            _ => {
+                return Err(PyError::type_error(
+                    "urlsafe_b64decode() argument must be a string or bytes",
+                ))
+            }
         };
         let s = s.replace('-', "+").replace('_', "/");
-        b64_decode(&s).map(|b| PyObjectRef::imm(PyObject::Bytes(b))).map_err(PyError::value_error)
+        b64_decode(&s)
+            .map(|b| PyObjectRef::imm(PyObject::Bytes(b)))
+            .map_err(PyError::value_error)
     });
     b64_func!("b16encode", |args| {
-        if args.len() != 1 { return Err(PyError::type_error("b16encode() takes exactly one argument")); }
-        let bytes = arg_bytes(&args[0]).ok_or_else(|| PyError::type_error("b16encode() argument must be bytes"))?;
+        if args.len() != 1 {
+            return Err(PyError::type_error(
+                "b16encode() takes exactly one argument",
+            ));
+        }
+        let bytes = arg_bytes(&args[0])
+            .ok_or_else(|| PyError::type_error("b16encode() argument must be bytes"))?;
         let mut out = String::with_capacity(bytes.len() * 2);
-        for b in &bytes { out.push_str(&format!("{:02X}", b)); }
+        for b in &bytes {
+            out.push_str(&format!("{:02X}", b));
+        }
         Ok(PyObjectRef::imm(PyObject::Bytes(out.into_bytes())))
     });
     b64_func!("b16decode", |args| {
-        if args.is_empty() { return Err(PyError::type_error("b16decode() takes at least one argument")); }
+        if args.is_empty() {
+            return Err(PyError::type_error(
+                "b16decode() takes at least one argument",
+            ));
+        }
         let s = match &*args[0].borrow() {
             PyObject::Str(s) => s.to_string(),
             PyObject::Bytes(b) => String::from_utf8_lossy(b).to_string(),
             PyObject::ByteArray(b) => String::from_utf8_lossy(b).to_string(),
-            _ => return Err(PyError::type_error("b16decode() argument must be a string or bytes")),
+            _ => {
+                return Err(PyError::type_error(
+                    "b16decode() argument must be a string or bytes",
+                ))
+            }
         };
         let casefold = args.get(1).map(|v| v.truthy()).unwrap_or(false);
         let s = if casefold { s.to_uppercase() } else { s };
@@ -432,24 +581,44 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
         let bytes = s.as_bytes();
         for chunk in bytes.chunks(2) {
             let hex = std::str::from_utf8(chunk).unwrap();
-            out.push(u8::from_str_radix(hex, 16).map_err(|_| PyError::value_error("Non-base16 digit found"))?);
+            out.push(
+                u8::from_str_radix(hex, 16)
+                    .map_err(|_| PyError::value_error("Non-base16 digit found"))?,
+            );
         }
         Ok(PyObjectRef::imm(PyObject::Bytes(out)))
     });
     b64_func!("b32hexencode", |args| {
-        if args.len() != 1 { return Err(PyError::type_error("b32hexencode() takes exactly one argument")); }
-        let data = arg_bytes(&args[0]).ok_or_else(|| PyError::type_error("b32hexencode() argument must be bytes"))?;
-        Ok(PyObjectRef::imm(PyObject::Bytes(b32_encode_with(&data, B32HEX_ALPHABET).into_bytes())))
+        if args.len() != 1 {
+            return Err(PyError::type_error(
+                "b32hexencode() takes exactly one argument",
+            ));
+        }
+        let data = arg_bytes(&args[0])
+            .ok_or_else(|| PyError::type_error("b32hexencode() argument must be bytes"))?;
+        Ok(PyObjectRef::imm(PyObject::Bytes(
+            b32_encode_with(&data, B32HEX_ALPHABET).into_bytes(),
+        )))
     });
     b64_func!("b32hexdecode", |args| {
-        if args.is_empty() { return Err(PyError::type_error("b32hexdecode() takes at least one argument")); }
+        if args.is_empty() {
+            return Err(PyError::type_error(
+                "b32hexdecode() takes at least one argument",
+            ));
+        }
         let s = match &*args[0].borrow() {
             PyObject::Str(s) => s.to_string(),
             PyObject::Bytes(b) => String::from_utf8_lossy(b).to_string(),
             PyObject::ByteArray(b) => String::from_utf8_lossy(b).to_string(),
-            _ => return Err(PyError::type_error("b32hexdecode() argument must be a string or bytes")),
+            _ => {
+                return Err(PyError::type_error(
+                    "b32hexdecode() argument must be a string or bytes",
+                ))
+            }
         };
-        b32_decode_with(&s, B32HEX_ALPHABET).map(|b| PyObjectRef::imm(PyObject::Bytes(b))).map_err(binascii_error)
+        b32_decode_with(&s, B32HEX_ALPHABET)
+            .map(|b| PyObjectRef::imm(PyObject::Bytes(b)))
+            .map_err(binascii_error)
     });
 
     d
@@ -464,7 +633,13 @@ pub fn create_secrets_dict() -> HashMap<String, PyObjectRef> {
     d.insert_str("DEFAULT_ENTROPY", py_int(32));
     macro_rules! sec_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
 
@@ -478,7 +653,10 @@ pub fn create_secrets_dict() -> HashMap<String, PyObjectRef> {
         match args.first() {
             None => Ok(32),
             Some(a) if matches!(&*a.borrow(), PyObject::None) => Ok(32),
-            Some(a) => a.as_i64().ok_or_else(|| PyError::type_error("nbytes must be an integer")).map(|n| n as usize),
+            Some(a) => a
+                .as_i64()
+                .ok_or_else(|| PyError::type_error("nbytes must be an integer"))
+                .map(|n| n as usize),
         }
     }
 
@@ -539,14 +717,18 @@ pub fn create_secrets_dict() -> HashMap<String, PyObjectRef> {
     // boolean result and type-checking behavior.
     sec_func!("compare_digest", |args| {
         if args.len() < 2 {
-            return Err(PyError::type_error("compare_digest() missing required argument"));
+            return Err(PyError::type_error(
+                "compare_digest() missing required argument",
+            ));
         }
         let a = args[0].borrow();
         let b = args[1].borrow();
         match (&*a, &*b) {
             (PyObject::Str(sa), PyObject::Str(sb)) => Ok(py_bool(sa.as_bytes() == sb.as_bytes())),
             (PyObject::Bytes(ba), PyObject::Bytes(bb)) => Ok(py_bool(ba == bb)),
-            _ => Err(PyError::type_error("unsupported operand types(s) or combination of types")),
+            _ => Err(PyError::type_error(
+                "unsupported operand types(s) or combination of types",
+            )),
         }
     });
 
@@ -560,9 +742,13 @@ pub fn create_secrets_dict() -> HashMap<String, PyObjectRef> {
     // negative) before converting to `i64` fixes this.
     sec_func!("randbelow", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("randbelow() missing required argument (upper)"));
+            return Err(PyError::type_error(
+                "randbelow() missing required argument (upper)",
+            ));
         }
-        let upper = args[0].as_i64().ok_or_else(|| PyError::type_error("upper must be an integer"))?;
+        let upper = args[0]
+            .as_i64()
+            .ok_or_else(|| PyError::type_error("upper must be an integer"))?;
         if upper <= 0 {
             return Err(PyError::value_error("upper must be positive"));
         }
@@ -574,32 +760,48 @@ pub fn create_secrets_dict() -> HashMap<String, PyObjectRef> {
     // missing entirely.
     sec_func!("randbits", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("randbits() missing required argument (k)"));
+            return Err(PyError::type_error(
+                "randbits() missing required argument (k)",
+            ));
         }
-        let k = args[0].as_i64().ok_or_else(|| PyError::type_error("k must be an integer"))?;
+        let k = args[0]
+            .as_i64()
+            .ok_or_else(|| PyError::type_error("k must be an integer"))?;
         if k <= 0 {
-            return Err(PyError::value_error("number of bits must be greater than zero"));
+            return Err(PyError::value_error(
+                "number of bits must be greater than zero",
+            ));
         }
         let nbytes = ((k as usize) + 7) / 8;
         let mut val: u128 = 0;
         for i in 0..nbytes {
             val |= (crate::object::fast_random_u64() as u8 as u128) << (8 * i);
         }
-        let mask: u128 = if k >= 128 { u128::MAX } else { (1u128 << k) - 1 };
+        let mask: u128 = if k >= 128 {
+            u128::MAX
+        } else {
+            (1u128 << k) - 1
+        };
         Ok(py_int(BigInt::from(val & mask)))
     });
 
     // choice(seq) — random element from sequence
     sec_func!("choice", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("choice() missing required argument (seq)"));
+            return Err(PyError::type_error(
+                "choice() missing required argument (seq)",
+            ));
         }
         let seq = &args[0];
         let borrowed = seq.borrow();
         let items = match &*borrowed {
             PyObject::List(v) => v.clone(),
             PyObject::Tuple(v) => v.clone(),
-            _ => return Err(PyError::type_error("choice() argument must be a sequence (list or tuple)")),
+            _ => {
+                return Err(PyError::type_error(
+                    "choice() argument must be a sequence (list or tuple)",
+                ))
+            }
         };
         if items.is_empty() {
             return Err(PyError::index_error("cannot choose from an empty sequence"));
@@ -615,19 +817,30 @@ pub fn create_hmac_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! hmac_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
 
     // `hmac.compare_digest` — CPython's own `test_hmac.py` asserts this IS
     // `_operator._compare_digest` (same object), so register the shared
     // instance (see `core::shared_compare_digest`).
-    d.insert_str("compare_digest", crate::modules::core::shared_compare_digest());
+    d.insert_str(
+        "compare_digest",
+        crate::modules::core::shared_compare_digest(),
+    );
 
     // new(key, msg=None, digestmod=None) — returns an HMAC object with hexdigest()/digest()
     hmac_func!("new", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("hmac.new() missing required argument: key"));
+            return Err(PyError::type_error(
+                "hmac.new() missing required argument: key",
+            ));
         }
         let key = match &*args[0].borrow() {
             PyObject::Bytes(b) => b.clone(),
@@ -651,7 +864,9 @@ pub fn create_hmac_dict() -> HashMap<String, PyObjectRef> {
         // Compute inner hash: H((key XOR ipad) || msg)
         let mut ipad = vec![0x36u8; 64];
         for (i, k) in key.iter().enumerate() {
-            if i < 64 { ipad[i] ^= k; }
+            if i < 64 {
+                ipad[i] ^= k;
+            }
         }
 
         let mut inner_hasher = DefaultHasher::new();
@@ -663,7 +878,9 @@ pub fn create_hmac_dict() -> HashMap<String, PyObjectRef> {
         // Compute outer hash: H((key XOR opad) || inner_hash)
         let mut opad = vec![0x5cu8; 64];
         for (i, k) in key.iter().enumerate() {
-            if i < 64 { opad[i] ^= k; }
+            if i < 64 {
+                opad[i] ^= k;
+            }
         }
 
         let mut outer_hasher = DefaultHasher::new();
@@ -679,33 +896,43 @@ pub fn create_hmac_dict() -> HashMap<String, PyObjectRef> {
         // Store hash values in instance dict; methods read from self
         let mut type_dict = HashMap::new();
 
-        type_dict.insert_str("digest", PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "digest".to_string(),
-            func: |args| {
-                if args.is_empty() {
-                    return Err(PyError::type_error("digest() missing self argument"));
-                }
-                let v = args[0].borrow().get_attribute("_digest")
-                    .unwrap_or(py_none());
-                let bytes = match &*v.borrow() {
-                    PyObject::Bytes(b) => b.clone(),
-                    _ => vec![],
-                };
-                Ok(PyObjectRef::imm(PyObject::Bytes(bytes)))
-            },
-        }));
+        type_dict.insert_str(
+            "digest",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "digest".to_string(),
+                func: |args| {
+                    if args.is_empty() {
+                        return Err(PyError::type_error("digest() missing self argument"));
+                    }
+                    let v = args[0]
+                        .borrow()
+                        .get_attribute("_digest")
+                        .unwrap_or(py_none());
+                    let bytes = match &*v.borrow() {
+                        PyObject::Bytes(b) => b.clone(),
+                        _ => vec![],
+                    };
+                    Ok(PyObjectRef::imm(PyObject::Bytes(bytes)))
+                },
+            }),
+        );
 
-        type_dict.insert_str("hexdigest", PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "hexdigest".to_string(),
-            func: |args| {
-                if args.is_empty() {
-                    return Err(PyError::type_error("hexdigest() missing self argument"));
-                }
-                let v = args[0].borrow().get_attribute("_hexdigest")
-                    .unwrap_or(py_str(""));
-                Ok(py_str(&v.str()))
-            },
-        }));
+        type_dict.insert_str(
+            "hexdigest",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "hexdigest".to_string(),
+                func: |args| {
+                    if args.is_empty() {
+                        return Err(PyError::type_error("hexdigest() missing self argument"));
+                    }
+                    let v = args[0]
+                        .borrow()
+                        .get_attribute("_hexdigest")
+                        .unwrap_or(py_str(""));
+                    Ok(py_str(&v.str()))
+                },
+            }),
+        );
 
         let mut instance_dict = AttrMap::new();
         instance_dict.insert_str("_digest", PyObjectRef::imm(PyObject::Bytes(hash_bytes)));
@@ -734,7 +961,13 @@ pub fn create_zlib_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! z_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
 
@@ -754,24 +987,37 @@ pub fn create_zlib_dict() -> HashMap<String, PyObjectRef> {
     // module.
     z_func!("compress", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("compress() missing required argument (data)"));
+            return Err(PyError::type_error(
+                "compress() missing required argument (data)",
+            ));
         }
         let data = match &*args[0].borrow() {
             PyObject::Bytes(b) => b.clone(),
             PyObject::ByteArray(b) => b.clone(),
             _ => return Err(PyError::type_error("compress() argument must be bytes")),
         };
-        let level = if args.len() > 1 { args[1].as_i64().unwrap_or(6).clamp(0, 9) as u32 } else { 6 };
+        let level = if args.len() > 1 {
+            args[1].as_i64().unwrap_or(6).clamp(0, 9) as u32
+        } else {
+            6
+        };
         use std::io::Write;
-        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(level));
-        encoder.write_all(&data).map_err(|e| PyError::os_error_from_io(&e))?;
-        let compressed = encoder.finish().map_err(|e| PyError::os_error_from_io(&e))?;
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(level));
+        encoder
+            .write_all(&data)
+            .map_err(|e| PyError::os_error_from_io(&e))?;
+        let compressed = encoder
+            .finish()
+            .map_err(|e| PyError::os_error_from_io(&e))?;
         Ok(PyObjectRef::imm(PyObject::Bytes(compressed)))
     });
 
     z_func!("decompress", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("decompress() missing required argument (data)"));
+            return Err(PyError::type_error(
+                "decompress() missing required argument (data)",
+            ));
         }
         let data = match &*args[0].borrow() {
             PyObject::Bytes(b) => b.clone(),
@@ -781,10 +1027,11 @@ pub fn create_zlib_dict() -> HashMap<String, PyObjectRef> {
         use std::io::Read;
         let mut decoder = flate2::read::ZlibDecoder::new(&data[..]);
         let mut out = Vec::new();
-        decoder.read_to_end(&mut out).map_err(|e| PyError::value_error(format!("Error -3 while decompressing data: {}", e)))?;
+        decoder.read_to_end(&mut out).map_err(|e| {
+            PyError::value_error(format!("Error -3 while decompressing data: {}", e))
+        })?;
         Ok(PyObjectRef::imm(PyObject::Bytes(out)))
     });
 
     d
 }
-

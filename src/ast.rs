@@ -288,7 +288,7 @@ pub enum FStringPart {
     String(String),
     Expr {
         expr: Box<Expr>,
-        conversion: u8,  // 0=none, 1=repr(!r), 2=str(!s), 3=ascii(!a)
+        conversion: u8, // 0=none, 1=repr(!r), 2=str(!s), 3=ascii(!a)
         format_spec: Option<Box<Expr>>,
     },
 }

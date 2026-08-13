@@ -62,12 +62,20 @@ pub(crate) fn generator_next_fallback(args: &[PyObjectRef]) -> PyResult<PyObject
         match vm.execute() {
             Ok(val) => {
                 let modified = vm.frames.pop().unwrap();
-                if modified.ip > 0 && matches!(&modified.code.instructions[modified.ip - 1].op, crate::bytecode::Opcode::YIELD_VALUE) {
+                if modified.ip > 0
+                    && matches!(
+                        &modified.code.instructions[modified.ip - 1].op,
+                        crate::bytecode::Opcode::YIELD_VALUE
+                    )
+                {
                     *f = Box::new(modified);
                     Ok(val)
                 } else {
                     *frame_opt = None;
-                    Err(crate::object::PyError::Exception("StopIteration".to_string(), val))
+                    Err(crate::object::PyError::Exception(
+                        "StopIteration".to_string(),
+                        val,
+                    ))
                 }
             }
             Err(e) => {
@@ -102,11 +110,14 @@ fn wrap_stopiteration_pep479(e: PyError) -> PyError {
         _ => None,
     };
     match stop_instance {
-        Some(inst) => PyError::Exception("RuntimeError".to_string(), PyObjectRef::new(PyObject::Exception {
-            typ: "RuntimeError".to_string(),
-            args: vec![py_str("generator raised StopIteration")],
-            cause: Some(inst),
-        })),
+        Some(inst) => PyError::Exception(
+            "RuntimeError".to_string(),
+            PyObjectRef::new(PyObject::Exception {
+                typ: "RuntimeError".to_string(),
+                args: vec![py_str("generator raised StopIteration")],
+                cause: Some(inst),
+            }),
+        ),
         None => e,
     }
 }
@@ -139,13 +150,21 @@ pub(crate) fn coroutine_send_fallback(args: &[PyObjectRef]) -> PyResult<PyObject
             match vm.execute() {
                 Ok(val) => {
                     let modified = vm.frames.pop().unwrap();
-                    if modified.ip > 0 && matches!(&modified.code.instructions[modified.ip - 1].op, crate::bytecode::Opcode::YIELD_VALUE) {
+                    if modified.ip > 0
+                        && matches!(
+                            &modified.code.instructions[modified.ip - 1].op,
+                            crate::bytecode::Opcode::YIELD_VALUE
+                        )
+                    {
                         *f = Box::new(modified);
                         Ok(val)
                     } else {
                         *frame_opt = None;
                         // Propagate the return value via StopIteration for SEND
-                        Err(crate::object::PyError::Exception("StopIteration".to_string(), val))
+                        Err(crate::object::PyError::Exception(
+                            "StopIteration".to_string(),
+                            val,
+                        ))
                     }
                 }
                 Err(e) => {
@@ -166,7 +185,11 @@ pub(crate) fn coroutine_send_fallback(args: &[PyObjectRef]) -> PyResult<PyObject
 
 /// Body of `coroutine.throw(value)` — see `coroutine_send_fallback` above.
 pub(crate) fn coroutine_throw_fallback(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.len() < 2 { return Err(PyError::type_error("throw() missing required argument 'value'")); }
+    if args.len() < 2 {
+        return Err(PyError::type_error(
+            "throw() missing required argument 'value'",
+        ));
+    }
     let gen = args[0].borrow();
     if let PyObject::Coroutine { frame } = &*gen {
         let mut frame_opt = match frame.try_borrow_mut() {
@@ -176,12 +199,18 @@ pub(crate) fn coroutine_throw_fallback(args: &[PyObjectRef]) -> PyResult<PyObjec
         if let Some(f) = frame_opt.as_mut() {
             let mut vm = crate::vm::VirtualMachine::new();
             let raw = args[1].clone();
-            let is_callable = !matches!(&*raw.borrow(),
-                PyObject::Exception { .. } | PyObject::ExceptionGroup { .. } | PyObject::Instance { .. }
+            let is_callable = !matches!(
+                &*raw.borrow(),
+                PyObject::Exception { .. }
+                    | PyObject::ExceptionGroup { .. }
+                    | PyObject::Instance { .. }
             );
             let exc_obj = if is_callable {
-                vm.call_function(raw.clone(), vec![], vec![])
-                    .map_err(|_| PyError::type_error("exceptions must be classes or instances deriving from BaseException"))?
+                vm.call_function(raw.clone(), vec![], vec![]).map_err(|_| {
+                    PyError::type_error(
+                        "exceptions must be classes or instances deriving from BaseException",
+                    )
+                })?
             } else {
                 raw
             };
@@ -194,12 +223,20 @@ pub(crate) fn coroutine_throw_fallback(args: &[PyObjectRef]) -> PyResult<PyObjec
             match vm.throw_into_frame(err) {
                 Ok(val) => {
                     let modified = vm.frames.pop().unwrap();
-                    if modified.ip > 0 && matches!(&modified.code.instructions[modified.ip - 1].op, crate::bytecode::Opcode::YIELD_VALUE) {
+                    if modified.ip > 0
+                        && matches!(
+                            &modified.code.instructions[modified.ip - 1].op,
+                            crate::bytecode::Opcode::YIELD_VALUE
+                        )
+                    {
                         *f = Box::new(modified);
                         Ok(val)
                     } else {
                         *frame_opt = None;
-                        Err(crate::object::PyError::Exception("StopIteration".to_string(), val))
+                        Err(crate::object::PyError::Exception(
+                            "StopIteration".to_string(),
+                            val,
+                        ))
                     }
                 }
                 Err(e) => {
@@ -232,8 +269,15 @@ pub(crate) fn coroutine_throw_fallback(args: &[PyObjectRef]) -> PyResult<PyObjec
 /// instead of the exception actually being thrown in — `unittest.main()`
 /// then crashed on `issubclass(None, ...)` the moment any real test
 /// failure/error needed to be classified and reported.
-pub(crate) fn generator_throw_with_vm(vm: &mut crate::vm::VirtualMachine, args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.len() < 2 { return Err(PyError::type_error("throw() missing required argument 'value'")); }
+pub(crate) fn generator_throw_with_vm(
+    vm: &mut crate::vm::VirtualMachine,
+    args: &[PyObjectRef],
+) -> PyResult<PyObjectRef> {
+    if args.len() < 2 {
+        return Err(PyError::type_error(
+            "throw() missing required argument 'value'",
+        ));
+    }
     let gen = args[0].borrow();
     if let PyObject::Generator { frame } = &*gen {
         let mut frame_opt = match frame.try_borrow_mut() {
@@ -242,12 +286,18 @@ pub(crate) fn generator_throw_with_vm(vm: &mut crate::vm::VirtualMachine, args: 
         };
         if let Some(f) = frame_opt.as_mut() {
             let raw = args[1].clone();
-            let is_callable = !matches!(&*raw.borrow(),
-                PyObject::Exception { .. } | PyObject::ExceptionGroup { .. } | PyObject::Instance { .. }
+            let is_callable = !matches!(
+                &*raw.borrow(),
+                PyObject::Exception { .. }
+                    | PyObject::ExceptionGroup { .. }
+                    | PyObject::Instance { .. }
             );
             let exc_obj = if is_callable {
-                vm.call_function(raw.clone(), vec![], vec![])
-                    .map_err(|_| PyError::type_error("exceptions must be classes or instances deriving from BaseException"))?
+                vm.call_function(raw.clone(), vec![], vec![]).map_err(|_| {
+                    PyError::type_error(
+                        "exceptions must be classes or instances deriving from BaseException",
+                    )
+                })?
             } else {
                 raw
             };
@@ -260,12 +310,20 @@ pub(crate) fn generator_throw_with_vm(vm: &mut crate::vm::VirtualMachine, args: 
             match vm.throw_into_frame(err) {
                 Ok(val) => {
                     let modified = vm.frames.pop().unwrap();
-                    if modified.ip > 0 && matches!(&modified.code.instructions[modified.ip - 1].op, crate::bytecode::Opcode::YIELD_VALUE) {
+                    if modified.ip > 0
+                        && matches!(
+                            &modified.code.instructions[modified.ip - 1].op,
+                            crate::bytecode::Opcode::YIELD_VALUE
+                        )
+                    {
                         *f = Box::new(modified);
                         Ok(val)
                     } else {
                         *frame_opt = None;
-                        Err(crate::object::PyError::Exception("StopIteration".to_string(), val))
+                        Err(crate::object::PyError::Exception(
+                            "StopIteration".to_string(),
+                            val,
+                        ))
                     }
                 }
                 Err(e) => {
@@ -291,4 +349,3 @@ pub(crate) fn generator_throw_with_vm(vm: &mut crate::vm::VirtualMachine, args: 
 pub(crate) fn generator_throw_fallback(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     with_vm_mut(|vm| generator_throw_with_vm(vm, args))?
 }
-

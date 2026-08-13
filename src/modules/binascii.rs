@@ -61,7 +61,8 @@ fn b64_decode(s: &[u8]) -> Result<Vec<u8>, String> {
         rev[c as usize] = i as u8;
     }
     // Strip whitespace
-    let clean: Vec<u8> = s.iter()
+    let clean: Vec<u8> = s
+        .iter()
         .filter(|&&b| !b.is_ascii_whitespace())
         .copied()
         .collect();
@@ -170,23 +171,34 @@ pub fn create_binascii_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
 
     // Standard binascii.Error exception
-    d.insert_str("Error", PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "Error".to_string(),
-        func: |args| {
-            let msg = if args.is_empty() { String::new() } else { args[0].str() };
-            Ok(PyObjectRef::new(PyObject::Exception {
-                typ: "Error".to_string(),
-                args: vec![py_str(&msg)],
-                cause: None,
-            }))
-        },
-    }));
+    d.insert_str(
+        "Error",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "Error".to_string(),
+            func: |args| {
+                let msg = if args.is_empty() {
+                    String::new()
+                } else {
+                    args[0].str()
+                };
+                Ok(PyObjectRef::new(PyObject::Exception {
+                    typ: "Error".to_string(),
+                    args: vec![py_str(&msg)],
+                    cause: None,
+                }))
+            },
+        }),
+    );
 
     macro_rules! bin_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
-                name: $name.to_string(), func: $func,
-            }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
 
@@ -199,7 +211,11 @@ pub fn create_binascii_dict() -> HashMap<String, PyObjectRef> {
             PyObject::Bytes(b) => b.clone(),
             PyObject::ByteArray(b) => b.clone(),
             PyObject::Str(s) => s.as_bytes().to_vec(),
-            _ => return Err(PyError::type_error("argument must be bytes, bytearray, or str")),
+            _ => {
+                return Err(PyError::type_error(
+                    "argument must be bytes, bytearray, or str",
+                ))
+            }
         };
         let hex: String = data.iter().map(|b| format!("{:02x}", b)).collect();
         Ok(PyObjectRef::imm(PyObject::Bytes(hex.into_bytes())))
@@ -214,14 +230,19 @@ pub fn create_binascii_dict() -> HashMap<String, PyObjectRef> {
             PyObject::Bytes(b) => String::from_utf8_lossy(b).to_string(),
             PyObject::ByteArray(b) => String::from_utf8_lossy(b).to_string(),
             PyObject::Str(s) => s.to_string(),
-            _ => return Err(PyError::type_error("argument must be bytes, bytearray, or str")),
+            _ => {
+                return Err(PyError::type_error(
+                    "argument must be bytes, bytearray, or str",
+                ))
+            }
         };
         let clean: String = hex_str.chars().filter(|c| !c.is_whitespace()).collect();
         if clean.len() % 2 != 0 {
             return Err(PyError::value_error("hex string must be of even length"));
         }
-        let bytes: Vec<u8> = (0..clean.len()).step_by(2)
-            .map(|i| u8::from_str_radix(&clean[i..i+2], 16))
+        let bytes: Vec<u8> = (0..clean.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&clean[i..i + 2], 16))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| PyError::value_error("non-hexadecimal number found"))?;
         Ok(PyObjectRef::imm(PyObject::Bytes(bytes)))
@@ -230,13 +251,19 @@ pub fn create_binascii_dict() -> HashMap<String, PyObjectRef> {
     // --- a2b_base64 ---
     bin_func!("a2b_base64", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("a2b_base64() missing required argument"));
+            return Err(PyError::type_error(
+                "a2b_base64() missing required argument",
+            ));
         }
         let data = match &*args[0].borrow() {
             PyObject::Bytes(b) => b.clone(),
             PyObject::ByteArray(b) => b.clone(),
             PyObject::Str(s) => s.as_bytes().to_vec(),
-            _ => return Err(PyError::type_error("argument must be bytes, bytearray, or str")),
+            _ => {
+                return Err(PyError::type_error(
+                    "argument must be bytes, bytearray, or str",
+                ))
+            }
         };
         match b64_decode(&data) {
             Ok(bytes) => Ok(PyObjectRef::imm(PyObject::Bytes(bytes))),
@@ -247,7 +274,9 @@ pub fn create_binascii_dict() -> HashMap<String, PyObjectRef> {
     // --- b2a_base64 ---
     bin_func!("b2a_base64", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("b2a_base64() missing required argument"));
+            return Err(PyError::type_error(
+                "b2a_base64() missing required argument",
+            ));
         }
         let data = match &*args[0].borrow() {
             PyObject::Bytes(b) => b.clone(),
@@ -317,17 +346,18 @@ pub fn create_binascii_dict() -> HashMap<String, PyObjectRef> {
         let mut out = Vec::new();
         let mut i = 0;
         while i < data.len() {
-            if data[i] == b'=' && i + 2 < data.len() && data[i+1] != b'\n' {
-                if data[i+1] == b'\r' || data[i+1] == b'\n' {
+            if data[i] == b'=' && i + 2 < data.len() && data[i + 1] != b'\n' {
+                if data[i + 1] == b'\r' || data[i + 1] == b'\n' {
                     // Soft line break, skip
                     i += 2;
-                    if data[i] == b'\n' { i += 1; }
+                    if data[i] == b'\n' {
+                        i += 1;
+                    }
                     continue;
                 }
-                if let Ok(byte) = u8::from_str_radix(
-                    &String::from_utf8_lossy(&data[i+1..i+3]),
-                    16
-                ) {
+                if let Ok(byte) =
+                    u8::from_str_radix(&String::from_utf8_lossy(&data[i + 1..i + 3]), 16)
+                {
                     out.push(byte);
                     i += 3;
                     continue;
@@ -394,7 +424,12 @@ pub fn create_binascii_dict() -> HashMap<String, PyObjectRef> {
                         "quotetabs" => quotetabs = v.truthy(),
                         "istext" => istext = v.truthy(),
                         "header" => header = v.truthy(),
-                        _ => return Err(PyError::type_error(format!("b2a_qp() got an unexpected keyword argument '{}'", k.str()))),
+                        _ => {
+                            return Err(PyError::type_error(format!(
+                                "b2a_qp() got an unexpected keyword argument '{}'",
+                                k.str()
+                            )))
+                        }
                     }
                 }
             }
@@ -403,19 +438,24 @@ pub fn create_binascii_dict() -> HashMap<String, PyObjectRef> {
         let datalen = data.len();
         let mut crlf = false;
         if let Some(pos) = data.iter().position(|&b| b == b'\n') {
-            if pos > 0 && data[pos - 1] == b'\r' { crlf = true; }
+            if pos > 0 && data[pos - 1] == b'\r' {
+                crlf = true;
+            }
         }
         let needs_encode = |i: usize, linelen: usize, data: &[u8]| -> bool {
             let b = data[i];
             (b > 126)
                 || b == b'='
                 || (header && b == b'_')
-                || (b == b'.' && linelen == 0
-                    && (i + 1 == datalen || data[i + 1] == b'\n' || data[i + 1] == b'\r' || data[i + 1] == 0))
+                || (b == b'.'
+                    && linelen == 0
+                    && (i + 1 == datalen
+                        || data[i + 1] == b'\n'
+                        || data[i + 1] == b'\r'
+                        || data[i + 1] == 0))
                 || (!istext && (b == b'\r' || b == b'\n'))
                 || ((b == b'\t' || b == b' ') && i + 1 == datalen)
-                || (b < 33 && b != b'\r' && b != b'\n'
-                    && (quotetabs || (b != b'\t' && b != b' ')))
+                || (b < 33 && b != b'\r' && b != b'\n' && (quotetabs || (b != b'\t' && b != b' ')))
         };
         // Pass 1: compute output size.
         let mut odatalen = 0usize;
@@ -424,17 +464,27 @@ pub fn create_binascii_dict() -> HashMap<String, PyObjectRef> {
         while i < datalen {
             let mut delta = 0usize;
             if needs_encode(i, linelen, &data) {
-                if linelen + 3 >= MAXLINESIZE { linelen = 0; delta += if crlf { 3 } else { 2 }; }
+                if linelen + 3 >= MAXLINESIZE {
+                    linelen = 0;
+                    delta += if crlf { 3 } else { 2 };
+                }
                 linelen += 3;
                 delta += 3;
                 i += 1;
             } else {
                 let b = data[i];
-                if istext && (b == b'\n' || (i + 1 < datalen && b == b'\r' && data[i + 1] == b'\n')) {
+                if istext && (b == b'\n' || (i + 1 < datalen && b == b'\r' && data[i + 1] == b'\n'))
+                {
                     linelen = 0;
-                    if i > 0 && (data[i - 1] == b' ' || data[i - 1] == b'\t') { delta += 2; }
+                    if i > 0 && (data[i - 1] == b' ' || data[i - 1] == b'\t') {
+                        delta += 2;
+                    }
                     delta += if crlf { 2 } else { 1 };
-                    if b == b'\r' { i += 2; } else { i += 1; }
+                    if b == b'\r' {
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
                 } else {
                     if i + 1 != datalen && data[i + 1] != b'\n' && linelen + 1 >= MAXLINESIZE {
                         linelen = 0;
@@ -455,7 +505,9 @@ pub fn create_binascii_dict() -> HashMap<String, PyObjectRef> {
             if needs_encode(i, linelen, &data) {
                 if linelen + 3 >= MAXLINESIZE {
                     out.push(b'=');
-                    if crlf { out.push(b'\r'); }
+                    if crlf {
+                        out.push(b'\r');
+                    }
                     out.push(b'\n');
                     linelen = 0;
                 }
@@ -467,7 +519,8 @@ pub fn create_binascii_dict() -> HashMap<String, PyObjectRef> {
                 linelen += 3;
             } else {
                 let b = data[i];
-                if istext && (b == b'\n' || (i + 1 < datalen && b == b'\r' && data[i + 1] == b'\n')) {
+                if istext && (b == b'\n' || (i + 1 < datalen && b == b'\r' && data[i + 1] == b'\n'))
+                {
                     linelen = 0;
                     if let Some(&last) = out.last() {
                         if last == b' ' || last == b'\t' {
@@ -477,13 +530,21 @@ pub fn create_binascii_dict() -> HashMap<String, PyObjectRef> {
                             out.push(b"0123456789ABCDEF"[(last & 0x0f) as usize]);
                         }
                     }
-                    if crlf { out.push(b'\r'); }
+                    if crlf {
+                        out.push(b'\r');
+                    }
                     out.push(b'\n');
-                    if b == b'\r' { i += 2; } else { i += 1; }
+                    if b == b'\r' {
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
                 } else {
                     if i + 1 != datalen && data[i + 1] != b'\n' && linelen + 1 >= MAXLINESIZE {
                         out.push(b'=');
-                        if crlf { out.push(b'\r'); }
+                        if crlf {
+                            out.push(b'\r');
+                        }
                         out.push(b'\n');
                         linelen = 0;
                     }
@@ -498,7 +559,9 @@ pub fn create_binascii_dict() -> HashMap<String, PyObjectRef> {
         // final pass since spaces pass through the emit loop unchanged.
         if header {
             for ch in out.iter_mut() {
-                if *ch == b' ' { *ch = b'_'; }
+                if *ch == b' ' {
+                    *ch = b'_';
+                }
             }
         }
         Ok(PyObjectRef::imm(PyObject::Bytes(out)))
@@ -521,7 +584,12 @@ pub fn create_binascii_dict() -> HashMap<String, PyObjectRef> {
                 for (k, v) in d.items() {
                     match k.str().as_str() {
                         "header" => header = v.truthy(),
-                        _ => return Err(PyError::type_error(format!("a2b_qp() got an unexpected keyword argument '{}'", k.str()))),
+                        _ => {
+                            return Err(PyError::type_error(format!(
+                                "a2b_qp() got an unexpected keyword argument '{}'",
+                                k.str()
+                            )))
+                        }
                     }
                 }
             }
@@ -540,13 +608,19 @@ pub fn create_binascii_dict() -> HashMap<String, PyObjectRef> {
         while i < datalen {
             if data[i] == b'=' {
                 i += 1;
-                if i >= datalen { break; }
+                if i >= datalen {
+                    break;
+                }
                 if data[i] == b'\n' || data[i] == b'\r' {
                     // Soft line break.
                     if data[i] != b'\n' {
-                        while i < datalen && data[i] != b'\n' { i += 1; }
+                        while i < datalen && data[i] != b'\n' {
+                            i += 1;
+                        }
                     }
-                    if i < datalen { i += 1; }
+                    if i < datalen {
+                        i += 1;
+                    }
                 } else if data[i] == b'=' {
                     out.push(b'=');
                     i += 1;
@@ -572,7 +646,9 @@ pub fn create_binascii_dict() -> HashMap<String, PyObjectRef> {
     });
     bin_func!("rlecode_hqx", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("rlecode_hqx() missing required argument"));
+            return Err(PyError::type_error(
+                "rlecode_hqx() missing required argument",
+            ));
         }
         let data = match &*args[0].borrow() {
             PyObject::Bytes(b) => b.clone(),
@@ -586,7 +662,9 @@ pub fn create_binascii_dict() -> HashMap<String, PyObjectRef> {
     // --- rledecode_hqx (stub) ---
     bin_func!("rledecode_hqx", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("rledecode_hqx() missing required argument"));
+            return Err(PyError::type_error(
+                "rledecode_hqx() missing required argument",
+            ));
         }
         let data = match &*args[0].borrow() {
             PyObject::Bytes(b) => b.clone(),

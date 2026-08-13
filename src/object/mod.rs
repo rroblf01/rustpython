@@ -37,14 +37,13 @@ pub use exceptions_ctor::*;
 mod memoryview;
 pub use memoryview::*;
 
-use std::rc::Rc;
-use std::cell::RefCell;
-use std::fmt;
-use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use num_bigint::{BigInt, Sign};
-use num_traits::{Zero, One, ToPrimitive, Signed};
-use crate::interner::{self, StrId};
 use crate::bytecode::CodeObject;
+use crate::interner::{self, StrId};
 use crate::modules::*;
-
+use num_bigint::{BigInt, Sign};
+use num_traits::{One, Signed, ToPrimitive, Zero};
+use std::cell::RefCell;
+use std::collections::{HashMap, VecDeque};
+use std::fmt;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};

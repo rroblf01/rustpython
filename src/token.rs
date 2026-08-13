@@ -255,21 +255,30 @@ impl Lexer {
             match next {
                 Some('x' | 'X') => {
                     s.push(self.advance().unwrap());
-                    while self.peek().map_or(false, |c| Self::is_hex_char(c) || c == '_') {
+                    while self
+                        .peek()
+                        .map_or(false, |c| Self::is_hex_char(c) || c == '_')
+                    {
                         s.push(self.advance().unwrap());
                     }
                     return Token::Number(s);
                 }
                 Some('o' | 'O') => {
                     s.push(self.advance().unwrap());
-                    while self.peek().map_or(false, |c| Self::is_oct_char(c) || c == '_') {
+                    while self
+                        .peek()
+                        .map_or(false, |c| Self::is_oct_char(c) || c == '_')
+                    {
                         s.push(self.advance().unwrap());
                     }
                     return Token::Number(s);
                 }
                 Some('b' | 'B') => {
                     s.push(self.advance().unwrap());
-                    while self.peek().map_or(false, |c| Self::is_bin_char(c) || c == '_') {
+                    while self
+                        .peek()
+                        .map_or(false, |c| Self::is_bin_char(c) || c == '_')
+                    {
                         s.push(self.advance().unwrap());
                     }
                     return Token::Number(s);
@@ -311,8 +320,7 @@ impl Lexer {
 
     fn read_bytes(&mut self, quote: char, raw: bool) -> Token {
         let mut bytes = Vec::new();
-        let triple = self.peek() == Some(quote)
-            && self.peek_ahead(1) == Some(quote);
+        let triple = self.peek() == Some(quote) && self.peek_ahead(1) == Some(quote);
 
         if triple {
             self.advance();
@@ -350,7 +358,8 @@ impl Lexer {
                             Some('x') => {
                                 let h1 = self.advance().unwrap_or('0');
                                 let h2 = self.advance().unwrap_or('0');
-                                let val = u8::from_str_radix(&format!("{}{}", h1, h2), 16).unwrap_or(0);
+                                let val =
+                                    u8::from_str_radix(&format!("{}{}", h1, h2), 16).unwrap_or(0);
                                 bytes.push(val);
                             }
                             Some(c) if c == '\n' => {}
@@ -419,7 +428,8 @@ impl Lexer {
                             Some('x') => {
                                 let h1 = self.advance().unwrap_or('0');
                                 let h2 = self.advance().unwrap_or('0');
-                                let val = u8::from_str_radix(&format!("{}{}", h1, h2), 16).unwrap_or(0);
+                                let val =
+                                    u8::from_str_radix(&format!("{}{}", h1, h2), 16).unwrap_or(0);
                                 bytes.push(val);
                             }
                             Some(c) if c == '\n' => {}
@@ -449,8 +459,7 @@ impl Lexer {
 
     fn read_string(&mut self, quote: char, raw: bool, fstring: bool) -> Token {
         let mut s = String::new();
-        let triple = self.peek() == Some(quote)
-            && self.peek_ahead(1) == Some(quote);
+        let triple = self.peek() == Some(quote) && self.peek_ahead(1) == Some(quote);
 
         if triple {
             self.advance();
@@ -499,16 +508,19 @@ impl Lexer {
                             Some('x') => {
                                 let h1 = self.advance().unwrap_or('0');
                                 let h2 = self.advance().unwrap_or('0');
-                                let val = u8::from_str_radix(&format!("{}{}", h1, h2), 16).unwrap_or(0);
+                                let val =
+                                    u8::from_str_radix(&format!("{}{}", h1, h2), 16).unwrap_or(0);
                                 s.push(val as char);
                             }
                             Some('u') => {
-                                let digits: String = (0..4).map(|_| self.advance().unwrap_or('0')).collect();
+                                let digits: String =
+                                    (0..4).map(|_| self.advance().unwrap_or('0')).collect();
                                 let val = u32::from_str_radix(&digits, 16).unwrap_or(0xFFFD);
                                 s.push(std::char::from_u32(val).unwrap_or('\u{FFFD}'));
                             }
                             Some('U') => {
-                                let digits: String = (0..8).map(|_| self.advance().unwrap_or('0')).collect();
+                                let digits: String =
+                                    (0..8).map(|_| self.advance().unwrap_or('0')).collect();
                                 let val = u32::from_str_radix(&digits, 16).unwrap_or(0xFFFD);
                                 s.push(std::char::from_u32(val).unwrap_or('\u{FFFD}'));
                             }
@@ -605,16 +617,19 @@ impl Lexer {
                             Some('x') => {
                                 let h1 = self.advance().unwrap_or('0');
                                 let h2 = self.advance().unwrap_or('0');
-                                let val = u8::from_str_radix(&format!("{}{}", h1, h2), 16).unwrap_or(0);
+                                let val =
+                                    u8::from_str_radix(&format!("{}{}", h1, h2), 16).unwrap_or(0);
                                 s.push(val as char);
                             }
                             Some('u') => {
-                                let digits: String = (0..4).map(|_| self.advance().unwrap_or('0')).collect();
+                                let digits: String =
+                                    (0..4).map(|_| self.advance().unwrap_or('0')).collect();
                                 let val = u32::from_str_radix(&digits, 16).unwrap_or(0xFFFD);
                                 s.push(std::char::from_u32(val).unwrap_or('\u{FFFD}'));
                             }
                             Some('U') => {
-                                let digits: String = (0..8).map(|_| self.advance().unwrap_or('0')).collect();
+                                let digits: String =
+                                    (0..8).map(|_| self.advance().unwrap_or('0')).collect();
                                 let val = u32::from_str_radix(&digits, 16).unwrap_or(0xFFFD);
                                 s.push(std::char::from_u32(val).unwrap_or('\u{FFFD}'));
                             }
@@ -701,7 +716,8 @@ impl Lexer {
         // Check if we're in the middle of emitting f-string parts
         if let Some(_quote) = self.fstring_quote {
             if self.fstring_part_idx < self.fstring_parts.len() {
-                let (ref literal, ref expr_text, ref format_spec, conversion) = self.fstring_parts[self.fstring_part_idx];
+                let (ref literal, ref expr_text, ref format_spec, conversion) =
+                    self.fstring_parts[self.fstring_part_idx];
                 self.fstring_part_idx += 1;
                 // to_push holds tokens in OUTPUT order (first to last)
                 let mut to_push: Vec<Token> = Vec::new();
@@ -724,7 +740,11 @@ impl Lexer {
                 }
                 // If this is the last part, end the f-string
                 let is_last = self.fstring_part_idx >= self.fstring_parts.len()
-                    || self.fstring_parts[self.fstring_part_idx..].iter().all(|(l, e, fs, c)| l.is_empty() && e.is_empty() && fs.is_empty() && *c == 0);
+                    || self.fstring_parts[self.fstring_part_idx..]
+                        .iter()
+                        .all(|(l, e, fs, c)| {
+                            l.is_empty() && e.is_empty() && fs.is_empty() && *c == 0
+                        });
                 if is_last {
                     to_push.push(Token::FStringEnd);
                     self.fstring_quote = None;
@@ -827,7 +847,10 @@ impl Lexer {
                     // silently fell through to being tokenized as a plain
                     // (undefined) name.
                     let lower_name = name.to_ascii_lowercase();
-                    let is_string_prefix = matches!(lower_name.as_str(), "f" | "r" | "b" | "u" | "t" | "fr" | "rf" | "br" | "rb");
+                    let is_string_prefix = matches!(
+                        lower_name.as_str(),
+                        "f" | "r" | "b" | "u" | "t" | "fr" | "rf" | "br" | "rb"
+                    );
                     if is_string_prefix && (self.peek() == Some('"') || self.peek() == Some('\'')) {
                         let quote = self.advance().unwrap();
                         let raw = lower_name.contains('r');
@@ -886,86 +909,172 @@ impl Lexer {
 
                 // Operators and delimiters
                 '+' => {
-                    if self.advance_if('=') { return Token::PlusEqual }
-                    else { return Token::Plus }
+                    if self.advance_if('=') {
+                        return Token::PlusEqual;
+                    } else {
+                        return Token::Plus;
+                    }
                 }
                 '-' => {
-                    if self.advance_if('=') { return Token::MinusEqual }
-                    else if self.advance_if('>') { return Token::Arrow }
-                    else { return Token::Minus }
+                    if self.advance_if('=') {
+                        return Token::MinusEqual;
+                    } else if self.advance_if('>') {
+                        return Token::Arrow;
+                    } else {
+                        return Token::Minus;
+                    }
                 }
                 '*' => {
                     if self.advance_if('*') {
-                        if self.advance_if('=') { return Token::DoubleStarEqual }
-                        else { return Token::DoubleStar }
-                    } else if self.advance_if('=') { return Token::StarEqual }
-                    else { return Token::Star }
+                        if self.advance_if('=') {
+                            return Token::DoubleStarEqual;
+                        } else {
+                            return Token::DoubleStar;
+                        }
+                    } else if self.advance_if('=') {
+                        return Token::StarEqual;
+                    } else {
+                        return Token::Star;
+                    }
                 }
                 '/' => {
                     if self.advance_if('/') {
-                        if self.advance_if('=') { return Token::DoubleSlashEqual }
-                        else { return Token::DoubleSlash }
-                    } else if self.advance_if('=') { return Token::SlashEqual }
-                    else { return Token::Slash }
+                        if self.advance_if('=') {
+                            return Token::DoubleSlashEqual;
+                        } else {
+                            return Token::DoubleSlash;
+                        }
+                    } else if self.advance_if('=') {
+                        return Token::SlashEqual;
+                    } else {
+                        return Token::Slash;
+                    }
                 }
                 '%' => {
-                    if self.advance_if('=') { return Token::PercentEqual }
-                    else { return Token::Percent }
+                    if self.advance_if('=') {
+                        return Token::PercentEqual;
+                    } else {
+                        return Token::Percent;
+                    }
                 }
                 '@' => {
-                    if self.advance_if('=') { return Token::AtEqual }
-                    else { return Token::At }
+                    if self.advance_if('=') {
+                        return Token::AtEqual;
+                    } else {
+                        return Token::At;
+                    }
                 }
                 '&' => {
-                    if self.advance_if('=') { return Token::AmpersandEqual }
-                    else { return Token::Ampersand }
+                    if self.advance_if('=') {
+                        return Token::AmpersandEqual;
+                    } else {
+                        return Token::Ampersand;
+                    }
                 }
                 '|' => {
-                    if self.advance_if('=') { return Token::PipeEqual }
-                    else { return Token::Pipe }
+                    if self.advance_if('=') {
+                        return Token::PipeEqual;
+                    } else {
+                        return Token::Pipe;
+                    }
                 }
                 '^' => {
-                    if self.advance_if('=') { return Token::CaretEqual }
-                    else { return Token::Caret }
+                    if self.advance_if('=') {
+                        return Token::CaretEqual;
+                    } else {
+                        return Token::Caret;
+                    }
                 }
-                '~' => { return Token::Tilde; },
+                '~' => {
+                    return Token::Tilde;
+                }
                 '<' => {
                     if self.advance_if('<') {
-                        if self.advance_if('=') { return Token::LeftShiftEqual }
-                        else { return Token::LeftShift }
-                    } else if self.advance_if('=') { return Token::LessEqual }
-                    else { return Token::Less }
+                        if self.advance_if('=') {
+                            return Token::LeftShiftEqual;
+                        } else {
+                            return Token::LeftShift;
+                        }
+                    } else if self.advance_if('=') {
+                        return Token::LessEqual;
+                    } else {
+                        return Token::Less;
+                    }
                 }
                 '>' => {
                     if self.advance_if('>') {
-                        if self.advance_if('=') { return Token::RightShiftEqual }
-                        else { return Token::RightShift }
-                    } else if self.advance_if('=') { return Token::GreaterEqual }
-                    else { return Token::Greater }
+                        if self.advance_if('=') {
+                            return Token::RightShiftEqual;
+                        } else {
+                            return Token::RightShift;
+                        }
+                    } else if self.advance_if('=') {
+                        return Token::GreaterEqual;
+                    } else {
+                        return Token::Greater;
+                    }
                 }
                 '=' => {
-                    if self.advance_if('=') { return Token::EqualEqual }
-                    else { return Token::Equal }
+                    if self.advance_if('=') {
+                        return Token::EqualEqual;
+                    } else {
+                        return Token::Equal;
+                    }
                 }
                 '!' => {
-                    if self.advance_if('=') { return Token::NotEqual }
-                    else { return Token::Name("!".to_string()) }
+                    if self.advance_if('=') {
+                        return Token::NotEqual;
+                    } else {
+                        return Token::Name("!".to_string());
+                    }
                 }
-                '(' => { self.paren_level += 1; return Token::LeftParen; }
-                ')' => { if self.paren_level > 0 { self.paren_level -= 1; } return Token::RightParen; }
-                '[' => { self.paren_level += 1; return Token::LeftBracket; }
-                ']' => { if self.paren_level > 0 { self.paren_level -= 1; } return Token::RightBracket; }
-                '{' => { self.paren_level += 1; return Token::LeftBrace; }
-                '}' => { if self.paren_level > 0 { self.paren_level -= 1; } return Token::RightBrace; }
-                ',' => { return Token::Comma; },
+                '(' => {
+                    self.paren_level += 1;
+                    return Token::LeftParen;
+                }
+                ')' => {
+                    if self.paren_level > 0 {
+                        self.paren_level -= 1;
+                    }
+                    return Token::RightParen;
+                }
+                '[' => {
+                    self.paren_level += 1;
+                    return Token::LeftBracket;
+                }
+                ']' => {
+                    if self.paren_level > 0 {
+                        self.paren_level -= 1;
+                    }
+                    return Token::RightBracket;
+                }
+                '{' => {
+                    self.paren_level += 1;
+                    return Token::LeftBrace;
+                }
+                '}' => {
+                    if self.paren_level > 0 {
+                        self.paren_level -= 1;
+                    }
+                    return Token::RightBrace;
+                }
+                ',' => {
+                    return Token::Comma;
+                }
                 ':' => {
-                    if self.advance_if('=') { return Token::Walrus }
-                    else { return Token::Colon }
+                    if self.advance_if('=') {
+                        return Token::Walrus;
+                    } else {
+                        return Token::Colon;
+                    }
                 }
-                ';' => { return Token::Semicolon; },
+                ';' => {
+                    return Token::Semicolon;
+                }
                 '.' => {
                     if self.peek() == Some('.') && self.peek_ahead(1) == Some('.') {
-                        self.advance(); self.advance();
+                        self.advance();
+                        self.advance();
                         return Token::Ellipsis;
                     } else if self.peek().map_or(false, |c| c.is_ascii_digit()) {
                         // A float literal with no leading digit (`.995`,
@@ -989,8 +1098,14 @@ impl Lexer {
         let mut indent = 0;
         loop {
             match self.peek() {
-                Some(' ') => { indent += 1; self.advance(); }
-                Some('\t') => { indent += 8; self.advance(); }
+                Some(' ') => {
+                    indent += 1;
+                    self.advance();
+                }
+                Some('\t') => {
+                    indent += 8;
+                    self.advance();
+                }
                 Some('#') => {
                     while self.peek() != Some('\n') && self.peek().is_some() {
                         self.advance();
@@ -1008,10 +1123,15 @@ impl Lexer {
                     self.at_line_start = true;
                     continue;
                 }
-                Some('\r') => { self.advance(); continue; }
+                Some('\r') => {
+                    self.advance();
+                    continue;
+                }
                 Some('\\') => {
                     self.advance();
-                    if self.peek() == Some('\n') { self.advance(); }
+                    if self.peek() == Some('\n') {
+                        self.advance();
+                    }
                     indent = 0;
                     continue;
                 }
@@ -1174,7 +1294,10 @@ impl Lexer {
                                     loop {
                                         match self.peek() {
                                             None | Some('\n') => break,
-                                            Some(nc) => { expr.push(nc); self.advance(); }
+                                            Some(nc) => {
+                                                expr.push(nc);
+                                                self.advance();
+                                            }
                                         }
                                     }
                                 }
@@ -1183,10 +1306,15 @@ impl Lexer {
                                     expr.push(c);
                                 }
                                 Some('{') => {
-                                    if state == 0 { depth += 1; }
-                                    if depth > 1 || state > 0 { 
-                                        if state == 2 { format_spec.push('{'); }
-                                        else { expr.push('{'); }
+                                    if state == 0 {
+                                        depth += 1;
+                                    }
+                                    if depth > 1 || state > 0 {
+                                        if state == 2 {
+                                            format_spec.push('{');
+                                        } else {
+                                            expr.push('{');
+                                        }
                                     }
                                 }
                                 Some('}') => {
@@ -1195,27 +1323,28 @@ impl Lexer {
                                         depth -= 1;
                                     } else {
                                         depth -= 1;
-                                        if depth > 0 { 
-                                            if state == 2 { format_spec.push('}'); }
-                                            else { expr.push('}'); }
+                                        if depth > 0 {
+                                            if state == 2 {
+                                                format_spec.push('}');
+                                            } else {
+                                                expr.push('}');
+                                            }
                                         }
                                     }
                                 }
-                                Some('=') if depth == 1 && state == 0 => {
-                                    match self.peek() {
-                                        Some('=') => {
-                                            expr.push('=');
-                                            expr.push('=');
-                                            self.advance();
-                                        }
-                                        Some('}') | Some('!') | Some(':') => {
-                                            debug = true;
-                                        }
-                                        _ => {
-                                            expr.push('=');
-                                        }
+                                Some('=') if depth == 1 && state == 0 => match self.peek() {
+                                    Some('=') => {
+                                        expr.push('=');
+                                        expr.push('=');
+                                        self.advance();
                                     }
-                                }
+                                    Some('}') | Some('!') | Some(':') => {
+                                        debug = true;
+                                    }
+                                    _ => {
+                                        expr.push('=');
+                                    }
+                                },
                                 Some('!') if depth == 1 && state == 0 => {
                                     if self.peek() == Some('=') {
                                         expr.push('!');
@@ -1225,9 +1354,18 @@ impl Lexer {
                                         state = 1;
                                     }
                                 }
-                                Some('r') if state == 1 => { conversion = 1; state = 0; }
-                                Some('s') if state == 1 => { conversion = 2; state = 0; }
-                                Some('a') if state == 1 => { conversion = 3; state = 0; }
+                                Some('r') if state == 1 => {
+                                    conversion = 1;
+                                    state = 0;
+                                }
+                                Some('s') if state == 1 => {
+                                    conversion = 2;
+                                    state = 0;
+                                }
+                                Some('a') if state == 1 => {
+                                    conversion = 3;
+                                    state = 0;
+                                }
                                 Some(':') if depth == 1 && state == 0 && bracket_depth == 0 => {
                                     if self.peek() == Some('=') {
                                         expr.push(':');
@@ -1248,8 +1386,13 @@ impl Lexer {
                                     } else {
                                         expr.push(c);
                                         // Track bracket nesting for format spec : detection
-                                        if c == '(' || c == '[' { bracket_depth += 1; }
-                                        else if c == ')' || c == ']' { if bracket_depth > 0 { bracket_depth -= 1; } }
+                                        if c == '(' || c == '[' {
+                                            bracket_depth += 1;
+                                        } else if c == ')' || c == ']' {
+                                            if bracket_depth > 0 {
+                                                bracket_depth -= 1;
+                                            }
+                                        }
                                     }
                                 }
                                 None => break,
@@ -1325,4 +1468,3 @@ impl Lexer {
         (self.line, self.col)
     }
 }
-

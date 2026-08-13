@@ -16,13 +16,21 @@ pub(crate) fn mv_itemsize(format: &str) -> usize {
 }
 
 pub(crate) fn mv_total_items(shape: &[usize]) -> usize {
-    if shape.is_empty() { 1 } else { shape.iter().product() }
+    if shape.is_empty() {
+        1
+    } else {
+        shape.iter().product()
+    }
 }
 
 fn array_elem_to_bytes(typecode: char, val: f64) -> Vec<u8> {
     let isz = mv_itemsize(&typecode.to_string());
     if array_typecode_is_float(typecode) {
-        if isz == 4 { (val as f32).to_ne_bytes().to_vec() } else { val.to_ne_bytes().to_vec() }
+        if isz == 4 {
+            (val as f32).to_ne_bytes().to_vec()
+        } else {
+            val.to_ne_bytes().to_vec()
+        }
     } else {
         let n = val as i64;
         match isz {
@@ -36,8 +44,11 @@ fn array_elem_to_bytes(typecode: char, val: f64) -> Vec<u8> {
 
 fn array_bytes_to_elem(typecode: char, bytes: &[u8]) -> f64 {
     if array_typecode_is_float(typecode) {
-        if bytes.len() == 4 { f32::from_ne_bytes(bytes.try_into().unwrap()) as f64 }
-        else { f64::from_ne_bytes(bytes.try_into().unwrap()) }
+        if bytes.len() == 4 {
+            f32::from_ne_bytes(bytes.try_into().unwrap()) as f64
+        } else {
+            f64::from_ne_bytes(bytes.try_into().unwrap())
+        }
     } else {
         match bytes.len() {
             1 => bytes[0] as i64 as f64,
@@ -61,8 +72,11 @@ pub(crate) fn mv_source_bytes(source: &PyObjectRef) -> Vec<u8> {
         // bytes-like object is required, not 'array'` for every one of
         // `test_memoryview.py`'s own `BaseArrayMemoryTests`-derived cases.
         PyObject::Array(arr) => {
-            let mut out = Vec::with_capacity(arr.data.len() * mv_itemsize(&arr.typecode.to_string()));
-            for &v in &arr.data { out.extend(array_elem_to_bytes(arr.typecode, v)); }
+            let mut out =
+                Vec::with_capacity(arr.data.len() * mv_itemsize(&arr.typecode.to_string()));
+            for &v in &arr.data {
+                out.extend(array_elem_to_bytes(arr.typecode, v));
+            }
             out
         }
         _ => Vec::new(),
@@ -81,7 +95,9 @@ pub(crate) fn mv_write_bytes(source: &PyObjectRef, offset: usize, data: &[u8]) -
         PyObject::Array(arr) => {
             let isz = mv_itemsize(&arr.typecode.to_string());
             if data.len() % isz != 0 || offset % isz != 0 {
-                return Err(PyError::value_error("memoryview assignment: lvalue and rvalue have different structures"));
+                return Err(PyError::value_error(
+                    "memoryview assignment: lvalue and rvalue have different structures",
+                ));
             }
             let start_elem = offset / isz;
             let n_elems = data.len() / isz;
@@ -89,7 +105,8 @@ pub(crate) fn mv_write_bytes(source: &PyObjectRef, offset: usize, data: &[u8]) -
                 return Err(PyError::index_error("memoryview assignment out of range"));
             }
             for i in 0..n_elems {
-                arr.data[start_elem + i] = array_bytes_to_elem(arr.typecode, &data[i * isz..(i + 1) * isz]);
+                arr.data[start_elem + i] =
+                    array_bytes_to_elem(arr.typecode, &data[i * isz..(i + 1) * isz]);
             }
             Ok(())
         }
@@ -97,9 +114,26 @@ pub(crate) fn mv_write_bytes(source: &PyObjectRef, offset: usize, data: &[u8]) -
     }
 }
 
-pub(crate) fn mv_fields(v: &PyObjectRef) -> PyResult<(PyObjectRef, String, Vec<usize>, usize, usize, bool)> {
-    if let PyObject::MemoryView { source, format, shape, itemsize, offset, readonly } = &*v.borrow() {
-        Ok((source.clone(), format.clone(), shape.clone(), *itemsize, *offset, *readonly))
+pub(crate) fn mv_fields(
+    v: &PyObjectRef,
+) -> PyResult<(PyObjectRef, String, Vec<usize>, usize, usize, bool)> {
+    if let PyObject::MemoryView {
+        source,
+        format,
+        shape,
+        itemsize,
+        offset,
+        readonly,
+    } = &*v.borrow()
+    {
+        Ok((
+            source.clone(),
+            format.clone(),
+            shape.clone(),
+            *itemsize,
+            *offset,
+            *readonly,
+        ))
     } else {
         Err(PyError::type_error("not a memoryview"))
     }
@@ -128,10 +162,16 @@ fn mv_encode_elem(format: &str, val: &PyObjectRef) -> PyResult<Vec<u8>> {
     Ok(match format {
         "c" => match &*val.borrow() {
             PyObject::Bytes(b) if b.len() == 1 => vec![b[0]],
-            _ => return Err(PyError::type_error("memoryview: invalid value for format 'c'")),
+            _ => {
+                return Err(PyError::type_error(
+                    "memoryview: invalid value for format 'c'",
+                ))
+            }
         },
         "?" => vec![if val.truthy() { 1 } else { 0 }],
-        "f" => (val.as_f64().ok_or_else(bad)? as f32).to_ne_bytes().to_vec(),
+        "f" => (val.as_f64().ok_or_else(bad)? as f32)
+            .to_ne_bytes()
+            .to_vec(),
         "d" => val.as_f64().ok_or_else(bad)?.to_ne_bytes().to_vec(),
         _ => {
             let n = val.as_i64().ok_or_else(bad)?;
@@ -153,22 +193,49 @@ fn nest_list(items: &[PyObjectRef], shape: &[usize]) -> PyObjectRef {
     let inner_size = mv_total_items(inner_shape);
     let mut rows = Vec::with_capacity(shape[0]);
     for i in 0..shape[0] {
-        rows.push(nest_list(&items[i * inner_size..(i + 1) * inner_size], inner_shape));
+        rows.push(nest_list(
+            &items[i * inner_size..(i + 1) * inner_size],
+            inner_shape,
+        ));
     }
     py_list(rows)
 }
 
 pub fn builtin_memoryview(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() != 1 {
-        return Err(PyError::type_error("memoryview() takes exactly one argument"));
+        return Err(PyError::type_error(
+            "memoryview() takes exactly one argument",
+        ));
     }
-    let existing = if let PyObject::MemoryView { source, format, shape, itemsize, offset, readonly } = &*args[0].borrow() {
-        Some((source.clone(), format.clone(), shape.clone(), *itemsize, *offset, *readonly))
+    let existing = if let PyObject::MemoryView {
+        source,
+        format,
+        shape,
+        itemsize,
+        offset,
+        readonly,
+    } = &*args[0].borrow()
+    {
+        Some((
+            source.clone(),
+            format.clone(),
+            shape.clone(),
+            *itemsize,
+            *offset,
+            *readonly,
+        ))
     } else {
         None
     };
     if let Some((source, format, shape, itemsize, offset, readonly)) = existing {
-        return Ok(PyObjectRef::new(PyObject::MemoryView { source, format, shape, itemsize, offset, readonly }));
+        return Ok(PyObjectRef::new(PyObject::MemoryView {
+            source,
+            format,
+            shape,
+            itemsize,
+            offset,
+            readonly,
+        }));
     }
     let (readonly, format, len) = match &*args[0].borrow() {
         PyObject::Bytes(b) => (true, "B".to_string(), b.len()),
@@ -177,7 +244,12 @@ pub fn builtin_memoryview(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         // (matching real Python: `memoryview(array.array('i', ...)).format
         // == 'i'`), not the generic byte view `bytes`/`bytearray` get.
         PyObject::Array(arr) => (false, arr.typecode.to_string(), arr.data.len()),
-        other => return Err(PyError::type_error(format!("memoryview: a bytes-like object is required, not '{}'", other.type_name()))),
+        other => {
+            return Err(PyError::type_error(format!(
+                "memoryview: a bytes-like object is required, not '{}'",
+                other.type_name()
+            )))
+        }
     };
     let itemsize = mv_itemsize(&format);
     Ok(PyObjectRef::new(PyObject::MemoryView {
@@ -226,7 +298,9 @@ fn mv_tolist_impl(v: &PyObjectRef) -> PyResult<PyObjectRef> {
 }
 
 fn mv_cast_impl(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.len() < 2 { return Err(PyError::type_error("cast() takes at least 1 argument")); }
+    if args.len() < 2 {
+        return Err(PyError::type_error("cast() takes at least 1 argument"));
+    }
     let (source, _cur_format, cur_shape, cur_itemsize, offset, readonly) = mv_fields(&args[0])?;
     let new_format = match &*args[1].borrow() {
         PyObject::Str(s) => s.to_string(),
@@ -239,37 +313,60 @@ fn mv_cast_impl(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
     let new_shape: Vec<usize> = if args.len() > 2 && !matches!(&*args[2].borrow(), PyObject::None) {
         match &*args[2].borrow() {
-            PyObject::Tuple(items) | PyObject::List(items) => {
-                items.iter().map(|v| v.as_i64().unwrap_or(0) as usize).collect()
-            }
+            PyObject::Tuple(items) | PyObject::List(items) => items
+                .iter()
+                .map(|v| v.as_i64().unwrap_or(0) as usize)
+                .collect(),
             _ => return Err(PyError::type_error("shape must be a list or tuple")),
         }
     } else {
         if total_bytes % new_itemsize != 0 {
-            return Err(PyError::type_error("memoryview: length is not a multiple of itemsize"));
+            return Err(PyError::type_error(
+                "memoryview: length is not a multiple of itemsize",
+            ));
         }
         vec![total_bytes / new_itemsize]
     };
     let expected_bytes = new_itemsize * mv_total_items(&new_shape);
     if expected_bytes != total_bytes {
-        return Err(PyError::type_error("memoryview: length is not a multiple of itemsize"));
+        return Err(PyError::type_error(
+            "memoryview: length is not a multiple of itemsize",
+        ));
     }
     Ok(PyObjectRef::new(PyObject::MemoryView {
-        source, format: new_format, shape: new_shape, itemsize: new_itemsize, offset, readonly,
+        source,
+        format: new_format,
+        shape: new_shape,
+        itemsize: new_itemsize,
+        offset,
+        readonly,
     }))
 }
 
 pub(crate) fn mv_getattr(name: &str) -> Option<PyObjectRef> {
     macro_rules! method {
-        ($f:expr) => { Some(PyObjectRef::imm(PyObject::BuiltinMethod { name: name.to_string(), func: $f, self_obj: PyObjectRef::new(PyObject::None) })) };
+        ($f:expr) => {
+            Some(PyObjectRef::imm(PyObject::BuiltinMethod {
+                name: name.to_string(),
+                func: $f,
+                self_obj: PyObjectRef::new(PyObject::None),
+            }))
+        };
     }
     match name {
         "cast" => method!(|args| mv_cast_impl(args)),
-        "tobytes" | "tostring" => method!(|args| Ok(PyObjectRef::imm(PyObject::Bytes(mv_tobytes(&args[0])?)))),
+        "tobytes" | "tostring" => {
+            method!(|args| Ok(PyObjectRef::imm(PyObject::Bytes(mv_tobytes(&args[0])?))))
+        }
         "tolist" => method!(|args| mv_tolist_impl(&args[0])),
         "hex" => method!(|args| {
             let bytes = mv_tobytes(&args[0])?;
-            Ok(py_str(&bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>()))
+            Ok(py_str(
+                &bytes
+                    .iter()
+                    .map(|b| format!("{:02x}", b))
+                    .collect::<String>(),
+            ))
         }),
         "release" => method!(|_args| Ok(py_none())),
         "__enter__" => method!(|args| Ok(args[0].clone())),
@@ -287,7 +384,9 @@ pub(crate) fn mv_getprop(v: &PyObjectRef, name: &str) -> Option<PyResult<PyObjec
     match name {
         "format" => Some(Ok(py_str(&format))),
         "itemsize" => Some(Ok(py_int(itemsize as i64))),
-        "shape" => Some(Ok(py_tuple(shape.iter().map(|&n| py_int(n as i64)).collect()))),
+        "shape" => Some(Ok(py_tuple(
+            shape.iter().map(|&n| py_int(n as i64)).collect(),
+        ))),
         "ndim" => Some(Ok(py_int(shape.len() as i64))),
         "nbytes" => Some(Ok(py_int((itemsize * mv_total_items(&shape)) as i64))),
         "readonly" => Some(Ok(py_bool(readonly))),
@@ -305,7 +404,10 @@ pub(crate) fn mv_getprop(v: &PyObjectRef, name: &str) -> Option<PyResult<PyObjec
             strides.reverse();
             Some(Ok(py_tuple(strides.into_iter().map(py_int).collect())))
         }
-        _ => { let _ = offset; None }
+        _ => {
+            let _ = offset;
+            None
+        }
     }
 }
 
@@ -316,7 +418,9 @@ pub(crate) fn mv_getitem(v: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObj
         let len = shape.first().copied().unwrap_or(0);
         let (start_val, stop_val, step_val) = extract_slice_fields(start, stop, step)?;
         if step_val != 1 {
-            return Err(PyError::type_error("memoryview slicing with step != 1 is not supported"));
+            return Err(PyError::type_error(
+                "memoryview slicing with step != 1 is not supported",
+            ));
         }
         let (start_n, stop_n) = normalize_slice_bounds(start_val, stop_val, step_val, len);
         let count = (stop_n - start_n).max(0) as usize;
@@ -324,11 +428,17 @@ pub(crate) fn mv_getitem(v: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObj
         new_shape[0] = count;
         let row_size: usize = itemsize * mv_total_items(&shape[1..]);
         return Ok(PyObjectRef::new(PyObject::MemoryView {
-            source: source.clone(), format, shape: new_shape, itemsize,
-            offset: offset + (start_n as usize) * row_size, readonly: _readonly,
+            source: source.clone(),
+            format,
+            shape: new_shape,
+            itemsize,
+            offset: offset + (start_n as usize) * row_size,
+            readonly: _readonly,
         }));
     }
-    let i = index.as_i64().ok_or_else(|| PyError::type_error("memoryview: invalid slice key"))?;
+    let i = index
+        .as_i64()
+        .ok_or_else(|| PyError::type_error("memoryview: invalid slice key"))?;
     let len = shape.first().copied().unwrap_or(0) as i64;
     let i = if i < 0 { len + i } else { i };
     if i < 0 || i >= len {
@@ -343,8 +453,12 @@ pub(crate) fn mv_getitem(v: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObj
     } else {
         let row_size = mv_total_items(&shape[1..]);
         Ok(PyObjectRef::new(PyObject::MemoryView {
-            source: source.clone(), format, shape: shape[1..].to_vec(), itemsize,
-            offset: offset + (i as usize) * row_size * itemsize, readonly: _readonly,
+            source: source.clone(),
+            format,
+            shape: shape[1..].to_vec(),
+            itemsize,
+            offset: offset + (i as usize) * row_size * itemsize,
+            readonly: _readonly,
         }))
     }
 }
@@ -355,9 +469,13 @@ pub(crate) fn mv_setitem(v: &PyObjectRef, index: &PyObjectRef, value: PyObjectRe
         return Err(PyError::type_error("cannot modify read-only memory"));
     }
     if shape.len() > 1 {
-        return Err(PyError::type_error("memoryview assignment to multi-dimensional views is not supported"));
+        return Err(PyError::type_error(
+            "memoryview assignment to multi-dimensional views is not supported",
+        ));
     }
-    let i = index.as_i64().ok_or_else(|| PyError::type_error("memoryview: invalid slice key"))?;
+    let i = index
+        .as_i64()
+        .ok_or_else(|| PyError::type_error("memoryview: invalid slice key"))?;
     let len = shape.first().copied().unwrap_or(0) as i64;
     let i = if i < 0 { len + i } else { i };
     if i < 0 || i >= len {
@@ -368,7 +486,10 @@ pub(crate) fn mv_setitem(v: &PyObjectRef, index: &PyObjectRef, value: PyObjectRe
 }
 
 pub(crate) fn mv_equals(a: &PyObjectRef, b: &PyObjectRef) -> bool {
-    let a_bytes = match mv_tobytes(a) { Ok(b) => b, Err(_) => return false };
+    let a_bytes = match mv_tobytes(a) {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
     match &*b.borrow() {
         PyObject::Bytes(bb) => a_bytes == *bb,
         PyObject::ByteArray(bb) => a_bytes == *bb,

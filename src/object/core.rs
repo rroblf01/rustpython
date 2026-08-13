@@ -4,16 +4,16 @@
 // infrastructure, PyObjectRef (the tagged-pointer-style enum) and its impl,
 // and SmallStr/RefOrOwned helpers.
 use super::*;
-use std::rc::Rc;
-use std::cell::RefCell;
-use std::fmt;
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use num_bigint::{BigInt, Sign};
-use num_traits::{Zero, One, ToPrimitive, Signed};
-use crate::interner::{self, StrId};
 use crate::bytecode::CodeObject;
+use crate::interner::{self, StrId};
 use crate::modules::*;
+use num_bigint::{BigInt, Sign};
+use num_traits::{One, Signed, ToPrimitive, Zero};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::fmt;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// A minimal FxHash-style hasher (the same public-domain algorithm used by
 /// `rustc-hash`/Firefox's own internals: rotate-xor-multiply per word, no
@@ -52,14 +52,24 @@ impl std::hash::Hasher for FxHasher {
         }
         self.hash = hash;
     }
-    fn write_u8(&mut self, i: u8) { self.write_u64(i as u64); }
-    fn write_u16(&mut self, i: u16) { self.write_u64(i as u64); }
-    fn write_u32(&mut self, i: u32) { self.write_u64(i as u64); }
+    fn write_u8(&mut self, i: u8) {
+        self.write_u64(i as u64);
+    }
+    fn write_u16(&mut self, i: u16) {
+        self.write_u64(i as u64);
+    }
+    fn write_u32(&mut self, i: u32) {
+        self.write_u64(i as u64);
+    }
     fn write_u64(&mut self, i: u64) {
         self.hash = (self.hash.rotate_left(5) ^ i).wrapping_mul(FX_SEED);
     }
-    fn write_usize(&mut self, i: usize) { self.write_u64(i as u64); }
-    fn finish(&self) -> u64 { self.hash }
+    fn write_usize(&mut self, i: usize) {
+        self.write_u64(i as u64);
+    }
+    fn finish(&self) -> u64 {
+        self.hash
+    }
 }
 
 /// `BuildHasher` for `FxHasher` — pass this as a `HashMap`'s 3rd type
@@ -81,9 +91,15 @@ pub trait DictMap {
     fn contains_key_str(&self, name: &str) -> bool;
 }
 impl DictMap for HashMap<String, PyObjectRef> {
-    fn get_str(&self, name: &str) -> Option<&PyObjectRef> { self.get(name) }
-    fn insert_str(&mut self, name: &str, val: PyObjectRef) -> Option<PyObjectRef> { self.insert(name.to_string(), val) }
-    fn contains_key_str(&self, name: &str) -> bool { self.contains_key(name) }
+    fn get_str(&self, name: &str) -> Option<&PyObjectRef> {
+        self.get(name)
+    }
+    fn insert_str(&mut self, name: &str, val: PyObjectRef) -> Option<PyObjectRef> {
+        self.insert(name.to_string(), val)
+    }
+    fn contains_key_str(&self, name: &str) -> bool {
+        self.contains_key(name)
+    }
 }
 /// `Module`/`Type` dicts' storage — real hashing (unlike `AttrMap`'s linear
 /// scan) still pays for itself here since a module/class can hold many
@@ -95,9 +111,15 @@ impl DictMap for HashMap<String, PyObjectRef> {
 /// `"__repr__"` across every class/module that defines them, and hashing
 /// a `u32` is far cheaper than hashing a variable-length string.
 impl<S: std::hash::BuildHasher> DictMap for HashMap<StrId, PyObjectRef, S> {
-    fn get_str(&self, name: &str) -> Option<&PyObjectRef> { self.get(&interner::intern(name)) }
-    fn insert_str(&mut self, name: &str, val: PyObjectRef) -> Option<PyObjectRef> { self.insert(interner::intern(name), val) }
-    fn contains_key_str(&self, name: &str) -> bool { self.contains_key(&interner::intern(name)) }
+    fn get_str(&self, name: &str) -> Option<&PyObjectRef> {
+        self.get(&interner::intern(name))
+    }
+    fn insert_str(&mut self, name: &str, val: PyObjectRef) -> Option<PyObjectRef> {
+        self.insert(interner::intern(name), val)
+    }
+    fn contains_key_str(&self, name: &str) -> bool {
+        self.contains_key(&interner::intern(name))
+    }
 }
 
 /// Convert a `HashMap<String, V>` to `HashMap<StrId, V>` (default hasher)
@@ -107,7 +129,9 @@ impl<S: std::hash::BuildHasher> DictMap for HashMap<StrId, PyObjectRef, S> {
 /// `Module`/`Type` dict construction. See `str_map_to_typedict` for the
 /// `TypeDict` (fast-hasher)-targeting variant used specifically there.
 pub(crate) fn str_map_to_strid_map<V>(map: HashMap<String, V>) -> HashMap<StrId, V> {
-    map.into_iter().map(|(k, v)| (interner::intern(&k), v)).collect()
+    map.into_iter()
+        .map(|(k, v)| (interner::intern(&k), v))
+        .collect()
 }
 
 /// Same as `str_map_to_strid_map`, but targets `TypeDict`'s shape
@@ -117,7 +141,9 @@ pub(crate) fn str_map_to_strid_map<V>(map: HashMap<String, V>) -> HashMap<StrId,
 /// the ~1800 call sites across `src/modules/*.rs` that build these) is
 /// stored into a real `PyObject::Module`/`PyObject::Type`'s `dict` field.
 pub(crate) fn str_map_to_typedict<V>(map: HashMap<String, V>) -> HashMap<StrId, V, FxBuildHasher> {
-    map.into_iter().map(|(k, v)| (interner::intern(&k), v)).collect()
+    map.into_iter()
+        .map(|(k, v)| (interner::intern(&k), v))
+        .collect()
 }
 
 /// Dense, linear-scan small map used for `PyObject::Instance.dict`.
@@ -140,7 +166,9 @@ pub struct AttrMap {
 
 impl AttrMap {
     pub fn new() -> Self {
-        AttrMap { entries: Vec::new() }
+        AttrMap {
+            entries: Vec::new(),
+        }
     }
 
     fn position(&self, key: StrId) -> Option<usize> {
@@ -194,11 +222,15 @@ impl AttrMap {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&str, &PyObjectRef)> {
-        self.entries.iter().map(|(k, v)| (interner::lookup_str(*k), v))
+        self.entries
+            .iter()
+            .map(|(k, v)| (interner::lookup_str(*k), v))
     }
 
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (&str, &mut PyObjectRef)> {
-        self.entries.iter_mut().map(|(k, v)| (interner::lookup_str(*k), v))
+        self.entries
+            .iter_mut()
+            .map(|(k, v)| (interner::lookup_str(*k), v))
     }
 
     pub fn len(&self) -> usize {
@@ -284,9 +316,15 @@ impl<'a> AttrEntry<'a> {
 }
 
 impl DictMap for AttrMap {
-    fn get_str(&self, name: &str) -> Option<&PyObjectRef> { self.get(name) }
-    fn insert_str(&mut self, name: &str, val: PyObjectRef) -> Option<PyObjectRef> { self.insert(name.to_string(), val) }
-    fn contains_key_str(&self, name: &str) -> bool { self.contains_key(name) }
+    fn get_str(&self, name: &str) -> Option<&PyObjectRef> {
+        self.get(name)
+    }
+    fn insert_str(&mut self, name: &str, val: PyObjectRef) -> Option<PyObjectRef> {
+        self.insert(name.to_string(), val)
+    }
+    fn contains_key_str(&self, name: &str) -> bool {
+        self.contains_key(name)
+    }
 }
 
 pub type BuiltinFunc = fn(&[PyObjectRef]) -> PyResult<PyObjectRef>;
@@ -329,15 +367,16 @@ impl SmallStr {
         }
         let mut data = [0u8; 15];
         data[..bytes.len()].copy_from_slice(bytes);
-        Some(SmallStr { data, len: bytes.len() as u8 })
+        Some(SmallStr {
+            data,
+            len: bytes.len() as u8,
+        })
     }
 
     pub fn as_str(&self) -> &str {
         // We only store valid UTF-8 (checked in `new()` via `s.as_bytes()`)
-        std::str::from_utf8(&self.data[..self.len as usize])
-            .expect("SmallStr: invalid UTF-8 data")
+        std::str::from_utf8(&self.data[..self.len as usize]).expect("SmallStr: invalid UTF-8 data")
     }
-
 }
 
 // ---- id() infrastructure ----
@@ -409,10 +448,18 @@ mod object_id {
     const TAG_INT: usize = 0x12 << 56;
     const TAG_FLOAT: usize = 0x13 << 56;
 
-    pub(super) fn none_id() -> usize { TAG_NONE }
-    pub(super) fn bool_id(b: bool) -> usize { TAG_BOOL | (b as usize) }
-    pub(super) fn int_id(n: i64) -> usize { TAG_INT | ((n as u64 as usize) & 0x00ff_ffff_ffff_ffff) }
-    pub(super) fn float_id(bits: u64) -> usize { TAG_FLOAT | ((bits as usize) & 0x00ff_ffff_ffff_ffff) }
+    pub(super) fn none_id() -> usize {
+        TAG_NONE
+    }
+    pub(super) fn bool_id(b: bool) -> usize {
+        TAG_BOOL | (b as usize)
+    }
+    pub(super) fn int_id(n: i64) -> usize {
+        TAG_INT | ((n as u64 as usize) & 0x00ff_ffff_ffff_ffff)
+    }
+    pub(super) fn float_id(bits: u64) -> usize {
+        TAG_FLOAT | ((bits as usize) & 0x00ff_ffff_ffff_ffff)
+    }
 
     thread_local! {
         static NEXT_HEAP_ID: Cell<usize> = const { Cell::new(1) };
@@ -444,11 +491,11 @@ mod object_id {
 pub enum PyObjectRef {
     SmallInt(i64),
     SmallBool(bool),
-    SmallFloat(f64),     // Inline f64 — avoids Rc + heap alloc
-    SmallStr(SmallStr),  // Inline short string (<16 bytes)
+    SmallFloat(f64),    // Inline f64 — avoids Rc + heap alloc
+    SmallStr(SmallStr), // Inline short string (<16 bytes)
     None,
-    Mut(Rc<RefCell<PyObject>>),  // Mutable: List, Dict, Set, Instance
-    Imm(Rc<RefCell<PyObject>>),  // Immutable: Int, Str, Float, Tuple, Bytes, Code, Function
+    Mut(Rc<RefCell<PyObject>>), // Mutable: List, Dict, Set, Instance
+    Imm(Rc<RefCell<PyObject>>), // Immutable: Int, Str, Float, Tuple, Bytes, Code, Function
 }
 
 // Identity stack of `PyObject` pointers currently being repr'd, used by
@@ -507,7 +554,9 @@ impl PyObjectRef {
             PyObjectRef::SmallInt(n) => RefOrOwned::Owned(PyObject::Int(BigInt::from(*n))),
             PyObjectRef::SmallBool(b) => RefOrOwned::Owned(PyObject::Bool(*b)),
             PyObjectRef::SmallFloat(f) => RefOrOwned::Owned(PyObject::Float(*f)),
-            PyObjectRef::SmallStr(s) => RefOrOwned::Owned(PyObject::Str(compact_str::CompactString::from(s.as_str()))),
+            PyObjectRef::SmallStr(s) => {
+                RefOrOwned::Owned(PyObject::Str(compact_str::CompactString::from(s.as_str())))
+            }
             PyObjectRef::None => RefOrOwned::Owned(PyObject::None),
             PyObjectRef::Mut(rc) => RefOrOwned::Ref(rc.borrow()),
             PyObjectRef::Imm(rc) => {
@@ -529,7 +578,8 @@ impl PyObjectRef {
                     Ok(guard) => guard,
                     Err(_) => {
                         use std::io::Write;
-                        let _ = std::io::stderr().write_all(b"RefCell CONFLICT - borrow_mut while borrowed\n");
+                        let _ = std::io::stderr()
+                            .write_all(b"RefCell CONFLICT - borrow_mut while borrowed\n");
                         let _ = std::io::stderr().flush();
                         panic!("RefCell already borrowed");
                     }
@@ -583,7 +633,9 @@ impl PyObjectRef {
     pub fn is_float_typed(&self) -> bool {
         match self {
             PyObjectRef::SmallFloat(_) => true,
-            PyObjectRef::Imm(_) | PyObjectRef::Mut(_) => matches!(&*self.borrow(), PyObject::Float(_)),
+            PyObjectRef::Imm(_) | PyObjectRef::Mut(_) => {
+                matches!(&*self.borrow(), PyObject::Float(_))
+            }
             _ => false,
         }
     }
@@ -619,7 +671,11 @@ impl PyObjectRef {
         thread_local! {
             static REPR_DEPTH: std::cell::Cell<usize> = std::cell::Cell::new(0);
         }
-        let depth = REPR_DEPTH.with(|c| { let d = c.get() + 1; c.set(d); d });
+        let depth = REPR_DEPTH.with(|c| {
+            let d = c.get() + 1;
+            c.set(d);
+            d
+        });
         if depth > 200 {
             REPR_DEPTH.with(|c| c.set(c.get() - 1));
             return "...".to_string();
@@ -664,15 +720,24 @@ impl PyObjectRef {
                 // pure depth-based guard (the generic `REPR_DEPTH` above)
                 // cannot produce.
                 let ptr: Option<*const ()> = match self {
-                    PyObjectRef::Mut(rc) | PyObjectRef::Imm(rc) => Some(Rc::as_ptr(rc) as *const ()),
+                    PyObjectRef::Mut(rc) | PyObjectRef::Imm(rc) => {
+                        Some(Rc::as_ptr(rc) as *const ())
+                    }
                     _ => None,
                 };
                 let reentered = if let Some(ptr) = ptr {
                     REPR_VISITED.with(|v| {
                         let mut v = v.borrow_mut();
-                        if v.contains(&ptr) { true } else { v.push(ptr); false }
+                        if v.contains(&ptr) {
+                            true
+                        } else {
+                            v.push(ptr);
+                            false
+                        }
                     })
-                } else { false };
+                } else {
+                    false
+                };
                 if reentered {
                     return "[...]".to_string();
                 }
@@ -685,7 +750,9 @@ impl PyObjectRef {
                     None => format!("deque([{}])", parts.join(", ")),
                 };
                 if let Some(ptr) = ptr {
-                    REPR_VISITED.with(|v| { v.borrow_mut().retain(|&p| p != ptr); });
+                    REPR_VISITED.with(|v| {
+                        v.borrow_mut().retain(|&p| p != ptr);
+                    });
                 }
                 s
             }
@@ -708,7 +775,10 @@ impl PyObjectRef {
             PyObject::Dict(d) => {
                 let items = d.items();
                 drop(obj);
-                let parts: Vec<String> = items.iter().map(|(k, v)| format!("{}: {}", k.repr(), v.repr())).collect();
+                let parts: Vec<String> = items
+                    .iter()
+                    .map(|(k, v)| format!("{}: {}", k.repr(), v.repr()))
+                    .collect();
                 format!("{{{}}}", parts.join(", "))
             }
             PyObject::Set(s) => {
@@ -738,7 +808,8 @@ impl PyObjectRef {
         let str_func = {
             let obj = self.borrow();
             match &*obj {
-                PyObject::Instance { typ, .. } => lookup_dunder_via_mro(typ, "__str__").or_else(|| lookup_dunder_via_mro(typ, "__repr__")),
+                PyObject::Instance { typ, .. } => lookup_dunder_via_mro(typ, "__str__")
+                    .or_else(|| lookup_dunder_via_mro(typ, "__repr__")),
                 _ => None,
             }
         };
@@ -848,8 +919,9 @@ impl PyObjectRef {
                             )));
                         }
                         let result = call_bound_method(f, self.clone(), vec![])?;
-                        let n = result.as_i64()
-                            .ok_or_else(|| PyError::type_error("__len__() should return >= 0 integer"))?;
+                        let n = result.as_i64().ok_or_else(|| {
+                            PyError::type_error("__len__() should return >= 0 integer")
+                        })?;
                         return Ok(n != 0);
                     }
                     if let Some(native) = native_backing_of(self) {
@@ -905,13 +977,16 @@ impl PyObjectRef {
                     _ => None,
                 };
                 if let Some(typ) = typ {
-                if let Some(f) = lookup_dunder_via_mro(&typ, "__hash__") {
-                    // `__hash__ = None` makes an instance unhashable
-                    // (CPython: TypeError: unhashable type: 'H').
-                    if matches!(&*f.borrow(), PyObject::None) {
-                        return Err(PyError::type_error(format!("unhashable type: '{}'", typ.borrow().type_name())));
-                    }
-                    let result = call_bound_method(f, self.clone(), vec![])?;
+                    if let Some(f) = lookup_dunder_via_mro(&typ, "__hash__") {
+                        // `__hash__ = None` makes an instance unhashable
+                        // (CPython: TypeError: unhashable type: 'H').
+                        if matches!(&*f.borrow(), PyObject::None) {
+                            return Err(PyError::type_error(format!(
+                                "unhashable type: '{}'",
+                                typ.borrow().type_name()
+                            )));
+                        }
+                        let result = call_bound_method(f, self.clone(), vec![])?;
                         let n = result.borrow();
                         // Real Python's `__hash__` protocol: whatever `int`
                         // is returned BECOMES the hash value directly (bit
@@ -931,7 +1006,9 @@ impl PyObjectRef {
                         // `hash(Fraction(n)) == hash(n)` for an integral
                         // Fraction backed by a custom `__hash__`).
                         return if let PyObject::Int(i) = &*n {
-                            let h = i.to_i64().ok_or_else(|| PyError::type_error("__hash__ result too large to fit in a C long"))?;
+                            let h = i.to_i64().ok_or_else(|| {
+                                PyError::type_error("__hash__ result too large to fit in a C long")
+                            })?;
                             Ok(h as usize)
                         } else {
                             Err(PyError::type_error("__hash__ should return an integer"))
@@ -960,10 +1037,16 @@ impl PyObjectRef {
         thread_local! {
             static EQUALS_DEPTH: std::cell::Cell<usize> = std::cell::Cell::new(0);
         }
-        let depth = EQUALS_DEPTH.with(|c| { let d = c.get() + 1; c.set(d); d });
+        let depth = EQUALS_DEPTH.with(|c| {
+            let d = c.get() + 1;
+            c.set(d);
+            d
+        });
         if depth > 500 {
             EQUALS_DEPTH.with(|c| c.set(c.get() - 1));
-            return Err(PyError::recursion_error("maximum recursion depth exceeded in comparison"));
+            return Err(PyError::recursion_error(
+                "maximum recursion depth exceeded in comparison",
+            ));
         }
         let result = self.equals_inner(other);
         EQUALS_DEPTH.with(|c| c.set(c.get() - 1));
@@ -1043,7 +1126,11 @@ impl PyObjectRef {
         // instance (surfaced by enum member comparisons: `Color.RED ==
         // Color.RED` came out False). Doing the mro lookup and call here,
         // with the real `self`, fixes that at the root.
-        let typ = if let PyObject::Instance { typ, .. } = &*self.borrow() { Some(typ.clone()) } else { None };
+        let typ = if let PyObject::Instance { typ, .. } = &*self.borrow() {
+            Some(typ.clone())
+        } else {
+            None
+        };
         if let Some(typ) = typ {
             if let Some(f) = lookup_dunder_via_mro(&typ, "__eq__") {
                 let result = call_bound_method(f, self.clone(), vec![other.clone()])?;
@@ -1105,7 +1192,9 @@ impl PyObjectRef {
                 _ => None,
             };
             if let Some(other_items) = other_items {
-                if my_items.len() != other_items.len() { return Ok(false); }
+                if my_items.len() != other_items.len() {
+                    return Ok(false);
+                }
                 // Real container `==` shortcuts each element via identity
                 // BEFORE falling back to `__eq__` (`x is y or x == y`) —
                 // needed for non-reflexive elements (`float('nan')`, or any
@@ -1118,7 +1207,9 @@ impl PyObjectRef {
                 // for the SAME `values` tuple, containing both `nan` and a
                 // never-equal sentinel, must be `True`).
                 for (x, y) in my_items.iter().zip(other_items.iter()) {
-                    if !(x.is(y) || x.equals(y)?) { return Ok(false); }
+                    if !(x.is(y) || x.equals(y)?) {
+                        return Ok(false);
+                    }
                 }
                 return Ok(true);
             }
@@ -1134,17 +1225,28 @@ impl PyObjectRef {
                 _ => None,
             };
             if let Some(other_items) = other_dict {
-                if my_items.len() != other_items.len() { return Ok(false); }
+                if my_items.len() != other_items.len() {
+                    return Ok(false);
+                }
                 // Same identity-shortcut fix as the List/Tuple case just
                 // above, for both keys and values.
                 for (k, va) in my_items {
                     let mut found = None;
                     for (ok, ov) in &other_items {
-                        if ok.is(&k) || ok.equals(&k)? { found = Some(ov); break; }
+                        if ok.is(&k) || ok.equals(&k)? {
+                            found = Some(ov);
+                            break;
+                        }
                     }
                     match found {
-                        Some(vb) => { if !(va.is(vb) || va.equals(vb)?) { return Ok(false); } }
-                        None => { return Ok(false); }
+                        Some(vb) => {
+                            if !(va.is(vb) || va.equals(vb)?) {
+                                return Ok(false);
+                            }
+                        }
+                        None => {
+                            return Ok(false);
+                        }
                     }
                 }
                 return Ok(true);
@@ -1152,7 +1254,9 @@ impl PyObjectRef {
         }
         self.borrow().equals(other)
     }
-    pub fn get_type_name(&self) -> String { self.borrow().type_name() }
+    pub fn get_type_name(&self) -> String {
+        self.borrow().type_name()
+    }
 
     pub fn get_id(&self) -> usize {
         match self {

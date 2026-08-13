@@ -85,10 +85,18 @@ pub fn py_compare(a: &PyObjectRef, b: &PyObjectRef, op: u32) -> PyResult<PyObjec
                 2 => a.is(b),
                 5 => !a.is(b),
                 _ => {
-                    let op_sym = match op { 0 => "<", 1 => "<=", 3 => ">=", 4 => ">", _ => unreachable!() };
+                    let op_sym = match op {
+                        0 => "<",
+                        1 => "<=",
+                        3 => ">=",
+                        4 => ">",
+                        _ => unreachable!(),
+                    };
                     return Err(PyError::type_error(format!(
                         "'{}' not supported between instances of '{}' and '{}'",
-                        op_sym, a.get_type_name(), b.get_type_name()
+                        op_sym,
+                        a.get_type_name(),
+                        b.get_type_name()
                     )));
                 }
             }));
@@ -137,14 +145,26 @@ pub fn py_compare(a: &PyObjectRef, b: &PyObjectRef, op: u32) -> PyResult<PyObjec
     // instead — cloning both operands' elements up front, before any
     // comparison call that could reenter — sidesteps the hazard entirely.
     if matches!(op, 0 | 1 | 3 | 4) {
-        let a_items = if let PyObject::List(v) = &*a.borrow() { Some(v.clone()) } else { None };
+        let a_items = if let PyObject::List(v) = &*a.borrow() {
+            Some(v.clone())
+        } else {
+            None
+        };
         if let Some(a_items) = a_items {
-            let b_items = if let PyObject::List(v) = &*b.borrow() { Some(v.clone()) } else { None };
+            let b_items = if let PyObject::List(v) = &*b.borrow() {
+                Some(v.clone())
+            } else {
+                None
+            };
             if let Some(b_items) = b_items {
                 let mut ord = std::cmp::Ordering::Equal;
                 for (x, y) in a_items.iter().zip(b_items.iter()) {
                     if !x.equals(y)? {
-                        ord = if py_compare(x, y, 0)?.truthy() { std::cmp::Ordering::Less } else { std::cmp::Ordering::Greater };
+                        ord = if py_compare(x, y, 0)?.truthy() {
+                            std::cmp::Ordering::Less
+                        } else {
+                            std::cmp::Ordering::Greater
+                        };
                         break;
                     }
                 }
@@ -164,14 +184,26 @@ pub fn py_compare(a: &PyObjectRef, b: &PyObjectRef, op: u32) -> PyResult<PyObjec
         // `deque` ordering gets the same clone-before-compare treatment as
         // `List` just above (its own elements can carry a mutating `__eq__`
         // that reenters and mutates the deque being compared mid-comparison).
-        let a_items = if let PyObject::Deque { data, .. } = &*a.borrow() { Some(data.clone()) } else { None };
+        let a_items = if let PyObject::Deque { data, .. } = &*a.borrow() {
+            Some(data.clone())
+        } else {
+            None
+        };
         if let Some(a_items) = a_items {
-            let b_items = if let PyObject::Deque { data, .. } = &*b.borrow() { Some(data.clone()) } else { None };
+            let b_items = if let PyObject::Deque { data, .. } = &*b.borrow() {
+                Some(data.clone())
+            } else {
+                None
+            };
             if let Some(b_items) = b_items {
                 let mut ord = std::cmp::Ordering::Equal;
                 for (x, y) in a_items.iter().zip(b_items.iter()) {
                     if !x.equals(y)? {
-                        ord = if py_compare(x, y, 0)?.truthy() { std::cmp::Ordering::Less } else { std::cmp::Ordering::Greater };
+                        ord = if py_compare(x, y, 0)?.truthy() {
+                            std::cmp::Ordering::Less
+                        } else {
+                            std::cmp::Ordering::Greater
+                        };
                         break;
                     }
                 }
@@ -280,13 +312,26 @@ fn try_rich_compare(a: &PyObjectRef, b: &PyObjectRef, op: u32) -> PyResult<Optio
     };
 
     let instance_type_of = |v: &PyObjectRef| -> Option<PyObjectRef> {
-        if let PyObject::Instance { typ, .. } = &*v.borrow() { Some(typ.clone()) } else { None }
+        if let PyObject::Instance { typ, .. } = &*v.borrow() {
+            Some(typ.clone())
+        } else {
+            None
+        }
     };
     let is_proper_subclass = |sub: &PyObjectRef, base: &PyObjectRef| -> bool {
-        if sub.is(base) { return false; }
-        if let PyObject::Type { mro, .. } = &*sub.borrow() { mro.iter().any(|c| c.is(base)) } else { false }
+        if sub.is(base) {
+            return false;
+        }
+        if let PyObject::Type { mro, .. } = &*sub.borrow() {
+            mro.iter().any(|c| c.is(base))
+        } else {
+            false
+        }
     };
-    let try_side = |self_ref: &PyObjectRef, other_ref: &PyObjectRef, method: &str| -> PyResult<Option<PyObjectRef>> {
+    let try_side = |self_ref: &PyObjectRef,
+                    other_ref: &PyObjectRef,
+                    method: &str|
+     -> PyResult<Option<PyObjectRef>> {
         if let PyObject::Instance { typ, .. } = &*self_ref.borrow() {
             if let Some(f) = lookup_dunder_via_mro(typ, method) {
                 let result = call_bound_method(f, self_ref.clone(), vec![other_ref.clone()])?;
@@ -311,11 +356,19 @@ fn try_rich_compare(a: &PyObjectRef, b: &PyObjectRef, op: u32) -> PyResult<Optio
     };
 
     if b_first {
-        if let Some(r) = try_side(b, a, refl_name)? { return Ok(Some(r)); }
-        if let Some(r) = try_side(a, b, own_name)? { return Ok(Some(r)); }
+        if let Some(r) = try_side(b, a, refl_name)? {
+            return Ok(Some(r));
+        }
+        if let Some(r) = try_side(a, b, own_name)? {
+            return Ok(Some(r));
+        }
     } else {
-        if let Some(r) = try_side(a, b, own_name)? { return Ok(Some(r)); }
-        if let Some(r) = try_side(b, a, refl_name)? { return Ok(Some(r)); }
+        if let Some(r) = try_side(a, b, own_name)? {
+            return Ok(Some(r));
+        }
+        if let Some(r) = try_side(b, a, refl_name)? {
+            return Ok(Some(r));
+        }
     }
     Ok(None)
 }
@@ -344,8 +397,14 @@ impl Compare for PyObject {
             (PyObject::Int(a), PyObject::Bool(b)) => Ok(a.to_i32().unwrap_or(0) < (*b as i32)),
             (PyObject::Set(a), PyObject::Set(b)) => {
                 // a < b: proper subset (a <= b and a != b)
-                if a.len() >= b.len() { return Ok(false); }
-                for item in a.to_vec() { if !b.contains(&item)? { return Ok(false); } }
+                if a.len() >= b.len() {
+                    return Ok(false);
+                }
+                for item in a.to_vec() {
+                    if !b.contains(&item)? {
+                        return Ok(false);
+                    }
+                }
                 Ok(true)
             }
             (PyObject::Tuple(a), PyObject::Tuple(b)) => {
@@ -355,7 +414,9 @@ impl Compare for PyObject {
                 // common ordering idiom: `(sort_key, obj)` tuples) always
                 // raised TypeError instead of consulting it.
                 for (x, y) in a.iter().zip(b.iter()) {
-                    if !x.equals(y)? { return Ok(py_compare(x, y, 0)?.truthy()); }
+                    if !x.equals(y)? {
+                        return Ok(py_compare(x, y, 0)?.truthy());
+                    }
                 }
                 Ok(a.len() < b.len())
             }
@@ -375,25 +436,40 @@ impl Compare for PyObject {
             (PyObject::ByteArray(a), PyObject::Bytes(b)) => Ok(a.as_slice() < b.as_slice()),
             (PyObject::List(a), PyObject::List(b)) => {
                 for (x, y) in a.iter().zip(b.iter()) {
-                    if !x.equals(y)? { return Ok(py_compare(x, y, 0)?.truthy()); }
+                    if !x.equals(y)? {
+                        return Ok(py_compare(x, y, 0)?.truthy());
+                    }
                 }
                 Ok(a.len() < b.len())
             }
             (PyObject::Deque { data: a, .. }, PyObject::Deque { data: b, .. }) => {
                 for (x, y) in a.iter().zip(b.iter()) {
-                    if !x.equals(y)? { return Ok(py_compare(x, y, 0)?.truthy()); }
+                    if !x.equals(y)? {
+                        return Ok(py_compare(x, y, 0)?.truthy());
+                    }
                 }
                 Ok(a.len() < b.len())
             }
             (PyObject::None, PyObject::None) => Ok(false),
             _ => {
                 if std::env::var("RPY_DEBUG_LT").is_ok() {
-                    let self_cls = if let PyObject::Instance { typ, .. } = self { get_type_name_for_instance(typ) } else { self.type_name() };
-                    let other_cls = if let PyObject::Instance { typ, .. } = &*other { get_type_name_for_instance(typ) } else { other.type_name() };
+                    let self_cls = if let PyObject::Instance { typ, .. } = self {
+                        get_type_name_for_instance(typ)
+                    } else {
+                        self.type_name()
+                    };
+                    let other_cls = if let PyObject::Instance { typ, .. } = &*other {
+                        get_type_name_for_instance(typ)
+                    } else {
+                        other.type_name()
+                    };
                     eprintln!("LT_FAIL: self_cls={} other_cls={}", self_cls, other_cls);
                 }
-                Err(PyError::type_error(format!("'<' not supported between instances of '{}' and '{}'",
-                    self.type_name(), other.type_name())))
+                Err(PyError::type_error(format!(
+                    "'<' not supported between instances of '{}' and '{}'",
+                    self.type_name(),
+                    other.type_name()
+                )))
             }
         }
     }
@@ -410,13 +486,21 @@ impl Compare for PyObject {
             (PyObject::Str(a), PyObject::Str(b)) => Ok(a <= b),
             (PyObject::Bool(a), PyObject::Bool(b)) => Ok(a <= b),
             (PyObject::Set(a), PyObject::Set(b)) => {
-                if a.len() > b.len() { return Ok(false); }
-                for item in a.to_vec() { if !b.contains(&item)? { return Ok(false); } }
+                if a.len() > b.len() {
+                    return Ok(false);
+                }
+                for item in a.to_vec() {
+                    if !b.contains(&item)? {
+                        return Ok(false);
+                    }
+                }
                 Ok(true)
             }
             (PyObject::Tuple(a), PyObject::Tuple(b)) => {
                 for (x, y) in a.iter().zip(b.iter()) {
-                    if !x.equals(y)? { return Ok(py_compare(x, y, 0)?.truthy()); }
+                    if !x.equals(y)? {
+                        return Ok(py_compare(x, y, 0)?.truthy());
+                    }
                 }
                 Ok(a.len() <= b.len())
             }
@@ -426,18 +510,25 @@ impl Compare for PyObject {
             (PyObject::ByteArray(a), PyObject::Bytes(b)) => Ok(a.as_slice() <= b.as_slice()),
             (PyObject::List(a), PyObject::List(b)) => {
                 for (x, y) in a.iter().zip(b.iter()) {
-                    if !x.equals(y)? { return Ok(py_compare(x, y, 0)?.truthy()); }
+                    if !x.equals(y)? {
+                        return Ok(py_compare(x, y, 0)?.truthy());
+                    }
                 }
                 Ok(a.len() <= b.len())
             }
             (PyObject::Deque { data: a, .. }, PyObject::Deque { data: b, .. }) => {
                 for (x, y) in a.iter().zip(b.iter()) {
-                    if !x.equals(y)? { return Ok(py_compare(x, y, 0)?.truthy()); }
+                    if !x.equals(y)? {
+                        return Ok(py_compare(x, y, 0)?.truthy());
+                    }
                 }
                 Ok(a.len() <= b.len())
             }
-            _ => Err(PyError::type_error(format!("'<=' not supported between instances of '{}' and '{}'",
-                self.type_name(), other.type_name()))),
+            _ => Err(PyError::type_error(format!(
+                "'<=' not supported between instances of '{}' and '{}'",
+                self.type_name(),
+                other.type_name()
+            ))),
         }
     }
 
@@ -453,13 +544,21 @@ impl Compare for PyObject {
             (PyObject::Str(a), PyObject::Str(b)) => Ok(a > b),
             (PyObject::Bool(a), PyObject::Bool(b)) => Ok(a > b),
             (PyObject::Set(a), PyObject::Set(b)) => {
-                if a.len() <= b.len() { return Ok(false); }
-                for item in b.to_vec() { if !a.contains(&item)? { return Ok(false); } }
+                if a.len() <= b.len() {
+                    return Ok(false);
+                }
+                for item in b.to_vec() {
+                    if !a.contains(&item)? {
+                        return Ok(false);
+                    }
+                }
                 Ok(true)
             }
             (PyObject::Tuple(a), PyObject::Tuple(b)) => {
                 for (x, y) in a.iter().zip(b.iter()) {
-                    if !x.equals(y)? { return Ok(py_compare(x, y, 4)?.truthy()); }
+                    if !x.equals(y)? {
+                        return Ok(py_compare(x, y, 4)?.truthy());
+                    }
                 }
                 Ok(a.len() > b.len())
             }
@@ -469,18 +568,25 @@ impl Compare for PyObject {
             (PyObject::ByteArray(a), PyObject::Bytes(b)) => Ok(a.as_slice() > b.as_slice()),
             (PyObject::List(a), PyObject::List(b)) => {
                 for (x, y) in a.iter().zip(b.iter()) {
-                    if !x.equals(y)? { return Ok(py_compare(x, y, 4)?.truthy()); }
+                    if !x.equals(y)? {
+                        return Ok(py_compare(x, y, 4)?.truthy());
+                    }
                 }
                 Ok(a.len() > b.len())
             }
             (PyObject::Deque { data: a, .. }, PyObject::Deque { data: b, .. }) => {
                 for (x, y) in a.iter().zip(b.iter()) {
-                    if !x.equals(y)? { return Ok(py_compare(x, y, 4)?.truthy()); }
+                    if !x.equals(y)? {
+                        return Ok(py_compare(x, y, 4)?.truthy());
+                    }
                 }
                 Ok(a.len() > b.len())
             }
-            _ => Err(PyError::type_error(format!("'>' not supported between instances of '{}' and '{}'",
-                self.type_name(), other.type_name()))),
+            _ => Err(PyError::type_error(format!(
+                "'>' not supported between instances of '{}' and '{}'",
+                self.type_name(),
+                other.type_name()
+            ))),
         }
     }
 
@@ -496,13 +602,21 @@ impl Compare for PyObject {
             (PyObject::Str(a), PyObject::Str(b)) => Ok(a >= b),
             (PyObject::Bool(a), PyObject::Bool(b)) => Ok(a >= b),
             (PyObject::Set(a), PyObject::Set(b)) => {
-                if a.len() < b.len() { return Ok(false); }
-                for item in b.to_vec() { if !a.contains(&item)? { return Ok(false); } }
+                if a.len() < b.len() {
+                    return Ok(false);
+                }
+                for item in b.to_vec() {
+                    if !a.contains(&item)? {
+                        return Ok(false);
+                    }
+                }
                 Ok(true)
             }
             (PyObject::Tuple(a), PyObject::Tuple(b)) => {
                 for (x, y) in a.iter().zip(b.iter()) {
-                    if !x.equals(y)? { return Ok(py_compare(x, y, 4)?.truthy()); }
+                    if !x.equals(y)? {
+                        return Ok(py_compare(x, y, 4)?.truthy());
+                    }
                 }
                 Ok(a.len() >= b.len())
             }
@@ -512,18 +626,25 @@ impl Compare for PyObject {
             (PyObject::ByteArray(a), PyObject::Bytes(b)) => Ok(a.as_slice() >= b.as_slice()),
             (PyObject::List(a), PyObject::List(b)) => {
                 for (x, y) in a.iter().zip(b.iter()) {
-                    if !x.equals(y)? { return Ok(py_compare(x, y, 4)?.truthy()); }
+                    if !x.equals(y)? {
+                        return Ok(py_compare(x, y, 4)?.truthy());
+                    }
                 }
                 Ok(a.len() >= b.len())
             }
             (PyObject::Deque { data: a, .. }, PyObject::Deque { data: b, .. }) => {
                 for (x, y) in a.iter().zip(b.iter()) {
-                    if !x.equals(y)? { return Ok(py_compare(x, y, 4)?.truthy()); }
+                    if !x.equals(y)? {
+                        return Ok(py_compare(x, y, 4)?.truthy());
+                    }
                 }
                 Ok(a.len() >= b.len())
             }
-            _ => Err(PyError::type_error(format!("'>=' not supported between instances of '{}' and '{}'",
-                self.type_name(), other.type_name()))),
+            _ => Err(PyError::type_error(format!(
+                "'>=' not supported between instances of '{}' and '{}'",
+                self.type_name(),
+                other.type_name()
+            ))),
         }
     }
 

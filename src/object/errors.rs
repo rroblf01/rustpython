@@ -78,20 +78,30 @@ impl PyError {
         // validation errors ("unexpected '/' ...") don't. Ensure a position
         // is always present so `SyntaxError.lineno`/`.offset` are never
         // None (test.support's check_syntax_error asserts both exist).
-        let msg = if msg.starts_with('L') { msg } else { format!("L1:1: {}", msg) };
-        PyError::Exception("SyntaxError".to_string(), PyObjectRef::new(PyObject::Exception {
-            typ: "SyntaxError".to_string(),
-            args: vec![py_str(&msg)],
-            cause: None,
-        }))
+        let msg = if msg.starts_with('L') {
+            msg
+        } else {
+            format!("L1:1: {}", msg)
+        };
+        PyError::Exception(
+            "SyntaxError".to_string(),
+            PyObjectRef::new(PyObject::Exception {
+                typ: "SyntaxError".to_string(),
+                args: vec![py_str(&msg)],
+                cause: None,
+            }),
+        )
     }
     pub fn memory_error(msg: impl Into<String>) -> Self {
         let msg = msg.into();
-        PyError::Exception("MemoryError".to_string(), PyObjectRef::new(PyObject::Exception {
-            typ: "MemoryError".to_string(),
-            args: vec![py_str(&msg)],
-            cause: None,
-        }))
+        PyError::Exception(
+            "MemoryError".to_string(),
+            PyObjectRef::new(PyObject::Exception {
+                typ: "MemoryError".to_string(),
+                args: vec![py_str(&msg)],
+                cause: None,
+            }),
+        )
     }
     /// Same `PyError::Exception(name, obj)` pattern as `syntax_error`/
     /// `memory_error` above — `OverflowError` has no dedicated `PyError`
@@ -99,11 +109,14 @@ impl PyError {
     /// (e.g. `math.pow`'s own genuine-overflow case).
     pub fn overflow_error(msg: impl Into<String>) -> Self {
         let msg = msg.into();
-        PyError::Exception("OverflowError".to_string(), PyObjectRef::new(PyObject::Exception {
-            typ: "OverflowError".to_string(),
-            args: vec![py_str(&msg)],
-            cause: None,
-        }))
+        PyError::Exception(
+            "OverflowError".to_string(),
+            PyObjectRef::new(PyObject::Exception {
+                typ: "OverflowError".to_string(),
+                args: vec![py_str(&msg)],
+                cause: None,
+            }),
+        )
     }
     /// Same `PyError::Exception(name, obj)` pattern as `syntax_error`/
     /// `memory_error`/`overflow_error` above. Real CPython's
@@ -116,11 +129,14 @@ impl PyError {
     /// at all — found via `test_scope.py`'s own `testUnboundLocal`).
     pub fn unbound_local_error(msg: impl Into<String>) -> Self {
         let msg = msg.into();
-        PyError::Exception("UnboundLocalError".to_string(), PyObjectRef::new(PyObject::Exception {
-            typ: "UnboundLocalError".to_string(),
-            args: vec![py_str(&msg)],
-            cause: None,
-        }))
+        PyError::Exception(
+            "UnboundLocalError".to_string(),
+            PyObjectRef::new(PyObject::Exception {
+                typ: "UnboundLocalError".to_string(),
+                args: vec![py_str(&msg)],
+                cause: None,
+            }),
+        )
     }
     /// Same `PyError::Exception(name, obj)` pattern as `syntax_error`/
     /// `memory_error`/`overflow_error`/`unbound_local_error` above. Real
@@ -159,11 +175,14 @@ impl PyError {
             ErrorKind::Interrupted => "InterruptedError",
             _ => return PyError::OsError(msg),
         };
-        PyError::Exception(name.to_string(), PyObjectRef::new(PyObject::Exception {
-            typ: name.to_string(),
-            args: vec![py_str(&msg)],
-            cause: None,
-        }))
+        PyError::Exception(
+            name.to_string(),
+            PyObjectRef::new(PyObject::Exception {
+                typ: name.to_string(),
+                args: vec![py_str(&msg)],
+                cause: None,
+            }),
+        )
     }
 
     /// Same pattern as `os_error_from_io` above, for the (rarer) call sites
@@ -171,20 +190,26 @@ impl PyError {
     /// from a real `std::io::Error` (e.g. an explicit existence check).
     pub fn file_not_found_error(msg: impl Into<String>) -> Self {
         let msg = msg.into();
-        PyError::Exception("FileNotFoundError".to_string(), PyObjectRef::new(PyObject::Exception {
-            typ: "FileNotFoundError".to_string(),
-            args: vec![py_str(&msg)],
-            cause: None,
-        }))
+        PyError::Exception(
+            "FileNotFoundError".to_string(),
+            PyObjectRef::new(PyObject::Exception {
+                typ: "FileNotFoundError".to_string(),
+                args: vec![py_str(&msg)],
+                cause: None,
+            }),
+        )
     }
 
     pub fn module_not_found_error(msg: impl Into<String>) -> Self {
         let msg = msg.into();
-        PyError::Exception("ModuleNotFoundError".to_string(), PyObjectRef::new(PyObject::Exception {
-            typ: "ModuleNotFoundError".to_string(),
-            args: vec![py_str(&msg)],
-            cause: None,
-        }))
+        PyError::Exception(
+            "ModuleNotFoundError".to_string(),
+            PyObjectRef::new(PyObject::Exception {
+                typ: "ModuleNotFoundError".to_string(),
+                args: vec![py_str(&msg)],
+                cause: None,
+            }),
+        )
     }
     pub fn runtime_error(msg: impl Into<String>) -> Self {
         PyError::RuntimeError(msg.into())
@@ -209,13 +234,11 @@ impl PyError {
                 // message — the actual args live on the wrapped exception
                 // object itself.
                 match &*exc.borrow() {
-                    PyObject::Exception { args, .. } => {
-                        match args.len() {
-                            0 => String::new(),
-                            1 => args[0].str(),
-                            _ => args.iter().map(|a| a.str()).collect::<Vec<_>>().join(", "),
-                        }
-                    }
+                    PyObject::Exception { args, .. } => match args.len() {
+                        0 => String::new(),
+                        1 => args[0].str(),
+                        _ => args.iter().map(|a| a.str()).collect::<Vec<_>>().join(", "),
+                    },
                     // A user-defined exception class (`class Foo(Exception):
                     // ...`, raised/reraised — e.g. Django's real
                     // `ImproperlyConfigured`) is a plain `PyObject::Instance`,
@@ -228,24 +251,28 @@ impl PyError {
                     // mirrors what `Exception.__init__` conventionally
                     // stores (`self.args = args`), read directly rather than
                     // calling `__str__` (no VM access from this plain method).
-                    PyObject::Instance { dict, .. } => {
-                        match dict.get("args") {
-                            Some(args_obj) => {
-                                let is_tuple = matches!(&*args_obj.borrow(), PyObject::Tuple(_));
-                                if is_tuple {
-                                    let items = if let PyObject::Tuple(items) = &*args_obj.borrow() { items.clone() } else { unreachable!() };
-                                    match items.len() {
-                                        0 => String::new(),
-                                        1 => items[0].str(),
-                                        _ => items.iter().map(|a| a.str()).collect::<Vec<_>>().join(", "),
-                                    }
+                    PyObject::Instance { dict, .. } => match dict.get("args") {
+                        Some(args_obj) => {
+                            let is_tuple = matches!(&*args_obj.borrow(), PyObject::Tuple(_));
+                            if is_tuple {
+                                let items = if let PyObject::Tuple(items) = &*args_obj.borrow() {
+                                    items.clone()
                                 } else {
-                                    args_obj.str()
+                                    unreachable!()
+                                };
+                                match items.len() {
+                                    0 => String::new(),
+                                    1 => items[0].str(),
+                                    _ => {
+                                        items.iter().map(|a| a.str()).collect::<Vec<_>>().join(", ")
+                                    }
                                 }
+                            } else {
+                                args_obj.str()
                             }
-                            None => String::new(),
                         }
-                    }
+                        None => String::new(),
+                    },
                     _ => m.clone(),
                 }
             }

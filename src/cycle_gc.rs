@@ -161,7 +161,9 @@ fn trace_children(obj: &PyObject, out: &mut Vec<PyObjectRef>) {
             out.push(func.clone());
             out.extend(args.iter().cloned());
         }
-        PyObject::Type { dict, bases, mro, .. } => {
+        PyObject::Type {
+            dict, bases, mro, ..
+        } => {
             out.extend(dict.values().cloned());
             out.extend(bases.iter().cloned());
             out.extend(mro.iter().cloned());
@@ -173,7 +175,9 @@ fn trace_children(obj: &PyObject, out: &mut Vec<PyObjectRef>) {
                 out.push(c.clone());
             }
         }
-        PyObject::ExceptionGroup { args, exceptions, .. } => {
+        PyObject::ExceptionGroup {
+            args, exceptions, ..
+        } => {
             out.extend(args.iter().cloned());
             out.extend(exceptions.iter().cloned());
         }
@@ -202,9 +206,7 @@ fn trace_children(obj: &PyObject, out: &mut Vec<PyObjectRef>) {
             out.push(func.clone());
             out.push((**iterator).clone());
         }
-        PyObject::ListIter { list: items, .. } => {
-            out.extend(items.iter().cloned())
-        }
+        PyObject::ListIter { list: items, .. } => out.extend(items.iter().cloned()),
         PyObject::EnumerateIter { source, .. } => out.push(source.clone()),
         PyObject::CycleIter { items, .. } => out.extend(items.iter().cloned()),
         PyObject::Slice { start, stop, step } => {
@@ -274,13 +276,17 @@ pub fn collect() -> usize {
         return 0;
     }
 
-    let mut index_of: HashMap<*const RefCell<PyObject>, usize> = HashMap::with_capacity(live_rcs.len());
+    let mut index_of: HashMap<*const RefCell<PyObject>, usize> =
+        HashMap::with_capacity(live_rcs.len());
     for (i, rc) in live_rcs.iter().enumerate() {
         index_of.insert(Rc::as_ptr(rc), i);
     }
 
     // `- 1`: undo the inflation from this function's own `live_rcs` clone.
-    let mut gc_refs: Vec<isize> = live_rcs.iter().map(|rc| Rc::strong_count(rc) as isize - 1).collect();
+    let mut gc_refs: Vec<isize> = live_rcs
+        .iter()
+        .map(|rc| Rc::strong_count(rc) as isize - 1)
+        .collect();
 
     // Trial deletion: subtract one for every reference found coming from
     // another TRACKED object (cycle-internal references don't count as
@@ -372,7 +378,11 @@ pub fn collect() -> usize {
     }
     LAST_STATS.with(|c| c.set((live_rcs.len(), collected)));
     if std::env::var("RPY_DEBUG_GC").is_ok() {
-        eprintln!("cycle_gc: tracked={} collected={}", live_rcs.len(), collected);
+        eprintln!(
+            "cycle_gc: tracked={} collected={}",
+            live_rcs.len(),
+            collected
+        );
     }
     collected
 }

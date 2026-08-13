@@ -32,7 +32,12 @@ fn sys_modules_has(vm: &crate::vm::VirtualMachine, name: &str) -> bool {
 // confirmed segfaulting via the simplest possible repro (`__import__("os")`
 // at plain top level), the same unconditional `with_vm_mut`-aliasing UB
 // found repeatedly elsewhere this session.
-pub(crate) fn import_impl(vm: &mut crate::vm::VirtualMachine, name: &str, has_dots: bool, has_fromlist: bool) -> PyResult<PyObjectRef> {
+pub(crate) fn import_impl(
+    vm: &mut crate::vm::VirtualMachine,
+    name: &str,
+    has_dots: bool,
+    has_fromlist: bool,
+) -> PyResult<PyObjectRef> {
     // With a non-empty fromlist and a dotted name, import the full module chain
     // and return the rightmost module. CPython behavior:
     //   __import__("certifi.core", ..., ["where"], 0)  -> imports certifi.core, returns certifi.core
@@ -48,7 +53,10 @@ pub(crate) fn import_impl(vm: &mut crate::vm::VirtualMachine, name: &str, has_do
                     if let Some(sys_mod) = vm.modules.get("sys") {
                         if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
                             if let Some(mod_dict) = dict.get_str("modules") {
-                                mod_dict.borrow_mut().set_attribute(&top_name, module.clone()).ok();
+                                mod_dict
+                                    .borrow_mut()
+                                    .set_attribute(&top_name, module.clone())
+                                    .ok();
                             }
                         }
                     }
@@ -68,7 +76,10 @@ pub(crate) fn import_impl(vm: &mut crate::vm::VirtualMachine, name: &str, has_do
                 if let Some(sys_mod) = vm.modules.get("sys") {
                     if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
                         if let Some(mod_dict) = dict.get_str("modules") {
-                            mod_dict.borrow_mut().set_attribute(name, module.clone()).ok();
+                            mod_dict
+                                .borrow_mut()
+                                .set_attribute(name, module.clone())
+                                .ok();
                         }
                     }
                 }
@@ -100,7 +111,10 @@ pub(crate) fn import_impl(vm: &mut crate::vm::VirtualMachine, name: &str, has_do
             if let Some(sys_mod) = vm.modules.get("sys") {
                 if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
                     if let Some(mod_dict) = dict.get_str("modules") {
-                        mod_dict.borrow_mut().set_attribute(&resolved_name, module.clone()).ok();
+                        mod_dict
+                            .borrow_mut()
+                            .set_attribute(&resolved_name, module.clone())
+                            .ok();
                     }
                 }
             }
@@ -112,24 +126,33 @@ pub(crate) fn import_impl(vm: &mut crate::vm::VirtualMachine, name: &str, has_do
 
 pub fn builtin_import(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
-        return Err(PyError::type_error("__import__() requires at least 1 argument (module name)"));
+        return Err(PyError::type_error(
+            "__import__() requires at least 1 argument (module name)",
+        ));
     }
     // Mirrors the same check in `vm.rs`'s direct-dispatch fast path — `name`
     // must actually be a `str`, not silently coerced via `.str()`.
     if !matches!(&*args[0].borrow(), PyObject::Str(_)) {
-        return Err(PyError::type_error("__import__() argument 'name' must be str"));
+        return Err(PyError::type_error(
+            "__import__() argument 'name' must be str",
+        ));
     }
     let name = args[0].str();
     // See the matching check in `vm.rs`'s direct-dispatch fast path for why
     // this is gated on `level == 0` (an empty name is the normal encoding
     // of a pure relative import when `level>0`).
-    let level = args.last().and_then(|last| {
-        if let PyObject::Dict(d) = &*last.borrow() {
-            d.get(&py_str("level")).ok().flatten()
-        } else {
-            None
-        }
-    }).or_else(|| args.get(4).cloned()).and_then(|v| v.as_i64()).unwrap_or(0);
+    let level = args
+        .last()
+        .and_then(|last| {
+            if let PyObject::Dict(d) = &*last.borrow() {
+                d.get(&py_str("level")).ok().flatten()
+            } else {
+                None
+            }
+        })
+        .or_else(|| args.get(4).cloned())
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
     if name.is_empty() && level == 0 {
         return Err(PyError::value_error("Empty module name"));
     }
@@ -154,12 +177,10 @@ pub fn builtin_import(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         }
     });
     let fromlist_arg = kwargs_fromlist.or_else(|| args.get(3).cloned());
-    let fromlist = fromlist_arg.and_then(|fl| {
-        match &*fl.borrow() {
-            PyObject::List(items) => Some(items.clone()),
-            PyObject::Tuple(items) => Some(items.iter().cloned().collect()),
-            _ => None,
-        }
+    let fromlist = fromlist_arg.and_then(|fl| match &*fl.borrow() {
+        PyObject::List(items) => Some(items.clone()),
+        PyObject::Tuple(items) => Some(items.iter().cloned().collect()),
+        _ => None,
     });
     let has_dots = name.contains('.');
     let has_fromlist = fromlist.as_ref().map_or(false, |fl| !fl.is_empty());
@@ -180,9 +201,13 @@ pub fn builtin_eval(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
     let source = args[0].str();
     let mut parser = crate::parser::Parser::new(&source);
-    let program = parser.parse_program().map_err(|e| PyError::type_error(format!("eval parse error: {}", e)))?;
+    let program = parser
+        .parse_program()
+        .map_err(|e| PyError::type_error(format!("eval parse error: {}", e)))?;
     let mut compiler = crate::compiler::Compiler::new();
-    let code = compiler.compile(&program, "<eval>").map_err(|e| PyError::type_error(format!("eval compile error: {}", e)))?;
+    let code = compiler
+        .compile(&program, "<eval>")
+        .map_err(|e| PyError::type_error(format!("eval compile error: {}", e)))?;
     let code2 = code.clone();
     // Use current VM if available via VM_PTR so exec() shares modules, sys.path, etc.
     match with_vm_mut(|vm| vm.run(code)) {
@@ -190,7 +215,9 @@ pub fn builtin_eval(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         Ok(Err(e)) => Err(PyError::type_error(format!("eval error: {}", e))),
         Err(_) => {
             let mut new_vm = crate::vm::VirtualMachine::new();
-            new_vm.run(code2).map_err(|e| PyError::type_error(format!("eval error: {}", e)))
+            new_vm
+                .run(code2)
+                .map_err(|e| PyError::type_error(format!("eval error: {}", e)))
         }
     }
 }
@@ -203,12 +230,13 @@ pub fn builtin_exec(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let code = match &*args[0].borrow() {
         PyObject::Code(c) => (**c).clone(),
         _ => (|| -> Result<CodeObject, String> {
-                let source = args[0].str();
-                let mut parser = crate::parser::Parser::new(&source);
-                let program = parser.parse_program()?;
-                let mut compiler = crate::compiler::Compiler::new();
-                compiler.compile(&program, "<exec>")
-            })().map_err(|e| PyError::type_error(format!("exec error: {}", e)))?,
+            let source = args[0].str();
+            let mut parser = crate::parser::Parser::new(&source);
+            let program = parser.parse_program()?;
+            let mut compiler = crate::compiler::Compiler::new();
+            compiler.compile(&program, "<exec>")
+        })()
+        .map_err(|e| PyError::type_error(format!("exec error: {}", e)))?,
     };
     let code2 = code.clone();
     // Use current VM if available via VM_PTR so exec() shares modules, sys.path, etc.
@@ -217,7 +245,9 @@ pub fn builtin_exec(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         Ok(Err(e)) => Err(PyError::type_error(format!("exec error: {}", e))),
         Err(_) => {
             let mut new_vm = crate::vm::VirtualMachine::new();
-            new_vm.run(code2).map_err(|e| PyError::type_error(format!("exec error: {}", e)))?;
+            new_vm
+                .run(code2)
+                .map_err(|e| PyError::type_error(format!("exec error: {}", e)))?;
             Ok(py_none())
         }
     }
@@ -239,8 +269,12 @@ fn detect_pep263_encoding(bytes: &[u8]) -> Option<String> {
         if let Some(idx) = trimmed.find("coding").map(|i| i + "coding".len()) {
             let rest = trimmed[idx..].trim_start();
             if let Some(rest) = rest.strip_prefix(':').or_else(|| rest.strip_prefix('=')) {
-                let name: String = rest.trim_start().chars()
-                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_' || *c == '.')
+                let name: String = rest
+                    .trim_start()
+                    .chars()
+                    .take_while(|c| {
+                        c.is_ascii_alphanumeric() || *c == '-' || *c == '_' || *c == '.'
+                    })
                     .collect();
                 if !name.is_empty() {
                     return Some(name);
@@ -283,7 +317,9 @@ pub(crate) fn decode_source_bytes(bytes: &[u8]) -> PyResult<String> {
 
 pub fn builtin_compile(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() < 3 {
-        return Err(PyError::type_error("compile() requires 3 arguments (source, filename, mode)"));
+        return Err(PyError::type_error(
+            "compile() requires 3 arguments (source, filename, mode)",
+        ));
     }
     // `bytes`/`bytearray` source must be decoded using its OWN encoding
     // (PEP 263 coding cookie, defaulting to UTF-8) — `.str()` on a `bytes`
@@ -327,10 +363,14 @@ pub fn builtin_compile(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         crate::parser::try_parse_as_expression(&source).map_err(|e| PyError::syntax_error(e))?
     } else {
         let mut parser = crate::parser::Parser::new(&source);
-        parser.parse_program().map_err(|e| PyError::syntax_error(e))?
+        parser
+            .parse_program()
+            .map_err(|e| PyError::syntax_error(e))?
     };
     let mut compiler = crate::compiler::Compiler::new();
-    let code = compiler.compile(&program, &filename).map_err(|e| PyError::syntax_error(e))?;
+    let code = compiler
+        .compile(&program, &filename)
+        .map_err(|e| PyError::syntax_error(e))?;
     Ok(PyObjectRef::new(PyObject::Code(Rc::new(code))))
 }
 
@@ -384,16 +424,26 @@ pub fn builtin_zip(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         let last = args.last().unwrap();
         let last_borrowed = last.borrow();
         if let PyObject::Dict(kwargs) = &*last_borrowed {
-            let strict = kwargs.get(&py_str("strict")).ok().flatten().map(|v| v.truthy()).unwrap_or(false);
+            let strict = kwargs
+                .get(&py_str("strict"))
+                .ok()
+                .flatten()
+                .map(|v| v.truthy())
+                .unwrap_or(false);
             (&args[..args.len() - 1], strict)
         } else {
             (args, false)
         }
     };
     if iterables.is_empty() {
-        return Ok(PyObjectRef::new(PyObject::ZipIterator { iterators: vec![] }));
+        return Ok(PyObjectRef::new(PyObject::ZipIterator {
+            iterators: vec![],
+        }));
     }
-    let iters: Vec<PyObjectRef> = iterables.iter().map(|a| builtin_iter(&[a.clone()])).collect::<PyResult<Vec<_>>>()?;
+    let iters: Vec<PyObjectRef> = iterables
+        .iter()
+        .map(|a| builtin_iter(&[a.clone()]))
+        .collect::<PyResult<Vec<_>>>()?;
     if strict {
         // Eagerly materialize and check equal lengths — the lazy
         // ZipIterator has no way to distinguish "ran out because lengths
@@ -413,17 +463,23 @@ pub fn builtin_zip(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             if !stopped_indices.is_empty() {
                 if stopped_indices.len() != iters.len() {
                     let shorter_at = stopped_indices[0];
-                    let longer_at = (0..iters.len()).find(|i| !stopped_indices.contains(i)).unwrap();
+                    let longer_at = (0..iters.len())
+                        .find(|i| !stopped_indices.contains(i))
+                        .unwrap();
                     return Err(PyError::value_error(format!(
                         "zip() argument {} is shorter than argument {}",
-                        shorter_at + 1, longer_at + 1,
+                        shorter_at + 1,
+                        longer_at + 1,
                     )));
                 }
                 break;
             }
             rows.push(py_tuple(row));
         }
-        return Ok(PyObjectRef::new(PyObject::ListIter { list: rows, index: 0 }));
+        return Ok(PyObjectRef::new(PyObject::ListIter {
+            list: rows,
+            index: 0,
+        }));
     }
     Ok(PyObjectRef::new(PyObject::ZipIterator { iterators: iters }))
 }
@@ -447,14 +503,25 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
     };
     match kind {
         0 => {
-            if let PyObject::BuiltinFunction { func: bf, .. } = &*f.borrow() { bf(&a) } else { unreachable!() }
+            if let PyObject::BuiltinFunction { func: bf, .. } = &*f.borrow() {
+                bf(&a)
+            } else {
+                unreachable!()
+            }
         }
         1 => {
-            if let PyObject::BuiltinMethod { func: bf, self_obj: s, .. } = &*f.borrow() {
+            if let PyObject::BuiltinMethod {
+                func: bf,
+                self_obj: s,
+                ..
+            } = &*f.borrow()
+            {
                 let mut all_args = vec![s.clone()];
                 all_args.extend(a);
                 bf(&all_args)
-            } else { unreachable!() }
+            } else {
+                unreachable!()
+            }
         }
         2 => {
             // See `NativeDispatchRecursionGuard`'s own doc comment (`core.rs`)
@@ -479,18 +546,37 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
             let (code, g, defaults, closure, fname) = {
                 let obj = f.borrow();
                 if let PyObject::Function(inner_f) = &*obj {
-                    (inner_f.code.clone(), inner_f.globals.clone(), inner_f.defaults.clone(), inner_f.closure.clone(), inner_f.code.name)
-                } else { unreachable!() }
+                    (
+                        inner_f.code.clone(),
+                        inner_f.globals.clone(),
+                        inner_f.defaults.clone(),
+                        inner_f.closure.clone(),
+                        inner_f.code.name,
+                    )
+                } else {
+                    unreachable!()
+                }
             };
             {
                 if std::env::var("RPY_DEBUG_IMPORT").is_ok() {
-                    eprintln!("BUILTIN_CALL (disposable VM): fname={} code_name={} filename={}", crate::interner::lookup_str(fname), crate::interner::lookup_str(code.name), code.filename);
+                    eprintln!(
+                        "BUILTIN_CALL (disposable VM): fname={} code_name={} filename={}",
+                        crate::interner::lookup_str(fname),
+                        crate::interner::lookup_str(code.name),
+                        code.filename
+                    );
                 }
                 let npos = a.len();
                 let named_params = if code.vararg_name.is_some() || code.kwarg_name.is_some() {
-                    code.varnames.iter().position(|n| {
-                        code.vararg_name.as_ref().map(|b| b.as_str()) == Some(crate::interner::lookup_str(*n)) || code.kwarg_name.as_ref().map(|b| b.as_str()) == Some(crate::interner::lookup_str(*n))
-                    }).unwrap_or(code.varnames.len())
+                    code.varnames
+                        .iter()
+                        .position(|n| {
+                            code.vararg_name.as_ref().map(|b| b.as_str())
+                                == Some(crate::interner::lookup_str(*n))
+                                || code.kwarg_name.as_ref().map(|b| b.as_str())
+                                    == Some(crate::interner::lookup_str(*n))
+                        })
+                        .unwrap_or(code.varnames.len())
                 } else {
                     code.varnames.len()
                 };
@@ -508,12 +594,20 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
                 // call instead of the disposable VM's own, breaking
                 // pointer-identity checks like the `type(x)` special case.
                 let mut vm = crate::vm::VirtualMachine::new();
-                let mut frame = crate::vm::Frame::new(code.clone(), g.clone(), std::rc::Rc::clone(&vm.builtins), None);
+                let mut frame = crate::vm::Frame::new(
+                    code.clone(),
+                    g.clone(),
+                    std::rc::Rc::clone(&vm.builtins),
+                    None,
+                );
                 frame.closure = Box::new(closure);
                 for i in 0..npos.min(named_params) {
                     if i < code.varnames.len() {
                         frame.fast_locals[i] = Some(a[i].clone());
-                        frame.insert_local(crate::interner::lookup_str(code.varnames[i]), a[i].clone());
+                        frame.insert_local(
+                            crate::interner::lookup_str(code.varnames[i]),
+                            a[i].clone(),
+                        );
                     }
                 }
                 if let Some(vararg_name) = &code.vararg_name {
@@ -529,7 +623,11 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
                     // via `map()`/`filter()`/etc. through THIS disposable-VM
                     // path, not just the bound-method-via-class-construction
                     // case that surfaced it).
-                    if let Some(idx) = code.varnames.iter().position(|n| crate::interner::lookup_str(*n) == vararg_name.as_str()) {
+                    if let Some(idx) = code
+                        .varnames
+                        .iter()
+                        .position(|n| crate::interner::lookup_str(*n) == vararg_name.as_str())
+                    {
                         if idx < frame.fast_locals.len() {
                             frame.fast_locals[idx] = Some(vararg_val.clone());
                         }
@@ -556,12 +654,19 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
                             if i < frame.fast_locals.len() {
                                 frame.fast_locals[i] = Some(defaults[default_idx].clone());
                             }
-                            frame.insert_local(crate::interner::lookup_str(code.varnames[i]), defaults[default_idx].clone());
+                            frame.insert_local(
+                                crate::interner::lookup_str(code.varnames[i]),
+                                defaults[default_idx].clone(),
+                            );
                         }
                     }
                 }
                 if let Some(kwarg_name) = &code.kwarg_name {
-                    if let Some(idx) = code.varnames.iter().position(|n| crate::interner::lookup_str(*n) == kwarg_name.as_str()) {
+                    if let Some(idx) = code
+                        .varnames
+                        .iter()
+                        .position(|n| crate::interner::lookup_str(*n) == kwarg_name.as_str())
+                    {
                         if idx < frame.fast_locals.len() && frame.fast_locals[idx].is_none() {
                             frame.fast_locals[idx] = Some(py_dict());
                         }
@@ -577,9 +682,16 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
         3 => {
             let (bf, self_obj) = {
                 let obj = f.borrow();
-                if let PyObject::BoundMethod { func: bf, self_obj: s, .. } = &*obj {
+                if let PyObject::BoundMethod {
+                    func: bf,
+                    self_obj: s,
+                    ..
+                } = &*obj
+                {
                     (bf.clone(), s.clone())
-                } else { return Err(PyError::type_error("not a bound method")); }
+                } else {
+                    return Err(PyError::type_error("not a bound method"));
+                }
             };
             let mut all_args = vec![self_obj];
             let _a_len = a.len();
@@ -622,7 +734,9 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
                     call_bound_method(init, instance.clone(), a)?;
                 }
                 Ok(instance)
-            } else { unreachable!() }
+            } else {
+                unreachable!()
+            }
         }
         5 => {
             let instance = PyObjectRef::new(PyObject::Instance {
@@ -636,13 +750,17 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
                 let obj = f.borrow();
                 if let PyObject::Partial { func: bf, args: pa } = &*obj {
                     (bf.clone(), pa.clone())
-                } else { return Err(PyError::type_error("not a partial")); }
+                } else {
+                    return Err(PyError::type_error("not a partial"));
+                }
             };
             let mut all_args = partial_args.clone();
             all_args.extend(a);
             builtin_call(&func, &all_args)
         }
-        _ => Err(PyError::type_error(format!("'{}' object is not callable", type_name))),
+        _ => Err(PyError::type_error(format!(
+            "'{}' object is not callable",
+            type_name
+        ))),
     }
 }
-

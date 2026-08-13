@@ -11,9 +11,16 @@ thread_local! {
 }
 
 pub fn logging_debug(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.len() < 2 { return Ok(py_none()); }
+    if args.len() < 2 {
+        return Ok(py_none());
+    }
     let level = LOG_LEVEL.with(|l| l.borrow().clone());
-    if level != "DEBUG" && level != "INFO" && level != "WARNING" && level != "ERROR" && level != "CRITICAL" {
+    if level != "DEBUG"
+        && level != "INFO"
+        && level != "WARNING"
+        && level != "ERROR"
+        && level != "CRITICAL"
+    {
         return Ok(py_none());
     }
     let _msg = args[1].str();
@@ -29,7 +36,9 @@ pub fn logging_debug(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 }
 
 pub fn logging_info(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.len() < 2 { return Ok(py_none()); }
+    if args.len() < 2 {
+        return Ok(py_none());
+    }
     let level = LOG_LEVEL.with(|l| l.borrow().clone());
     if level != "INFO" && level != "WARNING" && level != "ERROR" && level != "CRITICAL" {
         return Ok(py_none());
@@ -48,7 +57,9 @@ pub fn logging_info(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 }
 
 pub fn logging_warning(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.len() < 2 { return Ok(py_none()); }
+    if args.len() < 2 {
+        return Ok(py_none());
+    }
     let level = LOG_LEVEL.with(|l| l.borrow().clone());
     if level != "WARNING" && level != "ERROR" && level != "CRITICAL" {
         return Ok(py_none());
@@ -67,7 +78,9 @@ pub fn logging_warning(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 }
 
 pub fn logging_error(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.len() < 2 { return Ok(py_none()); }
+    if args.len() < 2 {
+        return Ok(py_none());
+    }
     let level = LOG_LEVEL.with(|l| l.borrow().clone());
     if level != "ERROR" && level != "CRITICAL" {
         return Ok(py_none());
@@ -106,10 +119,15 @@ fn escape_loose_braces(pattern: &str) -> String {
         if c == '{' {
             let mut j = i + 1;
             let mut saw_digit = false;
-            while j < chars.len() && chars[j].is_ascii_digit() { j += 1; saw_digit = true; }
+            while j < chars.len() && chars[j].is_ascii_digit() {
+                j += 1;
+                saw_digit = true;
+            }
             if j < chars.len() && chars[j] == ',' {
                 j += 1;
-                while j < chars.len() && chars[j].is_ascii_digit() { j += 1; }
+                while j < chars.len() && chars[j].is_ascii_digit() {
+                    j += 1;
+                }
             }
             if saw_digit && j < chars.len() && chars[j] == '}' {
                 result.extend(&chars[i..=j]);
@@ -299,15 +317,30 @@ fn compile_python_regex(pattern: &str) -> Result<fancy_regex::Regex, fancy_regex
 /// inline flag group (`(?ismx)...`) prepended to the pattern — `regex`/
 /// `fancy_regex`'s own flag semantics for `i`/`s`/`m`/`x` match Python's
 /// IGNORECASE/DOTALL/MULTILINE/VERBOSE closely enough for real-world use.
-fn compile_python_regex_flags(pattern: &str, flags: i32) -> Result<fancy_regex::Regex, fancy_regex::Error> {
+fn compile_python_regex_flags(
+    pattern: &str,
+    flags: i32,
+) -> Result<fancy_regex::Regex, fancy_regex::Error> {
     let pattern = escape_loose_braces(pattern);
     let pattern = escape_leading_bracket_in_class(&pattern);
     let mut inline = String::new();
-    if flags & 2 != 0 { inline.push('i'); }   // IGNORECASE
-    if flags & 16 != 0 { inline.push('s'); }  // DOTALL
-    if flags & 8 != 0 { inline.push('m'); }   // MULTILINE
-    if flags & 64 != 0 { inline.push('x'); }  // VERBOSE
-    let pattern = if inline.is_empty() { pattern } else { format!("(?{}){}", inline, pattern) };
+    if flags & 2 != 0 {
+        inline.push('i');
+    } // IGNORECASE
+    if flags & 16 != 0 {
+        inline.push('s');
+    } // DOTALL
+    if flags & 8 != 0 {
+        inline.push('m');
+    } // MULTILINE
+    if flags & 64 != 0 {
+        inline.push('x');
+    } // VERBOSE
+    let pattern = if inline.is_empty() {
+        pattern
+    } else {
+        format!("(?{}){}", inline, pattern)
+    };
     fancy_regex::Regex::new(&pattern)
 }
 
@@ -329,7 +362,11 @@ fn resolve_group_arg(obj: &PyObjectRef, arg: Option<&PyObjectRef>) -> Option<usi
                     let names = obj.borrow().get_attribute("_group_names").ok()?;
                     let names_b = names.borrow();
                     if let PyObject::Dict(d) = &*names_b {
-                        d.get(&py_str(&name)).ok().flatten().and_then(|v| v.as_i64()).map(|i| i as usize)
+                        d.get(&py_str(&name))
+                            .ok()
+                            .flatten()
+                            .and_then(|v| v.as_i64())
+                            .map(|i| i as usize)
                     } else {
                         None
                     }
@@ -353,7 +390,10 @@ fn resolve_group_arg(obj: &PyObjectRef, arg: Option<&PyObjectRef>) -> Option<usi
 /// `html.parser`/`_markupbase`'s tokenizer, which relies on named/indexed
 /// groups throughout (`tagfind_tolerant`, `attrfind_tolerant`, etc.).
 /// Returns `py_none()` if the regex didn't match.
-pub(crate) fn make_match_object(re: &fancy_regex::Regex, caps: Option<fancy_regex::Captures<'_>>) -> PyObjectRef {
+pub(crate) fn make_match_object(
+    re: &fancy_regex::Regex,
+    caps: Option<fancy_regex::Captures<'_>>,
+) -> PyObjectRef {
     match caps {
         Some(caps) => {
             let whole = caps.get(0).unwrap();
@@ -396,141 +436,241 @@ pub(crate) fn make_match_object(re: &fancy_regex::Regex, caps: Option<fancy_rege
             // participate, matching real `re.Match.group`); with multiple
             // args, a tuple of each. Raises IndexError for an out-of-range
             // index or unknown name, matching real CPython.
-            type_dict.insert_str("group", PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "group".to_string(),
-                func: |args| {
-                    let self_obj = &args[0];
-                    let group_texts = self_obj.borrow().get_attribute("_groups_text").unwrap_or_else(|_| py_tuple(vec![]));
-                    let fetch_one = |arg: Option<&PyObjectRef>| -> PyResult<PyObjectRef> {
-                        let idx = resolve_group_arg(self_obj, arg)
-                            .ok_or_else(|| PyError::IndexError("no such group".to_string()))?;
-                        if let PyObject::Tuple(items) = &*group_texts.borrow() {
-                            items.get(idx).cloned().ok_or_else(|| PyError::IndexError("no such group".to_string()))
+            type_dict.insert_str(
+                "group",
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "group".to_string(),
+                    func: |args| {
+                        let self_obj = &args[0];
+                        let group_texts = self_obj
+                            .borrow()
+                            .get_attribute("_groups_text")
+                            .unwrap_or_else(|_| py_tuple(vec![]));
+                        let fetch_one = |arg: Option<&PyObjectRef>| -> PyResult<PyObjectRef> {
+                            let idx = resolve_group_arg(self_obj, arg)
+                                .ok_or_else(|| PyError::IndexError("no such group".to_string()))?;
+                            if let PyObject::Tuple(items) = &*group_texts.borrow() {
+                                items
+                                    .get(idx)
+                                    .cloned()
+                                    .ok_or_else(|| PyError::IndexError("no such group".to_string()))
+                            } else {
+                                Err(PyError::IndexError("no such group".to_string()))
+                            }
+                        };
+                        if args.len() <= 1 {
+                            fetch_one(None)
+                        } else if args.len() == 2 {
+                            fetch_one(Some(&args[1]))
                         } else {
-                            Err(PyError::IndexError("no such group".to_string()))
+                            let results: PyResult<Vec<PyObjectRef>> =
+                                args[1..].iter().map(|a| fetch_one(Some(a))).collect();
+                            Ok(py_tuple(results?))
                         }
-                    };
-                    if args.len() <= 1 {
-                        fetch_one(None)
-                    } else if args.len() == 2 {
-                        fetch_one(Some(&args[1]))
-                    } else {
-                        let results: PyResult<Vec<PyObjectRef>> = args[1..].iter().map(|a| fetch_one(Some(a))).collect();
-                        Ok(py_tuple(results?))
-                    }
-                },
-            }));
+                    },
+                }),
+            );
 
             // groups(default=None) — tuple of ALL captured groups (1..N,
             // excluding the whole match at index 0), substituting `default`
             // for any group that didn't participate (None otherwise).
-            type_dict.insert_str("groups", PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "groups".to_string(),
-                func: |args| {
-                    let default = args.get(1).cloned().unwrap_or_else(py_none);
-                    let group_texts = args[0].borrow().get_attribute("_groups_text").unwrap_or_else(|_| py_tuple(vec![]));
-                    let result = if let PyObject::Tuple(items) = &*group_texts.borrow() {
-                        let rest: Vec<PyObjectRef> = items.iter().skip(1).map(|v| {
-                            if matches!(&*v.borrow(), PyObject::None) { default.clone() } else { v.clone() }
-                        }).collect();
-                        Ok(py_tuple(rest))
-                    } else {
-                        Ok(py_tuple(vec![]))
-                    };
-                    result
-                },
-            }));
+            type_dict.insert_str(
+                "groups",
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "groups".to_string(),
+                    func: |args| {
+                        let default = args.get(1).cloned().unwrap_or_else(py_none);
+                        let group_texts = args[0]
+                            .borrow()
+                            .get_attribute("_groups_text")
+                            .unwrap_or_else(|_| py_tuple(vec![]));
+                        let result = if let PyObject::Tuple(items) = &*group_texts.borrow() {
+                            let rest: Vec<PyObjectRef> = items
+                                .iter()
+                                .skip(1)
+                                .map(|v| {
+                                    if matches!(&*v.borrow(), PyObject::None) {
+                                        default.clone()
+                                    } else {
+                                        v.clone()
+                                    }
+                                })
+                                .collect();
+                            Ok(py_tuple(rest))
+                        } else {
+                            Ok(py_tuple(vec![]))
+                        };
+                        result
+                    },
+                }),
+            );
 
             // groupdict(default=None) — {name: value} for every NAMED group.
-            type_dict.insert_str("groupdict", PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "groupdict".to_string(),
-                func: |args| {
-                    let default = args.get(1).cloned().unwrap_or_else(py_none);
-                    let names = args[0].borrow().get_attribute("_group_names").unwrap_or_else(|_| PyObjectRef::new(PyObject::Dict(Box::new(crate::object::PyDict::new()))));
-                    let group_texts = args[0].borrow().get_attribute("_groups_text").unwrap_or_else(|_| py_tuple(vec![]));
-                    let mut result = crate::object::PyDict::new();
-                    if let (PyObject::Dict(names_d), PyObject::Tuple(items)) = (&*names.borrow(), &*group_texts.borrow()) {
-                        for (k, v) in names_d.iter() {
-                            let idx = v.as_i64().unwrap_or(0) as usize;
-                            let val = items.get(idx).cloned().unwrap_or_else(py_none);
-                            let val = if matches!(&*val.borrow(), PyObject::None) { default.clone() } else { val };
-                            let _ = result.set(k.clone(), val);
+            type_dict.insert_str(
+                "groupdict",
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "groupdict".to_string(),
+                    func: |args| {
+                        let default = args.get(1).cloned().unwrap_or_else(py_none);
+                        let names = args[0]
+                            .borrow()
+                            .get_attribute("_group_names")
+                            .unwrap_or_else(|_| {
+                                PyObjectRef::new(PyObject::Dict(Box::new(
+                                    crate::object::PyDict::new(),
+                                )))
+                            });
+                        let group_texts = args[0]
+                            .borrow()
+                            .get_attribute("_groups_text")
+                            .unwrap_or_else(|_| py_tuple(vec![]));
+                        let mut result = crate::object::PyDict::new();
+                        if let (PyObject::Dict(names_d), PyObject::Tuple(items)) =
+                            (&*names.borrow(), &*group_texts.borrow())
+                        {
+                            for (k, v) in names_d.iter() {
+                                let idx = v.as_i64().unwrap_or(0) as usize;
+                                let val = items.get(idx).cloned().unwrap_or_else(py_none);
+                                let val = if matches!(&*val.borrow(), PyObject::None) {
+                                    default.clone()
+                                } else {
+                                    val
+                                };
+                                let _ = result.set(k.clone(), val);
+                            }
                         }
-                    }
-                    Ok(PyObjectRef::new(PyObject::Dict(Box::new(result))))
-                },
-            }));
+                        Ok(PyObjectRef::new(PyObject::Dict(Box::new(result))))
+                    },
+                }),
+            );
 
             // start([n_or_name]) — start position of the whole match or a
             // specific group (-1 if that group didn't participate).
-            type_dict.insert_str("start", PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "start".to_string(),
-                func: |args| {
-                    let self_obj = &args[0];
-                    let idx = resolve_group_arg(self_obj, args.get(1)).ok_or_else(|| PyError::IndexError("no such group".to_string()))?;
-                    let starts = self_obj.borrow().get_attribute("_starts").unwrap_or_else(|_| py_tuple(vec![]));
-                    let result = if let PyObject::Tuple(items) = &*starts.borrow() {
-                        items.get(idx).cloned().ok_or_else(|| PyError::IndexError("no such group".to_string()))
-                    } else { Ok(py_int(-1)) };
-                    result
-                },
-            }));
+            type_dict.insert_str(
+                "start",
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "start".to_string(),
+                    func: |args| {
+                        let self_obj = &args[0];
+                        let idx = resolve_group_arg(self_obj, args.get(1))
+                            .ok_or_else(|| PyError::IndexError("no such group".to_string()))?;
+                        let starts = self_obj
+                            .borrow()
+                            .get_attribute("_starts")
+                            .unwrap_or_else(|_| py_tuple(vec![]));
+                        let result = if let PyObject::Tuple(items) = &*starts.borrow() {
+                            items
+                                .get(idx)
+                                .cloned()
+                                .ok_or_else(|| PyError::IndexError("no such group".to_string()))
+                        } else {
+                            Ok(py_int(-1))
+                        };
+                        result
+                    },
+                }),
+            );
 
             // end([n_or_name]) — end position of the whole match or a
             // specific group (-1 if that group didn't participate).
-            type_dict.insert_str("end", PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "end".to_string(),
-                func: |args| {
-                    let self_obj = &args[0];
-                    let idx = resolve_group_arg(self_obj, args.get(1)).ok_or_else(|| PyError::IndexError("no such group".to_string()))?;
-                    let ends = self_obj.borrow().get_attribute("_ends").unwrap_or_else(|_| py_tuple(vec![]));
-                    let result = if let PyObject::Tuple(items) = &*ends.borrow() {
-                        items.get(idx).cloned().ok_or_else(|| PyError::IndexError("no such group".to_string()))
-                    } else { Ok(py_int(-1)) };
-                    result
-                },
-            }));
+            type_dict.insert_str(
+                "end",
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "end".to_string(),
+                    func: |args| {
+                        let self_obj = &args[0];
+                        let idx = resolve_group_arg(self_obj, args.get(1))
+                            .ok_or_else(|| PyError::IndexError("no such group".to_string()))?;
+                        let ends = self_obj
+                            .borrow()
+                            .get_attribute("_ends")
+                            .unwrap_or_else(|_| py_tuple(vec![]));
+                        let result = if let PyObject::Tuple(items) = &*ends.borrow() {
+                            items
+                                .get(idx)
+                                .cloned()
+                                .ok_or_else(|| PyError::IndexError("no such group".to_string()))
+                        } else {
+                            Ok(py_int(-1))
+                        };
+                        result
+                    },
+                }),
+            );
 
             // span([n_or_name]) — (start, end) tuple, whole match or a group.
-            type_dict.insert_str("span", PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "span".to_string(),
-                func: |args| {
-                    let self_obj = &args[0];
-                    let idx = resolve_group_arg(self_obj, args.get(1)).ok_or_else(|| PyError::IndexError("no such group".to_string()))?;
-                    let starts = self_obj.borrow().get_attribute("_starts").unwrap_or_else(|_| py_tuple(vec![]));
-                    let ends = self_obj.borrow().get_attribute("_ends").unwrap_or_else(|_| py_tuple(vec![]));
-                    let s = if let PyObject::Tuple(items) = &*starts.borrow() { items.get(idx).cloned() } else { None };
-                    let e = if let PyObject::Tuple(items) = &*ends.borrow() { items.get(idx).cloned() } else { None };
-                    match (s, e) {
-                        (Some(s), Some(e)) => Ok(py_tuple(vec![s, e])),
-                        _ => Err(PyError::IndexError("no such group".to_string())),
-                    }
-                },
-            }));
+            type_dict.insert_str(
+                "span",
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "span".to_string(),
+                    func: |args| {
+                        let self_obj = &args[0];
+                        let idx = resolve_group_arg(self_obj, args.get(1))
+                            .ok_or_else(|| PyError::IndexError("no such group".to_string()))?;
+                        let starts = self_obj
+                            .borrow()
+                            .get_attribute("_starts")
+                            .unwrap_or_else(|_| py_tuple(vec![]));
+                        let ends = self_obj
+                            .borrow()
+                            .get_attribute("_ends")
+                            .unwrap_or_else(|_| py_tuple(vec![]));
+                        let s = if let PyObject::Tuple(items) = &*starts.borrow() {
+                            items.get(idx).cloned()
+                        } else {
+                            None
+                        };
+                        let e = if let PyObject::Tuple(items) = &*ends.borrow() {
+                            items.get(idx).cloned()
+                        } else {
+                            None
+                        };
+                        match (s, e) {
+                            (Some(s), Some(e)) => Ok(py_tuple(vec![s, e])),
+                            _ => Err(PyError::IndexError("no such group".to_string())),
+                        }
+                    },
+                }),
+            );
 
             // __getitem__ — match[0] returns full match (== group(0)),
             // match[n_or_name] same as group(n_or_name) for n/name >= 1.
-            type_dict.insert_str("__getitem__", PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "__getitem__".to_string(),
-                func: |args| {
-                    if args.len() < 2 { return Err(PyError::type_error("__getitem__ requires index")); }
-                    let self_obj = &args[0];
-                    let idx = resolve_group_arg(self_obj, Some(&args[1])).ok_or_else(|| PyError::IndexError("no such group".to_string()))?;
-                    let group_texts = self_obj.borrow().get_attribute("_groups_text").unwrap_or_else(|_| py_tuple(vec![]));
-                    let result = if let PyObject::Tuple(items) = &*group_texts.borrow() {
-                        items.get(idx).cloned().ok_or_else(|| PyError::IndexError("no such group".to_string()))
-                    } else {
-                        Err(PyError::IndexError("no such group".to_string()))
-                    };
-                    result
-                },
-            }));
+            type_dict.insert_str(
+                "__getitem__",
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "__getitem__".to_string(),
+                    func: |args| {
+                        if args.len() < 2 {
+                            return Err(PyError::type_error("__getitem__ requires index"));
+                        }
+                        let self_obj = &args[0];
+                        let idx = resolve_group_arg(self_obj, Some(&args[1]))
+                            .ok_or_else(|| PyError::IndexError("no such group".to_string()))?;
+                        let group_texts = self_obj
+                            .borrow()
+                            .get_attribute("_groups_text")
+                            .unwrap_or_else(|_| py_tuple(vec![]));
+                        let result = if let PyObject::Tuple(items) = &*group_texts.borrow() {
+                            items
+                                .get(idx)
+                                .cloned()
+                                .ok_or_else(|| PyError::IndexError("no such group".to_string()))
+                        } else {
+                            Err(PyError::IndexError("no such group".to_string()))
+                        };
+                        result
+                    },
+                }),
+            );
 
             // __bool__ — always True for a successful match
-            type_dict.insert_str("__bool__", PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "__bool__".to_string(),
-                func: |_| Ok(py_bool(true)),
-            }));
+            type_dict.insert_str(
+                "__bool__",
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "__bool__".to_string(),
+                    func: |_| Ok(py_bool(true)),
+                }),
+            );
 
             let typ = PyObjectRef::new(PyObject::Type {
                 name: "Match".to_string(),
@@ -550,7 +690,10 @@ pub(crate) fn make_match_object(re: &fancy_regex::Regex, caps: Option<fancy_rege
             instance_dict.insert_str("_groups_text", py_tuple(groups_text));
             instance_dict.insert_str("_starts", py_tuple(starts));
             instance_dict.insert_str("_ends", py_tuple(ends));
-            instance_dict.insert_str("_group_names", PyObjectRef::new(PyObject::Dict(Box::new(name_to_index))));
+            instance_dict.insert_str(
+                "_group_names",
+                PyObjectRef::new(PyObject::Dict(Box::new(name_to_index))),
+            );
 
             PyObjectRef::new(PyObject::Instance {
                 typ,
@@ -565,7 +708,13 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! re_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
 
@@ -606,14 +755,19 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
 
     re_func!("fullmatch", |args| {
         if args.len() < 2 {
-            return Err(PyError::type_error("fullmatch() takes at least 2 arguments"));
+            return Err(PyError::type_error(
+                "fullmatch() takes at least 2 arguments",
+            ));
         }
         let pattern = args[0].str();
         let string = args[1].str();
         match compile_python_regex(&pattern) {
             Ok(re) => {
-                let caps = re.captures(&string).unwrap_or(None)
-                    .filter(|c| c.get(0).map(|m| m.start() == 0 && m.end() == string.len()).unwrap_or(false));
+                let caps = re.captures(&string).unwrap_or(None).filter(|c| {
+                    c.get(0)
+                        .map(|m| m.start() == 0 && m.end() == string.len())
+                        .unwrap_or(false)
+                });
                 Ok(make_match_object(&re, caps))
             }
             Err(e) => Err(PyError::ValueError(format!("invalid regex: {}", e))),
@@ -628,7 +782,8 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         let string = args[1].str();
         match compile_python_regex(&pattern) {
             Ok(re) => {
-                let results: Vec<PyObjectRef> = re.find_iter(&string)
+                let results: Vec<PyObjectRef> = re
+                    .find_iter(&string)
                     .filter_map(|r| r.ok())
                     .map(|m| py_str(m.as_str()))
                     .collect();
@@ -656,7 +811,11 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         // version silently ignored entirely.
         let pattern = args[0].str();
         let is_callable_repl = !matches!(&*args[1].borrow(), PyObject::Str(_));
-        let repl_template = if is_callable_repl { String::new() } else { translate_python_replacement(&args[1].str()) };
+        let repl_template = if is_callable_repl {
+            String::new()
+        } else {
+            translate_python_replacement(&args[1].str())
+        };
         let string = args[2].str();
         // `count`/`flags` may arrive positionally (args[3]) OR as a trailing
         // kwargs dict (`re.sub(p, r, s, count=1)` — a real, common call
@@ -665,21 +824,38 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         // calls, same as `sorted`'s own `key=`/`reverse=` handling).
         let count = if args.len() > 3 {
             if let PyObject::Dict(kwargs) = &*args[3].borrow() {
-                kwargs.get(&py_str("count")).ok().flatten().and_then(|v| v.as_i64()).unwrap_or(0)
+                kwargs
+                    .get(&py_str("count"))
+                    .ok()
+                    .flatten()
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0)
             } else {
                 args[3].as_i64().unwrap_or(0)
             }
-        } else { 0 };
+        } else {
+            0
+        };
         match compile_python_regex(&pattern) {
             Ok(re) => {
                 let mut result = String::new();
                 let mut last_end = 0usize;
                 let mut n = 0i64;
                 for caps in re.captures_iter(&string) {
-                    let caps = match caps { Ok(c) => c, Err(_) => break };
-                    if count > 0 && n >= count { break; }
-                    let (m_start, m_end) = { let m = caps.get(0).unwrap(); (m.start(), m.end()) };
-                    if m_start < last_end { continue; }
+                    let caps = match caps {
+                        Ok(c) => c,
+                        Err(_) => break,
+                    };
+                    if count > 0 && n >= count {
+                        break;
+                    }
+                    let (m_start, m_end) = {
+                        let m = caps.get(0).unwrap();
+                        (m.start(), m.end())
+                    };
+                    if m_start < last_end {
+                        continue;
+                    }
                     result.push_str(&string[last_end..m_start]);
                     if is_callable_repl {
                         // Calling an arbitrary Python callable (not just a
@@ -720,13 +896,23 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         }
         let pattern = args[0].str();
         let string = args[1].str();
-        let limit = if args.len() > 2 { args[2].as_i64().unwrap_or(0) as usize } else { 0 };
+        let limit = if args.len() > 2 {
+            args[2].as_i64().unwrap_or(0) as usize
+        } else {
+            0
+        };
         match compile_python_regex(&pattern) {
             Ok(re) => {
                 let parts: Vec<PyObjectRef> = if limit > 0 {
-                    re.splitn(&string, limit).filter_map(|r| r.ok()).map(|s| py_str(s)).collect()
+                    re.splitn(&string, limit)
+                        .filter_map(|r| r.ok())
+                        .map(|s| py_str(s))
+                        .collect()
                 } else {
-                    re.split(&string).filter_map(|r| r.ok()).map(|s| py_str(s)).collect()
+                    re.split(&string)
+                        .filter_map(|r| r.ok())
+                        .map(|s| py_str(s))
+                        .collect()
                 };
                 Ok(py_list(parts))
             }
@@ -744,15 +930,17 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
             return Ok(args[0].clone());
         }
         let pattern = args[0].str();
-        let flags = if args.len() > 1 { args[1].as_i64().unwrap_or(0) as i32 } else { 0 };
+        let flags = if args.len() > 1 {
+            args[1].as_i64().unwrap_or(0) as i32
+        } else {
+            0
+        };
         match compile_python_regex_flags(&pattern, flags) {
-            Ok(re) => {
-                Ok(PyObjectRef::new(PyObject::CompiledRegex {
-                    regex: Box::new(re),
-                    pattern: pattern.to_string(),
-                    flags,
-                }))
-            }
+            Ok(re) => Ok(PyObjectRef::new(PyObject::CompiledRegex {
+                regex: Box::new(re),
+                pattern: pattern.to_string(),
+                flags,
+            })),
             Err(e) => Err(PyError::ValueError(format!("invalid regex: {}", e))),
         }
     });
@@ -766,7 +954,8 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         let string = args[1].str();
         match compile_python_regex(&pattern) {
             Ok(re) => {
-                let matches: Vec<PyObjectRef> = re.captures_iter(&string)
+                let matches: Vec<PyObjectRef> = re
+                    .captures_iter(&string)
                     .filter_map(|r| r.ok())
                     .map(|c| make_match_object(&re, Some(c)))
                     .collect();
@@ -805,7 +994,13 @@ pub fn create_threading_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! thr_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
 
@@ -836,11 +1031,19 @@ pub fn create_threading_dict() -> HashMap<String, PyObjectRef> {
         // it if present, falling back to positional args only for whichever
         // of the two a kwarg didn't already supply.
         let (positional, kwargs) = match args.last() {
-            Some(last) if matches!(&*last.borrow(), PyObject::Dict(_)) => (&args[..args.len() - 1], Some(last.clone())),
+            Some(last) if matches!(&*last.borrow(), PyObject::Dict(_)) => {
+                (&args[..args.len() - 1], Some(last.clone()))
+            }
             _ => (args, None),
         };
         let kwarg = |name: &str| -> Option<PyObjectRef> {
-            kwargs.as_ref().and_then(|d| if let PyObject::Dict(d) = &*d.borrow() { d.get(&py_str(name)).ok().flatten() } else { None })
+            kwargs.as_ref().and_then(|d| {
+                if let PyObject::Dict(d) = &*d.borrow() {
+                    d.get(&py_str(name)).ok().flatten()
+                } else {
+                    None
+                }
+            })
         };
         let target = kwarg("target")
             .or_else(|| positional.get(1).cloned())
@@ -903,26 +1106,18 @@ pub fn create_threading_dict() -> HashMap<String, PyObjectRef> {
         Ok(PyObjectRef::new(PyObject::Event(inner)))
     });
 
-    thr_func!("current_thread", |_| {
-        Ok(py_str("MainThread"))
-    });
+    thr_func!("current_thread", |_| { Ok(py_str("MainThread")) });
 
-    thr_func!("active_count", |_| {
-        Ok(py_int(1))
-    });
+    thr_func!("active_count", |_| { Ok(py_int(1)) });
 
     // Real CPython returns a unique-per-thread integer. This interpreter
     // only ever runs Python code on one thread at a time (see the `local()`
     // comment above), so a stable constant is correct and sufficient — real
     // code (e.g. asgiref's `_CVar`/`Local`) uses this purely to tag/compare
     // "am I still on the thread that stored this", never as a real handle.
-    thr_func!("get_ident", |_| {
-        Ok(py_int(1))
-    });
+    thr_func!("get_ident", |_| { Ok(py_int(1)) });
 
-    thr_func!("get_native_id", |_| {
-        Ok(py_int(1))
-    });
+    thr_func!("get_native_id", |_| { Ok(py_int(1)) });
 
     d
 }
@@ -989,7 +1184,13 @@ pub fn create_copy_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! copy_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
 
@@ -1002,7 +1203,9 @@ pub fn create_copy_dict() -> HashMap<String, PyObjectRef> {
         match &*borrowed {
             PyObject::None => Ok(py_none()),
             PyObject::Bool(b) => Ok(py_bool(*b)),
-            PyObject::Int(_) | PyObject::Float(_) | PyObject::Str(_) | PyObject::Bytes(_) => Ok(obj.clone()),
+            PyObject::Int(_) | PyObject::Float(_) | PyObject::Str(_) | PyObject::Bytes(_) => {
+                Ok(obj.clone())
+            }
             PyObject::Tuple(items) => {
                 let mut new_items = Vec::with_capacity(items.len());
                 for item in items {
@@ -1011,16 +1214,19 @@ pub fn create_copy_dict() -> HashMap<String, PyObjectRef> {
                 Ok(PyObjectRef::imm(PyObject::Tuple(new_items)))
             }
             PyObject::List(items) => {
-                let new_items: Vec<PyObjectRef> = items.iter().map(|i| {
-                    // Shallow copy: clone references
-                    let b = i.borrow();
-                    match &*b {
-                        PyObject::None => py_none(),
-                        PyObject::Bool(b) => py_bool(*b),
-                        PyObject::Int(_) | PyObject::Float(_) | PyObject::Str(_) => i.clone(),
-                        _ => i.clone(),
-                    }
-                }).collect();
+                let new_items: Vec<PyObjectRef> = items
+                    .iter()
+                    .map(|i| {
+                        // Shallow copy: clone references
+                        let b = i.borrow();
+                        match &*b {
+                            PyObject::None => py_none(),
+                            PyObject::Bool(b) => py_bool(*b),
+                            PyObject::Int(_) | PyObject::Float(_) | PyObject::Str(_) => i.clone(),
+                            _ => i.clone(),
+                        }
+                    })
+                    .collect();
                 Ok(py_list(new_items))
             }
             PyObject::Dict(dict) => {
@@ -1037,9 +1243,7 @@ pub fn create_copy_dict() -> HashMap<String, PyObjectRef> {
                 }
                 Ok(PyObjectRef::new(PyObject::Set(new_set)))
             }
-            PyObject::Deque { data, maxlen } => {
-                Ok(py_deque(data.clone(), *maxlen))
-            }
+            PyObject::Deque { data, maxlen } => Ok(py_deque(data.clone(), *maxlen)),
             // A class transparently subclassing a native container
             // (`class NodeList(list): pass`, real CPython's own
             // `xml.dom.minicompat.NodeList`) with no explicit `__copy__`
@@ -1058,19 +1262,26 @@ pub fn create_copy_dict() -> HashMap<String, PyObjectRef> {
                     PyObject::Tuple(items) => PyObjectRef::imm(PyObject::Tuple(items.clone())),
                     PyObject::Dict(d) => {
                         let mut nd = PyDict::new();
-                        for (k, v) in d.items() { let _ = nd.set(k, v); }
+                        for (k, v) in d.items() {
+                            let _ = nd.set(k, v);
+                        }
                         PyObjectRef::new(PyObject::Dict(Box::new(nd)))
                     }
                     PyObject::Set(s) => {
                         let mut ns = PySet::new();
-                        for item in s.to_vec() { let _ = ns.add(item); }
+                        for item in s.to_vec() {
+                            let _ = ns.add(item);
+                        }
                         PyObjectRef::new(PyObject::Set(ns))
                     }
                     other => PyObjectRef::new(other.clone()),
                 };
                 let mut new_dict = dict.clone();
                 new_dict.insert(crate::object::NATIVE_BACKING_KEY.to_string(), new_native);
-                Ok(PyObjectRef::new(PyObject::Instance { typ: typ.clone(), dict: new_dict }))
+                Ok(PyObjectRef::new(PyObject::Instance {
+                    typ: typ.clone(),
+                    dict: new_dict,
+                }))
             }
             _ => {
                 // For instances and custom types, try __copy__
@@ -1097,7 +1308,9 @@ pub fn create_copy_dict() -> HashMap<String, PyObjectRef> {
     // just without a real `__replace__` slot to dispatch through.
     copy_func!("replace", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("replace() missing required argument: 'obj'"));
+            return Err(PyError::type_error(
+                "replace() missing required argument: 'obj'",
+            ));
         }
         let obj = args[0].clone();
         let changes: Vec<(PyObjectRef, PyObjectRef)> = if args.len() > 1 {
@@ -1108,16 +1321,21 @@ pub fn create_copy_dict() -> HashMap<String, PyObjectRef> {
         } else {
             vec![]
         };
-        let changes_kv: Vec<(String, PyObjectRef)> = changes.iter().map(|(k, v)| (k.str(), v.clone())).collect();
+        let changes_kv: Vec<(String, PyObjectRef)> =
+            changes.iter().map(|(k, v)| (k.str(), v.clone())).collect();
 
         // A namedtuple instance's own dict already holds `_fields` alongside
         // its field values (see `nt_replace`'s own construction), so the
         // generic Instance-merge path below reconstructs a namedtuple
         // correctly too — no need for a separate `_replace`-dispatch branch.
-        let instance_parts: Option<(PyObjectRef, Vec<(String, PyObjectRef)>)> = match &*obj.borrow() {
-            PyObject::Instance { typ, dict } => {
-                Some((typ.clone(), dict.iter().map(|(k, v)| (k.to_string(), v.clone())).collect()))
-            }
+        let instance_parts: Option<(PyObjectRef, Vec<(String, PyObjectRef)>)> = match &*obj.borrow()
+        {
+            PyObject::Instance { typ, dict } => Some((
+                typ.clone(),
+                dict.iter()
+                    .map(|(k, v)| (k.to_string(), v.clone()))
+                    .collect(),
+            )),
             _ => None,
         };
         match instance_parts {
@@ -1146,9 +1364,15 @@ pub fn create_copy_dict() -> HashMap<String, PyObjectRef> {
                 for (k, v) in new_dict {
                     attrs.insert(k, v);
                 }
-                Ok(PyObjectRef::new(PyObject::Instance { typ: cls, dict: attrs }))
+                Ok(PyObjectRef::new(PyObject::Instance {
+                    typ: cls,
+                    dict: attrs,
+                }))
             }
-            None => Err(PyError::type_error(format!("replace() does not support {} objects", obj.borrow().type_name()))),
+            None => Err(PyError::type_error(format!(
+                "replace() does not support {} objects",
+                obj.borrow().type_name()
+            ))),
         }
     });
 
@@ -1157,7 +1381,11 @@ pub fn create_copy_dict() -> HashMap<String, PyObjectRef> {
             return Err(PyError::type_error("deepcopy() missing required argument"));
         }
         let obj = &args[0];
-        let memo = if args.len() > 1 { args[1].clone() } else { py_dict() };
+        let memo = if args.len() > 1 {
+            args[1].clone()
+        } else {
+            py_dict()
+        };
         // Delegate entirely to `deepcopy_one` — this used to duplicate its
         // whole List/Tuple/Dict/`__deepcopy__` dispatch inline, with the
         // SAME "memoize after recursing instead of before" bug fixed there
@@ -1172,18 +1400,29 @@ pub fn create_copy_dict() -> HashMap<String, PyObjectRef> {
     });
 
     // Error class
-    d.insert_str("Error", PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "Error".to_string(),
-        func: |args| {
-            let msg = if !args.is_empty() { args[0].str() } else { "copy error".to_string() };
-            Err(PyError::Exception(msg, py_none()))
-        },
-    }));
+    d.insert_str(
+        "Error",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "Error".to_string(),
+            func: |args| {
+                let msg = if !args.is_empty() {
+                    args[0].str()
+                } else {
+                    "copy error".to_string()
+                };
+                Err(PyError::Exception(msg, py_none()))
+            },
+        }),
+    );
 
     // `copy.__all__` — same fix, same reason, as `operator.__all__`
     // (`core.rs`) — missing entirely, breaking the module's own
     // `test___all__` sanity check at collection time.
-    let all_names: Vec<PyObjectRef> = d.keys().filter(|k| !k.starts_with('_')).map(|k| py_str(k)).collect();
+    let all_names: Vec<PyObjectRef> = d
+        .keys()
+        .filter(|k| !k.starts_with('_'))
+        .map(|k| py_str(k))
+        .collect();
     d.insert_str("__all__", py_list(all_names));
 
     d
@@ -1193,7 +1432,13 @@ pub fn create_weakref_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! wr_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
 
@@ -1232,7 +1477,9 @@ pub fn create_weakref_dict() -> HashMap<String, PyObjectRef> {
     // rather than a crash.
     wr_func!("finalize", |args| {
         if args.len() < 2 {
-            return Err(PyError::type_error("finalize() requires at least 2 arguments (obj, func)"));
+            return Err(PyError::type_error(
+                "finalize() requires at least 2 arguments (obj, func)",
+            ));
         }
         let func = args[1].clone();
         let extra_args: Vec<PyObjectRef> = args[2..].to_vec();
@@ -1242,12 +1489,19 @@ pub fn create_weakref_dict() -> HashMap<String, PyObjectRef> {
                 // self_obj holds (func, extra_args) packed as a tuple
                 if let PyObject::Tuple(items) = &*args[0].borrow() {
                     let func = items[0].clone();
-                    let extra = if let PyObject::Tuple(a) = &*items[1].borrow() { a.clone() } else { vec![] };
+                    let extra = if let PyObject::Tuple(a) = &*items[1].borrow() {
+                        a.clone()
+                    } else {
+                        vec![]
+                    };
                     return call_function(&func, extra);
                 }
                 Ok(py_none())
             },
-            self_obj: PyObjectRef::imm(PyObject::Tuple(vec![func, PyObjectRef::imm(PyObject::Tuple(extra_args))])),
+            self_obj: PyObjectRef::imm(PyObject::Tuple(vec![
+                func,
+                PyObjectRef::imm(PyObject::Tuple(extra_args)),
+            ])),
         }))
     });
 
@@ -1255,7 +1509,9 @@ pub fn create_weakref_dict() -> HashMap<String, PyObjectRef> {
     // simplification as ref() above (no real weak semantics, just holds on).
     wr_func!("WeakMethod", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("WeakMethod() requires at least 1 argument"));
+            return Err(PyError::type_error(
+                "WeakMethod() requires at least 1 argument",
+            ));
         }
         let obj = args[0].clone();
         Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
@@ -1280,7 +1536,13 @@ pub fn create_collections_abc_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! abc_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
 
@@ -1309,14 +1571,20 @@ pub fn create_collections_abc_dict() -> HashMap<String, PyObjectRef> {
     // don't crash — nothing at runtime actually inspects these values.
     fn generic_alias_placeholder(repr: String) -> PyObjectRef {
         let mut type_dict = HashMap::new();
-        type_dict.insert_str("__class_getitem__", PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "__class_getitem__".to_string(),
-            func: |_args| Ok(generic_alias_placeholder("...".to_string())),
-        }));
-        type_dict.insert_str("__or__", PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "__or__".to_string(),
-            func: |_args| Ok(generic_alias_placeholder("...".to_string())),
-        }));
+        type_dict.insert_str(
+            "__class_getitem__",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__class_getitem__".to_string(),
+                func: |_args| Ok(generic_alias_placeholder("...".to_string())),
+            }),
+        );
+        type_dict.insert_str(
+            "__or__",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__or__".to_string(),
+                func: |_args| Ok(generic_alias_placeholder("...".to_string())),
+            }),
+        );
         PyObjectRef::new(PyObject::Instance {
             typ: PyObjectRef::new(PyObject::Type {
                 name: repr,
@@ -1333,42 +1601,60 @@ pub fn create_collections_abc_dict() -> HashMap<String, PyObjectRef> {
             PyObjectRef::new(PyObject::Type {
                 name: $name.to_string(),
                 dict: Box::new(str_map_to_typedict(HashMap::from([
-                    ("__class_getitem__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
-                        name: "__class_getitem__".to_string(),
-                        func: |args| {
-                            if args.len() < 2 { return Err(PyError::type_error("__class_getitem__ requires 2 args")); }
-                            Ok(generic_alias_placeholder(format!("{}[{}]", args[0].str(), args[1].str())))
-                        },
-                    })),
+                    (
+                        "__class_getitem__".to_string(),
+                        PyObjectRef::new(PyObject::BuiltinFunction {
+                            name: "__class_getitem__".to_string(),
+                            func: |args| {
+                                if args.len() < 2 {
+                                    return Err(PyError::type_error(
+                                        "__class_getitem__ requires 2 args",
+                                    ));
+                                }
+                                Ok(generic_alias_placeholder(format!(
+                                    "{}[{}]",
+                                    args[0].str(),
+                                    args[1].str()
+                                )))
+                            },
+                        }),
+                    ),
                     // `isinstance(x, Hashable)` etc. via a method-presence
                     // check, like CPython's __subclasshook__.
-                    ("__instancecheck__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
-                        name: "__instancecheck__".to_string(),
-                        func: |args| {
-                            if args.len() < 2 { return Err(PyError::type_error("__instancecheck__ requires 2 args")); }
-                            let cls_name = match &*args[0].borrow() {
-                                PyObject::Type { name, .. } => name.clone(),
-                                _ => String::new(),
-                            };
-                            let required: &[&str] = match cls_name.as_str() {
-                                "Hashable" => &["__hash__"],
-                                "Iterable" => &["__iter__"],
-                                "Sized" => &["__len__"],
-                                _ => &[],
-                            };
-                            if required.is_empty() {
-                                return Ok(crate::object::py_not_implemented());
-                            }
-                            let typ = crate::object::builtin_type_of(&[args[1].clone()])?;
-                            for m in required {
-                                match crate::object::lookup_dunder_via_mro(&typ, m) {
-                                    Some(f) if !matches!(&*f.borrow(), PyObject::None) => {}
-                                    _ => return Ok(py_bool(false)),
+                    (
+                        "__instancecheck__".to_string(),
+                        PyObjectRef::new(PyObject::BuiltinFunction {
+                            name: "__instancecheck__".to_string(),
+                            func: |args| {
+                                if args.len() < 2 {
+                                    return Err(PyError::type_error(
+                                        "__instancecheck__ requires 2 args",
+                                    ));
                                 }
-                            }
-                            Ok(py_bool(true))
-                        },
-                    })),
+                                let cls_name = match &*args[0].borrow() {
+                                    PyObject::Type { name, .. } => name.clone(),
+                                    _ => String::new(),
+                                };
+                                let required: &[&str] = match cls_name.as_str() {
+                                    "Hashable" => &["__hash__"],
+                                    "Iterable" => &["__iter__"],
+                                    "Sized" => &["__len__"],
+                                    _ => &[],
+                                };
+                                if required.is_empty() {
+                                    return Ok(crate::object::py_not_implemented());
+                                }
+                                let typ = crate::object::builtin_type_of(&[args[1].clone()])?;
+                                for m in required {
+                                    match crate::object::lookup_dunder_via_mro(&typ, m) {
+                                        Some(f) if !matches!(&*f.borrow(), PyObject::None) => {}
+                                        _ => return Ok(py_bool(false)),
+                                    }
+                                }
+                                Ok(py_bool(true))
+                            },
+                        }),
+                    ),
                 ]))),
                 bases: vec![],
                 mro: vec![],
@@ -1408,49 +1694,86 @@ fn build_simple_namespace_type() -> PyObjectRef {
     let mut type_dict: HashMap<String, PyObjectRef> = HashMap::new();
     macro_rules! bf {
         ($name:expr, $f:expr) => {
-            PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $f })
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: $name.to_string(),
+                func: $f,
+            })
         };
     }
     // Real CPython's `SimpleNamespace.__repr__` lists attributes SORTED by
     // name (`namespace(x=1, y=2)`, regardless of assignment order) —
     // confirmed against real Python behavior, not guessed.
-    type_dict.insert_str("__repr__", bf!("__repr__", |args| {
-        if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
-            let mut items: Vec<(String, PyObjectRef)> = dict.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
-            items.sort_by(|a, b| a.0.cmp(&b.0));
-            let body = items.iter().map(|(k, v)| format!("{}={}", k, v.repr())).collect::<Vec<_>>().join(", ");
-            Ok(py_str(&format!("namespace({})", body)))
-        } else {
-            Ok(py_str("namespace()"))
-        }
-    }));
-    // Real CPython compares two SimpleNamespaces by their `__dict__`s.
-    type_dict.insert_str("__eq__", bf!("__eq__", |args| {
-        if args.len() < 2 { return Ok(py_bool(false)); }
-        let a = if let PyObject::Instance { dict, .. } = &*args[0].borrow() { Some(dict.clone()) } else { None };
-        let b = if let PyObject::Instance { dict, .. } = &*args[1].borrow() { Some(dict.clone()) } else { None };
-        match (a, b) {
-            (Some(a), Some(b)) => {
-                if a.len() != b.len() { return Ok(py_bool(false)); }
-                for (k, v) in a.iter() {
-                    match b.get(k) {
-                        Some(bv) if v.equals(bv)? => {}
-                        _ => return Ok(py_bool(false)),
-                    }
-                }
-                Ok(py_bool(true))
+    type_dict.insert_str(
+        "__repr__",
+        bf!("__repr__", |args| {
+            if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+                let mut items: Vec<(String, PyObjectRef)> = dict
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.clone()))
+                    .collect();
+                items.sort_by(|a, b| a.0.cmp(&b.0));
+                let body = items
+                    .iter()
+                    .map(|(k, v)| format!("{}={}", k, v.repr()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                Ok(py_str(&format!("namespace({})", body)))
+            } else {
+                Ok(py_str("namespace()"))
             }
-            _ => Ok(py_bool(false)),
-        }
-    }));
-    PyObjectRef::new(PyObject::Type { name: "types.SimpleNamespace".to_string(), dict: Box::new(str_map_to_typedict(type_dict)), bases: vec![], mro: vec![] })
+        }),
+    );
+    // Real CPython compares two SimpleNamespaces by their `__dict__`s.
+    type_dict.insert_str(
+        "__eq__",
+        bf!("__eq__", |args| {
+            if args.len() < 2 {
+                return Ok(py_bool(false));
+            }
+            let a = if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+                Some(dict.clone())
+            } else {
+                None
+            };
+            let b = if let PyObject::Instance { dict, .. } = &*args[1].borrow() {
+                Some(dict.clone())
+            } else {
+                None
+            };
+            match (a, b) {
+                (Some(a), Some(b)) => {
+                    if a.len() != b.len() {
+                        return Ok(py_bool(false));
+                    }
+                    for (k, v) in a.iter() {
+                        match b.get(k) {
+                            Some(bv) if v.equals(bv)? => {}
+                            _ => return Ok(py_bool(false)),
+                        }
+                    }
+                    Ok(py_bool(true))
+                }
+                _ => Ok(py_bool(false)),
+            }
+        }),
+    );
+    PyObjectRef::new(PyObject::Type {
+        name: "types.SimpleNamespace".to_string(),
+        dict: Box::new(str_map_to_typedict(type_dict)),
+        bases: vec![],
+        mro: vec![],
+    })
 }
 
 fn get_simple_namespace_type() -> PyObjectRef {
     let existing = SIMPLE_NAMESPACE_TYPE.with(|c| c.borrow().clone());
-    if let Some(t) = existing { return t; }
+    if let Some(t) = existing {
+        return t;
+    }
     let typ = build_simple_namespace_type();
-    SIMPLE_NAMESPACE_TYPE.with(|c| { *c.borrow_mut() = Some(typ.clone()); });
+    SIMPLE_NAMESPACE_TYPE.with(|c| {
+        *c.borrow_mut() = Some(typ.clone());
+    });
     typ
 }
 
@@ -1485,7 +1808,10 @@ pub(crate) fn make_union(parts: Vec<PyObjectRef>) -> PyObjectRef {
     for part in parts {
         let flattened = union_args(&part).unwrap_or_else(|| vec![part]);
         for m in flattened {
-            if !members.iter().any(|existing| existing.is(&m) || existing.equals(&m).unwrap_or(false)) {
+            if !members
+                .iter()
+                .any(|existing| existing.is(&m) || existing.equals(&m).unwrap_or(false))
+            {
                 members.push(m);
             }
         }
@@ -1495,7 +1821,10 @@ pub(crate) fn make_union(parts: Vec<PyObjectRef>) -> PyObjectRef {
     }
     let mut inst_dict = AttrMap::new();
     inst_dict.insert_str("__args__", py_tuple(members));
-    PyObjectRef::new(PyObject::Instance { typ: get_union_type(), dict: inst_dict })
+    PyObjectRef::new(PyObject::Instance {
+        typ: get_union_type(),
+        dict: inst_dict,
+    })
 }
 
 fn union_member_repr(m: &PyObjectRef) -> String {
@@ -1510,113 +1839,174 @@ fn build_union_type() -> PyObjectRef {
     let mut type_dict: HashMap<String, PyObjectRef> = HashMap::new();
     macro_rules! bf {
         ($name:expr, $f:expr) => {
-            PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $f })
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: $name.to_string(),
+                func: $f,
+            })
         };
     }
-    type_dict.insert("__repr__".to_string(), bf!("__repr__", |args| {
-        if args.is_empty() { return Err(PyError::type_error("__repr__ missing argument")); }
-        let members = union_args(&args[0]).unwrap_or_default();
-        let parts: Vec<String> = members.iter().map(union_member_repr).collect();
-        Ok(py_str(&parts.join(" | ")))
-    }));
+    type_dict.insert(
+        "__repr__".to_string(),
+        bf!("__repr__", |args| {
+            if args.is_empty() {
+                return Err(PyError::type_error("__repr__ missing argument"));
+            }
+            let members = union_args(&args[0]).unwrap_or_default();
+            let parts: Vec<String> = members.iter().map(union_member_repr).collect();
+            Ok(py_str(&parts.join(" | ")))
+        }),
+    );
     // Order-independent membership comparison (real CPython: `int | str ==
     // str | int`) — NOT a positional/sequence comparison.
-    type_dict.insert("__eq__".to_string(), bf!("__eq__", |args| {
-        if args.len() < 2 { return Ok(py_not_implemented()); }
-        let a = match union_args(&args[0]) { Some(a) => a, None => return Ok(py_not_implemented()) };
-        let b = match union_args(&args[1]) { Some(b) => b, None => return Ok(py_not_implemented()) };
-        if a.len() != b.len() { return Ok(py_bool(false)); }
-        for x in &a {
-            if !b.iter().any(|y| x.equals(y).unwrap_or(false)) {
+    type_dict.insert(
+        "__eq__".to_string(),
+        bf!("__eq__", |args| {
+            if args.len() < 2 {
+                return Ok(py_not_implemented());
+            }
+            let a = match union_args(&args[0]) {
+                Some(a) => a,
+                None => return Ok(py_not_implemented()),
+            };
+            let b = match union_args(&args[1]) {
+                Some(b) => b,
+                None => return Ok(py_not_implemented()),
+            };
+            if a.len() != b.len() {
                 return Ok(py_bool(false));
             }
-        }
-        Ok(py_bool(true))
-    }));
+            for x in &a {
+                if !b.iter().any(|y| x.equals(y).unwrap_or(false)) {
+                    return Ok(py_bool(false));
+                }
+            }
+            Ok(py_bool(true))
+        }),
+    );
     // Order-independent hash (XOR, matching the order-independent __eq__
     // above) so a union is usable as a dict key/set member consistently
     // regardless of the order its members were written in.
-    type_dict.insert("__hash__".to_string(), bf!("__hash__", |args| {
-        if args.is_empty() { return Err(PyError::type_error("__hash__ missing argument")); }
-        let members = union_args(&args[0]).unwrap_or_default();
-        let mut h: i64 = 0;
-        for m in &members { h ^= m.hash()? as i64; }
-        Ok(py_int(h))
-    }));
-    type_dict.insert("__or__".to_string(), bf!("__or__", |args| {
-        if args.len() < 2 { return Err(PyError::type_error("__or__() missing argument")); }
-        Ok(make_union(vec![args[0].clone(), args[1].clone()]))
-    }));
-    type_dict.insert("__ror__".to_string(), bf!("__ror__", |args| {
-        if args.len() < 2 { return Err(PyError::type_error("__ror__() missing argument")); }
-        Ok(make_union(vec![args[1].clone(), args[0].clone()]))
-    }));
-    PyObjectRef::new(PyObject::Type { name: "types.UnionType".to_string(), dict: Box::new(str_map_to_typedict(type_dict)), bases: vec![], mro: vec![] })
+    type_dict.insert(
+        "__hash__".to_string(),
+        bf!("__hash__", |args| {
+            if args.is_empty() {
+                return Err(PyError::type_error("__hash__ missing argument"));
+            }
+            let members = union_args(&args[0]).unwrap_or_default();
+            let mut h: i64 = 0;
+            for m in &members {
+                h ^= m.hash()? as i64;
+            }
+            Ok(py_int(h))
+        }),
+    );
+    type_dict.insert(
+        "__or__".to_string(),
+        bf!("__or__", |args| {
+            if args.len() < 2 {
+                return Err(PyError::type_error("__or__() missing argument"));
+            }
+            Ok(make_union(vec![args[0].clone(), args[1].clone()]))
+        }),
+    );
+    type_dict.insert(
+        "__ror__".to_string(),
+        bf!("__ror__", |args| {
+            if args.len() < 2 {
+                return Err(PyError::type_error("__ror__() missing argument"));
+            }
+            Ok(make_union(vec![args[1].clone(), args[0].clone()]))
+        }),
+    );
+    PyObjectRef::new(PyObject::Type {
+        name: "types.UnionType".to_string(),
+        dict: Box::new(str_map_to_typedict(type_dict)),
+        bases: vec![],
+        mro: vec![],
+    })
 }
 
 pub(crate) fn get_union_type() -> PyObjectRef {
     let existing = UNION_TYPE.with(|c| c.borrow().clone());
-    if let Some(t) = existing { return t; }
+    if let Some(t) = existing {
+        return t;
+    }
     let typ = build_union_type();
-    UNION_TYPE.with(|c| { *c.borrow_mut() = Some(typ.clone()); });
+    UNION_TYPE.with(|c| {
+        *c.borrow_mut() = Some(typ.clone());
+    });
     typ
 }
 
-    // `types.GenericAlias` — real generic-alias instances for `list[int]`,
-    // `dict[str, str]` etc. Previously `__class_getitem__` returned a bare
-    // TUPLE `(cls, item)` and `types.GenericAlias` was a placeholder string,
-    // so `dict[str, str] | None` (real code: configparser.py's class-level
-    // annotations) raised "unsupported operand types for |". An alias is an
-    // Instance of a shared GenericAlias type holding origin + args, with the
-    // union/equality/repr/attribute surface real code touches.
-    thread_local! {
-        static GENERIC_ALIAS_TYPE: std::cell::RefCell<Option<PyObjectRef>> = std::cell::RefCell::new(None);
-    }
+// `types.GenericAlias` — real generic-alias instances for `list[int]`,
+// `dict[str, str]` etc. Previously `__class_getitem__` returned a bare
+// TUPLE `(cls, item)` and `types.GenericAlias` was a placeholder string,
+// so `dict[str, str] | None` (real code: configparser.py's class-level
+// annotations) raised "unsupported operand types for |". An alias is an
+// Instance of a shared GenericAlias type holding origin + args, with the
+// union/equality/repr/attribute surface real code touches.
+thread_local! {
+    static GENERIC_ALIAS_TYPE: std::cell::RefCell<Option<PyObjectRef>> = std::cell::RefCell::new(None);
+}
 
-    fn generic_alias_origin(inst: &PyObjectRef) -> Option<PyObjectRef> {
-        let obj = inst.borrow();
-        if let PyObject::Instance { dict, .. } = &*obj {
-            dict.get_str("__origin__").cloned()
-        } else {
-            None
-        }
+fn generic_alias_origin(inst: &PyObjectRef) -> Option<PyObjectRef> {
+    let obj = inst.borrow();
+    if let PyObject::Instance { dict, .. } = &*obj {
+        dict.get_str("__origin__").cloned()
+    } else {
+        None
     }
+}
 
-    fn generic_alias_args(inst: &PyObjectRef) -> Vec<PyObjectRef> {
-        let obj = inst.borrow();
-        if let PyObject::Instance { dict, .. } = &*obj {
-            if let Some(a) = dict.get_str("__args__") {
-                if let PyObject::Tuple(t) = &*a.borrow() {
-                    return t.clone();
-                }
+fn generic_alias_args(inst: &PyObjectRef) -> Vec<PyObjectRef> {
+    let obj = inst.borrow();
+    if let PyObject::Instance { dict, .. } = &*obj {
+        if let Some(a) = dict.get_str("__args__") {
+            if let PyObject::Tuple(t) = &*a.borrow() {
+                return t.clone();
             }
         }
-        vec![]
     }
+    vec![]
+}
 
-    fn build_generic_alias_type() -> PyObjectRef {
-        let mut td: HashMap<String, PyObjectRef> = HashMap::new();
-        // __or__ / __ror__ (PEP 604: `list[int] | None` / `dict[str,str] | None`)
-        // (BuiltinFunction funcs are fn pointers, so no captured closures.)
-        td.insert_str("__or__", PyObjectRef::new(PyObject::BuiltinFunction {
+fn build_generic_alias_type() -> PyObjectRef {
+    let mut td: HashMap<String, PyObjectRef> = HashMap::new();
+    // __or__ / __ror__ (PEP 604: `list[int] | None` / `dict[str,str] | None`)
+    // (BuiltinFunction funcs are fn pointers, so no captured closures.)
+    td.insert_str(
+        "__or__",
+        PyObjectRef::new(PyObject::BuiltinFunction {
             name: "__or__".to_string(),
             func: |args: &[PyObjectRef]| {
-                if args.len() < 2 { return Err(PyError::type_error("missing argument")); }
+                if args.len() < 2 {
+                    return Err(PyError::type_error("missing argument"));
+                }
                 Ok(make_union(vec![args[0].clone(), args[1].clone()]))
             },
-        }));
-        td.insert_str("__ror__", PyObjectRef::new(PyObject::BuiltinFunction {
+        }),
+    );
+    td.insert_str(
+        "__ror__",
+        PyObjectRef::new(PyObject::BuiltinFunction {
             name: "__ror__".to_string(),
             func: |args: &[PyObjectRef]| {
-                if args.len() < 2 { return Err(PyError::type_error("missing argument")); }
+                if args.len() < 2 {
+                    return Err(PyError::type_error("missing argument"));
+                }
                 Ok(make_union(vec![args[1].clone(), args[0].clone()]))
             },
-        }));
-        // __getitem__ (nested generics: `list[int][str]` — rare, but real)
-        td.insert_str("__getitem__", PyObjectRef::new(PyObject::BuiltinFunction {
+        }),
+    );
+    // __getitem__ (nested generics: `list[int][str]` — rare, but real)
+    td.insert_str(
+        "__getitem__",
+        PyObjectRef::new(PyObject::BuiltinFunction {
             name: "__getitem__".to_string(),
             func: |args: &[PyObjectRef]| {
-                if args.len() < 2 { return Err(PyError::type_error("missing argument")); }
+                if args.len() < 2 {
+                    return Err(PyError::type_error("missing argument"));
+                }
                 let origin = generic_alias_origin(&args[0]);
                 let base = generic_alias_args(&args[0]);
                 let mut new_args = base;
@@ -1626,11 +2016,16 @@ pub(crate) fn get_union_type() -> PyObjectRef {
                     None => Err(PyError::type_error("GenericAlias has no origin")),
                 }
             },
-        }));
-        td.insert_str("__eq__", PyObjectRef::new(PyObject::BuiltinFunction {
+        }),
+    );
+    td.insert_str(
+        "__eq__",
+        PyObjectRef::new(PyObject::BuiltinFunction {
             name: "__eq__".to_string(),
             func: |args: &[PyObjectRef]| {
-                if args.len() < 2 { return Ok(py_bool(false)); }
+                if args.len() < 2 {
+                    return Ok(py_bool(false));
+                }
                 let other = &args[1];
                 let ob = other.borrow();
                 if let PyObject::Instance { .. } = &*ob {
@@ -1644,89 +2039,145 @@ pub(crate) fn get_union_type() -> PyObjectRef {
                         _ => false,
                     };
                     let same_args = my_args.len() == oa.len()
-                        && my_args.iter().zip(oa.iter()).all(|(x, y)| x.is(y) || x.equals(y).unwrap_or(false));
+                        && my_args
+                            .iter()
+                            .zip(oa.iter())
+                            .all(|(x, y)| x.is(y) || x.equals(y).unwrap_or(false));
                     return Ok(py_bool(same_origin && same_args));
                 }
                 Ok(py_bool(false))
             },
-        }));
-        td.insert_str("__hash__", PyObjectRef::new(PyObject::BuiltinFunction {
+        }),
+    );
+    td.insert_str(
+        "__hash__",
+        PyObjectRef::new(PyObject::BuiltinFunction {
             name: "__hash__".to_string(),
             func: |args: &[PyObjectRef]| {
-                if args.is_empty() { return Err(PyError::type_error("missing self")); }
+                if args.is_empty() {
+                    return Err(PyError::type_error("missing self"));
+                }
                 Ok(py_int(args[0].hash()? as i64))
             },
-        }));
-        td.insert_str("__copy__", PyObjectRef::new(PyObject::BuiltinFunction {
+        }),
+    );
+    td.insert_str(
+        "__copy__",
+        PyObjectRef::new(PyObject::BuiltinFunction {
             name: "__copy__".to_string(),
             func: |args: &[PyObjectRef]| Ok(args[0].clone()),
-        }));
-        td.insert_str("__origin__", PyObjectRef::new(PyObject::Property(Box::new(crate::object::PropertyData {
+        }),
+    );
+    td.insert_str(
+        "__origin__",
+        PyObjectRef::new(PyObject::Property(Box::new(crate::object::PropertyData {
             getter: Some(PyObjectRef::new(PyObject::BuiltinFunction {
                 name: "__origin__".to_string(),
                 func: |args: &[PyObjectRef]| {
-                    generic_alias_origin(args.first().ok_or_else(|| PyError::type_error("missing self"))?)
-                        .ok_or_else(|| PyError::type_error("GenericAlias has no origin"))
+                    generic_alias_origin(
+                        args.first()
+                            .ok_or_else(|| PyError::type_error("missing self"))?,
+                    )
+                    .ok_or_else(|| PyError::type_error("GenericAlias has no origin"))
                 },
             })),
-            setter: None, deleter: None, doc: None,
-        }))));
-        td.insert_str("__args__", PyObjectRef::new(PyObject::Property(Box::new(crate::object::PropertyData {
+            setter: None,
+            deleter: None,
+            doc: None,
+        }))),
+    );
+    td.insert_str(
+        "__args__",
+        PyObjectRef::new(PyObject::Property(Box::new(crate::object::PropertyData {
             getter: Some(PyObjectRef::new(PyObject::BuiltinFunction {
                 name: "__args__".to_string(),
                 func: |args: &[PyObjectRef]| {
-                    Ok(py_tuple(generic_alias_args(args.first().ok_or_else(|| PyError::type_error("missing self"))?)))
+                    Ok(py_tuple(generic_alias_args(
+                        args.first()
+                            .ok_or_else(|| PyError::type_error("missing self"))?,
+                    )))
                 },
             })),
-            setter: None, deleter: None, doc: None,
-        }))));
-        // repr: `list[int]`, `dict[str, str]`
-        td.insert_str("__repr__", PyObjectRef::new(PyObject::BuiltinFunction {
+            setter: None,
+            deleter: None,
+            doc: None,
+        }))),
+    );
+    // repr: `list[int]`, `dict[str, str]`
+    td.insert_str(
+        "__repr__",
+        PyObjectRef::new(PyObject::BuiltinFunction {
             name: "__repr__".to_string(),
             func: |args: &[PyObjectRef]| {
-                let origin = generic_alias_origin(args.first().ok_or_else(|| PyError::type_error("missing self"))?)
-                    .ok_or_else(|| PyError::type_error("GenericAlias has no origin"))?;
+                let origin = generic_alias_origin(
+                    args.first()
+                        .ok_or_else(|| PyError::type_error("missing self"))?,
+                )
+                .ok_or_else(|| PyError::type_error("GenericAlias has no origin"))?;
                 let origin_repr = match &*origin.borrow() {
                     PyObject::Type { name, .. } => name.clone(),
                     _ => origin.borrow().repr(),
                 };
-                let arg_reprs: Vec<String> = generic_alias_args(&args[0]).iter().map(|a| a.borrow().repr()).collect();
-                Ok(py_str(&format!("{}[{}]", origin_repr, arg_reprs.join(", "))))
+                let arg_reprs: Vec<String> = generic_alias_args(&args[0])
+                    .iter()
+                    .map(|a| a.borrow().repr())
+                    .collect();
+                Ok(py_str(&format!(
+                    "{}[{}]",
+                    origin_repr,
+                    arg_reprs.join(", ")
+                )))
             },
-        }));
-        PyObjectRef::new(PyObject::Type {
-            name: "types.GenericAlias".to_string(),
-            dict: Box::new(str_map_to_typedict(td)),
-            bases: vec![],
-            mro: vec![],
-        })
-    }
+        }),
+    );
+    PyObjectRef::new(PyObject::Type {
+        name: "types.GenericAlias".to_string(),
+        dict: Box::new(str_map_to_typedict(td)),
+        bases: vec![],
+        mro: vec![],
+    })
+}
 
-    pub(crate) fn get_generic_alias_type() -> PyObjectRef {
-        let existing = GENERIC_ALIAS_TYPE.with(|c| c.borrow().clone());
-        if let Some(t) = existing { return t; }
-        let typ = build_generic_alias_type();
-        GENERIC_ALIAS_TYPE.with(|c| { *c.borrow_mut() = Some(typ.clone()); });
-        typ
+pub(crate) fn get_generic_alias_type() -> PyObjectRef {
+    let existing = GENERIC_ALIAS_TYPE.with(|c| c.borrow().clone());
+    if let Some(t) = existing {
+        return t;
     }
+    let typ = build_generic_alias_type();
+    GENERIC_ALIAS_TYPE.with(|c| {
+        *c.borrow_mut() = Some(typ.clone());
+    });
+    typ
+}
 
-    pub(crate) fn make_generic_alias(origin: PyObjectRef, args: Vec<PyObjectRef>) -> PyObjectRef {
-        let mut inst_dict = AttrMap::new();
-        inst_dict.insert_str("__origin__", origin);
-        inst_dict.insert_str("__args__", py_tuple(args));
-        PyObjectRef::new(PyObject::Instance { typ: get_generic_alias_type(), dict: inst_dict })
-    }
+pub(crate) fn make_generic_alias(origin: PyObjectRef, args: Vec<PyObjectRef>) -> PyObjectRef {
+    let mut inst_dict = AttrMap::new();
+    inst_dict.insert_str("__origin__", origin);
+    inst_dict.insert_str("__args__", py_tuple(args));
+    PyObjectRef::new(PyObject::Instance {
+        typ: get_generic_alias_type(),
+        dict: inst_dict,
+    })
+}
 
 pub fn create_types_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! t_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
 
     t_func!("FunctionType", |args| {
-        if args.is_empty() { return Err(PyError::type_error("FunctionType() requires an argument")); }
+        if args.is_empty() {
+            return Err(PyError::type_error("FunctionType() requires an argument"));
+        }
         Ok(args[0].clone())
     });
     // Real `types.DynamicClassAttribute` differs from plain `property` only
@@ -1740,7 +2191,9 @@ pub fn create_types_dict() -> HashMap<String, PyObjectRef> {
     // otherwise hits any code merely importing it.
     t_func!("DynamicClassAttribute", builtin_property);
     t_func!("LambdaType", |args| {
-        if args.is_empty() { return Err(PyError::type_error("LambdaType() requires an argument")); }
+        if args.is_empty() {
+            return Err(PyError::type_error("LambdaType() requires an argument"));
+        }
         Ok(args[0].clone())
     });
     // Unlike `FunctionType`/`LambdaType` above (pure isinstance-check
@@ -1759,15 +2212,27 @@ pub fn create_types_dict() -> HashMap<String, PyObjectRef> {
     // instead). Fixed to build a real `PyObject::BoundMethod`, the same
     // representation this interpreter already uses for `obj.method`
     // attribute access.
-    d.insert_str("MethodType", PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "MethodType".to_string(),
-        func: |args| {
-            if args.len() < 2 { return Err(PyError::type_error("MethodType() requires 2 arguments")); }
-            Ok(PyObjectRef::new(PyObject::BoundMethod { func: args[0].clone(), self_obj: args[1].clone() }))
-        },
-    }));
+    d.insert_str(
+        "MethodType",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "MethodType".to_string(),
+            func: |args| {
+                if args.len() < 2 {
+                    return Err(PyError::type_error("MethodType() requires 2 arguments"));
+                }
+                Ok(PyObjectRef::new(PyObject::BoundMethod {
+                    func: args[0].clone(),
+                    self_obj: args[1].clone(),
+                }))
+            },
+        }),
+    );
     t_func!("BuiltinFunctionType", |args| {
-        if args.is_empty() { return Err(PyError::type_error("BuiltinFunctionType() requires an argument")); }
+        if args.is_empty() {
+            return Err(PyError::type_error(
+                "BuiltinFunctionType() requires an argument",
+            ));
+        }
         Ok(args[0].clone())
     });
     // Unlike its neighbors above (`FunctionType`/`LambdaType`/`MethodType`,
@@ -1783,30 +2248,52 @@ pub fn create_types_dict() -> HashMap<String, PyObjectRef> {
     // `borrow_mut()` an inline `PyObjectRef::SmallStr`, panicking
     // ("borrow_mut on non-mutable value") instead of setting a real module
     // attribute.
-    d.insert_str("ModuleType", PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "ModuleType".to_string(),
-        func: |args| {
-            if args.is_empty() { return Err(PyError::type_error("module.__init__() takes at least 1 argument (0 given)")); }
-            let name = args[0].str();
-            let module = crate::object::create_module(&name, HashMap::new());
-            if let PyObject::Module { dict, .. } = &mut *module.borrow_mut() {
-                dict.insert_str("__name__", crate::object::py_str(&name));
-                dict.insert_str("__doc__", if args.len() > 1 { args[1].clone() } else { crate::object::py_none() });
-            }
-            Ok(module)
-        },
-    }));
+    d.insert_str(
+        "ModuleType",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "ModuleType".to_string(),
+            func: |args| {
+                if args.is_empty() {
+                    return Err(PyError::type_error(
+                        "module.__init__() takes at least 1 argument (0 given)",
+                    ));
+                }
+                let name = args[0].str();
+                let module = crate::object::create_module(&name, HashMap::new());
+                if let PyObject::Module { dict, .. } = &mut *module.borrow_mut() {
+                    dict.insert_str("__name__", crate::object::py_str(&name));
+                    dict.insert_str(
+                        "__doc__",
+                        if args.len() > 1 {
+                            args[1].clone()
+                        } else {
+                            crate::object::py_none()
+                        },
+                    );
+                }
+                Ok(module)
+            },
+        }),
+    );
     t_func!("NoneType", |_| Ok(py_none()));
     t_func!("GeneratorType", |args| {
-        if args.is_empty() { return Err(PyError::type_error("GeneratorType() requires an argument")); }
+        if args.is_empty() {
+            return Err(PyError::type_error("GeneratorType() requires an argument"));
+        }
         Ok(args[0].clone())
     });
     t_func!("CoroutineType", |args| {
-        if args.is_empty() { return Err(PyError::type_error("CoroutineType() requires an argument")); }
+        if args.is_empty() {
+            return Err(PyError::type_error("CoroutineType() requires an argument"));
+        }
         Ok(args[0].clone())
     });
     t_func!("AsyncGeneratorType", |args| {
-        if args.is_empty() { return Err(PyError::type_error("AsyncGeneratorType() requires an argument")); }
+        if args.is_empty() {
+            return Err(PyError::type_error(
+                "AsyncGeneratorType() requires an argument",
+            ));
+        }
         Ok(args[0].clone())
     });
     // Real `types.SimpleNamespace(**kwargs)` creates an object exposing
@@ -1819,20 +2306,26 @@ pub fn create_types_dict() -> HashMap<String, PyObjectRef> {
     // e.g. `dict(mapping, key=val)`'s handling elsewhere) — real
     // `SimpleNamespace` takes no positional arguments at all, so the ONLY
     // arg ever present here is that trailing kwargs dict, if any.
-    d.insert_str("SimpleNamespace", PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "SimpleNamespace".to_string(),
-        func: |args| {
-            let mut inst_dict = crate::object::AttrMap::new();
-            if let Some(last) = args.last() {
-                if let PyObject::Dict(items) = &*last.borrow() {
-                    for (k, v) in items.items() {
-                        inst_dict.insert(k.str(), v);
+    d.insert_str(
+        "SimpleNamespace",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "SimpleNamespace".to_string(),
+            func: |args| {
+                let mut inst_dict = crate::object::AttrMap::new();
+                if let Some(last) = args.last() {
+                    if let PyObject::Dict(items) = &*last.borrow() {
+                        for (k, v) in items.items() {
+                            inst_dict.insert(k.str(), v);
+                        }
                     }
                 }
-            }
-            Ok(PyObjectRef::new(PyObject::Instance { typ: get_simple_namespace_type(), dict: inst_dict }))
-        },
-    }));
+                Ok(PyObjectRef::new(PyObject::Instance {
+                    typ: get_simple_namespace_type(),
+                    dict: inst_dict,
+                }))
+            },
+        }),
+    );
     // `types.UnionType` — the runtime type of `int | str` (PEP 604). Only
     // exposed as a name here (real code mostly just needs `isinstance(x,
     // types.UnionType)` or the name to exist for introspection/`__all__`
@@ -1848,7 +2341,9 @@ pub fn create_types_dict() -> HashMap<String, PyObjectRef> {
     // transparent passthrough — real trigger: CPython's own `test.support`,
     // `@types.coroutine\ndef async_yield(v): return (yield v)`.
     t_func!("coroutine", |args| {
-        if args.is_empty() { return Err(PyError::type_error("coroutine() requires an argument")); }
+        if args.is_empty() {
+            return Err(PyError::type_error("coroutine() requires an argument"));
+        }
         Ok(args[0].clone())
     });
     {
@@ -1859,11 +2354,19 @@ pub fn create_types_dict() -> HashMap<String, PyObjectRef> {
         // otherwise raises `AttributeError` — on a plain str — before ever
         // reaching the `try/except ValueError:` guarding that line).
         let mut code_type_dict = HashMap::new();
-        code_type_dict.insert_str("__init__", PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "__init__".to_string(),
-            func: |_args| Ok(py_none()),
-        }));
-        let code_type = PyObjectRef::new(PyObject::Type { name: "code".to_string(), dict: Box::new(str_map_to_typedict(code_type_dict)), bases: vec![], mro: vec![] });
+        code_type_dict.insert_str(
+            "__init__",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__init__".to_string(),
+                func: |_args| Ok(py_none()),
+            }),
+        );
+        let code_type = PyObjectRef::new(PyObject::Type {
+            name: "code".to_string(),
+            dict: Box::new(str_map_to_typedict(code_type_dict)),
+            bases: vec![],
+            mro: vec![],
+        });
         d.insert_str("CodeType", code_type);
     }
     d.insert_str("CellType", py_str("cell"));
@@ -1875,105 +2378,161 @@ pub fn create_types_dict() -> HashMap<String, PyObjectRef> {
     // Instance exposing `keys`/`__iter__`/`__getitem__`/`get`/`__len__`/
     // `items`/`__contains__`; the dict stays shared with the caller (a true
     // view: mutations through the original dict are visible).
-    d.insert_str("MappingProxyType", PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "MappingProxyType".to_string(),
-        func: |args| {
-            if args.len() != 1 {
-                return Err(PyError::type_error("mappingproxy() takes exactly one argument"));
-            }
-            let src = args[0].clone();
-            let is_dict = matches!(&*src.borrow(), PyObject::Dict(_));
-            let inner: PyObjectRef = if is_dict {
-                src.clone()
-            } else {
-                // Non-dict mapping: materialize a snapshot dict via items().
-                let mut items = Vec::new();
-                if let Ok(it) = builtin_iter(&[src]) {
-                    loop {
-                        match builtin_next(&[it.clone()]) {
-                            Ok(v) => {
-                                if let PyObject::Tuple(vals) = &*v.borrow() {
-                                    if vals.len() == 2 {
-                                        items.push((vals[0].clone(), vals[1].clone()));
-                                    }
-                                }
-                            }
-                            Err(PyError::StopIteration) => break,
-                            Err(e) => return Err(e),
-                        }
-                    }
+    d.insert_str(
+        "MappingProxyType",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "MappingProxyType".to_string(),
+            func: |args| {
+                if args.len() != 1 {
+                    return Err(PyError::type_error(
+                        "mappingproxy() takes exactly one argument",
+                    ));
                 }
-                let mut d = crate::object::PyDict::new();
-                for (k, v) in items {
-                    let _ = d.set(k, v);
-                }
-                PyObjectRef::new(PyObject::Dict(Box::new(d)))
-            };
-            let mut dict = crate::object::AttrMap::new();
-            let typ = PyObjectRef::new(PyObject::Type {
-                name: "mappingproxy".to_string(),
-                dict: Box::new(str_map_to_typedict({
-                    let mut td = HashMap::new();
-                    // Each method captures `inner` directly rather than
-                    // relying on self: attribute-call (`m.get(k)`) passes a
-                    // bare Closure with NO self, while the dunder/subscript
-                    // paths (`m[k]`, `len(m)`) prepend it — so reading the
-                    // key as the LAST arg works for both shapes.
-                    let key_arg = |args: &[PyObjectRef]| args.last().cloned();
-                    for (name, field) in [("keys", "keys"), ("values", "values"), ("items", "items"), ("__len__", "len"), ("__iter__", "keys")] {
-                        let inner = inner.clone();
-                        let field = field.to_string();
-                        td.insert_str(name, PyObjectRef::new(PyObject::Closure(Rc::new(move |_args: &[PyObjectRef]| {
-                            if let PyObject::Dict(d) = &*inner.borrow() {
-                                match field.as_str() {
-                                    "keys" => Ok(py_list(d.keys().iter().cloned().collect())),
-                                    "values" => Ok(py_list(d.values().iter().cloned().collect())),
-                                    "items" => Ok(py_list(d.items().into_iter().map(|(k, v)| py_tuple(vec![k, v])).collect())),
-                                    "len" => Ok(py_int(d.len() as i64)),
-                                    _ => Err(PyError::runtime_error("unhandled mappingproxy field")),
-                                }
-                            } else {
-                                Err(PyError::type_error("mappingproxy wrapping a non-dict"))
-                            }
-                        }))));
-                    }
-                    for (name, field) in [("get", "get"), ("__getitem__", "getitem"), ("__contains__", "contains")] {
-                        let inner = inner.clone();
-                        let field = field.to_string();
-                        td.insert_str(name, PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| {
-                            let k = key_arg(args).ok_or_else(|| PyError::type_error(format!("{}() missing key argument", field)))?;
-                            if let PyObject::Dict(d) = &*inner.borrow() {
-                                match field.as_str() {
-                                    "contains" => Ok(py_bool(d.contains(&k).unwrap_or(false))),
-                                    "get" => {
-                                        // `get` is only ever reached via
-                                        // attribute-call (no self): args =
-                                        // [key] or [key, default].
-                                        let key = args.first().cloned().ok_or_else(|| PyError::type_error("get() missing key"))?;
-                                        match d.get(&key).ok().flatten() {
-                                            Some(v) => Ok(v),
-                                            None => Ok(args.get(1).cloned().unwrap_or_else(|| PyObjectRef::new(PyObject::None))),
+                let src = args[0].clone();
+                let is_dict = matches!(&*src.borrow(), PyObject::Dict(_));
+                let inner: PyObjectRef = if is_dict {
+                    src.clone()
+                } else {
+                    // Non-dict mapping: materialize a snapshot dict via items().
+                    let mut items = Vec::new();
+                    if let Ok(it) = builtin_iter(&[src]) {
+                        loop {
+                            match builtin_next(&[it.clone()]) {
+                                Ok(v) => {
+                                    if let PyObject::Tuple(vals) = &*v.borrow() {
+                                        if vals.len() == 2 {
+                                            items.push((vals[0].clone(), vals[1].clone()));
                                         }
                                     }
-                                    "getitem" => match d.get(&k).ok().flatten() {
-                                        Some(v) => Ok(v),
-                                        None => Err(PyError::key_error(k.repr())),
-                                    },
-                                    _ => Err(PyError::runtime_error("unhandled mappingproxy field")),
                                 }
-                            } else {
-                                Err(PyError::type_error("mappingproxy wrapping a non-dict"))
+                                Err(PyError::StopIteration) => break,
+                                Err(e) => return Err(e),
                             }
-                        }))));
+                        }
                     }
-                    td
-                })),
-                bases: vec![],
-                mro: vec![],
-            });
-            Ok(PyObjectRef::new(PyObject::Instance { typ, dict }))
-        },
-    }));
+                    let mut d = crate::object::PyDict::new();
+                    for (k, v) in items {
+                        let _ = d.set(k, v);
+                    }
+                    PyObjectRef::new(PyObject::Dict(Box::new(d)))
+                };
+                let mut dict = crate::object::AttrMap::new();
+                let typ = PyObjectRef::new(PyObject::Type {
+                    name: "mappingproxy".to_string(),
+                    dict: Box::new(str_map_to_typedict({
+                        let mut td = HashMap::new();
+                        // Each method captures `inner` directly rather than
+                        // relying on self: attribute-call (`m.get(k)`) passes a
+                        // bare Closure with NO self, while the dunder/subscript
+                        // paths (`m[k]`, `len(m)`) prepend it — so reading the
+                        // key as the LAST arg works for both shapes.
+                        let key_arg = |args: &[PyObjectRef]| args.last().cloned();
+                        for (name, field) in [
+                            ("keys", "keys"),
+                            ("values", "values"),
+                            ("items", "items"),
+                            ("__len__", "len"),
+                            ("__iter__", "keys"),
+                        ] {
+                            let inner = inner.clone();
+                            let field = field.to_string();
+                            td.insert_str(
+                                name,
+                                PyObjectRef::new(PyObject::Closure(Rc::new(
+                                    move |_args: &[PyObjectRef]| {
+                                        if let PyObject::Dict(d) = &*inner.borrow() {
+                                            match field.as_str() {
+                                                "keys" => {
+                                                    Ok(py_list(d.keys().iter().cloned().collect()))
+                                                }
+                                                "values" => Ok(py_list(
+                                                    d.values().iter().cloned().collect(),
+                                                )),
+                                                "items" => Ok(py_list(
+                                                    d.items()
+                                                        .into_iter()
+                                                        .map(|(k, v)| py_tuple(vec![k, v]))
+                                                        .collect(),
+                                                )),
+                                                "len" => Ok(py_int(d.len() as i64)),
+                                                _ => Err(PyError::runtime_error(
+                                                    "unhandled mappingproxy field",
+                                                )),
+                                            }
+                                        } else {
+                                            Err(PyError::type_error(
+                                                "mappingproxy wrapping a non-dict",
+                                            ))
+                                        }
+                                    },
+                                ))),
+                            );
+                        }
+                        for (name, field) in [
+                            ("get", "get"),
+                            ("__getitem__", "getitem"),
+                            ("__contains__", "contains"),
+                        ] {
+                            let inner = inner.clone();
+                            let field = field.to_string();
+                            td.insert_str(
+                                name,
+                                PyObjectRef::new(PyObject::Closure(Rc::new(
+                                    move |args: &[PyObjectRef]| {
+                                        let k = key_arg(args).ok_or_else(|| {
+                                            PyError::type_error(format!(
+                                                "{}() missing key argument",
+                                                field
+                                            ))
+                                        })?;
+                                        if let PyObject::Dict(d) = &*inner.borrow() {
+                                            match field.as_str() {
+                                                "contains" => {
+                                                    Ok(py_bool(d.contains(&k).unwrap_or(false)))
+                                                }
+                                                "get" => {
+                                                    // `get` is only ever reached via
+                                                    // attribute-call (no self): args =
+                                                    // [key] or [key, default].
+                                                    let key =
+                                                        args.first().cloned().ok_or_else(|| {
+                                                            PyError::type_error("get() missing key")
+                                                        })?;
+                                                    match d.get(&key).ok().flatten() {
+                                                        Some(v) => Ok(v),
+                                                        None => {
+                                                            Ok(args.get(1).cloned().unwrap_or_else(
+                                                                || PyObjectRef::new(PyObject::None),
+                                                            ))
+                                                        }
+                                                    }
+                                                }
+                                                "getitem" => match d.get(&k).ok().flatten() {
+                                                    Some(v) => Ok(v),
+                                                    None => Err(PyError::key_error(k.repr())),
+                                                },
+                                                _ => Err(PyError::runtime_error(
+                                                    "unhandled mappingproxy field",
+                                                )),
+                                            }
+                                        } else {
+                                            Err(PyError::type_error(
+                                                "mappingproxy wrapping a non-dict",
+                                            ))
+                                        }
+                                    },
+                                ))),
+                            );
+                        }
+                        td
+                    })),
+                    bases: vec![],
+                    mro: vec![],
+                });
+                Ok(PyObjectRef::new(PyObject::Instance { typ, dict }))
+            },
+        }),
+    );
     // GenericAlias — used for generic type annotations like list[int], dict[str, int]
     d.insert_str("GenericAlias", get_generic_alias_type());
 
@@ -1996,35 +2555,62 @@ pub fn create_types_dict() -> HashMap<String, PyObjectRef> {
 
 fn struct_error(msg: impl Into<String>) -> PyError {
     let msg = msg.into();
-    let exc = PyObjectRef::new(PyObject::Exception { typ: "error".to_string(), args: vec![py_str(&msg)], cause: None });
+    let exc = PyObjectRef::new(PyObject::Exception {
+        typ: "error".to_string(),
+        args: vec![py_str(&msg)],
+        cause: None,
+    });
     PyError::Exception(msg, exc)
 }
 
 #[derive(Clone, Copy, PartialEq)]
-enum StructByteOrder { Little, Big }
+enum StructByteOrder {
+    Little,
+    Big,
+}
 
-struct StructFmtItem { code: char, count: usize }
+struct StructFmtItem {
+    code: char,
+    count: usize,
+}
 
 fn parse_struct_format(fmt: &str) -> PyResult<(StructByteOrder, Vec<StructFmtItem>)> {
     let mut chars = fmt.chars().peekable();
     let mut order = StructByteOrder::Little;
     if let Some(&c) = chars.peek() {
         match c {
-            '@' | '=' | '<' => { order = StructByteOrder::Little; chars.next(); }
-            '>' | '!' => { order = StructByteOrder::Big; chars.next(); }
+            '@' | '=' | '<' => {
+                order = StructByteOrder::Little;
+                chars.next();
+            }
+            '>' | '!' => {
+                order = StructByteOrder::Big;
+                chars.next();
+            }
             _ => {}
         }
     }
     let mut items = Vec::new();
     while let Some(c) = chars.next() {
-        if c == ' ' { continue; }
+        if c == ' ' {
+            continue;
+        }
         if c.is_ascii_digit() {
             let mut n = String::from(c);
             while let Some(&d) = chars.peek() {
-                if d.is_ascii_digit() { n.push(d); chars.next(); } else { break; }
+                if d.is_ascii_digit() {
+                    n.push(d);
+                    chars.next();
+                } else {
+                    break;
+                }
             }
-            let count: usize = n.parse().map_err(|_| struct_error("bad repeat count in struct format"))?;
-            let code = chars.next().ok_or_else(|| struct_error("repeat count given without format specifier"))?;
+            let count: usize = n
+                .parse()
+                .map_err(|_| struct_error("bad repeat count in struct format"))?;
+            let code = chars
+                .next()
+                .ok_or_else(|| struct_error("repeat count given without format specifier"))?;
             items.push(StructFmtItem { code, count });
         } else {
             items.push(StructFmtItem { code: c, count: 1 });
@@ -2039,7 +2625,12 @@ fn struct_code_size(code: char) -> PyResult<usize> {
         'h' | 'H' => 2,
         'i' | 'I' | 'l' | 'L' | 'f' => 4,
         'q' | 'Q' | 'n' | 'N' | 'd' => 8,
-        _ => return Err(struct_error(format!("bad char in struct format: '{}'", code))),
+        _ => {
+            return Err(struct_error(format!(
+                "bad char in struct format: '{}'",
+                code
+            )))
+        }
     })
 }
 
@@ -2092,7 +2683,10 @@ fn struct_check_bounds(code: char, n: &BigInt) -> PyResult<()> {
         _ => return Ok(()),
     };
     if n < &lo || n > &hi {
-        return Err(struct_error(format!("'{}' format requires {} <= number <= {}", code, lo, hi)));
+        return Err(struct_error(format!(
+            "'{}' format requires {} <= number <= {}",
+            code, lo, hi
+        )));
     }
     Ok(())
 }
@@ -2104,19 +2698,37 @@ fn struct_push_bytes(out: &mut Vec<u8>, order: StructByteOrder, le: &[u8], be: &
     }
 }
 
-fn struct_pack_one(out: &mut Vec<u8>, order: StructByteOrder, code: char, count: usize, val: &PyObjectRef) -> PyResult<()> {
+fn struct_pack_one(
+    out: &mut Vec<u8>,
+    order: StructByteOrder,
+    code: char,
+    count: usize,
+    val: &PyObjectRef,
+) -> PyResult<()> {
     match code {
-        '?' => { out.push(if val.truthy() { 1 } else { 0 }); }
+        '?' => {
+            out.push(if val.truthy() { 1 } else { 0 });
+        }
         'c' => {
             let b = val.borrow();
             match &*b {
                 PyObject::Bytes(data) if data.len() == 1 => out.push(data[0]),
-                PyObject::Bytes(_) => return Err(struct_error("char format requires a bytes object of length 1")),
-                _ => return Err(struct_error("argument for 'c' must be a bytes object of length 1")),
+                PyObject::Bytes(_) => {
+                    return Err(struct_error(
+                        "char format requires a bytes object of length 1",
+                    ))
+                }
+                _ => {
+                    return Err(struct_error(
+                        "argument for 'c' must be a bytes object of length 1",
+                    ))
+                }
             }
         }
         's' | 'p' => {
-            let data = arg_bytes(val).ok_or_else(|| struct_error(format!("argument for '{}' must be a bytes object", code)))?;
+            let data = arg_bytes(val).ok_or_else(|| {
+                struct_error(format!("argument for '{}' must be a bytes object", code))
+            })?;
             let mut field = vec![0u8; count];
             if code == 's' {
                 let n = data.len().min(count);
@@ -2130,12 +2742,16 @@ fn struct_pack_one(out: &mut Vec<u8>, order: StructByteOrder, code: char, count:
             out.extend_from_slice(&field);
         }
         'f' => {
-            let f = val.as_f64().ok_or_else(|| struct_error("required argument is not a float"))?;
+            let f = val
+                .as_f64()
+                .ok_or_else(|| struct_error("required argument is not a float"))?;
             let v = f as f32;
             struct_push_bytes(out, order, &v.to_le_bytes(), &v.to_be_bytes());
         }
         'd' => {
-            let f = val.as_f64().ok_or_else(|| struct_error("required argument is not a float"))?;
+            let f = val
+                .as_f64()
+                .ok_or_else(|| struct_error("required argument is not a float"))?;
             struct_push_bytes(out, order, &f.to_le_bytes(), &f.to_be_bytes());
         }
         'b' | 'B' | 'h' | 'H' | 'i' | 'I' | 'l' | 'L' | 'q' | 'n' | 'Q' | 'N' => {
@@ -2144,23 +2760,48 @@ fn struct_pack_one(out: &mut Vec<u8>, order: StructByteOrder, code: char, count:
             match code {
                 'b' => out.push(n.to_i64().unwrap() as i8 as u8),
                 'B' => out.push(n.to_i64().unwrap() as u8),
-                'h' => { let v = n.to_i64().unwrap() as i16; struct_push_bytes(out, order, &v.to_le_bytes(), &v.to_be_bytes()); }
-                'H' => { let v = n.to_i64().unwrap() as u16; struct_push_bytes(out, order, &v.to_le_bytes(), &v.to_be_bytes()); }
-                'i' | 'l' => { let v = n.to_i64().unwrap() as i32; struct_push_bytes(out, order, &v.to_le_bytes(), &v.to_be_bytes()); }
-                'I' | 'L' => { let v = n.to_i64().unwrap() as u32; struct_push_bytes(out, order, &v.to_le_bytes(), &v.to_be_bytes()); }
-                'q' | 'n' => { let v = n.to_i64().unwrap(); struct_push_bytes(out, order, &v.to_le_bytes(), &v.to_be_bytes()); }
-                'Q' | 'N' => { let v = n.to_u64().unwrap(); struct_push_bytes(out, order, &v.to_le_bytes(), &v.to_be_bytes()); }
+                'h' => {
+                    let v = n.to_i64().unwrap() as i16;
+                    struct_push_bytes(out, order, &v.to_le_bytes(), &v.to_be_bytes());
+                }
+                'H' => {
+                    let v = n.to_i64().unwrap() as u16;
+                    struct_push_bytes(out, order, &v.to_le_bytes(), &v.to_be_bytes());
+                }
+                'i' | 'l' => {
+                    let v = n.to_i64().unwrap() as i32;
+                    struct_push_bytes(out, order, &v.to_le_bytes(), &v.to_be_bytes());
+                }
+                'I' | 'L' => {
+                    let v = n.to_i64().unwrap() as u32;
+                    struct_push_bytes(out, order, &v.to_le_bytes(), &v.to_be_bytes());
+                }
+                'q' | 'n' => {
+                    let v = n.to_i64().unwrap();
+                    struct_push_bytes(out, order, &v.to_le_bytes(), &v.to_be_bytes());
+                }
+                'Q' | 'N' => {
+                    let v = n.to_u64().unwrap();
+                    struct_push_bytes(out, order, &v.to_le_bytes(), &v.to_be_bytes());
+                }
                 _ => unreachable!(),
             }
         }
-        _ => return Err(struct_error(format!("bad char in struct format: '{}'", code))),
+        _ => {
+            return Err(struct_error(format!(
+                "bad char in struct format: '{}'",
+                code
+            )))
+        }
     }
     Ok(())
 }
 
 fn struct_pack_impl(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
-        return Err(PyError::type_error("pack() missing required argument: 'format'"));
+        return Err(PyError::type_error(
+            "pack() missing required argument: 'format'",
+        ));
     }
     let fmt = args[0].str();
     let (order, items) = parse_struct_format(&fmt)?;
@@ -2168,15 +2809,23 @@ fn struct_pack_impl(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let mut arg_idx = 1usize;
     for item in &items {
         match item.code {
-            'x' => { for _ in 0..item.count { out.push(0u8); } }
+            'x' => {
+                for _ in 0..item.count {
+                    out.push(0u8);
+                }
+            }
             's' | 'p' => {
-                if arg_idx >= args.len() { return Err(struct_error("pack expected more arguments")); }
+                if arg_idx >= args.len() {
+                    return Err(struct_error("pack expected more arguments"));
+                }
                 struct_pack_one(&mut out, order, item.code, item.count, &args[arg_idx])?;
                 arg_idx += 1;
             }
             _ => {
                 for _ in 0..item.count.max(1) {
-                    if arg_idx >= args.len() { return Err(struct_error("pack expected more arguments")); }
+                    if arg_idx >= args.len() {
+                        return Err(struct_error("pack expected more arguments"));
+                    }
                     struct_pack_one(&mut out, order, item.code, 1, &args[arg_idx])?;
                     arg_idx += 1;
                 }
@@ -2192,8 +2841,13 @@ fn struct_pack_impl(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 fn struct_decode_scalar(order: StructByteOrder, code: char, field: &[u8]) -> PyResult<PyObjectRef> {
     let widen = |le: bool| -> u64 {
         let mut arr = [0u8; 8];
-        if le { arr[..field.len()].copy_from_slice(field); u64::from_le_bytes(arr) }
-        else { arr[8 - field.len()..].copy_from_slice(field); u64::from_be_bytes(arr) }
+        if le {
+            arr[..field.len()].copy_from_slice(field);
+            u64::from_le_bytes(arr)
+        } else {
+            arr[8 - field.len()..].copy_from_slice(field);
+            u64::from_be_bytes(arr)
+        }
     };
     let le = order == StructByteOrder::Little;
     Ok(match code {
@@ -2209,7 +2863,12 @@ fn struct_decode_scalar(order: StructByteOrder, code: char, field: &[u8]) -> PyR
         'Q' | 'N' => py_int(widen(le)),
         'f' => py_float(f32::from_bits(widen(le) as u32) as f64),
         'd' => py_float(f64::from_bits(widen(le))),
-        _ => return Err(struct_error(format!("bad char in struct format: '{}'", code))),
+        _ => {
+            return Err(struct_error(format!(
+                "bad char in struct format: '{}'",
+                code
+            )))
+        }
     })
 }
 
@@ -2217,13 +2876,18 @@ fn struct_unpack_buf(fmt: &str, buf: &[u8]) -> PyResult<Vec<PyObjectRef>> {
     let (order, items) = parse_struct_format(fmt)?;
     let total = struct_calcsize(fmt)?;
     if buf.len() != total {
-        return Err(struct_error(format!("unpack requires a buffer of {} bytes", total)));
+        return Err(struct_error(format!(
+            "unpack requires a buffer of {} bytes",
+            total
+        )));
     }
     let mut results = Vec::new();
     let mut pos = 0usize;
     for item in &items {
         match item.code {
-            'x' => { pos += item.count; }
+            'x' => {
+                pos += item.count;
+            }
             's' => {
                 let end = pos + item.count;
                 results.push(PyObjectRef::imm(PyObject::Bytes(buf[pos..end].to_vec())));
@@ -2256,22 +2920,36 @@ fn struct_unpack_buf(fmt: &str, buf: &[u8]) -> PyResult<Vec<PyObjectRef>> {
 
 fn struct_unpack_impl(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() < 2 {
-        return Err(PyError::type_error("unpack() requires format string and buffer"));
+        return Err(PyError::type_error(
+            "unpack() requires format string and buffer",
+        ));
     }
     let fmt = args[0].str();
-    let buf = arg_bytes(&args[1]).ok_or_else(|| PyError::type_error("unpack() arg 2 must be bytes"))?;
+    let buf =
+        arg_bytes(&args[1]).ok_or_else(|| PyError::type_error("unpack() arg 2 must be bytes"))?;
     let values = struct_unpack_buf(&fmt, &buf)?;
     Ok(PyObjectRef::imm(PyObject::Tuple(values)))
 }
 
 fn struct_unpack_from_impl(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() < 2 {
-        return Err(PyError::type_error("unpack_from() requires format string and buffer"));
+        return Err(PyError::type_error(
+            "unpack_from() requires format string and buffer",
+        ));
     }
     let fmt = args[0].str();
-    let buf = arg_bytes(&args[1]).ok_or_else(|| PyError::type_error("unpack_from() arg 2 must be bytes"))?;
-    let offset = if args.len() > 2 { args[2].as_i64().unwrap_or(0) } else { 0 };
-    let offset = if offset < 0 { (buf.len() as i64 + offset).max(0) as usize } else { offset as usize };
+    let buf = arg_bytes(&args[1])
+        .ok_or_else(|| PyError::type_error("unpack_from() arg 2 must be bytes"))?;
+    let offset = if args.len() > 2 {
+        args[2].as_i64().unwrap_or(0)
+    } else {
+        0
+    };
+    let offset = if offset < 0 {
+        (buf.len() as i64 + offset).max(0) as usize
+    } else {
+        offset as usize
+    };
     let size = struct_calcsize(&fmt)?;
     if offset + size > buf.len() {
         return Err(struct_error(format!(
@@ -2285,10 +2963,16 @@ fn struct_unpack_from_impl(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 
 fn struct_pack_into_impl(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() < 2 {
-        return Err(PyError::type_error("pack_into() requires format, buffer, offset"));
+        return Err(PyError::type_error(
+            "pack_into() requires format, buffer, offset",
+        ));
     }
     let fmt = args[0].str();
-    let offset = if args.len() > 2 { args[2].as_i64().unwrap_or(0) } else { 0 };
+    let offset = if args.len() > 2 {
+        args[2].as_i64().unwrap_or(0)
+    } else {
+        0
+    };
     let size = struct_calcsize(&fmt)?;
     let packed = {
         let mut rest = vec![args[0].clone()];
@@ -2299,7 +2983,11 @@ fn struct_pack_into_impl(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let mut buf_obj = args[1].borrow_mut();
     match &mut *buf_obj {
         PyObject::ByteArray(data) => {
-            let offset = if offset < 0 { (data.len() as i64 + offset).max(0) as usize } else { offset as usize };
+            let offset = if offset < 0 {
+                (data.len() as i64 + offset).max(0) as usize
+            } else {
+                offset as usize
+            };
             if offset + size > data.len() {
                 return Err(struct_error(format!(
                     "pack_into requires a buffer of at least {} bytes for packing {} bytes at offset {} (actual buffer size is {})",
@@ -2309,22 +2997,32 @@ fn struct_pack_into_impl(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             data[offset..offset + size].copy_from_slice(&packed_bytes);
             Ok(py_none())
         }
-        _ => Err(PyError::type_error("pack_into() argument must be a mutable buffer (bytearray)")),
+        _ => Err(PyError::type_error(
+            "pack_into() argument must be a mutable buffer (bytearray)",
+        )),
     }
 }
 
 fn struct_iter_unpack_impl(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() < 2 {
-        return Err(PyError::type_error("iter_unpack() requires format string and buffer"));
+        return Err(PyError::type_error(
+            "iter_unpack() requires format string and buffer",
+        ));
     }
     let fmt = args[0].str();
-    let buf = arg_bytes(&args[1]).ok_or_else(|| PyError::type_error("iter_unpack() arg 2 must be bytes"))?;
+    let buf = arg_bytes(&args[1])
+        .ok_or_else(|| PyError::type_error("iter_unpack() arg 2 must be bytes"))?;
     let unit = struct_calcsize(&fmt)?;
     if unit == 0 {
-        return Err(struct_error("cannot iteratively unpack with a struct of length 0"));
+        return Err(struct_error(
+            "cannot iteratively unpack with a struct of length 0",
+        ));
     }
     if buf.len() % unit != 0 {
-        return Err(struct_error(format!("iterative unpacking requires a buffer of a multiple of {} bytes", unit)));
+        return Err(struct_error(format!(
+            "iterative unpacking requires a buffer of a multiple of {} bytes",
+            unit
+        )));
     }
     let mut tuples = Vec::new();
     let mut pos = 0usize;
@@ -2340,7 +3038,13 @@ pub fn create_struct_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! s_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
 
@@ -2358,12 +3062,19 @@ pub fn create_struct_dict() -> HashMap<String, PyObjectRef> {
     s_func!("pack_into", struct_pack_into_impl);
     s_func!("iter_unpack", struct_iter_unpack_impl);
 
-    d.insert_str("error", PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "error".to_string(),
-        func: |args| {
-            Ok(PyObjectRef::new(PyObject::Exception { typ: "error".to_string(), args: args.to_vec(), cause: None }))
-        },
-    }));
+    d.insert_str(
+        "error",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "error".to_string(),
+            func: |args| {
+                Ok(PyObjectRef::new(PyObject::Exception {
+                    typ: "error".to_string(),
+                    args: args.to_vec(),
+                    cause: None,
+                }))
+            },
+        }),
+    );
 
     d
 }
@@ -2383,7 +3094,13 @@ pub fn create_bisect_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! bisect_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
 
@@ -2392,7 +3109,15 @@ pub fn create_bisect_dict() -> HashMap<String, PyObjectRef> {
     // key=...` (the VM packs keywords into a trailing `PyObject::Dict`).
     // Returns the sequence, the probe, lo/hi as Option (None = default), and
     // the optional key callable.
-    fn bisect_parse<'a>(args: &'a [PyObjectRef]) -> PyResult<(PyObjectRef, PyObjectRef, Option<i64>, Option<i64>, Option<PyObjectRef>)> {
+    fn bisect_parse<'a>(
+        args: &'a [PyObjectRef],
+    ) -> PyResult<(
+        PyObjectRef,
+        PyObjectRef,
+        Option<i64>,
+        Option<i64>,
+        Option<PyObjectRef>,
+    )> {
         let mut pos: Vec<PyObjectRef> = args.to_vec();
         let mut kw_a: Option<PyObjectRef> = None;
         let mut kw_x: Option<PyObjectRef> = None;
@@ -2405,10 +3130,25 @@ pub fn create_bisect_dict() -> HashMap<String, PyObjectRef> {
                     match k.str().as_str() {
                         "a" => kw_a = Some(v),
                         "x" => kw_x = Some(v),
-                        "lo" => kw_lo = Some(v.as_i64().ok_or_else(|| PyError::type_error("lo must be an integer"))?),
-                        "hi" => kw_hi = Some(v.as_i64().ok_or_else(|| PyError::type_error("hi must be an integer"))?),
+                        "lo" => {
+                            kw_lo = Some(
+                                v.as_i64()
+                                    .ok_or_else(|| PyError::type_error("lo must be an integer"))?,
+                            )
+                        }
+                        "hi" => {
+                            kw_hi = Some(
+                                v.as_i64()
+                                    .ok_or_else(|| PyError::type_error("hi must be an integer"))?,
+                            )
+                        }
                         "key" => kw_key = Some(v),
-                        other => return Err(PyError::type_error(format!("bisect() got an unexpected keyword argument '{}'", other))),
+                        other => {
+                            return Err(PyError::type_error(format!(
+                                "bisect() got an unexpected keyword argument '{}'",
+                                other
+                            )))
+                        }
                     }
                 }
                 pos.pop();
@@ -2416,14 +3156,32 @@ pub fn create_bisect_dict() -> HashMap<String, PyObjectRef> {
         }
         let a = match kw_a {
             Some(a) => a,
-            None => pos.first().cloned().ok_or_else(|| PyError::type_error("missing required argument: 'a'"))?,
+            None => pos
+                .first()
+                .cloned()
+                .ok_or_else(|| PyError::type_error("missing required argument: 'a'"))?,
         };
         let x = match kw_x {
             Some(x) => x,
-            None => pos.get(1).cloned().ok_or_else(|| PyError::type_error("missing required argument: 'x'"))?,
+            None => pos
+                .get(1)
+                .cloned()
+                .ok_or_else(|| PyError::type_error("missing required argument: 'x'"))?,
         };
-        let p_lo = pos.get(2).map(|v| v.as_i64().ok_or_else(|| PyError::type_error("lo must be an integer"))).transpose()?;
-        let p_hi = pos.get(3).map(|v| v.as_i64().ok_or_else(|| PyError::type_error("hi must be an integer"))).transpose()?;
+        let p_lo = pos
+            .get(2)
+            .map(|v| {
+                v.as_i64()
+                    .ok_or_else(|| PyError::type_error("lo must be an integer"))
+            })
+            .transpose()?;
+        let p_hi = pos
+            .get(3)
+            .map(|v| {
+                v.as_i64()
+                    .ok_or_else(|| PyError::type_error("hi must be an integer"))
+            })
+            .transpose()?;
         Ok((a, x, kw_lo.or(p_lo), kw_hi.or(p_hi), kw_key))
     }
 
@@ -2439,13 +3197,26 @@ pub fn create_bisect_dict() -> HashMap<String, PyObjectRef> {
     // just lists — real CPython's own test_bisect runs it against `range`
     // with n = sys.maxsize (test_large_range). Use the generic
     // `py_getitem`/`builtin_len` instead of destructuring a List.
-    fn bisect_locate(a: &PyObjectRef, x: &PyObjectRef, lo: Option<i64>, hi: Option<i64>, right: bool, key: &Option<PyObjectRef>) -> PyResult<PyObjectRef> {
-        let len = builtin_len(&[a.clone()])?.as_i64().ok_or_else(|| PyError::type_error("sequence length must be an integer"))?;
+    fn bisect_locate(
+        a: &PyObjectRef,
+        x: &PyObjectRef,
+        lo: Option<i64>,
+        hi: Option<i64>,
+        right: bool,
+        key: &Option<PyObjectRef>,
+    ) -> PyResult<PyObjectRef> {
+        let len = builtin_len(&[a.clone()])?
+            .as_i64()
+            .ok_or_else(|| PyError::type_error("sequence length must be an integer"))?;
         let key_x = bisect_key(key, x)?;
         let lo_raw = lo.unwrap_or(0);
-        if lo_raw < 0 { return Err(PyError::value_error("lo must be non-negative")); }
+        if lo_raw < 0 {
+            return Err(PyError::value_error("lo must be non-negative"));
+        }
         let hi_raw = hi.unwrap_or(len);
-        if hi_raw < lo_raw { return Err(PyError::value_error("hi must be greater than lo")); }
+        if hi_raw < lo_raw {
+            return Err(PyError::value_error("hi must be greater than lo"));
+        }
         let mut lo = lo_raw as usize;
         let mut hi = hi_raw.min(len) as usize;
         while lo < hi {
@@ -2456,17 +3227,29 @@ pub fn create_bisect_dict() -> HashMap<String, PyObjectRef> {
                 // bisect_right: find the first position where `x` can be
                 // inserted while staying to the RIGHT of equal elements:
                 // if key(x) < key(a[mid]) go left, else go right.
-                if py_lt(&key_x, &key_mid)? { hi = mid; } else { lo = mid + 1; }
+                if py_lt(&key_x, &key_mid)? {
+                    hi = mid;
+                } else {
+                    lo = mid + 1;
+                }
             } else {
                 // bisect_left: first position >= x.
-                if py_lt(&key_mid, &key_x)? { lo = mid + 1; } else { hi = mid; }
+                if py_lt(&key_mid, &key_x)? {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
             }
         }
         Ok(py_int(lo as i64))
     }
 
     bisect_func!("bisect_left", |args| {
-        if args.is_empty() { return Err(PyError::type_error("bisect_left() missing required argument: 'a'")); }
+        if args.is_empty() {
+            return Err(PyError::type_error(
+                "bisect_left() missing required argument: 'a'",
+            ));
+        }
         let (a, x, lo, hi, key) = bisect_parse(args)?;
         bisect_locate(&a, &x, lo, hi, false, &key)
     });
@@ -2476,7 +3259,11 @@ pub fn create_bisect_dict() -> HashMap<String, PyObjectRef> {
     let bisect_right = PyObjectRef::new(PyObject::BuiltinFunction {
         name: "bisect_right".to_string(),
         func: |args: &[PyObjectRef]| {
-            if args.is_empty() { return Err(PyError::type_error("bisect_right() missing required argument: 'a'")); }
+            if args.is_empty() {
+                return Err(PyError::type_error(
+                    "bisect_right() missing required argument: 'a'",
+                ));
+            }
             let (a, x, lo, hi, key) = bisect_parse(args)?;
             bisect_locate(&a, &x, lo, hi, true, &key)
         },
@@ -2484,8 +3271,17 @@ pub fn create_bisect_dict() -> HashMap<String, PyObjectRef> {
     d.insert("bisect_right".to_string(), bisect_right.clone());
     d.insert("bisect".to_string(), bisect_right);
 
-    fn bisect_insert(a: &PyObjectRef, x: &PyObjectRef, lo: Option<i64>, hi: Option<i64>, right: bool, key: &Option<PyObjectRef>) -> PyResult<PyObjectRef> {
-        let pos = bisect_locate(a, x, lo, hi, right, key)?.as_i64().ok_or_else(|| PyError::type_error("internal"))? as usize;
+    fn bisect_insert(
+        a: &PyObjectRef,
+        x: &PyObjectRef,
+        lo: Option<i64>,
+        hi: Option<i64>,
+        right: bool,
+        key: &Option<PyObjectRef>,
+    ) -> PyResult<PyObjectRef> {
+        let pos = bisect_locate(a, x, lo, hi, right, key)?
+            .as_i64()
+            .ok_or_else(|| PyError::type_error("internal"))? as usize;
         // Call `a.insert(pos, x)` — real CPython's insort goes through the
         // object's own `insert` method, so it works on list subclasses and
         // duck-typed sequences (test_bisect's custom `Range`, which records
@@ -2496,16 +3292,28 @@ pub fn create_bisect_dict() -> HashMap<String, PyObjectRef> {
         let method = a.borrow().get_attribute("insert")?;
         let result = match &*method.borrow() {
             PyObject::BuiltinMethod { name, func, .. } => {
-                let bound = PyObjectRef::imm(PyObject::BuiltinMethod { name: name.clone(), func: *func, self_obj: a.clone() });
+                let bound = PyObjectRef::imm(PyObject::BuiltinMethod {
+                    name: name.clone(),
+                    func: *func,
+                    self_obj: a.clone(),
+                });
                 call_function_disposable(&bound, vec![py_int(pos as i64), x.clone()], vec![])
             }
-            _ => call_function_disposable(&method, vec![a.clone(), py_int(pos as i64), x.clone()], vec![]),
+            _ => call_function_disposable(
+                &method,
+                vec![a.clone(), py_int(pos as i64), x.clone()],
+                vec![],
+            ),
         };
         result.map(|_| py_none())
     }
 
     bisect_func!("insort_left", |args| {
-        if args.is_empty() { return Err(PyError::type_error("insort_left() missing required argument: 'a'")); }
+        if args.is_empty() {
+            return Err(PyError::type_error(
+                "insort_left() missing required argument: 'a'",
+            ));
+        }
         let (a, x, lo, hi, key) = bisect_parse(args)?;
         bisect_insert(&a, &x, lo, hi, false, &key)
     });
@@ -2515,7 +3323,11 @@ pub fn create_bisect_dict() -> HashMap<String, PyObjectRef> {
     let insort_right = PyObjectRef::new(PyObject::BuiltinFunction {
         name: "insort_right".to_string(),
         func: |args: &[PyObjectRef]| {
-            if args.is_empty() { return Err(PyError::type_error("insort_right() missing required argument: 'a'")); }
+            if args.is_empty() {
+                return Err(PyError::type_error(
+                    "insort_right() missing required argument: 'a'",
+                ));
+            }
             let (a, x, lo, hi, key) = bisect_parse(args)?;
             bisect_insert(&a, &x, lo, hi, true, &key)
         },
@@ -2530,7 +3342,13 @@ pub fn create_heapq_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! heap_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
 
@@ -2563,7 +3381,9 @@ pub fn create_heapq_dict() -> HashMap<String, PyObjectRef> {
             if right < end && py_lt(&heap[right], &heap[smallest]).unwrap_or(false) {
                 smallest = right;
             }
-            if smallest == pos { break; }
+            if smallest == pos {
+                break;
+            }
             heap.swap(pos, smallest);
             pos = smallest;
         }
@@ -2590,21 +3410,34 @@ pub fn create_heapq_dict() -> HashMap<String, PyObjectRef> {
     // for each individual read/swap, never holding a borrow across a
     // comparison call.
     fn heap_get_live(heap_ref: &PyObjectRef, idx: usize) -> Option<PyObjectRef> {
-        if let PyObject::List(list) = &*heap_ref.borrow() { list.get(idx).cloned() } else { None }
+        if let PyObject::List(list) = &*heap_ref.borrow() {
+            list.get(idx).cloned()
+        } else {
+            None
+        }
     }
     fn heap_len_live(heap_ref: &PyObjectRef) -> usize {
-        if let PyObject::List(list) = &*heap_ref.borrow() { list.len() } else { 0 }
+        if let PyObject::List(list) = &*heap_ref.borrow() {
+            list.len()
+        } else {
+            0
+        }
     }
     fn heap_swap_live(heap_ref: &PyObjectRef, i: usize, j: usize) {
         if let PyObject::List(list) = &mut *heap_ref.borrow_mut() {
-            if i < list.len() && j < list.len() { list.swap(i, j); }
+            if i < list.len() && j < list.len() {
+                list.swap(i, j);
+            }
         }
     }
     fn _siftdown_live(heap_ref: &PyObjectRef, start: usize, pos: usize) {
         let mut pos = pos;
         while pos > start {
             let parent = (pos - 1) / 2;
-            let (item_pos, item_parent) = match (heap_get_live(heap_ref, pos), heap_get_live(heap_ref, parent)) {
+            let (item_pos, item_parent) = match (
+                heap_get_live(heap_ref, pos),
+                heap_get_live(heap_ref, parent),
+            ) {
                 (Some(a), Some(b)) => (a, b),
                 _ => return,
             };
@@ -2625,16 +3458,28 @@ pub fn create_heapq_dict() -> HashMap<String, PyObjectRef> {
             let right = 2 * pos + 2;
             let mut smallest = pos;
             if left < end {
-                if let (Some(l), Some(s)) = (heap_get_live(heap_ref, left), heap_get_live(heap_ref, smallest)) {
-                    if py_lt(&l, &s).unwrap_or(false) { smallest = left; }
+                if let (Some(l), Some(s)) = (
+                    heap_get_live(heap_ref, left),
+                    heap_get_live(heap_ref, smallest),
+                ) {
+                    if py_lt(&l, &s).unwrap_or(false) {
+                        smallest = left;
+                    }
                 }
             }
             if right < end {
-                if let (Some(r), Some(s)) = (heap_get_live(heap_ref, right), heap_get_live(heap_ref, smallest)) {
-                    if py_lt(&r, &s).unwrap_or(false) { smallest = right; }
+                if let (Some(r), Some(s)) = (
+                    heap_get_live(heap_ref, right),
+                    heap_get_live(heap_ref, smallest),
+                ) {
+                    if py_lt(&r, &s).unwrap_or(false) {
+                        smallest = right;
+                    }
                 }
             }
-            if smallest == pos { break; }
+            if smallest == pos {
+                break;
+            }
             heap_swap_live(heap_ref, pos, smallest);
             pos = smallest;
         }
@@ -2642,7 +3487,9 @@ pub fn create_heapq_dict() -> HashMap<String, PyObjectRef> {
     }
 
     heap_func!("heapify", |args| {
-        if args.is_empty() { return Err(PyError::type_error("heapify() missing required argument")); }
+        if args.is_empty() {
+            return Err(PyError::type_error("heapify() missing required argument"));
+        }
         if !matches!(&*args[0].borrow(), PyObject::List(_)) {
             return Err(PyError::type_error("heapify() argument must be a list"));
         }
@@ -2656,7 +3503,11 @@ pub fn create_heapq_dict() -> HashMap<String, PyObjectRef> {
     });
 
     heap_func!("heappush", |args| {
-        if args.len() < 2 { return Err(PyError::type_error("heappush() requires 2 arguments (heap, item)")); }
+        if args.len() < 2 {
+            return Err(PyError::type_error(
+                "heappush() requires 2 arguments (heap, item)",
+            ));
+        }
         // Check the variant via an IMMUTABLE borrow first — `.borrow_mut()`
         // panics outright (rather than erroring) on a non-`Mut` value like
         // `PyObjectRef::None`/`SmallInt`, so calling it unconditionally
@@ -2676,29 +3527,41 @@ pub fn create_heapq_dict() -> HashMap<String, PyObjectRef> {
     });
 
     heap_func!("heappop", |args| {
-        if args.is_empty() { return Err(PyError::type_error("heappop() missing required argument")); }
+        if args.is_empty() {
+            return Err(PyError::type_error("heappop() missing required argument"));
+        }
         if !matches!(&*args[0].borrow(), PyObject::List(_)) {
             return Err(PyError::type_error("heappop() argument must be a list"));
         }
         let result = if let PyObject::List(list) = &mut *args[0].borrow_mut() {
-            if list.is_empty() { return Err(PyError::index_error("pop from an empty heap")); }
+            if list.is_empty() {
+                return Err(PyError::index_error("pop from an empty heap"));
+            }
             let last = list.len() - 1;
             list.swap(0, last);
             list.pop().unwrap()
         } else {
             unreachable!()
         };
-        if heap_len_live(&args[0]) > 0 { _siftup_live(&args[0], 0); }
+        if heap_len_live(&args[0]) > 0 {
+            _siftup_live(&args[0], 0);
+        }
         Ok(result)
     });
 
     heap_func!("heapreplace", |args| {
-        if args.len() < 2 { return Err(PyError::type_error("heapreplace() requires 2 arguments (heap, item)")); }
+        if args.len() < 2 {
+            return Err(PyError::type_error(
+                "heapreplace() requires 2 arguments (heap, item)",
+            ));
+        }
         if !matches!(&*args[0].borrow(), PyObject::List(_)) {
             return Err(PyError::type_error("heapreplace() argument must be a list"));
         }
         let result = if let PyObject::List(list) = &mut *args[0].borrow_mut() {
-            if list.is_empty() { return Err(PyError::index_error("heapreplace() on empty heap")); }
+            if list.is_empty() {
+                return Err(PyError::index_error("heapreplace() on empty heap"));
+            }
             let result = list[0].clone();
             list[0] = args[1].clone();
             result
@@ -2711,9 +3574,17 @@ pub fn create_heapq_dict() -> HashMap<String, PyObjectRef> {
 
     // Helper: extract comparable values for nlargest/nsmallest
     fn _extract_items(args: &[PyObjectRef]) -> PyResult<(usize, Vec<PyObjectRef>)> {
-        if args.len() < 2 { return Err(PyError::type_error("requires at least 2 arguments (n, iterable)")); }
-        let n = args[0].as_i64().ok_or_else(|| PyError::type_error("n must be an integer"))?;
-        if n < 0 { return Err(PyError::value_error("n must be non-negative")); }
+        if args.len() < 2 {
+            return Err(PyError::type_error(
+                "requires at least 2 arguments (n, iterable)",
+            ));
+        }
+        let n = args[0]
+            .as_i64()
+            .ok_or_else(|| PyError::type_error("n must be an integer"))?;
+        if n < 0 {
+            return Err(PyError::value_error("n must be non-negative"));
+        }
         let n = n as usize;
         // Extract items from iterable
         let iterable = crate::object::builtin_iter(&[args[1].clone()])?;
@@ -2730,7 +3601,9 @@ pub fn create_heapq_dict() -> HashMap<String, PyObjectRef> {
 
     heap_func!("nlargest", |args| {
         let (n, mut items) = _extract_items(args)?;
-        if n == 0 { return Ok(py_list(Vec::new())); }
+        if n == 0 {
+            return Ok(py_list(Vec::new()));
+        }
         // Use a min-heap of size n to track largest n elements
         if items.len() <= n {
             // Sort descending
@@ -2759,7 +3632,9 @@ pub fn create_heapq_dict() -> HashMap<String, PyObjectRef> {
 
     heap_func!("nsmallest", |args| {
         let (n, mut items) = _extract_items(args)?;
-        if n == 0 { return Ok(py_list(Vec::new())); }
+        if n == 0 {
+            return Ok(py_list(Vec::new()));
+        }
         if items.len() <= n {
             items.sort_by(|a, b| py_lt(a, b).unwrap_or(false).cmp(&true));
             return Ok(py_list(items));
@@ -2798,7 +3673,9 @@ pub fn create_heapq_dict() -> HashMap<String, PyObjectRef> {
             if right < end && py_lt(&heap[largest], &heap[right]).unwrap_or(false) {
                 largest = right;
             }
-            if largest == pos { break; }
+            if largest == pos {
+                break;
+            }
             heap.swap(pos, largest);
             pos = largest;
         }
@@ -2816,76 +3693,125 @@ pub const ENUM_SOURCE: &str = include_str!("enum_extra.py");
 fn make_uuid(hex32: String) -> PyObjectRef {
     let mut type_dict = HashMap::new();
 
-    type_dict.insert_str("__str__", PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "__str__".to_string(),
-        func: |args| {
-            if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
-                if let Some(h) = dict.get_str("_hex") {
-                    let s = h.str();
-                    return Ok(py_str(&format!("{}-{}-{}-{}-{}", &s[0..8], &s[8..12], &s[12..16], &s[16..20], &s[20..32])));
+    type_dict.insert_str(
+        "__str__",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__str__".to_string(),
+            func: |args| {
+                if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+                    if let Some(h) = dict.get_str("_hex") {
+                        let s = h.str();
+                        return Ok(py_str(&format!(
+                            "{}-{}-{}-{}-{}",
+                            &s[0..8],
+                            &s[8..12],
+                            &s[12..16],
+                            &s[16..20],
+                            &s[20..32]
+                        )));
+                    }
                 }
-            }
-            Err(PyError::runtime_error("UUID instance missing _hex"))
-        },
-    }));
-    type_dict.insert_str("__repr__", PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "__repr__".to_string(),
-        func: |args| {
-            if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
-                if let Some(h) = dict.get_str("_hex") {
-                    let s = h.str();
-                    return Ok(py_str(&format!("UUID('{}-{}-{}-{}-{}')", &s[0..8], &s[8..12], &s[12..16], &s[16..20], &s[20..32])));
+                Err(PyError::runtime_error("UUID instance missing _hex"))
+            },
+        }),
+    );
+    type_dict.insert_str(
+        "__repr__",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__repr__".to_string(),
+            func: |args| {
+                if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+                    if let Some(h) = dict.get_str("_hex") {
+                        let s = h.str();
+                        return Ok(py_str(&format!(
+                            "UUID('{}-{}-{}-{}-{}')",
+                            &s[0..8],
+                            &s[8..12],
+                            &s[12..16],
+                            &s[16..20],
+                            &s[20..32]
+                        )));
+                    }
                 }
-            }
-            Err(PyError::runtime_error("UUID instance missing _hex"))
-        },
-    }));
-    type_dict.insert_str("__eq__", PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "__eq__".to_string(),
-        func: |args| {
-            let self_hex = if let PyObject::Instance { dict, .. } = &*args[0].borrow() { dict.get_str("_hex").map(|h| h.str()) } else { None };
-            let other_hex = if let PyObject::Instance { dict, .. } = &*args[1].borrow() { dict.get_str("_hex").map(|h| h.str()) } else { None };
-            Ok(py_bool(self_hex.is_some() && self_hex == other_hex))
-        },
-    }));
-    type_dict.insert_str("__hash__", PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "__hash__".to_string(),
-        func: |args| {
-            if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
-                if let Some(h) = dict.get_str("_hex") {
-                    return builtin_hash(&[py_str(&h.str())]);
+                Err(PyError::runtime_error("UUID instance missing _hex"))
+            },
+        }),
+    );
+    type_dict.insert_str(
+        "__eq__",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__eq__".to_string(),
+            func: |args| {
+                let self_hex = if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+                    dict.get_str("_hex").map(|h| h.str())
+                } else {
+                    None
+                };
+                let other_hex = if let PyObject::Instance { dict, .. } = &*args[1].borrow() {
+                    dict.get_str("_hex").map(|h| h.str())
+                } else {
+                    None
+                };
+                Ok(py_bool(self_hex.is_some() && self_hex == other_hex))
+            },
+        }),
+    );
+    type_dict.insert_str(
+        "__hash__",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__hash__".to_string(),
+            func: |args| {
+                if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+                    if let Some(h) = dict.get_str("_hex") {
+                        return builtin_hash(&[py_str(&h.str())]);
+                    }
                 }
-            }
-            Err(PyError::runtime_error("UUID instance missing _hex"))
-        },
-    }));
+                Err(PyError::runtime_error("UUID instance missing _hex"))
+            },
+        }),
+    );
     let hex_getter = PyObjectRef::new(PyObject::BuiltinFunction {
         name: "hex".to_string(),
         func: |args| {
             if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
-                if let Some(h) = dict.get_str("_hex") { return Ok(h.clone()); }
+                if let Some(h) = dict.get_str("_hex") {
+                    return Ok(h.clone());
+                }
             }
             Err(PyError::runtime_error("UUID instance missing _hex"))
         },
     });
-    type_dict.insert_str("hex", PyObjectRef::new(PyObject::Property(Box::new(PropertyData {
-        getter: Some(hex_getter), setter: None, deleter: None, doc: None,
-    }))));
+    type_dict.insert_str(
+        "hex",
+        PyObjectRef::new(PyObject::Property(Box::new(PropertyData {
+            getter: Some(hex_getter),
+            setter: None,
+            deleter: None,
+            doc: None,
+        }))),
+    );
     let int_getter = PyObjectRef::new(PyObject::BuiltinFunction {
         name: "int".to_string(),
         func: |args| {
             if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
                 if let Some(h) = dict.get_str("_hex") {
-                    let n = num_bigint::BigInt::parse_bytes(h.str().as_bytes(), 16).unwrap_or_else(|| num_bigint::BigInt::from(0));
+                    let n = num_bigint::BigInt::parse_bytes(h.str().as_bytes(), 16)
+                        .unwrap_or_else(|| num_bigint::BigInt::from(0));
                     return Ok(py_int(n));
                 }
             }
             Err(PyError::runtime_error("UUID instance missing _hex"))
         },
     });
-    type_dict.insert_str("int", PyObjectRef::new(PyObject::Property(Box::new(PropertyData {
-        getter: Some(int_getter), setter: None, deleter: None, doc: None,
-    }))));
+    type_dict.insert_str(
+        "int",
+        PyObjectRef::new(PyObject::Property(Box::new(PropertyData {
+            getter: Some(int_getter),
+            setter: None,
+            deleter: None,
+            doc: None,
+        }))),
+    );
 
     let typ = PyObjectRef::new(PyObject::Type {
         name: "UUID".to_string(),
@@ -2907,25 +3833,34 @@ fn random_uuid_hex(version: u8) -> String {
     let time_hi_and_version = ((r1 >> 48) as u16 & 0x0FFF) | ((version as u16) << 12);
     let clock_seq = (r2 as u16 & 0x3FFF) | 0x8000;
     let node = (r2 >> 16) as u64;
-    format!("{:08x}{:04x}{:04x}{:04x}{:012x}", time_low, time_mid, time_hi_and_version, clock_seq, node)
+    format!(
+        "{:08x}{:04x}{:04x}{:04x}{:012x}",
+        time_low, time_mid, time_hi_and_version, clock_seq, node
+    )
 }
 
 pub fn create_uuid_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! uuid_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
 
     uuid_func!("uuid4", |args| {
-        if !args.is_empty() { return Err(PyError::type_error("uuid4() takes no arguments")); }
+        if !args.is_empty() {
+            return Err(PyError::type_error("uuid4() takes no arguments"));
+        }
         Ok(make_uuid(random_uuid_hex(4)))
     });
 
-    uuid_func!("uuid1", |_args| {
-        Ok(make_uuid(random_uuid_hex(1)))
-    });
+    uuid_func!("uuid1", |_args| { Ok(make_uuid(random_uuid_hex(1))) });
 
     // UUID(hex=None, int=None, bytes=None) — supports the common construction forms.
     uuid_func!("UUID", |args| {
@@ -2947,16 +3882,26 @@ pub fn create_csv_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! csv_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
 
     csv_func!("reader", |args| {
-        if args.is_empty() { return Err(PyError::type_error("reader() missing required argument")); }
+        if args.is_empty() {
+            return Err(PyError::type_error("reader() missing required argument"));
+        }
         let s = args[0].str();
         let mut result = Vec::new();
         for line in s.lines() {
-            if line.trim().is_empty() { continue; }
+            if line.trim().is_empty() {
+                continue;
+            }
             let fields: Vec<PyObjectRef> = line.split(',').map(|f| py_str(f.trim())).collect();
             result.push(py_list(fields));
         }
@@ -2964,7 +3909,9 @@ pub fn create_csv_dict() -> HashMap<String, PyObjectRef> {
     });
 
     csv_func!("writer", |args| {
-        if args.is_empty() { return Err(PyError::type_error("writer() missing required argument")); }
+        if args.is_empty() {
+            return Err(PyError::type_error("writer() missing required argument"));
+        }
         let data = &args[0];
         let borrowed = data.borrow();
         if let PyObject::List(rows) = &*borrowed {
@@ -2975,12 +3922,16 @@ pub fn create_csv_dict() -> HashMap<String, PyObjectRef> {
                     let line: Vec<String> = fields.iter().map(|f| f.str()).collect();
                     lines.push(line.join(","));
                 } else {
-                    return Err(PyError::type_error("writer() argument must be a list of lists"));
+                    return Err(PyError::type_error(
+                        "writer() argument must be a list of lists",
+                    ));
                 }
             }
             Ok(py_str(&lines.join("\n")))
         } else {
-            Err(PyError::type_error("writer() argument must be a list of lists"))
+            Err(PyError::type_error(
+                "writer() argument must be a list of lists",
+            ))
         }
     });
 
@@ -2993,102 +3944,149 @@ pub fn create_csv_dict() -> HashMap<String, PyObjectRef> {
         mro: vec![],
     });
     if let PyObject::Type { dict, .. } = &mut *dict_reader_type.borrow_mut() {
-        dict.insert_str("__init__", PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "__init__".to_string(),
-            func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
-                if args.len() < 2 {
-                    return Err(PyError::type_error("DictReader() missing required argument: 'csvfile'"));
-                }
-                let self_obj = &args[0];
-                let csvfile = &args[1];
-                // Read all lines from the file-like / string source.
-                let content: String = {
-                    if matches!(&*csvfile.borrow(), PyObject::Str(_)) {
-                        csvfile.str()
-                    } else if let Ok(read) = csvfile.borrow().get_attribute("read") {
-                        let v = crate::object::call_function_disposable(&read, vec![], vec![])?;
-                        v.str()
-                    } else {
-                        csvfile.str()
+        dict.insert_str(
+            "__init__",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__init__".to_string(),
+                func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                    if args.len() < 2 {
+                        return Err(PyError::type_error(
+                            "DictReader() missing required argument: 'csvfile'",
+                        ));
                     }
-                };
-                let rows: Vec<Vec<String>> = content.lines()
-                    .filter(|l| !l.trim().is_empty())
-                    .map(|l| l.split(',').map(|f| f.trim().to_string()).collect())
-                    .collect();
-                let fieldnames: Vec<String> = if let Some(fn_arg) = args.get(2) {
-                    if matches!(&*fn_arg.borrow(), PyObject::None) {
-                        rows.first().cloned().unwrap_or_default()
-                    } else {
-                        let b = fn_arg.borrow();
-                        if let PyObject::List(items) = &*b {
-                            items.iter().map(|i| i.str()).collect()
+                    let self_obj = &args[0];
+                    let csvfile = &args[1];
+                    // Read all lines from the file-like / string source.
+                    let content: String = {
+                        if matches!(&*csvfile.borrow(), PyObject::Str(_)) {
+                            csvfile.str()
+                        } else if let Ok(read) = csvfile.borrow().get_attribute("read") {
+                            let v = crate::object::call_function_disposable(&read, vec![], vec![])?;
+                            v.str()
                         } else {
-                            fn_arg.str().split(',').map(|s| s.trim().to_string()).collect()
+                            csvfile.str()
                         }
-                    }
-                } else {
-                    rows.first().cloned().unwrap_or_default()
-                };
-                let data_rows: Vec<Vec<String>> = if args.get(2).map(|a| matches!(&*a.borrow(), PyObject::None)).unwrap_or(args.len() < 3) {
-                    rows.into_iter().skip(1).collect()
-                } else {
-                    rows
-                };
-                self_obj.borrow_mut().set_attribute("fieldnames", py_list(fieldnames.iter().map(|f| py_str(f)).collect()))?;
-                let fieldnames2 = fieldnames.clone();
-                let data_rows2 = data_rows.clone();
-                self_obj.borrow_mut().set_attribute("_rows", py_list(data_rows2.into_iter().map(|r| py_list(r.into_iter().map(|v| py_str(&v)).collect())).collect()))?;
-                let _ = fieldnames2;
-                Ok(py_none())
-            },
-        }));
-        // __iter__ returns a list iterator over dict rows.
-        dict.insert_str("__iter__", PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "__iter__".to_string(),
-            func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
-                let self_obj = &args[0];
-                let fieldnames: Vec<PyObjectRef> = self_obj.borrow().get_attribute("fieldnames")
-                    .and_then(|f| {
-                        let b = f.borrow();
-                        if let PyObject::List(items) = &*b { Ok(items.clone()) } else { Err(PyError::type_error("fieldnames")) }
-                    })
-                    .unwrap_or_default();
-                let rows: Vec<PyObjectRef> = self_obj.borrow().get_attribute("_rows")
-                    .and_then(|r| {
-                        let b = r.borrow();
-                        if let PyObject::List(items) = &*b { Ok(items.clone()) } else { Err(PyError::type_error("_rows")) }
-                    })
-                    .unwrap_or_default();
-                let mut dicts = Vec::new();
-                for row in rows {
-                    let rb = row.borrow();
-                    if let PyObject::List(cells) = &*rb {
-                        let d = crate::object::py_dict();
-                        {
-                            let mut db = d.borrow_mut();
-                            if let PyObject::Dict(pd) = &mut *db {
-                                for (i, fname) in fieldnames.iter().enumerate() {
-                                    let key = fname.str();
-                                    let val = cells.get(i).cloned().unwrap_or_else(|| py_none());
-                                    pd.set(py_str(&key), val)?;
-                                }
+                    };
+                    let rows: Vec<Vec<String>> = content
+                        .lines()
+                        .filter(|l| !l.trim().is_empty())
+                        .map(|l| l.split(',').map(|f| f.trim().to_string()).collect())
+                        .collect();
+                    let fieldnames: Vec<String> = if let Some(fn_arg) = args.get(2) {
+                        if matches!(&*fn_arg.borrow(), PyObject::None) {
+                            rows.first().cloned().unwrap_or_default()
+                        } else {
+                            let b = fn_arg.borrow();
+                            if let PyObject::List(items) = &*b {
+                                items.iter().map(|i| i.str()).collect()
+                            } else {
+                                fn_arg
+                                    .str()
+                                    .split(',')
+                                    .map(|s| s.trim().to_string())
+                                    .collect()
                             }
                         }
-                        dicts.push(d);
+                    } else {
+                        rows.first().cloned().unwrap_or_default()
+                    };
+                    let data_rows: Vec<Vec<String>> = if args
+                        .get(2)
+                        .map(|a| matches!(&*a.borrow(), PyObject::None))
+                        .unwrap_or(args.len() < 3)
+                    {
+                        rows.into_iter().skip(1).collect()
+                    } else {
+                        rows
+                    };
+                    self_obj.borrow_mut().set_attribute(
+                        "fieldnames",
+                        py_list(fieldnames.iter().map(|f| py_str(f)).collect()),
+                    )?;
+                    let fieldnames2 = fieldnames.clone();
+                    let data_rows2 = data_rows.clone();
+                    self_obj.borrow_mut().set_attribute(
+                        "_rows",
+                        py_list(
+                            data_rows2
+                                .into_iter()
+                                .map(|r| py_list(r.into_iter().map(|v| py_str(&v)).collect()))
+                                .collect(),
+                        ),
+                    )?;
+                    let _ = fieldnames2;
+                    Ok(py_none())
+                },
+            }),
+        );
+        // __iter__ returns a list iterator over dict rows.
+        dict.insert_str(
+            "__iter__",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__iter__".to_string(),
+                func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                    let self_obj = &args[0];
+                    let fieldnames: Vec<PyObjectRef> = self_obj
+                        .borrow()
+                        .get_attribute("fieldnames")
+                        .and_then(|f| {
+                            let b = f.borrow();
+                            if let PyObject::List(items) = &*b {
+                                Ok(items.clone())
+                            } else {
+                                Err(PyError::type_error("fieldnames"))
+                            }
+                        })
+                        .unwrap_or_default();
+                    let rows: Vec<PyObjectRef> = self_obj
+                        .borrow()
+                        .get_attribute("_rows")
+                        .and_then(|r| {
+                            let b = r.borrow();
+                            if let PyObject::List(items) = &*b {
+                                Ok(items.clone())
+                            } else {
+                                Err(PyError::type_error("_rows"))
+                            }
+                        })
+                        .unwrap_or_default();
+                    let mut dicts = Vec::new();
+                    for row in rows {
+                        let rb = row.borrow();
+                        if let PyObject::List(cells) = &*rb {
+                            let d = crate::object::py_dict();
+                            {
+                                let mut db = d.borrow_mut();
+                                if let PyObject::Dict(pd) = &mut *db {
+                                    for (i, fname) in fieldnames.iter().enumerate() {
+                                        let key = fname.str();
+                                        let val =
+                                            cells.get(i).cloned().unwrap_or_else(|| py_none());
+                                        pd.set(py_str(&key), val)?;
+                                    }
+                                }
+                            }
+                            dicts.push(d);
+                        }
                     }
-                }
-                Ok(PyObjectRef::new(PyObject::ListIter { list: dicts, index: 0 }))
-            },
-        }));
-        dict.insert_str("__next__", PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "__next__".to_string(),
-            func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
-                let self_obj = &args[0];
-                let it = crate::object::builtin_iter(&[self_obj.clone()])?;
-                crate::object::builtin_next(&[it.clone()])
-            },
-        }));
+                    Ok(PyObjectRef::new(PyObject::ListIter {
+                        list: dicts,
+                        index: 0,
+                    }))
+                },
+            }),
+        );
+        dict.insert_str(
+            "__next__",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__next__".to_string(),
+                func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                    let self_obj = &args[0];
+                    let it = crate::object::builtin_iter(&[self_obj.clone()])?;
+                    crate::object::builtin_next(&[it.clone()])
+                },
+            }),
+        );
     }
     d.insert_str("DictReader", dict_reader_type.clone());
 
@@ -3101,86 +4099,130 @@ pub fn create_csv_dict() -> HashMap<String, PyObjectRef> {
         mro: vec![],
     });
     if let PyObject::Type { dict, .. } = &mut *dict_writer_type.borrow_mut() {
-        dict.insert_str("__init__", PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "__init__".to_string(),
-            func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
-                if args.len() < 3 {
-                    return Err(PyError::type_error("DictWriter() missing required argument: 'fieldnames'"));
-                }
-                let self_obj = &args[0];
-                let _sink = &args[1];
-                let fn_arg = &args[2];
-                let fieldnames: Vec<PyObjectRef> = {
-                    let b = fn_arg.borrow();
-                    if let PyObject::List(items) = &*b {
-                        items.clone()
-                    } else {
-                        fn_arg.str().split(',').map(|s| py_str(s.trim())).collect()
+        dict.insert_str(
+            "__init__",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__init__".to_string(),
+                func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                    if args.len() < 3 {
+                        return Err(PyError::type_error(
+                            "DictWriter() missing required argument: 'fieldnames'",
+                        ));
                     }
-                };
-                self_obj.borrow_mut().set_attribute("fieldnames", py_list(fieldnames.clone()))?;
-                self_obj.borrow_mut().set_attribute("_lines", py_list(vec![]))?;
-                Ok(py_none())
-            },
-        }));
-        dict.insert_str("writeheader", PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "writeheader".to_string(),
-            func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
-                let self_obj = &args[0];
-                let fieldnames = self_obj.borrow().get_attribute("fieldnames")
-                    .and_then(|f| { let b = f.borrow(); if let PyObject::List(items) = &*b { Ok(items.iter().map(|i| i.str()).collect::<Vec<_>>()) } else { Err(PyError::type_error("fieldnames")) } })
-                    .unwrap_or_default();
-                let line = fieldnames.join(",");
-                if let Ok(lines) = self_obj.borrow().get_attribute("_lines") {
-                    if let PyObject::List(items) = &mut *lines.borrow_mut() {
-                        items.push(py_str(&line));
-                    }
-                }
-                Ok(py_none())
-            },
-        }));
-        dict.insert_str("writerow", PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "writerow".to_string(),
-            func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
-                let self_obj = &args[0];
-                let row = args.get(1).ok_or_else(|| PyError::type_error("writerow() missing argument"))?;
-                let fieldnames: Vec<PyObjectRef> = self_obj.borrow().get_attribute("fieldnames")
-                    .and_then(|f| { let b = f.borrow(); if let PyObject::List(items) = &*b { Ok(items.clone()) } else { Err(PyError::type_error("fieldnames")) } })
-                    .unwrap_or_default();
-                let mut cells: Vec<String> = Vec::new();
-                for fname in &fieldnames {
-                    let key = fname.str();
-                    let val = row.borrow().get_attribute(&key).map(|v| v.str()).unwrap_or_default();
-                    cells.push(val);
-                }
-                let line = cells.join(",");
-                if let Ok(lines) = self_obj.borrow().get_attribute("_lines") {
-                    if let PyObject::List(items) = &mut *lines.borrow_mut() {
-                        items.push(py_str(&line));
-                    }
-                }
-                Ok(py_none())
-            },
-        }));
-        dict.insert_str("writerows", PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "writerows".to_string(),
-            func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
-                let self_obj = &args[0];
-                let rows = args.get(1).ok_or_else(|| PyError::type_error("writerows() missing argument"))?;
-                let it = crate::object::builtin_iter(&[rows.clone()])?;
-                loop {
-                    match crate::object::builtin_next(&[it.clone()]) {
-                        Ok(row) => {
-                            let wrow = self_obj.borrow().get_attribute("writerow")?;
-                            crate::object::call_function_disposable(&wrow, vec![row], vec![])?;
+                    let self_obj = &args[0];
+                    let _sink = &args[1];
+                    let fn_arg = &args[2];
+                    let fieldnames: Vec<PyObjectRef> = {
+                        let b = fn_arg.borrow();
+                        if let PyObject::List(items) = &*b {
+                            items.clone()
+                        } else {
+                            fn_arg.str().split(',').map(|s| py_str(s.trim())).collect()
                         }
-                        Err(crate::object::PyError::StopIteration) => break,
-                        Err(e) => return Err(e),
+                    };
+                    self_obj
+                        .borrow_mut()
+                        .set_attribute("fieldnames", py_list(fieldnames.clone()))?;
+                    self_obj
+                        .borrow_mut()
+                        .set_attribute("_lines", py_list(vec![]))?;
+                    Ok(py_none())
+                },
+            }),
+        );
+        dict.insert_str(
+            "writeheader",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "writeheader".to_string(),
+                func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                    let self_obj = &args[0];
+                    let fieldnames = self_obj
+                        .borrow()
+                        .get_attribute("fieldnames")
+                        .and_then(|f| {
+                            let b = f.borrow();
+                            if let PyObject::List(items) = &*b {
+                                Ok(items.iter().map(|i| i.str()).collect::<Vec<_>>())
+                            } else {
+                                Err(PyError::type_error("fieldnames"))
+                            }
+                        })
+                        .unwrap_or_default();
+                    let line = fieldnames.join(",");
+                    if let Ok(lines) = self_obj.borrow().get_attribute("_lines") {
+                        if let PyObject::List(items) = &mut *lines.borrow_mut() {
+                            items.push(py_str(&line));
+                        }
                     }
-                }
-                Ok(py_none())
-            },
-        }));
+                    Ok(py_none())
+                },
+            }),
+        );
+        dict.insert_str(
+            "writerow",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "writerow".to_string(),
+                func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                    let self_obj = &args[0];
+                    let row = args
+                        .get(1)
+                        .ok_or_else(|| PyError::type_error("writerow() missing argument"))?;
+                    let fieldnames: Vec<PyObjectRef> = self_obj
+                        .borrow()
+                        .get_attribute("fieldnames")
+                        .and_then(|f| {
+                            let b = f.borrow();
+                            if let PyObject::List(items) = &*b {
+                                Ok(items.clone())
+                            } else {
+                                Err(PyError::type_error("fieldnames"))
+                            }
+                        })
+                        .unwrap_or_default();
+                    let mut cells: Vec<String> = Vec::new();
+                    for fname in &fieldnames {
+                        let key = fname.str();
+                        let val = row
+                            .borrow()
+                            .get_attribute(&key)
+                            .map(|v| v.str())
+                            .unwrap_or_default();
+                        cells.push(val);
+                    }
+                    let line = cells.join(",");
+                    if let Ok(lines) = self_obj.borrow().get_attribute("_lines") {
+                        if let PyObject::List(items) = &mut *lines.borrow_mut() {
+                            items.push(py_str(&line));
+                        }
+                    }
+                    Ok(py_none())
+                },
+            }),
+        );
+        dict.insert_str(
+            "writerows",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "writerows".to_string(),
+                func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                    let self_obj = &args[0];
+                    let rows = args
+                        .get(1)
+                        .ok_or_else(|| PyError::type_error("writerows() missing argument"))?;
+                    let it = crate::object::builtin_iter(&[rows.clone()])?;
+                    loop {
+                        match crate::object::builtin_next(&[it.clone()]) {
+                            Ok(row) => {
+                                let wrow = self_obj.borrow().get_attribute("writerow")?;
+                                crate::object::call_function_disposable(&wrow, vec![row], vec![])?;
+                            }
+                            Err(crate::object::PyError::StopIteration) => break,
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    Ok(py_none())
+                },
+            }),
+        );
     }
     d.insert_str("DictWriter", dict_writer_type);
 
@@ -3191,15 +4233,27 @@ pub fn create_contextlib_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! ctx_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
     ctx_func!("contextmanager", |args| {
-        if args.is_empty() { return Err(PyError::type_error("contextmanager() missing argument")); }
+        if args.is_empty() {
+            return Err(PyError::type_error("contextmanager() missing argument"));
+        }
         Ok(args[0].clone())
     });
     ctx_func!("nullcontext", |args| {
-        if args.is_empty() { Ok(py_none()) } else { Ok(args[0].clone()) }
+        if args.is_empty() {
+            Ok(py_none())
+        } else {
+            Ok(args[0].clone())
+        }
     });
     ctx_func!("suppress", |_| Ok(py_none()));
     d
@@ -3212,7 +4266,13 @@ pub fn create_platform_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! plat_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
     plat_func!("platform", |_| {
@@ -3220,22 +4280,14 @@ pub fn create_platform_dict() -> HashMap<String, PyObjectRef> {
         let arch = std::env::consts::ARCH;
         Ok(py_str(&format!("{}-{}", os, arch)))
     });
-    plat_func!("machine", |_| {
-        Ok(py_str(std::env::consts::ARCH))
-    });
+    plat_func!("machine", |_| { Ok(py_str(std::env::consts::ARCH)) });
     plat_func!("processor", |_| {
         // Fall back to architecture string if no more specific info
         Ok(py_str(std::env::consts::ARCH))
     });
-    plat_func!("python_implementation", |_| {
-        Ok(py_str("RustPython"))
-    });
-    plat_func!("python_version", |_| {
-        Ok(py_str("3.12.0"))
-    });
-    plat_func!("system", |_| {
-        Ok(py_str(std::env::consts::OS))
-    });
+    plat_func!("python_implementation", |_| { Ok(py_str("RustPython")) });
+    plat_func!("python_version", |_| { Ok(py_str("3.12.0")) });
+    plat_func!("system", |_| { Ok(py_str(std::env::consts::OS)) });
     // Real signature: libc_ver(executable=None, lib='', version='',
     // chunksize=16384) -> (lib, version) — detects glibc/musl via parsing
     // the executable's dynamic-linker strings on real CPython. Honest
@@ -3247,9 +4299,7 @@ pub fn create_platform_dict() -> HashMap<String, PyObjectRef> {
     // Windows-only in real CPython (returns e.g. "ServerStandard" on
     // Windows Server); always "" elsewhere, which is what non-Windows
     // `platform.py` itself falls back to.
-    plat_func!("win32_edition", |_| {
-        Ok(py_str(""))
-    });
+    plat_func!("win32_edition", |_| { Ok(py_str("")) });
     // `platform.uname()` — was missing entirely. Real CPython returns a
     // structseq (`uname_result`) with 6 named fields (`system`, `node`,
     // `release`, `version`, `machine`, `processor`) that's ALSO index/
@@ -3269,7 +4319,10 @@ pub fn create_platform_dict() -> HashMap<String, PyObjectRef> {
         dict.insert_str("version", py_str(""));
         dict.insert_str("machine", machine.clone());
         dict.insert_str("processor", py_str(std::env::consts::ARCH));
-        Ok(PyObjectRef::new(PyObject::Instance { typ: get_uname_result_type(), dict }))
+        Ok(PyObjectRef::new(PyObject::Instance {
+            typ: get_uname_result_type(),
+            dict,
+        }))
     });
     d
 }
@@ -3278,47 +4331,105 @@ thread_local! {
     static UNAME_RESULT_TYPE: std::cell::RefCell<Option<PyObjectRef>> = std::cell::RefCell::new(None);
 }
 
-const UNAME_FIELDS: [&str; 6] = ["system", "node", "release", "version", "machine", "processor"];
+const UNAME_FIELDS: [&str; 6] = [
+    "system",
+    "node",
+    "release",
+    "version",
+    "machine",
+    "processor",
+];
 
 fn build_uname_result_type() -> PyObjectRef {
     let mut type_dict: HashMap<String, PyObjectRef> = HashMap::new();
     macro_rules! bf {
         ($name:expr, $f:expr) => {
-            PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $f })
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: $name.to_string(),
+                func: $f,
+            })
         };
     }
-    type_dict.insert_str("__getitem__", bf!("__getitem__", |args| {
-        if args.len() < 2 { return Err(PyError::type_error("__getitem__() takes exactly one argument")); }
-        let idx = args[1].as_i64().ok_or_else(|| PyError::type_error("indices must be integers"))?;
-        if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
-            let i = if idx < 0 { idx + 6 } else { idx };
-            let name = UNAME_FIELDS.get(i as usize).ok_or_else(|| PyError::index_error("uname_result index out of range"))?;
-            Ok(dict.get(name).cloned().unwrap_or_else(py_none))
-        } else { Err(PyError::runtime_error("__getitem__ on non-uname_result")) }
-    }));
+    type_dict.insert_str(
+        "__getitem__",
+        bf!("__getitem__", |args| {
+            if args.len() < 2 {
+                return Err(PyError::type_error(
+                    "__getitem__() takes exactly one argument",
+                ));
+            }
+            let idx = args[1]
+                .as_i64()
+                .ok_or_else(|| PyError::type_error("indices must be integers"))?;
+            if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+                let i = if idx < 0 { idx + 6 } else { idx };
+                let name = UNAME_FIELDS
+                    .get(i as usize)
+                    .ok_or_else(|| PyError::index_error("uname_result index out of range"))?;
+                Ok(dict.get(name).cloned().unwrap_or_else(py_none))
+            } else {
+                Err(PyError::runtime_error("__getitem__ on non-uname_result"))
+            }
+        }),
+    );
     type_dict.insert_str("__len__", bf!("__len__", |_| Ok(py_int(6))));
-    type_dict.insert_str("__iter__", bf!("__iter__", |args| {
-        if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
-            let items: Vec<PyObjectRef> = UNAME_FIELDS.iter().map(|f| dict.get(f).cloned().unwrap_or_else(py_none)).collect();
-            Ok(PyObjectRef::new(PyObject::ListIter { list: items, index: 0 }))
-        } else { Err(PyError::runtime_error("__iter__ on non-uname_result")) }
-    }));
-    type_dict.insert_str("__repr__", bf!("__repr__", |args| {
-        if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
-            let body = UNAME_FIELDS.iter()
-                .map(|f| format!("{}={}", f, dict.get(f).map(|v| v.repr()).unwrap_or_else(|| "None".to_string())))
-                .collect::<Vec<_>>().join(", ");
-            Ok(py_str(&format!("uname_result({})", body)))
-        } else { Ok(py_str("uname_result(...)")) }
-    }));
-    PyObjectRef::new(PyObject::Type { name: "platform.uname_result".to_string(), dict: Box::new(str_map_to_typedict(type_dict)), bases: vec![], mro: vec![] })
+    type_dict.insert_str(
+        "__iter__",
+        bf!("__iter__", |args| {
+            if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+                let items: Vec<PyObjectRef> = UNAME_FIELDS
+                    .iter()
+                    .map(|f| dict.get(f).cloned().unwrap_or_else(py_none))
+                    .collect();
+                Ok(PyObjectRef::new(PyObject::ListIter {
+                    list: items,
+                    index: 0,
+                }))
+            } else {
+                Err(PyError::runtime_error("__iter__ on non-uname_result"))
+            }
+        }),
+    );
+    type_dict.insert_str(
+        "__repr__",
+        bf!("__repr__", |args| {
+            if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+                let body = UNAME_FIELDS
+                    .iter()
+                    .map(|f| {
+                        format!(
+                            "{}={}",
+                            f,
+                            dict.get(f)
+                                .map(|v| v.repr())
+                                .unwrap_or_else(|| "None".to_string())
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                Ok(py_str(&format!("uname_result({})", body)))
+            } else {
+                Ok(py_str("uname_result(...)"))
+            }
+        }),
+    );
+    PyObjectRef::new(PyObject::Type {
+        name: "platform.uname_result".to_string(),
+        dict: Box::new(str_map_to_typedict(type_dict)),
+        bases: vec![],
+        mro: vec![],
+    })
 }
 
 fn get_uname_result_type() -> PyObjectRef {
     let existing = UNAME_RESULT_TYPE.with(|c| c.borrow().clone());
-    if let Some(t) = existing { return t; }
+    if let Some(t) = existing {
+        return t;
+    }
     let typ = build_uname_result_type();
-    UNAME_RESULT_TYPE.with(|c| { *c.borrow_mut() = Some(typ.clone()); });
+    UNAME_RESULT_TYPE.with(|c| {
+        *c.borrow_mut() = Some(typ.clone());
+    });
     typ
 }
 
@@ -3326,7 +4437,13 @@ pub fn create_getopt_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! getopt_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
 
@@ -3341,7 +4458,9 @@ pub fn create_getopt_dict() -> HashMap<String, PyObjectRef> {
 
     getopt_func!("getopt", |args| {
         if args.len() < 2 {
-            return Err(PyError::type_error("getopt() requires at least 2 arguments (args, shortopts)"));
+            return Err(PyError::type_error(
+                "getopt() requires at least 2 arguments (args, shortopts)",
+            ));
         }
         let shortopts = args[1].str();
         // Parse longopts if provided (third argument is a list of long option names)
@@ -3378,7 +4497,9 @@ pub fn create_getopt_dict() -> HashMap<String, PyObjectRef> {
             if options_done || !arg.starts_with('-') {
                 positional.push(py_str(arg));
                 i += 1;
-                if arg.starts_with('-') { options_done = true; }
+                if arg.starts_with('-') {
+                    options_done = true;
+                }
                 continue;
             }
             if arg == "--" {
@@ -3396,7 +4517,11 @@ pub fn create_getopt_dict() -> HashMap<String, PyObjectRef> {
                 };
                 // Check if this long option expects an argument
                 let needs_val = longopts.iter().any(|lo| {
-                    let base = if lo.ends_with('=') { &lo[..lo.len()-1] } else { lo.as_str() };
+                    let base = if lo.ends_with('=') {
+                        &lo[..lo.len() - 1]
+                    } else {
+                        lo.as_str()
+                    };
                     base == name && lo.ends_with('=')
                 });
                 match val {
@@ -3405,9 +4530,15 @@ pub fn create_getopt_dict() -> HashMap<String, PyObjectRef> {
                         if needs_val {
                             i += 1;
                             if i < arg_list.len() {
-                                opts.push(py_tuple(vec![py_str(&format!("--{}", name)), py_str(&arg_list[i])]));
+                                opts.push(py_tuple(vec![
+                                    py_str(&format!("--{}", name)),
+                                    py_str(&arg_list[i]),
+                                ]));
                             } else {
-                                return Err(PyError::type_error(&format!("option --{} requires a value", name)));
+                                return Err(PyError::type_error(&format!(
+                                    "option --{} requires a value",
+                                    name
+                                )));
                             }
                         } else {
                             opts.push(py_tuple(vec![py_str(&format!("--{}", name)), py_str("")]));
@@ -3420,7 +4551,10 @@ pub fn create_getopt_dict() -> HashMap<String, PyObjectRef> {
                 let chars: Vec<char> = arg[1..].chars().collect();
                 for (j, c) in chars.iter().enumerate() {
                     if !shortopts.contains(*c) {
-                        return Err(PyError::type_error(&format!("option -{} not recognized", c)));
+                        return Err(PyError::type_error(&format!(
+                            "option -{} not recognized",
+                            c
+                        )));
                     }
                     if short_has_arg(*c, &shortopts) {
                         if j + 1 < chars.len() {
@@ -3431,9 +4565,15 @@ pub fn create_getopt_dict() -> HashMap<String, PyObjectRef> {
                         } else {
                             i += 1;
                             if i < arg_list.len() {
-                                opts.push(py_tuple(vec![py_str(&format!("-{}", c)), py_str(&arg_list[i])]));
+                                opts.push(py_tuple(vec![
+                                    py_str(&format!("-{}", c)),
+                                    py_str(&arg_list[i]),
+                                ]));
                             } else {
-                                return Err(PyError::type_error(&format!("option -{} requires an argument", c)));
+                                return Err(PyError::type_error(&format!(
+                                    "option -{} requires an argument",
+                                    c
+                                )));
                             }
                         }
                     } else {
@@ -3453,7 +4593,13 @@ pub fn create_getpass_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! getpass_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
     getpass_func!("getuser", |_| {
@@ -3463,7 +4609,11 @@ pub fn create_getpass_dict() -> HashMap<String, PyObjectRef> {
         Ok(py_str(&user))
     });
     getpass_func!("getpass", |args| {
-        let prompt = if args.is_empty() { "Password: ".to_string() } else { args[0].str() };
+        let prompt = if args.is_empty() {
+            "Password: ".to_string()
+        } else {
+            args[0].str()
+        };
         // In this minimal native implementation, we echo the prompt and read a line from stdin.
         // This is simplified — a real getpass would disable terminal echo.
         print!("{}", prompt);
@@ -3495,14 +4645,20 @@ const TOPOSORTER_STARTED_KEY: &str = "_started";
 const TOPOSORTER_PASSOUT_KEY: &str = "_passedout";
 
 fn toposorter_graph(obj: &PyObjectRef) -> Option<PyObjectRef> {
-    if let PyObject::Instance { dict, .. } = &*obj.borrow() { dict.get(TOPOSORTER_GRAPH_KEY).cloned() } else { None }
+    if let PyObject::Instance { dict, .. } = &*obj.borrow() {
+        dict.get(TOPOSORTER_GRAPH_KEY).cloned()
+    } else {
+        None
+    }
 }
 
 /// Read a boolean state flag off the instance's own dict.
 fn toposorter_inst_flag(obj: &PyObjectRef, key: &str) -> bool {
     if let PyObject::Instance { dict, .. } = &*obj.borrow() {
         dict.get(key).map(|v| v.truthy()).unwrap_or(false)
-    } else { false }
+    } else {
+        false
+    }
 }
 
 fn toposorter_set_inst_flag(obj: &PyObjectRef, key: &str, val: bool) {
@@ -3516,7 +4672,9 @@ fn toposorter_flag_dict_keys(obj: &PyObjectRef, key: &str) -> Vec<PyObjectRef> {
     if let PyObject::Instance { dict, .. } = &*obj.borrow() {
         if let Some(d) = dict.get(key) {
             let db = d.borrow();
-            if let PyObject::Dict(pd) = &*db { return pd.keys(); }
+            if let PyObject::Dict(pd) = &*db {
+                return pd.keys();
+            }
         }
     }
     Vec::new()
@@ -3558,7 +4716,11 @@ fn toposorter_ensure_node(graph: &PyObjectRef, node: &PyObjectRef) -> PyResult<(
     Ok(())
 }
 
-fn toposorter_add_edge(graph: &PyObjectRef, node: &PyObjectRef, pred: &PyObjectRef) -> PyResult<()> {
+fn toposorter_add_edge(
+    graph: &PyObjectRef,
+    node: &PyObjectRef,
+    pred: &PyObjectRef,
+) -> PyResult<()> {
     // Ensure the NODE before the pred so the graph dict's insertion order
     // matches real CPython's `_node2info` (the node first) — cycle reporting
     // starts from the first node in that order, and the test asserts the
@@ -3600,10 +4762,16 @@ fn toposorter_find_cycle(graph: &PyObjectRef, _leftover: &[PyObjectRef]) -> Vec<
     let preds_of = |node: &PyObjectRef| -> Vec<PyObjectRef> {
         if let Ok(Some(p)) = {
             let g = graph.borrow();
-            if let PyObject::Dict(d) = &*g { d.get(node) } else { Ok(None) }
+            if let PyObject::Dict(d) = &*g {
+                d.get(node)
+            } else {
+                Ok(None)
+            }
         } {
             let pb = p.borrow();
-            if let PyObject::List(items) = &*pb { return items.clone(); }
+            if let PyObject::List(items) = &*pb {
+                return items.clone();
+            }
         }
         Vec::new()
     };
@@ -3632,7 +4800,10 @@ fn toposorter_find_cycle(graph: &PyObjectRef, _leftover: &[PyObjectRef]) -> Vec<
         let mut node = start.clone();
         loop {
             if seen.iter().any(|s| s.equals(&node).unwrap_or(false)) {
-                if let Some(pos) = node2stacki.iter().position(|n| n.equals(&node).unwrap_or(false)) {
+                if let Some(pos) = node2stacki
+                    .iter()
+                    .position(|n| n.equals(&node).unwrap_or(false))
+                {
                     let mut cycle = stack[pos..].to_vec();
                     cycle.push(node.clone());
                     return cycle;
@@ -3648,15 +4819,25 @@ fn toposorter_find_cycle(graph: &PyObjectRef, _leftover: &[PyObjectRef]) -> Vec<
                 let top = stack.last().unwrap().clone();
                 let succs = successors_of(&top);
                 // find the next successor NOT yet fully processed
-                let next_succ = succs.iter().find(|s| {
-                    // if already seen and not in current stack, skip (state 2)
-                    let already = seen.iter().any(|x| x.equals(*s).unwrap_or(false));
-                    let in_stack = node2stacki.iter().any(|x| x.equals(*s).unwrap_or(false));
-                    !(already && !in_stack)
-                }).cloned();
+                let next_succ = succs
+                    .iter()
+                    .find(|s| {
+                        // if already seen and not in current stack, skip (state 2)
+                        let already = seen.iter().any(|x| x.equals(*s).unwrap_or(false));
+                        let in_stack = node2stacki.iter().any(|x| x.equals(*s).unwrap_or(false));
+                        !(already && !in_stack)
+                    })
+                    .cloned();
                 match next_succ {
-                    Some(s) => { node = s; descended = true; break; }
-                    None => { stack.pop(); node2stacki.pop(); }
+                    Some(s) => {
+                        node = s;
+                        descended = true;
+                        break;
+                    }
+                    None => {
+                        stack.pop();
+                        node2stacki.pop();
+                    }
                 }
             }
             if !descended {
@@ -3691,7 +4872,9 @@ fn toposorter_sorted_order(graph: &PyObjectRef) -> PyResult<Vec<PyObjectRef>> {
         let mut ready = Vec::new();
         let mut still_pending = Vec::new();
         for (node, preds) in remaining {
-            let all_ready = preds.iter().all(|p| result.iter().any(|r| r.equals(p).unwrap_or(false)));
+            let all_ready = preds
+                .iter()
+                .all(|p| result.iter().any(|r| r.equals(p).unwrap_or(false)));
             if all_ready {
                 ready.push(node);
             } else {
@@ -3728,168 +4911,233 @@ fn build_topological_sorter_type() -> PyObjectRef {
     let mut type_dict: HashMap<String, PyObjectRef> = HashMap::new();
     macro_rules! bf {
         ($name:expr, $f:expr) => {
-            PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $f })
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: $name.to_string(),
+                func: $f,
+            })
         };
     }
 
-    type_dict.insert_str("__init__", bf!("__init__", |args| {
-        let graph = py_dict();
-        if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
-            dict.insert(TOPOSORTER_GRAPH_KEY.to_string(), graph.clone());
-            dict.insert(TOPOSORTER_DONE_KEY.to_string(), py_dict());
-            dict.insert(TOPOSORTER_PASSOUT_KEY.to_string(), py_dict());
-        }
-        // Optional initial graph: {node: iterable_of_predecessors, ...}
-        if args.len() > 1 {
-            let entries = match &*args[1].borrow() {
-                PyObject::Dict(d) => d.items(),
-                PyObject::None => vec![],
-                _ => return Err(PyError::type_error("graph argument must be a dict")),
-            };
-            for (node, preds) in entries {
-                toposorter_ensure_node(&graph, &node)?;
-                // Preds may be ANY iterable (list, tuple, set, a generator,
-                // an EMPTY DICT literal `{}` — which is not a set — etc.).
-                // Treating the value as a single predecessor (the previous
-                // `_ => vec![preds.clone()]` fallback) broke `{1: {}}`
-                // (an empty dict → hashing a dict → "unhashable type").
-                let it = builtin_iter(&[preds])?;
-                loop {
-                    match builtin_next(&[it.clone()]) {
-                        Ok(p) => toposorter_add_edge(&graph, &node, &p)?,
-                        Err(PyError::StopIteration) => break,
-                        Err(e) => return Err(e),
+    type_dict.insert_str(
+        "__init__",
+        bf!("__init__", |args| {
+            let graph = py_dict();
+            if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
+                dict.insert(TOPOSORTER_GRAPH_KEY.to_string(), graph.clone());
+                dict.insert(TOPOSORTER_DONE_KEY.to_string(), py_dict());
+                dict.insert(TOPOSORTER_PASSOUT_KEY.to_string(), py_dict());
+            }
+            // Optional initial graph: {node: iterable_of_predecessors, ...}
+            if args.len() > 1 {
+                let entries = match &*args[1].borrow() {
+                    PyObject::Dict(d) => d.items(),
+                    PyObject::None => vec![],
+                    _ => return Err(PyError::type_error("graph argument must be a dict")),
+                };
+                for (node, preds) in entries {
+                    toposorter_ensure_node(&graph, &node)?;
+                    // Preds may be ANY iterable (list, tuple, set, a generator,
+                    // an EMPTY DICT literal `{}` — which is not a set — etc.).
+                    // Treating the value as a single predecessor (the previous
+                    // `_ => vec![preds.clone()]` fallback) broke `{1: {}}`
+                    // (an empty dict → hashing a dict → "unhashable type").
+                    let it = builtin_iter(&[preds])?;
+                    loop {
+                        match builtin_next(&[it.clone()]) {
+                            Ok(p) => toposorter_add_edge(&graph, &node, &p)?,
+                            Err(PyError::StopIteration) => break,
+                            Err(e) => return Err(e),
+                        }
                     }
                 }
             }
-        }
-        Ok(py_none())
-    }));
-    type_dict.insert_str("add", bf!("add", |args| {
-        if args.len() < 2 { return Err(PyError::type_error("add() missing required argument: 'node'")); }
-        let graph = toposorter_graph(&args[0]).ok_or_else(|| PyError::runtime_error("not a TopologicalSorter"))?;
-        let node = &args[1];
-        if args.len() > 2 {
-            for pred in &args[2..] {
-                toposorter_add_edge(&graph, node, pred)?;
+            Ok(py_none())
+        }),
+    );
+    type_dict.insert_str(
+        "add",
+        bf!("add", |args| {
+            if args.len() < 2 {
+                return Err(PyError::type_error(
+                    "add() missing required argument: 'node'",
+                ));
             }
-        } else {
-            toposorter_ensure_node(&graph, node)?;
-        }
-        Ok(py_none())
-    }));
-    type_dict.insert_str("prepare", bf!("prepare", |args| {
-        let graph = toposorter_graph(&args[0]).ok_or_else(|| PyError::runtime_error("not a TopologicalSorter"))?;
-        // Real graphlib: prepare() may be called repeatedly BEFORE get_ready()
-        // (test_prepare_multiple_times), but NOT once the sort has started.
-        let started = toposorter_inst_flag(&args[0], TOPOSORTER_STARTED_KEY);
-        if started {
-            return Err(PyError::value_error("cannot prepare() after starting sort"));
-        }
-        toposorter_set_inst_flag(&args[0], TOPOSORTER_PREPARED_KEY, true);
-        // Validates the graph is acyclic up front, matching real prepare().
-        toposorter_sorted_order(&graph)?;
-        Ok(py_none())
-    }));
-    type_dict.insert_str("static_order", bf!("static_order", |args| {
-        let graph = toposorter_graph(&args[0]).ok_or_else(|| PyError::runtime_error("not a TopologicalSorter"))?;
-        let order = toposorter_sorted_order(&graph)?;
-        Ok(py_list(order))
-    }));
-    type_dict.insert_str("get_ready", bf!("get_ready", |args| {
-        if !toposorter_inst_flag(&args[0], TOPOSORTER_PREPARED_KEY) {
-            return Err(PyError::value_error("prepare() must be called first"));
-        }
-        toposorter_set_inst_flag(&args[0], TOPOSORTER_STARTED_KEY, true);
-        let graph = toposorter_graph(&args[0]).ok_or_else(|| PyError::runtime_error("not a TopologicalSorter"))?;
-        let done_items: Vec<PyObjectRef> = toposorter_done_items(&args[0]);
-        let passedout_items: Vec<PyObjectRef> = toposorter_flag_dict_keys(&args[0], TOPOSORTER_PASSOUT_KEY);
-        let entries = match &*graph.borrow() {
-            PyObject::Dict(d) => d.items(),
-            _ => vec![],
-        };
-        let mut ready = Vec::new();
-        for (node, preds_ref) in entries {
-            if done_items.iter().any(|d| d.equals(&node).unwrap_or(false)) {
-                continue;
+            let graph = toposorter_graph(&args[0])
+                .ok_or_else(|| PyError::runtime_error("not a TopologicalSorter"))?;
+            let node = &args[1];
+            if args.len() > 2 {
+                for pred in &args[2..] {
+                    toposorter_add_edge(&graph, node, pred)?;
+                }
+            } else {
+                toposorter_ensure_node(&graph, node)?;
             }
-            if passedout_items.iter().any(|d| d.equals(&node).unwrap_or(false)) {
-                continue;
+            Ok(py_none())
+        }),
+    );
+    type_dict.insert_str(
+        "prepare",
+        bf!("prepare", |args| {
+            let graph = toposorter_graph(&args[0])
+                .ok_or_else(|| PyError::runtime_error("not a TopologicalSorter"))?;
+            // Real graphlib: prepare() may be called repeatedly BEFORE get_ready()
+            // (test_prepare_multiple_times), but NOT once the sort has started.
+            let started = toposorter_inst_flag(&args[0], TOPOSORTER_STARTED_KEY);
+            if started {
+                return Err(PyError::value_error("cannot prepare() after starting sort"));
             }
-            let preds = match &*preds_ref.borrow() { PyObject::List(v) => v.clone(), _ => vec![] };
-            let all_done = preds.iter().all(|p| done_items.iter().any(|d| d.equals(p).unwrap_or(false)));
-            if all_done {
-                ready.push(node);
+            toposorter_set_inst_flag(&args[0], TOPOSORTER_PREPARED_KEY, true);
+            // Validates the graph is acyclic up front, matching real prepare().
+            toposorter_sorted_order(&graph)?;
+            Ok(py_none())
+        }),
+    );
+    type_dict.insert_str(
+        "static_order",
+        bf!("static_order", |args| {
+            let graph = toposorter_graph(&args[0])
+                .ok_or_else(|| PyError::runtime_error("not a TopologicalSorter"))?;
+            let order = toposorter_sorted_order(&graph)?;
+            Ok(py_list(order))
+        }),
+    );
+    type_dict.insert_str(
+        "get_ready",
+        bf!("get_ready", |args| {
+            if !toposorter_inst_flag(&args[0], TOPOSORTER_PREPARED_KEY) {
+                return Err(PyError::value_error("prepare() must be called first"));
             }
-        }
-        // Mark the returned nodes as passed out (a second get_ready() call
-        // returns nothing until done() is called, matching real graphlib).
-        for node in &ready {
-            toposorter_set_flag_dict(&args[0], TOPOSORTER_PASSOUT_KEY, node.clone());
-        }
-        Ok(py_tuple(ready))
-    }));
-    type_dict.insert_str("done", bf!("done", |args| {
-        if !toposorter_inst_flag(&args[0], TOPOSORTER_PREPARED_KEY) {
-            return Err(PyError::value_error("prepare() must be called first"));
-        }
-        let graph = toposorter_graph(&args[0]).ok_or_else(|| PyError::runtime_error("not a TopologicalSorter"))?;
-        for node in &args[1..] {
-            // node must have been added via add()/the graph
-            let exists = match &*graph.borrow() {
-                PyObject::Dict(d) => d.get(node).ok().flatten().is_some(),
+            toposorter_set_inst_flag(&args[0], TOPOSORTER_STARTED_KEY, true);
+            let graph = toposorter_graph(&args[0])
+                .ok_or_else(|| PyError::runtime_error("not a TopologicalSorter"))?;
+            let done_items: Vec<PyObjectRef> = toposorter_done_items(&args[0]);
+            let passedout_items: Vec<PyObjectRef> =
+                toposorter_flag_dict_keys(&args[0], TOPOSORTER_PASSOUT_KEY);
+            let entries = match &*graph.borrow() {
+                PyObject::Dict(d) => d.items(),
+                _ => vec![],
+            };
+            let mut ready = Vec::new();
+            for (node, preds_ref) in entries {
+                if done_items.iter().any(|d| d.equals(&node).unwrap_or(false)) {
+                    continue;
+                }
+                if passedout_items
+                    .iter()
+                    .any(|d| d.equals(&node).unwrap_or(false))
+                {
+                    continue;
+                }
+                let preds = match &*preds_ref.borrow() {
+                    PyObject::List(v) => v.clone(),
+                    _ => vec![],
+                };
+                let all_done = preds
+                    .iter()
+                    .all(|p| done_items.iter().any(|d| d.equals(p).unwrap_or(false)));
+                if all_done {
+                    ready.push(node);
+                }
+            }
+            // Mark the returned nodes as passed out (a second get_ready() call
+            // returns nothing until done() is called, matching real graphlib).
+            for node in &ready {
+                toposorter_set_flag_dict(&args[0], TOPOSORTER_PASSOUT_KEY, node.clone());
+            }
+            Ok(py_tuple(ready))
+        }),
+    );
+    type_dict.insert_str(
+        "done",
+        bf!("done", |args| {
+            if !toposorter_inst_flag(&args[0], TOPOSORTER_PREPARED_KEY) {
+                return Err(PyError::value_error("prepare() must be called first"));
+            }
+            let graph = toposorter_graph(&args[0])
+                .ok_or_else(|| PyError::runtime_error("not a TopologicalSorter"))?;
+            for node in &args[1..] {
+                // node must have been added via add()/the graph
+                let exists = match &*graph.borrow() {
+                    PyObject::Dict(d) => d.get(node).ok().flatten().is_some(),
+                    _ => false,
+                };
+                if !exists {
+                    return Err(PyError::value_error(format!(
+                        "node {} was not added using add()",
+                        node.repr()
+                    )));
+                }
+                // node must have been passed out by get_ready()
+                if !toposorter_flag_dict_has(&args[0], TOPOSORTER_PASSOUT_KEY, node) {
+                    return Err(PyError::value_error(format!(
+                        "node {} was not passed out",
+                        node.repr()
+                    )));
+                }
+                toposorter_set_flag_dict(&args[0], TOPOSORTER_DONE_KEY, node.clone());
+            }
+            Ok(py_none())
+        }),
+    );
+    type_dict.insert_str(
+        "is_active",
+        bf!("is_active", |args| {
+            if !toposorter_inst_flag(&args[0], TOPOSORTER_PREPARED_KEY) {
+                return Err(PyError::value_error("prepare() must be called first"));
+            }
+            let graph = toposorter_graph(&args[0])
+                .ok_or_else(|| PyError::runtime_error("not a TopologicalSorter"))?;
+            let total = match &*graph.borrow() {
+                PyObject::Dict(d) => d.len(),
+                _ => 0,
+            };
+            let done_count = toposorter_done_items(&args[0]).len();
+            Ok(py_bool(done_count < total))
+        }),
+    );
+    type_dict.insert_str(
+        "__bool__",
+        bf!("__bool__", |args| {
+            let graph = toposorter_graph(&args[0])
+                .ok_or_else(|| PyError::runtime_error("not a TopologicalSorter"))?;
+            let non_empty = match &*graph.borrow() {
+                PyObject::Dict(d) => !d.is_empty(),
                 _ => false,
             };
-            if !exists {
-                return Err(PyError::value_error(format!(
-                    "node {} was not added using add()",
-                    node.repr()
-                )));
-            }
-            // node must have been passed out by get_ready()
-            if !toposorter_flag_dict_has(&args[0], TOPOSORTER_PASSOUT_KEY, node) {
-                return Err(PyError::value_error(format!(
-                    "node {} was not passed out",
-                    node.repr()
-                )));
-            }
-            toposorter_set_flag_dict(&args[0], TOPOSORTER_DONE_KEY, node.clone());
-        }
-        Ok(py_none())
-    }));
-    type_dict.insert_str("is_active", bf!("is_active", |args| {
-        if !toposorter_inst_flag(&args[0], TOPOSORTER_PREPARED_KEY) {
-            return Err(PyError::value_error("prepare() must be called first"));
-        }
-        let graph = toposorter_graph(&args[0]).ok_or_else(|| PyError::runtime_error("not a TopologicalSorter"))?;
-        let total = match &*graph.borrow() { PyObject::Dict(d) => d.len(), _ => 0 };
-        let done_count = toposorter_done_items(&args[0]).len();
-        Ok(py_bool(done_count < total))
-    }));
-    type_dict.insert_str("__bool__", bf!("__bool__", |args| {
-        let graph = toposorter_graph(&args[0]).ok_or_else(|| PyError::runtime_error("not a TopologicalSorter"))?;
-        let non_empty = match &*graph.borrow() { PyObject::Dict(d) => !d.is_empty(), _ => false };
-        Ok(py_bool(non_empty))
-    }));
+            Ok(py_bool(non_empty))
+        }),
+    );
 
-    PyObjectRef::new(PyObject::Type { name: "TopologicalSorter".to_string(), dict: Box::new(str_map_to_typedict(type_dict)), bases: vec![], mro: vec![] })
+    PyObjectRef::new(PyObject::Type {
+        name: "TopologicalSorter".to_string(),
+        dict: Box::new(str_map_to_typedict(type_dict)),
+        bases: vec![],
+        mro: vec![],
+    })
 }
 
 fn get_topological_sorter_type() -> PyObjectRef {
     let existing = TOPOSORTER_TYPE.with(|c| c.borrow().clone());
-    if let Some(t) = existing { return t; }
+    if let Some(t) = existing {
+        return t;
+    }
     let typ = build_topological_sorter_type();
-    TOPOSORTER_TYPE.with(|c| { *c.borrow_mut() = Some(typ.clone()); });
+    TOPOSORTER_TYPE.with(|c| {
+        *c.borrow_mut() = Some(typ.clone());
+    });
     typ
 }
 
 pub fn create_graphlib_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     d.insert_str("TopologicalSorter", get_topological_sorter_type());
-    d.insert_str("CycleError", PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "CycleError".to_string(),
-        func: crate::object::builtin_make_exception_cycleerror,
-    }));
+    d.insert_str(
+        "CycleError",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "CycleError".to_string(),
+            func: crate::object::builtin_make_exception_cycleerror,
+        }),
+    );
     d
 }
 
@@ -3920,7 +5168,11 @@ fn container_ptr(o: &PyObjectRef) -> Option<*const ()> {
     }
 }
 
-fn pickle_serialize(obj: &PyObjectRef, buf: &mut Vec<u8>, memo: &mut Vec<*const ()>) -> PyResult<()> {
+fn pickle_serialize(
+    obj: &PyObjectRef,
+    buf: &mut Vec<u8>,
+    memo: &mut Vec<*const ()>,
+) -> PyResult<()> {
     match &*obj.borrow() {
         PyObject::None => buf.push(b'N'),
         PyObject::Bool(true) => buf.push(b'T'),
@@ -4004,7 +5256,11 @@ fn pickle_serialize(obj: &PyObjectRef, buf: &mut Vec<u8>, memo: &mut Vec<*const 
             }
             buf.push(b']');
         }
-        PyObject::DequeIter { deque, index, start_len } => {
+        PyObject::DequeIter {
+            deque,
+            index,
+            start_len,
+        } => {
             buf.push(b'q');
             pickle_serialize(deque, buf, memo)?;
             pickle_serialize(&py_int(*index as i64), buf, memo)?;
@@ -4051,7 +5307,11 @@ fn pickle_serialize(obj: &PyObjectRef, buf: &mut Vec<u8>, memo: &mut Vec<*const 
             pickle_serialize(&py_list(list.clone()), buf, memo)?;
             pickle_serialize(&py_int(*index as i64), buf, memo)?;
         }
-        PyObject::RangeIter { current, stop, step } => {
+        PyObject::RangeIter {
+            current,
+            stop,
+            step,
+        } => {
             buf.push(b'r');
             pickle_serialize(&py_int(*current), buf, memo)?;
             pickle_serialize(&py_int(*stop), buf, memo)?;
@@ -4066,7 +5326,16 @@ fn pickle_serialize(obj: &PyObjectRef, buf: &mut Vec<u8>, memo: &mut Vec<*const 
         // instance dict. The instance's own pointer is memoized so both the
         // deque content and the instance dict can self-reference it
         // (`d.append(d)`, `d.x = d`).
-        PyObject::Instance { typ, dict } if crate::object::native_backing_of(obj).map(|n| matches!(&*n.borrow(), PyObject::Deque { .. } | PyObject::List(_) | PyObject::Dict(_))).unwrap_or(false) => {
+        PyObject::Instance { typ, dict }
+            if crate::object::native_backing_of(obj)
+                .map(|n| {
+                    matches!(
+                        &*n.borrow(),
+                        PyObject::Deque { .. } | PyObject::List(_) | PyObject::Dict(_)
+                    )
+                })
+                .unwrap_or(false) =>
+        {
             if let Some(ptr) = container_ptr(obj) {
                 if let Some(id) = memo.iter().position(|&p| p == ptr) {
                     buf.push(b'@');
@@ -4078,10 +5347,20 @@ fn pickle_serialize(obj: &PyObjectRef, buf: &mut Vec<u8>, memo: &mut Vec<*const 
             }
             let (module, name) = {
                 let tb = typ.borrow();
-                if let PyObject::Type { name: tname, dict: tdict, .. } = &*tb {
-                    let module = tdict.get_str("__module__").map(|m| m.str()).unwrap_or_else(|| "builtins".to_string());
+                if let PyObject::Type {
+                    name: tname,
+                    dict: tdict,
+                    ..
+                } = &*tb
+                {
+                    let module = tdict
+                        .get_str("__module__")
+                        .map(|m| m.str())
+                        .unwrap_or_else(|| "builtins".to_string());
                     (module, tname.clone())
-                } else { return Err(PyError::type_error("cannot pickle non-type instance")) }
+                } else {
+                    return Err(PyError::type_error("cannot pickle non-type instance"));
+                }
             };
             buf.push(b'C');
             pickle_serialize(&py_str(&module), buf, memo)?;
@@ -4101,7 +5380,11 @@ fn pickle_serialize(obj: &PyObjectRef, buf: &mut Vec<u8>, memo: &mut Vec<*const 
             if kind == b'D' {
                 let maxlen = {
                     let nb = backing.borrow();
-                    if let PyObject::Deque { maxlen, .. } = &*nb { *maxlen } else { None }
+                    if let PyObject::Deque { maxlen, .. } = &*nb {
+                        *maxlen
+                    } else {
+                        None
+                    }
                 };
                 match maxlen {
                     Some(m) => {
@@ -4117,7 +5400,11 @@ fn pickle_serialize(obj: &PyObjectRef, buf: &mut Vec<u8>, memo: &mut Vec<*const 
                 buf.push(b'{');
                 let items = {
                     let nb = backing.borrow();
-                    if let PyObject::Dict(d) = &*nb { d.items() } else { Vec::new() }
+                    if let PyObject::Dict(d) = &*nb {
+                        d.items()
+                    } else {
+                        Vec::new()
+                    }
                 };
                 for (k, v) in items {
                     pickle_serialize(&k, buf, memo)?;
@@ -4143,7 +5430,9 @@ fn pickle_serialize(obj: &PyObjectRef, buf: &mut Vec<u8>, memo: &mut Vec<*const 
             // instance dict (excluding the internal native backing)
             buf.push(b'{');
             for (k, v) in dict.iter() {
-                if k == crate::object::NATIVE_BACKING_KEY { continue; }
+                if k == crate::object::NATIVE_BACKING_KEY {
+                    continue;
+                }
                 pickle_serialize(&py_str(&k), buf, memo)?;
                 pickle_serialize(&v, buf, memo)?;
             }
@@ -4154,13 +5443,23 @@ fn pickle_serialize(obj: &PyObjectRef, buf: &mut Vec<u8>, memo: &mut Vec<*const 
         // global again.
         PyObject::Function(f) => {
             buf.push(b'E');
-            let module = f.dict.get("__module__").map(|m| m.str())
+            let module = f
+                .dict
+                .get("__module__")
+                .map(|m| m.str())
                 .or_else(|| {
-                    f.globals.borrow().get(&crate::interner::intern("__name__")).map(|m| m.str())
+                    f.globals
+                        .borrow()
+                        .get(&crate::interner::intern("__name__"))
+                        .map(|m| m.str())
                 })
                 .unwrap_or_else(|| "builtins".to_string());
             pickle_serialize(&py_str(&module), buf, memo)?;
-            pickle_serialize(&py_str(&crate::interner::lookup_str(f.code.name)), buf, memo)?;
+            pickle_serialize(
+                &py_str(&crate::interner::lookup_str(f.code.name)),
+                buf,
+                memo,
+            )?;
         }
         _ => {
             return Err(PyError::type_error(format!(
@@ -4177,7 +5476,11 @@ fn pickle_serialize(obj: &PyObjectRef, buf: &mut Vec<u8>, memo: &mut Vec<*const 
 /// `memo` mirrors the serializer's container memo: each container's ref is
 /// registered BEFORE its children are read, so a `@<id>` reference (a cycle
 /// or an alias) resolves to the shared object being built.
-fn pickle_deserialize(data: &[u8], pos: &mut usize, memo: &mut Vec<PyObjectRef>) -> PyResult<PyObjectRef> {
+fn pickle_deserialize(
+    data: &[u8],
+    pos: &mut usize,
+    memo: &mut Vec<PyObjectRef>,
+) -> PyResult<PyObjectRef> {
     if *pos >= data.len() {
         return Err(PyError::type_error("unexpected end of pickle data"));
     }
@@ -4298,7 +5601,10 @@ fn pickle_deserialize(data: &[u8], pos: &mut usize, memo: &mut Vec<PyObjectRef>)
                     let s = std::str::from_utf8(&data[start..*pos])
                         .map_err(|_| PyError::type_error("invalid utf-8 in pickle maxlen"))?;
                     *pos += 1; // skip '\n'
-                    Some(s.parse::<usize>().map_err(|_| PyError::type_error(format!("invalid maxlen: {}", s)))?)
+                    Some(
+                        s.parse::<usize>()
+                            .map_err(|_| PyError::type_error(format!("invalid maxlen: {}", s)))?,
+                    )
                 }
                 Some(b'N') => {
                     *pos += 1;
@@ -4318,7 +5624,11 @@ fn pickle_deserialize(data: &[u8], pos: &mut usize, memo: &mut Vec<PyObjectRef>)
                 return Err(PyError::type_error("unterminated deque in pickle data"));
             }
             *pos += 1; // skip ']'
-            if let PyObject::Deque { data: d, maxlen: ml } = &mut *deque_ref.borrow_mut() {
+            if let PyObject::Deque {
+                data: d,
+                maxlen: ml,
+            } = &mut *deque_ref.borrow_mut()
+            {
                 *d = items;
                 *ml = maxlen;
             }
@@ -4340,13 +5650,19 @@ fn pickle_deserialize(data: &[u8], pos: &mut usize, memo: &mut Vec<PyObjectRef>)
                 *pos += 1;
             }
             if *pos >= data.len() {
-                return Err(PyError::type_error("unterminated memo reference in pickle data"));
+                return Err(PyError::type_error(
+                    "unterminated memo reference in pickle data",
+                ));
             }
             let s = std::str::from_utf8(&data[start..*pos])
                 .map_err(|_| PyError::type_error("invalid utf-8 in pickle memo reference"))?;
             *pos += 1; // skip '\n'
-            let id: usize = s.parse().map_err(|_| PyError::type_error(format!("invalid memo reference: {}", s)))?;
-            memo.get(id).cloned().ok_or_else(|| PyError::type_error(format!("pickle memo reference out of range: {}", id)))
+            let id: usize = s
+                .parse()
+                .map_err(|_| PyError::type_error(format!("invalid memo reference: {}", s)))?;
+            memo.get(id).cloned().ok_or_else(|| {
+                PyError::type_error(format!("pickle memo reference out of range: {}", id))
+            })
         }
         b'E' => {
             // Function by reference (see the matching serializer arm).
@@ -4356,11 +5672,19 @@ fn pickle_deserialize(data: &[u8], pos: &mut usize, memo: &mut Vec<PyObjectRef>)
             let name_str = name.str();
             let func = crate::modules::get_module(&module_str)
                 .and_then(|m| m.borrow().get_attribute(&name_str).ok())
-                .ok_or_else(|| PyError::type_error(format!("cannot find function {}.{} referenced by pickle data", module_str, name_str)))?;
+                .ok_or_else(|| {
+                    PyError::type_error(format!(
+                        "cannot find function {}.{} referenced by pickle data",
+                        module_str, name_str
+                    ))
+                })?;
             if matches!(&*func.borrow(), PyObject::Function(_)) {
                 Ok(func)
             } else {
-                Err(PyError::type_error(format!("{}.{} is not a function", module_str, name_str)))
+                Err(PyError::type_error(format!(
+                    "{}.{} is not a function",
+                    module_str, name_str
+                )))
             }
         }
         b'C' => {
@@ -4374,13 +5698,21 @@ fn pickle_deserialize(data: &[u8], pos: &mut usize, memo: &mut Vec<PyObjectRef>)
             // unreliable here because the active VM pointer can be a
             // transient disposable one during `pickle.loads`.
             let typ = crate::object::find_class_by_qualified_name(&module_str, &class_name)
-                .ok_or_else(|| PyError::type_error(format!("cannot find class {}.{} referenced by pickle data", module_str, class_name)))?;
+                .ok_or_else(|| {
+                    PyError::type_error(format!(
+                        "cannot find class {}.{} referenced by pickle data",
+                        module_str, class_name
+                    ))
+                })?;
             let instance = PyObjectRef::new(PyObject::Instance {
                 typ: typ.clone(),
                 dict: AttrMap::new(),
             });
             memo.push(instance.clone());
-            let kind = data.get(*pos).copied().ok_or_else(|| PyError::type_error("malformed instance pickle data"))?;
+            let kind = data
+                .get(*pos)
+                .copied()
+                .ok_or_else(|| PyError::type_error("malformed instance pickle data"))?;
             *pos += 1;
             let backing = match kind {
                 b'D' => {
@@ -4392,18 +5724,25 @@ fn pickle_deserialize(data: &[u8], pos: &mut usize, memo: &mut Vec<PyObjectRef>)
                                 *pos += 1;
                             }
                             if *pos >= data.len() {
-                                return Err(PyError::type_error("unterminated maxlen in pickle data"));
+                                return Err(PyError::type_error(
+                                    "unterminated maxlen in pickle data",
+                                ));
                             }
-                            let s = std::str::from_utf8(&data[start..*pos])
-                                .map_err(|_| PyError::type_error("invalid utf-8 in pickle maxlen"))?;
+                            let s = std::str::from_utf8(&data[start..*pos]).map_err(|_| {
+                                PyError::type_error("invalid utf-8 in pickle maxlen")
+                            })?;
                             *pos += 1;
-                            Some(s.parse::<usize>().map_err(|_| PyError::type_error(format!("invalid maxlen: {}", s)))?)
+                            Some(s.parse::<usize>().map_err(|_| {
+                                PyError::type_error(format!("invalid maxlen: {}", s))
+                            })?)
                         }
                         Some(b'N') => {
                             *pos += 1;
                             None
                         }
-                        _ => return Err(PyError::type_error("malformed deque-instance pickle data")),
+                        _ => {
+                            return Err(PyError::type_error("malformed deque-instance pickle data"))
+                        }
                     };
                     if *pos >= data.len() || data[*pos] != b'[' {
                         return Err(PyError::type_error("malformed deque-instance pickle data"));
@@ -4414,7 +5753,9 @@ fn pickle_deserialize(data: &[u8], pos: &mut usize, memo: &mut Vec<PyObjectRef>)
                         items.push_back(pickle_deserialize(data, pos, memo)?);
                     }
                     if *pos >= data.len() {
-                        return Err(PyError::type_error("unterminated deque-instance in pickle data"));
+                        return Err(PyError::type_error(
+                            "unterminated deque-instance in pickle data",
+                        ));
                     }
                     *pos += 1;
                     py_deque(items, maxlen)
@@ -4429,7 +5770,9 @@ fn pickle_deserialize(data: &[u8], pos: &mut usize, memo: &mut Vec<PyObjectRef>)
                         items.push(pickle_deserialize(data, pos, memo)?);
                     }
                     if *pos >= data.len() {
-                        return Err(PyError::type_error("unterminated list-instance in pickle data"));
+                        return Err(PyError::type_error(
+                            "unterminated list-instance in pickle data",
+                        ));
                     }
                     *pos += 1;
                     py_list(items)
@@ -4443,18 +5786,27 @@ fn pickle_deserialize(data: &[u8], pos: &mut usize, memo: &mut Vec<PyObjectRef>)
                     while *pos < data.len() && data[*pos] != b'}' {
                         let k = pickle_deserialize(data, pos, memo)?;
                         if *pos >= data.len() {
-                            return Err(PyError::type_error("unterminated dict-instance in pickle data"));
+                            return Err(PyError::type_error(
+                                "unterminated dict-instance in pickle data",
+                            ));
                         }
                         let v = pickle_deserialize(data, pos, memo)?;
                         dict.set(k, v)?;
                     }
                     if *pos >= data.len() {
-                        return Err(PyError::type_error("unterminated dict-instance in pickle data"));
+                        return Err(PyError::type_error(
+                            "unterminated dict-instance in pickle data",
+                        ));
                     }
                     *pos += 1;
                     PyObjectRef::new(PyObject::Dict(Box::new(dict)))
                 }
-                _ => return Err(PyError::type_error(format!("unknown instance backing kind: {}", kind as char))),
+                _ => {
+                    return Err(PyError::type_error(format!(
+                        "unknown instance backing kind: {}",
+                        kind as char
+                    )))
+                }
             };
             if *pos >= data.len() || data[*pos] != b'{' {
                 return Err(PyError::type_error("malformed deque-instance pickle data"));
@@ -4464,13 +5816,17 @@ fn pickle_deserialize(data: &[u8], pos: &mut usize, memo: &mut Vec<PyObjectRef>)
             while *pos < data.len() && data[*pos] != b'}' {
                 let k = pickle_deserialize(data, pos, memo)?;
                 if *pos >= data.len() {
-                    return Err(PyError::type_error("unterminated instance dict in pickle data"));
+                    return Err(PyError::type_error(
+                        "unterminated instance dict in pickle data",
+                    ));
                 }
                 let v = pickle_deserialize(data, pos, memo)?;
                 inst_dict.insert(k.str(), v);
             }
             if *pos >= data.len() {
-                return Err(PyError::type_error("unterminated instance dict in pickle data"));
+                return Err(PyError::type_error(
+                    "unterminated instance dict in pickle data",
+                ));
             }
             *pos += 1;
             inst_dict.insert(crate::object::NATIVE_BACKING_KEY.to_string(), backing);
@@ -4516,7 +5872,11 @@ fn pickle_deserialize(data: &[u8], pos: &mut usize, memo: &mut Vec<PyObjectRef>)
             let s = start.as_i64().unwrap_or(0);
             let e = stop.as_i64().unwrap_or(0);
             let p = step.as_i64().unwrap_or(1);
-            Ok(PyObjectRef::imm(PyObject::Range { start: s, stop: e, step: p }))
+            Ok(PyObjectRef::imm(PyObject::Range {
+                start: s,
+                stop: e,
+                step: p,
+            }))
         }
         b's' => {
             let start = pickle_deserialize(data, pos, memo)?;
@@ -4532,7 +5892,10 @@ fn pickle_deserialize(data: &[u8], pos: &mut usize, memo: &mut Vec<PyObjectRef>)
                 _ => return Err(PyError::type_error("invalid list_iterator pickle data")),
             };
             let idx = index.as_i64().unwrap_or(0) as usize;
-            Ok(PyObjectRef::new(PyObject::ListIter { list: items, index: idx }))
+            Ok(PyObjectRef::new(PyObject::ListIter {
+                list: items,
+                index: idx,
+            }))
         }
         b'r' => {
             let current = pickle_deserialize(data, pos, memo)?;
@@ -4541,7 +5904,11 @@ fn pickle_deserialize(data: &[u8], pos: &mut usize, memo: &mut Vec<PyObjectRef>)
             let c = current.as_i64().unwrap_or(0);
             let e = stop.as_i64().unwrap_or(0);
             let p = step.as_i64().unwrap_or(1);
-            Ok(PyObjectRef::new(PyObject::RangeIter { current: c, stop: e, step: p }))
+            Ok(PyObjectRef::new(PyObject::RangeIter {
+                current: c,
+                stop: e,
+                step: p,
+            }))
         }
         _ => Err(PyError::type_error(format!(
             "unknown pickle marker byte: 0x{:02x}",
@@ -4571,10 +5938,15 @@ pub fn create_pickle_dict() -> HashMap<String, PyObjectRef> {
     // here does its own name-based comparison against a `PyObject::Type`
     // (see `builtin_type_of`'s doc comment), so building this from real
     // `type(...)` calls on sample instances works correctly.
-    d.insert_str("bytes_types", py_tuple(vec![
-        crate::object::builtin_type_of(&[PyObjectRef::imm(PyObject::Bytes(Vec::new()))]).unwrap_or_else(|_| py_none()),
-        crate::object::builtin_type_of(&[PyObjectRef::new(PyObject::ByteArray(Vec::new()))]).unwrap_or_else(|_| py_none()),
-    ]));
+    d.insert_str(
+        "bytes_types",
+        py_tuple(vec![
+            crate::object::builtin_type_of(&[PyObjectRef::imm(PyObject::Bytes(Vec::new()))])
+                .unwrap_or_else(|_| py_none()),
+            crate::object::builtin_type_of(&[PyObjectRef::new(PyObject::ByteArray(Vec::new()))])
+                .unwrap_or_else(|_| py_none()),
+        ]),
+    );
     // Minimal `PickleBuffer` stub — real CPython's wraps a buffer-protocol
     // object for out-of-band (protocol 5) pickling; this project's own
     // `pickle_serialize`/deserialize don't implement the out-of-band
@@ -4582,39 +5954,72 @@ pub fn create_pickle_dict() -> HashMap<String, PyObjectRef> {
     // constructible/importable (unblocking any code that merely
     // references the name) with `.raw()` returning the wrapped object
     // and `.release()` a no-op, not a real zero-copy buffer view.
-    d.insert_str("PickleBuffer", PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "PickleBuffer".to_string(),
-        func: |args| {
-            if args.is_empty() { return Err(PyError::type_error("PickleBuffer() requires an argument")); }
-            let mut inst_dict = AttrMap::new();
-            inst_dict.insert("_obj".to_string(), args[0].clone());
-            Ok(PyObjectRef::new(PyObject::Instance {
-                typ: PyObjectRef::new(PyObject::Type {
-                    name: "PickleBuffer".to_string(),
-                    dict: Box::new(str_map_to_typedict(HashMap::from([
-                        ("raw".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
-                            name: "raw".to_string(),
-                            func: |args| {
-                                if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
-                                    Ok(dict.get("_obj").cloned().unwrap_or_else(py_none))
-                                } else { Ok(py_none()) }
-                            },
-                        })),
-                        ("release".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
-                            name: "release".to_string(), func: |_args| Ok(py_none()),
-                        })),
-                    ]))),
-                    bases: vec![],
-                    mro: vec![],
-                }),
-                dict: inst_dict,
-            }))
-        },
-    }));
+    d.insert_str(
+        "PickleBuffer",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "PickleBuffer".to_string(),
+            func: |args| {
+                if args.is_empty() {
+                    return Err(PyError::type_error("PickleBuffer() requires an argument"));
+                }
+                let mut inst_dict = AttrMap::new();
+                inst_dict.insert("_obj".to_string(), args[0].clone());
+                Ok(PyObjectRef::new(PyObject::Instance {
+                    typ: PyObjectRef::new(PyObject::Type {
+                        name: "PickleBuffer".to_string(),
+                        dict: Box::new(str_map_to_typedict(HashMap::from([
+                            (
+                                "raw".to_string(),
+                                PyObjectRef::new(PyObject::BuiltinFunction {
+                                    name: "raw".to_string(),
+                                    func: |args| {
+                                        if let PyObject::Instance { dict, .. } = &*args[0].borrow()
+                                        {
+                                            Ok(dict.get("_obj").cloned().unwrap_or_else(py_none))
+                                        } else {
+                                            Ok(py_none())
+                                        }
+                                    },
+                                }),
+                            ),
+                            (
+                                "release".to_string(),
+                                PyObjectRef::new(PyObject::BuiltinFunction {
+                                    name: "release".to_string(),
+                                    func: |_args| Ok(py_none()),
+                                }),
+                            ),
+                        ]))),
+                        bases: vec![],
+                        mro: vec![],
+                    }),
+                    dict: inst_dict,
+                }))
+            },
+        }),
+    );
 
-    d.insert_str("PickleError", PyObjectRef::new(PyObject::BuiltinFunction { name: "PickleError".to_string(), func: crate::object::builtin_make_exception_pickleerror }));
-    d.insert_str("PicklingError", PyObjectRef::new(PyObject::BuiltinFunction { name: "PicklingError".to_string(), func: crate::object::builtin_make_exception_picklingerror }));
-    d.insert_str("UnpicklingError", PyObjectRef::new(PyObject::BuiltinFunction { name: "UnpicklingError".to_string(), func: crate::object::builtin_make_exception_unpicklingerror }));
+    d.insert_str(
+        "PickleError",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "PickleError".to_string(),
+            func: crate::object::builtin_make_exception_pickleerror,
+        }),
+    );
+    d.insert_str(
+        "PicklingError",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "PicklingError".to_string(),
+            func: crate::object::builtin_make_exception_picklingerror,
+        }),
+    );
+    d.insert_str(
+        "UnpicklingError",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "UnpicklingError".to_string(),
+            func: crate::object::builtin_make_exception_unpicklingerror,
+        }),
+    );
 
     pickle_func!("dumps", |args| {
         if args.is_empty() {
@@ -4660,7 +6065,13 @@ pub fn create_logging_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! log_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
 
@@ -4679,7 +6090,11 @@ pub fn create_logging_dict() -> HashMap<String, PyObjectRef> {
     }
 
     log_func!("getLogger", |args| {
-        let name = if args.is_empty() { "root".to_string() } else { args[0].str() };
+        let name = if args.is_empty() {
+            "root".to_string()
+        } else {
+            args[0].str()
+        };
         // Check registry first
         let cached = LOGGER_REGISTRY.with(|reg| reg.borrow().get(&name).cloned());
         if let Some(logger) = cached {
@@ -4690,61 +6105,94 @@ pub fn create_logging_dict() -> HashMap<String, PyObjectRef> {
             name: "Logger".to_string(),
             dict: {
                 let mut type_dict: crate::object::TypeDict = Default::default();
-                type_dict.insert_str("info", PyObjectRef::imm(PyObject::BuiltinMethod {
-                    name: "info".to_string(),
-                    func: logging_info,
-                    self_obj: py_none(),
-                }));
-                type_dict.insert_str("debug", PyObjectRef::imm(PyObject::BuiltinMethod {
-                    name: "debug".to_string(),
-                    func: logging_debug,
-                    self_obj: py_none(),
-                }));
-                type_dict.insert_str("warning", PyObjectRef::imm(PyObject::BuiltinMethod {
-                    name: "warning".to_string(),
-                    func: logging_warning,
-                    self_obj: py_none(),
-                }));
-                type_dict.insert_str("error", PyObjectRef::imm(PyObject::BuiltinMethod {
-                    name: "error".to_string(),
-                    func: logging_error,
-                    self_obj: py_none(),
-                }));
-                type_dict.insert_str("setLevel", PyObjectRef::imm(PyObject::BuiltinMethod {
-                    name: "setLevel".to_string(),
-                    func: |args| {
-                        if args.len() < 2 { return Err(PyError::type_error("setLevel requires level argument")); }
-                        // Store level in instance dict
-                        let instance = args[0].clone();
-                        let level = args[1].clone();
-                        let mut dict = instance.borrow_mut();
-                        if let PyObject::Instance { dict: inst_dict, .. } = &mut *dict {
-                            inst_dict.insert_str("level", level);
-                        }
-                        Ok(py_none())
-                    },
-                    self_obj: py_none(),
-                }));
-                type_dict.insert_str("addHandler", PyObjectRef::imm(PyObject::BuiltinMethod {
-                    name: "addHandler".to_string(),
-                    func: |args| {
-                        if args.len() < 2 { return Err(PyError::type_error("addHandler requires handler argument")); }
-                        // Store handler in instance dict's _handlers list
-                        let instance = args[0].clone();
-                        let handler = args[1].clone();
-                        let mut dict = instance.borrow_mut();
-                        if let PyObject::Instance { dict: inst_dict, .. } = &mut *dict {
-                            let handlers = inst_dict.entry("_handlers".to_string()).or_insert_with(|| {
-                                PyObjectRef::new(PyObject::List(Vec::new()))
-                            });
-                            if let PyObject::List(ref mut v) = &mut *handlers.borrow_mut() {
-                                v.push(handler);
+                type_dict.insert_str(
+                    "info",
+                    PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "info".to_string(),
+                        func: logging_info,
+                        self_obj: py_none(),
+                    }),
+                );
+                type_dict.insert_str(
+                    "debug",
+                    PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "debug".to_string(),
+                        func: logging_debug,
+                        self_obj: py_none(),
+                    }),
+                );
+                type_dict.insert_str(
+                    "warning",
+                    PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "warning".to_string(),
+                        func: logging_warning,
+                        self_obj: py_none(),
+                    }),
+                );
+                type_dict.insert_str(
+                    "error",
+                    PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "error".to_string(),
+                        func: logging_error,
+                        self_obj: py_none(),
+                    }),
+                );
+                type_dict.insert_str(
+                    "setLevel",
+                    PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "setLevel".to_string(),
+                        func: |args| {
+                            if args.len() < 2 {
+                                return Err(PyError::type_error(
+                                    "setLevel requires level argument",
+                                ));
                             }
-                        }
-                        Ok(py_none())
-                    },
-                    self_obj: py_none(),
-                }));
+                            // Store level in instance dict
+                            let instance = args[0].clone();
+                            let level = args[1].clone();
+                            let mut dict = instance.borrow_mut();
+                            if let PyObject::Instance {
+                                dict: inst_dict, ..
+                            } = &mut *dict
+                            {
+                                inst_dict.insert_str("level", level);
+                            }
+                            Ok(py_none())
+                        },
+                        self_obj: py_none(),
+                    }),
+                );
+                type_dict.insert_str(
+                    "addHandler",
+                    PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "addHandler".to_string(),
+                        func: |args| {
+                            if args.len() < 2 {
+                                return Err(PyError::type_error(
+                                    "addHandler requires handler argument",
+                                ));
+                            }
+                            // Store handler in instance dict's _handlers list
+                            let instance = args[0].clone();
+                            let handler = args[1].clone();
+                            let mut dict = instance.borrow_mut();
+                            if let PyObject::Instance {
+                                dict: inst_dict, ..
+                            } = &mut *dict
+                            {
+                                let handlers =
+                                    inst_dict.entry("_handlers".to_string()).or_insert_with(|| {
+                                        PyObjectRef::new(PyObject::List(Vec::new()))
+                                    });
+                                if let PyObject::List(ref mut v) = &mut *handlers.borrow_mut() {
+                                    v.push(handler);
+                                }
+                            }
+                            Ok(py_none())
+                        },
+                        self_obj: py_none(),
+                    }),
+                );
                 Box::new(type_dict)
             },
             bases: vec![],
@@ -4752,9 +6200,7 @@ pub fn create_logging_dict() -> HashMap<String, PyObjectRef> {
         });
         let instance = PyObjectRef::new(PyObject::Instance {
             typ: logger_typ,
-            dict: AttrMap::from([
-                ("name".to_string(), py_str(&name)),
-            ]),
+            dict: AttrMap::from([("name".to_string(), py_str(&name))]),
         });
         LOGGER_REGISTRY.with(|reg| reg.borrow_mut().insert(name.clone(), instance.clone()));
         Ok(instance)
@@ -4765,19 +6211,25 @@ pub fn create_logging_dict() -> HashMap<String, PyObjectRef> {
     let handler_class = PyObjectRef::new(PyObject::Type {
         name: "Handler".to_string(),
         dict: Box::new(str_map_to_typedict(HashMap::from([
-            ("__init__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "__init__".to_string(),
-                func: |args| {
-                    if args.len() > 1 {
-                        let _ = args[0].borrow_mut().set_attribute("level", args[1].clone());
-                    }
-                    Ok(py_none())
-                },
-            })),
-            ("setLevel".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "setLevel".to_string(),
-                func: |_| Ok(py_none()),
-            })),
+            (
+                "__init__".to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "__init__".to_string(),
+                    func: |args| {
+                        if args.len() > 1 {
+                            let _ = args[0].borrow_mut().set_attribute("level", args[1].clone());
+                        }
+                        Ok(py_none())
+                    },
+                }),
+            ),
+            (
+                "setLevel".to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "setLevel".to_string(),
+                    func: |_| Ok(py_none()),
+                }),
+            ),
         ]))),
         bases: vec![],
         mro: vec![],
@@ -4796,18 +6248,28 @@ pub fn create_logging_dict() -> HashMap<String, PyObjectRef> {
     let filter_class = PyObjectRef::new(PyObject::Type {
         name: "Filter".to_string(),
         dict: Box::new(str_map_to_typedict(HashMap::from([
-            ("__init__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "__init__".to_string(),
-                func: |args| {
-                    let name = if args.len() > 1 { args[1].str() } else { String::new() };
-                    let _ = args[0].borrow_mut().set_attribute("name", py_str(&name));
-                    Ok(py_none())
-                },
-            })),
-            ("filter".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "filter".to_string(),
-                func: |_| Ok(py_bool(true)),
-            })),
+            (
+                "__init__".to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "__init__".to_string(),
+                    func: |args| {
+                        let name = if args.len() > 1 {
+                            args[1].str()
+                        } else {
+                            String::new()
+                        };
+                        let _ = args[0].borrow_mut().set_attribute("name", py_str(&name));
+                        Ok(py_none())
+                    },
+                }),
+            ),
+            (
+                "filter".to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "filter".to_string(),
+                    func: |_| Ok(py_bool(true)),
+                }),
+            ),
         ]))),
         bases: vec![],
         mro: vec![],
@@ -4826,45 +6288,66 @@ pub fn create_logging_dict() -> HashMap<String, PyObjectRef> {
     let formatter_class = PyObjectRef::new(PyObject::Type {
         name: "Formatter".to_string(),
         dict: Box::new(str_map_to_typedict(HashMap::from([
-            ("__init__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "__init__".to_string(),
-                func: |args| {
-                    let fmt = if args.len() > 1 && !matches!(&*args[1].borrow(), PyObject::None) {
-                        Some(args[1].str())
-                    } else {
-                        None
-                    };
-                    let _ = args[0].borrow_mut().set_attribute("_fmt", fmt.map_or_else(py_none, |f| py_str(&f)));
-                    Ok(py_none())
-                },
-            })),
-            ("format".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "format".to_string(),
-                func: |args| {
-                    if args.len() < 2 { return Err(PyError::type_error("format() missing record argument")); }
-                    let fmt_attr = args[0].borrow().get_attribute("_fmt").ok();
-                    let record = &args[1];
-                    let get_msg = record.borrow().get_attribute("getMessage").ok();
-                    let message = if let Some(f) = get_msg {
-                        crate::object::call_bound_method(f, record.clone(), vec![]).map(|v| v.str()).unwrap_or_default()
-                    } else {
-                        String::new()
-                    };
-                    let text = match fmt_attr {
-                        Some(f) if !matches!(&*f.borrow(), PyObject::None) => {
-                            let mut s = f.str();
-                            let levelname = record.borrow().get_attribute("levelname").map(|v| v.str()).unwrap_or_default();
-                            let name = record.borrow().get_attribute("name").map(|v| v.str()).unwrap_or_default();
-                            s = s.replace("%(levelname)s", &levelname);
-                            s = s.replace("%(name)s", &name);
-                            s = s.replace("%(message)s", &message);
-                            s
+            (
+                "__init__".to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "__init__".to_string(),
+                    func: |args| {
+                        let fmt = if args.len() > 1 && !matches!(&*args[1].borrow(), PyObject::None)
+                        {
+                            Some(args[1].str())
+                        } else {
+                            None
+                        };
+                        let _ = args[0]
+                            .borrow_mut()
+                            .set_attribute("_fmt", fmt.map_or_else(py_none, |f| py_str(&f)));
+                        Ok(py_none())
+                    },
+                }),
+            ),
+            (
+                "format".to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "format".to_string(),
+                    func: |args| {
+                        if args.len() < 2 {
+                            return Err(PyError::type_error("format() missing record argument"));
                         }
-                        _ => message,
-                    };
-                    Ok(py_str(&text))
-                },
-            })),
+                        let fmt_attr = args[0].borrow().get_attribute("_fmt").ok();
+                        let record = &args[1];
+                        let get_msg = record.borrow().get_attribute("getMessage").ok();
+                        let message = if let Some(f) = get_msg {
+                            crate::object::call_bound_method(f, record.clone(), vec![])
+                                .map(|v| v.str())
+                                .unwrap_or_default()
+                        } else {
+                            String::new()
+                        };
+                        let text = match fmt_attr {
+                            Some(f) if !matches!(&*f.borrow(), PyObject::None) => {
+                                let mut s = f.str();
+                                let levelname = record
+                                    .borrow()
+                                    .get_attribute("levelname")
+                                    .map(|v| v.str())
+                                    .unwrap_or_default();
+                                let name = record
+                                    .borrow()
+                                    .get_attribute("name")
+                                    .map(|v| v.str())
+                                    .unwrap_or_default();
+                                s = s.replace("%(levelname)s", &levelname);
+                                s = s.replace("%(name)s", &name);
+                                s = s.replace("%(message)s", &message);
+                                s
+                            }
+                            _ => message,
+                        };
+                        Ok(py_str(&text))
+                    },
+                }),
+            ),
         ]))),
         bases: vec![],
         mro: vec![],
@@ -4873,22 +6356,31 @@ pub fn create_logging_dict() -> HashMap<String, PyObjectRef> {
         mro.push(formatter_class.clone());
     }
     d.insert_str("Formatter", formatter_class);
-    d.insert_str("NullHandler", PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(move |_| {
+    d.insert_str(
+        "NullHandler",
+        PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(move |_| {
             Ok(PyObjectRef::new(PyObject::Instance {
                 typ: handler_class.clone(),
                 dict: AttrMap::from([
-                    ("emit".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
-                        name: "emit".to_string(),
-                        func: |_| Ok(py_none()),
-                    })),
-                    ("handle".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
-                        name: "handle".to_string(),
-                        func: |_| Ok(py_none()),
-                    })),
+                    (
+                        "emit".to_string(),
+                        PyObjectRef::new(PyObject::BuiltinFunction {
+                            name: "emit".to_string(),
+                            func: |_| Ok(py_none()),
+                        }),
+                    ),
+                    (
+                        "handle".to_string(),
+                        PyObjectRef::new(PyObject::BuiltinFunction {
+                            name: "handle".to_string(),
+                            func: |_| Ok(py_none()),
+                        }),
+                    ),
                     ("level".to_string(), py_int(0)),
                 ]),
             }))
-        }))));
+        }))),
+    );
 
     // Add level constants
     d.insert_str("CRITICAL", py_int(50));
@@ -4905,7 +6397,13 @@ pub fn create_logging_config_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! log_cfg_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
     log_cfg_func!("dictConfig", |_args| {
@@ -4942,7 +6440,9 @@ thread_local! {
     static CURRENT_BUILTINS: std::cell::RefCell<Option<std::rc::Rc<std::collections::HashMap<crate::interner::StrId, PyObjectRef>>>> = std::cell::RefCell::new(None);
 }
 
-pub(crate) fn set_builtins_ref(builtins: std::rc::Rc<std::collections::HashMap<crate::interner::StrId, PyObjectRef>>) {
+pub(crate) fn set_builtins_ref(
+    builtins: std::rc::Rc<std::collections::HashMap<crate::interner::StrId, PyObjectRef>>,
+) {
     CURRENT_BUILTINS.with(|b| *b.borrow_mut() = Some(builtins));
 }
 
@@ -4997,7 +6497,12 @@ fn get_current_unraisablehook() -> Option<PyObjectRef> {
 fn build_unraisable_args(func: &PyObjectRef, err: &PyError) -> PyObjectRef {
     let exc_name = py_error_type_name(err);
     if std::env::var("RPY_DEBUG_UNRAISABLE").is_ok() {
-        eprintln!("UNRAISABLE name={} err={:?} builtin={:?}", exc_name, err, get_builtin_class(&exc_name).map(|b| b.repr()));
+        eprintln!(
+            "UNRAISABLE name={} err={:?} builtin={:?}",
+            exc_name,
+            err,
+            get_builtin_class(&exc_name).map(|b| b.repr())
+        );
     }
     let exc_value = PyObjectRef::new(PyObject::Exception {
         typ: exc_name.clone(),
@@ -5030,13 +6535,21 @@ fn build_unraisable_args(func: &PyObjectRef, err: &PyError) -> PyObjectRef {
     });
     let mut attrs = crate::object::AttrMap::new();
     attrs.insert_str("object", py_none());
-    attrs.insert_str("err_msg", py_str(&format!("Exception ignored in atexit callback {}", func.repr())));
+    attrs.insert_str(
+        "err_msg",
+        py_str(&format!(
+            "Exception ignored in atexit callback {}",
+            func.repr()
+        )),
+    );
     attrs.insert_str("exc_type", exc_type.unwrap_or_else(|| py_none()));
     attrs.insert_str("exc_value", exc_value);
     attrs.insert_str("exc_traceback", py_none());
     let typ = PyObjectRef::new(PyObject::Type {
         name: "UnraisableHookArgs".to_string(),
-        dict: Box::new(crate::object::str_map_to_typedict(std::collections::HashMap::new())),
+        dict: Box::new(crate::object::str_map_to_typedict(
+            std::collections::HashMap::new(),
+        )),
         bases: vec![],
         mro: vec![],
     });
@@ -5078,11 +6591,23 @@ fn py_error_type_name(err: &PyError) -> String {
 
 fn py_error_args(err: &PyError) -> Vec<PyObjectRef> {
     match err {
-        PyError::TypeError(m) | PyError::ValueError(m) | PyError::NameError(m) | PyError::AttributeError(m)
-        | PyError::IndexError(m) | PyError::KeyError(m) | PyError::ZeroDivisionError(m) | PyError::RuntimeError(m)
-        | PyError::ImportError(m) | PyError::RecursionError(m) | PyError::OsError(m) => vec![py_str(m)],
+        PyError::TypeError(m)
+        | PyError::ValueError(m)
+        | PyError::NameError(m)
+        | PyError::AttributeError(m)
+        | PyError::IndexError(m)
+        | PyError::KeyError(m)
+        | PyError::ZeroDivisionError(m)
+        | PyError::RuntimeError(m)
+        | PyError::ImportError(m)
+        | PyError::RecursionError(m)
+        | PyError::OsError(m) => vec![py_str(m)],
         PyError::Exception(_, exc) => {
-            if let PyObject::Exception { args, .. } = &*exc.borrow() { args.clone() } else { vec![exc.clone()] }
+            if let PyObject::Exception { args, .. } = &*exc.borrow() {
+                args.clone()
+            } else {
+                vec![exc.clone()]
+            }
         }
         _ => vec![],
     }
@@ -5090,111 +6615,149 @@ fn py_error_args(err: &PyError) -> Vec<PyObjectRef> {
 
 pub fn create_atexit_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
-    d.insert_str("register", PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "register".to_string(),
-        func: |args| {
-            if args.is_empty() { return Err(PyError::type_error("register() requires a callable argument")); }
-            // Real `atexit.register(func, *args, **kwargs)` stores the extra
-            // positional args (and, if present, a trailing keyword dict) and
-            // passes them to `func` when it runs at shutdown — `test_atexit`
-            // registers `print` with a message arg, and `test_shutdown`
-            // asserts the printed output.
-            let func = args[0].clone();
-            let mut extra = args[1..].to_vec();
-            let mut kwargs: Vec<(String, PyObjectRef)> = Vec::new();
-            let trailing_is_dict = extra.last().map(|l| matches!(&*l.borrow(), PyObject::Dict(_))).unwrap_or(false);
-            if trailing_is_dict {
-                // Extract the trailing keyword-dict's items into `kwargs`
-                // (cloned so no borrow is held across `extra.pop()`).
-                let items: Vec<(String, PyObjectRef)> = {
-                    let b = extra.last().unwrap().borrow();
-                    if let PyObject::Dict(d) = &*b {
-                        d.items().into_iter().map(|(k, v)| (k.str(), v)).collect()
-                    } else { Vec::new() }
-                };
-                extra.pop();
-                kwargs = items;
-            }
-            EXIT_CALLBACKS.with(|cb| cb.borrow_mut().push((func, extra, kwargs)));
-            Ok(py_none())
-        },
-    }));
-    d.insert_str("unregister", PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "unregister".to_string(),
-        func: |args| {
-            if args.is_empty() { return Err(PyError::type_error("unregister() requires a callable argument")); }
-            let target = args[0].clone();
-            // Real CPython compares callbacks with `==` (a callback's own
-            // `__eq__` may even call unregister re-entrantly — see CPython
-            // issue #112127 / _test_atexit's test_eq_unregister), NOT
-            // identity. Evaluate equality WITHOUT holding the callbacks
-            // borrow (re-entrant unregister needs borrow_mut), removing each
-            // match from the live list as it is found.
-            let funcs: Vec<PyObjectRef> = EXIT_CALLBACKS.with(|cb| {
-                cb.borrow().iter().map(|(f, _, _)| f.clone()).collect()
-            });
-            for f in &funcs {
-                let eq = crate::object::py_compare(f, &target, 2).map(|v| v.truthy()).unwrap_or(false);
-                if eq {
-                    EXIT_CALLBACKS.with(|cb| cb.borrow_mut().retain(|(g, _, _)| !g.is(f)));
+    d.insert_str(
+        "register",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "register".to_string(),
+            func: |args| {
+                if args.is_empty() {
+                    return Err(PyError::type_error(
+                        "register() requires a callable argument",
+                    ));
                 }
-            }
-            Ok(py_none())
-        },
-    }));
+                // Real `atexit.register(func, *args, **kwargs)` stores the extra
+                // positional args (and, if present, a trailing keyword dict) and
+                // passes them to `func` when it runs at shutdown — `test_atexit`
+                // registers `print` with a message arg, and `test_shutdown`
+                // asserts the printed output.
+                let func = args[0].clone();
+                let mut extra = args[1..].to_vec();
+                let mut kwargs: Vec<(String, PyObjectRef)> = Vec::new();
+                let trailing_is_dict = extra
+                    .last()
+                    .map(|l| matches!(&*l.borrow(), PyObject::Dict(_)))
+                    .unwrap_or(false);
+                if trailing_is_dict {
+                    // Extract the trailing keyword-dict's items into `kwargs`
+                    // (cloned so no borrow is held across `extra.pop()`).
+                    let items: Vec<(String, PyObjectRef)> = {
+                        let b = extra.last().unwrap().borrow();
+                        if let PyObject::Dict(d) = &*b {
+                            d.items().into_iter().map(|(k, v)| (k.str(), v)).collect()
+                        } else {
+                            Vec::new()
+                        }
+                    };
+                    extra.pop();
+                    kwargs = items;
+                }
+                EXIT_CALLBACKS.with(|cb| cb.borrow_mut().push((func, extra, kwargs)));
+                Ok(py_none())
+            },
+        }),
+    );
+    d.insert_str(
+        "unregister",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "unregister".to_string(),
+            func: |args| {
+                if args.is_empty() {
+                    return Err(PyError::type_error(
+                        "unregister() requires a callable argument",
+                    ));
+                }
+                let target = args[0].clone();
+                // Real CPython compares callbacks with `==` (a callback's own
+                // `__eq__` may even call unregister re-entrantly — see CPython
+                // issue #112127 / _test_atexit's test_eq_unregister), NOT
+                // identity. Evaluate equality WITHOUT holding the callbacks
+                // borrow (re-entrant unregister needs borrow_mut), removing each
+                // match from the live list as it is found.
+                let funcs: Vec<PyObjectRef> = EXIT_CALLBACKS
+                    .with(|cb| cb.borrow().iter().map(|(f, _, _)| f.clone()).collect());
+                for f in &funcs {
+                    let eq = crate::object::py_compare(f, &target, 2)
+                        .map(|v| v.truthy())
+                        .unwrap_or(false);
+                    if eq {
+                        EXIT_CALLBACKS.with(|cb| cb.borrow_mut().retain(|(g, _, _)| !g.is(f)));
+                    }
+                }
+                Ok(py_none())
+            },
+        }),
+    );
     d.insert_str("__name__", py_str("atexit"));
-    d.insert_str("_clear", PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "_clear".to_string(),
-        func: |_| {
-            EXIT_CALLBACKS.with(|cb| cb.borrow_mut().clear());
-            Ok(py_none())
-        },
-    }));
+    d.insert_str(
+        "_clear",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "_clear".to_string(),
+            func: |_| {
+                EXIT_CALLBACKS.with(|cb| cb.borrow_mut().clear());
+                Ok(py_none())
+            },
+        }),
+    );
     // `atexit._ncallbacks` — real CPython's internal count of registered
     // callbacks, read directly by `test_atexit.py`'s `test_callbacks_leak`/
     // `test_callbacks_leak_refcycle` to detect leaked registrations. Backed
     // by the live `EXIT_CALLBACKS` list length so it stays in sync.
-    d.insert_str("_ncallbacks", PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "_ncallbacks".to_string(),
-        func: |_| {
-            Ok(py_int(EXIT_CALLBACKS.with(|cb| cb.borrow().len() as i64)))
-        },
-    }));
+    d.insert_str(
+        "_ncallbacks",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "_ncallbacks".to_string(),
+            func: |_| Ok(py_int(EXIT_CALLBACKS.with(|cb| cb.borrow().len() as i64))),
+        }),
+    );
     // `atexit.is_tracing()` — real CPython returns True iff a Python-level
     // trace function is currently set (`sys.gettrace() != None`). This
     // interpreter's `sys.settrace` is a no-op stub, so no tracing is ever
     // active; `test_atexit.py`'s leak tests call it during callback
     // iteration.
-    d.insert_str("is_tracing", PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "is_tracing".to_string(),
-        func: |_| Ok(py_bool(false)),
-    }));
+    d.insert_str(
+        "is_tracing",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "is_tracing".to_string(),
+            func: |_| Ok(py_bool(false)),
+        }),
+    );
     // `atexit._run_exitfuncs()` — runs all registered callbacks in LIFO
     // order and CLEARS them (real CPython's internal function, exercised
     // directly by the vendored `_test_atexit.py`, which runs it in-process
     // to verify ordering/arg-passing/unraisable handling without exiting).
-    d.insert_str("_run_exitfuncs", PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "_run_exitfuncs".to_string(),
-        func: |_| {
-            let callbacks: Vec<(PyObjectRef, Vec<PyObjectRef>, Vec<(String, PyObjectRef)>)> =
-                EXIT_CALLBACKS.with(|cb| cb.borrow().clone());
-            for (func, extra, kwargs) in callbacks.iter().rev() {
-                // A raising callback is "unraisable" — real CPython reports
-                // it via sys.unraisablehook (the current hook, which
-                // catch_unraisable_exception-style contexts may have
-                // reassigned), then continues with the next callback.
-                let result = crate::object::call_function_disposable(func, extra.clone(), kwargs.clone());
-                if let Err(err) = result {
-                    let unraisable = build_unraisable_args(func, &err);
-                    if let Some(hook) = get_current_unraisablehook() {
-                        let _ = crate::object::call_function_disposable(&hook, vec![unraisable], vec![]);
+    d.insert_str(
+        "_run_exitfuncs",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "_run_exitfuncs".to_string(),
+            func: |_| {
+                let callbacks: Vec<(PyObjectRef, Vec<PyObjectRef>, Vec<(String, PyObjectRef)>)> =
+                    EXIT_CALLBACKS.with(|cb| cb.borrow().clone());
+                for (func, extra, kwargs) in callbacks.iter().rev() {
+                    // A raising callback is "unraisable" — real CPython reports
+                    // it via sys.unraisablehook (the current hook, which
+                    // catch_unraisable_exception-style contexts may have
+                    // reassigned), then continues with the next callback.
+                    let result = crate::object::call_function_disposable(
+                        func,
+                        extra.clone(),
+                        kwargs.clone(),
+                    );
+                    if let Err(err) = result {
+                        let unraisable = build_unraisable_args(func, &err);
+                        if let Some(hook) = get_current_unraisablehook() {
+                            let _ = crate::object::call_function_disposable(
+                                &hook,
+                                vec![unraisable],
+                                vec![],
+                            );
+                        }
                     }
                 }
-            }
-            EXIT_CALLBACKS.with(|cb| cb.borrow_mut().clear());
-            Ok(py_none())
-        },
-    }));
+                EXIT_CALLBACKS.with(|cb| cb.borrow_mut().clear());
+                Ok(py_none())
+            },
+        }),
+    );
     d
 }
 
@@ -5203,7 +6766,8 @@ pub fn run_atexit_handlers(vm: &mut crate::vm::VirtualMachine) {
     // Real CPython runs exit handlers in LIFO order (last registered runs
     // FIRST) — `test_shutdown`'s `atexit.register(print, "one"); atexit.
     // register(print, "two")` expects output `two` then `one`.
-    let callbacks: Vec<(PyObjectRef, Vec<PyObjectRef>, Vec<(String, PyObjectRef)>)> = EXIT_CALLBACKS.with(|cb| cb.borrow().clone());
+    let callbacks: Vec<(PyObjectRef, Vec<PyObjectRef>, Vec<(String, PyObjectRef)>)> =
+        EXIT_CALLBACKS.with(|cb| cb.borrow().clone());
     for (func, extra, kwargs) in callbacks.iter().rev() {
         let mut call_args = extra.clone();
         if !kwargs.is_empty() {
@@ -5221,13 +6785,21 @@ pub fn create_timeit_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! timeit_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
 
     timeit_func!("timeit", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("timeit() missing required argument (stmt)"));
+            return Err(PyError::type_error(
+                "timeit() missing required argument (stmt)",
+            ));
         }
         let stmt = args[0].str();
         let number: u64 = if args.len() > 1 {
@@ -5238,10 +6810,12 @@ pub fn create_timeit_dict() -> HashMap<String, PyObjectRef> {
 
         // Compile the statement
         let mut parser = crate::parser::Parser::new(&stmt);
-        let program = parser.parse_program()
+        let program = parser
+            .parse_program()
             .map_err(|e| PyError::type_error(format!("timeit parse error: {}", e)))?;
         let mut compiler = crate::compiler::Compiler::new();
-        let code = compiler.compile(&program, "<timeit>")
+        let code = compiler
+            .compile(&program, "<timeit>")
             .map_err(|e| PyError::type_error(format!("timeit compile error: {}", e)))?;
 
         // Execute number times, measuring elapsed wall time
@@ -5262,7 +6836,9 @@ pub fn create_timeit_dict() -> HashMap<String, PyObjectRef> {
     // Also provide a repeat function for convenience
     timeit_func!("repeat", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("repeat() missing required argument (stmt)"));
+            return Err(PyError::type_error(
+                "repeat() missing required argument (stmt)",
+            ));
         }
         let stmt = args[0].str();
         let repeat: u64 = if args.len() > 1 {
@@ -5277,10 +6853,12 @@ pub fn create_timeit_dict() -> HashMap<String, PyObjectRef> {
         };
 
         let mut parser = crate::parser::Parser::new(&stmt);
-        let program = parser.parse_program()
+        let program = parser
+            .parse_program()
             .map_err(|e| PyError::type_error(format!("timeit repeat parse error: {}", e)))?;
         let mut compiler = crate::compiler::Compiler::new();
-        let code = compiler.compile(&program, "<timeit>")
+        let code = compiler
+            .compile(&program, "<timeit>")
             .map_err(|e| PyError::type_error(format!("timeit repeat compile error: {}", e)))?;
 
         let mut times = Vec::new();
@@ -5309,7 +6887,13 @@ pub fn create_json_tool_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! jt_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
 
@@ -5327,7 +6911,10 @@ pub fn create_json_tool_dict() -> HashMap<String, PyObjectRef> {
                 println!("{}", formatted.str());
                 Ok(py_none())
             }
-            Err(e) => Err(PyError::runtime_error(format!("json.tool error reading stdin: {}", e))),
+            Err(e) => Err(PyError::runtime_error(format!(
+                "json.tool error reading stdin: {}",
+                e
+            ))),
         }
     });
 
@@ -5338,23 +6925,47 @@ pub fn create_cmath_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! cm_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
     cm_func!("sqrt", |args| {
-        if args.len() != 1 { return Err(PyError::type_error("sqrt() takes exactly one argument")); }
+        if args.len() != 1 {
+            return Err(PyError::type_error("sqrt() takes exactly one argument"));
+        }
         let v = args[0].borrow();
-        match &*v { PyObject::Int(i) => Ok(py_float(i.to_f64().unwrap_or(0.0).sqrt())), PyObject::Float(f) => Ok(py_float(f.sqrt())), _ => Err(PyError::type_error("sqrt() argument must be a number")) }
+        match &*v {
+            PyObject::Int(i) => Ok(py_float(i.to_f64().unwrap_or(0.0).sqrt())),
+            PyObject::Float(f) => Ok(py_float(f.sqrt())),
+            _ => Err(PyError::type_error("sqrt() argument must be a number")),
+        }
     });
     cm_func!("sin", |args| {
-        if args.len() != 1 { return Err(PyError::type_error("sin() takes exactly one argument")); }
+        if args.len() != 1 {
+            return Err(PyError::type_error("sin() takes exactly one argument"));
+        }
         let v = args[0].borrow();
-        match &*v { PyObject::Int(i) => Ok(py_float(i.to_f64().unwrap_or(0.0).sin())), PyObject::Float(f) => Ok(py_float(f.sin())), _ => Err(PyError::type_error("sin() argument must be a number")) }
+        match &*v {
+            PyObject::Int(i) => Ok(py_float(i.to_f64().unwrap_or(0.0).sin())),
+            PyObject::Float(f) => Ok(py_float(f.sin())),
+            _ => Err(PyError::type_error("sin() argument must be a number")),
+        }
     });
     cm_func!("cos", |args| {
-        if args.len() != 1 { return Err(PyError::type_error("cos() takes exactly one argument")); }
+        if args.len() != 1 {
+            return Err(PyError::type_error("cos() takes exactly one argument"));
+        }
         let v = args[0].borrow();
-        match &*v { PyObject::Int(i) => Ok(py_float(i.to_f64().unwrap_or(0.0).cos())), PyObject::Float(f) => Ok(py_float(f.cos())), _ => Err(PyError::type_error("cos() argument must be a number")) }
+        match &*v {
+            PyObject::Int(i) => Ok(py_float(i.to_f64().unwrap_or(0.0).cos())),
+            PyObject::Float(f) => Ok(py_float(f.cos())),
+            _ => Err(PyError::type_error("cos() argument must be a number")),
+        }
     });
     d
 }
@@ -5363,12 +6974,20 @@ pub fn create_hashlib_extra_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! hle_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
 
     hle_func!("md5", |args| {
-        if args.len() != 1 { return Err(PyError::type_error("md5() takes exactly one argument")); }
+        if args.len() != 1 {
+            return Err(PyError::type_error("md5() takes exactly one argument"));
+        }
         let data = args[0].borrow();
         let bytes = match &*data {
             PyObject::Bytes(b) => b.clone(),
@@ -5384,7 +7003,9 @@ pub fn create_hashlib_extra_dict() -> HashMap<String, PyObjectRef> {
     });
 
     hle_func!("sha1", |args| {
-        if args.len() != 1 { return Err(PyError::type_error("sha1() takes exactly one argument")); }
+        if args.len() != 1 {
+            return Err(PyError::type_error("sha1() takes exactly one argument"));
+        }
         let data = args[0].borrow();
         let bytes = match &*data {
             PyObject::Bytes(b) => b.clone(),
@@ -5400,12 +7021,18 @@ pub fn create_hashlib_extra_dict() -> HashMap<String, PyObjectRef> {
     });
 
     hle_func!("sha256", |args| {
-        if args.len() != 1 { return Err(PyError::type_error("sha256() takes exactly one argument")); }
+        if args.len() != 1 {
+            return Err(PyError::type_error("sha256() takes exactly one argument"));
+        }
         let data = args[0].borrow();
         let bytes = match &*data {
             PyObject::Bytes(b) => b.clone(),
             PyObject::Str(s) => s.as_bytes().to_vec(),
-            _ => return Err(PyError::type_error("sha256() argument must be bytes or str")),
+            _ => {
+                return Err(PyError::type_error(
+                    "sha256() argument must be bytes or str",
+                ))
+            }
         };
         use std::collections::hash_map::DefaultHasher;
         use std::hash::Hasher;
@@ -5422,7 +7049,13 @@ pub fn create_queue_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! q_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
 
@@ -5440,79 +7073,87 @@ pub fn create_array_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
 
     // Array type as a factory function
-    d.insert_str("array", PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "array".to_string(),
-        func: |args| {
-            if args.is_empty() {
-                return Err(PyError::type_error("array() requires at least 1 argument (typecode)"));
-            }
-            let typecode_str = args[0].str();
-            if typecode_str.is_empty() {
-                return Err(PyError::value_error("empty typecode".to_string()));
-            }
-            let typecode = typecode_str.chars().next().unwrap();
-            // Real Python's `array` module accepts all of `bBuhHiIlLqQfd` —
-            // this previously only recognized 'i'/'f'/'d', raising
-            // `ValueError: bad typecode` for anything else (e.g. `array
-            // .array('B', ...)`, an extremely common "typed byte buffer"
-            // idiom used throughout CPython's own test suite as setup/helper
-            // code, not something specific to `array` itself). `PyArray`
-            // stores every element as `f64` regardless of typecode (a
-            // simplification — real per-typecode overflow/wraparound
-            // semantics and `itemsize` aren't modeled), but that's already
-            // true for the 'i' case this accepted before; broadening which
-            // typecodes are ACCEPTED (and read back as `int` vs `float` per
-            // `array_typecode_is_float` below) fixes the far more common
-            // "construction rejected outright" failure mode.
-            if !"bBuhHiIlLqQfd".contains(typecode) {
-                return Err(PyError::value_error(format!("bad typecode '{}'", typecode)));
-            }
-            let is_float = array_typecode_is_float(typecode);
-            let mut data: Vec<f64> = Vec::new();
-            if args.len() > 1 {
-                let init = &args[1];
-                let init_borrowed = init.borrow();
-                match &*init_borrowed {
-                    PyObject::List(items) => {
-                        for item in items {
-                            if is_float {
-                                data.push(item.as_f64().unwrap_or(0.0));
-                            } else {
-                                data.push(item.as_i64().unwrap_or(0) as f64);
-                            }
-                        }
-                    }
-                    PyObject::Tuple(items) => {
-                        for item in items {
-                            if is_float {
-                                data.push(item.as_f64().unwrap_or(0.0));
-                            } else {
-                                data.push(item.as_i64().unwrap_or(0) as f64);
-                            }
-                        }
-                    }
-                    _ => {
-                        // Try iterating
-                        let iter_obj = builtin_iter(&[init.clone()])?;
-                        loop {
-                            match builtin_next(&[iter_obj.clone()]) {
-                                Ok(item) => {
-                                    if is_float {
-                                        data.push(item.as_f64().unwrap_or(0.0));
-                                    } else {
-                                        data.push(item.as_i64().unwrap_or(0) as f64);
-                                    }
+    d.insert_str(
+        "array",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "array".to_string(),
+            func: |args| {
+                if args.is_empty() {
+                    return Err(PyError::type_error(
+                        "array() requires at least 1 argument (typecode)",
+                    ));
+                }
+                let typecode_str = args[0].str();
+                if typecode_str.is_empty() {
+                    return Err(PyError::value_error("empty typecode".to_string()));
+                }
+                let typecode = typecode_str.chars().next().unwrap();
+                // Real Python's `array` module accepts all of `bBuhHiIlLqQfd` —
+                // this previously only recognized 'i'/'f'/'d', raising
+                // `ValueError: bad typecode` for anything else (e.g. `array
+                // .array('B', ...)`, an extremely common "typed byte buffer"
+                // idiom used throughout CPython's own test suite as setup/helper
+                // code, not something specific to `array` itself). `PyArray`
+                // stores every element as `f64` regardless of typecode (a
+                // simplification — real per-typecode overflow/wraparound
+                // semantics and `itemsize` aren't modeled), but that's already
+                // true for the 'i' case this accepted before; broadening which
+                // typecodes are ACCEPTED (and read back as `int` vs `float` per
+                // `array_typecode_is_float` below) fixes the far more common
+                // "construction rejected outright" failure mode.
+                if !"bBuhHiIlLqQfd".contains(typecode) {
+                    return Err(PyError::value_error(format!("bad typecode '{}'", typecode)));
+                }
+                let is_float = array_typecode_is_float(typecode);
+                let mut data: Vec<f64> = Vec::new();
+                if args.len() > 1 {
+                    let init = &args[1];
+                    let init_borrowed = init.borrow();
+                    match &*init_borrowed {
+                        PyObject::List(items) => {
+                            for item in items {
+                                if is_float {
+                                    data.push(item.as_f64().unwrap_or(0.0));
+                                } else {
+                                    data.push(item.as_i64().unwrap_or(0) as f64);
                                 }
-                                Err(PyError::StopIteration) => break,
-                                Err(e) => return Err(e),
+                            }
+                        }
+                        PyObject::Tuple(items) => {
+                            for item in items {
+                                if is_float {
+                                    data.push(item.as_f64().unwrap_or(0.0));
+                                } else {
+                                    data.push(item.as_i64().unwrap_or(0) as f64);
+                                }
+                            }
+                        }
+                        _ => {
+                            // Try iterating
+                            let iter_obj = builtin_iter(&[init.clone()])?;
+                            loop {
+                                match builtin_next(&[iter_obj.clone()]) {
+                                    Ok(item) => {
+                                        if is_float {
+                                            data.push(item.as_f64().unwrap_or(0.0));
+                                        } else {
+                                            data.push(item.as_i64().unwrap_or(0) as f64);
+                                        }
+                                    }
+                                    Err(PyError::StopIteration) => break,
+                                    Err(e) => return Err(e),
+                                }
                             }
                         }
                     }
                 }
-            }
-            Ok(PyObjectRef::new(PyObject::Array(PyArray { typecode, data })))
-        },
-    }));
+                Ok(PyObjectRef::new(PyObject::Array(PyArray {
+                    typecode,
+                    data,
+                })))
+            },
+        }),
+    );
 
     d
 }
@@ -5546,35 +7187,51 @@ pub fn create_thread_module_dict() -> HashMap<String, PyObjectRef> {
     d.insert_str("TIMEOUT_MAX", py_float(4294967.0));
     // `_thread.get_ident()` — the calling thread's identifier (real CPython's
     // pprint.py and reprlib.py both use it as a recursion-guard key).
-    d.insert_str("get_ident", PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "get_ident".to_string(),
-        func: |_args: &[PyObjectRef]| {
-            use std::sync::atomic::{AtomicU64, Ordering};
-            thread_local! { static ID: AtomicU64 = const { AtomicU64::new(0) }; }
-            static NEXT: AtomicU64 = AtomicU64::new(1);
-            let id = ID.with(|c| {
-                let mut v = c.load(Ordering::Relaxed);
-                if v == 0 { v = NEXT.fetch_add(1, Ordering::Relaxed); c.store(v, Ordering::Relaxed); }
-                v
-            });
-            Ok(py_int(id as i64))
-        },
-    }));
+    d.insert_str(
+        "get_ident",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "get_ident".to_string(),
+            func: |_args: &[PyObjectRef]| {
+                use std::sync::atomic::{AtomicU64, Ordering};
+                thread_local! { static ID: AtomicU64 = const { AtomicU64::new(0) }; }
+                static NEXT: AtomicU64 = AtomicU64::new(1);
+                let id = ID.with(|c| {
+                    let mut v = c.load(Ordering::Relaxed);
+                    if v == 0 {
+                        v = NEXT.fetch_add(1, Ordering::Relaxed);
+                        c.store(v, Ordering::Relaxed);
+                    }
+                    v
+                });
+                Ok(py_int(id as i64))
+            },
+        }),
+    );
     macro_rules! thr_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
 
     thr_func!("start_new_thread", |args| {
         if args.len() < 2 {
-            return Err(PyError::type_error("start_new_thread() requires at least 2 arguments (function, args)"));
+            return Err(PyError::type_error(
+                "start_new_thread() requires at least 2 arguments (function, args)",
+            ));
         }
         let func = args[0].clone();
         let func_args = if let PyObject::Tuple(items) = &*args[1].borrow() {
             items.clone()
         } else {
-            return Err(PyError::type_error("start_new_thread() args must be a tuple"));
+            return Err(PyError::type_error(
+                "start_new_thread() args must be a tuple",
+            ));
         };
         // Call function synchronously
         crate::object::call_function(&func, func_args)?;
@@ -5612,7 +7269,9 @@ pub fn create_thread_module_dict() -> HashMap<String, PyObjectRef> {
 thread_local! {
     static SIGNAL_HANDLERS: std::cell::RefCell<std::collections::HashMap<i64, PyObjectRef>> = std::cell::RefCell::new(std::collections::HashMap::new());
 }
-fn signal_handlers() -> &'static std::thread::LocalKey<std::cell::RefCell<std::collections::HashMap<i64, PyObjectRef>>> {
+fn signal_handlers(
+) -> &'static std::thread::LocalKey<std::cell::RefCell<std::collections::HashMap<i64, PyObjectRef>>>
+{
     &SIGNAL_HANDLERS
 }
 
@@ -5623,7 +7282,10 @@ fn signal_handlers() -> &'static std::thread::LocalKey<std::cell::RefCell<std::c
 /// nothing if no handler is registered, or if the stored value is one of
 /// the `SIG_DFL`/`SIG_IGN` int sentinels rather than a real callable —
 /// matches `signal.signal()`'s own default/ignore semantics.
-pub(crate) fn invoke_signal_handler_impl(vm: &mut crate::vm::VirtualMachine, signum: i64) -> PyResult<PyObjectRef> {
+pub(crate) fn invoke_signal_handler_impl(
+    vm: &mut crate::vm::VirtualMachine,
+    signum: i64,
+) -> PyResult<PyObjectRef> {
     let handler = SIGNAL_HANDLERS.with(|h| h.borrow().get(&signum).cloned());
     match handler {
         Some(h) if !matches!(&*h.borrow(), PyObject::Int(_)) => {
@@ -5633,16 +7295,23 @@ pub(crate) fn invoke_signal_handler_impl(vm: &mut crate::vm::VirtualMachine, sig
     }
 }
 
-pub(crate) fn signal_raise_signal_impl(vm: &mut crate::vm::VirtualMachine, signum: i64) -> PyResult<PyObjectRef> {
+pub(crate) fn signal_raise_signal_impl(
+    vm: &mut crate::vm::VirtualMachine,
+    signum: i64,
+) -> PyResult<PyObjectRef> {
     invoke_signal_handler_impl(vm, signum)?;
     Ok(py_none())
 }
 
 pub fn signal_raise_signal_builtin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
-        return Err(PyError::type_error("raise_signal() missing required argument (signalnum)"));
+        return Err(PyError::type_error(
+            "raise_signal() missing required argument (signalnum)",
+        ));
     }
-    let signum = args[0].as_i64().ok_or_else(|| PyError::type_error("signalnum must be an int"))?;
+    let signum = args[0]
+        .as_i64()
+        .ok_or_else(|| PyError::type_error("signalnum must be an int"))?;
     crate::object::with_vm_mut(|vm| signal_raise_signal_impl(vm, signum))?
 }
 
@@ -5666,7 +7335,13 @@ pub fn create_signal_dict() -> HashMap<String, PyObjectRef> {
 
     macro_rules! sig_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
 
@@ -5678,20 +7353,32 @@ pub fn create_signal_dict() -> HashMap<String, PyObjectRef> {
     // (see `signal_handlers` and its own doc comment).
     sig_func!("signal", |args| {
         if args.len() < 2 {
-            return Err(PyError::type_error("signal() requires 2 arguments (signalnum, handler)"));
+            return Err(PyError::type_error(
+                "signal() requires 2 arguments (signalnum, handler)",
+            ));
         }
-        let signum = args[0].as_i64().ok_or_else(|| PyError::type_error("signalnum must be an int"))?;
-        let old = signal_handlers().with(|h| h.borrow().get(&signum).cloned()).unwrap_or_else(py_none);
+        let signum = args[0]
+            .as_i64()
+            .ok_or_else(|| PyError::type_error("signalnum must be an int"))?;
+        let old = signal_handlers()
+            .with(|h| h.borrow().get(&signum).cloned())
+            .unwrap_or_else(py_none);
         signal_handlers().with(|h| h.borrow_mut().insert(signum, args[1].clone()));
         Ok(old)
     });
 
     sig_func!("getsignal", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("getsignal() missing required argument (signalnum)"));
+            return Err(PyError::type_error(
+                "getsignal() missing required argument (signalnum)",
+            ));
         }
-        let signum = args[0].as_i64().ok_or_else(|| PyError::type_error("signalnum must be an int"))?;
-        Ok(signal_handlers().with(|h| h.borrow().get(&signum).cloned()).unwrap_or_else(|| py_int(0)))
+        let signum = args[0]
+            .as_i64()
+            .ok_or_else(|| PyError::type_error("signalnum must be an int"))?;
+        Ok(signal_handlers()
+            .with(|h| h.borrow().get(&signum).cloned())
+            .unwrap_or_else(|| py_int(0)))
     });
 
     // `signal.alarm` — this interpreter has no real OS-timer/signal-delivery
@@ -5715,7 +7402,13 @@ pub fn create_gc_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! gc_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
 
@@ -5748,9 +7441,7 @@ pub fn create_gc_dict() -> HashMap<String, PyObjectRef> {
         Ok(py_tuple(vec![py_int(tracked as i64), py_int(0), py_int(0)]))
     });
 
-    gc_func!("is_tracked", |_| {
-        Ok(py_bool(false))
-    });
+    gc_func!("is_tracked", |_| { Ok(py_bool(false)) });
 
     // `gc.set_threshold`/`gc.get_threshold` — were missing entirely
     // (`AttributeError`). This interpreter's cycle collector (`cycle_gc.rs`)
@@ -5808,50 +7499,59 @@ pub fn create_sysconfig_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! syscfg_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
 
     syscfg_func!("get_config_var", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("get_config_var() missing required argument (name)"));
+            return Err(PyError::type_error(
+                "get_config_var() missing required argument (name)",
+            ));
         }
         Ok(py_none())
     });
 
-    syscfg_func!("get_config_vars", |_| {
-        Ok(py_dict())
-    });
+    syscfg_func!("get_config_vars", |_| { Ok(py_dict()) });
 
-    syscfg_func!("get_platform", |_| {
-        Ok(py_str("linux-x86_64"))
-    });
+    syscfg_func!("get_platform", |_| { Ok(py_str("linux-x86_64")) });
 
     // sysconfig.get_path(name, ...) — returns install paths; pydoc reads
     // get_path('stdlib') to locate module docstrings. Return the interpreter's
     // Lib dir (sys.path[0] resolved through the live sys module).
     syscfg_func!("get_path", |args| {
         let name = args.first().map(|a| a.str()).unwrap_or_default();
-        let base = crate::modules::get_module("sys")
-            .and_then(|m| {
-                let b = m.borrow();
-                if let PyObject::Module { dict, .. } = &*b {
-                    dict.get_str("path").cloned()
-                } else { None }
-            });
+        let base = crate::modules::get_module("sys").and_then(|m| {
+            let b = m.borrow();
+            if let PyObject::Module { dict, .. } = &*b {
+                dict.get_str("path").cloned()
+            } else {
+                None
+            }
+        });
         if let Some(path_list) = base {
             let p = {
                 let pb = path_list.borrow();
                 if let PyObject::List(items) = &*pb {
                     items.first().map(|i| i.str())
-                } else { None }
+                } else {
+                    None
+                }
             };
             if let Some(p) = p {
                 if !p.is_empty() {
                     let r = match name.as_str() {
                         "stdlib" => format!("{}/Lib", p),
                         "platstdlib" => format!("{}/Lib", p),
-                        "purelib" | "platlib" | "include" | "platinclude" | "scripts" | "data" => p.clone(),
+                        "purelib" | "platlib" | "include" | "platinclude" | "scripts" | "data" => {
+                            p.clone()
+                        }
                         _ => p.clone(),
                     };
                     return Ok(py_str(&r));
@@ -5861,13 +7561,9 @@ pub fn create_sysconfig_dict() -> HashMap<String, PyObjectRef> {
         Ok(py_str(""))
     });
 
-    syscfg_func!("get_python_version", |_| {
-        Ok(py_str("3.13"))
-    });
+    syscfg_func!("get_python_version", |_| { Ok(py_str("3.13")) });
 
-    syscfg_func!("is_python_build", |_| {
-        Ok(py_bool(false))
-    });
+    syscfg_func!("is_python_build", |_| { Ok(py_bool(false)) });
 
     d
 }
@@ -5876,7 +7572,13 @@ pub fn create_locale_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! loc_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
 
@@ -5896,17 +7598,24 @@ pub fn create_locale_dict() -> HashMap<String, PyObjectRef> {
     // catches it around every `setlocale` call). Real CPython subclasses
     // `OSError`; the name-based matching this interpreter uses only needs the
     // `"Error"` type name to line up.
-    d.insert_str("Error", PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "locale.Error".to_string(),
-        func: |args| {
-            let msg = if args.is_empty() { String::new() } else { args[0].str() };
-            Ok(PyObjectRef::new(PyObject::Exception {
-                typ: "Error".to_string(),
-                args: vec![py_str(&msg)],
-                cause: None,
-            }))
-        },
-    }));
+    d.insert_str(
+        "Error",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "locale.Error".to_string(),
+            func: |args| {
+                let msg = if args.is_empty() {
+                    String::new()
+                } else {
+                    args[0].str()
+                };
+                Ok(PyObjectRef::new(PyObject::Exception {
+                    typ: "Error".to_string(),
+                    args: vec![py_str(&msg)],
+                    cause: None,
+                }))
+            },
+        }),
+    );
 
     // Real, shared per-category locale state — `setlocale(category, locale)`
     // writes here, `setlocale(category)` (the 1-arg getter form real Python
@@ -5939,16 +7648,20 @@ pub fn create_locale_dict() -> HashMap<String, PyObjectRef> {
     }
 
     fn get_locale(category: i64) -> String {
-        CURRENT_LOCALES.with(|m| {
-            let map = m.borrow();
-            if category == 6 {
-                map.get(&6).cloned().or_else(|| {
-                    [0i64, 1, 2, 3, 4, 5].iter().find_map(|c| map.get(c).cloned())
-                })
-            } else {
-                map.get(&category).cloned()
-            }
-        }).unwrap_or_else(|| "C".to_string())
+        CURRENT_LOCALES
+            .with(|m| {
+                let map = m.borrow();
+                if category == 6 {
+                    map.get(&6).cloned().or_else(|| {
+                        [0i64, 1, 2, 3, 4, 5]
+                            .iter()
+                            .find_map(|c| map.get(c).cloned())
+                    })
+                } else {
+                    map.get(&category).cloned()
+                }
+            })
+            .unwrap_or_else(|| "C".to_string())
     }
     fn set_locale(category: i64, locale: &str) {
         CURRENT_LOCALES.with(|m| {
@@ -5985,7 +7698,9 @@ pub fn create_locale_dict() -> HashMap<String, PyObjectRef> {
     // getter idiom (`test_strftime.py`'s setUp) raised a spurious TypeError.
     loc_func!("setlocale", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("setlocale() missing required argument (category)"));
+            return Err(PyError::type_error(
+                "setlocale() missing required argument (category)",
+            ));
         }
         let category = args[0].as_i64().unwrap_or(6); // default LC_ALL
         if args.len() >= 2 && !matches!(&*args[1].borrow(), PyObject::None) {
@@ -6009,11 +7724,13 @@ pub fn create_locale_dict() -> HashMap<String, PyObjectRef> {
         if let PyObject::Dict(d) = &mut *dict.borrow_mut() {
             d.set(py_str("decimal_point"), py_str(&decimal_point)).ok();
             d.set(py_str("thousands_sep"), py_str(&thousands_sep)).ok();
-            d.set(py_str("grouping"), py_list(vec![py_int(3), py_int(0)])).ok();
+            d.set(py_str("grouping"), py_list(vec![py_int(3), py_int(0)]))
+                .ok();
             d.set(py_str("currency_symbol"), py_str("$")).ok();
             d.set(py_str("mon_decimal_point"), py_str(".")).ok();
             d.set(py_str("mon_thousands_sep"), py_str(",")).ok();
-            d.set(py_str("mon_grouping"), py_list(vec![py_int(3), py_int(0)])).ok();
+            d.set(py_str("mon_grouping"), py_list(vec![py_int(3), py_int(0)]))
+                .ok();
             d.set(py_str("positive_sign"), py_str("")).ok();
             d.set(py_str("negative_sign"), py_str("-")).ok();
             d.set(py_str("int_frac_digits"), py_int(2)).ok();
@@ -6031,21 +7748,18 @@ pub fn create_locale_dict() -> HashMap<String, PyObjectRef> {
 
     // getdefaultlocale() — returns (lang_code, encoding)
     loc_func!("getdefaultlocale", |_| {
-        Ok(py_tuple(vec![
-            py_str("en_US"),
-            py_str("UTF-8"),
-        ]))
+        Ok(py_tuple(vec![py_str("en_US"), py_str("UTF-8")]))
     });
 
     // getpreferredencoding() — returns 'UTF-8'
-    loc_func!("getpreferredencoding", |_| {
-        Ok(py_str("UTF-8"))
-    });
+    loc_func!("getpreferredencoding", |_| { Ok(py_str("UTF-8")) });
 
     // strcoll(a, b) — string comparison using locale
     loc_func!("strcoll", |args| {
         if args.len() < 2 {
-            return Err(PyError::type_error("strcoll() requires 2 arguments (str1, str2)"));
+            return Err(PyError::type_error(
+                "strcoll() requires 2 arguments (str1, str2)",
+            ));
         }
         let a = args[0].str();
         let b = args[1].str();
@@ -6055,7 +7769,9 @@ pub fn create_locale_dict() -> HashMap<String, PyObjectRef> {
     // strxfrm(s) — string transformation for locale-aware comparison
     loc_func!("strxfrm", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("strxfrm() missing required argument (str)"));
+            return Err(PyError::type_error(
+                "strxfrm() missing required argument (str)",
+            ));
         }
         Ok(py_str(&args[0].str()))
     });
@@ -6077,13 +7793,25 @@ pub fn create_colorsys_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! cs_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
 
     // Helper: clamp a float to [0.0, 1.0]
     fn clampf(v: f64) -> f64 {
-        if v < 0.0 { 0.0 } else if v > 1.0 { 1.0 } else { v }
+        if v < 0.0 {
+            0.0
+        } else if v > 1.0 {
+            1.0
+        } else {
+            v
+        }
     }
 
     // one third = 1.0 / 3.0
@@ -6091,21 +7819,39 @@ pub fn create_colorsys_dict() -> HashMap<String, PyObjectRef> {
     const TWO_THIRD: f64 = 2.0 / 3.0;
 
     fn hue_to_rgb(m1: f64, m2: f64, mut h: f64) -> f64 {
-        if h < 0.0 { h += 1.0; }
-        if h > 1.0 { h -= 1.0; }
-        if h * 6.0 < 1.0 { return m1 + (m2 - m1) * h * 6.0; }
-        if h * 2.0 < 1.0 { return m2; }
-        if h * 3.0 < 2.0 { return m1 + (m2 - m1) * (TWO_THIRD - h) * 6.0; }
+        if h < 0.0 {
+            h += 1.0;
+        }
+        if h > 1.0 {
+            h -= 1.0;
+        }
+        if h * 6.0 < 1.0 {
+            return m1 + (m2 - m1) * h * 6.0;
+        }
+        if h * 2.0 < 1.0 {
+            return m2;
+        }
+        if h * 3.0 < 2.0 {
+            return m1 + (m2 - m1) * (TWO_THIRD - h) * 6.0;
+        }
         m1
     }
 
     cs_func!("rgb_to_hsv", |args| {
         if args.len() < 3 {
-            return Err(PyError::type_error("rgb_to_hsv() requires 3 arguments (r, g, b)"));
+            return Err(PyError::type_error(
+                "rgb_to_hsv() requires 3 arguments (r, g, b)",
+            ));
         }
-        let r = args[0].as_f64().ok_or_else(|| PyError::type_error("r must be a number"))?;
-        let g = args[1].as_f64().ok_or_else(|| PyError::type_error("g must be a number"))?;
-        let b = args[2].as_f64().ok_or_else(|| PyError::type_error("b must be a number"))?;
+        let r = args[0]
+            .as_f64()
+            .ok_or_else(|| PyError::type_error("r must be a number"))?;
+        let g = args[1]
+            .as_f64()
+            .ok_or_else(|| PyError::type_error("g must be a number"))?;
+        let b = args[2]
+            .as_f64()
+            .ok_or_else(|| PyError::type_error("b must be a number"))?;
 
         let maxc = r.max(g).max(b);
         let minc = r.min(g).min(b);
@@ -6131,15 +7877,27 @@ pub fn create_colorsys_dict() -> HashMap<String, PyObjectRef> {
 
     cs_func!("hsv_to_rgb", |args| {
         if args.len() < 3 {
-            return Err(PyError::type_error("hsv_to_rgb() requires 3 arguments (h, s, v)"));
+            return Err(PyError::type_error(
+                "hsv_to_rgb() requires 3 arguments (h, s, v)",
+            ));
         }
-        let h = args[0].as_f64().ok_or_else(|| PyError::type_error("h must be a number"))?;
-        let s = args[1].as_f64().ok_or_else(|| PyError::type_error("s must be a number"))?;
-        let v = args[2].as_f64().ok_or_else(|| PyError::type_error("v must be a number"))?;
+        let h = args[0]
+            .as_f64()
+            .ok_or_else(|| PyError::type_error("h must be a number"))?;
+        let s = args[1]
+            .as_f64()
+            .ok_or_else(|| PyError::type_error("s must be a number"))?;
+        let v = args[2]
+            .as_f64()
+            .ok_or_else(|| PyError::type_error("v must be a number"))?;
 
         if s == 0.0 {
             let gray = clampf(v);
-            return Ok(py_tuple(vec![py_float(gray), py_float(gray), py_float(gray)]));
+            return Ok(py_tuple(vec![
+                py_float(gray),
+                py_float(gray),
+                py_float(gray),
+            ]));
         }
 
         let h = (h % 1.0 + 1.0) % 1.0;
@@ -6157,7 +7915,11 @@ pub fn create_colorsys_dict() -> HashMap<String, PyObjectRef> {
             4 => (t, p, v),
             _ => (v, p, q),
         };
-        Ok(py_tuple(vec![py_float(clampf(r)), py_float(clampf(g)), py_float(clampf(b))]))
+        Ok(py_tuple(vec![
+            py_float(clampf(r)),
+            py_float(clampf(g)),
+            py_float(clampf(b)),
+        ]))
     });
 
     // `colorsys.rgb_to_yiq`/`yiq_to_rgb` — were missing entirely
@@ -6165,11 +7927,19 @@ pub fn create_colorsys_dict() -> HashMap<String, PyObjectRef> {
     // directly from real CPython's own `Lib/colorsys.py`.
     cs_func!("rgb_to_yiq", |args| {
         if args.len() < 3 {
-            return Err(PyError::type_error("rgb_to_yiq() requires 3 arguments (r, g, b)"));
+            return Err(PyError::type_error(
+                "rgb_to_yiq() requires 3 arguments (r, g, b)",
+            ));
         }
-        let r = args[0].as_f64().ok_or_else(|| PyError::type_error("r must be a number"))?;
-        let g = args[1].as_f64().ok_or_else(|| PyError::type_error("g must be a number"))?;
-        let b = args[2].as_f64().ok_or_else(|| PyError::type_error("b must be a number"))?;
+        let r = args[0]
+            .as_f64()
+            .ok_or_else(|| PyError::type_error("r must be a number"))?;
+        let g = args[1]
+            .as_f64()
+            .ok_or_else(|| PyError::type_error("g must be a number"))?;
+        let b = args[2]
+            .as_f64()
+            .ok_or_else(|| PyError::type_error("b must be a number"))?;
         let y = 0.30 * r + 0.59 * g + 0.11 * b;
         let i = 0.74 * (r - y) - 0.27 * (b - y);
         let q = 0.48 * (r - y) + 0.41 * (b - y);
@@ -6178,24 +7948,44 @@ pub fn create_colorsys_dict() -> HashMap<String, PyObjectRef> {
 
     cs_func!("yiq_to_rgb", |args| {
         if args.len() < 3 {
-            return Err(PyError::type_error("yiq_to_rgb() requires 3 arguments (y, i, q)"));
+            return Err(PyError::type_error(
+                "yiq_to_rgb() requires 3 arguments (y, i, q)",
+            ));
         }
-        let y = args[0].as_f64().ok_or_else(|| PyError::type_error("y must be a number"))?;
-        let i = args[1].as_f64().ok_or_else(|| PyError::type_error("i must be a number"))?;
-        let q = args[2].as_f64().ok_or_else(|| PyError::type_error("q must be a number"))?;
+        let y = args[0]
+            .as_f64()
+            .ok_or_else(|| PyError::type_error("y must be a number"))?;
+        let i = args[1]
+            .as_f64()
+            .ok_or_else(|| PyError::type_error("i must be a number"))?;
+        let q = args[2]
+            .as_f64()
+            .ok_or_else(|| PyError::type_error("q must be a number"))?;
         let r = y + 0.9468822170900693 * i + 0.6235565819861433 * q;
         let g = y - 0.27478764629897834 * i - 0.6356910791873801 * q;
         let b = y - 1.1085450346420322 * i + 1.7090069284064666 * q;
-        Ok(py_tuple(vec![py_float(clampf(r)), py_float(clampf(g)), py_float(clampf(b))]))
+        Ok(py_tuple(vec![
+            py_float(clampf(r)),
+            py_float(clampf(g)),
+            py_float(clampf(b)),
+        ]))
     });
 
     cs_func!("rgb_to_hls", |args| {
         if args.len() < 3 {
-            return Err(PyError::type_error("rgb_to_hls() requires 3 arguments (r, g, b)"));
+            return Err(PyError::type_error(
+                "rgb_to_hls() requires 3 arguments (r, g, b)",
+            ));
         }
-        let r = args[0].as_f64().ok_or_else(|| PyError::type_error("r must be a number"))?;
-        let g = args[1].as_f64().ok_or_else(|| PyError::type_error("g must be a number"))?;
-        let b = args[2].as_f64().ok_or_else(|| PyError::type_error("b must be a number"))?;
+        let r = args[0]
+            .as_f64()
+            .ok_or_else(|| PyError::type_error("r must be a number"))?;
+        let g = args[1]
+            .as_f64()
+            .ok_or_else(|| PyError::type_error("g must be a number"))?;
+        let b = args[2]
+            .as_f64()
+            .ok_or_else(|| PyError::type_error("b must be a number"))?;
 
         let maxc = r.max(g).max(b);
         let minc = r.min(g).min(b);
@@ -6225,21 +8015,37 @@ pub fn create_colorsys_dict() -> HashMap<String, PyObjectRef> {
 
     cs_func!("hls_to_rgb", |args| {
         if args.len() < 3 {
-            return Err(PyError::type_error("hls_to_rgb() requires 3 arguments (h, l, s)"));
+            return Err(PyError::type_error(
+                "hls_to_rgb() requires 3 arguments (h, l, s)",
+            ));
         }
-        let h = args[0].as_f64().ok_or_else(|| PyError::type_error("h must be a number"))?;
-        let l = args[1].as_f64().ok_or_else(|| PyError::type_error("l must be a number"))?;
-        let s = args[2].as_f64().ok_or_else(|| PyError::type_error("s must be a number"))?;
+        let h = args[0]
+            .as_f64()
+            .ok_or_else(|| PyError::type_error("h must be a number"))?;
+        let l = args[1]
+            .as_f64()
+            .ok_or_else(|| PyError::type_error("l must be a number"))?;
+        let s = args[2]
+            .as_f64()
+            .ok_or_else(|| PyError::type_error("s must be a number"))?;
 
         if s == 0.0 {
             return Ok(py_tuple(vec![py_float(l), py_float(l), py_float(l)]));
         }
-        let m2 = if l <= 0.5 { l * (1.0 + s) } else { l + s - l * s };
+        let m2 = if l <= 0.5 {
+            l * (1.0 + s)
+        } else {
+            l + s - l * s
+        };
         let m1 = 2.0 * l - m2;
         let r = hue_to_rgb(m1, m2, h + ONE_THIRD);
         let g = hue_to_rgb(m1, m2, h);
         let b = hue_to_rgb(m1, m2, h - ONE_THIRD);
-        Ok(py_tuple(vec![py_float(clampf(r)), py_float(clampf(g)), py_float(clampf(b))]))
+        Ok(py_tuple(vec![
+            py_float(clampf(r)),
+            py_float(clampf(g)),
+            py_float(clampf(b)),
+        ]))
     });
 
     d
@@ -6261,15 +8067,20 @@ pub fn create_wave_dict() -> HashMap<String, PyObjectRef> {
             if offset + 8 > data.len() {
                 return Err("Not a valid WAV file: no fmt chunk found".to_string());
             }
-            let chunk_id = &data[offset..offset+4];
+            let chunk_id = &data[offset..offset + 4];
             let chunk_size = u32::from_le_bytes([
-                data[offset+4], data[offset+5], data[offset+6], data[offset+7],
+                data[offset + 4],
+                data[offset + 5],
+                data[offset + 6],
+                data[offset + 7],
             ]) as usize;
             if chunk_id == b"fmt " {
                 break (offset, chunk_size);
             }
             offset += 8 + chunk_size;
-            if offset % 2 != 0 { offset += 1; } // pad to word boundary
+            if offset % 2 != 0 {
+                offset += 1;
+            } // pad to word boundary
             if offset >= data.len() {
                 return Err("Not a valid WAV file: no fmt chunk found".to_string());
             }
@@ -6282,10 +8093,14 @@ pub fn create_wave_dict() -> HashMap<String, PyObjectRef> {
 
         let audio_format = u16::from_le_bytes([fmt_data[8], fmt_data[9]]);
         if audio_format != 1 {
-            return Err(format!("Unsupported WAV audio format: {} (only PCM/1 supported)", audio_format));
+            return Err(format!(
+                "Unsupported WAV audio format: {} (only PCM/1 supported)",
+                audio_format
+            ));
         }
         let nchannels = u16::from_le_bytes([fmt_data[10], fmt_data[11]]) as i32;
-        let framerate = i32::from_le_bytes([fmt_data[12], fmt_data[13], fmt_data[14], fmt_data[15]]);
+        let framerate =
+            i32::from_le_bytes([fmt_data[12], fmt_data[13], fmt_data[14], fmt_data[15]]);
         // Byte rate is at [16..20], block align at [20..22]
         let bits_per_sample = u16::from_le_bytes([fmt_data[22], fmt_data[23]]);
         let sampwidth = (bits_per_sample / 8) as i32;
@@ -6295,21 +8110,28 @@ pub fn create_wave_dict() -> HashMap<String, PyObjectRef> {
 
         // Find data chunk
         let mut data_offset = fmt_offset + 8 + fmt_size;
-        if data_offset % 2 != 0 { data_offset += 1; }
+        if data_offset % 2 != 0 {
+            data_offset += 1;
+        }
 
         let (data_chunk_start, data_size) = loop {
             if data_offset + 8 > data.len() {
                 return Err("Not a valid WAV file: no data chunk found".to_string());
             }
-            let chunk_id = &data[data_offset..data_offset+4];
+            let chunk_id = &data[data_offset..data_offset + 4];
             let chunk_size = u32::from_le_bytes([
-                data[data_offset+4], data[data_offset+5], data[data_offset+6], data[data_offset+7],
+                data[data_offset + 4],
+                data[data_offset + 5],
+                data[data_offset + 6],
+                data[data_offset + 7],
             ]) as usize;
             if chunk_id == b"data" {
                 break (data_offset + 8, chunk_size);
             }
             data_offset += 8 + chunk_size;
-            if data_offset % 2 != 0 { data_offset += 1; }
+            if data_offset % 2 != 0 {
+                data_offset += 1;
+            }
             if data_offset >= data.len() {
                 return Err("Not a valid WAV file: no data chunk found".to_string());
             }
@@ -6325,144 +8147,211 @@ pub fn create_wave_dict() -> HashMap<String, PyObjectRef> {
     }
 
     // Wave_read module-level alias — direct instantiation not allowed
-    d.insert_str("Wave_read", PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "Wave_read".to_string(),
-        func: |_args| {
-            Err(PyError::type_error("Wave_read cannot be instantiated directly; use wave.open()"))
-        },
-    }));
+    d.insert_str(
+        "Wave_read",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "Wave_read".to_string(),
+            func: |_args| {
+                Err(PyError::type_error(
+                    "Wave_read cannot be instantiated directly; use wave.open()",
+                ))
+            },
+        }),
+    );
 
-    d.insert_str("open", PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "open".to_string(),
-        func: |args| {
-            if args.is_empty() {
-                return Err(PyError::type_error("open() missing required argument: file"));
-            }
-            let file_path = args[0].str();
-            let mode = if args.len() > 1 { args[1].str() } else { "r".to_string() };
-            let mode = mode.trim();
-            if mode != "r" && mode != "rb" {
-                return Err(PyError::type_error(format!("wave.open() only supports mode='r' or 'rb', got '{}'", mode)));
-            }
-
-            let data = match std::fs::read(&file_path) {
-                Ok(d) => d,
-                Err(e) => return Err(PyError::type_error(format!("Cannot open wave file: {}", e))),
-            };
-
-            match read_wave_params(&data) {
-                Ok((nchannels, sampwidth, framerate, nframes, data_start)) => {
-                    // Build a proper Type with methods so args[0] is self
-                    let mut type_dict = HashMap::new();
-
-                    type_dict.insert_str("getparams", PyObjectRef::new(PyObject::BuiltinFunction {
-                        name: "getparams".to_string(),
-                        func: |gp_args| {
-                            if gp_args.is_empty() {
-                                return Err(PyError::type_error("getparams() missing self argument"));
-                            }
-                            let inst = gp_args[0].borrow();
-                            if let PyObject::Instance { dict, .. } = &*inst {
-                                let nc = dict.get_str("nchannels").and_then(|v| v.as_i64()).unwrap_or(0);
-                                let sw = dict.get_str("sampwidth").and_then(|v| v.as_i64()).unwrap_or(0);
-                                let fr = dict.get_str("framerate").and_then(|v| v.as_i64()).unwrap_or(0);
-                                let nf = dict.get_str("nframes").and_then(|v| v.as_i64()).unwrap_or(0);
-                                Ok(py_tuple(vec![
-                                    py_int(nc),
-                                    py_int(sw),
-                                    py_int(fr),
-                                    py_int(nf),
-                                    py_str("NONE"),
-                                    py_str("not compressed"),
-                                ]))
-                            } else {
-                                Err(PyError::type_error("getparams: not a Wave_read instance"))
-                            }
-                        },
-                    }));
-
-                    type_dict.insert_str("readframes", PyObjectRef::new(PyObject::BuiltinFunction {
-                        name: "readframes".to_string(),
-                        func: |rf_args| {
-                            if rf_args.is_empty() {
-                                return Err(PyError::type_error("readframes() missing required argument: self"));
-                            }
-                            let n = if rf_args.len() > 1 {
-                                rf_args[1].as_i64().ok_or_else(|| PyError::type_error("readframes() argument must be an integer"))? as usize
-                            } else {
-                                0
-                            };
-                            if n == 0 {
-                                return Ok(PyObjectRef::imm(PyObject::Bytes(vec![])));
-                            }
-                            // Read nchannels, sampwidth, _data, _data_start from instance dict
-                            let (nc_r, sw_r, dc_opt, ds_r) = {
-                                let inst = rf_args[0].borrow();
-                                if let PyObject::Instance { dict, .. } = &*inst {
-                                    let nc_r = dict.get_str("nchannels").and_then(|v| v.as_i64()).unwrap_or(0) as usize;
-                                    let sw_r = dict.get_str("sampwidth").and_then(|v| v.as_i64()).unwrap_or(0) as usize;
-                                    let dc_opt = dict.get_str("_data").cloned();
-                                    let ds_r = dict.get_str("_data_start").and_then(|v| v.as_i64()).unwrap_or(0) as usize;
-                                    (nc_r, sw_r, dc_opt, ds_r)
-                                } else {
-                                    return Err(PyError::type_error("readframes: not a Wave_read instance"));
-                                }
-                            };
-                            let frame_size = sw_r * nc_r;
-                            if frame_size == 0 {
-                                return Ok(PyObjectRef::imm(PyObject::Bytes(vec![])));
-                            }
-                            let dc = match dc_opt {
-                                Some(d) => {
-                                    let b = d.borrow();
-                                    if let PyObject::Bytes(byte_data) = &*b {
-                                        byte_data.clone()
-                                    } else { vec![] }
-                                }
-                                None => vec![],
-                            };
-                            let nframes_avail = dc.len().saturating_sub(ds_r) / frame_size;
-                            let n_to_read = n.min(nframes_avail);
-                            let end = ds_r + n_to_read * frame_size;
-                            if end > dc.len() || end <= ds_r {
-                                return Ok(PyObjectRef::imm(PyObject::Bytes(vec![])));
-                            }
-                            let frame_data = dc[ds_r..end].to_vec();
-                            Ok(PyObjectRef::imm(PyObject::Bytes(frame_data)))
-                        },
-                    }));
-
-                    type_dict.insert_str("close", PyObjectRef::new(PyObject::BuiltinFunction {
-                        name: "close".to_string(),
-                        func: |_| Ok(py_none()),
-                    }));
-
-                    let typ = PyObjectRef::new(PyObject::Type {
-                        name: "Wave_read".to_string(),
-                        dict: Box::new(str_map_to_typedict(type_dict)),
-                        bases: vec![],
-                        mro: vec![],
-                    });
-
-                    let mut instance_dict = AttrMap::new();
-                    instance_dict.insert_str("nchannels", py_int(nchannels as i64));
-                    instance_dict.insert_str("sampwidth", py_int(sampwidth as i64));
-                    instance_dict.insert_str("framerate", py_int(framerate as i64));
-                    instance_dict.insert_str("nframes", py_int(nframes as i64));
-                    instance_dict.insert_str("comptype", py_str("NONE"));
-                    instance_dict.insert_str("compname", py_str("not compressed"));
-                    instance_dict.insert_str("_data", PyObjectRef::imm(PyObject::Bytes(data.clone())));
-                    instance_dict.insert_str("_data_start", py_int(data_start as i64));
-
-                    Ok(PyObjectRef::new(PyObject::Instance {
-                        typ,
-                        dict: instance_dict,
-                    }))
+    d.insert_str(
+        "open",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "open".to_string(),
+            func: |args| {
+                if args.is_empty() {
+                    return Err(PyError::type_error(
+                        "open() missing required argument: file",
+                    ));
                 }
-                Err(e) => Err(PyError::type_error(e)),
-            }
-        },
-    }));
+                let file_path = args[0].str();
+                let mode = if args.len() > 1 {
+                    args[1].str()
+                } else {
+                    "r".to_string()
+                };
+                let mode = mode.trim();
+                if mode != "r" && mode != "rb" {
+                    return Err(PyError::type_error(format!(
+                        "wave.open() only supports mode='r' or 'rb', got '{}'",
+                        mode
+                    )));
+                }
+
+                let data = match std::fs::read(&file_path) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        return Err(PyError::type_error(format!("Cannot open wave file: {}", e)))
+                    }
+                };
+
+                match read_wave_params(&data) {
+                    Ok((nchannels, sampwidth, framerate, nframes, data_start)) => {
+                        // Build a proper Type with methods so args[0] is self
+                        let mut type_dict = HashMap::new();
+
+                        type_dict.insert_str(
+                            "getparams",
+                            PyObjectRef::new(PyObject::BuiltinFunction {
+                                name: "getparams".to_string(),
+                                func: |gp_args| {
+                                    if gp_args.is_empty() {
+                                        return Err(PyError::type_error(
+                                            "getparams() missing self argument",
+                                        ));
+                                    }
+                                    let inst = gp_args[0].borrow();
+                                    if let PyObject::Instance { dict, .. } = &*inst {
+                                        let nc = dict
+                                            .get_str("nchannels")
+                                            .and_then(|v| v.as_i64())
+                                            .unwrap_or(0);
+                                        let sw = dict
+                                            .get_str("sampwidth")
+                                            .and_then(|v| v.as_i64())
+                                            .unwrap_or(0);
+                                        let fr = dict
+                                            .get_str("framerate")
+                                            .and_then(|v| v.as_i64())
+                                            .unwrap_or(0);
+                                        let nf = dict
+                                            .get_str("nframes")
+                                            .and_then(|v| v.as_i64())
+                                            .unwrap_or(0);
+                                        Ok(py_tuple(vec![
+                                            py_int(nc),
+                                            py_int(sw),
+                                            py_int(fr),
+                                            py_int(nf),
+                                            py_str("NONE"),
+                                            py_str("not compressed"),
+                                        ]))
+                                    } else {
+                                        Err(PyError::type_error(
+                                            "getparams: not a Wave_read instance",
+                                        ))
+                                    }
+                                },
+                            }),
+                        );
+
+                        type_dict.insert_str(
+                            "readframes",
+                            PyObjectRef::new(PyObject::BuiltinFunction {
+                                name: "readframes".to_string(),
+                                func: |rf_args| {
+                                    if rf_args.is_empty() {
+                                        return Err(PyError::type_error(
+                                            "readframes() missing required argument: self",
+                                        ));
+                                    }
+                                    let n = if rf_args.len() > 1 {
+                                        rf_args[1].as_i64().ok_or_else(|| {
+                                            PyError::type_error(
+                                                "readframes() argument must be an integer",
+                                            )
+                                        })? as usize
+                                    } else {
+                                        0
+                                    };
+                                    if n == 0 {
+                                        return Ok(PyObjectRef::imm(PyObject::Bytes(vec![])));
+                                    }
+                                    // Read nchannels, sampwidth, _data, _data_start from instance dict
+                                    let (nc_r, sw_r, dc_opt, ds_r) = {
+                                        let inst = rf_args[0].borrow();
+                                        if let PyObject::Instance { dict, .. } = &*inst {
+                                            let nc_r = dict
+                                                .get_str("nchannels")
+                                                .and_then(|v| v.as_i64())
+                                                .unwrap_or(0)
+                                                as usize;
+                                            let sw_r = dict
+                                                .get_str("sampwidth")
+                                                .and_then(|v| v.as_i64())
+                                                .unwrap_or(0)
+                                                as usize;
+                                            let dc_opt = dict.get_str("_data").cloned();
+                                            let ds_r = dict
+                                                .get_str("_data_start")
+                                                .and_then(|v| v.as_i64())
+                                                .unwrap_or(0)
+                                                as usize;
+                                            (nc_r, sw_r, dc_opt, ds_r)
+                                        } else {
+                                            return Err(PyError::type_error(
+                                                "readframes: not a Wave_read instance",
+                                            ));
+                                        }
+                                    };
+                                    let frame_size = sw_r * nc_r;
+                                    if frame_size == 0 {
+                                        return Ok(PyObjectRef::imm(PyObject::Bytes(vec![])));
+                                    }
+                                    let dc = match dc_opt {
+                                        Some(d) => {
+                                            let b = d.borrow();
+                                            if let PyObject::Bytes(byte_data) = &*b {
+                                                byte_data.clone()
+                                            } else {
+                                                vec![]
+                                            }
+                                        }
+                                        None => vec![],
+                                    };
+                                    let nframes_avail = dc.len().saturating_sub(ds_r) / frame_size;
+                                    let n_to_read = n.min(nframes_avail);
+                                    let end = ds_r + n_to_read * frame_size;
+                                    if end > dc.len() || end <= ds_r {
+                                        return Ok(PyObjectRef::imm(PyObject::Bytes(vec![])));
+                                    }
+                                    let frame_data = dc[ds_r..end].to_vec();
+                                    Ok(PyObjectRef::imm(PyObject::Bytes(frame_data)))
+                                },
+                            }),
+                        );
+
+                        type_dict.insert_str(
+                            "close",
+                            PyObjectRef::new(PyObject::BuiltinFunction {
+                                name: "close".to_string(),
+                                func: |_| Ok(py_none()),
+                            }),
+                        );
+
+                        let typ = PyObjectRef::new(PyObject::Type {
+                            name: "Wave_read".to_string(),
+                            dict: Box::new(str_map_to_typedict(type_dict)),
+                            bases: vec![],
+                            mro: vec![],
+                        });
+
+                        let mut instance_dict = AttrMap::new();
+                        instance_dict.insert_str("nchannels", py_int(nchannels as i64));
+                        instance_dict.insert_str("sampwidth", py_int(sampwidth as i64));
+                        instance_dict.insert_str("framerate", py_int(framerate as i64));
+                        instance_dict.insert_str("nframes", py_int(nframes as i64));
+                        instance_dict.insert_str("comptype", py_str("NONE"));
+                        instance_dict.insert_str("compname", py_str("not compressed"));
+                        instance_dict
+                            .insert_str("_data", PyObjectRef::imm(PyObject::Bytes(data.clone())));
+                        instance_dict.insert_str("_data_start", py_int(data_start as i64));
+
+                        Ok(PyObjectRef::new(PyObject::Instance {
+                            typ,
+                            dict: instance_dict,
+                        }))
+                    }
+                    Err(e) => Err(PyError::type_error(e)),
+                }
+            },
+        }),
+    );
 
     d
 }
@@ -6471,7 +8360,9 @@ pub fn create_wave_dict() -> HashMap<String, PyObjectRef> {
 
 fn email_message_getitem(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() < 2 {
-        return Err(PyError::type_error("__getitem__() takes at least 2 arguments (self, key)"));
+        return Err(PyError::type_error(
+            "__getitem__() takes at least 2 arguments (self, key)",
+        ));
     }
     let key = args[1].str();
     let inst = args[0].borrow();
@@ -6488,7 +8379,9 @@ fn email_message_getitem(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 
 fn email_message_setitem(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() < 3 {
-        return Err(PyError::type_error("__setitem__() takes at least 3 arguments (self, key, value)"));
+        return Err(PyError::type_error(
+            "__setitem__() takes at least 3 arguments (self, key, value)",
+        ));
     }
     let key = args[1].str();
     let value = args[2].str();
@@ -6502,7 +8395,9 @@ fn email_message_setitem(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 
 fn email_message_set_content(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() < 2 {
-        return Err(PyError::type_error("set_content() takes at least 1 argument (text)"));
+        return Err(PyError::type_error(
+            "set_content() takes at least 1 argument (text)",
+        ));
     }
     let text = args[1].str();
     let mut inst = args[0].borrow_mut();
@@ -6515,7 +8410,9 @@ fn email_message_set_content(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 
 fn email_message_as_string(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
-        return Err(PyError::type_error("as_string() takes at least 1 argument (self)"));
+        return Err(PyError::type_error(
+            "as_string() takes at least 1 argument (self)",
+        ));
     }
     let inst = args[0].borrow();
     if let PyObject::Instance { dict, .. } = &*inst {
@@ -6537,7 +8434,10 @@ fn email_message_as_string(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         };
         headers.sort_by_key(|(k, _)| priority(k));
 
-        let content = dict.get_str("_content").map(|v| v.str()).unwrap_or_default();
+        let content = dict
+            .get_str("_content")
+            .map(|v| v.str())
+            .unwrap_or_default();
 
         let mut result = String::new();
         for (name, value) in &headers {
@@ -6554,14 +8454,28 @@ fn email_message_as_string(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 
 fn email_message_repr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
-        return Err(PyError::type_error("__repr__() takes at least 1 argument (self)"));
+        return Err(PyError::type_error(
+            "__repr__() takes at least 1 argument (self)",
+        ));
     }
     let inst = args[0].borrow();
     if let PyObject::Instance { dict, .. } = &*inst {
-        let subject = dict.get_str("_header_Subject").map(|v| v.str()).unwrap_or_default();
-        let from_addr = dict.get_str("_header_From").map(|v| v.str()).unwrap_or_default();
-        let to_addr = dict.get_str("_header_To").map(|v| v.str()).unwrap_or_default();
-        Ok(py_str(&format!("<EmailMessage: From: {}, To: {}, Subject: {}>", from_addr, to_addr, subject)))
+        let subject = dict
+            .get_str("_header_Subject")
+            .map(|v| v.str())
+            .unwrap_or_default();
+        let from_addr = dict
+            .get_str("_header_From")
+            .map(|v| v.str())
+            .unwrap_or_default();
+        let to_addr = dict
+            .get_str("_header_To")
+            .map(|v| v.str())
+            .unwrap_or_default();
+        Ok(py_str(&format!(
+            "<EmailMessage: From: {}, To: {}, Subject: {}>",
+            from_addr, to_addr, subject
+        )))
     } else {
         Err(PyError::type_error("EmailMessage instance required"))
     }
@@ -6570,26 +8484,41 @@ fn email_message_repr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 fn email_message_constructor(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // Create the EmailMessage type
     let mut type_dict = HashMap::new();
-    type_dict.insert_str("__getitem__", PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "__getitem__".to_string(),
-        func: email_message_getitem,
-    }));
-    type_dict.insert_str("__setitem__", PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "__setitem__".to_string(),
-        func: email_message_setitem,
-    }));
-    type_dict.insert_str("__repr__", PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "__repr__".to_string(),
-        func: email_message_repr,
-    }));
-    type_dict.insert_str("set_content", PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "set_content".to_string(),
-        func: email_message_set_content,
-    }));
-    type_dict.insert_str("as_string", PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "as_string".to_string(),
-        func: email_message_as_string,
-    }));
+    type_dict.insert_str(
+        "__getitem__",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__getitem__".to_string(),
+            func: email_message_getitem,
+        }),
+    );
+    type_dict.insert_str(
+        "__setitem__",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__setitem__".to_string(),
+            func: email_message_setitem,
+        }),
+    );
+    type_dict.insert_str(
+        "__repr__",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__repr__".to_string(),
+            func: email_message_repr,
+        }),
+    );
+    type_dict.insert_str(
+        "set_content",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "set_content".to_string(),
+            func: email_message_set_content,
+        }),
+    );
+    type_dict.insert_str(
+        "as_string",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "as_string".to_string(),
+            func: email_message_as_string,
+        }),
+    );
 
     let email_type = PyObjectRef::new(PyObject::Type {
         name: "EmailMessage".to_string(),
@@ -6611,15 +8540,24 @@ pub fn create_email_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! email_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
 
     // EmailMessage class constructor (callable)
-    d.insert_str("EmailMessage", PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "EmailMessage".to_string(),
-        func: email_message_constructor,
-    }));
+    d.insert_str(
+        "EmailMessage",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "EmailMessage".to_string(),
+            func: email_message_constructor,
+        }),
+    );
 
     // MIMEText is in email.mime.text, but we provide a stub here for convenience
     email_func!("MIMEText", |args| {
@@ -6627,27 +8565,40 @@ pub fn create_email_dict() -> HashMap<String, PyObjectRef> {
             return Err(PyError::type_error("MIMEText() missing required argument"));
         }
         let body = args[0].str();
-        let subtype = if args.len() > 1 { args[1].str() } else { "plain".to_string() };
+        let subtype = if args.len() > 1 {
+            args[1].str()
+        } else {
+            "plain".to_string()
+        };
 
         // Create a simple MIMEText instance (EmailMessage-like)
         let mut type_dict = HashMap::new();
-        type_dict.insert_str("as_string", PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "as_string".to_string(),
-            func: |a| {
-                let inst = a[0].borrow();
-                if let PyObject::Instance { dict, .. } = &*inst {
-                    let content = dict.get_str("_content").map(|v| v.str()).unwrap_or_default();
-                    let ct = dict.get_str("_content_type").map(|v| v.str()).unwrap_or_default();
-                    let mut result = format!("Content-Type: {}\r\n", ct);
-                    result.push_str(&format!("Content-Transfer-Encoding: 7bit\r\n"));
-                    result.push_str("\r\n");
-                    result.push_str(&content);
-                    Ok(py_str(&result))
-                } else {
-                    Err(PyError::type_error("MIMEText instance required"))
-                }
-            },
-        }));
+        type_dict.insert_str(
+            "as_string",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "as_string".to_string(),
+                func: |a| {
+                    let inst = a[0].borrow();
+                    if let PyObject::Instance { dict, .. } = &*inst {
+                        let content = dict
+                            .get_str("_content")
+                            .map(|v| v.str())
+                            .unwrap_or_default();
+                        let ct = dict
+                            .get_str("_content_type")
+                            .map(|v| v.str())
+                            .unwrap_or_default();
+                        let mut result = format!("Content-Type: {}\r\n", ct);
+                        result.push_str(&format!("Content-Transfer-Encoding: 7bit\r\n"));
+                        result.push_str("\r\n");
+                        result.push_str(&content);
+                        Ok(py_str(&result))
+                    } else {
+                        Err(PyError::type_error("MIMEText instance required"))
+                    }
+                },
+            }),
+        );
 
         let mime_type = PyObjectRef::new(PyObject::Type {
             name: "MIMEText".to_string(),
@@ -6671,87 +8622,113 @@ pub fn create_email_dict() -> HashMap<String, PyObjectRef> {
 
 pub fn create_email_mime_text_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
-    d.insert_str("MIMEText", PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "MIMEText".to_string(),
-        func: |args| {
-            if args.is_empty() {
-                return Err(PyError::type_error("MIMEText() missing required argument"));
-            }
-            let body = args[0].str();
-            let subtype = if args.len() > 1 { args[1].str() } else { "plain".to_string() };
+    d.insert_str(
+        "MIMEText",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "MIMEText".to_string(),
+            func: |args| {
+                if args.is_empty() {
+                    return Err(PyError::type_error("MIMEText() missing required argument"));
+                }
+                let body = args[0].str();
+                let subtype = if args.len() > 1 {
+                    args[1].str()
+                } else {
+                    "plain".to_string()
+                };
 
-            let mut type_dict = HashMap::new();
-            type_dict.insert_str("as_string", PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "as_string".to_string(),
-                func: |a| {
-                    let inst = a[0].borrow();
-                    if let PyObject::Instance { dict, .. } = &*inst {
-                        let content = dict.get_str("_content").map(|v| v.str()).unwrap_or_default();
-                        let ct = dict.get_str("_content_type").map(|v| v.str()).unwrap_or_default();
-                        let mut result = format!("Content-Type: {}\r\n", ct);
-                        result.push_str("Content-Transfer-Encoding: 7bit\r\n");
-                        result.push_str("\r\n");
-                        result.push_str(&content);
-                        Ok(py_str(&result))
-                    } else {
-                        Err(PyError::type_error("MIMEText instance required"))
-                    }
-                },
-            }));
+                let mut type_dict = HashMap::new();
+                type_dict.insert_str(
+                    "as_string",
+                    PyObjectRef::new(PyObject::BuiltinFunction {
+                        name: "as_string".to_string(),
+                        func: |a| {
+                            let inst = a[0].borrow();
+                            if let PyObject::Instance { dict, .. } = &*inst {
+                                let content = dict
+                                    .get_str("_content")
+                                    .map(|v| v.str())
+                                    .unwrap_or_default();
+                                let ct = dict
+                                    .get_str("_content_type")
+                                    .map(|v| v.str())
+                                    .unwrap_or_default();
+                                let mut result = format!("Content-Type: {}\r\n", ct);
+                                result.push_str("Content-Transfer-Encoding: 7bit\r\n");
+                                result.push_str("\r\n");
+                                result.push_str(&content);
+                                Ok(py_str(&result))
+                            } else {
+                                Err(PyError::type_error("MIMEText instance required"))
+                            }
+                        },
+                    }),
+                );
 
-            let mime_type = PyObjectRef::new(PyObject::Type {
-                name: "MIMEText".to_string(),
-                dict: Box::new(str_map_to_typedict(type_dict)),
-                bases: vec![],
-                mro: vec![],
-            });
+                let mime_type = PyObjectRef::new(PyObject::Type {
+                    name: "MIMEText".to_string(),
+                    dict: Box::new(str_map_to_typedict(type_dict)),
+                    bases: vec![],
+                    mro: vec![],
+                });
 
-            let mut instance_dict = AttrMap::new();
-            instance_dict.insert_str("_content", py_str(&body));
-            instance_dict.insert_str("_content_type", py_str(&format!("text/{}", subtype)));
+                let mut instance_dict = AttrMap::new();
+                instance_dict.insert_str("_content", py_str(&body));
+                instance_dict.insert_str("_content_type", py_str(&format!("text/{}", subtype)));
 
-            Ok(PyObjectRef::new(PyObject::Instance {
-                typ: mime_type,
-                dict: instance_dict,
-            }))
-        },
-    }));
+                Ok(PyObjectRef::new(PyObject::Instance {
+                    typ: mime_type,
+                    dict: instance_dict,
+                }))
+            },
+        }),
+    );
     d
 }
 
 pub fn create_email_header_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     // Header class stub — used by django.http.response
-    d.insert_str("Header", PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "Header".to_string(),
-        func: |args| {
-            let text = if args.is_empty() { String::new() } else { args[0].str() };
-            // Return a string wrapped as an object with __str__ for compatibility
-            Ok(PyObjectRef::new(PyObject::Instance {
-                typ: PyObjectRef::new(PyObject::Type {
-                    name: "email.header.Header".to_string(),
-                    dict: Box::new(str_map_to_typedict(HashMap::new())),
-                    bases: vec![],
-                    mro: vec![],
-                }),
-                dict: AttrMap::from([
-                    ("_text".to_string(), py_str(&text)),
-                    ("__str__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
-                        name: "__str__".to_string(),
-                        func: |a| {
-                            let inst = a[0].borrow();
-                            if let PyObject::Instance { dict, .. } = &*inst {
-                                if let Some(t) = dict.get_str("_text") {
-                                    return Ok(t.clone());
-                                }
-                            }
-                            Ok(py_str(""))
-                        },
-                    })),
-                ]),
-            }))
-        },
-    }));
+    d.insert_str(
+        "Header",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "Header".to_string(),
+            func: |args| {
+                let text = if args.is_empty() {
+                    String::new()
+                } else {
+                    args[0].str()
+                };
+                // Return a string wrapped as an object with __str__ for compatibility
+                Ok(PyObjectRef::new(PyObject::Instance {
+                    typ: PyObjectRef::new(PyObject::Type {
+                        name: "email.header.Header".to_string(),
+                        dict: Box::new(str_map_to_typedict(HashMap::new())),
+                        bases: vec![],
+                        mro: vec![],
+                    }),
+                    dict: AttrMap::from([
+                        ("_text".to_string(), py_str(&text)),
+                        (
+                            "__str__".to_string(),
+                            PyObjectRef::new(PyObject::BuiltinFunction {
+                                name: "__str__".to_string(),
+                                func: |a| {
+                                    let inst = a[0].borrow();
+                                    if let PyObject::Instance { dict, .. } = &*inst {
+                                        if let Some(t) = dict.get_str("_text") {
+                                            return Ok(t.clone());
+                                        }
+                                    }
+                                    Ok(py_str(""))
+                                },
+                            }),
+                        ),
+                    ]),
+                }))
+            },
+        }),
+    );
     d
 }
 
@@ -6767,10 +8744,15 @@ fn day_of_week(y: i64, m: i64, d: i64) -> usize {
 
 fn rfc2822_date(y: i64, mo: i64, d: i64, h: i64, mi: i64, s: i64) -> String {
     const DAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
     let wd = DAYS[day_of_week(y, mo, d)];
     let mon = MONTHS[((mo - 1).clamp(0, 11)) as usize];
-    format!("{}, {:02} {} {:04} {:02}:{:02}:{:02} +0000", wd, d, mon, y, h, mi, s)
+    format!(
+        "{}, {:02} {} {:04} {:02}:{:02}:{:02} +0000",
+        wd, d, mon, y, h, mi, s
+    )
 }
 
 fn unix_secs_to_ymdhms(secs: i64) -> (i64, i64, i64, i64, i64, i64) {
@@ -6782,16 +8764,46 @@ fn unix_secs_to_ymdhms(secs: i64) -> (i64, i64, i64, i64, i64, i64) {
     let mut y = 1970i64;
     let mut remaining = days;
     loop {
-        let year_days = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) { 366 } else { 365 };
-        if remaining >= year_days { remaining -= year_days; y += 1; }
-        else if remaining < 0 { y -= 1; let yd = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) { 366 } else { 365 }; remaining += yd; }
-        else { break; }
+        let year_days = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) {
+            366
+        } else {
+            365
+        };
+        if remaining >= year_days {
+            remaining -= year_days;
+            y += 1;
+        } else if remaining < 0 {
+            y -= 1;
+            let yd = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) {
+                366
+            } else {
+                365
+            };
+            remaining += yd;
+        } else {
+            break;
+        }
     }
     let is_leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
-    let month_days = [31, if is_leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let month_days = [
+        31,
+        if is_leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     let mut m = 1i64;
     for days_in_month in &month_days {
-        if remaining < *days_in_month { break; }
+        if remaining < *days_in_month {
+            break;
+        }
         remaining -= days_in_month;
         m += 1;
     }
@@ -6802,9 +8814,13 @@ pub fn create_email_utils_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! eu_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
-                name: $name.to_string(), func: $func,
-            }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
     // formatdate(timeval=None, localtime=False, usegmt=False) -> string
@@ -6812,7 +8828,10 @@ pub fn create_email_utils_dict() -> HashMap<String, PyObjectRef> {
         let secs = if !args.is_empty() && !matches!(&*args[0].borrow(), PyObject::None) {
             args[0].as_f64().unwrap_or(0.0) as i64
         } else {
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64
         };
         let (y, mo, d, h, mi, s) = unix_secs_to_ymdhms(secs);
         Ok(py_str(&rfc2822_date(y, mo, d, h, mi, s)))
@@ -6820,9 +8839,18 @@ pub fn create_email_utils_dict() -> HashMap<String, PyObjectRef> {
     // format_datetime(dt, usegmt=False) -> string — reads year/month/day/
     // hour/minute/second attributes off the given datetime-like object.
     eu_func!("format_datetime", |args| {
-        if args.is_empty() { return Err(PyError::type_error("format_datetime() missing required argument")); }
+        if args.is_empty() {
+            return Err(PyError::type_error(
+                "format_datetime() missing required argument",
+            ));
+        }
         let get = |name: &str, default: i64| -> i64 {
-            args[0].borrow().get_attribute(name).ok().and_then(|v| v.as_i64()).unwrap_or(default)
+            args[0]
+                .borrow()
+                .get_attribute(name)
+                .ok()
+                .and_then(|v| v.as_i64())
+                .unwrap_or(default)
         };
         let y = get("year", 1970);
         let mo = get("month", 1);
@@ -6870,7 +8898,9 @@ pub fn create_configparser_dict() -> HashMap<String, PyObjectRef> {
                 let key = trimmed[..eq_pos].trim().to_string();
                 let value = trimmed[eq_pos + 1..].trim().to_string();
                 if !key.is_empty() {
-                    let section_name = current_section.clone().unwrap_or_else(|| "DEFAULT".to_string());
+                    let section_name = current_section
+                        .clone()
+                        .unwrap_or_else(|| "DEFAULT".to_string());
                     let section = sections.entry(section_name).or_insert_with(HashMap::new);
                     section.insert(key, value);
                 }
@@ -6881,417 +8911,553 @@ pub fn create_configparser_dict() -> HashMap<String, PyObjectRef> {
     }
 
     // ConfigParser class — constructor
-    d.insert_str("ConfigParser", PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "ConfigParser".to_string(),
-        func: |_args| {
-            let mut type_dict = HashMap::new();
+    d.insert_str(
+        "ConfigParser",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "ConfigParser".to_string(),
+            func: |_args| {
+                let mut type_dict = HashMap::new();
 
-            // read_string(self, string) — parse INI from a string
-            type_dict.insert_str("read_string", PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "read_string".to_string(),
-                func: |inner_args| {
-                    if inner_args.len() < 2 {
-                        return Err(PyError::type_error("read_string() missing required argument: string"));
-                    }
-                    let data = inner_args[1].str();
+                // read_string(self, string) — parse INI from a string
+                type_dict.insert_str(
+                    "read_string",
+                    PyObjectRef::new(PyObject::BuiltinFunction {
+                        name: "read_string".to_string(),
+                        func: |inner_args| {
+                            if inner_args.len() < 2 {
+                                return Err(PyError::type_error(
+                                    "read_string() missing required argument: string",
+                                ));
+                            }
+                            let data = inner_args[1].str();
 
-                    let sections_ref = {
-                        let inst = inner_args[0].borrow();
-                        if let PyObject::Instance { dict, .. } = &*inst {
-                            dict.get_str("_sections").cloned().unwrap_or(py_dict())
-                        } else {
-                            return Err(PyError::type_error("read_string(): not a ConfigParser instance"));
-                        }
-                    };
+                            let sections_ref = {
+                                let inst = inner_args[0].borrow();
+                                if let PyObject::Instance { dict, .. } = &*inst {
+                                    dict.get_str("_sections").cloned().unwrap_or(py_dict())
+                                } else {
+                                    return Err(PyError::type_error(
+                                        "read_string(): not a ConfigParser instance",
+                                    ));
+                                }
+                            };
 
-                    let parsed = parse_ini_string(&data);
-                    // Merge parsed sections into existing sections
-                    if let PyObject::Dict(ref mut sections_dict) = &mut *sections_ref.borrow_mut() {
-                        for (section_name, options) in parsed {
-                            let section_key = py_str(&section_name);
-                            // Try to get existing section dict
-                            let existing = sections_dict.get(&section_key).ok().and_then(|o| o);
-                            if let Some(existing_ref) = existing {
-                                if let PyObject::Dict(ref mut existing_dict) = &mut *existing_ref.borrow_mut() {
-                                    for (key, val) in options {
-                                        let _ = existing_dict.set(py_str(&key), py_str(&val));
+                            let parsed = parse_ini_string(&data);
+                            // Merge parsed sections into existing sections
+                            if let PyObject::Dict(ref mut sections_dict) =
+                                &mut *sections_ref.borrow_mut()
+                            {
+                                for (section_name, options) in parsed {
+                                    let section_key = py_str(&section_name);
+                                    // Try to get existing section dict
+                                    let existing =
+                                        sections_dict.get(&section_key).ok().and_then(|o| o);
+                                    if let Some(existing_ref) = existing {
+                                        if let PyObject::Dict(ref mut existing_dict) =
+                                            &mut *existing_ref.borrow_mut()
+                                        {
+                                            for (key, val) in options {
+                                                let _ =
+                                                    existing_dict.set(py_str(&key), py_str(&val));
+                                            }
+                                        }
+                                    } else {
+                                        // Create new section dict
+                                        let option_dict = py_dict();
+                                        if let PyObject::Dict(ref mut od) =
+                                            &mut *option_dict.borrow_mut()
+                                        {
+                                            for (key, val) in options {
+                                                let _ = od.set(py_str(&key), py_str(&val));
+                                            }
+                                        }
+                                        let _ =
+                                            sections_dict.set(py_str(&section_name), option_dict);
                                     }
+                                }
+                            }
+
+                            Ok(py_none())
+                        },
+                    }),
+                );
+
+                // read(self, filename) — parse INI from a file
+                type_dict.insert_str(
+                    "read",
+                    PyObjectRef::new(PyObject::BuiltinFunction {
+                        name: "read".to_string(),
+                        func: |inner_args| {
+                            if inner_args.len() < 2 {
+                                return Err(PyError::type_error(
+                                    "read() missing required argument: filename",
+                                ));
+                            }
+                            let filename = inner_args[1].str();
+                            let content = match std::fs::read_to_string(&filename) {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    return Err(PyError::type_error(format!(
+                                        "Cannot read file '{}': {}",
+                                        filename, e
+                                    )))
+                                }
+                            };
+
+                            // Reuse read_string logic — call it on self
+                            let sections_ref = {
+                                let inst = inner_args[0].borrow();
+                                if let PyObject::Instance { dict, .. } = &*inst {
+                                    dict.get_str("_sections").cloned().unwrap_or(py_dict())
+                                } else {
+                                    return Err(PyError::type_error(
+                                        "read(): not a ConfigParser instance",
+                                    ));
+                                }
+                            };
+
+                            let parsed = parse_ini_string(&content);
+                            if let PyObject::Dict(ref mut sections_dict) =
+                                &mut *sections_ref.borrow_mut()
+                            {
+                                for (section_name, options) in parsed {
+                                    let section_key = py_str(&section_name);
+                                    let existing =
+                                        sections_dict.get(&section_key).ok().and_then(|o| o);
+                                    if let Some(existing_ref) = existing {
+                                        if let PyObject::Dict(ref mut existing_dict) =
+                                            &mut *existing_ref.borrow_mut()
+                                        {
+                                            for (key, val) in options {
+                                                let _ =
+                                                    existing_dict.set(py_str(&key), py_str(&val));
+                                            }
+                                        }
+                                    } else {
+                                        let option_dict = py_dict();
+                                        if let PyObject::Dict(ref mut od) =
+                                            &mut *option_dict.borrow_mut()
+                                        {
+                                            for (key, val) in options {
+                                                let _ = od.set(py_str(&key), py_str(&val));
+                                            }
+                                        }
+                                        let _ =
+                                            sections_dict.set(py_str(&section_name), option_dict);
+                                    }
+                                }
+                            }
+
+                            // Return list of successfully read files
+                            Ok(py_list(vec![inner_args[1].clone()]))
+                        },
+                    }),
+                );
+
+                // sections(self) — return list of section names
+                type_dict.insert_str(
+                    "sections",
+                    PyObjectRef::new(PyObject::BuiltinFunction {
+                        name: "sections".to_string(),
+                        func: |inner_args| {
+                            if inner_args.is_empty() {
+                                return Err(PyError::type_error(
+                                    "sections() missing self argument",
+                                ));
+                            }
+                            let inst = inner_args[0].borrow();
+                            if let PyObject::Instance { dict, .. } = &*inst {
+                                let sections_ref =
+                                    dict.get_str("_sections").cloned().unwrap_or(py_dict());
+                                let sections_borrow = sections_ref.borrow();
+                                if let PyObject::Dict(sections_dict) = &*sections_borrow {
+                                    let mut names: Vec<PyObjectRef> = Vec::new();
+                                    for (k, _) in sections_dict.items() {
+                                        let name = k.str();
+                                        if name != "DEFAULT" {
+                                            names.push(py_str(&name));
+                                        }
+                                    }
+                                    Ok(py_list(names))
+                                } else {
+                                    Ok(py_list(vec![]))
                                 }
                             } else {
-                                // Create new section dict
-                                let option_dict = py_dict();
-                                if let PyObject::Dict(ref mut od) = &mut *option_dict.borrow_mut() {
-                                    for (key, val) in options {
-                                        let _ = od.set(py_str(&key), py_str(&val));
-                                    }
-                                }
-                                let _ = sections_dict.set(py_str(&section_name), option_dict);
+                                Err(PyError::type_error(
+                                    "sections(): not a ConfigParser instance",
+                                ))
                             }
-                        }
-                    }
+                        },
+                    }),
+                );
 
-                    Ok(py_none())
-                },
-            }));
-
-            // read(self, filename) — parse INI from a file
-            type_dict.insert_str("read", PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "read".to_string(),
-                func: |inner_args| {
-                    if inner_args.len() < 2 {
-                        return Err(PyError::type_error("read() missing required argument: filename"));
-                    }
-                    let filename = inner_args[1].str();
-                    let content = match std::fs::read_to_string(&filename) {
-                        Ok(s) => s,
-                        Err(e) => return Err(PyError::type_error(format!("Cannot read file '{}': {}", filename, e))),
-                    };
-
-                    // Reuse read_string logic — call it on self
-                    let sections_ref = {
-                        let inst = inner_args[0].borrow();
-                        if let PyObject::Instance { dict, .. } = &*inst {
-                            dict.get_str("_sections").cloned().unwrap_or(py_dict())
-                        } else {
-                            return Err(PyError::type_error("read(): not a ConfigParser instance"));
-                        }
-                    };
-
-                    let parsed = parse_ini_string(&content);
-                    if let PyObject::Dict(ref mut sections_dict) = &mut *sections_ref.borrow_mut() {
-                        for (section_name, options) in parsed {
-                            let section_key = py_str(&section_name);
-                            let existing = sections_dict.get(&section_key).ok().and_then(|o| o);
-                            if let Some(existing_ref) = existing {
-                                if let PyObject::Dict(ref mut existing_dict) = &mut *existing_ref.borrow_mut() {
-                                    for (key, val) in options {
-                                        let _ = existing_dict.set(py_str(&key), py_str(&val));
-                                    }
-                                }
-                            } else {
-                                let option_dict = py_dict();
-                                if let PyObject::Dict(ref mut od) = &mut *option_dict.borrow_mut() {
-                                    for (key, val) in options {
-                                        let _ = od.set(py_str(&key), py_str(&val));
-                                    }
-                                }
-                                let _ = sections_dict.set(py_str(&section_name), option_dict);
+                // options(self, section) — return list of option names in a section
+                type_dict.insert_str(
+                    "options",
+                    PyObjectRef::new(PyObject::BuiltinFunction {
+                        name: "options".to_string(),
+                        func: |inner_args| {
+                            if inner_args.len() < 2 {
+                                return Err(PyError::type_error(
+                                    "options() missing required argument: section",
+                                ));
                             }
-                        }
-                    }
-
-                    // Return list of successfully read files
-                    Ok(py_list(vec![inner_args[1].clone()]))
-                },
-            }));
-
-            // sections(self) — return list of section names
-            type_dict.insert_str("sections", PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "sections".to_string(),
-                func: |inner_args| {
-                    if inner_args.is_empty() {
-                        return Err(PyError::type_error("sections() missing self argument"));
-                    }
-                    let inst = inner_args[0].borrow();
-                    if let PyObject::Instance { dict, .. } = &*inst {
-                        let sections_ref = dict.get_str("_sections").cloned().unwrap_or(py_dict());
-                        let sections_borrow = sections_ref.borrow();
-                        if let PyObject::Dict(sections_dict) = &*sections_borrow {
-                            let mut names: Vec<PyObjectRef> = Vec::new();
-                            for (k, _) in sections_dict.items() {
-                                let name = k.str();
-                                if name != "DEFAULT" {
-                                    names.push(py_str(&name));
-                                }
-                            }
-                            Ok(py_list(names))
-                        } else {
-                            Ok(py_list(vec![]))
-                        }
-                    } else {
-                        Err(PyError::type_error("sections(): not a ConfigParser instance"))
-                    }
-                },
-            }));
-
-            // options(self, section) — return list of option names in a section
-            type_dict.insert_str("options", PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "options".to_string(),
-                func: |inner_args| {
-                    if inner_args.len() < 2 {
-                        return Err(PyError::type_error("options() missing required argument: section"));
-                    }
-                    let section_name = inner_args[1].str();
-                    let inst = inner_args[0].borrow();
-                    if let PyObject::Instance { dict, .. } = &*inst {
-                        let sections_ref = dict.get_str("_sections").cloned().unwrap_or(py_dict());
-                        drop(inst);
-                        let sections_borrow = sections_ref.borrow();
-                        if let PyObject::Dict(sections_dict) = &*sections_borrow {
-                            let section_key = py_str(&section_name);
-                            if let Ok(Some(section_ref)) = sections_dict.get(&section_key) {
-                                let section_borrow = section_ref.borrow();
-                                if let PyObject::Dict(option_dict) = &*section_borrow {
-                                    let mut keys: Vec<PyObjectRef> = option_dict.keys().into_iter()
-                                        .map(|k| py_str(&k.str()))
-                                        .collect();
-                                    // Also include DEFAULT options
-                                    if section_name != "DEFAULT" {
-                                        if let Ok(Some(default_ref)) = sections_dict.get(&py_str("DEFAULT")) {
-                                            if let PyObject::Dict(default_dict) = &*default_ref.borrow() {
-                                                for k in default_dict.keys() {
-                                                    let kstr = k.str();
-                                                    if !keys.iter().any(|k2| k2.str() == kstr) {
-                                                        keys.push(py_str(&kstr));
+                            let section_name = inner_args[1].str();
+                            let inst = inner_args[0].borrow();
+                            if let PyObject::Instance { dict, .. } = &*inst {
+                                let sections_ref =
+                                    dict.get_str("_sections").cloned().unwrap_or(py_dict());
+                                drop(inst);
+                                let sections_borrow = sections_ref.borrow();
+                                if let PyObject::Dict(sections_dict) = &*sections_borrow {
+                                    let section_key = py_str(&section_name);
+                                    if let Ok(Some(section_ref)) = sections_dict.get(&section_key) {
+                                        let section_borrow = section_ref.borrow();
+                                        if let PyObject::Dict(option_dict) = &*section_borrow {
+                                            let mut keys: Vec<PyObjectRef> = option_dict
+                                                .keys()
+                                                .into_iter()
+                                                .map(|k| py_str(&k.str()))
+                                                .collect();
+                                            // Also include DEFAULT options
+                                            if section_name != "DEFAULT" {
+                                                if let Ok(Some(default_ref)) =
+                                                    sections_dict.get(&py_str("DEFAULT"))
+                                                {
+                                                    if let PyObject::Dict(default_dict) =
+                                                        &*default_ref.borrow()
+                                                    {
+                                                        for k in default_dict.keys() {
+                                                            let kstr = k.str();
+                                                            if !keys
+                                                                .iter()
+                                                                .any(|k2| k2.str() == kstr)
+                                                            {
+                                                                keys.push(py_str(&kstr));
+                                                            }
+                                                        }
                                                     }
                                                 }
                                             }
+                                            Ok(py_list(keys))
+                                        } else {
+                                            Ok(py_list(vec![]))
                                         }
+                                    } else {
+                                        Err(PyError::type_error(format!(
+                                            "No section '{}'",
+                                            section_name
+                                        )))
                                     }
-                                    Ok(py_list(keys))
                                 } else {
                                     Ok(py_list(vec![]))
                                 }
                             } else {
-                                Err(PyError::type_error(format!("No section '{}'", section_name)))
+                                Err(PyError::type_error(
+                                    "options(): not a ConfigParser instance",
+                                ))
                             }
-                        } else {
-                            Ok(py_list(vec![]))
-                        }
-                    } else {
-                        Err(PyError::type_error("options(): not a ConfigParser instance"))
-                    }
-                },
-            }));
+                        },
+                    }),
+                );
 
-            // get(self, section, option, fallback=None) — get a value
-            type_dict.insert_str("get", PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "get".to_string(),
-                func: |inner_args| {
-                    if inner_args.len() < 3 {
-                        return Err(PyError::type_error("get() missing required arguments: section, option"));
-                    }
-                    let section_name = inner_args[1].str();
-                    let option_name = inner_args[2].str();
-                    let fallback = if inner_args.len() > 3 { Some(inner_args[3].clone()) } else { None };
-
-                    let inst = inner_args[0].borrow();
-                    if let PyObject::Instance { dict, .. } = &*inst {
-                        let sections_ref = dict.get_str("_sections").cloned().unwrap_or(py_dict());
-                        drop(inst);
-
-                        let sections_borrowed = sections_ref.borrow();
-                        if let PyObject::Dict(sections_dict) = &*sections_borrowed {
-                            // Try the specified section
-                            let section_key = py_str(&section_name);
-                            if let Ok(Some(section_ref)) = sections_dict.get(&section_key) {
-                                if let PyObject::Dict(option_dict) = &*section_ref.borrow() {
-                                    let option_key = py_str(&option_name);
-                                    if let Ok(Some(val)) = option_dict.get(&option_key) {
-                                        return Ok(val);
-                                    }
-                                }
+                // get(self, section, option, fallback=None) — get a value
+                type_dict.insert_str(
+                    "get",
+                    PyObjectRef::new(PyObject::BuiltinFunction {
+                        name: "get".to_string(),
+                        func: |inner_args| {
+                            if inner_args.len() < 3 {
+                                return Err(PyError::type_error(
+                                    "get() missing required arguments: section, option",
+                                ));
                             }
-                            // Try DEFAULT section
-                            if section_name != "DEFAULT" {
-                                if let Ok(Some(default_ref)) = sections_dict.get(&py_str("DEFAULT")) {
-                                    if let PyObject::Dict(default_dict) = &*default_ref.borrow() {
-                                        let option_key = py_str(&option_name);
-                                        if let Ok(Some(val)) = default_dict.get(&option_key) {
-                                            return Ok(val);
+                            let section_name = inner_args[1].str();
+                            let option_name = inner_args[2].str();
+                            let fallback = if inner_args.len() > 3 {
+                                Some(inner_args[3].clone())
+                            } else {
+                                None
+                            };
+
+                            let inst = inner_args[0].borrow();
+                            if let PyObject::Instance { dict, .. } = &*inst {
+                                let sections_ref =
+                                    dict.get_str("_sections").cloned().unwrap_or(py_dict());
+                                drop(inst);
+
+                                let sections_borrowed = sections_ref.borrow();
+                                if let PyObject::Dict(sections_dict) = &*sections_borrowed {
+                                    // Try the specified section
+                                    let section_key = py_str(&section_name);
+                                    if let Ok(Some(section_ref)) = sections_dict.get(&section_key) {
+                                        if let PyObject::Dict(option_dict) = &*section_ref.borrow()
+                                        {
+                                            let option_key = py_str(&option_name);
+                                            if let Ok(Some(val)) = option_dict.get(&option_key) {
+                                                return Ok(val);
+                                            }
                                         }
                                     }
-                                }
-                            }
-                        }
-                    }
-
-                    // Return fallback or raise error
-                    match fallback {
-                        Some(fb) => Ok(fb),
-                        None => Err(PyError::type_error(format!(
-                            "No option '{}' in section '{}'", option_name, section_name
-                        ))),
-                    }
-                },
-            }));
-
-            // items(self, section) — return list of (option, value) tuples
-            type_dict.insert_str("items", PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "items".to_string(),
-                func: |inner_args| {
-                    if inner_args.len() < 2 {
-                        return Err(PyError::type_error("items() missing required argument: section"));
-                    }
-                    let section_name = inner_args[1].str();
-                    let inst = inner_args[0].borrow();
-                    if let PyObject::Instance { dict, .. } = &*inst {
-                        let sections_ref = dict.get_str("_sections").cloned().unwrap_or(py_dict());
-                        drop(inst);
-                        let sections_borrow = sections_ref.borrow();
-                        if let PyObject::Dict(sections_dict) = &*sections_borrow {
-                            let section_key = py_str(&section_name);
-                            if let Ok(Some(section_ref)) = sections_dict.get(&section_key) {
-                                let section_borrow = section_ref.borrow();
-                                if let PyObject::Dict(option_dict) = &*section_borrow {
-                                    let mut result: Vec<PyObjectRef> = Vec::new();
-                                    // Include DEFAULT options first
+                                    // Try DEFAULT section
                                     if section_name != "DEFAULT" {
-                                        if let Ok(Some(default_ref)) = sections_dict.get(&py_str("DEFAULT")) {
-                                            if let PyObject::Dict(default_dict) = &*default_ref.borrow() {
-                                                for (k, v) in default_dict.items() {
-                                                    result.push(py_tuple(vec![k, v]));
+                                        if let Ok(Some(default_ref)) =
+                                            sections_dict.get(&py_str("DEFAULT"))
+                                        {
+                                            if let PyObject::Dict(default_dict) =
+                                                &*default_ref.borrow()
+                                            {
+                                                let option_key = py_str(&option_name);
+                                                if let Ok(Some(val)) = default_dict.get(&option_key)
+                                                {
+                                                    return Ok(val);
                                                 }
                                             }
                                         }
                                     }
-                                    // Add section-specific options
-                                    for (k, v) in option_dict.items() {
-                                        let kstr = k.str();
-                                        // Override DEFAULT if present
-                                        if let Some(pos) = result.iter().position(|t| {
-                                            if let PyObject::Tuple(items) = &*t.borrow() {
-                                                items[0].str() == kstr
-                                            } else { false }
-                                        }) {
-                                            result[pos] = py_tuple(vec![k, v]);
+                                }
+                            }
+
+                            // Return fallback or raise error
+                            match fallback {
+                                Some(fb) => Ok(fb),
+                                None => Err(PyError::type_error(format!(
+                                    "No option '{}' in section '{}'",
+                                    option_name, section_name
+                                ))),
+                            }
+                        },
+                    }),
+                );
+
+                // items(self, section) — return list of (option, value) tuples
+                type_dict.insert_str(
+                    "items",
+                    PyObjectRef::new(PyObject::BuiltinFunction {
+                        name: "items".to_string(),
+                        func: |inner_args| {
+                            if inner_args.len() < 2 {
+                                return Err(PyError::type_error(
+                                    "items() missing required argument: section",
+                                ));
+                            }
+                            let section_name = inner_args[1].str();
+                            let inst = inner_args[0].borrow();
+                            if let PyObject::Instance { dict, .. } = &*inst {
+                                let sections_ref =
+                                    dict.get_str("_sections").cloned().unwrap_or(py_dict());
+                                drop(inst);
+                                let sections_borrow = sections_ref.borrow();
+                                if let PyObject::Dict(sections_dict) = &*sections_borrow {
+                                    let section_key = py_str(&section_name);
+                                    if let Ok(Some(section_ref)) = sections_dict.get(&section_key) {
+                                        let section_borrow = section_ref.borrow();
+                                        if let PyObject::Dict(option_dict) = &*section_borrow {
+                                            let mut result: Vec<PyObjectRef> = Vec::new();
+                                            // Include DEFAULT options first
+                                            if section_name != "DEFAULT" {
+                                                if let Ok(Some(default_ref)) =
+                                                    sections_dict.get(&py_str("DEFAULT"))
+                                                {
+                                                    if let PyObject::Dict(default_dict) =
+                                                        &*default_ref.borrow()
+                                                    {
+                                                        for (k, v) in default_dict.items() {
+                                                            result.push(py_tuple(vec![k, v]));
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            // Add section-specific options
+                                            for (k, v) in option_dict.items() {
+                                                let kstr = k.str();
+                                                // Override DEFAULT if present
+                                                if let Some(pos) = result.iter().position(|t| {
+                                                    if let PyObject::Tuple(items) = &*t.borrow() {
+                                                        items[0].str() == kstr
+                                                    } else {
+                                                        false
+                                                    }
+                                                }) {
+                                                    result[pos] = py_tuple(vec![k, v]);
+                                                } else {
+                                                    result.push(py_tuple(vec![k, v]));
+                                                }
+                                            }
+                                            Ok(py_list(result))
                                         } else {
-                                            result.push(py_tuple(vec![k, v]));
+                                            Ok(py_list(vec![]))
                                         }
+                                    } else {
+                                        Err(PyError::type_error(format!(
+                                            "No section '{}'",
+                                            section_name
+                                        )))
                                     }
-                                    Ok(py_list(result))
                                 } else {
                                     Ok(py_list(vec![]))
                                 }
                             } else {
-                                Err(PyError::type_error(format!("No section '{}'", section_name)))
+                                Err(PyError::type_error("items(): not a ConfigParser instance"))
                             }
-                        } else {
-                            Ok(py_list(vec![]))
-                        }
-                    } else {
-                        Err(PyError::type_error("items(): not a ConfigParser instance"))
-                    }
-                },
-            }));
+                        },
+                    }),
+                );
 
-            // add_section(self, name) — add a new section
-            type_dict.insert_str("add_section", PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "add_section".to_string(),
-                func: |inner_args| {
-                    if inner_args.len() < 2 {
-                        return Err(PyError::type_error("add_section() missing required argument: name"));
-                    }
-                    let section_name = inner_args[1].str();
-
-                    let sections_ref = {
-                        let inst = inner_args[0].borrow();
-                        if let PyObject::Instance { dict, .. } = &*inst {
-                            dict.get_str("_sections").cloned().unwrap_or(py_dict())
-                        } else {
-                            return Err(PyError::type_error("add_section(): not a ConfigParser instance"));
-                        }
-                    };
-
-                    if let PyObject::Dict(ref mut sections_dict) = &mut *sections_ref.borrow_mut() {
-                        let section_key = py_str(&section_name);
-                        if sections_dict.contains(&section_key).unwrap_or(false) {
-                            return Err(PyError::type_error(format!("Section '{}' already exists", section_name)));
-                        }
-                        let _ = sections_dict.set(py_str(&section_name), py_dict());
-                    }
-
-                    Ok(py_none())
-                },
-            }));
-
-            // set(self, section, option, value) — set an option
-            type_dict.insert_str("set", PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "set".to_string(),
-                func: |inner_args| {
-                    if inner_args.len() < 4 {
-                        return Err(PyError::type_error("set() missing required arguments: section, option, value"));
-                    }
-                    let section_name = inner_args[1].str();
-                    let option_name = inner_args[2].str();
-                    let value = inner_args[3].str();
-
-                    let sections_ref = {
-                        let inst = inner_args[0].borrow();
-                        if let PyObject::Instance { dict, .. } = &*inst {
-                            dict.get_str("_sections").cloned().unwrap_or(py_dict())
-                        } else {
-                            return Err(PyError::type_error("set(): not a ConfigParser instance"));
-                        }
-                    };
-
-                    if let PyObject::Dict(ref mut sections_dict) = &mut *sections_ref.borrow_mut() {
-                        let section_key = py_str(&section_name);
-                        // Check section exists
-                        if !sections_dict.contains(&section_key).unwrap_or(false) {
-                            return Err(PyError::type_error(format!("No section '{}'", section_name)));
-                        }
-                        if let Ok(Some(existing_ref)) = sections_dict.get(&section_key) {
-                            if let PyObject::Dict(ref mut option_dict) = &mut *existing_ref.borrow_mut() {
-                                let _ = option_dict.set(py_str(&option_name), py_str(&value));
+                // add_section(self, name) — add a new section
+                type_dict.insert_str(
+                    "add_section",
+                    PyObjectRef::new(PyObject::BuiltinFunction {
+                        name: "add_section".to_string(),
+                        func: |inner_args| {
+                            if inner_args.len() < 2 {
+                                return Err(PyError::type_error(
+                                    "add_section() missing required argument: name",
+                                ));
                             }
-                        }
-                    }
+                            let section_name = inner_args[1].str();
 
-                    Ok(py_none())
-                },
-            }));
+                            let sections_ref = {
+                                let inst = inner_args[0].borrow();
+                                if let PyObject::Instance { dict, .. } = &*inst {
+                                    dict.get_str("_sections").cloned().unwrap_or(py_dict())
+                                } else {
+                                    return Err(PyError::type_error(
+                                        "add_section(): not a ConfigParser instance",
+                                    ));
+                                }
+                            };
 
-            // has_section(self, name) — check if section exists
-            type_dict.insert_str("has_section", PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "has_section".to_string(),
-                func: |inner_args| {
-                    if inner_args.len() < 2 {
-                        return Err(PyError::type_error("has_section() missing required argument: name"));
-                    }
-                    let section_name = inner_args[1].str();
-                    let inst = inner_args[0].borrow();
-                    if let PyObject::Instance { dict, .. } = &*inst {
-                        let sections_ref = dict.get_str("_sections").cloned().unwrap_or(py_dict());
-                        drop(inst);
-                        let sections_borrow = sections_ref.borrow();
-                        if let PyObject::Dict(sections_dict) = &*sections_borrow {
-                            let section_key = py_str(&section_name);
-                            let found = sections_dict.contains(&section_key).unwrap_or(false);
-                            Ok(py_bool(found))
-                        } else {
-                            Ok(py_bool(false))
-                        }
-                    } else {
-                        Err(PyError::type_error("has_section(): not a ConfigParser instance"))
-                    }
-                },
-            }));
+                            if let PyObject::Dict(ref mut sections_dict) =
+                                &mut *sections_ref.borrow_mut()
+                            {
+                                let section_key = py_str(&section_name);
+                                if sections_dict.contains(&section_key).unwrap_or(false) {
+                                    return Err(PyError::type_error(format!(
+                                        "Section '{}' already exists",
+                                        section_name
+                                    )));
+                                }
+                                let _ = sections_dict.set(py_str(&section_name), py_dict());
+                            }
 
-            let typ = PyObjectRef::new(PyObject::Type {
-                name: "ConfigParser".to_string(),
-                dict: Box::new(str_map_to_typedict(type_dict)),
-                bases: vec![],
-                mro: vec![],
-            });
+                            Ok(py_none())
+                        },
+                    }),
+                );
 
-            let mut instance_dict = AttrMap::new();
-            instance_dict.insert_str("_sections", py_dict());
+                // set(self, section, option, value) — set an option
+                type_dict.insert_str(
+                    "set",
+                    PyObjectRef::new(PyObject::BuiltinFunction {
+                        name: "set".to_string(),
+                        func: |inner_args| {
+                            if inner_args.len() < 4 {
+                                return Err(PyError::type_error(
+                                    "set() missing required arguments: section, option, value",
+                                ));
+                            }
+                            let section_name = inner_args[1].str();
+                            let option_name = inner_args[2].str();
+                            let value = inner_args[3].str();
 
-            Ok(PyObjectRef::new(PyObject::Instance {
-                typ,
-                dict: instance_dict,
-            }))
-        },
-    }));
+                            let sections_ref = {
+                                let inst = inner_args[0].borrow();
+                                if let PyObject::Instance { dict, .. } = &*inst {
+                                    dict.get_str("_sections").cloned().unwrap_or(py_dict())
+                                } else {
+                                    return Err(PyError::type_error(
+                                        "set(): not a ConfigParser instance",
+                                    ));
+                                }
+                            };
+
+                            if let PyObject::Dict(ref mut sections_dict) =
+                                &mut *sections_ref.borrow_mut()
+                            {
+                                let section_key = py_str(&section_name);
+                                // Check section exists
+                                if !sections_dict.contains(&section_key).unwrap_or(false) {
+                                    return Err(PyError::type_error(format!(
+                                        "No section '{}'",
+                                        section_name
+                                    )));
+                                }
+                                if let Ok(Some(existing_ref)) = sections_dict.get(&section_key) {
+                                    if let PyObject::Dict(ref mut option_dict) =
+                                        &mut *existing_ref.borrow_mut()
+                                    {
+                                        let _ =
+                                            option_dict.set(py_str(&option_name), py_str(&value));
+                                    }
+                                }
+                            }
+
+                            Ok(py_none())
+                        },
+                    }),
+                );
+
+                // has_section(self, name) — check if section exists
+                type_dict.insert_str(
+                    "has_section",
+                    PyObjectRef::new(PyObject::BuiltinFunction {
+                        name: "has_section".to_string(),
+                        func: |inner_args| {
+                            if inner_args.len() < 2 {
+                                return Err(PyError::type_error(
+                                    "has_section() missing required argument: name",
+                                ));
+                            }
+                            let section_name = inner_args[1].str();
+                            let inst = inner_args[0].borrow();
+                            if let PyObject::Instance { dict, .. } = &*inst {
+                                let sections_ref =
+                                    dict.get_str("_sections").cloned().unwrap_or(py_dict());
+                                drop(inst);
+                                let sections_borrow = sections_ref.borrow();
+                                if let PyObject::Dict(sections_dict) = &*sections_borrow {
+                                    let section_key = py_str(&section_name);
+                                    let found =
+                                        sections_dict.contains(&section_key).unwrap_or(false);
+                                    Ok(py_bool(found))
+                                } else {
+                                    Ok(py_bool(false))
+                                }
+                            } else {
+                                Err(PyError::type_error(
+                                    "has_section(): not a ConfigParser instance",
+                                ))
+                            }
+                        },
+                    }),
+                );
+
+                let typ = PyObjectRef::new(PyObject::Type {
+                    name: "ConfigParser".to_string(),
+                    dict: Box::new(str_map_to_typedict(type_dict)),
+                    bases: vec![],
+                    mro: vec![],
+                });
+
+                let mut instance_dict = AttrMap::new();
+                instance_dict.insert_str("_sections", py_dict());
+
+                Ok(PyObjectRef::new(PyObject::Instance {
+                    typ,
+                    dict: instance_dict,
+                }))
+            },
+        }),
+    );
 
     d
 }
 
-use std::rc::Rc;
-use std::cell::RefCell;
-use num_traits::ToPrimitive;
 use num_bigint::BigInt;
+use num_traits::ToPrimitive;
+use std::cell::RefCell;
+use std::rc::Rc;
 
 // ---------------------------------------------------------------------------
 // numbers module — Number ABCs as py_str stubs
@@ -7314,21 +9480,31 @@ pub fn create_ast_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! ast_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
 
     // literal_eval — simplified parser handling common Python literals
     ast_func!("literal_eval", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("literal_eval() missing required argument: node_or_string"));
+            return Err(PyError::type_error(
+                "literal_eval() missing required argument: node_or_string",
+            ));
         }
         let arg = &args[0];
         let s = arg.str();
         // Trim whitespace
         let s = s.trim().to_string();
         if s.is_empty() {
-            return Err(PyError::ValueError("malformed node or string: empty literal".to_string()));
+            return Err(PyError::ValueError(
+                "malformed node or string: empty literal".to_string(),
+            ));
         }
 
         // Try parsing as a literal from left to right
@@ -7338,7 +9514,10 @@ pub fn create_ast_dict() -> HashMap<String, PyObjectRef> {
         // Expect EOF after successful parse
         skip_ws(&chars, &mut pos);
         if pos < chars.len() {
-            return Err(PyError::ValueError(format!("malformed node or string: trailing garbage at position {}", pos)));
+            return Err(PyError::ValueError(format!(
+                "malformed node or string: trailing garbage at position {}",
+                pos
+            )));
         }
         Ok(result)
     });
@@ -7369,7 +9548,9 @@ fn skip_ws(chars: &[char], pos: &mut usize) {
 fn parse_literal(chars: &[char], pos: &mut usize) -> PyResult<PyObjectRef> {
     skip_ws(chars, pos);
     if *pos >= chars.len() {
-        return Err(PyError::ValueError("malformed node or string: unexpected end".to_string()));
+        return Err(PyError::ValueError(
+            "malformed node or string: unexpected end".to_string(),
+        ));
     }
 
     match chars[*pos] {
@@ -7380,7 +9561,9 @@ fn parse_literal(chars: &[char], pos: &mut usize) -> PyResult<PyObjectRef> {
             let mut buf = String::new();
             loop {
                 if *pos >= chars.len() {
-                    return Err(PyError::ValueError("malformed node or string: unterminated string".to_string()));
+                    return Err(PyError::ValueError(
+                        "malformed node or string: unterminated string".to_string(),
+                    ));
                 }
                 let c = chars[*pos];
                 *pos += 1;
@@ -7424,14 +9607,18 @@ fn parse_literal(chars: &[char], pos: &mut usize) -> PyResult<PyObjectRef> {
                 items.push(item);
                 skip_ws(chars, pos);
                 if *pos >= chars.len() {
-                    return Err(PyError::ValueError("malformed node or string: unterminated tuple".to_string()));
+                    return Err(PyError::ValueError(
+                        "malformed node or string: unterminated tuple".to_string(),
+                    ));
                 }
                 if chars[*pos] == ')' {
                     *pos += 1;
                     break;
                 }
                 if chars[*pos] != ',' {
-                    return Err(PyError::ValueError("malformed node or string: expected ',' or ')' in tuple".to_string()));
+                    return Err(PyError::ValueError(
+                        "malformed node or string: expected ',' or ')' in tuple".to_string(),
+                    ));
                 }
                 *pos += 1;
             }
@@ -7452,14 +9639,18 @@ fn parse_literal(chars: &[char], pos: &mut usize) -> PyResult<PyObjectRef> {
                 items.push(item);
                 skip_ws(chars, pos);
                 if *pos >= chars.len() {
-                    return Err(PyError::ValueError("malformed node or string: unterminated list".to_string()));
+                    return Err(PyError::ValueError(
+                        "malformed node or string: unterminated list".to_string(),
+                    ));
                 }
                 if chars[*pos] == ']' {
                     *pos += 1;
                     break;
                 }
                 if chars[*pos] != ',' {
-                    return Err(PyError::ValueError("malformed node or string: expected ',' or ']' in list".to_string()));
+                    return Err(PyError::ValueError(
+                        "malformed node or string: expected ',' or ']' in list".to_string(),
+                    ));
                 }
                 *pos += 1;
             }
@@ -7479,7 +9670,9 @@ fn parse_literal(chars: &[char], pos: &mut usize) -> PyResult<PyObjectRef> {
                 let key = parse_literal(chars, pos)?;
                 skip_ws(chars, pos);
                 if *pos >= chars.len() || chars[*pos] != ':' {
-                    return Err(PyError::ValueError("malformed node or string: expected ':' in dict literal".to_string()));
+                    return Err(PyError::ValueError(
+                        "malformed node or string: expected ':' in dict literal".to_string(),
+                    ));
                 }
                 *pos += 1;
                 skip_ws(chars, pos);
@@ -7491,14 +9684,18 @@ fn parse_literal(chars: &[char], pos: &mut usize) -> PyResult<PyObjectRef> {
                 }
                 skip_ws(chars, pos);
                 if *pos >= chars.len() {
-                    return Err(PyError::ValueError("malformed node or string: unterminated dict".to_string()));
+                    return Err(PyError::ValueError(
+                        "malformed node or string: unterminated dict".to_string(),
+                    ));
                 }
                 if chars[*pos] == '}' {
                     *pos += 1;
                     break;
                 }
                 if chars[*pos] != ',' {
-                    return Err(PyError::ValueError("malformed node or string: expected ',' or '}' in dict".to_string()));
+                    return Err(PyError::ValueError(
+                        "malformed node or string: expected ',' or '}' in dict".to_string(),
+                    ));
                 }
                 *pos += 1;
             }
@@ -7546,7 +9743,10 @@ fn parse_literal(chars: &[char], pos: &mut usize) -> PyResult<PyObjectRef> {
             if buf.contains('.') || buf.contains('e') || buf.contains('E') {
                 match buf.parse::<f64>() {
                     Ok(v) => Ok(py_float(v)),
-                    Err(_) => Err(PyError::ValueError(format!("malformed node or string: invalid float literal '{}'", buf))),
+                    Err(_) => Err(PyError::ValueError(format!(
+                        "malformed node or string: invalid float literal '{}'",
+                        buf
+                    ))),
                 }
             } else {
                 // Integer
@@ -7554,22 +9754,34 @@ fn parse_literal(chars: &[char], pos: &mut usize) -> PyResult<PyObjectRef> {
                 if clean.starts_with("0x") || clean.starts_with("0X") {
                     match i64::from_str_radix(&clean[2..], 16) {
                         Ok(v) => Ok(py_int(v)),
-                        Err(_) => Err(PyError::ValueError(format!("malformed node or string: invalid hex literal '{}'", buf))),
+                        Err(_) => Err(PyError::ValueError(format!(
+                            "malformed node or string: invalid hex literal '{}'",
+                            buf
+                        ))),
                     }
                 } else if clean.starts_with("0o") || clean.starts_with("0O") {
                     match i64::from_str_radix(&clean[2..], 8) {
                         Ok(v) => Ok(py_int(v)),
-                        Err(_) => Err(PyError::ValueError(format!("malformed node or string: invalid octal literal '{}'", buf))),
+                        Err(_) => Err(PyError::ValueError(format!(
+                            "malformed node or string: invalid octal literal '{}'",
+                            buf
+                        ))),
                     }
                 } else if clean.starts_with("0b") || clean.starts_with("0B") {
                     match i64::from_str_radix(&clean[2..], 2) {
                         Ok(v) => Ok(py_int(v)),
-                        Err(_) => Err(PyError::ValueError(format!("malformed node or string: invalid binary literal '{}'", buf))),
+                        Err(_) => Err(PyError::ValueError(format!(
+                            "malformed node or string: invalid binary literal '{}'",
+                            buf
+                        ))),
                     }
                 } else {
                     match clean.parse::<i64>() {
                         Ok(v) => Ok(py_int(v)),
-                        Err(_) => Err(PyError::ValueError(format!("malformed node or string: invalid integer literal '{}'", buf))),
+                        Err(_) => Err(PyError::ValueError(format!(
+                            "malformed node or string: invalid integer literal '{}'",
+                            buf
+                        ))),
                     }
                 }
             }
@@ -7584,7 +9796,13 @@ pub fn create_sunau_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! sunau_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
 
@@ -7614,7 +9832,9 @@ pub fn create_sunau_dict() -> HashMap<String, PyObjectRef> {
     // open() — returns an Au_read stub
     sunau_func!("open", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("open() missing required argument: file"));
+            return Err(PyError::type_error(
+                "open() missing required argument: file",
+            ));
         }
         // Return a minimal Au_read object stub
         let mut instance_dict = AttrMap::new();
@@ -7626,74 +9846,95 @@ pub fn create_sunau_dict() -> HashMap<String, PyObjectRef> {
         instance_dict.insert_str("_file", args[0].clone());
 
         let mut type_dict: HashMap<String, PyObjectRef> = HashMap::new();
-        type_dict.insert_str("getnchannels", PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "getnchannels".to_string(),
-            func: |self_args| {
-                if self_args.is_empty() {
-                    return Err(PyError::type_error("getnchannels() missing self"));
-                }
-                let inst = self_args[0].borrow();
-                if let PyObject::Instance { dict, .. } = &*inst {
-                    Ok(dict.get_str("nchannels").cloned().unwrap_or(py_int(1)))
-                } else {
-                    Err(PyError::type_error("getnchannels: not an Au_read instance"))
-                }
-            },
-        }));
-        type_dict.insert_str("getsampwidth", PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "getsampwidth".to_string(),
-            func: |self_args| {
-                if self_args.is_empty() {
-                    return Err(PyError::type_error("getsampwidth() missing self"));
-                }
-                let inst = self_args[0].borrow();
-                if let PyObject::Instance { dict, .. } = &*inst {
-                    Ok(dict.get_str("sampwidth").cloned().unwrap_or(py_int(2)))
-                } else {
-                    Err(PyError::type_error("getsampwidth: not an Au_read instance"))
-                }
-            },
-        }));
-        type_dict.insert_str("getframerate", PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "getframerate".to_string(),
-            func: |self_args| {
-                if self_args.is_empty() {
-                    return Err(PyError::type_error("getframerate() missing self"));
-                }
-                let inst = self_args[0].borrow();
-                if let PyObject::Instance { dict, .. } = &*inst {
-                    Ok(dict.get_str("framerate").cloned().unwrap_or(py_int(8000)))
-                } else {
-                    Err(PyError::type_error("getframerate: not an Au_read instance"))
-                }
-            },
-        }));
-        type_dict.insert_str("getnframes", PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "getnframes".to_string(),
-            func: |self_args| {
-                if self_args.is_empty() {
-                    return Err(PyError::type_error("getnframes() missing self"));
-                }
-                let inst = self_args[0].borrow();
-                if let PyObject::Instance { dict, .. } = &*inst {
-                    Ok(dict.get_str("nframes").cloned().unwrap_or(py_int(0)))
-                } else {
-                    Err(PyError::type_error("getnframes: not an Au_read instance"))
-                }
-            },
-        }));
-        type_dict.insert_str("getcomptype", PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "getcomptype".to_string(),
-            func: |_| Ok(py_str("NONE")),
-        }));
-        type_dict.insert_str("getcompname", PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "getcompname".to_string(),
-            func: |_| Ok(py_str("not compressed")),
-        }));
-        type_dict.insert_str("close", PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "close".to_string(),
-            func: |_| Ok(py_none()),
-        }));
+        type_dict.insert_str(
+            "getnchannels",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "getnchannels".to_string(),
+                func: |self_args| {
+                    if self_args.is_empty() {
+                        return Err(PyError::type_error("getnchannels() missing self"));
+                    }
+                    let inst = self_args[0].borrow();
+                    if let PyObject::Instance { dict, .. } = &*inst {
+                        Ok(dict.get_str("nchannels").cloned().unwrap_or(py_int(1)))
+                    } else {
+                        Err(PyError::type_error("getnchannels: not an Au_read instance"))
+                    }
+                },
+            }),
+        );
+        type_dict.insert_str(
+            "getsampwidth",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "getsampwidth".to_string(),
+                func: |self_args| {
+                    if self_args.is_empty() {
+                        return Err(PyError::type_error("getsampwidth() missing self"));
+                    }
+                    let inst = self_args[0].borrow();
+                    if let PyObject::Instance { dict, .. } = &*inst {
+                        Ok(dict.get_str("sampwidth").cloned().unwrap_or(py_int(2)))
+                    } else {
+                        Err(PyError::type_error("getsampwidth: not an Au_read instance"))
+                    }
+                },
+            }),
+        );
+        type_dict.insert_str(
+            "getframerate",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "getframerate".to_string(),
+                func: |self_args| {
+                    if self_args.is_empty() {
+                        return Err(PyError::type_error("getframerate() missing self"));
+                    }
+                    let inst = self_args[0].borrow();
+                    if let PyObject::Instance { dict, .. } = &*inst {
+                        Ok(dict.get_str("framerate").cloned().unwrap_or(py_int(8000)))
+                    } else {
+                        Err(PyError::type_error("getframerate: not an Au_read instance"))
+                    }
+                },
+            }),
+        );
+        type_dict.insert_str(
+            "getnframes",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "getnframes".to_string(),
+                func: |self_args| {
+                    if self_args.is_empty() {
+                        return Err(PyError::type_error("getnframes() missing self"));
+                    }
+                    let inst = self_args[0].borrow();
+                    if let PyObject::Instance { dict, .. } = &*inst {
+                        Ok(dict.get_str("nframes").cloned().unwrap_or(py_int(0)))
+                    } else {
+                        Err(PyError::type_error("getnframes: not an Au_read instance"))
+                    }
+                },
+            }),
+        );
+        type_dict.insert_str(
+            "getcomptype",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "getcomptype".to_string(),
+                func: |_| Ok(py_str("NONE")),
+            }),
+        );
+        type_dict.insert_str(
+            "getcompname",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "getcompname".to_string(),
+                func: |_| Ok(py_str("not compressed")),
+            }),
+        );
+        type_dict.insert_str(
+            "close",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "close".to_string(),
+                func: |_| Ok(py_none()),
+            }),
+        );
 
         let typ = PyObjectRef::new(PyObject::Type {
             name: "Au_read".to_string(),
@@ -7702,7 +9943,10 @@ pub fn create_sunau_dict() -> HashMap<String, PyObjectRef> {
             mro: vec![],
         });
 
-        Ok(PyObjectRef::new(PyObject::Instance { typ, dict: instance_dict }))
+        Ok(PyObjectRef::new(PyObject::Instance {
+            typ,
+            dict: instance_dict,
+        }))
     });
 
     d
@@ -7718,7 +9962,13 @@ pub fn create_xml_etree_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! et_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
 
@@ -7726,7 +9976,13 @@ pub fn create_xml_etree_dict() -> HashMap<String, PyObjectRef> {
     let mut element_type_dict = HashMap::new();
     macro_rules! e_method {
         ($name:expr, $func:expr) => {
-            element_type_dict.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            element_type_dict.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
 
@@ -7810,7 +10066,11 @@ pub fn create_xml_etree_dict() -> HashMap<String, PyObjectRef> {
             return Err(PyError::type_error("get() takes at least 1 argument"));
         }
         let key = args[1].str();
-        let default = if args.len() > 2 { Some(args[2].clone()) } else { None };
+        let default = if args.len() > 2 {
+            Some(args[2].clone())
+        } else {
+            None
+        };
         let obj = args[0].borrow();
         if let PyObject::Instance { dict, .. } = &*obj {
             if let Some(attrib) = dict.get_str("attrib") {
@@ -7868,15 +10128,16 @@ pub fn create_xml_etree_dict() -> HashMap<String, PyObjectRef> {
 
     // Helper to create a new Element instance
     fn new_element(tag: &str) -> PyObjectRef {
-        let typ = ELEMENT_TYPE.with(|cache| {
-            cache.borrow().clone().unwrap()
-        });
+        let typ = ELEMENT_TYPE.with(|cache| cache.borrow().clone().unwrap());
         let mut instance_dict = AttrMap::new();
         instance_dict.insert_str("tag", py_str(tag));
         instance_dict.insert_str("text", py_none());
         instance_dict.insert_str("attrib", py_dict());
         instance_dict.insert_str("children", py_list(vec![]));
-        PyObjectRef::new(PyObject::Instance { typ, dict: instance_dict })
+        PyObjectRef::new(PyObject::Instance {
+            typ,
+            dict: instance_dict,
+        })
     }
 
     // Element(tag) factory
@@ -7891,7 +10152,9 @@ pub fn create_xml_etree_dict() -> HashMap<String, PyObjectRef> {
     // SubElement(parent, tag) factory
     et_func!("SubElement", |args| {
         if args.len() < 2 {
-            return Err(PyError::type_error("SubElement() requires at least 2 arguments"));
+            return Err(PyError::type_error(
+                "SubElement() requires at least 2 arguments",
+            ));
         }
         let parent = &args[0];
         let tag = args[1].str();
@@ -7921,15 +10184,22 @@ pub fn create_xml_etree_dict() -> HashMap<String, PyObjectRef> {
                 let t = dict.get_str("tag").map(|t| t.str()).unwrap_or_default();
                 let txt = dict.get_str("text").and_then(|t| {
                     let s = t.str();
-                    if s.is_empty() || s == "None" { None } else { Some(s) }
-                });
-                let kids = dict.get_str("children").and_then(|c| {
-                    if let PyObject::List(list) = &*c.borrow() {
-                        Some(list.clone())
-                    } else {
+                    if s.is_empty() || s == "None" {
                         None
+                    } else {
+                        Some(s)
                     }
-                }).unwrap_or_default();
+                });
+                let kids = dict
+                    .get_str("children")
+                    .and_then(|c| {
+                        if let PyObject::List(list) = &*c.borrow() {
+                            Some(list.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_default();
                 (t, txt, kids)
             } else {
                 (String::new(), None, vec![])
@@ -7940,7 +10210,11 @@ pub fn create_xml_etree_dict() -> HashMap<String, PyObjectRef> {
         } else {
             let mut result = format!("<{}>", tag);
             if let Some(t) = text {
-                result.push_str(&t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"));
+                result.push_str(
+                    &t.replace("&", "&amp;")
+                        .replace("<", "&lt;")
+                        .replace(">", "&gt;"),
+                );
             }
             for child in &children {
                 result.push_str(&serialize_element(child));
@@ -7967,13 +10241,17 @@ pub fn create_xml_etree_dict() -> HashMap<String, PyObjectRef> {
             return None;
         }
         *pos += 1; // skip '<'
-        // Check for closing tag
+                   // Check for closing tag
         if *pos < s.len() && s.as_bytes()[*pos] == b'/' {
             return None;
         }
         // Read tag name
         let start = *pos;
-        while *pos < s.len() && !s.as_bytes()[*pos].is_ascii_whitespace() && s.as_bytes()[*pos] != b'>' && s.as_bytes()[*pos] != b'/' {
+        while *pos < s.len()
+            && !s.as_bytes()[*pos].is_ascii_whitespace()
+            && s.as_bytes()[*pos] != b'>'
+            && s.as_bytes()[*pos] != b'/'
+        {
             *pos += 1;
         }
         let tag_name = &s[start..*pos];
@@ -8046,7 +10324,9 @@ pub fn create_xml_etree_dict() -> HashMap<String, PyObjectRef> {
 
     et_func!("fromstring", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("fromstring() missing required argument"));
+            return Err(PyError::type_error(
+                "fromstring() missing required argument",
+            ));
         }
         let xml_str = args[0].str();
         let mut pos = 0;
@@ -8100,7 +10380,13 @@ pub fn create_argparse_dict() -> HashMap<String, PyObjectRef> {
     let mut parser_type_dict = HashMap::new();
     macro_rules! p_method {
         ($name:expr, $func:expr) => {
-            parser_type_dict.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            parser_type_dict.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
 
@@ -8131,7 +10417,9 @@ pub fn create_argparse_dict() -> HashMap<String, PyObjectRef> {
                 if let PyObject::List(list) = &*borrowed {
                     list.iter().map(|s| s.str()).collect()
                 } else {
-                    return Err(PyError::type_error("parse_args: expected a list of strings"));
+                    return Err(PyError::type_error(
+                        "parse_args: expected a list of strings",
+                    ));
                 }
             };
             let mut i = 0;
@@ -8163,7 +10451,10 @@ pub fn create_argparse_dict() -> HashMap<String, PyObjectRef> {
             }
         }
 
-        Ok(PyObjectRef::new(PyObject::Instance { typ: ns_type, dict: ns_dict }))
+        Ok(PyObjectRef::new(PyObject::Instance {
+            typ: ns_type,
+            dict: ns_dict,
+        }))
     });
 
     let parser_type = PyObjectRef::new(PyObject::Type {
@@ -8176,7 +10467,12 @@ pub fn create_argparse_dict() -> HashMap<String, PyObjectRef> {
     d.insert_str("ArgumentParser", parser_type);
     // Action subclasses needed by Django management commands
     fn make_action(name: &str) -> PyObjectRef {
-        PyObjectRef::new(PyObject::Type { name: name.to_string(), dict: Box::new(str_map_to_typedict(HashMap::new())), bases: vec![], mro: vec![] })
+        PyObjectRef::new(PyObject::Type {
+            name: name.to_string(),
+            dict: Box::new(str_map_to_typedict(HashMap::new())),
+            bases: vec![],
+            mro: vec![],
+        })
     }
     d.insert_str("HelpFormatter", make_action("HelpFormatter"));
     d.insert_str("SUPPRESS", py_str("==SUPPRESS=="));
@@ -8187,7 +10483,6 @@ pub fn create_argparse_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
-
 // ─── asyncio module (basic event loop) ────────────────────────────────────
 
 // `asyncio.run(coro)` — extracted out of `create_asyncio_dict`'s inline
@@ -8197,7 +10492,10 @@ pub fn create_argparse_dict() -> HashMap<String, PyObjectRef> {
 // (`asyncio.run(some_async_def())`, an extremely common real-world async
 // entry point) — same unconditional `with_vm_mut`-aliasing UB found
 // repeatedly elsewhere this session.
-pub(crate) fn asyncio_run_impl(vm: &mut crate::vm::VirtualMachine, coro: PyObjectRef) -> PyResult<PyObjectRef> {
+pub(crate) fn asyncio_run_impl(
+    vm: &mut crate::vm::VirtualMachine,
+    coro: PyObjectRef,
+) -> PyResult<PyObjectRef> {
     let coro_borrowed = coro.borrow();
     if let PyObject::Coroutine { ref frame } = &*coro_borrowed {
         let frame_borrowed = frame.borrow();
@@ -8217,7 +10515,11 @@ pub(crate) fn asyncio_run_impl(vm: &mut crate::vm::VirtualMachine, coro: PyObjec
     let coro_clone = coro.clone();
     let send_attr = coro_clone.borrow().get_attribute("send").ok();
     if let Some(send_method) = send_attr {
-        let result = crate::object::call_bound_method(send_method, coro.clone(), vec![crate::object::py_none()]);
+        let result = crate::object::call_bound_method(
+            send_method,
+            coro.clone(),
+            vec![crate::object::py_none()],
+        );
         match result {
             Ok(val) => Ok(val),
             Err(crate::object::PyError::StopIteration) => Ok(crate::object::py_none()),
@@ -8230,7 +10532,9 @@ pub(crate) fn asyncio_run_impl(vm: &mut crate::vm::VirtualMachine, coro: PyObjec
 
 pub fn asyncio_run_builtin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
-        return Err(PyError::type_error("run() missing required argument (coro)"));
+        return Err(PyError::type_error(
+            "run() missing required argument (coro)",
+        ));
     }
     let coro = args[0].clone();
     crate::object::with_vm_mut(|vm| asyncio_run_impl(vm, coro))?
@@ -8240,7 +10544,13 @@ pub fn create_asyncio_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! asyncio_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
 
@@ -8248,7 +10558,13 @@ pub fn create_asyncio_dict() -> HashMap<String, PyObjectRef> {
     let mut future_type_dict = HashMap::new();
     macro_rules! future_method {
         ($name:expr, $func:expr) => {
-            future_type_dict.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            future_type_dict.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
     future_method!("__init__", |args| {
@@ -8266,7 +10582,10 @@ pub fn create_asyncio_dict() -> HashMap<String, PyObjectRef> {
         let self_obj = args[0].clone();
         let result = args[1].clone();
         self_obj.borrow_mut().set_attribute("_result", result).ok();
-        self_obj.borrow_mut().set_attribute("_done", crate::object::py_bool(true)).ok();
+        self_obj
+            .borrow_mut()
+            .set_attribute("_done", crate::object::py_bool(true))
+            .ok();
         Ok(crate::object::py_none())
     });
     future_method!("done", |args| {
@@ -8281,7 +10600,9 @@ pub fn create_asyncio_dict() -> HashMap<String, PyObjectRef> {
         if let Ok(val) = self_obj.borrow().get_attribute("_result") {
             return Ok(val);
         }
-        Err(crate::object::PyError::runtime_error("Future has no result"))
+        Err(crate::object::PyError::runtime_error(
+            "Future has no result",
+        ))
     });
 
     let future_type = PyObjectRef::new(PyObject::Type {
@@ -8296,14 +10617,23 @@ pub fn create_asyncio_dict() -> HashMap<String, PyObjectRef> {
     let mut task_type_dict = HashMap::new();
     macro_rules! task_method {
         ($name:expr, $func:expr) => {
-            task_type_dict.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            task_type_dict.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
     task_method!("__init__", |args| {
         let self_obj = args[0].clone();
         let coro = args[1].clone();
         self_obj.borrow_mut().set_attribute("_coro", coro).ok();
-        self_obj.borrow_mut().set_attribute("_done", crate::object::py_bool(false)).ok();
+        self_obj
+            .borrow_mut()
+            .set_attribute("_done", crate::object::py_bool(false))
+            .ok();
         Ok(crate::object::py_none())
     });
     task_method!("step", |args| {
@@ -8320,16 +10650,24 @@ pub fn create_asyncio_dict() -> HashMap<String, PyObjectRef> {
                     let self_clone = self_obj.clone();
                     let callback = PyObjectRef::new(PyObject::Closure(Rc::new(move |_args| {
                         // Step the task again
-                        let _next_func2 = self_clone.borrow().get_attribute("_coro").ok()
+                        let _next_func2 = self_clone
+                            .borrow()
+                            .get_attribute("_coro")
+                            .ok()
                             .and_then(|c| c.borrow().get_attribute("send").ok());
                         Ok(crate::object::py_none())
                     })));
-                    val.borrow_mut().set_attribute("_callbacks", crate::object::py_list(vec![callback])).ok();
+                    val.borrow_mut()
+                        .set_attribute("_callbacks", crate::object::py_list(vec![callback]))
+                        .ok();
                 }
                 Ok(val)
             }
             Err(crate::object::PyError::StopIteration) => {
-                self_obj.borrow_mut().set_attribute("_done", crate::object::py_bool(true)).ok();
+                self_obj
+                    .borrow_mut()
+                    .set_attribute("_done", crate::object::py_bool(true))
+                    .ok();
                 Ok(crate::object::py_none())
             }
             Err(e) => Err(e),
@@ -8357,7 +10695,9 @@ pub fn create_asyncio_dict() -> HashMap<String, PyObjectRef> {
     // not AttributeError, so real code (e.g. Django's own internals) that
     // uses this idiom crashed instead of falling through cleanly.
     asyncio_func!("get_running_loop", |_args| {
-        Err(crate::object::PyError::runtime_error("no running event loop"))
+        Err(crate::object::PyError::runtime_error(
+            "no running event loop",
+        ))
     });
 
     asyncio_func!("run", asyncio_run_builtin);
@@ -8368,17 +10708,29 @@ pub fn create_asyncio_dict() -> HashMap<String, PyObjectRef> {
         let delay = args[0].clone();
         // Create a Future by calling builtins.dict or using construct
         let future = crate::object::PyObjectRef::new(crate::object::PyObject::Instance {
-            typ: crate::object::py_none(),  // placeholder
+            typ: crate::object::py_none(), // placeholder
             dict: AttrMap::new(),
         });
         // Set Future-specific attributes
-        future.borrow_mut().set_attribute("_done", crate::object::py_bool(false)).ok();
-        future.borrow_mut().set_attribute("_result", crate::object::py_none()).ok();
+        future
+            .borrow_mut()
+            .set_attribute("_done", crate::object::py_bool(false))
+            .ok();
+        future
+            .borrow_mut()
+            .set_attribute("_result", crate::object::py_none())
+            .ok();
         // For now, immediately resolve sleep(0) and create pending for others
         if let crate::object::PyObject::Int(n) = &*delay.borrow() {
             if n == &num_bigint::BigInt::from(0) {
-                future.borrow_mut().set_attribute("_done", crate::object::py_bool(true)).ok();
-                future.borrow_mut().set_attribute("_result", crate::object::py_none()).ok();
+                future
+                    .borrow_mut()
+                    .set_attribute("_done", crate::object::py_bool(true))
+                    .ok();
+                future
+                    .borrow_mut()
+                    .set_attribute("_result", crate::object::py_none())
+                    .ok();
             }
         }
         Ok(future)
@@ -8394,9 +10746,15 @@ pub fn create_asyncio_dict() -> HashMap<String, PyObjectRef> {
             let f_type = f.borrow().type_name();
             if f_type == "coroutine" || f_type == "generator" {
                 if let Ok(send) = f.borrow().get_attribute("send") {
-                    match crate::object::call_bound_method(send, f.clone(), vec![crate::object::py_none()]) {
+                    match crate::object::call_bound_method(
+                        send,
+                        f.clone(),
+                        vec![crate::object::py_none()],
+                    ) {
                         Ok(val) => results.push(val),
-                        Err(crate::object::PyError::StopIteration) => results.push(crate::object::py_none()),
+                        Err(crate::object::PyError::StopIteration) => {
+                            results.push(crate::object::py_none())
+                        }
                         Err(e) => return Err(e),
                     }
                 }
@@ -8410,7 +10768,9 @@ pub fn create_asyncio_dict() -> HashMap<String, PyObjectRef> {
     // asyncio.iscoroutinefunction(func): Check if func is a coroutine function
     asyncio_func!("iscoroutinefunction", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("iscoroutinefunction() missing required argument"));
+            return Err(PyError::type_error(
+                "iscoroutinefunction() missing required argument",
+            ));
         }
         let func = &args[0];
         let borrowed = func.borrow();
@@ -8439,13 +10799,22 @@ pub fn create_ssl_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! ssl_func {
         ($name:expr, $func:expr) => {
-            d.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction { name: $name.to_string(), func: $func }));
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
 
     // Version constants
     d.insert_str("OPENSSL_VERSION", py_str("OpenSSL 3.0.13 30 Jan 2024"));
-    d.insert_str("OPENSSL_VERSION_INFO", py_list(vec![py_int(3), py_int(0), py_int(13), py_int(0), py_int(0)]));
+    d.insert_str(
+        "OPENSSL_VERSION_INFO",
+        py_list(vec![py_int(3), py_int(0), py_int(13), py_int(0), py_int(0)]),
+    );
     d.insert_str("OPENSSL_VERSION_NUMBER", py_int(0x300000f0));
 
     // Feature flags
@@ -8512,7 +10881,9 @@ pub fn create_ssl_dict() -> HashMap<String, PyObjectRef> {
     // wrap_socket function — returns the socket as-is
     ssl_func!("wrap_socket", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("wrap_socket() missing required argument: sock"));
+            return Err(PyError::type_error(
+                "wrap_socket() missing required argument: sock",
+            ));
         }
         Ok(args[0].clone())
     });
@@ -8520,112 +10891,156 @@ pub fn create_ssl_dict() -> HashMap<String, PyObjectRef> {
     // get_default_verify_paths — stub
     ssl_func!("get_default_verify_paths", |_| {
         let mut p = HashMap::new();
-        p.insert_str("openssl_cafile", py_str("/etc/ssl/certs/ca-certificates.crt"));
+        p.insert_str(
+            "openssl_cafile",
+            py_str("/etc/ssl/certs/ca-certificates.crt"),
+        );
         p.insert_str("openssl_capath", py_str("/etc/ssl/certs"));
         p.insert_str("ssl_default_verify_paths", py_str("(stub)"));
         Ok(create_module("_VerifyPaths", p))
     });
 
     // SSLContext stub — returns a module-like object with wrap_socket and other methods
-    d.insert_str("SSLContext", PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "SSLContext".to_string(),
-        func: |_args| {
-            let mut ctx_dict = HashMap::new();
+    d.insert_str(
+        "SSLContext",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "SSLContext".to_string(),
+            func: |_args| {
+                let mut ctx_dict = HashMap::new();
 
-            ctx_dict.insert_str("wrap_socket", PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "wrap_socket".to_string(),
-                func: |wargs| {
-                    if wargs.is_empty() {
-                        return Err(PyError::type_error("wrap_socket() missing required argument: sock"));
-                    }
-                    Ok(wargs[0].clone())
-                },
-            }));
+                ctx_dict.insert_str(
+                    "wrap_socket",
+                    PyObjectRef::new(PyObject::BuiltinFunction {
+                        name: "wrap_socket".to_string(),
+                        func: |wargs| {
+                            if wargs.is_empty() {
+                                return Err(PyError::type_error(
+                                    "wrap_socket() missing required argument: sock",
+                                ));
+                            }
+                            Ok(wargs[0].clone())
+                        },
+                    }),
+                );
 
-            ctx_dict.insert_str("load_default_certs", PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "load_default_certs".to_string(),
-                func: |_| Ok(py_none()),
-            }));
+                ctx_dict.insert_str(
+                    "load_default_certs",
+                    PyObjectRef::new(PyObject::BuiltinFunction {
+                        name: "load_default_certs".to_string(),
+                        func: |_| Ok(py_none()),
+                    }),
+                );
 
-            ctx_dict.insert_str("load_verify_locations", PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "load_verify_locations".to_string(),
-                func: |_| Ok(py_none()),
-            }));
+                ctx_dict.insert_str(
+                    "load_verify_locations",
+                    PyObjectRef::new(PyObject::BuiltinFunction {
+                        name: "load_verify_locations".to_string(),
+                        func: |_| Ok(py_none()),
+                    }),
+                );
 
-            ctx_dict.insert_str("load_cert_chain", PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "load_cert_chain".to_string(),
-                func: |_| Ok(py_none()),
-            }));
+                ctx_dict.insert_str(
+                    "load_cert_chain",
+                    PyObjectRef::new(PyObject::BuiltinFunction {
+                        name: "load_cert_chain".to_string(),
+                        func: |_| Ok(py_none()),
+                    }),
+                );
 
-            ctx_dict.insert_str("set_alpn_protocols", PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "set_alpn_protocols".to_string(),
-                func: |_| Ok(py_none()),
-            }));
+                ctx_dict.insert_str(
+                    "set_alpn_protocols",
+                    PyObjectRef::new(PyObject::BuiltinFunction {
+                        name: "set_alpn_protocols".to_string(),
+                        func: |_| Ok(py_none()),
+                    }),
+                );
 
-            ctx_dict.insert_str("set_npn_protocols", PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "set_npn_protocols".to_string(),
-                func: |_| Ok(py_none()),
-            }));
+                ctx_dict.insert_str(
+                    "set_npn_protocols",
+                    PyObjectRef::new(PyObject::BuiltinFunction {
+                        name: "set_npn_protocols".to_string(),
+                        func: |_| Ok(py_none()),
+                    }),
+                );
 
-            ctx_dict.insert_str("set_ciphers", PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "set_ciphers".to_string(),
-                func: |_| Ok(py_none()),
-            }));
+                ctx_dict.insert_str(
+                    "set_ciphers",
+                    PyObjectRef::new(PyObject::BuiltinFunction {
+                        name: "set_ciphers".to_string(),
+                        func: |_| Ok(py_none()),
+                    }),
+                );
 
-            ctx_dict.insert_str("set_servername_callback", PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "set_servername_callback".to_string(),
-                func: |_| Ok(py_none()),
-            }));
+                ctx_dict.insert_str(
+                    "set_servername_callback",
+                    PyObjectRef::new(PyObject::BuiltinFunction {
+                        name: "set_servername_callback".to_string(),
+                        func: |_| Ok(py_none()),
+                    }),
+                );
 
-            ctx_dict.insert_str("get_ca_certs", PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "get_ca_certs".to_string(),
-                func: |_| Ok(py_list(vec![])),
-            }));
+                ctx_dict.insert_str(
+                    "get_ca_certs",
+                    PyObjectRef::new(PyObject::BuiltinFunction {
+                        name: "get_ca_certs".to_string(),
+                        func: |_| Ok(py_list(vec![])),
+                    }),
+                );
 
-            ctx_dict.insert_str("cert_store_stats", PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "cert_store_stats".to_string(),
-                func: |_| {
-                    let mut s = HashMap::new();
-                    s.insert_str("x509_ca", py_int(0));
-                    s.insert_str("crl", py_int(0));
-                    s.insert_str("x509", py_int(0));
-                    Ok(create_module("_CertStoreStats", s))
-                },
-            }));
+                ctx_dict.insert_str(
+                    "cert_store_stats",
+                    PyObjectRef::new(PyObject::BuiltinFunction {
+                        name: "cert_store_stats".to_string(),
+                        func: |_| {
+                            let mut s = HashMap::new();
+                            s.insert_str("x509_ca", py_int(0));
+                            s.insert_str("crl", py_int(0));
+                            s.insert_str("x509", py_int(0));
+                            Ok(create_module("_CertStoreStats", s))
+                        },
+                    }),
+                );
 
-            ctx_dict.insert_str("check_hostname", py_bool(false));
-            ctx_dict.insert_str("verify_mode", py_int(0));
+                ctx_dict.insert_str("check_hostname", py_bool(false));
+                ctx_dict.insert_str("verify_mode", py_int(0));
 
-            Ok(create_module("SSLContext", ctx_dict))
-        },
-    }));
+                Ok(create_module("SSLContext", ctx_dict))
+            },
+        }),
+    );
 
     // SSLSession stub (used by urllib3)
     ssl_func!("SSLSession", |_| Ok(py_none()));
 
     // CertificateError exception
-    d.insert_str("CertificateError", PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "CertificateError".to_string(),
-        func: |args| {
-            Ok(PyObjectRef::new(PyObject::Exception {
-                typ: "CertificateError".to_string(),
-                args: args.to_vec(),
-                cause: None,
-            }))
-        },
-    }));
+    d.insert_str(
+        "CertificateError",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "CertificateError".to_string(),
+            func: |args| {
+                Ok(PyObjectRef::new(PyObject::Exception {
+                    typ: "CertificateError".to_string(),
+                    args: args.to_vec(),
+                    cause: None,
+                }))
+            },
+        }),
+    );
 
     // SSLError exception
-    d.insert_str("SSLError", PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "SSLError".to_string(),
-        func: |args| {
-            Ok(PyObjectRef::new(PyObject::Exception {
-                typ: "SSLError".to_string(),
-                args: args.to_vec(),
-                cause: None,
-            }))
-        },
-    }));
+    d.insert_str(
+        "SSLError",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "SSLError".to_string(),
+            func: |args| {
+                Ok(PyObjectRef::new(PyObject::Exception {
+                    typ: "SSLError".to_string(),
+                    args: args.to_vec(),
+                    cause: None,
+                }))
+            },
+        }),
+    );
 
     ssl_func!("SSLWantReadError", |args| {
         Ok(PyObjectRef::new(PyObject::Exception {
@@ -8660,7 +11075,10 @@ pub fn create_ssl_dict() -> HashMap<String, PyObjectRef> {
     });
 
     d.insert_str("__name__", py_str("ssl"));
-    d.insert_str("__doc__", py_str("TLS/SSL wrapper for socket objects (stub)"));
+    d.insert_str(
+        "__doc__",
+        py_str("TLS/SSL wrapper for socket objects (stub)"),
+    );
 
     d
 }
@@ -8680,7 +11098,8 @@ thread_local! {
 fn context_var_get_value(name: &str) -> Option<PyObjectRef> {
     CONTEXT_DATA.with(|cell| {
         let map = cell.borrow();
-        map.get(name).and_then(|stack| stack.last().map(|(_, v)| v.clone()))
+        map.get(name)
+            .and_then(|stack| stack.last().map(|(_, v)| v.clone()))
     })
 }
 
@@ -8692,22 +11111,31 @@ pub fn create_contextvars_dict() -> HashMap<String, PyObjectRef> {
 
     macro_rules! cv_method {
         ($name:expr, $func:expr) => {
-            contextvar_type_dict.insert($name.to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
-                name: $name.to_string(),
-                func: $func,
-            }));
+            contextvar_type_dict.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
         };
     }
 
     // __init__(self, name, default=None)
     cv_method!("__init__", |args| {
         if args.len() < 2 {
-            return Err(PyError::type_error("ContextVar() requires at least 1 argument (name)"));
+            return Err(PyError::type_error(
+                "ContextVar() requires at least 1 argument (name)",
+            ));
         }
         let name = args[1].str();
         if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
             dict.insert_str("_name", py_str(&name));
-            let default = if args.len() > 2 { args[2].clone() } else { py_none() };
+            let default = if args.len() > 2 {
+                args[2].clone()
+            } else {
+                py_none()
+            };
             dict.insert_str("_default", default);
         }
         Ok(py_none())
@@ -8731,12 +11159,15 @@ pub fn create_contextvars_dict() -> HashMap<String, PyObjectRef> {
                 Err(PyError::type_error("ContextVar instance has no _name"))
             },
         });
-        contextvar_type_dict.insert_str("name", PyObjectRef::new(PyObject::Property(Box::new(PropertyData {
-            getter: Some(getter),
-            setter: None,
-            deleter: None,
-            doc: None,
-        }))));
+        contextvar_type_dict.insert_str(
+            "name",
+            PyObjectRef::new(PyObject::Property(Box::new(PropertyData {
+                getter: Some(getter),
+                setter: None,
+                deleter: None,
+                doc: None,
+            }))),
+        );
     }
 
     // get(self, default=None)
@@ -8750,7 +11181,10 @@ pub fn create_contextvars_dict() -> HashMap<String, PyObjectRef> {
         let (name, default) = {
             let borrowed = instance.borrow();
             if let PyObject::Instance { dict, .. } = &*borrowed {
-                let nm = dict.get_str("_name").ok_or_else(|| PyError::type_error("ContextVar instance has no _name"))?.str();
+                let nm = dict
+                    .get_str("_name")
+                    .ok_or_else(|| PyError::type_error("ContextVar instance has no _name"))?
+                    .str();
                 let df = dict.get_str("_default").cloned().unwrap_or(py_none());
                 (nm, df)
             } else {
@@ -8766,7 +11200,10 @@ pub fn create_contextvars_dict() -> HashMap<String, PyObjectRef> {
                 if args.len() > 1 {
                     Ok(args[1].clone())
                 } else if matches!(default, PyObjectRef::None) {
-                    Err(PyError::key_error(format!("ContextVar '{}' has no value and no default", name)))
+                    Err(PyError::key_error(format!(
+                        "ContextVar '{}' has no value and no default",
+                        name
+                    )))
                 } else {
                     Ok(default)
                 }
@@ -8785,7 +11222,9 @@ pub fn create_contextvars_dict() -> HashMap<String, PyObjectRef> {
         let name = {
             let borrowed = instance.borrow();
             if let PyObject::Instance { dict, .. } = &*borrowed {
-                dict.get_str("_name").ok_or_else(|| PyError::type_error("ContextVar instance has no _name"))?.str()
+                dict.get_str("_name")
+                    .ok_or_else(|| PyError::type_error("ContextVar instance has no _name"))?
+                    .str()
             } else {
                 return Err(PyError::type_error("not a ContextVar instance"));
             }
@@ -8811,7 +11250,9 @@ pub fn create_contextvars_dict() -> HashMap<String, PyObjectRef> {
         token_dict.insert_str("_token_id", py_int(token_id as i64));
         token_dict.insert_str("_var_name", py_str(&name));
         let token = PyObjectRef::new(PyObject::Instance {
-            typ: TOKEN_TYPE.with(|cell| cell.borrow().clone()).ok_or_else(|| PyError::runtime_error("Token type not initialized".to_string()))?,
+            typ: TOKEN_TYPE
+                .with(|cell| cell.borrow().clone())
+                .ok_or_else(|| PyError::runtime_error("Token type not initialized".to_string()))?,
             dict: token_dict,
         });
         Ok(token)
@@ -8829,7 +11270,9 @@ pub fn create_contextvars_dict() -> HashMap<String, PyObjectRef> {
         let token_id = {
             let borrowed = token.borrow();
             if let PyObject::Instance { dict, .. } = &*borrowed {
-                dict.get_str("_token_id").and_then(|v| v.as_i64()).unwrap_or(-1) as u64
+                dict.get_str("_token_id")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(-1) as u64
             } else {
                 return Err(PyError::type_error("reset() argument must be a Token"));
             }
@@ -8839,7 +11282,9 @@ pub fn create_contextvars_dict() -> HashMap<String, PyObjectRef> {
         let name = {
             let borrowed = instance.borrow();
             if let PyObject::Instance { dict, .. } = &*borrowed {
-                dict.get_str("_name").ok_or_else(|| PyError::type_error("ContextVar instance has no _name"))?.str()
+                dict.get_str("_name")
+                    .ok_or_else(|| PyError::type_error("ContextVar instance has no _name"))?
+                    .str()
             } else {
                 return Err(PyError::type_error("not a ContextVar instance"));
             }
@@ -8879,23 +11324,30 @@ pub fn create_contextvars_dict() -> HashMap<String, PyObjectRef> {
         dict: {
             let mut td: crate::object::TypeDict = Default::default();
             // __repr__ for debugging
-            td.insert_str("__repr__", PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "__repr__".to_string(),
-                func: |args| {
-                    if args.is_empty() {
-                        return Ok(py_str("<Token>"));
-                    }
-                    let borrowed = args[0].borrow();
-                    if let PyObject::Instance { dict, .. } = &*borrowed {
-                        if let Some(tid) = dict.get_str("_token_id") {
-                            return Ok(py_str(&format!("<Token var={:?} id={}>",
-                                dict.get_str("_var_name").map(|v| v.str()).unwrap_or_default(),
-                                tid.as_i64().unwrap_or(-1))));
+            td.insert_str(
+                "__repr__",
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "__repr__".to_string(),
+                    func: |args| {
+                        if args.is_empty() {
+                            return Ok(py_str("<Token>"));
                         }
-                    }
-                    Ok(py_str("<Token>"))
-                },
-            }));
+                        let borrowed = args[0].borrow();
+                        if let PyObject::Instance { dict, .. } = &*borrowed {
+                            if let Some(tid) = dict.get_str("_token_id") {
+                                return Ok(py_str(&format!(
+                                    "<Token var={:?} id={}>",
+                                    dict.get_str("_var_name")
+                                        .map(|v| v.str())
+                                        .unwrap_or_default(),
+                                    tid.as_i64().unwrap_or(-1)
+                                )));
+                            }
+                        }
+                        Ok(py_str("<Token>"))
+                    },
+                }),
+            );
             td.insert_str("__name__", py_str("Token"));
             Box::new(td)
         },
@@ -8935,13 +11387,16 @@ pub fn create_contextvars_dict() -> HashMap<String, PyObjectRef> {
 
             // Add items() method using Closure so we can capture context_vals
             let items_vals = context_vals.clone();
-            ctx_module_dict.insert_str("items", PyObjectRef::new(PyObject::Closure(Rc::new(move |_args| {
-                let mut items = Vec::new();
-                for (k, v) in items_vals.iter() {
-                    items.push(py_tuple(vec![py_str(k), v.clone()]));
-                }
-                Ok(py_list(items))
-            }))));
+            ctx_module_dict.insert_str(
+                "items",
+                PyObjectRef::new(PyObject::Closure(Rc::new(move |_args| {
+                    let mut items = Vec::new();
+                    for (k, v) in items_vals.iter() {
+                        items.push(py_tuple(vec![py_str(k), v.clone()]));
+                    }
+                    Ok(py_list(items))
+                }))),
+            );
 
             Ok(PyObjectRef::new(PyObject::Module {
                 name: "Context".to_string(),
@@ -8959,4 +11414,3 @@ pub fn create_contextvars_dict() -> HashMap<String, PyObjectRef> {
 
     d
 }
-

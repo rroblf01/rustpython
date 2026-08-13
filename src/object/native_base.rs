@@ -64,7 +64,21 @@ pub(crate) fn metatype_of(typ: &PyObjectRef) -> Option<PyObjectRef> {
 }
 
 pub(crate) fn is_recognized_native_base_name(name: &str) -> bool {
-    matches!(name, "list" | "dict" | "str" | "int" | "float" | "tuple" | "bytes" | "set" | "complex" | "bytearray" | "frozenset" | "deque")
+    matches!(
+        name,
+        "list"
+            | "dict"
+            | "str"
+            | "int"
+            | "float"
+            | "tuple"
+            | "bytes"
+            | "set"
+            | "complex"
+            | "bytearray"
+            | "frozenset"
+            | "deque"
+    )
 }
 
 /// True iff `name` is one of the builtin exception "classes" registered by
@@ -86,7 +100,8 @@ pub(crate) fn is_recognized_native_base_name(name: &str) -> bool {
 /// wrong-auto-bind behavior for that one type only — low risk, since new
 /// entries are rare and this list is co-located for easy eyeballing).
 pub(crate) fn is_builtin_exception_class_name(name: &str) -> bool {
-    matches!(name,
+    matches!(
+        name,
         "BaseException" | "Exception" | "TypeError" | "ValueError" |
         "ZeroDivisionError" | "NameError" | "UnboundLocalError" | "AttributeError" | "IndexError" |
         "KeyError" | "RuntimeError" | "StopIteration" | "AssertionError" |
@@ -205,7 +220,10 @@ pub(crate) fn native_backing_of(obj: &PyObjectRef) -> Option<PyObjectRef> {
 pub(crate) fn make_subclass_instance(typ: &PyObjectRef, backing: PyObjectRef) -> PyObjectRef {
     let mut dict = crate::object::AttrMap::new();
     dict.insert(NATIVE_BACKING_KEY.to_string(), backing);
-    PyObjectRef::new(PyObject::Instance { typ: typ.clone(), dict })
+    PyObjectRef::new(PyObject::Instance {
+        typ: typ.clone(),
+        dict,
+    })
 }
 
 pub(crate) fn make_native_backing(kind: &str) -> PyObjectRef {
@@ -232,7 +250,11 @@ pub(crate) fn make_native_backing(kind: &str) -> PyObjectRef {
 /// NATIVE_BACKING_KEY entry with it, rather than mutating in place, since
 /// the existing value's representation — e.g. an inline SmallStr — may not
 /// even be back-referenceable via borrow_mut()).
-pub(crate) fn synthesize_native_init(kind: &str, args: &[PyObjectRef], keywords: &[(String, PyObjectRef)]) -> PyResult<PyObjectRef> {
+pub(crate) fn synthesize_native_init(
+    kind: &str,
+    args: &[PyObjectRef],
+    keywords: &[(String, PyObjectRef)],
+) -> PyResult<PyObjectRef> {
     match kind {
         "list" => {
             if let Some(iterable) = args.first() {
@@ -334,10 +356,17 @@ pub(crate) fn synthesize_native_init(kind: &str, args: &[PyObjectRef], keywords:
 /// caller to pass `instance` explicitly — both forms end up calling this
 /// with `self` in `args[0]` either way.
 pub(crate) fn native_base_init_builtin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    let self_obj = args.first().ok_or_else(|| PyError::type_error("__init__() missing required argument: 'self'"))?.clone();
+    let self_obj = args
+        .first()
+        .ok_or_else(|| PyError::type_error("__init__() missing required argument: 'self'"))?
+        .clone();
     let rest = &args[1..];
     let kind = {
-        let typ = if let PyObject::Instance { typ, .. } = &*self_obj.borrow() { Some(typ.clone()) } else { None };
+        let typ = if let PyObject::Instance { typ, .. } = &*self_obj.borrow() {
+            Some(typ.clone())
+        } else {
+            None
+        };
         typ.and_then(|t| native_base_of_type(&t))
     };
     if let Some(kind) = kind {
@@ -364,7 +393,12 @@ pub(crate) fn collect_iterable(iterable: &PyObjectRef) -> PyResult<Vec<PyObjectR
 
 pub(crate) fn get_instance_slots(typ: &PyObjectRef) -> Option<Vec<String>> {
     let typ_ref = typ.borrow();
-    if let PyObject::Type { dict: type_dict, mro, .. } = &*typ_ref {
+    if let PyObject::Type {
+        dict: type_dict,
+        mro,
+        ..
+    } = &*typ_ref
+    {
         let mut all_slots = Vec::new();
 
         // Check the type's own __slots__
@@ -375,7 +409,10 @@ pub(crate) fn get_instance_slots(typ: &PyObjectRef) -> Option<Vec<String>> {
         // Check bases' __slots__ (skip self at index 0)
         for base in mro.iter().skip(1) {
             let base_ref = base.borrow();
-            if let PyObject::Type { dict: base_dict, .. } = &*base_ref {
+            if let PyObject::Type {
+                dict: base_dict, ..
+            } = &*base_ref
+            {
                 if let Some(slots_val) = base_dict.get_str("__slots__") {
                     extract_slots(slots_val, &mut all_slots);
                 }
@@ -407,4 +444,3 @@ pub(crate) fn get_type_name_for_instance(typ: &PyObjectRef) -> String {
         "object".to_string()
     }
 }
-

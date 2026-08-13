@@ -46,7 +46,7 @@ use crate::vm::VirtualMachine;
 pub struct PyObjectHeader {
     pub ob_refcnt: isize,
     pub ob_type: *mut PyTypeObject,
-    pub data: [u8; 0],  // flexible array — actual data follows
+    pub data: [u8; 0], // flexible array — actual data follows
 }
 
 /// Layout-compatible PyTypeObject (minimal subset)
@@ -57,8 +57,16 @@ pub struct PyTypeObject {
     pub tp_basicsize: isize,
     pub tp_itemsize: isize,
     pub tp_dealloc: Option<unsafe extern "C" fn(*mut PyObjectHeader)>,
-    pub tp_getattro: Option<unsafe extern "C" fn(*mut PyObjectHeader, *mut PyObjectHeader) -> *mut PyObjectHeader>,
-    pub tp_setattro: Option<unsafe extern "C" fn(*mut PyObjectHeader, *mut PyObjectHeader, *mut PyObjectHeader) -> c_int>,
+    pub tp_getattro: Option<
+        unsafe extern "C" fn(*mut PyObjectHeader, *mut PyObjectHeader) -> *mut PyObjectHeader,
+    >,
+    pub tp_setattro: Option<
+        unsafe extern "C" fn(
+            *mut PyObjectHeader,
+            *mut PyObjectHeader,
+            *mut PyObjectHeader,
+        ) -> c_int,
+    >,
     pub tp_flags: c_long,
     pub tp_doc: *const c_char,
 }
@@ -136,7 +144,9 @@ pub unsafe extern "C" fn Py_INCREF(op: *mut PyObjectHeader) {
 
 #[no_mangle]
 pub unsafe extern "C" fn Py_DECREF(op: *mut PyObjectHeader) {
-    if op.is_null() { return; }
+    if op.is_null() {
+        return;
+    }
     let new_ref = (*op).ob_refcnt.wrapping_sub(1);
     (*op).ob_refcnt = new_ref;
     if new_ref <= 0 {
@@ -150,18 +160,24 @@ pub unsafe extern "C" fn Py_DECREF(op: *mut PyObjectHeader) {
 
 #[no_mangle]
 pub unsafe extern "C" fn Py_XINCREF(op: *mut PyObjectHeader) {
-    if !op.is_null() { Py_INCREF(op); }
+    if !op.is_null() {
+        Py_INCREF(op);
+    }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn Py_XDECREF(op: *mut PyObjectHeader) {
-    if !op.is_null() { Py_DECREF(op); }
+    if !op.is_null() {
+        Py_DECREF(op);
+    }
 }
 
 // Type checking
 #[no_mangle]
 pub unsafe extern "C" fn PyBool_Check(op: *mut PyObjectHeader) -> c_int {
-    if op.is_null() { return 0; }
+    if op.is_null() {
+        return 0;
+    }
     // Check type tag stored after the header
     0
 }
@@ -209,7 +225,11 @@ pub unsafe extern "C" fn PyBytes_Check(op: *mut PyObjectHeader) -> c_int {
 // Object creation
 #[no_mangle]
 pub unsafe extern "C" fn PyBool_FromLong(v: c_long) -> *mut PyObjectHeader {
-    let obj = if v != 0 { py_bool(true) } else { py_bool(false) };
+    let obj = if v != 0 {
+        py_bool(true)
+    } else {
+        py_bool(false)
+    };
     obj_to_ptr(obj)
 }
 
@@ -225,7 +245,9 @@ pub unsafe extern "C" fn PyFloat_FromDouble(v: c_double) -> *mut PyObjectHeader 
 
 #[no_mangle]
 pub unsafe extern "C" fn PyUnicode_FromString(s: *const c_char) -> *mut PyObjectHeader {
-    if s.is_null() { return std::ptr::null_mut(); }
+    if s.is_null() {
+        return std::ptr::null_mut();
+    }
     let c_str = CStr::from_ptr(s);
     let rust_str = c_str.to_str().unwrap_or("");
     obj_to_ptr(py_str(rust_str))
@@ -280,9 +302,7 @@ pub unsafe extern "C" fn PyObject_HasAttr(
 
 // Module loading
 #[no_mangle]
-pub unsafe extern "C" fn PyModule_Create(
-    def: *const c_void,
-) -> *mut PyObjectHeader {
+pub unsafe extern "C" fn PyModule_Create(def: *const c_void) -> *mut PyObjectHeader {
     obj_to_ptr(crate::object::py_dict())
 }
 
@@ -315,11 +335,7 @@ pub unsafe extern "C" fn PyModule_AddStringConstant(
 
 // Error handling
 #[no_mangle]
-pub unsafe extern "C" fn PyErr_SetString(
-    exc: *mut PyObjectHeader,
-    msg: *const c_char,
-) {
-}
+pub unsafe extern "C" fn PyErr_SetString(exc: *mut PyObjectHeader, msg: *const c_char) {}
 
 #[no_mangle]
 pub unsafe extern "C" fn PyErr_Occurred() -> *mut PyObjectHeader {
@@ -327,8 +343,7 @@ pub unsafe extern "C" fn PyErr_Occurred() -> *mut PyObjectHeader {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn PyErr_Clear() {
-}
+pub unsafe extern "C" fn PyErr_Clear() {}
 
 #[no_mangle]
 pub unsafe extern "C" fn PyErr_Format(
@@ -340,19 +355,22 @@ pub unsafe extern "C" fn PyErr_Format(
 
 // Dynamic loading of .so files
 pub unsafe fn load_extension(path: &str, name: &str) -> Result<(), String> {
-    let lib = libloading::Library::new(path)
-        .map_err(|e| format!("Failed to load {}: {}", path, e))?;
+    let lib =
+        libloading::Library::new(path).map_err(|e| format!("Failed to load {}: {}", path, e))?;
     let init_fn_name = format!("PyInit_{}", name);
-    let init_fn: libloading::Symbol<unsafe extern "C" fn() -> *mut PyObjectHeader> =
-        lib.get(init_fn_name.as_bytes())
-            .map_err(|e| format!("Symbol {} not found: {}", init_fn_name, e))?;
+    let init_fn: libloading::Symbol<unsafe extern "C" fn() -> *mut PyObjectHeader> = lib
+        .get(init_fn_name.as_bytes())
+        .map_err(|e| format!("Symbol {} not found: {}", init_fn_name, e))?;
     let module_ptr = init_fn();
     let mut registry = EXTENSION_REGISTRY.lock().unwrap();
-    registry.insert(name.to_string(), ExtensionModule {
-        lib: Box::into_raw(Box::new(lib)) as *mut c_void,
-        module: module_ptr,
-        name: name.to_string(),
-    });
+    registry.insert(
+        name.to_string(),
+        ExtensionModule {
+            lib: Box::into_raw(Box::new(lib)) as *mut c_void,
+            module: module_ptr,
+            name: name.to_string(),
+        },
+    );
     Ok(())
 }
 

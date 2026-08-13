@@ -16,8 +16,10 @@ fn hash_secret() -> (u64, u64, u64) {
     *SECRET.get_or_init(|| {
         let seed_text = std::env::var("PYTHONHASHSEED").unwrap_or_default();
         let seed: u64 = if seed_text == "random" || seed_text.is_empty() {
-            let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos() as u64).unwrap_or(0);
+            let t = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
             t ^ (std::process::id() as u64)
         } else {
             seed_text.parse().unwrap_or(0)
@@ -140,7 +142,11 @@ pub(crate) fn hash_bigint(i: &BigInt) -> usize {
     // 0, not 2**61-1) and hence with `hash_double` of the equal float.
     if let Some(n) = i.to_i64() {
         if n > -(1i64 << 30) && n < (1i64 << 30) {
-            return if n == -1 { (-2i64) as usize } else { n as usize };
+            return if n == -1 {
+                (-2i64) as usize
+            } else {
+                n as usize
+            };
         }
     }
     const SHIFT: u32 = 30; // CPython PyLong_SHIFT
@@ -189,8 +195,8 @@ pub(crate) fn hash_double(v: f64) -> usize {
     }
     const BITS: u32 = 61; // CPython _PyHASH_BITS
     const MOD: u64 = (1u64 << BITS) - 1; // CPython _PyHASH_MODULUS
-    // frexp: v = m * 2**e with 0.5 <= |m| < 1, computed from the IEEE bits
-    // (a `2f64.powi(e)` scale would overflow to inf for e near ±1024).
+                                         // frexp: v = m * 2**e with 0.5 <= |m| < 1, computed from the IEEE bits
+                                         // (a `2f64.powi(e)` scale would overflow to inf for e near ±1024).
     let (m0, e0) = {
         let bits = v.abs().to_bits();
         let biased = ((bits >> 52) & 0x7ff) as i64;
@@ -226,7 +232,11 @@ pub(crate) fn hash_double(v: f64) -> usize {
         }
     }
     // Adjust for the exponent: rotate by (e mod 61).
-    e = if e >= 0 { e % BITS as i32 } else { BITS as i32 - 1 - ((-1 - e) % BITS as i32) };
+    e = if e >= 0 {
+        e % BITS as i32
+    } else {
+        BITS as i32 - 1 - ((-1 - e) % BITS as i32)
+    };
     x = ((x << (e as u32)) & MOD) | (x >> (BITS - e as u32));
     let mut result = if sign < 0 { 0u64.wrapping_sub(x) } else { x };
     if result == u64::MAX {
@@ -245,6 +255,15 @@ pub(crate) fn as_complex_parts(obj: &PyObject) -> Option<(f64, f64)> {
         PyObject::Int(n) => n.to_f64().map(|f| (f, 0.0)),
         PyObject::Float(f) => Some((*f, 0.0)),
         PyObject::Bool(b) => Some((if *b { 1.0 } else { 0.0 }, 0.0)),
+        PyObject::Instance { .. } => {
+            // `Fraction` participates in the numeric tower for complex
+            // arithmetic (`Fraction(1,2) + 1j` -> 0.5+1j in real CPython).
+            let cloned = PyObjectRef::new(obj.clone());
+            if let Some((n, d)) = crate::modules::frac_instance_num_den(&cloned) {
+                return Some((crate::modules::frac_to_f64(&n, &d), 0.0));
+            }
+            None
+        }
         _ => None,
     }
 }
@@ -275,14 +294,20 @@ pub fn py_neg(val: &PyObjectRef) -> PyResult<PyObjectRef> {
                 let negated = py_neg(&native)?;
                 return Ok(crate::object::make_subclass_instance(&typ, negated));
             }
-            Err(PyError::type_error(format!("bad operand type for unary -: '{}'", b.type_name())))
+            Err(PyError::type_error(format!(
+                "bad operand type for unary -: '{}'",
+                b.type_name()
+            )))
         }
         _ => {
             drop(b);
             if let Some(f) = val.as_f64() {
                 return Ok(py_float(-f));
             }
-            Err(PyError::type_error(format!("bad operand type for unary -: '{}'", val.borrow().type_name())))
+            Err(PyError::type_error(format!(
+                "bad operand type for unary -: '{}'",
+                val.borrow().type_name()
+            )))
         }
     }
 }
@@ -306,6 +331,9 @@ pub fn py_pos(val: &PyObjectRef) -> PyResult<PyObjectRef> {
             drop(obj);
             Ok(val.clone())
         }
-        _ => Err(PyError::type_error(format!("bad operand type for unary +: '{}'", obj.type_name()))),
+        _ => Err(PyError::type_error(format!(
+            "bad operand type for unary +: '{}'",
+            obj.type_name()
+        ))),
     }
 }

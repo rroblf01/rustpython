@@ -3,29 +3,29 @@ use mimalloc::MiMalloc;
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
-mod token;
 mod ast;
-mod parser;
 mod bytecode;
 mod compiler;
-mod object;
-mod modules;
-mod vm;
 mod cycle_gc;
-#[cfg(feature = "jit")]
-mod jit;
-mod interner;
-#[cfg(feature = "gc")]
-mod gc;
 #[cfg(feature = "ffi")]
 mod ffi_bridge;
+#[cfg(feature = "gc")]
+mod gc;
+mod interner;
+#[cfg(feature = "jit")]
+mod jit;
+mod modules;
+mod object;
+mod parser;
+mod token;
+mod vm;
 
+use compiler::Compiler;
+use object::{ObjectAccess, PyObject};
+use parser::{try_parse_as_expression, Parser};
 use std::env;
 use std::fs;
-use parser::{Parser, try_parse_as_expression};
-use compiler::Compiler;
 use vm::VirtualMachine;
-use object::{PyObject, ObjectAccess};
 
 /// Exit the process after running atexit handlers.
 use object::PyError;
@@ -33,8 +33,13 @@ use object::PyError;
 fn print_traceback(vm: &VirtualMachine, e: &PyError, fallback_file: &str) {
     eprintln!("Traceback (most recent call last):");
     if vm.last_traceback.is_empty() {
-        let line = vm.last_error_line.map_or("???".to_string(), |l| l.to_string());
-        let file = vm.last_error_file.clone().unwrap_or_else(|| fallback_file.to_string());
+        let line = vm
+            .last_error_line
+            .map_or("???".to_string(), |l| l.to_string());
+        let file = vm
+            .last_error_file
+            .clone()
+            .unwrap_or_else(|| fallback_file.to_string());
         eprintln!("  File \"{}\", line {}", file, line);
     } else {
         for (file, line, name) in &vm.last_traceback {
@@ -59,15 +64,19 @@ fn run_repl_source(vm: &mut VirtualMachine, source: &str) -> Result<object::PyOb
     // Try expression mode first — preserves the value for sys.displayhook
     if let Ok(program) = try_parse_as_expression(source) {
         let mut compiler = Compiler::new();
-        let code = compiler.compile(&program, "<stdin>")
+        let code = compiler
+            .compile(&program, "<stdin>")
             .map_err(|e| format!("Compile error: {}", e))?;
         return vm.run(code).map_err(|e| format!("{}", e));
     }
     // Fall back to module/statement mode
     let mut parser = Parser::new(source);
-    let program = parser.parse_program().map_err(|e| format!("Parse error: {}", e))?;
+    let program = parser
+        .parse_program()
+        .map_err(|e| format!("Parse error: {}", e))?;
     let mut compiler = Compiler::new();
-    let code = compiler.compile(&program, "<stdin>")
+    let code = compiler
+        .compile(&program, "<stdin>")
         .map_err(|e| format!("Compile error: {}", e))?;
     vm.run(code).map_err(|e| format!("{}", e))
 }
@@ -86,7 +95,7 @@ fn calculate_indent(line: &str, current: usize) -> usize {
         // Count actual leading whitespace of this line, then stay or dedent
         let leading = line.len() - trimmed.len();
         if leading < current {
-            leading  // dedent to match this line's actual indent
+            leading // dedent to match this line's actual indent
         } else {
             current
         }
@@ -108,7 +117,9 @@ fn run_repl() {
     let _ = std::io::stdout().flush();
 
     let mut vm = VirtualMachine::new();
-    let mut rl = rustyline::DefaultEditor::new().map_err(|e| format!("Failed to create editor: {}", e)).unwrap();
+    let mut rl = rustyline::DefaultEditor::new()
+        .map_err(|e| format!("Failed to create editor: {}", e))
+        .unwrap();
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     let history_path = std::path::Path::new(&home).join(".rustpython_history");
     let _ = rl.load_history(&history_path);
@@ -126,7 +137,11 @@ fn run_repl() {
     let mut indent_level = 0;
 
     loop {
-        let prompt = if source_buf.is_empty() { ">>> " } else { "... " };
+        let prompt = if source_buf.is_empty() {
+            ">>> "
+        } else {
+            "... "
+        };
 
         let line = if piped_stdin {
             // Real CPython writes REPL prompts to stderr when stdin is not
@@ -286,33 +301,79 @@ fn main() {
 
 fn real_main() {
     if env::var("RPY_DEBUG_SIZES").is_ok() {
-        eprintln!("size_of PyObjectRef: {}", std::mem::size_of::<object::PyObjectRef>());
-        eprintln!("size_of PyObject: {}", std::mem::size_of::<object::PyObject>());
+        eprintln!(
+            "size_of PyObjectRef: {}",
+            std::mem::size_of::<object::PyObjectRef>()
+        );
+        eprintln!(
+            "size_of PyObject: {}",
+            std::mem::size_of::<object::PyObject>()
+        );
         eprintln!("size_of PyDict: {}", std::mem::size_of::<object::PyDict>());
         eprintln!("size_of PySet: {}", std::mem::size_of::<object::PySet>());
         eprintln!("size_of vm::Frame: {}", std::mem::size_of::<vm::Frame>());
-        eprintln!("size_of SmallVec<[PyObjectRef;8]>: {}", std::mem::size_of::<smallvec::SmallVec<[object::PyObjectRef; 8]>>());
-        eprintln!("size_of InternedMap: {}", std::mem::size_of::<crate::interner::InternedMap<object::PyObjectRef>>());
-        eprintln!("size_of Option<PyResult>: {}", std::mem::size_of::<Option<Result<object::PyObjectRef, object::PyError>>>());
-        eprintln!("size_of Rc<RefCell<HashMap>>: {}", std::mem::size_of::<std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, object::PyObjectRef>>>>());
-        eprintln!("size_of bytecode::CodeObject: {}", std::mem::size_of::<bytecode::CodeObject>());
-        eprintln!("size_of bytecode::Instr: {}", std::mem::size_of::<bytecode::Instr>());
+        eprintln!(
+            "size_of SmallVec<[PyObjectRef;8]>: {}",
+            std::mem::size_of::<smallvec::SmallVec<[object::PyObjectRef; 8]>>()
+        );
+        eprintln!(
+            "size_of InternedMap: {}",
+            std::mem::size_of::<crate::interner::InternedMap<object::PyObjectRef>>()
+        );
+        eprintln!(
+            "size_of Option<PyResult>: {}",
+            std::mem::size_of::<Option<Result<object::PyObjectRef, object::PyError>>>()
+        );
+        eprintln!(
+            "size_of Rc<RefCell<HashMap>>: {}",
+            std::mem::size_of::<
+                std::rc::Rc<
+                    std::cell::RefCell<std::collections::HashMap<String, object::PyObjectRef>>,
+                >,
+            >()
+        );
+        eprintln!(
+            "size_of bytecode::CodeObject: {}",
+            std::mem::size_of::<bytecode::CodeObject>()
+        );
+        eprintln!(
+            "size_of bytecode::Instr: {}",
+            std::mem::size_of::<bytecode::Instr>()
+        );
         eprintln!("size_of String: {}", std::mem::size_of::<String>());
-        eprintln!("size_of HashMap<String,i64> empty: {}", std::mem::size_of::<std::collections::HashMap<String, i64>>());
-        eprintln!("size_of Vec<Option<PyObjectRef>>: {}", std::mem::size_of::<Vec<Option<object::PyObjectRef>>>());
-        eprintln!("size_of Vec<Option<(u64,PyObjectRef)>>: {}", std::mem::size_of::<Vec<Option<(u64, object::PyObjectRef)>>>());
-        eprintln!("size_of ExceptionHandler: {}", std::mem::size_of::<vm::ExceptionHandler>());
+        eprintln!(
+            "size_of HashMap<String,i64> empty: {}",
+            std::mem::size_of::<std::collections::HashMap<String, i64>>()
+        );
+        eprintln!(
+            "size_of Vec<Option<PyObjectRef>>: {}",
+            std::mem::size_of::<Vec<Option<object::PyObjectRef>>>()
+        );
+        eprintln!(
+            "size_of Vec<Option<(u64,PyObjectRef)>>: {}",
+            std::mem::size_of::<Vec<Option<(u64, object::PyObjectRef)>>>()
+        );
+        eprintln!(
+            "size_of ExceptionHandler: {}",
+            std::mem::size_of::<vm::ExceptionHandler>()
+        );
         {
             let mut m: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
             m.insert("x".to_string(), 1);
             m.insert("y".to_string(), 2);
-            eprintln!("HashMap<String,i64> with 2 entries: capacity={}", m.capacity());
+            eprintln!(
+                "HashMap<String,i64> with 2 entries: capacity={}",
+                m.capacity()
+            );
         }
         {
             let mut v: Vec<(String, i64)> = Vec::new();
             v.push(("x".to_string(), 1));
             v.push(("y".to_string(), 2));
-            eprintln!("Vec<(String,i64)> with 2 entries: capacity={}", v.capacity());
+            eprintln!(
+                "Vec<(String,i64)> with 2 entries: capacity={}",
+                v.capacity()
+            );
         }
         std::process::exit(0);
     }
@@ -583,7 +644,10 @@ fn real_main() {
                 // (real trigger: several of CPython's own `Lib/test/
                 // test_*.py` files read `__file__` directly for fixture
                 // data next to the script).
-                vm.globals.borrow_mut().insert(crate::interner::intern("__file__"), object::py_str(filename));
+                vm.globals.borrow_mut().insert(
+                    crate::interner::intern("__file__"),
+                    object::py_str(filename),
+                );
                 match vm.run(code) {
                     Ok(_val) => {
                         crate::modules::run_atexit_handlers(&mut vm);

@@ -29,7 +29,11 @@ pub fn builtin_print(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 /// trailing newline. Given how extremely common `sep=`/`end=`/`file=` and
 /// stdout-capturing test patterns both are in real Python code, this was one
 /// of the most broadly-impactful gaps found this session.
-pub(crate) fn print_with_vm(vm: &mut crate::vm::VirtualMachine, args: &[PyObjectRef], keywords: &[(String, PyObjectRef)]) -> PyResult<PyObjectRef> {
+pub(crate) fn print_with_vm(
+    vm: &mut crate::vm::VirtualMachine,
+    args: &[PyObjectRef],
+    keywords: &[(String, PyObjectRef)],
+) -> PyResult<PyObjectRef> {
     let mut sep = " ".to_string();
     let mut end = "\n".to_string();
     let mut file: Option<PyObjectRef> = None;
@@ -62,9 +66,13 @@ pub(crate) fn print_with_vm(vm: &mut crate::vm::VirtualMachine, args: &[PyObject
                 }
             }
             "file" => {
-                if !matches!(&*v.borrow(), PyObject::None) { file = Some(v.clone()); }
+                if !matches!(&*v.borrow(), PyObject::None) {
+                    file = Some(v.clone());
+                }
             }
-            "flush" => { flush = v.truthy(); }
+            "flush" => {
+                flush = v.truthy();
+            }
             _ => {}
         }
     }
@@ -75,8 +83,16 @@ pub(crate) fn print_with_vm(vm: &mut crate::vm::VirtualMachine, args: &[PyObject
 
     let target = match file {
         Some(f) => f,
-        None => vm.modules.get("sys")
-            .and_then(|m| if let PyObject::Module { dict, .. } = &*m.borrow() { dict.get_str("stdout").cloned() } else { None })
+        None => vm
+            .modules
+            .get("sys")
+            .and_then(|m| {
+                if let PyObject::Module { dict, .. } = &*m.borrow() {
+                    dict.get_str("stdout").cloned()
+                } else {
+                    None
+                }
+            })
             .ok_or_else(|| PyError::runtime_error("lost sys.stdout"))?,
     };
 
@@ -106,12 +122,21 @@ pub(crate) fn print_with_vm(vm: &mut crate::vm::VirtualMachine, args: &[PyObject
 /// "write on non-file" — confirmed by testing plain `f.write(x)` (which
 /// goes through `LOAD_ATTR`'s rebind-in-place logic, not `call_bound_method`)
 /// working correctly on the exact same object.
-pub(crate) fn call_method_rebound(vm: &mut crate::vm::VirtualMachine, target: &PyObjectRef, name: &str, call_args: Vec<PyObjectRef>) -> PyResult<PyObjectRef> {
+pub(crate) fn call_method_rebound(
+    vm: &mut crate::vm::VirtualMachine,
+    target: &PyObjectRef,
+    name: &str,
+    call_args: Vec<PyObjectRef>,
+) -> PyResult<PyObjectRef> {
     let method = target.borrow().get_attribute(name)?;
     let bound = match &*method.borrow() {
-        PyObject::BuiltinMethod { func, name: mname, .. } => {
-            PyObjectRef::imm(PyObject::BuiltinMethod { name: mname.clone(), func: *func, self_obj: target.clone() })
-        }
+        PyObject::BuiltinMethod {
+            func, name: mname, ..
+        } => PyObjectRef::imm(PyObject::BuiltinMethod {
+            name: mname.clone(),
+            func: *func,
+            self_obj: target.clone(),
+        }),
         // A user-defined method (raw `Function` from the type dict — the
         // ObjectAccess `get_attribute` trait doesn't auto-bind, unlike
         // LOAD_ATTR) must be wrapped in a BoundMethod so `self` is prepended.
@@ -119,9 +144,10 @@ pub(crate) fn call_method_rebound(vm: &mut crate::vm::VirtualMachine, target: &P
         // object's `write` invoked it with one argument missing (its own
         // `self`), raising a TypeError mapped to a bogus "'file' object has
         // no attribute 'write'" (test_print.py::test_print_flush).
-        PyObject::Function(_) => {
-            PyObjectRef::new(PyObject::BoundMethod { func: method.clone(), self_obj: target.clone() })
-        }
+        PyObject::Function(_) => PyObjectRef::new(PyObject::BoundMethod {
+            func: method.clone(),
+            self_obj: target.clone(),
+        }),
         _ => method.clone(),
     };
     vm.call_function(bound, call_args, vec![])
@@ -141,13 +167,18 @@ pub fn builtin_len(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         PyObject::Set(s) => Ok(py_int(s.len())),
         PyObject::FrozenSet(s) => Ok(py_int(s.len())),
         PyObject::Range { start, stop, step } => {
-            if *step > 0 && *start >= *stop { Ok(py_int(0)) }
-            else if *step < 0 && *start <= *stop { Ok(py_int(0)) }
-            else {
+            if *step > 0 && *start >= *stop {
+                Ok(py_int(0))
+            } else if *step < 0 && *start <= *stop {
+                Ok(py_int(0))
+            } else {
                 let raw_len = stop.checked_sub(*start).unwrap_or(i64::MAX);
                 let len = raw_len.checked_div(*step).unwrap_or(0) as i64;
-                if raw_len % *step != 0 { Ok(py_int(len.abs() + 1)) }
-                else { Ok(py_int(len.abs())) }
+                if raw_len % *step != 0 {
+                    Ok(py_int(len.abs() + 1))
+                } else {
+                    Ok(py_int(len.abs()))
+                }
             }
         }
         PyObject::Bytes(b) => Ok(py_int(b.len())),
@@ -164,19 +195,33 @@ pub fn builtin_len(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         // `test_iterlen.py`, whose whole purpose is exercising this exact
         // protocol across iterator types).
         PyObject::ListIter { list, index } => Ok(py_int(list.len().saturating_sub(*index))),
-        PyObject::DequeIter { deque, index, start_len } => {
+        PyObject::DequeIter {
+            deque,
+            index,
+            start_len,
+        } => {
             let remaining = {
                 let dq = deque.borrow();
                 if let PyObject::Deque { data, .. } = &*dq {
-                    if data.len() != *start_len { None } else { Some(data.len().saturating_sub(*index)) }
-                } else { None }
+                    if data.len() != *start_len {
+                        None
+                    } else {
+                        Some(data.len().saturating_sub(*index))
+                    }
+                } else {
+                    None
+                }
             };
             match remaining {
                 Some(n) => Ok(py_int(n)),
                 None => Ok(py_int(0)),
             }
         }
-        PyObject::RangeIter { current, stop, step } => {
+        PyObject::RangeIter {
+            current,
+            stop,
+            step,
+        } => {
             // Use BigInt throughout: `current`/`stop` can be near the i64
             // boundary (a range_iterator unpickled with adversarial bounds,
             // or a real near-i64::MAX/MIN range), and this arithmetic used
@@ -223,12 +268,15 @@ pub fn builtin_len(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     }
                     return Ok(py_int(i.clone()));
                 }
-                return Err(PyError::type_error("__len__() should return an int"))
+                return Err(PyError::type_error("__len__() should return an int"));
             }
             if let Some(native) = native {
                 return builtin_len(&[native]);
             }
-            Err(PyError::type_error(format!("object of type '{}' has no len()", type_name)))
+            Err(PyError::type_error(format!(
+                "object of type '{}' has no len()",
+                type_name
+            )))
         }
         // A class object itself, via its metaclass's `__len__` (e.g.
         // `len(SomeEnum)` — see the matching GET_ITER/builtin_iter handling
@@ -248,9 +296,15 @@ pub fn builtin_len(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 }
                 return Err(PyError::type_error("__len__() should return an int"));
             }
-            Err(PyError::type_error(format!("object of type '{}' has no len()", type_name)))
+            Err(PyError::type_error(format!(
+                "object of type '{}' has no len()",
+                type_name
+            )))
         }
-        _ => Err(PyError::type_error(format!("object of type '{}' has no len()", obj.type_name()))),
+        _ => Err(PyError::type_error(format!(
+            "object of type '{}' has no len()",
+            obj.type_name()
+        ))),
     }
 }
 
@@ -280,26 +334,42 @@ fn iterable_length_hint(obj: &PyObjectRef) -> Option<usize> {
 // slicing) — found via CPython's own `test_range.py`, which constructs
 // `range()` bounds from custom `__index__`-only objects.
 fn range_index_arg(obj: &PyObjectRef) -> PyResult<i64> {
-    to_index(obj)?.to_i64().ok_or_else(|| PyError::type_error("range() expects int arguments"))
+    to_index(obj)?
+        .to_i64()
+        .ok_or_else(|| PyError::type_error("range() expects int arguments"))
 }
 
 pub fn builtin_range(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     match args.len() {
         1 => {
             let stop = range_index_arg(&args[0])?;
-            Ok(PyObjectRef::imm(PyObject::Range { start: 0, stop, step: 1 }))
+            Ok(PyObjectRef::imm(PyObject::Range {
+                start: 0,
+                stop,
+                step: 1,
+            }))
         }
         2 => {
             let a = range_index_arg(&args[0])?;
             let b = range_index_arg(&args[1])?;
-            Ok(PyObjectRef::imm(PyObject::Range { start: a, stop: b, step: 1 }))
+            Ok(PyObjectRef::imm(PyObject::Range {
+                start: a,
+                stop: b,
+                step: 1,
+            }))
         }
         3 => {
             let a = range_index_arg(&args[0])?;
             let b = range_index_arg(&args[1])?;
             let s = range_index_arg(&args[2])?;
-            if s == 0 { return Err(PyError::value_error("range() arg 3 must not be zero")); }
-            Ok(PyObjectRef::imm(PyObject::Range { start: a, stop: b, step: s }))
+            if s == 0 {
+                return Err(PyError::value_error("range() arg 3 must not be zero"));
+            }
+            Ok(PyObjectRef::imm(PyObject::Range {
+                start: a,
+                stop: b,
+                step: s,
+            }))
         }
         _ => Err(PyError::type_error("range() takes at most 3 arguments")),
     }
@@ -332,7 +402,9 @@ thread_local! {
 /// `builtin_type_of`/`type(x)` returns this SAME object instead of lazily
 /// building an unrelated placeholder the first time `type(5)` is called.
 pub(crate) fn seed_primitive_type_cache(name: &str, ty: PyObjectRef) {
-    PRIMITIVE_TYPE_CACHE.with(|c| { c.borrow_mut().insert(name.to_string(), ty); });
+    PRIMITIVE_TYPE_CACHE.with(|c| {
+        c.borrow_mut().insert(name.to_string(), ty);
+    });
 }
 
 pub fn builtin_type_of(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
@@ -356,7 +428,8 @@ pub fn builtin_type_of(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 if let Some(cls) = crate::modules::get_builtin_class(&name) {
                     return Ok(cls);
                 }
-                if let Some(cached) = PRIMITIVE_TYPE_CACHE.with(|c| c.borrow().get(&name).cloned()) {
+                if let Some(cached) = PRIMITIVE_TYPE_CACHE.with(|c| c.borrow().get(&name).cloned())
+                {
                     return Ok(cached);
                 }
                 let new_type = PyObjectRef::new(PyObject::Type {
@@ -365,13 +438,16 @@ pub fn builtin_type_of(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     bases: vec![],
                     mro: vec![],
                 });
-                PRIMITIVE_TYPE_CACHE.with(|c| { c.borrow_mut().insert(name, new_type.clone()); });
+                PRIMITIVE_TYPE_CACHE.with(|c| {
+                    c.borrow_mut().insert(name, new_type.clone());
+                });
                 Ok(new_type)
             }
             _ => {
                 let name = borrowed.type_name();
                 drop(borrowed);
-                if let Some(cached) = PRIMITIVE_TYPE_CACHE.with(|c| c.borrow().get(&name).cloned()) {
+                if let Some(cached) = PRIMITIVE_TYPE_CACHE.with(|c| c.borrow().get(&name).cloned())
+                {
                     return Ok(cached);
                 }
                 let new_type = PyObjectRef::new(PyObject::Type {
@@ -380,7 +456,9 @@ pub fn builtin_type_of(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     bases: vec![],
                     mro: vec![],
                 });
-                PRIMITIVE_TYPE_CACHE.with(|c| { c.borrow_mut().insert(name, new_type.clone()); });
+                PRIMITIVE_TYPE_CACHE.with(|c| {
+                    c.borrow_mut().insert(name, new_type.clone());
+                });
                 Ok(new_type)
             }
         }
@@ -393,9 +471,13 @@ pub fn builtin_type_of(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         // less complete hand-rolled logic this used to have.
         let bases_vec = to_bases_vec(&args[1]);
         let namespace_dict = dict_arg_to_hashmap(&args[2], "type() third argument must be a dict")?;
-        with_vm_mut(|vm| vm.default_build_class(args[0].str(), bases_vec, namespace_dict, vec![], None))?
+        with_vm_mut(|vm| {
+            vm.default_build_class(args[0].str(), bases_vec, namespace_dict, vec![], None)
+        })?
     } else {
-        Err(PyError::type_error("type() takes exactly one or three arguments"))
+        Err(PyError::type_error(
+            "type() takes exactly one or three arguments",
+        ))
     }
 }
 
@@ -416,7 +498,10 @@ fn to_bases_vec(bases: &PyObjectRef) -> Vec<PyObjectRef> {
 /// overridden `__setitem__` — see `EnumType.__prepare__`), it arrives here
 /// as a `PyObject::Instance` whose actual dict contents live in its native
 /// backing, not a bare `PyObject::Dict`. Check both.
-pub(crate) fn dict_arg_to_hashmap(namespace: &PyObjectRef, err_msg: &str) -> PyResult<HashMap<String, PyObjectRef>> {
+pub(crate) fn dict_arg_to_hashmap(
+    namespace: &PyObjectRef,
+    err_msg: &str,
+) -> PyResult<HashMap<String, PyObjectRef>> {
     if let Some(native) = native_backing_of(namespace) {
         return dict_arg_to_hashmap(&native, err_msg);
     }
@@ -436,21 +521,41 @@ pub(crate) fn dict_arg_to_hashmap(namespace: &PyObjectRef, err_msg: &str) -> PyR
 /// (see `type`'s registration in `create_builtins`).
 pub fn type_new_builtin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if std::env::var("RPY_DEBUG_METACLASS").is_ok() {
-        eprintln!("type_new_builtin: args.len()={} args={:?}", args.len(), args.iter().map(|a| a.repr()).collect::<Vec<_>>());
+        eprintln!(
+            "type_new_builtin: args.len()={} args={:?}",
+            args.len(),
+            args.iter().map(|a| a.repr()).collect::<Vec<_>>()
+        );
     }
     if args.len() < 4 {
-        return Err(PyError::type_error("type.__new__() takes at least 4 arguments (metacls, name, bases, namespace)"));
+        return Err(PyError::type_error(
+            "type.__new__() takes at least 4 arguments (metacls, name, bases, namespace)",
+        ));
     }
     let metacls = args[0].clone();
     let name_str = args[1].str();
     let bases_vec = to_bases_vec(&args[2]);
     let namespace_dict = dict_arg_to_hashmap(&args[3], "type.__new__(): namespace must be a dict")?;
-    let kwargs: Vec<(String, PyObjectRef)> = args.get(4)
-        .map(|d| dict_arg_to_hashmap(d, "").unwrap_or_default().into_iter().collect())
+    let kwargs: Vec<(String, PyObjectRef)> = args
+        .get(4)
+        .map(|d| {
+            dict_arg_to_hashmap(d, "")
+                .unwrap_or_default()
+                .into_iter()
+                .collect()
+        })
         .unwrap_or_default();
     let metatype = with_vm_mut(|vm| {
-        let is_bare_type = vm.builtins.get(&interner::intern("type")).map(|t| t.is(&metacls)).unwrap_or(false);
-        if is_bare_type { None } else { Some(metacls.clone()) }
+        let is_bare_type = vm
+            .builtins
+            .get(&interner::intern("type"))
+            .map(|t| t.is(&metacls))
+            .unwrap_or(false);
+        if is_bare_type {
+            None
+        } else {
+            Some(metacls.clone())
+        }
     })?;
     with_vm_mut(|vm| vm.default_build_class(name_str, bases_vec, namespace_dict, kwargs, metatype))?
 }
@@ -472,11 +577,10 @@ fn is_base_digit_char(c: char, base: u32) -> bool {
 fn unicode_decimal_digit(c: char) -> Option<char> {
     let cp = c as u32;
     const BLOCKS: [u32; 40] = [
-        0x0030, 0x0660, 0x06F0, 0x07C0, 0x0966, 0x09E6, 0x0A66, 0x0AE6,
-        0x0B66, 0x0BE6, 0x0C66, 0x0CE6, 0x0D66, 0x0DE6, 0x0E50, 0x0ED0,
-        0x0F20, 0x1040, 0x1090, 0x17E0, 0x1810, 0x1946, 0x19D0, 0x1A80,
-        0x1A90, 0x1B50, 0x1BB0, 0x1C40, 0x1C50, 0xA620, 0xA8D0, 0xA900,
-        0xA9D0, 0xA9F0, 0xAA50, 0xABF0, 0xFF10, 0x104A0, 0x11066, 0x110F0,
+        0x0030, 0x0660, 0x06F0, 0x07C0, 0x0966, 0x09E6, 0x0A66, 0x0AE6, 0x0B66, 0x0BE6, 0x0C66,
+        0x0CE6, 0x0D66, 0x0DE6, 0x0E50, 0x0ED0, 0x0F20, 0x1040, 0x1090, 0x17E0, 0x1810, 0x1946,
+        0x19D0, 0x1A80, 0x1A90, 0x1B50, 0x1BB0, 0x1C40, 0x1C50, 0xA620, 0xA8D0, 0xA900, 0xA9D0,
+        0xA9F0, 0xAA50, 0xABF0, 0xFF10, 0x104A0, 0x11066, 0x110F0,
     ];
     for &start in &BLOCKS {
         if cp >= start && cp < start + 10 {
@@ -490,14 +594,19 @@ fn unicode_decimal_digit(c: char) -> Option<char> {
 /// sign, detects `0x`/`0o`/`0b` prefixes when no base is given, and parses.
 /// `repr_str` is the `%r`-style rendering used in the ValueError message
 /// (`'½'` for a str, `b'123\x00'` for bytes).
-fn int_from_digit_string(s: &str, base_obj: Option<&PyObjectRef>, repr_str: &str) -> PyResult<PyObjectRef> {
+fn int_from_digit_string(
+    s: &str,
+    base_obj: Option<&PyObjectRef>,
+    repr_str: &str,
+) -> PyResult<PyObjectRef> {
     let s_trim = s.trim();
     // Normalize Unicode decimal digits (१२३ -> 123, any Nd category) to
     // ASCII so parsing/validation see plain digits; everything else is kept
     // for the underscore validation and prefix detection below.
-    let s_norm: String = s_trim.chars().map(|c| {
-        unicode_decimal_digit(c).unwrap_or(c)
-    }).collect();
+    let s_norm: String = s_trim
+        .chars()
+        .map(|c| unicode_decimal_digit(c).unwrap_or(c))
+        .collect();
     let s_clean: String = s_norm.chars().filter(|&c| c != '_').collect();
     let (sign, body) = match s_clean.as_bytes().first() {
         Some(b'-') => (-1, &s_clean[1..]),
@@ -515,9 +624,12 @@ fn int_from_digit_string(s: &str, base_obj: Option<&PyObjectRef>, repr_str: &str
         }
         BigInt::parse_bytes(body.as_bytes(), base).map(|n| py_int(if sign < 0 { -n } else { n }))
     };
-    let make_err = |base: i64| PyError::value_error(format!(
-        "invalid literal for int() with base {}: {}", base, repr_str
-    ));
+    let make_err = |base: i64| {
+        PyError::value_error(format!(
+            "invalid literal for int() with base {}: {}",
+            base, repr_str
+        ))
+    };
     // Pick the digit body, the effective base (explicit base, base 0 =
     // prefix detection, or the default prefix detection / decimal), and
     // whether the body came from auto-detected prefix/octal detection.
@@ -537,10 +649,19 @@ fn int_from_digit_string(s: &str, base_obj: Option<&PyObjectRef>, repr_str: &str
                 return Err(PyError::value_error("int() base must be >= 2 and <= 36"));
             }
             if base == 0 {
-                if let Some(oct) = body.strip_prefix("0o").or_else(|| body.strip_prefix("0O")) { (oct, 8, true, true) }
-                else if let Some(hex) = body.strip_prefix("0x").or_else(|| body.strip_prefix("0X")) { (hex, 16, true, true) }
-                else if let Some(bin) = body.strip_prefix("0b").or_else(|| body.strip_prefix("0B")) { (bin, 2, true, true) }
-                else { (body, 10, true, false) }
+                if let Some(oct) = body.strip_prefix("0o").or_else(|| body.strip_prefix("0O")) {
+                    (oct, 8, true, true)
+                } else if let Some(hex) =
+                    body.strip_prefix("0x").or_else(|| body.strip_prefix("0X"))
+                {
+                    (hex, 16, true, true)
+                } else if let Some(bin) =
+                    body.strip_prefix("0b").or_else(|| body.strip_prefix("0B"))
+                {
+                    (bin, 2, true, true)
+                } else {
+                    (body, 10, true, false)
+                }
             } else {
                 let stripped = if base == 16 {
                     body.strip_prefix("0x").or_else(|| body.strip_prefix("0X"))
@@ -558,10 +679,15 @@ fn int_from_digit_string(s: &str, base_obj: Option<&PyObjectRef>, repr_str: &str
         None => {
             // No base given: prefix detection, but NO "old octal" rule —
             // int('010') is decimal 10, only int('010', 0) is an error.
-            if let Some(oct) = body.strip_prefix("0o").or_else(|| body.strip_prefix("0O")) { (oct, 8, false, true) }
-            else if let Some(hex) = body.strip_prefix("0x").or_else(|| body.strip_prefix("0X")) { (hex, 16, false, true) }
-            else if let Some(bin) = body.strip_prefix("0b").or_else(|| body.strip_prefix("0B")) { (bin, 2, false, true) }
-            else { (body, 10, false, false) }
+            if let Some(oct) = body.strip_prefix("0o").or_else(|| body.strip_prefix("0O")) {
+                (oct, 8, false, true)
+            } else if let Some(hex) = body.strip_prefix("0x").or_else(|| body.strip_prefix("0X")) {
+                (hex, 16, false, true)
+            } else if let Some(bin) = body.strip_prefix("0b").or_else(|| body.strip_prefix("0B")) {
+                (bin, 2, false, true)
+            } else {
+                (body, 10, false, false)
+            }
         }
     };
     // Underscore placement: one underscore may follow a base prefix
@@ -570,14 +696,23 @@ fn int_from_digit_string(s: &str, base_obj: Option<&PyObjectRef>, repr_str: &str
     // the underscore-stripped body.
     {
         let orig = s_norm.trim_start_matches(|c: char| c == '+' || c == '-');
-        let (orig, had_prefix) = if let Some(r) = orig.strip_prefix("0x").or_else(|| orig.strip_prefix("0X"))
-            .or_else(|| orig.strip_prefix("0o")).or_else(|| orig.strip_prefix("0O"))
-            .or_else(|| orig.strip_prefix("0b")).or_else(|| orig.strip_prefix("0B")) {
+        let (orig, had_prefix) = if let Some(r) = orig
+            .strip_prefix("0x")
+            .or_else(|| orig.strip_prefix("0X"))
+            .or_else(|| orig.strip_prefix("0o"))
+            .or_else(|| orig.strip_prefix("0O"))
+            .or_else(|| orig.strip_prefix("0b"))
+            .or_else(|| orig.strip_prefix("0B"))
+        {
             (r, true)
         } else {
             (orig, false)
         };
-        let orig = if had_prefix { orig.strip_prefix('_').unwrap_or(orig) } else { orig };
+        let orig = if had_prefix {
+            orig.strip_prefix('_').unwrap_or(orig)
+        } else {
+            orig
+        };
         if !orig.is_empty() {
             let bytes = orig.as_bytes();
             let mut prev_underscore = false;
@@ -586,8 +721,10 @@ fn int_from_digit_string(s: &str, base_obj: Option<&PyObjectRef>, repr_str: &str
                     if prev_underscore {
                         return Err(make_err(eff_base));
                     }
-                    let prev_ok = i > 0 && is_base_digit_char(bytes[i - 1] as char, eff_base as u32);
-                    let next_ok = i + 1 < bytes.len() && is_base_digit_char(bytes[i + 1] as char, eff_base as u32);
+                    let prev_ok =
+                        i > 0 && is_base_digit_char(bytes[i - 1] as char, eff_base as u32);
+                    let next_ok = i + 1 < bytes.len()
+                        && is_base_digit_char(bytes[i + 1] as char, eff_base as u32);
                     if !(prev_ok && next_ok) {
                         return Err(make_err(eff_base));
                     }
@@ -613,10 +750,12 @@ fn int_from_digit_string(s: &str, base_obj: Option<&PyObjectRef>, repr_str: &str
 /// CPython's str->int digit limit: enforced for decimal and non-power-of-2
 /// bases (base 3/36 hit it; base 2/4/8/16/32 use a fast binary path that
 /// skips it). Counts DIGITS, excluding underscores and the sign.
-fn check_int_str_digit_limit(s: &str, base_obj: Option<&PyObjectRef>) -> PyResult<()> {
+pub(crate) fn check_int_str_digit_limit(s: &str, base_obj: Option<&PyObjectRef>) -> PyResult<()> {
     #[cfg(not(feature = "no_int_str_limit"))]
     {
-        let power_of_two = base_obj.as_ref().and_then(|b| to_index(b).ok())
+        let power_of_two = base_obj
+            .as_ref()
+            .and_then(|b| to_index(b).ok())
             .and_then(|n| n.to_u64())
             .map(|n| n >= 2 && n & (n - 1) == 0)
             .unwrap_or(false);
@@ -624,9 +763,12 @@ fn check_int_str_digit_limit(s: &str, base_obj: Option<&PyObjectRef>) -> PyResul
             let limit = INT_MAX_STR_DIGITS.with(|d| d.get());
             if limit > 0 {
                 // Count DIGITS, ignoring the sign and surrounding whitespace.
-                let digit_len = s.trim()
+                let digit_len = s
+                    .trim()
                     .trim_start_matches(|c: char| c == '+' || c == '-')
-                    .chars().filter(|&c| c != '_').count();
+                    .chars()
+                    .filter(|&c| c != '_')
+                    .count();
                 if digit_len > limit as usize {
                     return Err(PyError::value_error(format!(
                         "Exceeds the limit ({} digits) for integer string conversion; use sys.set_int_max_str_digits()", limit
@@ -639,19 +781,29 @@ fn check_int_str_digit_limit(s: &str, base_obj: Option<&PyObjectRef>) -> PyResul
 }
 
 pub fn builtin_int(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.is_empty() { return Ok(py_int(0)); }
+    if args.is_empty() {
+        return Ok(py_int(0));
+    }
     // Keyword arguments: `x` is positional-only and `base` is the only
     // accepted keyword — int(x=1.2) is "int() got an unexpected keyword
     // argument 'x'", int(base=10) is "int() missing string argument".
     let mut args_vec = args.to_vec();
     let mut base_obj: Option<PyObjectRef> = None;
     {
-        let last_is_dict = args.last().map(|a| matches!(&*a.borrow(), PyObject::Dict(_))).unwrap_or(false);
+        let last_is_dict = args
+            .last()
+            .map(|a| matches!(&*a.borrow(), PyObject::Dict(_)))
+            .unwrap_or(false);
         if last_is_dict {
             let last_borrow = args.last().unwrap().borrow();
-            let pd = match &*last_borrow { PyObject::Dict(d) => d, _ => unreachable!() };
+            let pd = match &*last_borrow {
+                PyObject::Dict(d) => d,
+                _ => unreachable!(),
+            };
             if pd.get(&py_str("x")).ok().flatten().is_some() {
-                return Err(PyError::type_error("int() got an unexpected keyword argument 'x'"));
+                return Err(PyError::type_error(
+                    "int() got an unexpected keyword argument 'x'",
+                ));
             }
             base_obj = pd.get(&py_str("base")).ok().flatten();
             if args.len() == 1 {
@@ -678,9 +830,17 @@ pub fn builtin_int(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
     if base_obj.is_some() {
         let o = args_vec[0].borrow();
-        let accepts = matches!(&*o, PyObject::Str(_) | PyObject::Bytes(_) | PyObject::ByteArray(_) | PyObject::Instance { .. });
+        let accepts = matches!(
+            &*o,
+            PyObject::Str(_)
+                | PyObject::Bytes(_)
+                | PyObject::ByteArray(_)
+                | PyObject::Instance { .. }
+        );
         if !accepts {
-            return Err(PyError::type_error("int() can't convert non-string with explicit base"));
+            return Err(PyError::type_error(
+                "int() can't convert non-string with explicit base",
+            ));
         }
     }
     let obj = args_vec[0].borrow();
@@ -694,38 +854,65 @@ pub fn builtin_int(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         }
         PyObject::Str(s) => {
             check_int_str_digit_limit(s, base_obj.as_ref())?;
-            int_from_digit_string(s, base_obj.as_ref(), &format!("'{}'", crate::object::escape_string(s)))
+            int_from_digit_string(
+                s,
+                base_obj.as_ref(),
+                &format!("'{}'", crate::object::escape_string(s)),
+            )
         }
         PyObject::Bytes(b) => {
             let latin: String = b.iter().map(|&x| x as char).collect();
             check_int_str_digit_limit(&latin, base_obj.as_ref())?;
-            int_from_digit_string(&latin, base_obj.as_ref(), &format!("b'{}'", python_bytes_repr(b)))
+            int_from_digit_string(
+                &latin,
+                base_obj.as_ref(),
+                &format!("b'{}'", python_bytes_repr(b)),
+            )
         }
         PyObject::ByteArray(b) => {
             let latin: String = b.iter().map(|&x| x as char).collect();
             check_int_str_digit_limit(&latin, base_obj.as_ref())?;
-            int_from_digit_string(&latin, base_obj.as_ref(), &format!("bytearray(b'{}')", python_bytes_repr(b)))
+            int_from_digit_string(
+                &latin,
+                base_obj.as_ref(),
+                &format!("bytearray(b'{}')", python_bytes_repr(b)),
+            )
         }
         PyObject::MemoryView { .. } => {
             // memoryview/array parse base-10 only; an explicit base is
             // rejected ("can't convert non-string with explicit base").
             if base_obj.is_some() {
-                return Err(PyError::type_error("int() can't convert non-string with explicit base"));
+                return Err(PyError::type_error(
+                    "int() can't convert non-string with explicit base",
+                ));
             }
             let bytes = crate::object::mv_tobytes(&args_vec[0].clone())?;
             let latin: String = bytes.iter().map(|&x| x as char).collect();
-            int_from_digit_string(&latin, None, &format!("'{}'", crate::object::escape_string(&latin)))
+            int_from_digit_string(
+                &latin,
+                None,
+                &format!("'{}'", crate::object::escape_string(&latin)),
+            )
         }
         PyObject::Array(arr) => {
             if base_obj.is_some() {
-                return Err(PyError::type_error("int() can't convert non-string with explicit base"));
+                return Err(PyError::type_error(
+                    "int() can't convert non-string with explicit base",
+                ));
             }
             if matches!(arr.typecode, 'B' | 'b' | 'u') {
                 let bytes: Vec<u8> = arr.data.iter().map(|&v| v as u8).collect();
                 let latin: String = bytes.iter().map(|&x| x as char).collect();
-                return int_from_digit_string(&latin, None, &format!("'{}'", crate::object::escape_string(&latin)));
+                return int_from_digit_string(
+                    &latin,
+                    None,
+                    &format!("'{}'", crate::object::escape_string(&latin)),
+                );
             }
-            Err(PyError::type_error(format!("int() argument must be a string or number, not '{}'", obj.type_name())))
+            Err(PyError::type_error(format!(
+                "int() argument must be a string or number, not '{}'",
+                obj.type_name()
+            )))
         }
         PyObject::Bool(b) => Ok(py_int(if *b { 1 } else { 0 })),
         PyObject::Instance { typ, .. } => {
@@ -735,8 +922,16 @@ pub fn builtin_int(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             // native value — int(MyInt(7)) where MyInt.__int__()==42 is 42.
             // A bool return (an int subclass) is deprecated but usable.
             if let Some(int_method) = lookup_dunder_via_mro(&typ, "__int__") {
-                let is_native = matches!(&*int_method.borrow(), PyObject::BuiltinFunction { .. } | PyObject::Closure(_));
-                if !is_native {
+                let is_native = matches!(
+                    &*int_method.borrow(),
+                    PyObject::BuiltinFunction { .. } | PyObject::Closure(_)
+                );
+                let is_native_backed = native_backing_of(&args_vec[0]).is_some();
+                // Native-backed int/str/etc. subclasses skip their implicit
+                // (BuiltinFunction) `__int__` and use the backing instead —
+                // but a genuine object like `Fraction` whose `__int__` is a
+                // BuiltinFunction MUST be called.
+                if !is_native || !is_native_backed {
                     let result = call_bound_method(int_method, args_vec[0].clone(), vec![])?;
                     if let Some(n) = result.as_i64() {
                         if matches!(result, PyObjectRef::SmallBool(_)) {
@@ -749,7 +944,8 @@ pub fn builtin_int(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     }
                     return Err(PyError::type_error(format!(
                         "{}.__int__ returned non-int (type {})",
-                        get_type_name_for_instance(&typ), result.borrow().type_name()
+                        get_type_name_for_instance(&typ),
+                        result.borrow().type_name()
                     )));
                 }
             }
@@ -780,20 +976,28 @@ pub fn builtin_int(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 }
                 return Err(PyError::type_error(format!(
                     "{}.__index__ returned non-int (type {})",
-                    get_type_name_for_instance(&typ), result.borrow().type_name()
+                    get_type_name_for_instance(&typ),
+                    result.borrow().type_name()
                 )));
             }
-            Err(PyError::type_error(format!("int() argument must be a string or number, not '{}'", 
-                get_type_name_for_instance(&typ))))
+            Err(PyError::type_error(format!(
+                "int() argument must be a string or number, not '{}'",
+                get_type_name_for_instance(&typ)
+            )))
         }
-        _ => Err(PyError::type_error(format!("int() argument must be a string or number, not '{}'", obj.type_name()))),
+        _ => Err(PyError::type_error(format!(
+            "int() argument must be a string or number, not '{}'",
+            obj.type_name()
+        ))),
     }
 }
 
 /// int.from_bytes(bytes, byteorder, *, signed=False)
 pub fn builtin_int_from_bytes(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() < 2 {
-        return Err(PyError::type_error("int.from_bytes() needs at least 2 arguments"));
+        return Err(PyError::type_error(
+            "int.from_bytes() needs at least 2 arguments",
+        ));
     }
     let bytes_val = &args[0];
     let byteorder = &args[1];
@@ -801,9 +1005,10 @@ pub fn builtin_int_from_bytes(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let big_endian = order_str == "big";
     let byte_data: Vec<u8> = match &*bytes_val.borrow() {
         PyObject::Bytes(b) => b.clone(),
-        PyObject::List(items) => {
-            items.iter().map(|x| x.as_i64().unwrap_or(0) as u8).collect()
-        }
+        PyObject::List(items) => items
+            .iter()
+            .map(|x| x.as_i64().unwrap_or(0) as u8)
+            .collect(),
         _ => {
             let mut v = Vec::new();
             if let Ok(it) = builtin_iter(&[bytes_val.clone()]) {
@@ -821,7 +1026,10 @@ pub fn builtin_int_from_bytes(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let n = if big_endian {
         byte_data.iter().fold(0i64, |acc, &b| (acc << 8) | b as i64)
     } else {
-        byte_data.iter().rev().fold(0i64, |acc, &b| (acc << 8) | b as i64)
+        byte_data
+            .iter()
+            .rev()
+            .fold(0i64, |acc, &b| (acc << 8) | b as i64)
     };
     Ok(py_int(n))
 }
@@ -835,16 +1043,18 @@ pub(crate) fn validate_underscores(s: &str) -> PyResult<String> {
     let chars: Vec<char> = s.chars().collect();
     for i in 0..chars.len() {
         if chars[i] == '_' {
-            let prev_ok = i > 0 && if is_hex {
-                chars[i - 1].is_ascii_hexdigit()
-            } else {
-                chars[i - 1].is_ascii_digit()
-            };
-            let next_ok = i + 1 < chars.len() && if is_hex {
-                chars[i + 1].is_ascii_hexdigit()
-            } else {
-                chars[i + 1].is_ascii_digit()
-            };
+            let prev_ok = i > 0
+                && if is_hex {
+                    chars[i - 1].is_ascii_hexdigit()
+                } else {
+                    chars[i - 1].is_ascii_digit()
+                };
+            let next_ok = i + 1 < chars.len()
+                && if is_hex {
+                    chars[i + 1].is_ascii_hexdigit()
+                } else {
+                    chars[i + 1].is_ascii_digit()
+                };
             if !(prev_ok && next_ok) {
                 return Err(PyError::value_error(format!("invalid decimal literal")));
             }
@@ -856,8 +1066,9 @@ pub(crate) fn validate_underscores(s: &str) -> PyResult<String> {
 /// Python-style bytes repr (`b'...'`, escaping non-printables) — used in
 /// `float()` conversion error messages, which quote the original bytes.
 fn python_bytes_repr(b: &[u8]) -> String {
-    let s: String = b.iter().map(|&byte| {
-        match byte {
+    let s: String = b
+        .iter()
+        .map(|&byte| match byte {
             b'\\' => "\\\\".to_string(),
             b'\'' => "\\'".to_string(),
             b'\n' => "\\n".to_string(),
@@ -865,8 +1076,8 @@ fn python_bytes_repr(b: &[u8]) -> String {
             b'\r' => "\\r".to_string(),
             0x20..=0x7e => (byte as char).to_string(),
             _ => format!("\\x{:02x}", byte),
-        }
-    }).collect();
+        })
+        .collect();
     s
 }
 
@@ -880,7 +1091,9 @@ pub(crate) fn bigint_to_float(i: &BigInt) -> PyResult<f64> {
 }
 
 pub fn builtin_float(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.is_empty() { return Ok(py_float(0.0)); }
+    if args.is_empty() {
+        return Ok(py_float(0.0));
+    }
     let obj = args[0].borrow();
     match &*obj {
         PyObject::Int(i) => Ok(py_float(bigint_to_float(i)?)),
@@ -889,20 +1102,33 @@ pub fn builtin_float(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             let s: &str = s;
             let s_orig = s;
             let s = s.trim_matches(|c: char| c.is_whitespace());
-            let normalized: String = s.chars().map(|c| {
-                match c {
-                    '\u{0660}'..='\u{0669}' => char::from_u32('0' as u32 + (c as u32 - 0x0660)).unwrap_or(c),
-                    '\u{06F0}'..='\u{06F9}' => char::from_u32('0' as u32 + (c as u32 - 0x06F0)).unwrap_or(c),
-                    '\u{0966}'..='\u{096F}' => char::from_u32('0' as u32 + (c as u32 - 0x0966)).unwrap_or(c),
+            let normalized: String = s
+                .chars()
+                .map(|c| match c {
+                    '\u{0660}'..='\u{0669}' => {
+                        char::from_u32('0' as u32 + (c as u32 - 0x0660)).unwrap_or(c)
+                    }
+                    '\u{06F0}'..='\u{06F9}' => {
+                        char::from_u32('0' as u32 + (c as u32 - 0x06F0)).unwrap_or(c)
+                    }
+                    '\u{0966}'..='\u{096F}' => {
+                        char::from_u32('0' as u32 + (c as u32 - 0x0966)).unwrap_or(c)
+                    }
                     _ => c,
-                }
-            }).collect();
-            let normalized: String = validate_underscores(&normalized)?.chars().filter(|&c| c != '_').collect();
+                })
+                .collect();
+            let normalized: String = validate_underscores(&normalized)?
+                .chars()
+                .filter(|&c| c != '_')
+                .collect();
             // CPython's error quotes the ORIGINAL string with str repr
             // (%r), so control characters are escaped ('\t \n', '123\x00').
-            let f: f64 = normalized.parse().map_err(|_| PyError::value_error(format!(
-                "could not convert string to float: '{}'", crate::object::escape_string(s_orig)
-            )))?;
+            let f: f64 = normalized.parse().map_err(|_| {
+                PyError::value_error(format!(
+                    "could not convert string to float: '{}'",
+                    crate::object::escape_string(s_orig)
+                ))
+            })?;
             Ok(py_float(f))
         }
         PyObject::Bytes(b) => {
@@ -911,47 +1137,75 @@ pub fn builtin_float(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             // and reports the bytes repr.
             if b.iter().any(|&x| x >= 0x80) {
                 return Err(PyError::value_error(format!(
-                    "could not convert string to float: b'{}'", python_bytes_repr(b)
+                    "could not convert string to float: b'{}'",
+                    python_bytes_repr(b)
                 )));
             }
             let s: String = b.iter().map(|&x| x as char).collect();
             let s = s.trim_matches(|c: char| c.is_whitespace());
-            let normalized: String = s.chars().map(|c| {
-                match c {
-                    '\u{0660}'..='\u{0669}' => char::from_u32('0' as u32 + (c as u32 - 0x0660)).unwrap_or(c),
-                    '\u{06F0}'..='\u{06F9}' => char::from_u32('0' as u32 + (c as u32 - 0x06F0)).unwrap_or(c),
-                    '\u{0966}'..='\u{096F}' => char::from_u32('0' as u32 + (c as u32 - 0x0966)).unwrap_or(c),
+            let normalized: String = s
+                .chars()
+                .map(|c| match c {
+                    '\u{0660}'..='\u{0669}' => {
+                        char::from_u32('0' as u32 + (c as u32 - 0x0660)).unwrap_or(c)
+                    }
+                    '\u{06F0}'..='\u{06F9}' => {
+                        char::from_u32('0' as u32 + (c as u32 - 0x06F0)).unwrap_or(c)
+                    }
+                    '\u{0966}'..='\u{096F}' => {
+                        char::from_u32('0' as u32 + (c as u32 - 0x0966)).unwrap_or(c)
+                    }
                     _ => c,
-                }
-            }).collect();
-            let normalized: String = validate_underscores(&normalized)?.chars().filter(|&c| c != '_').collect();
+                })
+                .collect();
+            let normalized: String = validate_underscores(&normalized)?
+                .chars()
+                .filter(|&c| c != '_')
+                .collect();
             // CPython's error uses the bytes repr (%r) with the ORIGINAL
             // content: "could not convert string to float: b'  123 456  '".
-            let f: f64 = normalized.parse().map_err(|_| PyError::value_error(format!(
-                "could not convert string to float: b'{}'", python_bytes_repr(b)
-            )))?;
+            let f: f64 = normalized.parse().map_err(|_| {
+                PyError::value_error(format!(
+                    "could not convert string to float: b'{}'",
+                    python_bytes_repr(b)
+                ))
+            })?;
             Ok(py_float(f))
         }
         PyObject::ByteArray(b) => {
             if b.iter().any(|&x| x >= 0x80) {
                 return Err(PyError::value_error(format!(
-                    "could not convert bytearray to float: bytearray(b'{}')", python_bytes_repr(b)
+                    "could not convert bytearray to float: bytearray(b'{}')",
+                    python_bytes_repr(b)
                 )));
             }
             let s: String = b.iter().map(|&x| x as char).collect();
             let s = s.trim_matches(|c: char| c.is_whitespace());
-            let normalized: String = s.chars().map(|c| {
-                match c {
-                    '\u{0660}'..='\u{0669}' => char::from_u32('0' as u32 + (c as u32 - 0x0660)).unwrap_or(c),
-                    '\u{06F0}'..='\u{06F9}' => char::from_u32('0' as u32 + (c as u32 - 0x06F0)).unwrap_or(c),
-                    '\u{0966}'..='\u{096F}' => char::from_u32('0' as u32 + (c as u32 - 0x0966)).unwrap_or(c),
+            let normalized: String = s
+                .chars()
+                .map(|c| match c {
+                    '\u{0660}'..='\u{0669}' => {
+                        char::from_u32('0' as u32 + (c as u32 - 0x0660)).unwrap_or(c)
+                    }
+                    '\u{06F0}'..='\u{06F9}' => {
+                        char::from_u32('0' as u32 + (c as u32 - 0x06F0)).unwrap_or(c)
+                    }
+                    '\u{0966}'..='\u{096F}' => {
+                        char::from_u32('0' as u32 + (c as u32 - 0x0966)).unwrap_or(c)
+                    }
                     _ => c,
-                }
-            }).collect();
-            let normalized: String = validate_underscores(&normalized)?.chars().filter(|&c| c != '_').collect();
-            let f: f64 = normalized.parse().map_err(|_| PyError::value_error(format!(
-                "could not convert bytearray to float: bytearray(b'{}')", python_bytes_repr(b)
-            )))?;
+                })
+                .collect();
+            let normalized: String = validate_underscores(&normalized)?
+                .chars()
+                .filter(|&c| c != '_')
+                .collect();
+            let f: f64 = normalized.parse().map_err(|_| {
+                PyError::value_error(format!(
+                    "could not convert bytearray to float: bytearray(b'{}')",
+                    python_bytes_repr(b)
+                ))
+            })?;
             Ok(py_float(f))
         }
         PyObject::MemoryView { .. } => {
@@ -968,7 +1222,8 @@ pub fn builtin_float(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 return builtin_float(&[PyObjectRef::imm(PyObject::Bytes(bytes))]);
             }
             return Err(PyError::value_error(format!(
-                "could not convert string to float: array({:?}, ...)", arr.typecode
+                "could not convert string to float: array({:?}, ...)",
+                arr.typecode
             )));
         }
         PyObject::Instance { typ, .. } => {
@@ -984,7 +1239,8 @@ pub fn builtin_float(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 let result = call_bound_method(f, arg.clone(), vec![])?;
                 // Exact float result: used directly, no warning.
                 if matches!(&result, PyObjectRef::SmallFloat(_))
-                    || matches!(&*result.borrow(), PyObject::Float(_)) {
+                    || matches!(&*result.borrow(), PyObject::Float(_))
+                {
                     return Ok(result);
                 }
                 // A float SUBCLASS result is deprecated but still usable;
@@ -995,7 +1251,9 @@ pub fn builtin_float(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                         if native_base_of_type(rtyp).as_deref() == Some("float"))
                 };
                 if is_float_subclass {
-                    let v = native_backing_of(&result).and_then(|b| b.as_f64()).unwrap_or(f64::NAN);
+                    let v = native_backing_of(&result)
+                        .and_then(|b| b.as_f64())
+                        .unwrap_or(f64::NAN);
                     crate::modules::warnings_emit(
                         &format!("{}.__float__ returned non-float (type {}).  The ability to return an instance of a strict subclass of float is deprecated, and may be removed in a future version of Python.", type_name, result.borrow().type_name()),
                         "DeprecationWarning",
@@ -1004,7 +1262,8 @@ pub fn builtin_float(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 }
                 return Err(PyError::type_error(format!(
                     "{}.__float__ returned non-float (type {})",
-                    type_name, result.borrow().type_name()
+                    type_name,
+                    result.borrow().type_name()
                 )));
             }
             // Native-base routing for subclasses that define no __float__:
@@ -1031,9 +1290,15 @@ pub fn builtin_float(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 }
                 return Err(PyError::type_error("__index__ returned non-int"));
             }
-            Err(PyError::type_error(format!("float() argument must be a string or number, not '{}'", type_name)))
+            Err(PyError::type_error(format!(
+                "float() argument must be a string or number, not '{}'",
+                type_name
+            )))
         }
-        _ => Err(PyError::type_error(format!("float() argument must be a string or number, not '{}'", obj.type_name()))),
+        _ => Err(PyError::type_error(format!(
+            "float() argument must be a string or number, not '{}'",
+            obj.type_name()
+        ))),
     }
 }
 
@@ -1065,9 +1330,15 @@ pub(crate) fn float_subclass_result(cls: &PyObjectRef, value: f64) -> PyResult<P
     // skipped — the backing is already populated).
     let mut dict = AttrMap::new();
     dict.insert(NATIVE_BACKING_KEY.to_string(), py_float(value));
-    let instance = PyObjectRef::new(PyObject::Instance { typ: cls.clone(), dict });
+    let instance = PyObjectRef::new(PyObject::Instance {
+        typ: cls.clone(),
+        dict,
+    });
     if let Some(init_fn) = lookup_dunder_via_mro(cls, "__init__") {
-        let is_native = matches!(&*init_fn.borrow(), PyObject::BuiltinFunction { .. } | PyObject::Closure(_));
+        let is_native = matches!(
+            &*init_fn.borrow(),
+            PyObject::BuiltinFunction { .. } | PyObject::Closure(_)
+        );
         if !is_native {
             call_bound_method(init_fn, instance.clone(), vec![py_float(value)])?;
         }
@@ -1077,7 +1348,11 @@ pub(crate) fn float_subclass_result(cls: &PyObjectRef, value: f64) -> PyResult<P
 
 pub(crate) fn float_fromhex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // Bound as a classmethod: args[0] is the calling type, args[1] the string.
-    if args.len() < 2 { return Err(PyError::type_error("float.fromhex() requires exactly 1 argument")); }
+    if args.len() < 2 {
+        return Err(PyError::type_error(
+            "float.fromhex() requires exactly 1 argument",
+        ));
+    }
     let cls = &args[0];
     let s = args[1].str();
     let s = s.trim();
@@ -1087,41 +1362,66 @@ pub(crate) fn float_fromhex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         let first = c.next();
         let second = c.next();
         if matches!(first, Some('+') | Some('-')) && matches!(second, Some('+') | Some('-')) {
-            return Err(PyError::value_error("invalid hexadecimal floating-point literal"));
+            return Err(PyError::value_error(
+                "invalid hexadecimal floating-point literal",
+            ));
         }
     }
     let lower = s.to_lowercase();
     // nan spellings (with optional sign, case-insensitive) — all produce the
     // same nan.
-    if lower == "nan" || lower == "+nan" || lower == "-nan" { return float_subclass_result(cls, f64::NAN); }
-    if lower == "inf" || lower == "+inf" || lower == "-inf" || lower == "infinity" || lower == "+infinity" || lower == "-infinity" {
+    if lower == "nan" || lower == "+nan" || lower == "-nan" {
+        return float_subclass_result(cls, f64::NAN);
+    }
+    if lower == "inf"
+        || lower == "+inf"
+        || lower == "-inf"
+        || lower == "infinity"
+        || lower == "+infinity"
+        || lower == "-infinity"
+    {
         let sign = if lower.starts_with('-') { -1.0 } else { 1.0 };
         return float_subclass_result(cls, sign * f64::INFINITY);
     }
     let s = s.strip_prefix("+").unwrap_or(s);
     let sign = if s.starts_with('-') { -1.0 } else { 1.0 };
-    let s = s.strip_prefix('-').unwrap_or(s.strip_prefix('+').unwrap_or(s));
+    let s = s
+        .strip_prefix('-')
+        .unwrap_or(s.strip_prefix('+').unwrap_or(s));
     // A second sign ('++0x1.0p-0', '-+0x1.0p0') is invalid.
     if s.starts_with('+') || s.starts_with('-') {
-        return Err(PyError::value_error("invalid hexadecimal floating-point literal"));
+        return Err(PyError::value_error(
+            "invalid hexadecimal floating-point literal",
+        ));
     }
-    let s = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
+    let s = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .unwrap_or(s);
     if s.is_empty() {
-        return Err(PyError::value_error("invalid hexadecimal floating-point literal"));
+        return Err(PyError::value_error(
+            "invalid hexadecimal floating-point literal",
+        ));
     }
     // Split off the 'p' exponent FIRST — a mantissa without a dot
     // ('0x1p-1022') otherwise loses its exponent to the dot-split below.
-    let (mantissa, exp_part) = s.split_once('p').or_else(|| s.split_once('P'))
+    let (mantissa, exp_part) = s
+        .split_once('p')
+        .or_else(|| s.split_once('P'))
         .unwrap_or((s, ""));
     // A 'p'/'P' present but with no exponent digits after it ('0x0p') is
     // invalid, not an implicit exponent of 0.
     if exp_part.is_empty() && (s.contains('p') || s.contains('P')) {
-        return Err(PyError::value_error("invalid hexadecimal floating-point literal"));
+        return Err(PyError::value_error(
+            "invalid hexadecimal floating-point literal",
+        ));
     }
     let (int_part, frac_part) = mantissa.split_once('.').unwrap_or((mantissa, ""));
     // No hex digits before OR after the point ('0x.p0', '0x.') is invalid.
     if int_part.is_empty() && frac_part.is_empty() {
-        return Err(PyError::value_error("invalid hexadecimal floating-point literal"));
+        return Err(PyError::value_error(
+            "invalid hexadecimal floating-point literal",
+        ));
     }
     // Parse the mantissa EXACTLY: d = int * 16**frac_len + frac (a 17-digit
     // hex int overflows i64 — 0x10000000000000000 must be 2**64, not
@@ -1131,8 +1431,12 @@ pub(crate) fn float_fromhex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         if t.is_empty() {
             Ok(BigInt::from(0))
         } else {
-            BigInt::parse_bytes(t.as_bytes(), 16)
-                .ok_or_else(|| PyError::value_error(format!("invalid hexadecimal floating-point literal: '{}'", args[0].str())))
+            BigInt::parse_bytes(t.as_bytes(), 16).ok_or_else(|| {
+                PyError::value_error(format!(
+                    "invalid hexadecimal floating-point literal: '{}'",
+                    args[0].str()
+                ))
+            })
         }
     };
     let int_d = parse_hex(int_part)?;
@@ -1140,8 +1444,12 @@ pub(crate) fn float_fromhex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let frac_len = frac_part.len() as u64;
     let d = int_d * (BigInt::from(16u32).pow(frac_len as u32)) + frac_d;
     let exp: BigInt = if !exp_part.is_empty() {
-        exp_part.parse().map_err(|_| PyError::value_error(format!("invalid hex float exponent: {}", exp_part)))?
-    } else { BigInt::from(0) };
+        exp_part.parse().map_err(|_| {
+            PyError::value_error(format!("invalid hex float exponent: {}", exp_part))
+        })?
+    } else {
+        BigInt::from(0)
+    };
     // value = d * 2**(exp - 4*frac_len); round-half-even to the nearest
     // f64 EXACTLY (d.to_f64() before scaling would lose the low bits that
     // decide subnormal rounding — 0x1.00000000000000001p-1075 rounds to
@@ -1154,7 +1462,9 @@ pub(crate) fn float_fromhex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 if adj.sign() == num_bigint::Sign::Minus {
                     return Ok(py_float(sign * 0.0));
                 }
-                return Err(PyError::overflow_error("hexadecimal value too large to represent as a float"));
+                return Err(PyError::overflow_error(
+                    "hexadecimal value too large to represent as a float",
+                ));
             }
         }
     };
@@ -1200,7 +1510,9 @@ pub(crate) fn float_fromhex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // (0x1p1024, 0X1.fffffffffffff8p1023), not a real inf spelling (which
     // returned above).
     if result.is_infinite() {
-        return Err(PyError::overflow_error("hexadecimal value too large to represent as a float"));
+        return Err(PyError::overflow_error(
+            "hexadecimal value too large to represent as a float",
+        ));
     }
     float_subclass_result(cls, result)
 }
@@ -1238,7 +1550,9 @@ pub(crate) fn ldexp_f64(x: f64, exp: i32) -> f64 {
 /// `attrs.rs`, unaffected by this). Same extraction rationale as
 /// `float_fromhex` above.
 pub(crate) fn float_class_hex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.is_empty() { return Err(PyError::type_error("hex() takes exactly 1 argument")); }
+    if args.is_empty() {
+        return Err(PyError::type_error("hex() takes exactly 1 argument"));
+    }
     let obj = args[0].borrow();
     if let PyObject::Float(v) = &*obj {
         let bits = v.to_bits();
@@ -1246,10 +1560,14 @@ pub(crate) fn float_class_hex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         let biased_exp = ((bits >> 52) & 0x7ff) as i64;
         let mantissa = bits & 0x000f_ffff_ffff_ffff;
         if biased_exp == 0x7ff {
-            if mantissa == 0 { Ok(py_str(&format!("{}inf", sign))) }
-            else { Ok(py_str(&format!("{}nan", sign))) }
-        } else if *v == 0.0 { Ok(py_str(&format!("{}0x0.0p+0", sign))) }
-        else {
+            if mantissa == 0 {
+                Ok(py_str(&format!("{}inf", sign)))
+            } else {
+                Ok(py_str(&format!("{}nan", sign)))
+            }
+        } else if *v == 0.0 {
+            Ok(py_str(&format!("{}0x0.0p+0", sign)))
+        } else {
             let hex_mantissa = format!("{:013x}", mantissa);
             if biased_exp == 0 {
                 // Subnormal: same convention as the instance `x.hex()` —
@@ -1263,7 +1581,9 @@ pub(crate) fn float_class_hex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 Ok(py_str(&format!("{}0x1.{}p{:+}", sign, hex_mantissa, exp)))
             }
         }
-    } else { Err(PyError::type_error("hex() argument must be float")) }
+    } else {
+        Err(PyError::type_error("hex() argument must be float"))
+    }
 }
 
 /// Parses a real CPython-style complex literal string (`complex("1+2j")`,
@@ -1273,8 +1593,14 @@ pub(crate) fn float_class_hex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 fn parse_complex_str(s: &str) -> PyResult<(f64, f64)> {
     let malformed = || PyError::value_error(format!("complex() arg is a malformed string"));
     let s = s.trim();
-    let inner = s.strip_prefix('(').and_then(|s| s.strip_suffix(')')).unwrap_or(s).trim();
-    if inner.is_empty() { return Err(malformed()); }
+    let inner = s
+        .strip_prefix('(')
+        .and_then(|s| s.strip_suffix(')'))
+        .unwrap_or(s)
+        .trim();
+    if inner.is_empty() {
+        return Err(malformed());
+    }
     if let Some(stripped) = inner.strip_suffix(['j', 'J']) {
         let bytes = stripped.as_bytes();
         let mut split_idx = None;
@@ -1328,7 +1654,9 @@ pub fn builtin_complex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             PyObject::Bool(b) => (if *b { 1.0 } else { 0.0 }, 0.0),
             PyObject::Str(s) => {
                 if args.len() > 1 {
-                    return Err(PyError::type_error("complex() can't take second arg if first is a string"));
+                    return Err(PyError::type_error(
+                        "complex() can't take second arg if first is a string",
+                    ));
                 }
                 parse_complex_str(s)?
             }
@@ -1338,23 +1666,31 @@ pub fn builtin_complex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             // (`Lib/numbers.py`, implemented via `self.real`/`self.imag`),
             // exercised directly by `test_abstract_numbers.py::test_real`
             // (`complex(MyReal(1))`).
-            PyObject::Instance { typ, .. } => {
-                match lookup_dunder_via_mro(typ, "__complex__") {
-                    Some(f) => {
-                        let f = f.clone();
-                        let self_obj = args[0].clone();
-                        drop(obj);
-                        let result = call_bound_method(f, self_obj, vec![])?;
-                        let result_borrow = result.borrow();
-                        match &*result_borrow {
-                            PyObject::Complex(re, im) => (*re, *im),
-                            _ => return Err(PyError::type_error("__complex__ returned non-complex")),
-                        }
+            PyObject::Instance { typ, .. } => match lookup_dunder_via_mro(typ, "__complex__") {
+                Some(f) => {
+                    let f = f.clone();
+                    let self_obj = args[0].clone();
+                    drop(obj);
+                    let result = call_bound_method(f, self_obj, vec![])?;
+                    let result_borrow = result.borrow();
+                    match &*result_borrow {
+                        PyObject::Complex(re, im) => (*re, *im),
+                        _ => return Err(PyError::type_error("__complex__ returned non-complex")),
                     }
-                    None => return Err(PyError::type_error(format!("complex() argument must be a string or a number, not '{}'", get_type_name_for_instance(typ)))),
                 }
+                None => {
+                    return Err(PyError::type_error(format!(
+                        "complex() argument must be a string or a number, not '{}'",
+                        get_type_name_for_instance(typ)
+                    )))
+                }
+            },
+            _ => {
+                return Err(PyError::type_error(format!(
+                    "complex() argument must be a string or a number, not '{}'",
+                    obj.type_name()
+                )))
             }
-            _ => return Err(PyError::type_error(format!("complex() argument must be a string or a number, not '{}'", obj.type_name()))),
         }
     };
     if args.len() > 1 {
@@ -1363,8 +1699,45 @@ pub fn builtin_complex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             match &*obj {
                 PyObject::Int(i) => i.to_f64().unwrap_or(0.0),
                 PyObject::Float(f) => *f,
-                PyObject::Bool(b) => if *b { 1.0 } else { 0.0 },
-                _ => return Err(PyError::type_error(format!("complex() second argument must be a number, not '{}'", obj.type_name()))),
+                PyObject::Bool(b) => {
+                    if *b {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                }
+                PyObject::Instance { typ, .. } => match lookup_dunder_via_mro(typ, "__complex__") {
+                    Some(f) => {
+                        let f = f.clone();
+                        let self_obj = args[1].clone();
+                        drop(obj);
+                        let result = call_bound_method(f, self_obj, vec![])?;
+                        let result_borrow = result.borrow();
+                        match &*result_borrow {
+                            PyObject::Complex(re, im) => {
+                                if *im != 0.0 {
+                                    return Err(PyError::type_error("complex() can't take second arg if first is a complex number with a nonzero imaginary part"));
+                                }
+                                *re
+                            }
+                            _ => {
+                                return Err(PyError::type_error("__complex__ returned non-complex"))
+                            }
+                        }
+                    }
+                    None => {
+                        return Err(PyError::type_error(format!(
+                            "complex() second argument must be a number, not '{}'",
+                            get_type_name_for_instance(typ)
+                        )))
+                    }
+                },
+                _ => {
+                    return Err(PyError::type_error(format!(
+                        "complex() second argument must be a number, not '{}'",
+                        obj.type_name()
+                    )))
+                }
             }
         };
         return Ok(PyObjectRef::imm(PyObject::Complex(re, im + imag_extra)));
@@ -1393,9 +1766,15 @@ pub fn builtin_complex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 /// its own inline comment.)
 fn own_abc_registry(typ: &PyObjectRef) -> Vec<PyObjectRef> {
     if let PyObject::Type { dict, .. } = &*typ.borrow() {
-        dict.get_str("_abc_registry").and_then(|r| {
-            if let PyObject::FrozenSet(items) = &*r.borrow() { Some(items.to_vec()) } else { None }
-        }).unwrap_or_default()
+        dict.get_str("_abc_registry")
+            .and_then(|r| {
+                if let PyObject::FrozenSet(items) = &*r.borrow() {
+                    Some(items.to_vec())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default()
     } else {
         Vec::new()
     }
@@ -1410,11 +1789,16 @@ fn own_abc_registry(typ: &PyObjectRef) -> Vec<PyObjectRef> {
 /// `int` itself was registered against them directly — it wasn't). Walks
 /// `direct_subclasses_of` recursively; cheap in practice since real ABC
 /// hierarchies (`numbers`, `collections.abc`) are shallow.
-fn abc_registry_matches_in_subtree(base: &PyObjectRef, matcher: &dyn Fn(&PyObjectRef) -> bool) -> bool {
+fn abc_registry_matches_in_subtree(
+    base: &PyObjectRef,
+    matcher: &dyn Fn(&PyObjectRef) -> bool,
+) -> bool {
     if own_abc_registry(base).iter().any(|r| matcher(r)) {
         return true;
     }
-    direct_subclasses_of(base).iter().any(|sub| abc_registry_matches_in_subtree(sub, matcher))
+    direct_subclasses_of(base)
+        .iter()
+        .any(|sub| abc_registry_matches_in_subtree(sub, matcher))
 }
 
 fn is_exception_type(typ: &PyObjectRef) -> bool {
@@ -1455,7 +1839,11 @@ fn exception_instance_repr(instance: &PyObjectRef, class_name: &str) -> String {
         None
     };
     let args_str = match args.map(|a| a.borrow().clone()) {
-        Some(PyObject::Tuple(items)) => items.iter().map(|a| a.repr()).collect::<Vec<_>>().join(", "),
+        Some(PyObject::Tuple(items)) => items
+            .iter()
+            .map(|a| a.repr())
+            .collect::<Vec<_>>()
+            .join(", "),
         _ => String::new(),
     };
     format!("{}({})", class_name, args_str)
@@ -1474,11 +1862,17 @@ pub fn str_maketrans_builtin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             let mapping = &args[0];
             let items: Vec<(PyObjectRef, PyObjectRef)> = match &*mapping.borrow() {
                 PyObject::Dict(d) => d.items(),
-                _ => return Err(PyError::type_error("str.maketrans() argument 1 must be a mapping, not str")),
+                _ => {
+                    return Err(PyError::type_error(
+                        "str.maketrans() argument 1 must be a mapping, not str",
+                    ))
+                }
             };
             for (k, v) in items {
                 if k.str().chars().count() != 1 {
-                    return Err(PyError::value_error("string keys in translate table must be of length 1"));
+                    return Err(PyError::value_error(
+                        "string keys in translate table must be of length 1",
+                    ));
                 }
                 table.set(k, v)?;
             }
@@ -1489,7 +1883,9 @@ pub fn str_maketrans_builtin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             let x_chars: Vec<char> = x.chars().collect();
             let y_chars: Vec<char> = y.chars().collect();
             if x_chars.len() != y_chars.len() {
-                return Err(PyError::value_error("the first two maketrans arguments must have equal length"));
+                return Err(PyError::value_error(
+                    "the first two maketrans arguments must have equal length",
+                ));
             }
             for (a, b) in x_chars.iter().zip(y_chars.iter()) {
                 table.set(py_str(&a.to_string()), py_str(&b.to_string()))?;
@@ -1500,7 +1896,11 @@ pub fn str_maketrans_builtin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 }
             }
         }
-        _ => return Err(PyError::type_error("str.maketrans() takes 1 or 3 arguments (2 given)")),
+        _ => {
+            return Err(PyError::type_error(
+                "str.maketrans() takes 1 or 3 arguments (2 given)",
+            ))
+        }
     }
     Ok(PyObjectRef::new(PyObject::Dict(Box::new(table))))
 }
@@ -1508,18 +1908,30 @@ pub fn str_maketrans_builtin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 pub fn bytes_maketrans_builtin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // `bytes.maketrans(frm, to)` — returns a 256-byte translation table.
     if args.len() < 2 {
-        return Err(PyError::type_error("bytes.maketrans() takes exactly 2 arguments"));
+        return Err(PyError::type_error(
+            "bytes.maketrans() takes exactly 2 arguments",
+        ));
     }
     let frm: Vec<u8> = match &*args[0].borrow() {
         PyObject::Bytes(b) => b.clone(),
-        _ => return Err(PyError::type_error("bytes.maketrans() argument 1 must be bytes")),
+        _ => {
+            return Err(PyError::type_error(
+                "bytes.maketrans() argument 1 must be bytes",
+            ))
+        }
     };
     let to: Vec<u8> = match &*args[1].borrow() {
         PyObject::Bytes(b) => b.clone(),
-        _ => return Err(PyError::type_error("bytes.maketrans() argument 2 must be bytes")),
+        _ => {
+            return Err(PyError::type_error(
+                "bytes.maketrans() argument 2 must be bytes",
+            ))
+        }
     };
     if frm.len() != to.len() {
-        return Err(PyError::value_error("maketrans arguments must have same length"));
+        return Err(PyError::value_error(
+            "maketrans arguments must have same length",
+        ));
     }
     let mut result: Vec<u8> = (0u16..=255).map(|i| i as u8).collect();
     for (i, &f) in frm.iter().enumerate() {
@@ -1528,20 +1940,26 @@ pub fn bytes_maketrans_builtin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Ok(PyObjectRef::imm(PyObject::Bytes(result)))
 }
 
-
 pub fn builtin_str(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.is_empty() { Ok(py_str("")) }
-    else {
+    if args.is_empty() {
+        Ok(py_str(""))
+    } else {
         let f = {
             let obj_borrowed = args[0].borrow();
             if let PyObject::Instance { typ, .. } = &*obj_borrowed {
                 lookup_dunder_via_mro(typ, "__str__")
-            } else { None }
+            } else {
+                None
+            }
         };
         if let Some(f) = f {
             return call_bound_method(f, args[0].clone(), vec![]);
         }
-        let is_exc = if let PyObject::Instance { typ, .. } = &*args[0].borrow() { is_exception_type(typ) } else { false };
+        let is_exc = if let PyObject::Instance { typ, .. } = &*args[0].borrow() {
+            is_exception_type(typ)
+        } else {
+            false
+        };
         if is_exc {
             return Ok(py_str(&exception_instance_str(&args[0])));
         }
@@ -1630,8 +2048,12 @@ pub fn builtin_repr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 }
 
 pub fn builtin_bool(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.len() > 1 { return Err(PyError::type_error("bool() takes at most 1 argument")); }
-    if args.is_empty() { return Ok(py_bool(false)); }
+    if args.len() > 1 {
+        return Err(PyError::type_error("bool() takes at most 1 argument"));
+    }
+    if args.is_empty() {
+        return Ok(py_bool(false));
+    }
     let typ_opt = {
         let obj = args[0].borrow();
         if let PyObject::Instance { typ, .. } = &*obj {
@@ -1695,8 +2117,9 @@ pub fn builtin_bool(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 }
 
 pub fn builtin_list(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.is_empty() { Ok(py_list(Vec::new())) }
-    else {
+    if args.is_empty() {
+        Ok(py_list(Vec::new()))
+    } else {
         // Convert iterable to list
         let obj = args[0].borrow();
         match &*obj {
@@ -1754,11 +2177,16 @@ pub fn builtin_deque(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             for (k, v) in d.items() {
                 if k.str() == "maxlen" {
                     if kw_maxlen.is_some() || positional_maxlen.is_some() {
-                        return Err(PyError::type_error("deque() got multiple values for argument 'maxlen'"));
+                        return Err(PyError::type_error(
+                            "deque() got multiple values for argument 'maxlen'",
+                        ));
                     }
                     kw_maxlen = Some(v);
                 } else {
-                    return Err(PyError::type_error(format!("deque() got an unexpected keyword argument '{}'", k.str())));
+                    return Err(PyError::type_error(format!(
+                        "deque() got an unexpected keyword argument '{}'",
+                        k.str()
+                    )));
                 }
             }
         } else if !iterable_seen {
@@ -1771,7 +2199,9 @@ pub fn builtin_deque(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         }
     }
     if positional_maxlen.is_some() && kw_maxlen.is_some() {
-        return Err(PyError::type_error("deque() got multiple values for argument 'maxlen'"));
+        return Err(PyError::type_error(
+            "deque() got multiple values for argument 'maxlen'",
+        ));
     }
     let maxlen_ref = positional_maxlen.or(kw_maxlen);
     let maxlen = if let Some(m) = maxlen_ref {
@@ -1779,7 +2209,9 @@ pub fn builtin_deque(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         if matches!(&*m.borrow(), PyObject::None) {
             None
         } else {
-            let n = m.as_i64().ok_or_else(|| PyError::type_error("an integer is required"))?;
+            let n = m
+                .as_i64()
+                .ok_or_else(|| PyError::type_error("an integer is required"))?;
             if n < 0 {
                 return Err(PyError::value_error("maxlen must be non-negative"));
             }
@@ -1813,7 +2245,9 @@ pub fn builtin_deque(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 }
 
 pub fn builtin_tuple(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.is_empty() { return Ok(py_tuple(Vec::new())); }
+    if args.is_empty() {
+        return Ok(py_tuple(Vec::new()));
+    }
     // `tuple(x)` accepts ANY iterable in real Python, not just the handful
     // of native container shapes this used to special-case — e.g.
     // `tuple(map(...))`, generators, custom `__iter__` objects all raised
@@ -1932,7 +2366,9 @@ pub fn builtin_dict(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 }
 
 pub fn builtin_set(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.is_empty() { return Ok(py_set()); }
+    if args.is_empty() {
+        return Ok(py_set());
+    }
     // `set(x)` accepts any iterable in real Python — dicts (yielding keys),
     // generators, custom `__iter__` objects, etc., not just the handful of
     // native container shapes this used to special-case (which also had
@@ -1955,17 +2391,22 @@ pub fn builtin_set(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 }
 
 pub fn builtin_bytes(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.is_empty() { Ok(PyObjectRef::imm(PyObject::Bytes(Vec::new()))) }
-    else {
+    if args.is_empty() {
+        Ok(PyObjectRef::imm(PyObject::Bytes(Vec::new())))
+    } else {
         let obj = args[0].borrow();
         match &*obj {
             // Same fix as `bytearray(n)` above: `bytes(n)` zero-fills a
             // buffer of length `n`, it doesn't wrap `n` as a single byte
             // value.
             PyObject::Int(i) => {
-                let n = i.to_i64().ok_or_else(|| PyError::value_error("bytes() argument must be non-negative"))?;
+                let n = i
+                    .to_i64()
+                    .ok_or_else(|| PyError::value_error("bytes() argument must be non-negative"))?;
                 if n < 0 {
-                    return Err(PyError::value_error("bytes() argument must be non-negative"));
+                    return Err(PyError::value_error(
+                        "bytes() argument must be non-negative",
+                    ));
                 }
                 Ok(PyObjectRef::imm(PyObject::Bytes(vec![0u8; n as usize])))
             }
@@ -1977,13 +2418,19 @@ pub fn builtin_bytes(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 for item in v {
                     let item = item.borrow();
                     if let PyObject::Int(i) = &*item {
-                        let n = i.to_i64().ok_or_else(|| PyError::value_error("bytes() requires int in range 0-255"))?;
+                        let n = i.to_i64().ok_or_else(|| {
+                            PyError::value_error("bytes() requires int in range 0-255")
+                        })?;
                         if n < 0 || n > 255 {
-                            return Err(PyError::value_error("bytes() requires int in range 0-255"));
+                            return Err(PyError::value_error(
+                                "bytes() requires int in range 0-255",
+                            ));
                         }
                         result.push(n as u8);
                     } else {
-                        return Err(PyError::type_error("bytes() argument must be an integer or iterable"));
+                        return Err(PyError::type_error(
+                            "bytes() argument must be an integer or iterable",
+                        ));
                     }
                 }
                 Ok(PyObjectRef::imm(PyObject::Bytes(result)))
@@ -1993,13 +2440,19 @@ pub fn builtin_bytes(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 for item in v {
                     let item = item.borrow();
                     if let PyObject::Int(i) = &*item {
-                        let n = i.to_i64().ok_or_else(|| PyError::value_error("bytes() requires int in range 0-255"))?;
+                        let n = i.to_i64().ok_or_else(|| {
+                            PyError::value_error("bytes() requires int in range 0-255")
+                        })?;
                         if n < 0 || n > 255 {
-                            return Err(PyError::value_error("bytes() requires int in range 0-255"));
+                            return Err(PyError::value_error(
+                                "bytes() requires int in range 0-255",
+                            ));
                         }
                         result.push(n as u8);
                     } else {
-                        return Err(PyError::type_error("bytes() argument must be an integer or iterable"));
+                        return Err(PyError::type_error(
+                            "bytes() argument must be an integer or iterable",
+                        ));
                     }
                 }
                 Ok(PyObjectRef::imm(PyObject::Bytes(result)))
@@ -2009,13 +2462,19 @@ pub fn builtin_bytes(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 for item in items.to_vec() {
                     let item_b = item.borrow();
                     if let PyObject::Int(i) = &*item_b {
-                        let n = i.to_i64().ok_or_else(|| PyError::value_error("bytes() requires int in range 0-255"))?;
+                        let n = i.to_i64().ok_or_else(|| {
+                            PyError::value_error("bytes() requires int in range 0-255")
+                        })?;
                         if n < 0 || n > 255 {
-                            return Err(PyError::value_error("bytes() requires int in range 0-255"));
+                            return Err(PyError::value_error(
+                                "bytes() requires int in range 0-255",
+                            ));
                         }
                         result.push(n as u8);
                     } else {
-                        return Err(PyError::type_error("bytes() argument must be integer or iterable"));
+                        return Err(PyError::type_error(
+                            "bytes() argument must be integer or iterable",
+                        ));
                     }
                 }
                 Ok(PyObjectRef::imm(PyObject::Bytes(result)))
@@ -2036,13 +2495,19 @@ pub fn builtin_bytes(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     };
                     let item_b = item.borrow();
                     if let PyObject::Int(i) = &*item_b {
-                        let n = i.to_i64().ok_or_else(|| PyError::value_error("bytes() requires int in range 0-255"))?;
+                        let n = i.to_i64().ok_or_else(|| {
+                            PyError::value_error("bytes() requires int in range 0-255")
+                        })?;
                         if n < 0 || n > 255 {
-                            return Err(PyError::value_error("bytes() requires int in range 0-255"));
+                            return Err(PyError::value_error(
+                                "bytes() requires int in range 0-255",
+                            ));
                         }
                         result.push(n as u8);
                     } else {
-                        return Err(PyError::type_error("bytes() argument must be an integer or iterable"));
+                        return Err(PyError::type_error(
+                            "bytes() argument must be an integer or iterable",
+                        ));
                     }
                 }
                 Ok(PyObjectRef::imm(PyObject::Bytes(result)))
@@ -2056,7 +2521,9 @@ pub fn builtin_bytes(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 /// Create a bytes object from a string of hexadecimal digits.
 pub fn builtin_bytes_fromhex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
-        return Err(PyError::type_error("bytes.fromhex() takes exactly 1 argument (0 given)"));
+        return Err(PyError::type_error(
+            "bytes.fromhex() takes exactly 1 argument (0 given)",
+        ));
     }
     let s = args[0].str();
     // Remove spaces (CPython allows spaces in the hex string)
@@ -2067,11 +2534,13 @@ pub fn builtin_bytes_fromhex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let mut result = Vec::with_capacity(s.len() / 2);
     let bytes = s.as_bytes();
     for chunk in bytes.chunks(2) {
-        let hex_pair = std::str::from_utf8(chunk).map_err(|_| {
-            PyError::value_error("non-hexadecimal number found")
-        })?;
+        let hex_pair = std::str::from_utf8(chunk)
+            .map_err(|_| PyError::value_error("non-hexadecimal number found"))?;
         let byte = u8::from_str_radix(hex_pair, 16).map_err(|_| {
-            PyError::value_error(format!("non-hexadecimal number found in fromhex() arg at position {}", s.find(hex_pair).unwrap_or(0)))
+            PyError::value_error(format!(
+                "non-hexadecimal number found in fromhex() arg at position {}",
+                s.find(hex_pair).unwrap_or(0)
+            ))
         })?;
         result.push(byte);
     }
@@ -2079,8 +2548,9 @@ pub fn builtin_bytes_fromhex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 }
 
 pub fn builtin_bytearray(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.is_empty() { Ok(PyObjectRef::new(PyObject::ByteArray(Vec::new()))) }
-    else {
+    if args.is_empty() {
+        Ok(PyObjectRef::new(PyObject::ByteArray(Vec::new())))
+    } else {
         let obj = args[0].borrow();
         match &*obj {
             // Real `bytearray(n)` (a single non-negative int argument)
@@ -2092,9 +2562,13 @@ pub fn builtin_bytearray(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             // idiom — found via `struct.pack_into`'s own doctest-style
             // idiom `bytearray(10)`.
             PyObject::Int(i) => {
-                let n = i.to_i64().ok_or_else(|| PyError::value_error("bytearray() argument must be non-negative"))?;
+                let n = i.to_i64().ok_or_else(|| {
+                    PyError::value_error("bytearray() argument must be non-negative")
+                })?;
                 if n < 0 {
-                    return Err(PyError::value_error("bytearray() argument must be non-negative"));
+                    return Err(PyError::value_error(
+                        "bytearray() argument must be non-negative",
+                    ));
                 }
                 Ok(PyObjectRef::new(PyObject::ByteArray(vec![0u8; n as usize])))
             }
@@ -2106,13 +2580,19 @@ pub fn builtin_bytearray(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 for item in v {
                     let item = item.borrow();
                     if let PyObject::Int(i) = &*item {
-                        let n = i.to_i64().ok_or_else(|| PyError::value_error("bytearray() requires int in range 0-255"))?;
+                        let n = i.to_i64().ok_or_else(|| {
+                            PyError::value_error("bytearray() requires int in range 0-255")
+                        })?;
                         if n < 0 || n > 255 {
-                            return Err(PyError::value_error("bytearray() requires int in range 0-255"));
+                            return Err(PyError::value_error(
+                                "bytearray() requires int in range 0-255",
+                            ));
                         }
                         result.push(n as u8);
                     } else {
-                        return Err(PyError::type_error("bytearray() argument must be an integer or iterable"));
+                        return Err(PyError::type_error(
+                            "bytearray() argument must be an integer or iterable",
+                        ));
                     }
                 }
                 Ok(PyObjectRef::new(PyObject::ByteArray(result)))
@@ -2122,18 +2602,27 @@ pub fn builtin_bytearray(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 for item in v {
                     let item = item.borrow();
                     if let PyObject::Int(i) = &*item {
-                        let n = i.to_i64().ok_or_else(|| PyError::value_error("bytearray() requires int in range 0-255"))?;
+                        let n = i.to_i64().ok_or_else(|| {
+                            PyError::value_error("bytearray() requires int in range 0-255")
+                        })?;
                         if n < 0 || n > 255 {
-                            return Err(PyError::value_error("bytearray() requires int in range 0-255"));
+                            return Err(PyError::value_error(
+                                "bytearray() requires int in range 0-255",
+                            ));
                         }
                         result.push(n as u8);
                     } else {
-                        return Err(PyError::type_error("bytearray() argument must be an integer or iterable"));
+                        return Err(PyError::type_error(
+                            "bytearray() argument must be an integer or iterable",
+                        ));
                     }
                 }
                 Ok(PyObjectRef::new(PyObject::ByteArray(result)))
             }
-            _ => Err(PyError::type_error(format!("cannot convert '{}' to bytearray", obj.type_name()))),
+            _ => Err(PyError::type_error(format!(
+                "cannot convert '{}' to bytearray",
+                obj.type_name()
+            ))),
         }
     }
 }
@@ -2148,12 +2637,16 @@ pub fn builtin_frozenset(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             PyObject::FrozenSet(s) => Ok(PyObjectRef::imm(PyObject::FrozenSet(s.clone()))),
             PyObject::List(v) => {
                 let mut set = PySet::new();
-                for item in v { set.add(item.clone())?; }
+                for item in v {
+                    set.add(item.clone())?;
+                }
                 Ok(PyObjectRef::imm(PyObject::FrozenSet(set)))
             }
             PyObject::Tuple(v) => {
                 let mut set = PySet::new();
-                for item in v { set.add(item.clone())?; }
+                for item in v {
+                    set.add(item.clone())?;
+                }
                 Ok(PyObjectRef::imm(PyObject::FrozenSet(set)))
             }
             PyObject::Str(s) => {
@@ -2170,7 +2663,10 @@ pub fn builtin_frozenset(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 }
                 Ok(PyObjectRef::imm(PyObject::FrozenSet(set)))
             }
-            _ => Err(PyError::type_error(format!("cannot convert '{}' to frozenset", obj.type_name()))),
+            _ => Err(PyError::type_error(format!(
+                "cannot convert '{}' to frozenset",
+                obj.type_name()
+            ))),
         }
     }
 }
@@ -2180,8 +2676,13 @@ pub fn builtin_format(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         0 => Err(PyError::type_error("format() requires at least 1 argument")),
         1 => Ok(py_str(&args[0].str())),
         2 => {
+            if matches!(&*args[1].borrow(), PyObject::None) {
+                return Err(PyError::type_error(
+                    "format() argument 2 must be str, not NoneType",
+                ));
+            }
             let spec = args[1].str();
-            if spec.trim().is_empty() {
+            if spec.is_empty() {
                 return Ok(py_str(&args[0].str()));
             }
             // Use the comprehensive format_with_spec from vm.rs
@@ -2249,13 +2750,11 @@ pub fn builtin_slice(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 step: none,
             }))
         }
-        3 => {
-            Ok(PyObjectRef::imm(PyObject::Slice {
-                start: args[0].clone(),
-                stop: args[1].clone(),
-                step: args[2].clone(),
-            }))
-        }
+        3 => Ok(PyObjectRef::imm(PyObject::Slice {
+            start: args[0].clone(),
+            stop: args[1].clone(),
+            step: args[2].clone(),
+        })),
         _ => Err(PyError::type_error("slice() takes at most 3 arguments")),
     }
 }
@@ -2295,12 +2794,19 @@ pub fn builtin_dir(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             // a mixin base for any multiple-inheritance test class.
             let mut seen = std::collections::HashSet::new();
             for key in dict.keys() {
-                if seen.insert(*key) { names.push(py_str(interner::lookup_str(*key))); }
+                if seen.insert(*key) {
+                    names.push(py_str(interner::lookup_str(*key)));
+                }
             }
             for base in mro {
-                if let PyObject::Type { dict: base_dict, .. } = &*base.borrow() {
+                if let PyObject::Type {
+                    dict: base_dict, ..
+                } = &*base.borrow()
+                {
                     for key in base_dict.keys() {
-                        if seen.insert(*key) { names.push(py_str(interner::lookup_str(*key))); }
+                        if seen.insert(*key) {
+                            names.push(py_str(interner::lookup_str(*key)));
+                        }
                     }
                 }
             }
@@ -2323,14 +2829,19 @@ pub fn builtin_dir(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         let b = b.borrow();
         if let (PyObject::Str(a), PyObject::Str(b)) = (&*a, &*b) {
             a.cmp(b)
-        } else { std::cmp::Ordering::Equal }
+        } else {
+            std::cmp::Ordering::Equal
+        }
     });
     Ok(py_list(names))
 }
 
 pub fn builtin_globals(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     with_vm_mut(|vm| {
-        let frame = vm.frames.last().ok_or_else(|| PyError::runtime_error("no frame"))?;
+        let frame = vm
+            .frames
+            .last()
+            .ok_or_else(|| PyError::runtime_error("no frame"))?;
         let globals = frame.globals.borrow();
         let mut d = crate::object::PyDict::new();
         for (k, v) in globals.iter() {
@@ -2342,7 +2853,10 @@ pub fn builtin_globals(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 
 pub fn builtin_locals(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     with_vm_mut(|vm| {
-        let frame = vm.frames.last().ok_or_else(|| PyError::runtime_error("no frame"))?;
+        let frame = vm
+            .frames
+            .last()
+            .ok_or_else(|| PyError::runtime_error("no frame"))?;
         let mut d = crate::object::PyDict::new();
         for (k, v) in frame.locals.iter() {
             let name = crate::interner::lookup(k);
@@ -2353,7 +2867,9 @@ pub fn builtin_locals(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 }
 
 pub fn builtin_divmod(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.len() != 2 { return Err(PyError::type_error("divmod() takes exactly 2 arguments")); }
+    if args.len() != 2 {
+        return Err(PyError::type_error("divmod() takes exactly 2 arguments"));
+    }
     // Was: unconditional `args[0].as_i64()`/`args[1].as_i64()` — never
     // consulted `__divmod__`/`__rdivmod__` at all, so ANY custom numeric
     // type (real trigger: `numbers.Real`'s own MIXIN `__divmod__`/
@@ -2364,8 +2880,12 @@ pub fn builtin_divmod(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // rejected plain `float` arguments, which real `divmod()` supports
     // natively. Mirrors the established `try_dunder_binop` dispatch
     // pattern already used by `py_add`/etc.
-    if let Some(r) = try_dunder_binop(&args[0], &args[1], "__divmod__")? { return Ok(r); }
-    if let Some(r) = try_dunder_binop(&args[1], &args[0], "__rdivmod__")? { return Ok(r); }
+    if let Some(r) = try_dunder_binop(&args[0], &args[1], "__divmod__")? {
+        return Ok(r);
+    }
+    if let Some(r) = try_dunder_binop(&args[1], &args[0], "__rdivmod__")? {
+        return Ok(r);
+    }
     // Python's `//`/`%` floor toward negative infinity, unlike Rust's
     // truncating `/`/`%` — reuse the already-correct `py_floordiv`/`py_mod`
     // (which already raise `ZeroDivisionError` themselves) rather than
@@ -2406,11 +2926,20 @@ fn round_half_even_rat(num: &BigInt, den: &BigInt) -> BigInt {
     let q = &a / den;
     let r = &a % den;
     let two_r = &r * 2;
-    let q = if &two_r > den { q + 1 }
-        else if &two_r < den { q }
-        else if (&q % 2) == BigInt::zero() { q }
-        else { q + 1 };
-    if neg { -q } else { q }
+    let q = if &two_r > den {
+        q + 1
+    } else if &two_r < den {
+        q
+    } else if (&q % 2) == BigInt::zero() {
+        q
+    } else {
+        q + 1
+    };
+    if neg {
+        -q
+    } else {
+        q
+    }
 }
 
 // CPython's `double_round`: round `x` to `ndigits` decimal places with
@@ -2421,7 +2950,11 @@ fn double_round(x: f64, ndigits: i64) -> PyResult<f64> {
     let (num, den) = f64_exact_ratio(x);
     let pow10 = BigInt::from(10u32).pow(ndigits.unsigned_abs() as u32);
     let neg = num.sign() == num_bigint::Sign::Minus;
-    let (snum, sden) = if ndigits >= 0 { (num * &pow10, den) } else { (num, den * &pow10) };
+    let (snum, sden) = if ndigits >= 0 {
+        (num * &pow10, den)
+    } else {
+        (num, den * &pow10)
+    };
     let q = round_half_even_rat(&snum, &sden);
     // Reconstruct `q / 10^ndigits` as a decimal string.
     let digits = {
@@ -2442,14 +2975,22 @@ fn double_round(x: f64, ndigits: i64) -> PyResult<f64> {
     let sign = if neg { "-" } else { "" };
     let rounded: f64 = format!("{}{}", sign, digits).parse().unwrap_or(0.0);
     if rounded.is_infinite() {
-        return Err(PyError::overflow_error("rounded value too large to represent"));
+        return Err(PyError::overflow_error(
+            "rounded value too large to represent",
+        ));
     }
     Ok(rounded)
 }
 
 pub fn builtin_round(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.len() > 2 { return Err(PyError::type_error("round() takes at most 2 arguments")); }
-    if args.is_empty() { return Err(PyError::type_error("round() missing required argument 'number' (pos 1)")); }
+    if args.len() > 2 {
+        return Err(PyError::type_error("round() takes at most 2 arguments"));
+    }
+    if args.is_empty() {
+        return Err(PyError::type_error(
+            "round() missing required argument 'number' (pos 1)",
+        ));
+    }
     // `round(number=x, ndigits=n)` packs BOTH keywords into a leading dict;
     // `round(x, ndigits=n)` leaves `x` positional and packs only `ndigits`.
     let (val, ndigits_obj): (Option<PyObjectRef>, Option<PyObjectRef>) = {
@@ -2472,15 +3013,20 @@ pub fn builtin_round(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             (v, n)
         }
     };
-    let val = val.ok_or_else(|| PyError::type_error("round() missing required argument 'number' (pos 1)"))?;
+    let val = val
+        .ok_or_else(|| PyError::type_error("round() missing required argument 'number' (pos 1)"))?;
     // `round(x, None)` / `round(x, ndigits=None)` — an EXPLICIT `None` for
     // `ndigits` behaves exactly like the 1-arg form.
-    let has_ndigits = ndigits_obj.as_ref()
+    let has_ndigits = ndigits_obj
+        .as_ref()
         .map(|n| !matches!(&*n.borrow(), PyObject::None))
         .unwrap_or(false);
 
     // Non-numeric objects delegate to `type(x).__round__`, like CPython.
-    let is_numeric = matches!(&*val.borrow(), PyObject::Int(_) | PyObject::Bool(_) | PyObject::Float(_));
+    let is_numeric = matches!(
+        &*val.borrow(),
+        PyObject::Int(_) | PyObject::Bool(_) | PyObject::Float(_)
+    );
     if !is_numeric {
         let f = {
             let o = val.borrow();
@@ -2490,8 +3036,19 @@ pub fn builtin_round(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             }
         };
         return match f {
-            Some(f) => call_bound_method(f, val, if has_ndigits { vec![ndigits_obj.unwrap()] } else { vec![] }),
-            None => Err(PyError::type_error(format!("type {} doesn't define __round__ method", val.get_type_name()))),
+            Some(f) => call_bound_method(
+                f,
+                val,
+                if has_ndigits {
+                    vec![ndigits_obj.unwrap()]
+                } else {
+                    vec![]
+                },
+            ),
+            None => Err(PyError::type_error(format!(
+                "type {} doesn't define __round__ method",
+                val.get_type_name()
+            ))),
         };
     }
 
@@ -2520,11 +3077,20 @@ pub fn builtin_round(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
 
     // Float path.
-    let x = match &*val.borrow() { PyObject::Float(f) => *f, _ => unreachable!() };
+    let x = match &*val.borrow() {
+        PyObject::Float(f) => *f,
+        _ => unreachable!(),
+    };
     if !has_ndigits {
         // round(x) → nearest integer (ties to even), returned as an int.
-        if x.is_infinite() { return Err(PyError::overflow_error("cannot convert float infinity to integer")); }
-        if x.is_nan() { return Err(PyError::value_error("cannot convert float NaN to integer")); }
+        if x.is_infinite() {
+            return Err(PyError::overflow_error(
+                "cannot convert float infinity to integer",
+            ));
+        }
+        if x.is_nan() {
+            return Err(PyError::value_error("cannot convert float NaN to integer"));
+        }
         let (num, den) = f64_exact_ratio(x);
         return Ok(py_int(round_half_even_rat(&num, &den)));
     }
@@ -2553,16 +3119,20 @@ pub fn builtin_abs(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         PyObject::Float(f) => Ok(py_float(f.abs())),
         PyObject::Complex(re, im) => Ok(py_float(re.hypot(*im))),
         PyObject::Bool(b) => Ok(py_int(if *b { 1 } else { 0 })),
-        PyObject::Instance { typ, .. } => {
-            match lookup_dunder_via_mro(typ, "__abs__") {
-                Some(f) => {
-                    drop(obj);
-                    call_bound_method(f, args[0].clone(), vec![])
-                }
-                None => Err(PyError::type_error(format!("bad operand type for abs(): '{}'", get_type_name_for_instance(typ)))),
+        PyObject::Instance { typ, .. } => match lookup_dunder_via_mro(typ, "__abs__") {
+            Some(f) => {
+                drop(obj);
+                call_bound_method(f, args[0].clone(), vec![])
             }
-        }
-        _ => Err(PyError::type_error(format!("bad operand type for abs(): '{}'", obj.type_name()))),
+            None => Err(PyError::type_error(format!(
+                "bad operand type for abs(): '{}'",
+                get_type_name_for_instance(typ)
+            ))),
+        },
+        _ => Err(PyError::type_error(format!(
+            "bad operand type for abs(): '{}'",
+            obj.type_name()
+        ))),
     }
 }
 
@@ -2572,7 +3142,11 @@ pub fn builtin_hasattr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
     let attr_name = args[1].str();
     if std::env::var("RPY_DEBUG_GETATTR").is_ok() {
-        eprintln!("HASATTR: obj_type={} attr={}", args[0].borrow().type_name(), attr_name);
+        eprintln!(
+            "HASATTR: obj_type={} attr={}",
+            args[0].borrow().type_name(),
+            attr_name
+        );
     }
     match args[0].borrow().get_attribute(&attr_name) {
         Ok(_) => Ok(py_bool(true)),
@@ -2636,10 +3210,14 @@ pub fn builtin_setattr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // where CPython itself would have allowed it.
     if !matches!(args[0], PyObjectRef::Mut(_)) {
         return Err(PyError::attribute_error(format!(
-            "'{}' object has no attribute '{}'", args[0].borrow().type_name(), attr_name
+            "'{}' object has no attribute '{}'",
+            args[0].borrow().type_name(),
+            attr_name
         )));
     }
-    args[0].borrow_mut().set_attribute(&attr_name, args[2].clone())?;
+    args[0]
+        .borrow_mut()
+        .set_attribute(&attr_name, args[2].clone())?;
     Ok(py_none())
 }
 
@@ -2662,7 +3240,9 @@ pub fn builtin_delattr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // See the matching guard in `builtin_setattr` just above.
     if !matches!(args[0], PyObjectRef::Mut(_)) {
         return Err(PyError::attribute_error(format!(
-            "'{}' object has no attribute '{}'", args[0].borrow().type_name(), attr_name
+            "'{}' object has no attribute '{}'",
+            args[0].borrow().type_name(),
+            attr_name
         )));
     }
     args[0].borrow_mut().del_attribute(&attr_name)?;
@@ -2674,7 +3254,9 @@ pub fn builtin_ord(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         return Err(PyError::type_error("ord() takes exactly one argument"));
     }
     let s = args[0].str();
-    let c = s.chars().next().ok_or_else(|| PyError::type_error("ord() expected a character, but string of length 0 found"))?;
+    let c = s.chars().next().ok_or_else(|| {
+        PyError::type_error("ord() expected a character, but string of length 0 found")
+    })?;
     Ok(py_int(c as u32 as i64))
 }
 
@@ -2683,8 +3265,11 @@ pub fn builtin_chr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         return Err(PyError::type_error("chr() takes exactly one argument"));
     }
     let n = to_index(&args[0])?;
-    let code = n.to_usize().ok_or_else(|| PyError::value_error("chr() arg not in range(0x110000)"))?;
-    let c = char::from_u32(code as u32).ok_or_else(|| PyError::value_error("chr() arg not in range(0x110000)"))?;
+    let code = n
+        .to_usize()
+        .ok_or_else(|| PyError::value_error("chr() arg not in range(0x110000)"))?;
+    let c = char::from_u32(code as u32)
+        .ok_or_else(|| PyError::value_error("chr() arg not in range(0x110000)"))?;
     Ok(py_str(&c.to_string()))
 }
 
@@ -2740,7 +3325,9 @@ pub fn builtin_input(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         print!("{}", args[0].str());
     }
     let mut line = String::new();
-    std::io::stdin().read_line(&mut line).map_err(|e| PyError::runtime_error(e.to_string()))?;
+    std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|e| PyError::runtime_error(e.to_string()))?;
     if line.ends_with('\n') {
         line.pop();
     }
@@ -2748,10 +3335,13 @@ pub fn builtin_input(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 }
 
 pub fn builtin_exit(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    let code = if args.is_empty() { 0 }
-    else if let PyObject::Int(i) = &*args[0].borrow() {
+    let code = if args.is_empty() {
+        0
+    } else if let PyObject::Int(i) = &*args[0].borrow() {
         i.to_i32().unwrap_or(0)
-    } else { 0 };
+    } else {
+        0
+    };
     Err(PyError::SystemExit(code))
 }
 
@@ -2762,11 +3352,17 @@ pub fn builtin_exit(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 /// full calling convention without re-entering the live VM's execute loop
 /// (which is what `vm.call_function` does from inside a builtin, and which
 /// misbehaves for user Functions).
-pub fn call_function_disposable(func: &PyObjectRef, args: Vec<PyObjectRef>, keywords: Vec<(String, PyObjectRef)>) -> PyResult<PyObjectRef> {
+pub fn call_function_disposable(
+    func: &PyObjectRef,
+    args: Vec<PyObjectRef>,
+    keywords: Vec<(String, PyObjectRef)>,
+) -> PyResult<PyObjectRef> {
     match &*func.borrow() {
         PyObject::BuiltinFunction { func: f, .. } => f(&args),
         PyObject::Closure(c) => c(&args),
-        PyObject::BuiltinMethod { func: f, self_obj, .. } => {
+        PyObject::BuiltinMethod {
+            func: f, self_obj, ..
+        } => {
             let mut all = vec![self_obj.clone()];
             all.extend(args);
             f(&all)
@@ -2796,13 +3392,24 @@ pub fn call_function_disposable(func: &PyObjectRef, args: Vec<PyObjectRef>, keyw
             let mut vm = crate::vm::VirtualMachine::new();
             vm.call_function(func.clone(), args, keywords)
         }
-        _ => Err(PyError::type_error(format!("'{}' object is not callable", func.borrow().type_name()))),
+        _ => Err(PyError::type_error(format!(
+            "'{}' object is not callable",
+            func.borrow().type_name()
+        ))),
     }
 }
 
-pub fn call_bound_method(func: PyObjectRef, self_obj: PyObjectRef, args: Vec<PyObjectRef>) -> PyResult<PyObjectRef> {
+pub fn call_bound_method(
+    func: PyObjectRef,
+    self_obj: PyObjectRef,
+    args: Vec<PyObjectRef>,
+) -> PyResult<PyObjectRef> {
     match &*func.borrow() {
-        PyObject::BuiltinMethod { func: f, self_obj: s, .. } => {
+        PyObject::BuiltinMethod {
+            func: f,
+            self_obj: s,
+            ..
+        } => {
             let mut all_args = vec![s.clone()];
             all_args.push(self_obj);
             all_args.extend(args);
@@ -2832,10 +3439,19 @@ pub fn call_bound_method(func: PyObjectRef, self_obj: PyObjectRef, args: Vec<PyO
             let fname = &f.code.name;
             let closure = &f.closure;
             if std::env::var("RPY_DEBUG_IMPORT").is_ok() {
-                eprintln!("CALL_BOUND_METHOD (disposable VM): fname={} code_name={} filename={}", fname, code.name, code.filename);
+                eprintln!(
+                    "CALL_BOUND_METHOD (disposable VM): fname={} code_name={} filename={}",
+                    fname, code.name, code.filename
+                );
             }
             if std::env::var("RPY_DEBUG_CBM").is_ok() {
-                eprintln!("call_bound_method: fname={} varnames={:?} args.len()={} arg_count={}", fname, code.varnames, args.len(), code.arg_count);
+                eprintln!(
+                    "call_bound_method: fname={} varnames={:?} args.len()={} arg_count={}",
+                    fname,
+                    code.varnames,
+                    args.len(),
+                    code.arg_count
+                );
             }
             // The disposable VM is constructed BEFORE the frame (and the
             // frame borrows ITS `builtins` map, not a separately-built one)
@@ -2855,7 +3471,12 @@ pub fn call_bound_method(func: PyObjectRef, self_obj: PyObjectRef, args: Vec<PyO
             // '__name__'` — `type(self)` had silently returned a fresh
             // `type`-instance instead of the real class object.
             let mut vm = crate::vm::VirtualMachine::new();
-            let mut frame = crate::vm::Frame::new(code.clone(), g.clone(), std::rc::Rc::clone(&vm.builtins), None);
+            let mut frame = crate::vm::Frame::new(
+                code.clone(),
+                g.clone(),
+                std::rc::Rc::clone(&vm.builtins),
+                None,
+            );
             // Without this, ANY closure-capturing function invoked via
             // call_bound_method (repr()/str()/hash()/comparisons/other
             // native builtins that call a user-defined dunder this way,
@@ -2876,9 +3497,15 @@ pub fn call_bound_method(func: PyObjectRef, self_obj: PyObjectRef, args: Vec<PyO
             }
             let npos = args.len();
             let named_params = if code.vararg_name.is_some() || code.kwarg_name.is_some() {
-                code.varnames.iter().position(|n| {
-                    code.vararg_name.as_ref().map(|b| b.as_str()) == Some(crate::interner::lookup_str(*n)) || code.kwarg_name.as_ref().map(|b| b.as_str()) == Some(crate::interner::lookup_str(*n))
-                }).unwrap_or(code.varnames.len())
+                code.varnames
+                    .iter()
+                    .position(|n| {
+                        code.vararg_name.as_ref().map(|b| b.as_str())
+                            == Some(crate::interner::lookup_str(*n))
+                            || code.kwarg_name.as_ref().map(|b| b.as_str())
+                                == Some(crate::interner::lookup_str(*n))
+                    })
+                    .unwrap_or(code.varnames.len())
             } else {
                 code.varnames.len()
             };
@@ -2886,7 +3513,10 @@ pub fn call_bound_method(func: PyObjectRef, self_obj: PyObjectRef, args: Vec<PyO
                 let idx = i + 1;
                 if idx < code.varnames.len() {
                     frame.fast_locals[idx] = Some(args[i].clone());
-                    frame.insert_local(crate::interner::lookup_str(code.varnames[idx]), args[i].clone());
+                    frame.insert_local(
+                        crate::interner::lookup_str(code.varnames[idx]),
+                        args[i].clone(),
+                    );
                 }
             }
             if let Some(vararg_name) = &code.vararg_name {
@@ -2906,7 +3536,11 @@ pub fn call_bound_method(func: PyObjectRef, self_obj: PyObjectRef, args: Vec<PyO
                 // own vararg tuple — real trigger: CPython's own
                 // `test_descr.py`'s `OperatorsTest.__init__(self, *args,
                 // **kwargs)`, loaded via `unittest`'s `loadTestsFromTestCase`.
-                if let Some(idx) = code.varnames.iter().position(|n| crate::interner::lookup_str(*n) == vararg_name.as_str()) {
+                if let Some(idx) = code
+                    .varnames
+                    .iter()
+                    .position(|n| crate::interner::lookup_str(*n) == vararg_name.as_str())
+                {
                     if idx < frame.fast_locals.len() {
                         frame.fast_locals[idx] = Some(vararg_val.clone());
                     }
@@ -2918,11 +3552,13 @@ pub fn call_bound_method(func: PyObjectRef, self_obj: PyObjectRef, args: Vec<PyO
                 for i in npos..named_params.saturating_sub(1) {
                     let idx = i + 1;
                     if idx < code.varnames.len() {
-                        let default_idx = num_defaults.saturating_sub(named_params.saturating_sub(1) - i);
+                        let default_idx =
+                            num_defaults.saturating_sub(named_params.saturating_sub(1) - i);
                         if default_idx < defaults.len() {
                             let val = defaults[default_idx].clone();
                             frame.fast_locals[idx] = Some(val.clone());
-                            frame.insert_local(crate::interner::lookup_str(code.varnames[idx]), val);
+                            frame
+                                .insert_local(crate::interner::lookup_str(code.varnames[idx]), val);
                         }
                     }
                 }
@@ -2937,7 +3573,11 @@ pub fn call_bound_method(func: PyObjectRef, self_obj: PyObjectRef, args: Vec<PyO
             // `OperatorsTest.__init__(self, *args, **kwargs)` scenario,
             // whose body explicitly re-unpacks `**kwargs` into another call).
             if let Some(kwarg_name) = &code.kwarg_name {
-                if let Some(idx) = code.varnames.iter().position(|n| crate::interner::lookup_str(*n) == kwarg_name.as_str()) {
+                if let Some(idx) = code
+                    .varnames
+                    .iter()
+                    .position(|n| crate::interner::lookup_str(*n) == kwarg_name.as_str())
+                {
                     if idx < frame.fast_locals.len() {
                         frame.fast_locals[idx] = Some(py_dict());
                     }
@@ -2947,7 +3587,14 @@ pub fn call_bound_method(func: PyObjectRef, self_obj: PyObjectRef, args: Vec<PyO
                 }
             }
             if std::env::var("RPY_DEBUG_CBM").is_ok() {
-                eprintln!("call_bound_method: fast_locals after setup = {:?}", frame.fast_locals.iter().map(|v| v.as_ref().map(|x| x.repr())).collect::<Vec<_>>());
+                eprintln!(
+                    "call_bound_method: fast_locals after setup = {:?}",
+                    frame
+                        .fast_locals
+                        .iter()
+                        .map(|v| v.as_ref().map(|x| x.repr()))
+                        .collect::<Vec<_>>()
+                );
             }
             vm.frames.push(frame);
             vm.execute()
@@ -3002,7 +3649,11 @@ pub fn builtin_sorted(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         let last = args.last().unwrap();
         let last_borrowed = last.borrow();
         if let PyObject::Dict(kwargs) = &*last_borrowed {
-            kwargs.get(&py_str("reverse")).unwrap_or(None).map(|v| v.truthy()).unwrap_or(false)
+            kwargs
+                .get(&py_str("reverse"))
+                .unwrap_or(None)
+                .map(|v| v.truthy())
+                .unwrap_or(false)
         } else {
             false
         }
@@ -3040,7 +3691,9 @@ pub fn builtin_sorted(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             // Route through py_compare (not the raw Compare trait methods)
             // so user-defined classes' __lt__/__gt__ are consulted — the
             // trait impl alone has no notion of Instance dunder dispatch.
-            py_compare(&a_val, &b_val, 0).map(|r| r.truthy()).unwrap_or(false)
+            py_compare(&a_val, &b_val, 0)
+                .map(|r| r.truthy())
+                .unwrap_or(false)
         });
         if reverse {
             v.reverse();
@@ -3056,13 +3709,21 @@ pub fn builtin_enumerate(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let start: usize = if args.len() > 1 {
         if let PyObject::Int(i) = &*args[1].borrow() {
             i.to_usize().unwrap_or(0)
-        } else { 0 }
-    } else { 0 };
+        } else {
+            0
+        }
+    } else {
+        0
+    };
     // Lazily wrap the source iterator — see `PyObject::EnumerateIter`'s own
     // doc comment for why eagerly draining it here (the previous approach)
     // was a real bug, not just a style choice.
     let iterable = builtin_iter(&[args[0].clone()])?;
-    Ok(PyObjectRef::new(PyObject::EnumerateIter { source: iterable, pos: 0, start }))
+    Ok(PyObjectRef::new(PyObject::EnumerateIter {
+        source: iterable,
+        pos: 0,
+        start,
+    }))
 }
 
 pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
@@ -3072,7 +3733,9 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // idiom), not just a test-only construct.
     if args.len() == 2 {
         if !builtin_callable(&[args[0].clone()])?.truthy() {
-            return Err(PyError::type_error(format!("iter(v, w): v must be callable")));
+            return Err(PyError::type_error(format!(
+                "iter(v, w): v must be callable"
+            )));
         }
         return Ok(PyObjectRef::new(PyObject::CallSentinelIter {
             func: args[0].clone(),
@@ -3096,7 +3759,9 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             // `__iter__` (e.g. `iter(SomeEnum)` / `list(SomeEnum)`) — see
             // the matching GET_ITER opcode handling in vm.rs for why this
             // needs metatype_of rather than ordinary attribute lookup.
-            PyObject::Type { .. } => metatype_of(&args[0]).and_then(|mt| lookup_dunder_via_mro(&mt, "__iter__")),
+            PyObject::Type { .. } => {
+                metatype_of(&args[0]).and_then(|mt| lookup_dunder_via_mro(&mt, "__iter__"))
+            }
             _ => None,
         }
     };
@@ -3114,21 +3779,35 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // as their own dedicated arms already).
     if let PyObject::Instance { typ, .. } = &*args[0].borrow() {
         if lookup_dunder_via_mro(typ, "__getitem__").is_some() {
-            return Ok(PyObjectRef::new(PyObject::GetItemIter { obj: args[0].clone(), index: 0 }));
+            return Ok(PyObjectRef::new(PyObject::GetItemIter {
+                obj: args[0].clone(),
+                index: 0,
+            }));
         }
     }
     let obj = args[0].borrow();
     match &*obj {
         PyObject::Tuple(v) => Ok(py_list(v.clone())),
         PyObject::Str(s) => Ok(py_list(s.chars().map(|c| py_str(&c.to_string())).collect())),
-        PyObject::Bytes(b) => Ok(PyObjectRef::new(PyObject::ListIter { list: b.iter().map(|byte| py_int(*byte as i64)).collect(), index: 0 })),
-        PyObject::ByteArray(b) => Ok(PyObjectRef::new(PyObject::ListIter { list: b.iter().map(|byte| py_int(*byte as i64)).collect(), index: 0 })),
+        PyObject::Bytes(b) => Ok(PyObjectRef::new(PyObject::ListIter {
+            list: b.iter().map(|byte| py_int(*byte as i64)).collect(),
+            index: 0,
+        })),
+        PyObject::ByteArray(b) => Ok(PyObjectRef::new(PyObject::ListIter {
+            list: b.iter().map(|byte| py_int(*byte as i64)).collect(),
+            index: 0,
+        })),
         PyObject::MemoryView { .. } => {
             drop(obj);
             let len = mv_len(&args[0])?;
             let mut items = Vec::with_capacity(len);
-            for i in 0..len { items.push(mv_getitem(&args[0], &py_int(i as i64))?); }
-            Ok(PyObjectRef::new(PyObject::ListIter { list: items, index: 0 }))
+            for i in 0..len {
+                items.push(mv_getitem(&args[0], &py_int(i as i64))?);
+            }
+            Ok(PyObjectRef::new(PyObject::ListIter {
+                list: items,
+                index: 0,
+            }))
         }
         // `iter(a_set)` must return a real ITERATOR (advanceable via
         // `builtin_next`), not the bare materialized list `py_list` builds —
@@ -3142,20 +3821,32 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         // deeper in its own dependency chain hits a frozenset somewhere in
         // `unicodedata`/locale data) — but the bug is general, not specific
         // to that file.
-        PyObject::Set(s) => Ok(PyObjectRef::new(PyObject::ListIter { list: s.to_vec(), index: 0 })),
-        PyObject::FrozenSet(s) => Ok(PyObjectRef::new(PyObject::ListIter { list: s.to_vec(), index: 0 })),
-        PyObject::Range { start, stop, step } => {
-            Ok(PyObjectRef::new(PyObject::RangeIter { current: *start, stop: *stop, step: *step }))
-        }
-        PyObject::List(v) => {
-            Ok(PyObjectRef::new(PyObject::ListIter { list: v.clone(), index: 0 }))
-        }
-        PyObject::Deque { data, .. } => {
-            Ok(PyObjectRef::new(PyObject::DequeIter { deque: args[0].clone(), index: 0, start_len: data.len() }))
-        }
-        PyObject::Dict(d) => {
-            Ok(PyObjectRef::new(PyObject::ListIter { list: d.keys(), index: 0 }))
-        }
+        PyObject::Set(s) => Ok(PyObjectRef::new(PyObject::ListIter {
+            list: s.to_vec(),
+            index: 0,
+        })),
+        PyObject::FrozenSet(s) => Ok(PyObjectRef::new(PyObject::ListIter {
+            list: s.to_vec(),
+            index: 0,
+        })),
+        PyObject::Range { start, stop, step } => Ok(PyObjectRef::new(PyObject::RangeIter {
+            current: *start,
+            stop: *stop,
+            step: *step,
+        })),
+        PyObject::List(v) => Ok(PyObjectRef::new(PyObject::ListIter {
+            list: v.clone(),
+            index: 0,
+        })),
+        PyObject::Deque { data, .. } => Ok(PyObjectRef::new(PyObject::DequeIter {
+            deque: args[0].clone(),
+            index: 0,
+            start_len: data.len(),
+        })),
+        PyObject::Dict(d) => Ok(PyObjectRef::new(PyObject::ListIter {
+            list: d.keys(),
+            index: 0,
+        })),
         // `iter(f)`/`for line in f:` — see the matching `GET_ITER` opcode
         // handling in `vm.rs` for the full story; this is the SEPARATE
         // free-function path (`iter(f)` called explicitly, or anything
@@ -3163,28 +3854,49 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         PyObject::File { file, binary, .. } => {
             use std::io::Read;
             let mut rest = Vec::new();
-            file.borrow_mut().read_to_end(&mut rest).map_err(|e| PyError::os_error_from_io(&e))?;
+            file.borrow_mut()
+                .read_to_end(&mut rest)
+                .map_err(|e| PyError::os_error_from_io(&e))?;
             let mut lines: Vec<PyObjectRef> = Vec::new();
             let mut current: Vec<u8> = Vec::new();
             for byte in rest {
                 current.push(byte);
                 if byte == b'\n' {
-                    lines.push(if *binary { PyObjectRef::imm(PyObject::Bytes(current.clone())) } else { py_str(&String::from_utf8_lossy(&current)) });
+                    lines.push(if *binary {
+                        PyObjectRef::imm(PyObject::Bytes(current.clone()))
+                    } else {
+                        py_str(&String::from_utf8_lossy(&current))
+                    });
                     current.clear();
                 }
             }
             if !current.is_empty() {
-                lines.push(if *binary { PyObjectRef::imm(PyObject::Bytes(current.clone())) } else { py_str(&String::from_utf8_lossy(&current)) });
+                lines.push(if *binary {
+                    PyObjectRef::imm(PyObject::Bytes(current.clone()))
+                } else {
+                    py_str(&String::from_utf8_lossy(&current))
+                });
             }
-            Ok(PyObjectRef::new(PyObject::ListIter { list: lines, index: 0 }))
+            Ok(PyObjectRef::new(PyObject::ListIter {
+                list: lines,
+                index: 0,
+            }))
         }
         // Already an iterator object (one of `builtin_next`'s own
         // recognized variants) — `iter(it)` on an existing iterator
         // just returns it unchanged, matching real Python.
-        PyObject::ListIter { .. } | PyObject::RangeIter { .. } | PyObject::CycleIter { .. }
-        | PyObject::EnumerateIter { .. } | PyObject::MapIterator { .. } | PyObject::FilterIterator { .. }
-        | PyObject::ZipIterator { .. } | PyObject::FutureAwaitIterator { .. } | PyObject::GroupByIter { .. }
-        | PyObject::GetItemIter { .. } | PyObject::CallSentinelIter { .. } | PyObject::DequeIter { .. } => Ok(args[0].clone()),
+        PyObject::ListIter { .. }
+        | PyObject::RangeIter { .. }
+        | PyObject::CycleIter { .. }
+        | PyObject::EnumerateIter { .. }
+        | PyObject::MapIterator { .. }
+        | PyObject::FilterIterator { .. }
+        | PyObject::ZipIterator { .. }
+        | PyObject::FutureAwaitIterator { .. }
+        | PyObject::GroupByIter { .. }
+        | PyObject::GetItemIter { .. }
+        | PyObject::CallSentinelIter { .. }
+        | PyObject::DequeIter { .. } => Ok(args[0].clone()),
         // Anything else (plain functions, ints, ...) is genuinely not
         // iterable. The previous fallback (`Ok(args[0].clone())`)
         // silently treated ANY object as if it were already a valid
@@ -3196,7 +3908,10 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         // `TypeError` (confirmed via `operator.countOf(countOf, countOf)`
         // — a non-iterable `BuiltinFunction` passed to `iter()` — from
         // CPython's own `test_iter.py::test_countOf`).
-        other => Err(PyError::type_error(format!("'{}' object is not iterable", other.type_name()))),
+        other => Err(PyError::type_error(format!(
+            "'{}' object is not iterable",
+            other.type_name()
+        ))),
     }
 }
 
@@ -3210,13 +3925,26 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 /// `state * step` from wherever it currently sits. Found via CPython's own
 /// `test_range.py::test_iterator_setstate`.
 pub fn range_iter_setstate(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.len() < 2 { return Err(PyError::type_error("__setstate__() takes exactly one argument")); }
-    let state = to_index(&args[1]).map_err(|_| PyError::type_error(format!(
-        "an integer is required (got type {})", args[1].borrow().type_name())))?;
+    if args.len() < 2 {
+        return Err(PyError::type_error(
+            "__setstate__() takes exactly one argument",
+        ));
+    }
+    let state = to_index(&args[1]).map_err(|_| {
+        PyError::type_error(format!(
+            "an integer is required (got type {})",
+            args[1].borrow().type_name()
+        ))
+    })?;
     let mut obj = args[0].borrow_mut();
     if let PyObject::RangeIter { current, step, .. } = &mut *obj {
         let delta = state * BigInt::from(*step);
-        *current = current.checked_add(delta.to_i64().unwrap_or(if delta.sign() == Sign::Minus { i64::MIN } else { i64::MAX }))
+        *current = current
+            .checked_add(delta.to_i64().unwrap_or(if delta.sign() == Sign::Minus {
+                i64::MIN
+            } else {
+                i64::MAX
+            }))
             .unwrap_or(*current);
     }
     Ok(py_none())
@@ -3227,9 +3955,17 @@ pub fn range_iter_setstate(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 /// this just sets it directly (clamped to the list's length, matching real
 /// CPython's own clamping behavior for an out-of-range state).
 pub fn list_iter_setstate(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.len() < 2 { return Err(PyError::type_error("__setstate__() takes exactly one argument")); }
-    let state = to_index(&args[1]).map_err(|_| PyError::type_error(format!(
-        "an integer is required (got type {})", args[1].borrow().type_name())))?;
+    if args.len() < 2 {
+        return Err(PyError::type_error(
+            "__setstate__() takes exactly one argument",
+        ));
+    }
+    let state = to_index(&args[1]).map_err(|_| {
+        PyError::type_error(format!(
+            "an integer is required (got type {})",
+            args[1].borrow().type_name()
+        ))
+    })?;
     let mut obj = args[0].borrow_mut();
     if let PyObject::ListIter { list, index } = &mut *obj {
         let n = state.to_usize().unwrap_or(0).min(list.len());
@@ -3254,7 +3990,9 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     let b = next_func.borrow();
                     if let PyObject::BuiltinMethod { name, func, .. } = &*b {
                         (name.clone(), *func)
-                    } else { return Err(PyError::runtime_error("expected __next__ method")) }
+                    } else {
+                        return Err(PyError::runtime_error("expected __next__ method"));
+                    }
                 };
                 let result = f(&[args[0].clone()]);
                 // Convert raise StopIteration into PyError::StopIteration for next() protocol
@@ -3286,8 +4024,15 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // Inline types (SmallInt etc.) are not iterable — return TypeError
     // without calling borrow_mut on something that doesn't support it.
     match args[0] {
-        PyObjectRef::SmallInt(_) | PyObjectRef::SmallBool(_) | PyObjectRef::SmallFloat(_) | PyObjectRef::SmallStr(_) | PyObjectRef::None => {
-            return Err(PyError::type_error(format!("'{}' object is not an iterator", args[0].get_type_name())));
+        PyObjectRef::SmallInt(_)
+        | PyObjectRef::SmallBool(_)
+        | PyObjectRef::SmallFloat(_)
+        | PyObjectRef::SmallStr(_)
+        | PyObjectRef::None => {
+            return Err(PyError::type_error(format!(
+                "'{}' object is not an iterator",
+                args[0].get_type_name()
+            )));
         }
         _ => {}
     }
@@ -3306,12 +4051,24 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if is_groupby {
         let (source, key_func, mut pending, exhausted) = {
             let mut obj = args[0].borrow_mut();
-            if let PyObject::GroupByIter { source, key_func, pending, exhausted } = &mut *obj {
+            if let PyObject::GroupByIter {
+                source,
+                key_func,
+                pending,
+                exhausted,
+            } = &mut *obj
+            {
                 (source.clone(), key_func.clone(), pending.take(), *exhausted)
-            } else { unreachable!() }
+            } else {
+                unreachable!()
+            }
         };
         if exhausted {
-            return if args.len() >= 2 { Ok(args[1].clone()) } else { Err(PyError::stop_iteration()) };
+            return if args.len() >= 2 {
+                Ok(args[1].clone())
+            } else {
+                Err(PyError::stop_iteration())
+            };
         }
         let compute_key = |v: &PyObjectRef| -> PyResult<PyObjectRef> {
             match &key_func {
@@ -3323,17 +4080,24 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         // call's lookahead, or freshly read from the source.
         let (this_key, first_val) = match pending.take() {
             Some((k, v)) => (k, v),
-            None => {
-                match builtin_next(&[source.clone()]) {
-                    Ok(v) => { let k = compute_key(&v)?; (k, v) }
-                    Err(PyError::StopIteration) => {
-                        let mut obj = args[0].borrow_mut();
-                        if let PyObject::GroupByIter { exhausted, .. } = &mut *obj { *exhausted = true; }
-                        return if args.len() >= 2 { Ok(args[1].clone()) } else { Err(PyError::stop_iteration()) };
-                    }
-                    Err(e) => return Err(e),
+            None => match builtin_next(&[source.clone()]) {
+                Ok(v) => {
+                    let k = compute_key(&v)?;
+                    (k, v)
                 }
-            }
+                Err(PyError::StopIteration) => {
+                    let mut obj = args[0].borrow_mut();
+                    if let PyObject::GroupByIter { exhausted, .. } = &mut *obj {
+                        *exhausted = true;
+                    }
+                    return if args.len() >= 2 {
+                        Ok(args[1].clone())
+                    } else {
+                        Err(PyError::stop_iteration())
+                    };
+                }
+                Err(e) => return Err(e),
+            },
         };
         let mut group = vec![first_val];
         let mut new_pending = None;
@@ -3349,18 +4113,30 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                         break;
                     }
                 }
-                Err(PyError::StopIteration) => { new_exhausted = true; break; }
+                Err(PyError::StopIteration) => {
+                    new_exhausted = true;
+                    break;
+                }
                 Err(e) => return Err(e),
             }
         }
         {
             let mut obj = args[0].borrow_mut();
-            if let PyObject::GroupByIter { pending, exhausted, .. } = &mut *obj {
+            if let PyObject::GroupByIter {
+                pending, exhausted, ..
+            } = &mut *obj
+            {
                 *pending = new_pending;
                 *exhausted = new_exhausted;
             }
         }
-        return Ok(py_tuple(vec![this_key, PyObjectRef::new(PyObject::ListIter { list: group, index: 0 })]));
+        return Ok(py_tuple(vec![
+            this_key,
+            PyObjectRef::new(PyObject::ListIter {
+                list: group,
+                index: 0,
+            }),
+        ]));
     }
     // Same reentrancy concern as `GroupByIter` just above: advancing this
     // needs to call the underlying object's own `__getitem__` (arbitrary
@@ -3368,23 +4144,44 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // held, then a second short borrow to write the new index back.
     let getitem_state = {
         let obj = args[0].borrow();
-        if let PyObject::GetItemIter { obj: inner, index } = &*obj { Some((inner.clone(), *index)) } else { None }
+        if let PyObject::GetItemIter { obj: inner, index } = &*obj {
+            Some((inner.clone(), *index))
+        } else {
+            None
+        }
     };
     let call_sentinel_state = {
         let obj = args[0].borrow();
-        if let PyObject::CallSentinelIter { func, sentinel, exhausted } = &*obj {
+        if let PyObject::CallSentinelIter {
+            func,
+            sentinel,
+            exhausted,
+        } = &*obj
+        {
             Some((func.clone(), sentinel.clone(), *exhausted))
-        } else { None }
+        } else {
+            None
+        }
     };
     if let Some((func, sentinel, exhausted)) = call_sentinel_state {
         if exhausted {
-            return if args.len() >= 2 { Ok(args[1].clone()) } else { Err(PyError::stop_iteration()) };
+            return if args.len() >= 2 {
+                Ok(args[1].clone())
+            } else {
+                Err(PyError::stop_iteration())
+            };
         }
         let result = builtin_call(&func, &[])?;
         if result.equals(&sentinel)? {
             let mut obj = args[0].borrow_mut();
-            if let PyObject::CallSentinelIter { exhausted, .. } = &mut *obj { *exhausted = true; }
-            return if args.len() >= 2 { Ok(args[1].clone()) } else { Err(PyError::stop_iteration()) };
+            if let PyObject::CallSentinelIter { exhausted, .. } = &mut *obj {
+                *exhausted = true;
+            }
+            return if args.len() >= 2 {
+                Ok(args[1].clone())
+            } else {
+                Err(PyError::stop_iteration())
+            };
         }
         return Ok(result);
     }
@@ -3392,7 +4189,9 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         return match py_getitem(&inner, &py_int(index)) {
             Ok(v) => {
                 let mut obj = args[0].borrow_mut();
-                if let PyObject::GetItemIter { index, .. } = &mut *obj { *index += 1; }
+                if let PyObject::GetItemIter { index, .. } = &mut *obj {
+                    *index += 1;
+                }
                 Ok(v)
             }
             // Real Python accepts a Python-level `raise IndexError(...)`
@@ -3402,10 +4201,15 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             // ordinary `class C: def __getitem__(self, i): if i >= n: raise
             // IndexError` (the standard idiom) would propagate the
             // IndexError instead of stopping iteration.
-            Err(ref e) if matches!(e, PyError::IndexError(_))
-                || matches!(e, PyError::Exception(_, exc) if matches!(&*exc.borrow(), PyObject::Exception { typ, .. } if crate::vm::is_exception_subclass(typ, "IndexError"))) =>
+            Err(ref e)
+                if matches!(e, PyError::IndexError(_))
+                    || matches!(e, PyError::Exception(_, exc) if matches!(&*exc.borrow(), PyObject::Exception { typ, .. } if crate::vm::is_exception_subclass(typ, "IndexError"))) =>
             {
-                if args.len() >= 2 { Ok(args[1].clone()) } else { Err(PyError::stop_iteration()) }
+                if args.len() >= 2 {
+                    Ok(args[1].clone())
+                } else {
+                    Err(PyError::stop_iteration())
+                }
             }
             Err(e) => Err(e),
         };
@@ -3414,8 +4218,11 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     match &mut *obj {
         PyObject::List(v) => {
             if v.is_empty() {
-                if args.len() >= 2 { Ok(args[1].clone()) }
-                else { Err(PyError::stop_iteration()) }
+                if args.len() >= 2 {
+                    Ok(args[1].clone())
+                } else {
+                    Err(PyError::stop_iteration())
+                }
             } else {
                 // Convert to ListIter for O(1) iteration
                 let list = std::mem::take(v);
@@ -3426,13 +4233,18 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     let v = list[*index].clone();
                     *index += 1;
                     Ok(v)
-                } else { unreachable!() }
+                } else {
+                    unreachable!()
+                }
             }
         }
         PyObject::ListIter { list, index } => {
             if *index >= list.len() {
-                if args.len() >= 2 { Ok(args[1].clone()) }
-                else { Err(PyError::stop_iteration()) }
+                if args.len() >= 2 {
+                    Ok(args[1].clone())
+                } else {
+                    Err(PyError::stop_iteration())
+                }
             } else {
                 let v = list[*index].clone();
                 *index += 1;
@@ -3441,8 +4253,11 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         }
         PyObject::CycleIter { items, index } => {
             if items.is_empty() {
-                if args.len() >= 2 { Ok(args[1].clone()) }
-                else { Err(PyError::stop_iteration()) }
+                if args.len() >= 2 {
+                    Ok(args[1].clone())
+                } else {
+                    Err(PyError::stop_iteration())
+                }
             } else {
                 let v = items[*index % items.len()].clone();
                 *index += 1;
@@ -3466,7 +4281,11 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             match builtin_next(&[source]) {
                 Ok(val) => Ok(py_tuple(vec![py_int(idx as i64), val])),
                 Err(PyError::StopIteration) => {
-                    if args.len() >= 2 { Ok(args[1].clone()) } else { Err(PyError::stop_iteration()) }
+                    if args.len() >= 2 {
+                        Ok(args[1].clone())
+                    } else {
+                        Err(PyError::stop_iteration())
+                    }
                 }
                 Err(e) => Err(e),
             }
@@ -3484,8 +4303,11 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     }
                 }
                 Err(e) => {
-                    if args.len() >= 2 { Ok(args[1].clone()) }
-                    else { Err(e) }
+                    if args.len() >= 2 {
+                        Ok(args[1].clone())
+                    } else {
+                        Err(e)
+                    }
                 }
             }
         }
@@ -3513,8 +4335,11 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                         }
                     }
                     Err(e) => {
-                        if args.len() >= 2 { return Ok(args[1].clone()) }
-                        else { return Err(e) }
+                        if args.len() >= 2 {
+                            return Ok(args[1].clone());
+                        } else {
+                            return Err(e);
+                        }
                     }
                 }
             }
@@ -3525,17 +4350,27 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 match builtin_next(&[it.clone()]) {
                     Ok(val) => results.push(val),
                     Err(e) => {
-                        if args.len() >= 2 { return Ok(args[1].clone()) }
-                        else { return Err(e) }
+                        if args.len() >= 2 {
+                            return Ok(args[1].clone());
+                        } else {
+                            return Err(e);
+                        }
                     }
                 }
             }
             Ok(py_tuple(results))
         }
-        PyObject::RangeIter { current, stop, step } => {
+        PyObject::RangeIter {
+            current,
+            stop,
+            step,
+        } => {
             if (*step > 0 && *current >= *stop) || (*step < 0 && *current <= *stop) {
-                if args.len() >= 2 { Ok(args[1].clone()) }
-                else { Err(PyError::stop_iteration()) }
+                if args.len() >= 2 {
+                    Ok(args[1].clone())
+                } else {
+                    Err(PyError::stop_iteration())
+                }
             } else {
                 let v = py_int(*current);
                 // A plain `+=` panics ("attempt to add with overflow") once
@@ -3546,11 +4381,19 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 // correctly starves the NEXT call into `StopIteration`
                 // above — the just-returned `v` here is unaffected either
                 // way.
-                *current = current.checked_add(*step).unwrap_or(if *step > 0 { i64::MAX } else { i64::MIN });
+                *current = current.checked_add(*step).unwrap_or(if *step > 0 {
+                    i64::MAX
+                } else {
+                    i64::MIN
+                });
                 Ok(v)
             }
         }
-        PyObject::DequeIter { deque, index, start_len } => {
+        PyObject::DequeIter {
+            deque,
+            index,
+            start_len,
+        } => {
             let (done, item) = {
                 let dq = deque.borrow();
                 if let PyObject::Deque { data, .. } = &*dq {
@@ -3567,16 +4410,24 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 }
             };
             if done {
-                if args.len() >= 2 { Ok(args[1].clone()) }
-                else { Err(PyError::stop_iteration()) }
+                if args.len() >= 2 {
+                    Ok(args[1].clone())
+                } else {
+                    Err(PyError::stop_iteration())
+                }
             } else if let Some(v) = item {
-                if let PyObject::DequeIter { index, .. } = &mut *obj { *index += 1; }
+                if let PyObject::DequeIter { index, .. } = &mut *obj {
+                    *index += 1;
+                }
                 Ok(v)
             } else {
                 Err(PyError::runtime_error("deque iterator over non-deque"))
             }
         }
-        _ => Err(PyError::type_error(format!("'{}' is not an iterator", obj.type_name()))),
+        _ => Err(PyError::type_error(format!(
+            "'{}' is not an iterator",
+            obj.type_name()
+        ))),
     }
 }
 
@@ -3584,12 +4435,18 @@ pub fn builtin_sum(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
         return Err(PyError::type_error("sum() takes at least 1 argument"));
     }
-    let start = if args.len() >= 2 { args[1].clone() } else { py_int(0) };
+    let start = if args.len() >= 2 {
+        args[1].clone()
+    } else {
+        py_int(0)
+    };
     let mut total = start;
     let iterable = builtin_iter(&[args[0].clone()])?;
     loop {
         match builtin_next(&[iterable.clone()]) {
-            Ok(val) => { total = py_add(&total, &val)?; }
+            Ok(val) => {
+                total = py_add(&total, &val)?;
+            }
             Err(PyError::StopIteration) => return Ok(total),
             Err(e) => return Err(e),
         }
@@ -3606,7 +4463,9 @@ fn compare_gt(a: &PyObjectRef, b: &PyObjectRef) -> std::cmp::Ordering {
 }
 
 pub fn builtin_max(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.is_empty() { return Err(PyError::type_error("max() requires at least 1 argument")); }
+    if args.is_empty() {
+        return Err(PyError::type_error("max() requires at least 1 argument"));
+    }
     let items: Vec<PyObjectRef> = if args.len() == 1 {
         let mut v = Vec::new();
         let iterable = builtin_iter(&[args[0].clone()])?;
@@ -3621,11 +4480,16 @@ pub fn builtin_max(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     } else {
         args.to_vec()
     };
-    items.into_iter().max_by(compare_gt).ok_or_else(|| PyError::value_error("max() arg is an empty sequence"))
+    items
+        .into_iter()
+        .max_by(compare_gt)
+        .ok_or_else(|| PyError::value_error("max() arg is an empty sequence"))
 }
 
 pub fn builtin_min(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.is_empty() { return Err(PyError::type_error("min() requires at least 1 argument")); }
+    if args.is_empty() {
+        return Err(PyError::type_error("min() requires at least 1 argument"));
+    }
     let items: Vec<PyObjectRef> = if args.len() == 1 {
         let mut v = Vec::new();
         let iterable = builtin_iter(&[args[0].clone()])?;
@@ -3640,7 +4504,10 @@ pub fn builtin_min(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     } else {
         args.to_vec()
     };
-    items.into_iter().min_by(compare_gt).ok_or_else(|| PyError::value_error("min() arg is an empty sequence"))
+    items
+        .into_iter()
+        .min_by(compare_gt)
+        .ok_or_else(|| PyError::value_error("min() arg is an empty sequence"))
 }
 
 pub fn builtin_id(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
@@ -3670,7 +4537,9 @@ pub fn builtin_vars(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             }
             Ok(PyObjectRef::new(PyObject::Dict(Box::new(pd))))
         }
-        _ => Err(PyError::type_error(format!("vars() argument must have __dict__ attribute"))),
+        _ => Err(PyError::type_error(format!(
+            "vars() argument must have __dict__ attribute"
+        ))),
     }
 }
 
@@ -3715,7 +4584,9 @@ impl Drop for IsinstanceRecursionGuard {
 
 pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() != 2 {
-        return Err(PyError::type_error("isinstance() takes exactly 2 arguments"));
+        return Err(PyError::type_error(
+            "isinstance() takes exactly 2 arguments",
+        ));
     }
     // `isinstance(x, int | str)` — a PEP 604 union used as the second
     // argument checks membership against ANY of its parts, same as the
@@ -3729,7 +4600,11 @@ pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             // None`, matching real CPython's own PEP 604 syntax) rather than
             // `NoneType` itself — `isinstance(x, None)` isn't meaningful
             // (`None` isn't a class), so check against `type(None)` instead.
-            let t = if matches!(&*t.borrow(), PyObject::None) { builtin_type_of(&[py_none()])? } else { t.clone() };
+            let t = if matches!(&*t.borrow(), PyObject::None) {
+                builtin_type_of(&[py_none()])?
+            } else {
+                t.clone()
+            };
             let check_args = vec![args[0].clone(), t];
             if builtin_isinstance(&check_args)?.truthy() {
                 return Ok(py_bool(true));
@@ -3761,7 +4636,12 @@ pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         return Ok(py_bool(false));
     }
     match (&*obj, &*class) {
-        (PyObject::Type { .. }, PyObject::Type { name: class_name, .. }) => {
+        (
+            PyObject::Type { .. },
+            PyObject::Type {
+                name: class_name, ..
+            },
+        ) => {
             // isinstance(SomeClass, X): every class is an instance of its
             // metaclass (a custom one if it was built via `metaclass=`,
             // otherwise plain `type` — e.g. `isinstance(Foo, type)` is
@@ -3838,7 +4718,8 @@ pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             // here); `obj`'s class (or any of ITS ancestors, for a real
             // subclass of a registered virtual-subclass root) counts too.
             if abc_registry_matches_in_subtree(&args[1], &|registered| {
-                typ.is(registered) || matches!(&*typ.borrow(), PyObject::Type { mro, .. } if mro.iter().any(|c| c.is(registered)))
+                typ.is(registered)
+                    || matches!(&*typ.borrow(), PyObject::Type { mro, .. } if mro.iter().any(|c| c.is(registered)))
             }) {
                 return Ok(py_bool(true));
             }
@@ -3876,7 +4757,9 @@ pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     }
                 }
             }
-            Ok(py_bool(typ.borrow().type_name() == class_name || class_name == "object"))
+            Ok(py_bool(
+                typ.borrow().type_name() == class_name || class_name == "object",
+            ))
         }
         // `isinstance(TypeError, type)` (and similar for any builtin
         // exception "class") — real CPython: every exception class's
@@ -3957,8 +4840,13 @@ pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             // guards on `isinstance(self.path, BaseException)`, and a str
             // path incorrectly took the exception-raising branch, so every
             // `os.path.*`/`open()` call handed a `FakePath` failed.
-            if matches!(&*obj, PyObject::Exception { .. }) || is_builtin_exception_class_name(&obj_type) {
-                return Ok(py_bool(crate::vm::is_exception_subclass(&obj_type, &class_name)));
+            if matches!(&*obj, PyObject::Exception { .. })
+                || is_builtin_exception_class_name(&obj_type)
+            {
+                return Ok(py_bool(crate::vm::is_exception_subclass(
+                    &obj_type,
+                    &class_name,
+                )));
             }
             Ok(py_bool(false))
         }
@@ -4010,7 +4898,9 @@ pub(crate) fn path_arg_to_string(obj: &PyObjectRef) -> String {
 
 pub fn builtin_open(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
-        return Err(PyError::type_error("open() missing required argument 'file'"));
+        return Err(PyError::type_error(
+            "open() missing required argument 'file'",
+        ));
     }
     // A keyword call (e.g. the extremely common `open(path, encoding="utf-8")`,
     // with NO explicit `mode`) reaches every plain `BuiltinFunction` with its
@@ -4029,7 +4919,9 @@ pub fn builtin_open(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // themselves, so this is unambiguous) and reads `mode` from either the
     // second positional arg or the `mode` keyword, defaulting to `"r"`.
     let (pos_args, kwargs) = match args.last() {
-        Some(last) if matches!(&*last.borrow(), PyObject::Dict(_)) => (&args[..args.len() - 1], Some(last)),
+        Some(last) if matches!(&*last.borrow(), PyObject::Dict(_)) => {
+            (&args[..args.len() - 1], Some(last))
+        }
         _ => (args, None),
     };
     let filename = path_arg_to_string(&pos_args[0]);
@@ -4037,7 +4929,11 @@ pub fn builtin_open(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         pos_args[1].str()
     } else if let Some(kw) = kwargs {
         if let PyObject::Dict(d) = &*kw.borrow() {
-            d.get(&py_str("mode")).ok().flatten().map(|v| v.str()).unwrap_or_else(|| "r".to_string())
+            d.get(&py_str("mode"))
+                .ok()
+                .flatten()
+                .map(|v| v.str())
+                .unwrap_or_else(|| "r".to_string())
         } else {
             "r".to_string()
         }
@@ -4067,11 +4963,19 @@ pub fn builtin_open(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         .append(mode.contains('a'))
         .create(mode.contains('w') || mode.contains('a') || has_x)
         .truncate(mode.contains('w'));
-    if has_x { opts.create_new(true); }
-    let file = opts.open(&filename)
+    if has_x {
+        opts.create_new(true);
+    }
+    let file = opts
+        .open(&filename)
         .map_err(|e| PyError::os_error_from_io(&e))?;
     let binary = mode.contains('b');
-    Ok(PyObjectRef::new(PyObject::File { file: std::rc::Rc::new(std::cell::RefCell::new(file)), name: filename, binary, pending: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())) }))
+    Ok(PyObjectRef::new(PyObject::File {
+        file: std::rc::Rc::new(std::cell::RefCell::new(file)),
+        name: filename,
+        binary,
+        pending: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+    }))
 }
 
 pub fn builtin_any(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
@@ -4081,7 +4985,11 @@ pub fn builtin_any(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let iterable = builtin_iter(&[args[0].clone()])?;
     loop {
         match builtin_next(&[iterable.clone()]) {
-            Ok(val) => if val.truthy() { return Ok(py_bool(true)); },
+            Ok(val) => {
+                if val.truthy() {
+                    return Ok(py_bool(true));
+                }
+            }
             Err(PyError::StopIteration) => return Ok(py_bool(false)),
             Err(e) => return Err(e),
         }
@@ -4095,7 +5003,11 @@ pub fn builtin_all(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let iterable = builtin_iter(&[args[0].clone()])?;
     loop {
         match builtin_next(&[iterable.clone()]) {
-            Ok(val) => if !val.truthy() { return Ok(py_bool(false)); },
+            Ok(val) => {
+                if !val.truthy() {
+                    return Ok(py_bool(false));
+                }
+            }
             Err(PyError::StopIteration) => return Ok(py_bool(true)),
             Err(e) => return Err(e),
         }
@@ -4107,7 +5019,8 @@ pub fn builtin_callable(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         return Err(PyError::type_error("callable() takes exactly one argument"));
     }
     let obj = args[0].borrow();
-    let is_callable = matches!(&*obj,
+    let is_callable = matches!(
+        &*obj,
         PyObject::Function(_) | PyObject::BuiltinFunction { .. } |
         PyObject::BuiltinMethod { .. } | PyObject::Type { .. } | PyObject::BuildClass |
         PyObject::BoundMethod { .. } | PyObject::Partial { .. } |
@@ -4147,7 +5060,11 @@ pub fn builtin_breakpoint(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 // -50 to 49).
 fn bigint_mod_python(a: &BigInt, m: &BigInt) -> BigInt {
     let r = a % m;
-    if !r.is_zero() && (r.sign() != m.sign()) { r + m } else { r }
+    if !r.is_zero() && (r.sign() != m.sign()) {
+        r + m
+    } else {
+        r
+    }
 }
 
 // Plain Euclidean `gcd` — `num-bigint`'s `Integer` trait (which would give
@@ -4170,15 +5087,19 @@ fn bigint_gcd(a: &BigInt, b: &BigInt) -> BigInt {
 // inverse, with the same sign as m").
 pub(crate) fn bigint_mod_inverse(a: &BigInt, m: &BigInt) -> Option<BigInt> {
     let m_abs = m.abs();
-    if m_abs.is_zero() { return None; }
+    if m_abs.is_zero() {
+        return None;
+    }
     let (mut old_r, mut r) = (bigint_mod_python(a, &m_abs), m_abs.clone());
     let (mut old_s, mut s) = (BigInt::one(), BigInt::zero());
     while !r.is_zero() {
         let q = &old_r / &r;
         let new_r = &old_r - &q * &r;
-        old_r = r; r = new_r;
+        old_r = r;
+        r = new_r;
         let new_s = &old_s - &q * &s;
-        old_s = s; s = new_s;
+        old_s = s;
+        s = new_s;
     }
     if old_r != BigInt::one() {
         return None;
@@ -4204,13 +5125,55 @@ pub fn builtin_pow(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         // path) simultaneously.
         // 3-arg pow with a complex argument raises "complex modulo" (from
         // complex.__pow__'s mod path), NOT the int-only TypeError.
-        if args[..3].iter().any(|a| matches!(&*a.borrow(), PyObject::Complex(..))) {
+        if args[..3]
+            .iter()
+            .any(|a| matches!(&*a.borrow(), PyObject::Complex(..)))
+        {
             return Err(PyError::value_error("complex modulo"));
+        }
+        // Non-integer (e.g. Fraction/float) args first get a chance via
+        // `__pow__(exp, mod)` / `__rpow__(base, mod)`; Fraction returns
+        // NotImplemented and CPython raises "unsupported operand type(s)
+        // for ** or pow()" rather than the int-only message. (Ints are
+        // excluded so the all-int fast path below is untouched.)
+        let non_int_base = !matches!(&*args[0].borrow(), PyObject::Int(_) | PyObject::Bool(_));
+        let non_int_exp = !matches!(&*args[1].borrow(), PyObject::Int(_) | PyObject::Bool(_));
+        let non_int_mod = !matches!(&*args[2].borrow(), PyObject::Int(_) | PyObject::Bool(_));
+        let is_class_operand = matches!(&*args[0].borrow(), PyObject::Instance { .. })
+            || matches!(&*args[1].borrow(), PyObject::Instance { .. })
+            || matches!(&*args[2].borrow(), PyObject::Instance { .. });
+        if (non_int_base || non_int_exp || non_int_mod) && is_class_operand {
+            if let Some(r) = try_dunder_ternop(&args[0], &args[1], &args[2], "__pow__")? {
+                return Ok(r);
+            }
+            if let Some(r) = try_dunder_ternop(&args[1], &args[0], &args[2], "__rpow__")? {
+                return Ok(r);
+            }
+            // A class (Fraction, Decimal, ...) that *implements* __pow__ but
+            // refuses the modulus gets the "unsupported operand type(s)"
+            // message with all three types; builtin scalar types get the
+            // int-only message instead.
+            let tn = |i: usize| -> String {
+                match &*args[i].borrow() {
+                    PyObject::Instance { typ, .. } => {
+                        crate::object::get_type_name_for_instance(typ)
+                    }
+                    o => o.type_name(),
+                }
+            };
+            return Err(PyError::type_error(format!(
+                "unsupported operand type(s) for ** or pow(): '{}', '{}', '{}'",
+                tn(0),
+                tn(1),
+                tn(2)
+            )));
         }
         // Non-integer (e.g. float) args raise TypeError; CPython: pow(1.5,
         // 2, 3) -> "pow() 3rd argument not allowed unless all arguments are
         // integers".
-        let int_err = || PyError::type_error("pow() 3rd argument not allowed unless all arguments are integers");
+        let int_err = || {
+            PyError::type_error("pow() 3rd argument not allowed unless all arguments are integers")
+        };
         let a = to_index(&args[0]).map_err(|_| int_err())?;
         let b = to_index(&args[1]).map_err(|_| int_err())?;
         let m = to_index(&args[2]).map_err(|_| int_err())?;
@@ -4223,10 +5186,16 @@ pub fn builtin_pow(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         }
         if b.sign() == Sign::Minus {
             if bigint_gcd(&a, &m_abs) != BigInt::one() {
-                return Err(PyError::value_error("base is not invertible for the given modulus"));
+                return Err(PyError::value_error(
+                    "base is not invertible for the given modulus",
+                ));
             }
-            let inv = bigint_mod_inverse(&a, &m).ok_or_else(|| PyError::value_error("base is not invertible for the given modulus"))?;
-            let exp_abs = (-&b).to_biguint().ok_or_else(|| PyError::value_error("pow() exponent too large"))?;
+            let inv = bigint_mod_inverse(&a, &m).ok_or_else(|| {
+                PyError::value_error("base is not invertible for the given modulus")
+            })?;
+            let exp_abs = (-&b)
+                .to_biguint()
+                .ok_or_else(|| PyError::value_error("pow() exponent too large"))?;
             let result = bigint_mod_python(&inv, &m_abs).modpow(&BigInt::from(exp_abs), &m_abs);
             return Ok(py_int(bigint_mod_python(&result, &m)));
         }
@@ -4264,15 +5233,27 @@ pub fn builtin_reversed(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             let (start, stop, step) = (*start, *stop, *step);
             let empty = (step > 0 && start >= stop) || (step < 0 && start <= stop);
             if empty {
-                return Ok(PyObjectRef::new(PyObject::RangeIter { current: 0, stop: 0, step: 1 }));
+                return Ok(PyObjectRef::new(PyObject::RangeIter {
+                    current: 0,
+                    stop: 0,
+                    step: 1,
+                }));
             }
             let raw_len = (stop as i128) - (start as i128);
             let step128 = step as i128;
             let q = raw_len / step128;
-            let count: i128 = if raw_len % step128 != 0 { q.abs() + 1 } else { q.abs() };
+            let count: i128 = if raw_len % step128 != 0 {
+                q.abs() + 1
+            } else {
+                q.abs()
+            };
             let last = (start as i128 + (count - 1) * step128) as i64;
             let new_stop = start.wrapping_sub(step);
-            return Ok(PyObjectRef::new(PyObject::RangeIter { current: last, stop: new_stop, step: -step }));
+            return Ok(PyObjectRef::new(PyObject::RangeIter {
+                current: last,
+                stop: new_stop,
+                step: -step,
+            }));
         }
     }
     let kind = {
@@ -4288,16 +5269,28 @@ pub fn builtin_reversed(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         let obj = args[0].borrow();
         return match &*obj {
             PyObject::List(v) => {
-                let mut rev = v.clone(); rev.reverse();
-                Ok(PyObjectRef::new(PyObject::ListIter { list: rev, index: 0 }))
+                let mut rev = v.clone();
+                rev.reverse();
+                Ok(PyObjectRef::new(PyObject::ListIter {
+                    list: rev,
+                    index: 0,
+                }))
             }
             PyObject::Tuple(v) => {
-                let mut rev = v.clone(); rev.reverse();
-                Ok(PyObjectRef::new(PyObject::ListIter { list: rev, index: 0 }))
+                let mut rev = v.clone();
+                rev.reverse();
+                Ok(PyObjectRef::new(PyObject::ListIter {
+                    list: rev,
+                    index: 0,
+                }))
             }
             PyObject::Str(s) => {
-                let chars: Vec<PyObjectRef> = s.chars().rev().map(|c| py_str(&c.to_string())).collect();
-                Ok(PyObjectRef::new(PyObject::ListIter { list: chars, index: 0 }))
+                let chars: Vec<PyObjectRef> =
+                    s.chars().rev().map(|c| py_str(&c.to_string())).collect();
+                Ok(PyObjectRef::new(PyObject::ListIter {
+                    list: chars,
+                    index: 0,
+                }))
             }
             _ => unreachable!(),
         };
@@ -4335,7 +5328,10 @@ pub fn builtin_reversed(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             // (not callable — previously produced a confusing unrelated
             // error instead of a clean `TypeError`).
             if matches!(&*f.borrow(), PyObject::None) {
-                return Err(PyError::type_error(format!("'{}' object is not reversible", get_type_name_for_instance(typ))));
+                return Err(PyError::type_error(format!(
+                    "'{}' object is not reversible",
+                    get_type_name_for_instance(typ)
+                )));
             }
             return call_bound_method(f, args[0].clone(), vec![]);
         }
@@ -4351,8 +5347,11 @@ pub fn builtin_reversed(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         // `__getitem__` never raises `IndexError` for any index (which
         // `reversed()` never needed to rely on in the first place, since
         // real CPython bounds the count via `__len__` instead).
-        return if lookup_dunder_via_mro(typ, "__len__").is_some() && lookup_dunder_via_mro(typ, "__getitem__").is_some() {
-            let len = builtin_len(&[args[0].clone()])?.as_i64()
+        return if lookup_dunder_via_mro(typ, "__len__").is_some()
+            && lookup_dunder_via_mro(typ, "__getitem__").is_some()
+        {
+            let len = builtin_len(&[args[0].clone()])?
+                .as_i64()
                 .ok_or_else(|| PyError::type_error("__len__() should return an int"))?;
             let mut v = Vec::with_capacity(len.max(0) as usize);
             let mut i = len - 1;
@@ -4362,7 +5361,9 @@ pub fn builtin_reversed(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             }
             Ok(PyObjectRef::new(PyObject::ListIter { list: v, index: 0 }))
         } else {
-            Err(PyError::type_error("argument to reversed() must be a sequence"))
+            Err(PyError::type_error(
+                "argument to reversed() must be a sequence",
+            ))
         };
     }
     // Unknown type: drain via iteration (no active borrow on args[0])
@@ -4381,14 +5382,20 @@ pub fn builtin_reversed(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 
 pub fn builtin_issubclass(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() != 2 {
-        return Err(PyError::type_error("issubclass() takes exactly 2 arguments"));
+        return Err(PyError::type_error(
+            "issubclass() takes exactly 2 arguments",
+        ));
     }
     // `issubclass(cls, int | str)` — same PEP 604 union-membership check as
     // `builtin_isinstance`'s matching case just above.
     if let Some(members) = crate::modules::union_args(&args[1]) {
         let _guard = IsinstanceRecursionGuard::enter()?;
         for t in &members {
-            let t = if matches!(&*t.borrow(), PyObject::None) { builtin_type_of(&[py_none()])? } else { t.clone() };
+            let t = if matches!(&*t.borrow(), PyObject::None) {
+                builtin_type_of(&[py_none()])?
+            } else {
+                t.clone()
+            };
             let check_args = vec![args[0].clone(), t];
             if builtin_issubclass(&check_args)?.truthy() {
                 return Ok(py_bool(true));
@@ -4430,7 +5437,9 @@ pub fn builtin_issubclass(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             }
             // See `builtin_isinstance`'s matching fallback for
             // `ABCMeta.register`-style virtual subclass checks.
-            if abc_registry_matches_in_subtree(&args[1], &|registered| cls_mro.iter().any(|c| c.is(registered))) {
+            if abc_registry_matches_in_subtree(&args[1], &|registered| {
+                cls_mro.iter().any(|c| c.is(registered))
+            }) {
                 return Ok(py_bool(true));
             }
             Ok(py_bool(false))
@@ -4552,11 +5561,19 @@ pub fn builtin_issubclass(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 PyObject::Type { name, .. } => name.clone(),
                 _ => base.str(),
             };
-            Ok(py_bool(crate::vm::is_exception_subclass(cls_name, &base_name)))
+            Ok(py_bool(crate::vm::is_exception_subclass(
+                cls_name, &base_name,
+            )))
         }
         _ => {
             if std::env::var("RPY_DEBUG_ISSUBCLASS").is_ok() {
-                eprintln!("issubclass() FAIL: arg0={:?}/{} arg1={:?}/{}", cls.type_name(), cls.repr(), base.type_name(), base.repr());
+                eprintln!(
+                    "issubclass() FAIL: arg0={:?}/{} arg1={:?}/{}",
+                    cls.type_name(),
+                    cls.repr(),
+                    base.type_name(),
+                    base.repr()
+                );
             }
             Err(PyError::type_error("issubclass() arg 1 must be a class"))
         }
@@ -4600,14 +5617,17 @@ pub fn builtin_help(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 println!();
                 println!("Methods:");
                 for (key, val) in dict.iter() {
-                    if matches!(&*val.borrow(), PyObject::Function(_) | PyObject::BuiltinFunction { .. }) {
+                    if matches!(
+                        &*val.borrow(),
+                        PyObject::Function(_) | PyObject::BuiltinFunction { .. }
+                    ) {
                         println!("  {}()", interner::lookup_str(*key));
                     }
                 }
             }
             PyObject::Function(ref f) => {
-            let name = &f.code.name;
-            let dict = &f.dict;
+                let name = &f.code.name;
+                let dict = &f.dict;
                 println!("Help on function {}:", name);
                 if let Some(doc) = dict.get("__doc__") {
                     println!("  {}", doc.str());
@@ -4624,4 +5644,3 @@ pub fn builtin_help(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
     Ok(py_none())
 }
-

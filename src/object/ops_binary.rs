@@ -4,7 +4,11 @@
 // tolerant stable merge sort used by `list.sort()`/`sorted()`.
 use super::*;
 
-pub fn try_dunder_binop(a: &PyObjectRef, b: &PyObjectRef, method: &str) -> PyResult<Option<PyObjectRef>> {
+pub fn try_dunder_binop(
+    a: &PyObjectRef,
+    b: &PyObjectRef,
+    method: &str,
+) -> PyResult<Option<PyObjectRef>> {
     let f = {
         let a_borrowed = a.borrow();
         match &*a_borrowed {
@@ -58,6 +62,30 @@ pub fn try_dunder_binop(a: &PyObjectRef, b: &PyObjectRef, method: &str) -> PyRes
     Ok(None)
 }
 
+/// 3-argument dunder dispatch (`a.op(b, c)`), returning `Ok(None)` when the
+/// method is absent or returns `NotImplemented` — used by 3-arg `pow()`.
+pub fn try_dunder_ternop(
+    a: &PyObjectRef,
+    b: &PyObjectRef,
+    c: &PyObjectRef,
+    method: &str,
+) -> PyResult<Option<PyObjectRef>> {
+    let f = {
+        let a_borrowed = a.borrow();
+        match &*a_borrowed {
+            PyObject::Instance { typ, .. } => lookup_dunder_via_mro(typ, method),
+            _ => a_borrowed.get_attribute(method).ok(),
+        }
+    };
+    if let Some(f) = f {
+        let result = call_bound_method(f, a.clone(), vec![b.clone(), c.clone()])?;
+        if !is_not_implemented(&result) {
+            return Ok(Some(result));
+        }
+    }
+    Ok(None)
+}
+
 /// CPython's `unicode_concatenate`-style in-place string growth is NOT
 /// reliably possible here: the VM clones references through the eval stack,
 /// so a `s = s + "x"` left operand arrives with strong_count 3 (local +
@@ -77,8 +105,12 @@ pub fn py_add(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
             return Ok(py_float(af + bf));
         }
     }
-    if let Some(r) = try_dunder_binop(a, b, "__add__")? { return Ok(r); }
-    if let Some(r) = try_dunder_binop(b, a, "__radd__")? { return Ok(r); }
+    if let Some(r) = try_dunder_binop(a, b, "__add__")? {
+        return Ok(r);
+    }
+    if let Some(r) = try_dunder_binop(b, a, "__radd__")? {
+        return Ok(r);
+    }
     let a_obj = a.borrow();
     let b_obj = b.borrow();
     match (&*a_obj, &*b_obj) {
@@ -92,7 +124,13 @@ pub fn py_add(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
             v.extend(b.clone());
             Ok(py_list(v))
         }
-        (PyObject::Deque { data: a, maxlen: am }, PyObject::Deque { data: b, .. }) => {
+        (
+            PyObject::Deque {
+                data: a,
+                maxlen: am,
+            },
+            PyObject::Deque { data: b, .. },
+        ) => {
             // `deque.__add__` preserves the LEFT operand's maxlen and
             // truncates the concatenation to it (`deque('abcdef', 4) +
             // deque('gh')` == `deque(['e','f','g','h'], maxlen=4)`).
@@ -100,7 +138,9 @@ pub fn py_add(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
             for item in b.iter() {
                 data.push_back(item.clone());
                 if let Some(maxlen) = am {
-                    while data.len() > *maxlen { data.pop_front(); }
+                    while data.len() > *maxlen {
+                        data.pop_front();
+                    }
                 }
             }
             Ok(py_deque(data, *am))
@@ -132,8 +172,14 @@ pub fn py_add(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
         }
         (a, b) if matches!(a, PyObject::Complex(..)) || matches!(b, PyObject::Complex(..)) => {
             match (as_complex_parts(a), as_complex_parts(b)) {
-                (Some((ar, ai)), Some((br, bi))) => Ok(PyObjectRef::imm(PyObject::Complex(ar + br, ai + bi))),
-                _ => Err(PyError::type_error(format!("unsupported operand type(s) for +: '{}' and '{}'", a.type_name(), b.type_name()))),
+                (Some((ar, ai)), Some((br, bi))) => {
+                    Ok(PyObjectRef::imm(PyObject::Complex(ar + br, ai + bi)))
+                }
+                _ => Err(PyError::type_error(format!(
+                    "unsupported operand type(s) for +: '{}' and '{}'",
+                    a.type_name(),
+                    b.type_name()
+                ))),
             }
         }
         // A class transparently subclassing a native container (`class
@@ -158,8 +204,11 @@ pub fn py_add(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
                 drop(b_obj);
                 return py_add(&a_use, &b_use);
             }
-            Err(PyError::type_error(format!("unsupported operand type(s) for +: '{}' and '{}'",
-                a_obj.type_name(), b_obj.type_name())))
+            Err(PyError::type_error(format!(
+                "unsupported operand type(s) for +: '{}' and '{}'",
+                a_obj.type_name(),
+                b_obj.type_name()
+            )))
         }
     }
 }
@@ -176,8 +225,12 @@ pub fn py_sub(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
             return Ok(py_float(af - bf));
         }
     }
-    if let Some(r) = try_dunder_binop(a, b, "__sub__")? { return Ok(r); }
-    if let Some(r) = try_dunder_binop(b, a, "__rsub__")? { return Ok(r); }
+    if let Some(r) = try_dunder_binop(a, b, "__sub__")? {
+        return Ok(r);
+    }
+    if let Some(r) = try_dunder_binop(b, a, "__rsub__")? {
+        return Ok(r);
+    }
     if let (Some((sa, frozen)), Some((sb, _))) = (extract_pyset(a), extract_pyset(b)) {
         return set_difference(&sa, &sb, frozen);
     }
@@ -190,12 +243,21 @@ pub fn py_sub(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
         (PyObject::Float(a), PyObject::Int(b)) => Ok(py_float(a - b.to_f64().unwrap())),
         (a, b) if matches!(a, PyObject::Complex(..)) || matches!(b, PyObject::Complex(..)) => {
             match (as_complex_parts(a), as_complex_parts(b)) {
-                (Some((ar, ai)), Some((br, bi))) => Ok(PyObjectRef::imm(PyObject::Complex(ar - br, ai - bi))),
-                _ => Err(PyError::type_error(format!("unsupported operand type(s) for -: '{}' and '{}'", a.type_name(), b.type_name()))),
+                (Some((ar, ai)), Some((br, bi))) => {
+                    Ok(PyObjectRef::imm(PyObject::Complex(ar - br, ai - bi)))
+                }
+                _ => Err(PyError::type_error(format!(
+                    "unsupported operand type(s) for -: '{}' and '{}'",
+                    a.type_name(),
+                    b.type_name()
+                ))),
             }
         }
-        _ => Err(PyError::type_error(format!("unsupported operand type(s) for -: '{}' and '{}'",
-            a_obj.type_name(), b_obj.type_name()))),
+        _ => Err(PyError::type_error(format!(
+            "unsupported operand type(s) for -: '{}' and '{}'",
+            a_obj.type_name(),
+            b_obj.type_name()
+        ))),
     }
 }
 
@@ -211,8 +273,12 @@ pub fn py_mul(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
             return Ok(py_float(af * bf));
         }
     }
-    if let Some(r) = try_dunder_binop(a, b, "__mul__")? { return Ok(r); }
-    if let Some(r) = try_dunder_binop(b, a, "__rmul__")? { return Ok(r); }
+    if let Some(r) = try_dunder_binop(a, b, "__mul__")? {
+        return Ok(r);
+    }
+    if let Some(r) = try_dunder_binop(b, a, "__rmul__")? {
+        return Ok(r);
+    }
     // Sequence repetition (`seq * n`) accepts ANY object implementing
     // `__index__`, not just a plain `int` — real CPython's C implementation
     // converts the count via `PyNumber_AsSsize_t`, which itself falls back
@@ -224,7 +290,16 @@ pub fn py_mul(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     // sequence-like paired with a non-int/non-float `Instance` — recursing
     // once with the substituted value reaches the same match arms a literal
     // int count would.
-    let is_seq_like = |v: &PyObjectRef| matches!(&*v.borrow(), PyObject::Str(_) | PyObject::List(_) | PyObject::Tuple(_) | PyObject::Bytes(_) | PyObject::ByteArray(_));
+    let is_seq_like = |v: &PyObjectRef| {
+        matches!(
+            &*v.borrow(),
+            PyObject::Str(_)
+                | PyObject::List(_)
+                | PyObject::Tuple(_)
+                | PyObject::Bytes(_)
+                | PyObject::ByteArray(_)
+        )
+    };
     let is_plain_instance = |v: &PyObjectRef| matches!(&*v.borrow(), PyObject::Instance { .. });
     if is_seq_like(a) && is_plain_instance(b) {
         if let Ok(n) = to_index(b) {
@@ -306,7 +381,11 @@ pub fn py_mul(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
             // by `seq_tests.CommonTest.test_repeat`. Need the original
             // `PyObjectRef` (the `a`/`b` operands), not just `v`.
             if n.is_one() {
-                return Ok(if matches!(&*a.borrow(), PyObject::Tuple(_)) { a.clone() } else { b.clone() });
+                return Ok(if matches!(&*a.borrow(), PyObject::Tuple(_)) {
+                    a.clone()
+                } else {
+                    b.clone()
+                });
             }
             if let Some(n) = n.to_usize() {
                 let mut result = Vec::new();
@@ -325,7 +404,8 @@ pub fn py_mul(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
                 Err(PyError::memory_error("could not allocate tuple"))
             }
         }
-        (PyObject::Deque { data: v, maxlen }, PyObject::Int(n)) | (PyObject::Int(n), PyObject::Deque { data: v, maxlen }) => {
+        (PyObject::Deque { data: v, maxlen }, PyObject::Int(n))
+        | (PyObject::Int(n), PyObject::Deque { data: v, maxlen }) => {
             // `deque.__mul__`/`__rmul__` preserves the deque's maxlen and
             // truncates the repetition to its LAST `maxlen` items
             // (`deque('abc', maxlen=5) * 2` == `deque('bcabc')`, matching
@@ -335,14 +415,20 @@ pub fn py_mul(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
                 let mut result = VecDeque::new();
                 let ok = match maxlen {
                     Some(_) => true, // bounded by maxlen, cannot overflow
-                    None => v.len().checked_mul(n).map(|total| result.try_reserve_exact(total).is_ok()).unwrap_or(false),
+                    None => v
+                        .len()
+                        .checked_mul(n)
+                        .map(|total| result.try_reserve_exact(total).is_ok())
+                        .unwrap_or(false),
                 };
                 if ok {
                     for _ in 0..n {
                         for item in v.iter() {
                             result.push_back(item.clone());
                             if let Some(maxlen) = maxlen {
-                                while result.len() > *maxlen { result.pop_front(); }
+                                while result.len() > *maxlen {
+                                    result.pop_front();
+                                }
                             }
                         }
                     }
@@ -380,59 +466,97 @@ pub fn py_mul(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
         }
         (a, b) if matches!(a, PyObject::Complex(..)) || matches!(b, PyObject::Complex(..)) => {
             match (as_complex_parts(a), as_complex_parts(b)) {
-                (Some((ar, ai)), Some((br, bi))) => Ok(PyObjectRef::imm(PyObject::Complex(ar * br - ai * bi, ar * bi + ai * br))),
-                _ => Err(PyError::type_error(format!("unsupported operand type(s) for *: '{}' and '{}'", a.type_name(), b.type_name()))),
+                (Some((ar, ai)), Some((br, bi))) => Ok(PyObjectRef::imm(PyObject::Complex(
+                    ar * br - ai * bi,
+                    ar * bi + ai * br,
+                ))),
+                _ => Err(PyError::type_error(format!(
+                    "unsupported operand type(s) for *: '{}' and '{}'",
+                    a.type_name(),
+                    b.type_name()
+                ))),
             }
         }
-        _ => Err(PyError::type_error(format!("unsupported operand type(s) for *: '{}' and '{}'",
-            a_obj.type_name(), b_obj.type_name()))),
+        _ => Err(PyError::type_error(format!(
+            "unsupported operand type(s) for *: '{}' and '{}'",
+            a_obj.type_name(),
+            b_obj.type_name()
+        ))),
     }
 }
 
 pub fn py_div(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
-        if bi == 0 { return Err(PyError::zero_division()); }
+        if bi == 0 {
+            return Err(PyError::zero_division());
+        }
         return Ok(py_float(ai as f64 / bi as f64));
     }
-    if let Some(r) = try_dunder_binop(a, b, "__truediv__")? { return Ok(r); }
-    if let Some(r) = try_dunder_binop(b, a, "__rtruediv__")? { return Ok(r); }
+    if let Some(r) = try_dunder_binop(a, b, "__truediv__")? {
+        return Ok(r);
+    }
+    if let Some(r) = try_dunder_binop(b, a, "__rtruediv__")? {
+        return Ok(r);
+    }
     let a_obj = a.borrow();
     let b_obj = b.borrow();
     match (&*a_obj, &*b_obj) {
         (PyObject::Int(a), PyObject::Int(b)) => {
-            if b.is_zero() { return Err(PyError::zero_division()); }
+            if b.is_zero() {
+                return Err(PyError::zero_division());
+            }
             Ok(py_float(a.to_f64().unwrap() / b.to_f64().unwrap()))
         }
         (PyObject::Float(a), PyObject::Float(b)) => {
-            if *b == 0.0 { return Err(PyError::zero_division()); }
+            if *b == 0.0 {
+                return Err(PyError::zero_division());
+            }
             Ok(py_float(a / b))
         }
         (PyObject::Int(a), PyObject::Float(b)) => {
-            if *b == 0.0 { return Err(PyError::zero_division()); }
+            if *b == 0.0 {
+                return Err(PyError::zero_division());
+            }
             Ok(py_float(a.to_f64().unwrap() / b))
         }
         (PyObject::Float(a), PyObject::Int(b)) => {
-            if b.is_zero() { return Err(PyError::zero_division()); }
+            if b.is_zero() {
+                return Err(PyError::zero_division());
+            }
             Ok(py_float(a / b.to_f64().unwrap()))
         }
         (a, b) if matches!(a, PyObject::Complex(..)) || matches!(b, PyObject::Complex(..)) => {
             match (as_complex_parts(a), as_complex_parts(b)) {
                 (Some((ar, ai)), Some((br, bi))) => {
                     let denom = br * br + bi * bi;
-                    if denom == 0.0 { return Err(PyError::zero_division()); }
-                    Ok(PyObjectRef::imm(PyObject::Complex((ar * br + ai * bi) / denom, (ai * br - ar * bi) / denom)))
+                    if denom == 0.0 {
+                        return Err(PyError::zero_division());
+                    }
+                    Ok(PyObjectRef::imm(PyObject::Complex(
+                        (ar * br + ai * bi) / denom,
+                        (ai * br - ar * bi) / denom,
+                    )))
                 }
-                _ => Err(PyError::type_error(format!("unsupported operand type(s) for /: '{}' and '{}'", a.type_name(), b.type_name()))),
+                _ => Err(PyError::type_error(format!(
+                    "unsupported operand type(s) for /: '{}' and '{}'",
+                    a.type_name(),
+                    b.type_name()
+                ))),
             }
         }
-        _ => Err(PyError::type_error(format!("unsupported operand type(s) for /: '{}' and '{}'",
-            a_obj.type_name(), b_obj.type_name()))),
+        _ => Err(PyError::type_error(format!(
+            "unsupported operand type(s) for /: '{}' and '{}'",
+            a_obj.type_name(),
+            b_obj.type_name()
+        ))),
     }
 }
 
 pub fn py_floor_div(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
-        if bi == 0 { return Err(PyError::zero_division()); }
+        if bi == 0 {
+            return Err(PyError::zero_division());
+        }
         // `i64::MIN / -1` (and `% -1`) overflows outright — same classic
         // edge case as `py_mod`'s fix just above; fall back to BigInt
         // rather than let a plain `/`/`%` panic.
@@ -454,13 +578,19 @@ pub fn py_floor_div(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
             Ok(py_int(&big_a / &big_b))
         };
     }
-    if let Some(r) = try_dunder_binop(a, b, "__floordiv__")? { return Ok(r); }
-    if let Some(r) = try_dunder_binop(b, a, "__rfloordiv__")? { return Ok(r); }
+    if let Some(r) = try_dunder_binop(a, b, "__floordiv__")? {
+        return Ok(r);
+    }
+    if let Some(r) = try_dunder_binop(b, a, "__rfloordiv__")? {
+        return Ok(r);
+    }
     let a_obj = a.borrow();
     let b_obj = b.borrow();
     match (&*a_obj, &*b_obj) {
         (PyObject::Int(a), PyObject::Int(b)) => {
-            if b.is_zero() { return Err(PyError::zero_division()); }
+            if b.is_zero() {
+                return Err(PyError::zero_division());
+            }
             if a.sign() == Sign::Minus && &(a % b) != &BigInt::zero() {
                 Ok(py_int((a / b) - 1))
             } else {
@@ -468,25 +598,36 @@ pub fn py_floor_div(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
             }
         }
         (PyObject::Float(a), PyObject::Float(b)) => {
-            if *b == 0.0 { return Err(PyError::zero_division()); }
+            if *b == 0.0 {
+                return Err(PyError::zero_division());
+            }
             Ok(py_float((a / b).floor()))
         }
         (PyObject::Int(a), PyObject::Float(b)) => {
-            if *b == 0.0 { return Err(PyError::zero_division()); }
+            if *b == 0.0 {
+                return Err(PyError::zero_division());
+            }
             Ok(py_float((a.to_f64().unwrap() / b).floor()))
         }
         (PyObject::Float(a), PyObject::Int(b)) => {
-            if b.is_zero() { return Err(PyError::zero_division()); }
+            if b.is_zero() {
+                return Err(PyError::zero_division());
+            }
             Ok(py_float((a / b.to_f64().unwrap()).floor()))
         }
-        _ => Err(PyError::type_error(format!("unsupported operand type(s) for //: '{}' and '{}'",
-            a_obj.type_name(), b_obj.type_name()))),
+        _ => Err(PyError::type_error(format!(
+            "unsupported operand type(s) for //: '{}' and '{}'",
+            a_obj.type_name(),
+            b_obj.type_name()
+        ))),
     }
 }
 
 pub fn py_mod(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
-        if bi == 0 { return Err(PyError::zero_division()); }
+        if bi == 0 {
+            return Err(PyError::zero_division());
+        }
         // `ai % bi` itself can panic outright (`i64::MIN % -1` overflows,
         // same classic edge case as division), and even when it doesn't,
         // `rem + bi` (both operands can be large-magnitude negatives) can
@@ -520,13 +661,19 @@ pub fn py_mod(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
             Ok(py_int(rem))
         };
     }
-    if let Some(r) = try_dunder_binop(a, b, "__mod__")? { return Ok(r); }
-    if let Some(r) = try_dunder_binop(b, a, "__rmod__")? { return Ok(r); }
+    if let Some(r) = try_dunder_binop(a, b, "__mod__")? {
+        return Ok(r);
+    }
+    if let Some(r) = try_dunder_binop(b, a, "__rmod__")? {
+        return Ok(r);
+    }
     let a_obj = a.borrow();
     let b_obj = b.borrow();
     match (&*a_obj, &*b_obj) {
         (PyObject::Int(a), PyObject::Int(b)) => {
-            if b.is_zero() { return Err(PyError::zero_division()); }
+            if b.is_zero() {
+                return Err(PyError::zero_division());
+            }
             let rem = a % b;
             if !rem.is_zero() && (rem.sign() == Sign::Minus) != (b.sign() == Sign::Minus) {
                 Ok(py_int(rem + b))
@@ -535,29 +682,38 @@ pub fn py_mod(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
             }
         }
         (PyObject::Float(a), PyObject::Float(b)) => {
-            if *b == 0.0 { return Err(PyError::zero_division()); }
+            if *b == 0.0 {
+                return Err(PyError::zero_division());
+            }
             py_float_mod(*a, *b)
         }
         // Mixed int/float `%` (`5 % 2.0`, `5.0 % 2`) was missing entirely —
         // fell to the `_` catch-all TypeError below instead of promoting
         // to float like every other mixed-numeric-tower operator here does.
         (PyObject::Int(a), PyObject::Float(b)) => {
-            if *b == 0.0 { return Err(PyError::zero_division()); }
+            if *b == 0.0 {
+                return Err(PyError::zero_division());
+            }
             py_float_mod(a.to_f64().unwrap(), *b)
         }
         (PyObject::Float(a), PyObject::Int(b)) => {
-            if b.is_zero() { return Err(PyError::zero_division()); }
+            if b.is_zero() {
+                return Err(PyError::zero_division());
+            }
             py_float_mod(*a, b.to_f64().unwrap())
         }
-        _ => Err(PyError::type_error(format!("unsupported operand type(s) for %: '{}' and '{}'",
-            a_obj.type_name(), b_obj.type_name()))),
+        _ => Err(PyError::type_error(format!(
+            "unsupported operand type(s) for %: '{}' and '{}'",
+            a_obj.type_name(),
+            b_obj.type_name()
+        ))),
     }
 }
 
 /// Python's `%` for floats follows the DIVISOR's sign (floor-mod), unlike
 /// Rust's `%` (which follows the dividend, like C's `fmod`) — e.g. real
 /// Python's `7.5 % -3.0 == -1.5`, not `1.5`.
-fn py_float_mod(a: f64, b: f64) -> PyResult<PyObjectRef> {
+pub(crate) fn py_float_mod(a: f64, b: f64) -> PyResult<PyObjectRef> {
     let rem = a % b;
     // A zero result takes the DIVISOR's sign (CPython: -0.0 % 1.0 == 0.0,
     // -0.0 % -1.0 == -0.0) — a plain `rem != 0.0` check treats -0.0 as "no
@@ -585,7 +741,9 @@ fn py_pow_float(x: f64, y: f64) -> PyResult<PyObjectRef> {
     // legitimately diverges to `inf` (same IEEE-754 `pow()` semantics as
     // `math.pow`'s analogous domain-error check).
     if x == 0.0 && y < 0.0 && y.is_finite() {
-        return Err(PyError::ZeroDivisionError("0.0 cannot be raised to a negative power".to_string()));
+        return Err(PyError::ZeroDivisionError(
+            "0.0 cannot be raised to a negative power".to_string(),
+        ));
     }
     // A finite negative base with a NON-INTEGER exponent defers to complex
     // pow (CPython: (-2.0)**0.5 is complex ~ (8.66e-17+1.41j)). -INF stays
@@ -594,20 +752,31 @@ fn py_pow_float(x: f64, y: f64) -> PyResult<PyObjectRef> {
     if x < 0.0 && x.is_finite() && y.fract() != 0.0 && y.is_finite() {
         let r = (-x).powf(y);
         let theta = y * std::f64::consts::PI;
-        return Ok(PyObjectRef::imm(PyObject::Complex(r * theta.cos(), r * theta.sin())));
+        return Ok(PyObjectRef::imm(PyObject::Complex(
+            r * theta.cos(),
+            r * theta.sin(),
+        )));
     }
     let result = x.powf(y);
     if result.is_infinite() && x.is_finite() && y.is_finite() {
-        return Err(PyError::overflow_error("(34, 'Numerical result out of range')"));
+        return Err(PyError::overflow_error(
+            "(34, 'Numerical result out of range')",
+        ));
     }
     Ok(py_float(result))
 }
 
 pub fn py_pow(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
-        if bi < 0 { return py_pow_float(ai as f64, bi as f64); }
-        if bi == 0 { return Ok(py_int(1)); }
-        if bi == 1 { return Ok(py_int(ai)); }
+        if bi < 0 {
+            return py_pow_float(ai as f64, bi as f64);
+        }
+        if bi == 0 {
+            return Ok(py_int(1));
+        }
+        if bi == 1 {
+            return Ok(py_int(ai));
+        }
         // Real CPython promotes to an arbitrary-precision int the instant
         // a computation would overflow, regardless of how "small" the
         // exponent looks. The previous "use BigInt only when bi > 63"
@@ -631,8 +800,12 @@ pub fn py_pow(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
         let result = big_a.pow(bi as u32);
         return Ok(py_int(result));
     }
-    if let Some(r) = try_dunder_binop(a, b, "__pow__")? { return Ok(r); }
-    if let Some(r) = try_dunder_binop(b, a, "__rpow__")? { return Ok(r); }
+    if let Some(r) = try_dunder_binop(a, b, "__pow__")? {
+        return Ok(r);
+    }
+    if let Some(r) = try_dunder_binop(b, a, "__rpow__")? {
+        return Ok(r);
+    }
     let a_obj = a.borrow();
     let b_obj = b.borrow();
     match (&*a_obj, &*b_obj) {
@@ -660,15 +833,20 @@ pub fn py_pow(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
         // rather than accumulating log/exp floating-point error), falling
         // back to the general `z**w = exp(w * ln z)` polar-form identity
         // otherwise (fractional or complex exponents).
-        _ if as_complex_parts(&a_obj).is_some() && as_complex_parts(&b_obj).is_some()
-            && (matches!(&*a_obj, PyObject::Complex(_, _)) || matches!(&*b_obj, PyObject::Complex(_, _))) =>
+        _ if as_complex_parts(&a_obj).is_some()
+            && as_complex_parts(&b_obj).is_some()
+            && (matches!(&*a_obj, PyObject::Complex(_, _))
+                || matches!(&*b_obj, PyObject::Complex(_, _))) =>
         {
             let (are, aim) = as_complex_parts(&a_obj).unwrap();
             let (bre, bim) = as_complex_parts(&b_obj).unwrap();
             complex_pow(are, aim, bre, bim)
         }
-        _ => Err(PyError::type_error(format!("unsupported operand type(s) for **: '{}' and '{}'",
-            a_obj.type_name(), b_obj.type_name()))),
+        _ => Err(PyError::type_error(format!(
+            "unsupported operand type(s) for **: '{}' and '{}'",
+            a_obj.type_name(),
+            b_obj.type_name()
+        ))),
     }
 }
 
@@ -682,7 +860,9 @@ fn complex_pow_int(are: f64, aim: f64, n: i64) -> (f64, f64) {
     let mut result = (1.0f64, 0.0f64);
     let mut base = (are, aim);
     while n > 0 {
-        if n & 1 == 1 { result = complex_mul(result.0, result.1, base.0, base.1); }
+        if n & 1 == 1 {
+            result = complex_mul(result.0, result.1, base.0, base.1);
+        }
         base = complex_mul(base.0, base.1, base.0, base.1);
         n >>= 1;
     }
@@ -737,7 +917,9 @@ fn complex_pow(are: f64, aim: f64, bre: f64, bim: f64) -> PyResult<PyObjectRef> 
 
 pub fn py_lshift(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
-        if bi < 0 { return Err(PyError::value_error("negative shift count")); }
+        if bi < 0 {
+            return Err(PyError::value_error("negative shift count"));
+        }
         // Was: unconditional `wrapping_shl` — Rust's `wrapping_shl` reduces
         // the SHIFT AMOUNT modulo 64 (not the result), so `1 << 50000`
         // computed `1i64.wrapping_shl(50000 % 64)` == `1 << 16` == `65536`
@@ -765,37 +947,59 @@ pub fn py_lshift(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
         let big_a = BigInt::from(ai);
         return Ok(py_int(big_a << (bi as usize)));
     }
-    if let Some(r) = try_dunder_binop(a, b, "__lshift__")? { return Ok(r); }
-    if let Some(r) = try_dunder_binop(b, a, "__rlshift__")? { return Ok(r); }
+    if let Some(r) = try_dunder_binop(a, b, "__lshift__")? {
+        return Ok(r);
+    }
+    if let Some(r) = try_dunder_binop(b, a, "__rlshift__")? {
+        return Ok(r);
+    }
     let a_obj = a.borrow();
     let b_obj = b.borrow();
     match (&*a_obj, &*b_obj) {
         (PyObject::Int(a), PyObject::Int(b)) => {
-            let shift = b.to_usize().ok_or_else(|| PyError::value_error("negative shift count"))?;
+            let shift = b
+                .to_usize()
+                .ok_or_else(|| PyError::value_error("negative shift count"))?;
             Ok(py_int(a << shift))
         }
-        _ => Err(PyError::type_error(format!("unsupported operand type(s) for <<: '{}' and '{}'",
-            a_obj.type_name(), b_obj.type_name()))),
+        _ => Err(PyError::type_error(format!(
+            "unsupported operand type(s) for <<: '{}' and '{}'",
+            a_obj.type_name(),
+            b_obj.type_name()
+        ))),
     }
 }
 
 pub fn py_rshift(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
-        if bi < 0 { return Err(PyError::value_error("negative shift count")); }
-        if bi >= 64 { return Ok(py_int(if ai < 0 { -1i64 } else { 0i64 })); }
+        if bi < 0 {
+            return Err(PyError::value_error("negative shift count"));
+        }
+        if bi >= 64 {
+            return Ok(py_int(if ai < 0 { -1i64 } else { 0i64 }));
+        }
         return Ok(py_int(ai.wrapping_shr(bi as u32)));
     }
-    if let Some(r) = try_dunder_binop(a, b, "__rshift__")? { return Ok(r); }
-    if let Some(r) = try_dunder_binop(b, a, "__rrshift__")? { return Ok(r); }
+    if let Some(r) = try_dunder_binop(a, b, "__rshift__")? {
+        return Ok(r);
+    }
+    if let Some(r) = try_dunder_binop(b, a, "__rrshift__")? {
+        return Ok(r);
+    }
     let a_obj = a.borrow();
     let b_obj = b.borrow();
     match (&*a_obj, &*b_obj) {
         (PyObject::Int(a), PyObject::Int(b)) => {
-            let shift = b.to_usize().ok_or_else(|| PyError::value_error("negative shift count"))?;
+            let shift = b
+                .to_usize()
+                .ok_or_else(|| PyError::value_error("negative shift count"))?;
             Ok(py_int(a >> shift))
         }
-        _ => Err(PyError::type_error(format!("unsupported operand type(s) for >>: '{}' and '{}'",
-            a_obj.type_name(), b_obj.type_name()))),
+        _ => Err(PyError::type_error(format!(
+            "unsupported operand type(s) for >>: '{}' and '{}'",
+            a_obj.type_name(),
+            b_obj.type_name()
+        ))),
     }
 }
 
@@ -833,27 +1037,49 @@ fn wrap_set_result(result: PySet, as_frozen: bool) -> PyObjectRef {
 }
 fn set_union(a: &PySet, b: &PySet, as_frozen: bool) -> PyResult<PyObjectRef> {
     let mut result = a.clone();
-    for item in b.to_vec() { result.add(item)?; }
+    for item in b.to_vec() {
+        result.add(item)?;
+    }
     Ok(wrap_set_result(result, as_frozen))
 }
 fn set_intersection(a: &PySet, b: &PySet, as_frozen: bool) -> PyResult<PyObjectRef> {
     let mut result = PySet::new();
-    for item in a.to_vec() { if b.contains(&item)? { result.add(item)?; } }
+    for item in a.to_vec() {
+        if b.contains(&item)? {
+            result.add(item)?;
+        }
+    }
     Ok(wrap_set_result(result, as_frozen))
 }
 fn set_difference(a: &PySet, b: &PySet, as_frozen: bool) -> PyResult<PyObjectRef> {
     let mut result = PySet::new();
-    for item in a.to_vec() { if !b.contains(&item)? { result.add(item)?; } }
+    for item in a.to_vec() {
+        if !b.contains(&item)? {
+            result.add(item)?;
+        }
+    }
     Ok(wrap_set_result(result, as_frozen))
 }
 fn set_symmetric_diff(a: &PySet, b: &PySet, as_frozen: bool) -> PyResult<PyObjectRef> {
     let mut result = PySet::new();
-    for item in a.to_vec() { if !b.contains(&item)? { result.add(item)?; } }
-    for item in b.to_vec() { if !a.contains(&item)? { result.add(item)?; } }
+    for item in a.to_vec() {
+        if !b.contains(&item)? {
+            result.add(item)?;
+        }
+    }
+    for item in b.to_vec() {
+        if !a.contains(&item)? {
+            result.add(item)?;
+        }
+    }
     Ok(wrap_set_result(result, as_frozen))
 }
 
-fn i64_binop(a: &PyObjectRef, b: &PyObjectRef, f: impl Fn(i64, i64) -> i64) -> Option<PyResult<PyObjectRef>> {
+fn i64_binop(
+    a: &PyObjectRef,
+    b: &PyObjectRef,
+    f: impl Fn(i64, i64) -> i64,
+) -> Option<PyResult<PyObjectRef>> {
     if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
         return Some(Ok(py_int(f(ai, bi))));
     }
@@ -867,9 +1093,15 @@ pub fn py_bit_or(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
             return Ok(py_bool((av | bv) != 0));
         }
     }
-    if let Some(r) = i64_binop(a, b, |x, y| x | y) { return r; }
-    if let Some(r) = try_dunder_binop(a, b, "__or__")? { return Ok(r); }
-    if let Some(r) = try_dunder_binop(b, a, "__ror__")? { return Ok(r); }
+    if let Some(r) = i64_binop(a, b, |x, y| x | y) {
+        return r;
+    }
+    if let Some(r) = try_dunder_binop(a, b, "__or__")? {
+        return Ok(r);
+    }
+    if let Some(r) = try_dunder_binop(b, a, "__ror__")? {
+        return Ok(r);
+    }
     if let (Some((sa, frozen)), Some((sb, _))) = (extract_pyset(a), extract_pyset(b)) {
         return set_union(&sa, &sb, frozen);
     }
@@ -880,15 +1112,22 @@ pub fn py_bit_or(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
         (PyObject::Dict(a), PyObject::Dict(b)) => {
             let mut merged = PyDict::new();
             for k in a.keys() {
-                if let Ok(Some(v)) = a.get(&k) { merged.set(k, v)?; }
+                if let Ok(Some(v)) = a.get(&k) {
+                    merged.set(k, v)?;
+                }
             }
             for k in b.keys() {
-                if let Ok(Some(v)) = b.get(&k) { merged.set(k, v)?; }
+                if let Ok(Some(v)) = b.get(&k) {
+                    merged.set(k, v)?;
+                }
             }
             Ok(PyObjectRef::new(PyObject::Dict(Box::new(merged))))
         }
-        _ => Err(PyError::type_error(format!("unsupported operand type(s) for |: '{}' and '{}'",
-            a_obj.type_name(), b_obj.type_name()))),
+        _ => Err(PyError::type_error(format!(
+            "unsupported operand type(s) for |: '{}' and '{}'",
+            a_obj.type_name(),
+            b_obj.type_name()
+        ))),
     }
 }
 
@@ -899,9 +1138,15 @@ pub fn py_bit_xor(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
             return Ok(py_bool((av ^ bv) != 0));
         }
     }
-    if let Some(r) = i64_binop(a, b, |x, y| x ^ y) { return r; }
-    if let Some(r) = try_dunder_binop(a, b, "__xor__")? { return Ok(r); }
-    if let Some(r) = try_dunder_binop(b, a, "__rxor__")? { return Ok(r); }
+    if let Some(r) = i64_binop(a, b, |x, y| x ^ y) {
+        return r;
+    }
+    if let Some(r) = try_dunder_binop(a, b, "__xor__")? {
+        return Ok(r);
+    }
+    if let Some(r) = try_dunder_binop(b, a, "__rxor__")? {
+        return Ok(r);
+    }
     if let (Some((sa, frozen)), Some((sb, _))) = (extract_pyset(a), extract_pyset(b)) {
         return set_symmetric_diff(&sa, &sb, frozen);
     }
@@ -909,8 +1154,11 @@ pub fn py_bit_xor(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     let b_obj = b.borrow();
     match (&*a_obj, &*b_obj) {
         (PyObject::Int(a), PyObject::Int(b)) => Ok(py_int(a.clone() ^ b)),
-        _ => Err(PyError::type_error(format!("unsupported operand type(s) for ^: '{}' and '{}'",
-            a_obj.type_name(), b_obj.type_name()))),
+        _ => Err(PyError::type_error(format!(
+            "unsupported operand type(s) for ^: '{}' and '{}'",
+            a_obj.type_name(),
+            b_obj.type_name()
+        ))),
     }
 }
 
@@ -921,9 +1169,15 @@ pub fn py_bit_and(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
             return Ok(py_bool((av & bv) != 0));
         }
     }
-    if let Some(r) = i64_binop(a, b, |x, y| x & y) { return r; }
-    if let Some(r) = try_dunder_binop(a, b, "__and__")? { return Ok(r); }
-    if let Some(r) = try_dunder_binop(b, a, "__rand__")? { return Ok(r); }
+    if let Some(r) = i64_binop(a, b, |x, y| x & y) {
+        return r;
+    }
+    if let Some(r) = try_dunder_binop(a, b, "__and__")? {
+        return Ok(r);
+    }
+    if let Some(r) = try_dunder_binop(b, a, "__rand__")? {
+        return Ok(r);
+    }
     if let (Some((sa, frozen)), Some((sb, _))) = (extract_pyset(a), extract_pyset(b)) {
         return set_intersection(&sa, &sb, frozen);
     }
@@ -931,8 +1185,11 @@ pub fn py_bit_and(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     let b_obj = b.borrow();
     match (&*a_obj, &*b_obj) {
         (PyObject::Int(a), PyObject::Int(b)) => Ok(py_int(a.clone() & b)),
-        _ => Err(PyError::type_error(format!("unsupported operand type(s) for &: '{}' and '{}'",
-            a_obj.type_name(), b_obj.type_name()))),
+        _ => Err(PyError::type_error(format!(
+            "unsupported operand type(s) for &: '{}' and '{}'",
+            a_obj.type_name(),
+            b_obj.type_name()
+        ))),
     }
 }
 
@@ -953,7 +1210,9 @@ where
     F: Fn(&PyObjectRef, &PyObjectRef) -> bool,
 {
     let n = items.len();
-    if n <= 1 { return items; }
+    if n <= 1 {
+        return items;
+    }
     let right = items.split_off(n / 2);
     let left = py_stable_sort_by(items, is_less);
     let right = py_stable_sort_by(right, is_less);

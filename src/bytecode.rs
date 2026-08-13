@@ -127,16 +127,16 @@ pub enum Opcode {
     // ── Register-based instructions (prefix 0xC0, non-standard) ──────
     // These encode virtual register operands instead of using a stack.
     // The upper 4 bits of `arg` encode dst register, lower encode src(s).
-    REG_MOV = 0xC0,          // r[dst] = r[src]
-    REG_LOAD_CONST = 0xC1,   // r[dst] = consts[arg2]
-    REG_LOAD_FAST = 0xC2,    // r[dst] = fast_locals[arg2]
-    REG_STORE_FAST = 0xC3,   // fast_locals[arg2] = r[src]
-    REG_BINARY_OP = 0xC4,    // r[dst] = r[a] OP r[b]
-    REG_LOAD_GLOBAL = 0xC5,  // r[dst] = globals/builtins[name_idx]
-    REG_CALL = 0xC6,         // r[dst] = call(r[func], r[args...])
-    REG_RETURN = 0xC7,       // return r[src]
+    REG_MOV = 0xC0,           // r[dst] = r[src]
+    REG_LOAD_CONST = 0xC1,    // r[dst] = consts[arg2]
+    REG_LOAD_FAST = 0xC2,     // r[dst] = fast_locals[arg2]
+    REG_STORE_FAST = 0xC3,    // fast_locals[arg2] = r[src]
+    REG_BINARY_OP = 0xC4,     // r[dst] = r[a] OP r[b]
+    REG_LOAD_GLOBAL = 0xC5,   // r[dst] = globals/builtins[name_idx]
+    REG_CALL = 0xC6,          // r[dst] = call(r[func], r[args...])
+    REG_RETURN = 0xC7,        // return r[src]
     REG_JUMP_IF_FALSE = 0xC8, // if !r[src]: pc += offset
-    REG_BUILD_LIST = 0xC9,   // r[dst] = [r[arg0], r[arg1], ...]
+    REG_BUILD_LIST = 0xC9,    // r[dst] = [r[arg0], r[arg1], ...]
 
     // Custom opcodes for dict operations
     DICT_MERGE = 202, // Pop TOS (source dict) and merge into dict at TOS1
@@ -154,11 +154,18 @@ pub enum Opcode {
     CHECK_EXC_MATCH_STAR = 120,
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum OpGroup {
-    Load, Store, Delete, Arith, Call, Control, Build, Stack, Other,
+    Load,
+    Store,
+    Delete,
+    Arith,
+    Call,
+    Control,
+    Build,
+    Stack,
+    Other,
 }
 
 impl Opcode {
@@ -168,15 +175,21 @@ impl Opcode {
     pub fn group(self) -> OpGroup {
         use Opcode::*;
         match self {
-            LOAD_FAST | LOAD_CONST | LOAD_GLOBAL | LOAD_NAME | LOAD_DEREF | LOAD_ATTR => OpGroup::Load,
-            STORE_FAST | STORE_NAME | STORE_GLOBAL | STORE_DEREF | STORE_ATTR | STORE_SUBSCR => OpGroup::Store,
+            LOAD_FAST | LOAD_CONST | LOAD_GLOBAL | LOAD_NAME | LOAD_DEREF | LOAD_ATTR => {
+                OpGroup::Load
+            }
+            STORE_FAST | STORE_NAME | STORE_GLOBAL | STORE_DEREF | STORE_ATTR | STORE_SUBSCR => {
+                OpGroup::Store
+            }
             DELETE_FAST | DELETE_NAME | DELETE_ATTR | DELETE_SUBSCR => OpGroup::Delete,
-            BINARY_OP | COMPARE_OP | CONTAINS_OP | IS_OP | UNARY_NEGATIVE | UNARY_NOT | UNARY_INVERT | UNARY_POSITIVE => OpGroup::Arith,
+            BINARY_OP | COMPARE_OP | CONTAINS_OP | IS_OP | UNARY_NEGATIVE | UNARY_NOT
+            | UNARY_INVERT | UNARY_POSITIVE => OpGroup::Arith,
             CALL | CALL_FUNCTION_EX | CALL_KW | PUSH_NULL => OpGroup::Call,
-            JUMP_FORWARD | JUMP_BACKWARD | JUMP | POP_JUMP_IF_FALSE | POP_JUMP_IF_TRUE 
-                | POP_JUMP_IF_NONE | POP_JUMP_IF_NOT_NONE | FOR_ITER => OpGroup::Control,
+            JUMP_FORWARD | JUMP_BACKWARD | JUMP | POP_JUMP_IF_FALSE | POP_JUMP_IF_TRUE
+            | POP_JUMP_IF_NONE | POP_JUMP_IF_NOT_NONE | FOR_ITER => OpGroup::Control,
             BUILD_LIST | BUILD_TUPLE | BUILD_MAP | BUILD_SET | BUILD_SLICE | BUILD_STRING
-                | LIST_APPEND | LIST_EXTEND | MAP_ADD | SET_ADD | SET_UPDATE | UNPACK_SEQUENCE | UNPACK_EX => OpGroup::Build,
+            | LIST_APPEND | LIST_EXTEND | MAP_ADD | SET_ADD | SET_UPDATE | UNPACK_SEQUENCE
+            | UNPACK_EX => OpGroup::Build,
             DUP_TOP | POP_TOP | COPY | SWAP | GET_ITER => OpGroup::Stack,
             RETURN_VALUE | YIELD_VALUE | RAISE_VARARGS | RERAISE | SEND => OpGroup::Control,
             _ => OpGroup::Other,
@@ -229,10 +242,10 @@ impl Opcode {
             105 => SET_UPDATE,
             106 => STORE_ATTR,
             107 => STORE_DEREF,
-             108 => STORE_FAST,
-             109 => DELETE_ATTR,
-             110 => DELETE_SUBSCR,
-             111 => STORE_GLOBAL,
+            108 => STORE_FAST,
+            109 => DELETE_ATTR,
+            110 => DELETE_SUBSCR,
+            111 => STORE_GLOBAL,
             112 => STORE_NAME,
             113 => SWAP,
             115 => UNPACK_SEQUENCE,
@@ -282,26 +295,102 @@ impl fmt::Display for Instr {
 
 pub(crate) fn needs_arg(op: Opcode) -> bool {
     use Opcode::*;
-    matches!(op,
-        BINARY_OP | BUILD_LIST | BUILD_MAP | BUILD_SET | BUILD_SLICE |
-        BUILD_STRING | BUILD_TUPLE | CALL | CALL_FUNCTION_EX | CALL_KW |
-        COMPARE_OP | CONTAINS_OP | COPY | COPY_FREE_VARS | DELETE_FAST |
-        DELETE_NAME | EXTENDED_ARG | FOR_ITER | IMPORT_FROM | IMPORT_NAME |
-        IS_OP | JUMP_BACKWARD | JUMP_FORWARD | LIST_APPEND | LIST_EXTEND |
-        LOAD_ATTR | LOAD_CONST | LOAD_DEREF | LOAD_FAST | LOAD_FROM_DICT_OR_GLOBALS |
-        LOAD_GLOBAL | LOAD_NAME | MAKE_CELL | MAP_ADD | POP_JUMP_IF_FALSE |
-        POP_JUMP_IF_NONE | POP_JUMP_IF_NOT_NONE | POP_JUMP_IF_TRUE |
-        RAISE_VARARGS | RERAISE | SEND | SET_ADD | SET_FUNCTION_ATTRIBUTE |
-        SET_UPDATE | STORE_ATTR | STORE_DEREF | STORE_FAST | DELETE_ATTR | DELETE_SUBSCR | STORE_GLOBAL |
-        STORE_NAME | SWAP | UNPACK_EX | UNPACK_SEQUENCE | YIELD_VALUE |
-        RESUME | JUMP | POP_BLOCK | SETUP_FINALLY | SETUP_CLEANUP | SETUP_WITH |
-        MAKE_FUNCTION | LOAD_BUILD_CLASS | PUSH_NULL | RETURN_VALUE | UNARY_NEGATIVE |
-        UNARY_NOT | UNARY_INVERT | UNARY_POSITIVE | GET_LEN | MATCH_MAPPING | MATCH_SEQUENCE |
-        MATCH_KEYS | CHECK_EXC_MATCH | PUSH_EXC_INFO | END_FOR | GET_AITER |
-        GET_ANEXT | GET_AWAITABLE | CLEANUP_THROW | END_SEND | FORMAT_SIMPLE |
-        FORMAT_WITH_SPEC | CONVERT_VALUE | LOAD_LOCALS | RETURN_GENERATOR |
-        SETUP_ANNOTATIONS | POP_EXCEPT | UNPACK_SEQUENCE_TWO_TUPLE |
-        DUP_TOP | STORE_SUBSCR | LOAD_CLOSURE | POP_ITER | DICT_MERGE
+    matches!(
+        op,
+        BINARY_OP
+            | BUILD_LIST
+            | BUILD_MAP
+            | BUILD_SET
+            | BUILD_SLICE
+            | BUILD_STRING
+            | BUILD_TUPLE
+            | CALL
+            | CALL_FUNCTION_EX
+            | CALL_KW
+            | COMPARE_OP
+            | CONTAINS_OP
+            | COPY
+            | COPY_FREE_VARS
+            | DELETE_FAST
+            | DELETE_NAME
+            | EXTENDED_ARG
+            | FOR_ITER
+            | IMPORT_FROM
+            | IMPORT_NAME
+            | IS_OP
+            | JUMP_BACKWARD
+            | JUMP_FORWARD
+            | LIST_APPEND
+            | LIST_EXTEND
+            | LOAD_ATTR
+            | LOAD_CONST
+            | LOAD_DEREF
+            | LOAD_FAST
+            | LOAD_FROM_DICT_OR_GLOBALS
+            | LOAD_GLOBAL
+            | LOAD_NAME
+            | MAKE_CELL
+            | MAP_ADD
+            | POP_JUMP_IF_FALSE
+            | POP_JUMP_IF_NONE
+            | POP_JUMP_IF_NOT_NONE
+            | POP_JUMP_IF_TRUE
+            | RAISE_VARARGS
+            | RERAISE
+            | SEND
+            | SET_ADD
+            | SET_FUNCTION_ATTRIBUTE
+            | SET_UPDATE
+            | STORE_ATTR
+            | STORE_DEREF
+            | STORE_FAST
+            | DELETE_ATTR
+            | DELETE_SUBSCR
+            | STORE_GLOBAL
+            | STORE_NAME
+            | SWAP
+            | UNPACK_EX
+            | UNPACK_SEQUENCE
+            | YIELD_VALUE
+            | RESUME
+            | JUMP
+            | POP_BLOCK
+            | SETUP_FINALLY
+            | SETUP_CLEANUP
+            | SETUP_WITH
+            | MAKE_FUNCTION
+            | LOAD_BUILD_CLASS
+            | PUSH_NULL
+            | RETURN_VALUE
+            | UNARY_NEGATIVE
+            | UNARY_NOT
+            | UNARY_INVERT
+            | UNARY_POSITIVE
+            | GET_LEN
+            | MATCH_MAPPING
+            | MATCH_SEQUENCE
+            | MATCH_KEYS
+            | CHECK_EXC_MATCH
+            | PUSH_EXC_INFO
+            | END_FOR
+            | GET_AITER
+            | GET_ANEXT
+            | GET_AWAITABLE
+            | CLEANUP_THROW
+            | END_SEND
+            | FORMAT_SIMPLE
+            | FORMAT_WITH_SPEC
+            | CONVERT_VALUE
+            | LOAD_LOCALS
+            | RETURN_GENERATOR
+            | SETUP_ANNOTATIONS
+            | POP_EXCEPT
+            | UNPACK_SEQUENCE_TWO_TUPLE
+            | DUP_TOP
+            | STORE_SUBSCR
+            | LOAD_CLOSURE
+            | POP_ITER
+            | DICT_MERGE
     )
 }
 
@@ -416,7 +505,12 @@ impl CodeObject {
 
     /// Look up the line number for a given instruction index.
     pub fn line_number(&self, idx: usize) -> usize {
-        self.line_numbers.get(idx).copied().filter(|&ln| ln != 0).map(|ln| ln as usize).unwrap_or(self.first_lineno)
+        self.line_numbers
+            .get(idx)
+            .copied()
+            .filter(|&ln| ln != 0)
+            .map(|ln| ln as usize)
+            .unwrap_or(self.first_lineno)
     }
 
     /// Serialize this CodeObject to a byte vector.
@@ -479,14 +573,24 @@ impl CodeObject {
 
         // vararg_name
         match &self.vararg_name {
-            Some(s) => { write_u8(&mut buf, 1); write_str(&mut buf, s); }
-            None => { write_u8(&mut buf, 0); }
+            Some(s) => {
+                write_u8(&mut buf, 1);
+                write_str(&mut buf, s);
+            }
+            None => {
+                write_u8(&mut buf, 0);
+            }
         }
 
         // kwarg_name
         match &self.kwarg_name {
-            Some(s) => { write_u8(&mut buf, 1); write_str(&mut buf, s); }
-            None => { write_u8(&mut buf, 0); }
+            Some(s) => {
+                write_u8(&mut buf, 1);
+                write_str(&mut buf, s);
+            }
+            None => {
+                write_u8(&mut buf, 0);
+            }
         }
 
         write_u32(&mut buf, self.num_defaults as u32);
@@ -515,7 +619,8 @@ impl CodeObject {
         let mut instructions = Vec::with_capacity(instr_count);
         for _ in 0..instr_count {
             let op_val = read_u16(data, &mut pos)?;
-            let op = Opcode::from_u16(op_val).ok_or_else(|| format!("Unknown opcode: {}", op_val))?;
+            let op =
+                Opcode::from_u16(op_val).ok_or_else(|| format!("Unknown opcode: {}", op_val))?;
             let arg = read_u32(data, &mut pos)?;
             instructions.push(Instr { op, arg });
         }
