@@ -1052,6 +1052,23 @@ impl PyObjectRef {
                 }
             }
         }
+        // If SELF is a native type (its own __eq__ was not consulted above)
+        // and OTHER is an Instance, reflect to OTHER's __eq__ — CPython:
+        // 'halibut' == HalibutProxy() calls HalibutProxy.__eq__('halibut').
+        // Without this, set/dict membership `H() in {'halibut'}` failed even
+        // though the hashes matched and `'halibut' == H()` was True (the set
+        // probes with `existing.equals(new_key)`).
+        if !matches!(&*self.borrow(), PyObject::Instance { .. }) {
+            if let PyObject::Instance { typ, .. } = &*other.borrow() {
+                let typ = typ.clone();
+                if let Some(f) = lookup_dunder_via_mro(&typ, "__eq__") {
+                    let result = call_bound_method(f, other.clone(), vec![self.clone()])?;
+                    if !is_not_implemented(&result) {
+                        return Ok(result.truthy());
+                    }
+                }
+            }
+        }
         // Real CPython short-circuits container/slice `==` on POINTER
         // IDENTITY before comparing components — `s1 == s1` where a
         // component's `__eq__` raises (test_slice.py::test_cmp's `BadCmp`)

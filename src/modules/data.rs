@@ -2101,6 +2101,31 @@ fn build_decimal_type() -> PyObjectRef {
         Ok(decval_to_instance(&DecValue { special: DecSpecial::Finite, sign: n < 0, coeff: num_bigint::BigInt::from(n.abs()), exp: 0 }))
     }));
 
+    type_dict.insert_str("__hash__", bf!("__hash__", |args| {
+        // CPython's Decimal hash: (coeff * 10**exp) mod 2**61-1 for finite
+        // values (using the modular inverse of 10 for negative exponents),
+        // ±INF (314159) for infinities, 0 for nans; signed by the value.
+        let v = instance_to_decval(&args[0]).ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
+        const MOD: i64 = (1 << 61) - 1;
+        let magnitude = match v.special {
+            DecSpecial::QNaN | DecSpecial::SNaN => 0i64,
+            DecSpecial::Infinity => 314159,
+            DecSpecial::Finite => {
+                let modulus = num_bigint::BigInt::from(MOD);
+                let exp_hash = if v.exp >= 0 {
+                    num_bigint::BigInt::from(10u32).modpow(&num_bigint::BigInt::from(v.exp), &modulus)
+                } else {
+                    // 10**(-exp) = inv10**(|exp|); inv10 = 10**-1 mod P.
+                    let inv10 = crate::object::bigint_mod_inverse(&num_bigint::BigInt::from(10), &modulus).unwrap_or_else(|| num_bigint::BigInt::from(1));
+                    inv10.modpow(&num_bigint::BigInt::from(-v.exp), &modulus)
+                };
+                let h = (&v.coeff % &modulus * exp_hash) % &modulus;
+                h.to_i64().unwrap_or(0)
+            }
+        };
+        let result = if v.sign { -magnitude } else { magnitude };
+        Ok(py_int(if result == -1 { -2 } else { result }))
+    }));
     PyObjectRef::new(PyObject::Type { name: "Decimal".to_string(), dict: Box::new(str_map_to_typedict(type_dict)), bases: vec![], mro: vec![] })
 }
 
@@ -2534,17 +2559,20 @@ pub fn create_fractions_dict() -> HashMap<String, PyObjectRef> {
     });
     frac_method!("__hash__", |args| {
         let (n, d) = frac_self_num_den(&args[0])?;
-        // Simplified (not CPython's exact modular-inverse hash algorithm,
-        // which relies on `sys.hash_info.modulus`), but preserves the two
-        // invariants real code actually depends on: an integral fraction
-        // hashes the same as the equivalent `int`, and a fraction exactly
-        // representable as a `float` hashes the same as that `float`.
-        let h = if d == BigInt::one() {
-            py_int(n).hash()?
-        } else {
-            py_float(frac_to_f64(&n, &d)).hash()?
+        // CPython's _hash_algorithm: hash(|N| * dinv) mod 2**61-1, with INF
+        // (314159) when the denominator has no modular inverse (is a multiple
+        // of the modulus), signed by the numerator.
+        let modulus = (BigInt::from(1i64) << 61) - BigInt::from(1);
+        let hash_ = match crate::object::bigint_mod_inverse(&d, &modulus) {
+            None => 314159i64, // _PyHASH_INF
+            Some(inv) => {
+                let abs_n_hash = crate::object::hash_bigint(&n.abs());
+                let product = BigInt::from(abs_n_hash as i64) * inv;
+                crate::object::hash_bigint(&product) as i64
+            }
         };
-        Ok(py_int(h as i64))
+        let result = if n.sign() == num_bigint::Sign::Minus { -hash_ } else { hash_ };
+        Ok(py_int(if result == -1 { -2 } else { result }))
     });
     frac_method!("__eq__", |args| {
         if args.len() < 2 { return Ok(py_bool(false)); }

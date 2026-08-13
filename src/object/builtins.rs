@@ -4158,7 +4158,7 @@ fn bigint_gcd(a: &BigInt, b: &BigInt) -> BigInt {
 // `m` aren't coprime (no inverse exists). Result's sign matches `m`'s,
 // matching real CPython's own documented `pow(a, -1, m)` behavior ("an
 // inverse, with the same sign as m").
-fn bigint_mod_inverse(a: &BigInt, m: &BigInt) -> Option<BigInt> {
+pub(crate) fn bigint_mod_inverse(a: &BigInt, m: &BigInt) -> Option<BigInt> {
     let m_abs = m.abs();
     if m_abs.is_zero() { return None; }
     let (mut old_r, mut r) = (bigint_mod_python(a, &m_abs), m_abs.clone());
