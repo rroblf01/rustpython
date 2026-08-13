@@ -910,8 +910,13 @@ impl PyObjectRef {
                     _ => None,
                 };
                 if let Some(typ) = typ {
-                    if let Some(f) = lookup_dunder_via_mro(&typ, "__hash__") {
-                        let result = call_bound_method(f, self.clone(), vec![])?;
+                if let Some(f) = lookup_dunder_via_mro(&typ, "__hash__") {
+                    // `__hash__ = None` makes an instance unhashable
+                    // (CPython: TypeError: unhashable type: 'H').
+                    if matches!(&*f.borrow(), PyObject::None) {
+                        return Err(PyError::type_error(format!("unhashable type: '{}'", typ.borrow().type_name())));
+                    }
+                    let result = call_bound_method(f, self.clone(), vec![])?;
                         let n = result.borrow();
                         // Real Python's `__hash__` protocol: whatever `int`
                         // is returned BECOMES the hash value directly (bit

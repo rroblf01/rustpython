@@ -8088,6 +8088,13 @@ impl VirtualMachine {
             namespace_dict.insert(crate::object::METATYPE_KEY.to_string(), mt.clone());
         }
 
+        // A class that defines `__eq__` but not `__hash__` gets
+        // `__hash__ = None` (unhashable) — CPython's implicit rule
+        // (class OnlyEquality: def __eq__(...): ... is unhashable).
+        if namespace_dict.contains_key("__eq__") && !namespace_dict.contains_key("__hash__") {
+            namespace_dict.insert("__hash__".to_string(), py_none());
+        }
+
         let class = PyObjectRef::new(PyObject::Type {
             name: name_str,
             dict: Box::new(str_map_to_typedict(namespace_dict.clone())),
