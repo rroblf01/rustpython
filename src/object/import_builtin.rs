@@ -699,6 +699,14 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
             builtin_call(&bf, &all_args)
         }
         4 => {
+            // The `type` class called as a plain value (`map(type, seq)`,
+            // `key=type`, ...) must take the single-argument `type(x)` form
+            // (return x's type), not construct an instance of `type` — same
+            // special case the main VM's `call_function` already has.
+            if matches!(&*f.borrow(), PyObject::Type { name, .. } if name == "type") && a.len() == 1
+            {
+                return crate::object::builtin_type_of(&a);
+            }
             // A real native value type (`str`, `int`, `bool`, `list`, ...)
             // called through THIS disposable dispatcher — e.g. `map(str,
             // seq)`/`filter(bool, seq)`, which store the callable and

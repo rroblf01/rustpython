@@ -347,6 +347,27 @@ fn try_rich_compare(a: &PyObjectRef, b: &PyObjectRef, op: u32) -> PyResult<Optio
         }
         Ok(None)
     };
+    // For `!=`, a class with no `__ne__` uses `object.__ne__`'s default:
+    // `not (self.__eq__(other))` — but a class that DEFINES `__ne__` gets
+    // only that called (a `NotImplemented` return defers to the reflected
+    // side, never to its own `__eq__`).
+    let try_ne_side =
+        |self_ref: &PyObjectRef, other_ref: &PyObjectRef| -> PyResult<Option<PyObjectRef>> {
+            if let PyObject::Instance { typ, .. } = &*self_ref.borrow() {
+                if let Some(f) = lookup_dunder_via_mro(typ, "__ne__") {
+                    let result = call_bound_method(f, self_ref.clone(), vec![other_ref.clone()])?;
+                    if !is_not_implemented(&result) {
+                        return Ok(Some(result));
+                    }
+                } else if let Some(f) = lookup_dunder_via_mro(typ, "__eq__") {
+                    let result = call_bound_method(f, self_ref.clone(), vec![other_ref.clone()])?;
+                    if !is_not_implemented(&result) {
+                        return Ok(Some(py_bool(!result.truthy())));
+                    }
+                }
+            }
+            Ok(None)
+        };
 
     let a_type = instance_type_of(a);
     let b_type = instance_type_of(b);
@@ -356,17 +377,33 @@ fn try_rich_compare(a: &PyObjectRef, b: &PyObjectRef, op: u32) -> PyResult<Optio
     };
 
     if b_first {
-        if let Some(r) = try_side(b, a, refl_name)? {
+        if let Some(r) = if op == 5 {
+            try_ne_side(b, a)?
+        } else {
+            try_side(b, a, refl_name)?
+        } {
             return Ok(Some(r));
         }
-        if let Some(r) = try_side(a, b, own_name)? {
+        if let Some(r) = if op == 5 {
+            try_ne_side(a, b)?
+        } else {
+            try_side(a, b, own_name)?
+        } {
             return Ok(Some(r));
         }
     } else {
-        if let Some(r) = try_side(a, b, own_name)? {
+        if let Some(r) = if op == 5 {
+            try_ne_side(a, b)?
+        } else {
+            try_side(a, b, own_name)?
+        } {
             return Ok(Some(r));
         }
-        if let Some(r) = try_side(b, a, refl_name)? {
+        if let Some(r) = if op == 5 {
+            try_ne_side(b, a)?
+        } else {
+            try_side(b, a, refl_name)?
+        } {
             return Ok(Some(r));
         }
     }

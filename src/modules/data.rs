@@ -2646,10 +2646,9 @@ fn build_decimal_type() -> PyObjectRef {
             } else {
                 (v.coeff.clone(), ten_pow(-v.exp))
             };
-            Ok(py_tuple(vec![
-                py_int(if v.sign { -num } else { num }),
-                py_int(den),
-            ]))
+            // Reduce to lowest terms (Decimal('3.5e-2') -> 7/200, not 35/1000).
+            let (num, den) = frac_normalize(if v.sign { -num } else { num }, den)?;
+            Ok(py_tuple(vec![py_int(num), py_int(den)]))
         }),
     );
     type_dict.insert_str(
@@ -3622,8 +3621,8 @@ fn frac_parse_str(s: &str) -> PyResult<(BigInt, BigInt)> {
 
 pub(crate) fn frac_instance_num_den(v: &PyObjectRef) -> Option<(BigInt, BigInt)> {
     if let PyObject::Instance { dict, .. } = &*v.borrow() {
-        let num = dict.get_str("numerator")?;
-        let den = dict.get_str("denominator")?;
+        let num = dict.get_str("_numerator")?;
+        let den = dict.get_str("_denominator")?;
         let get = |o: &PyObjectRef| -> Option<BigInt> {
             match &*o.borrow() {
                 PyObject::Int(n) => Some(n.clone()),
@@ -3640,15 +3639,12 @@ pub(crate) fn frac_instance_num_den(v: &PyObjectRef) -> Option<(BigInt, BigInt)>
     None
 }
 
-fn frac_is_fraction(v: &PyObjectRef) -> bool {
-    matches!(&*v.borrow(), PyObject::Instance { dict, .. } if dict.get_str("numerator").is_some() && dict.get_str("denominator").is_some())
-}
 
 fn frac_make(frac_type: &PyObjectRef, num: BigInt, den: BigInt) -> PyResult<PyObjectRef> {
     let (num, den) = frac_normalize(num, den)?;
     let mut dict = AttrMap::new();
-    dict.insert_str("numerator", py_int(num));
-    dict.insert_str("denominator", py_int(den));
+    dict.insert_str("_numerator", py_int(num));
+    dict.insert_str("_denominator", py_int(den));
     Ok(PyObjectRef::new(PyObject::Instance {
         typ: frac_type.clone(),
         dict,
@@ -3838,6 +3834,29 @@ pub(crate) fn frac_to_f64(num: &BigInt, den: &BigInt) -> f64 {
     let d2 = d >> shift_d;
     let ratio = n2.to_f64().unwrap_or(f64::INFINITY) / d2.to_f64().unwrap_or(f64::INFINITY);
     sign * ratio * 2f64.powf(shift_n as f64 - shift_d as f64)
+}
+
+/// Exact comparison of `num/den` against an `f64` (CPython's Fraction/float
+/// comparisons use the float's exact binary value, so `F(10**23) == 1e23`
+/// is False). `None` when NaN is involved.
+fn frac_cmp_exact(num: &BigInt, den: &BigInt, f: f64) -> Option<std::cmp::Ordering> {
+    if f.is_nan() {
+        return None;
+    }
+    if f.is_infinite() {
+        // Every finite fraction is less than +inf and greater than -inf.
+        return Some(if f.is_sign_positive() {
+            std::cmp::Ordering::Less
+        } else {
+            std::cmp::Ordering::Greater
+        });
+    }
+    if num.is_zero() {
+        return Some(0.0f64.partial_cmp(&f).unwrap_or(std::cmp::Ordering::Equal));
+    }
+    let (fn_, fd) = frac_float_to_ratio(f).ok()?;
+    // Compare num/den with fn_/fd_ exactly (cross-multiplied).
+    Some((num * &fd).cmp(&(&fn_ * den)))
 }
 
 /// Shared binary-op dispatcher: `op` combines two exact `(num, den)` pairs;
@@ -4448,12 +4467,28 @@ fn frac_ctor_value(
         return frac_parse_str(s);
     }
     // The `numbers.Rational` protocol: read `.numerator` / `.denominator`
-    // attributes (properties included) on arbitrary non-type objects.
+    // attributes (properties included) on arbitrary non-type objects —
+    // checking the INSTANCE dict first (a `Rat`-style class stores them as
+    // plain attributes), then the type dict/property resolution.
     if !matches!(&*obj.borrow(), PyObject::Type { .. }) {
-        if let (Some(num), Some(den)) = (
-            vm.resolve_descriptor_attr(obj, "numerator"),
-            vm.resolve_descriptor_attr(obj, "denominator"),
-        ) {
+        let (num, den) = if let PyObject::Instance { dict, .. } = &*obj.borrow() {
+            let num = dict.get_str("numerator").cloned();
+            let den = dict.get_str("denominator").cloned();
+            if num.is_some() && den.is_some() {
+                (num, den)
+            } else {
+                (
+                    vm.resolve_descriptor_attr(obj, "numerator"),
+                    vm.resolve_descriptor_attr(obj, "denominator"),
+                )
+            }
+        } else {
+            (
+                vm.resolve_descriptor_attr(obj, "numerator"),
+                vm.resolve_descriptor_attr(obj, "denominator"),
+            )
+        };
+        if let (Some(num), Some(den)) = (num, den) {
             let n = crate::object::int_value_or_backing(&num)
                 .or_else(|| crate::object::to_index(&num).ok())
                 .or_else(|| {
@@ -4536,6 +4571,149 @@ fn frac_ctor_value(
     ))
 }
 
+/// Raw numerator/denominator OBJECTS for a constructor operand — exact ints/
+/// bools/Fractions/floats/strings become plain ints, but an int-subclass or
+/// registered-Rational operand keeps its `.numerator`/`.denominator` objects
+/// as-is (CPython stores these raw, so `F(myint(3), myint(6)).numerator` is
+/// a `myint`).
+fn frac_ctor_raw(
+    vm: &mut crate::vm::VirtualMachine,
+    obj: &PyObjectRef,
+    allow_as_integer_ratio: bool,
+    strict_rational: bool,
+) -> PyResult<Option<(PyObjectRef, PyObjectRef)>> {
+    if let PyObject::Int(n) = &*obj.borrow() {
+        return Ok(Some((py_int(n.clone()), py_int(1))));
+    }
+    if let PyObject::Bool(b) = &*obj.borrow() {
+        return Ok(Some((py_int(*b as i64), py_int(1))));
+    }
+    if let Some((n, d)) = frac_instance_num_den(obj) {
+        return Ok(Some((py_int(n), py_int(d))));
+    }
+    if !strict_rational {
+        if let FracOperand::Float(f) = frac_operand_of(obj) {
+            let (n, d) = frac_float_to_ratio(f)?;
+            return Ok(Some((py_int(n), py_int(d))));
+        }
+        if let PyObject::Str(s) = &*obj.borrow() {
+            let (n, d) = frac_parse_str(s)?;
+            return Ok(Some((py_int(n), py_int(d))));
+        }
+    }
+    if !matches!(&*obj.borrow(), PyObject::Type { .. }) {
+        let (num, den) = if let PyObject::Instance { dict, .. } = &*obj.borrow() {
+            let num = dict.get_str("numerator").cloned();
+            let den = dict.get_str("denominator").cloned();
+            if num.is_some() && den.is_some() {
+                (num, den)
+            } else {
+                (
+                    vm.resolve_descriptor_attr(obj, "numerator"),
+                    vm.resolve_descriptor_attr(obj, "denominator"),
+                )
+            }
+        } else {
+            (
+                vm.resolve_descriptor_attr(obj, "numerator"),
+                vm.resolve_descriptor_attr(obj, "denominator"),
+            )
+        };
+        if let (Some(num), Some(den)) = (num, den) {
+            return Ok(Some((num, den)));
+        }
+        // `as_integer_ratio` (instance-dict lambdas stay unbound) — only the
+        // SINGLE-argument constructor form accepts these; the two-arg form
+        // requires real Rational instances (CPython: `F(Ratio((3,7)), 11)`
+        // raises TypeError).
+        // raises TypeError).
+        if allow_as_integer_ratio {
+            let instance_attr = if let PyObject::Instance { dict, .. } = &*obj.borrow() {
+                dict.get_str("as_integer_ratio").cloned()
+            } else {
+                None
+            };
+            let as_integer_ratio: Option<PyObjectRef> = if let Some(found) = instance_attr {
+                Some(found)
+            } else {
+                let typ = if let PyObject::Instance { typ, .. } = &*obj.borrow() {
+                    Some(typ.clone())
+                } else {
+                    None
+                };
+                if let (Some(typ), Ok(found)) =
+                    (typ, obj.borrow().get_attribute("as_integer_ratio"))
+                {
+                    frac_bind_method(&found, obj, &typ)
+                } else {
+                    None
+                }
+            };
+            if let Some(bound) = as_integer_ratio {
+                let result = vm.call_function(bound, vec![], vec![])?;
+                let b = result.borrow();
+                if let PyObject::Tuple(items) = &*b {
+                    if items.len() != 2 {
+                        let msg = if items.len() < 2 {
+                            format!(
+                                "not enough values to unpack (expected 2, got {})",
+                                items.len()
+                            )
+                        } else {
+                            "too many values to unpack (expected 2)".to_string()
+                        };
+                        drop(b);
+                        return Err(PyError::value_error(msg));
+                    }
+                    let num = crate::object::int_value_or_backing(&items[0])
+                        .or_else(|| crate::object::to_index(&items[0]).ok())
+                        .ok_or_else(|| {
+                            PyError::type_error("as_integer_ratio() must return a pair of integers")
+                        })?;
+                    let den = crate::object::int_value_or_backing(&items[1])
+                        .or_else(|| crate::object::to_index(&items[1]).ok())
+                        .ok_or_else(|| {
+                            PyError::type_error("as_integer_ratio() must return a pair of integers")
+                        })?;
+                    drop(b);
+                    return Ok(Some((py_int(num), py_int(den))));
+                }
+                drop(b);
+                return Err(PyError::type_error(
+                    "cannot unpack non-iterable type from as_integer_ratio()",
+                ));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Normalize raw numerator/denominator objects to lowest terms with a
+/// positive denominator, dividing the RAW objects by the gcd (CPython's
+/// `numerator //= g; denominator //= g` on the stored objects).
+fn frac_normalize_raw(num: &PyObjectRef, den: &PyObjectRef) -> PyResult<(PyObjectRef, PyObjectRef)> {
+    let ni = crate::object::int_value_or_backing(num).or_else(|| crate::object::to_index(num).ok());
+    let di = crate::object::int_value_or_backing(den).or_else(|| crate::object::to_index(den).ok());
+    let (ni, di) = match (ni, di) {
+        (Some(n), Some(d)) => (n, d),
+        _ => return Ok((num.clone(), den.clone())),
+    };
+    if di.is_zero() {
+        return Err(PyError::ZeroDivisionError(format!("Fraction({}, 0)", ni)));
+    }
+    let g_pos = frac_bigint_gcd(&ni, &di);
+    let g = if di.sign() == num_bigint::Sign::Minus {
+        -g_pos
+    } else {
+        g_pos
+    };
+    // CPython divides ALWAYS (`numerator //= g`), which is a no-op for g == 1
+    // but flips the sign for a negative g.
+    let num = crate::object::py_floor_div(num, &py_int(g.clone()))?;
+    let den = crate::object::py_floor_div(den, &py_int(g))?;
+    Ok((num, den))
+}
+
 /// Fraction's real constructor (CPython's `Fraction.__new__`): single-arg
 /// int / Rational / float / string / as_integer_ratio object, or the
 /// two-arg numerator/denominator (each an int or Rational) form.
@@ -4547,39 +4725,38 @@ pub(crate) fn fraction_init_with_vm(
         return Err(PyError::type_error("__init__ requires self"));
     }
     let rest = &args[1..];
-    let (num, den) = match rest.len() {
-        0 => (BigInt::zero(), BigInt::one()),
-        1 => frac_ctor_value(vm, &rest[0])?,
+    let (num, den): (PyObjectRef, PyObjectRef) = match rest.len() {
+        0 => (py_int(0), py_int(1)),
+        1 => frac_ctor_raw(vm, &rest[0], true, false)?.ok_or_else(|| {
+            PyError::type_error(
+                "argument should be a string or a Rational instance or have the as_integer_ratio() method",
+            )
+        })?,
         2 => {
-            let a = frac_ctor_rational(&rest[0]).ok_or_else(|| {
+            let (an, ad) = frac_ctor_raw(vm, &rest[0], false, true)?.ok_or_else(|| {
                 PyError::type_error("both arguments should be Rational instances")
             })?;
-            let b = frac_ctor_rational(&rest[1]).ok_or_else(|| {
+            let (bn, bd) = frac_ctor_raw(vm, &rest[1], false, true)?.ok_or_else(|| {
                 PyError::type_error("both arguments should be Rational instances")
             })?;
-            let (an, ad) = a;
-            let (bn, bd) = b;
-            (&an * &bd, &ad * &bn)
+            let num = crate::object::py_mul(&an, &bd)?;
+            let den = crate::object::py_mul(&ad, &bn)?;
+            frac_normalize_raw(&num, &den)?
         }
         _ => return Err(PyError::type_error("Fraction() takes at most 2 arguments")),
     };
-    let (num, den) = frac_normalize(num, den)?;
     if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
-        dict.insert_str("numerator", py_int(num));
-        dict.insert_str("denominator", py_int(den));
+        // Immutable: a re-run `r.__init__(...)` on an already-built
+        // Fraction is a no-op (CPython's slots-based Fraction).
+        if dict.get_str("_numerator").is_some() {
+            return Ok(py_none());
+        }
+        dict.insert_str("_numerator", num);
+        dict.insert_str("_denominator", den);
     }
     Ok(py_none())
 }
 
-fn frac_ctor_rational(obj: &PyObjectRef) -> Option<(BigInt, BigInt)> {
-    if let PyObject::Int(n) = &*obj.borrow() {
-        return Some((n.clone(), BigInt::one()));
-    }
-    if let PyObject::Bool(b) = &*obj.borrow() {
-        return Some((BigInt::from(*b as i64), BigInt::one()));
-    }
-    frac_instance_num_den(obj)
-}
 
 pub fn create_fractions_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
@@ -4653,8 +4830,8 @@ pub fn create_fractions_dict() -> HashMap<String, PyObjectRef> {
                         .or_else(|| crate::object::to_index(&args[2]).ok())
                         .ok_or_else(|| PyError::type_error("denominator must be an integer"))?;
                     let mut dict = AttrMap::new();
-                    dict.insert_str("numerator", args[1].clone());
-                    dict.insert_str("denominator", args[2].clone());
+                    dict.insert_str("_numerator", args[1].clone());
+                    dict.insert_str("_denominator", args[2].clone());
                     Ok(PyObjectRef::new(PyObject::Instance {
                         typ: cls.clone(),
                         dict,
@@ -4759,8 +4936,16 @@ pub fn create_fractions_dict() -> HashMap<String, PyObjectRef> {
         },
         |a, b| a / b,
         |(ar, ai), (br, bi)| {
-            let den = br * br + bi * bi;
-            ((ar * br + ai * bi) / den, (ai * br - ar * bi) / den)
+            // Smith's algorithm (matching CPython's complex division).
+            if br.abs() >= bi.abs() {
+                let ratio = bi / br;
+                let denom = br + bi * ratio;
+                ((ar + ai * ratio) / denom, (ai - ar * ratio) / denom)
+            } else {
+                let ratio = br / bi;
+                let denom = br * ratio + bi;
+                ((ar * ratio + ai) / denom, (ai * ratio - ar) / denom)
+            }
         },
         crate::object::py_div
     ));
@@ -4777,8 +4962,16 @@ pub fn create_fractions_dict() -> HashMap<String, PyObjectRef> {
         },
         |a, b| a / b,
         |(ar, ai), (br, bi)| {
-            let den = br * br + bi * bi;
-            ((ar * br + ai * bi) / den, (ai * br - ar * bi) / den)
+            // Smith's algorithm (matching CPython's complex division).
+            if br.abs() >= bi.abs() {
+                let ratio = bi / br;
+                let denom = br + bi * ratio;
+                ((ar + ai * ratio) / denom, (ai - ar * ratio) / denom)
+            } else {
+                let ratio = br / bi;
+                let denom = br * ratio + bi;
+                ((ar * ratio + ai) / denom, (ai * ratio - ar) / denom)
+            }
         },
         crate::object::py_div
     ));
@@ -4797,7 +4990,7 @@ pub fn create_fractions_dict() -> HashMap<String, PyObjectRef> {
                         "Fraction division by zero".to_string(),
                     ));
                 }
-                Ok(py_int(&an * &bd / (&ad * &bn)))
+                Ok(py_int(floor_div_rem(&an * &bd, &(&ad * &bn)).0))
             }
             FracOperand::Float(bf) => {
                 if bf == 0.0 {
@@ -4823,7 +5016,7 @@ pub fn create_fractions_dict() -> HashMap<String, PyObjectRef> {
                         "Fraction division by zero".to_string(),
                     ));
                 }
-                Ok(py_int(&an * &bd / (&ad * &bn)))
+                Ok(py_int(floor_div_rem(&an * &bd, &(&ad * &bn)).0))
             }
             FracOperand::Float(af) => {
                 if af == 0.0 {
@@ -5006,7 +5199,15 @@ pub fn create_fractions_dict() -> HashMap<String, PyObjectRef> {
                 Ok(frac_float_pow(frac_to_f64(&an, &ad), frac_to_f64(&bn, &bd)))
             }
             FracOperand::Float(bf) => Ok(frac_float_pow(frac_to_f64(&an, &ad), bf)),
-            FracOperand::Other => Ok(py_not_implemented()),
+            FracOperand::Other => {
+                // CPython's `isinstance(b, (float, complex))` arm:
+                // `float(a) ** b` (delegates to a complex(-subclass)
+                // exponent's own `__rpow__`).
+                if frac_is_complex_operand(&args[1]) {
+                    return crate::object::py_pow(&py_float(frac_to_f64(&an, &ad)), &args[1]);
+                }
+                Ok(py_not_implemented())
+            }
         }
     });
     frac_method!("__rpow__", |args| {
@@ -5022,15 +5223,6 @@ pub fn create_fractions_dict() -> HashMap<String, PyObjectRef> {
         // b integer and >= 0: `a ** b.numerator` keeps an int base an int.
         if bd == BigInt::one() && bn.sign() != num_bigint::Sign::Minus {
             return crate::object::py_pow(a, &py_int(bn.clone()));
-        }
-        if bd == BigInt::one() {
-            // b integer (negative): `a ** b.numerator` preserves exactness
-            // for non-Rational bases too (Root(4) ** F(-2,1) -> Root.__pow__(-2)).
-            if let Ok(r) = crate::object::py_pow(a, &py_int(bn.clone())) {
-                if !crate::object::is_not_implemented(&r) {
-                    return Ok(r);
-                }
-            }
         }
         match frac_operand_of(a) {
             FracOperand::Frac(an, ad) => {
@@ -5051,6 +5243,16 @@ pub fn create_fractions_dict() -> HashMap<String, PyObjectRef> {
                 }
             }
             FracOperand::Other => {
+                // CPython's `b.denominator == 1` arm: `a ** b.numerator`
+                // (for non-Rational bases like a complex subclass, keeping
+                // exactness where possible).
+                if bd == BigInt::one() {
+                    if let Ok(r) = crate::object::py_pow(a, &py_int(bn.clone())) {
+                        if !crate::object::is_not_implemented(&r) {
+                            return Ok(r);
+                        }
+                    }
+                }
                 // CPython's final `a ** float(b)` arm for Real/Complex bases.
                 let bf = frac_to_f64(&bn, &bd);
                 let f = a.borrow().get_attribute("__pow__").ok();
@@ -5128,7 +5330,7 @@ pub fn create_fractions_dict() -> HashMap<String, PyObjectRef> {
         let ndigits = args[1].as_i64().ok_or_else(|| {
             PyError::type_error("__round__() argument 'ndigits' must be integral")
         })?;
-        let shift = BigInt::from(10).pow(ndigits.abs() as u32);
+        let shift = BigInt::from(10).pow(ndigits.unsigned_abs() as u32);
         let (rn, rd) = if ndigits > 0 {
             (round_int(&(n * &shift), &d), shift)
         } else {
@@ -5183,6 +5385,13 @@ pub fn create_fractions_dict() -> HashMap<String, PyObjectRef> {
         frac_make(&get_fraction_type(), rn, rd)
     });
     frac_method!("__bool__", |args| {
+        // CPython uses `bool(self._numerator)` — a raw (int-subclass /
+        // registered-Rational) numerator's own `__bool__` is consulted.
+        if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+            if let Some(num) = dict.get_str("_numerator") {
+                return Ok(py_bool(num.truthy()));
+            }
+        }
         let (n, _d) = frac_self_num_den(&args[0])?;
         Ok(py_bool(!n.is_zero()))
     });
@@ -5254,8 +5463,43 @@ pub fn create_fractions_dict() -> HashMap<String, PyObjectRef> {
         let (an, ad) = frac_self_num_den(&args[0])?;
         match frac_operand_of(&args[1]) {
             FracOperand::Frac(bn, bd) => Ok(py_bool(an == bn && ad == bd)),
-            FracOperand::Float(bf) => Ok(py_bool(frac_to_f64(&an, &ad) == bf)),
-            FracOperand::Other => Ok(py_not_implemented()),
+            FracOperand::Float(bf) => Ok(py_bool(match frac_cmp_exact(&an, &ad, bf) {
+                Some(o) => o.is_eq(),
+                None => false,
+            })),
+            FracOperand::Other => {
+                // CPython: `isinstance(b, Complex) and b.imag == 0` ->
+                // compare against the real part as a float (exactly).
+                let complex_val: Option<(f64, f64)> =
+                    if let PyObject::Complex(re, im) = &*args[1].borrow() {
+                        Some((*re, *im))
+                    } else if frac_is_complex_operand(&args[1]) {
+                        match args[1].borrow().get_attribute("__complex__") {
+                            Ok(f) => crate::object::call_bound_method(f, args[1].clone(), vec![])
+                                .ok()
+                                .and_then(|c| {
+                                    let cb = c.borrow();
+                                    if let PyObject::Complex(re, im) = &*cb {
+                                        Some((*re, *im))
+                                    } else {
+                                        None
+                                    }
+                                }),
+                            Err(_) => None,
+                        }
+                    } else {
+                        None
+                    };
+                if let Some((re, im)) = complex_val {
+                    if im == 0.0 {
+                        return Ok(py_bool(match frac_cmp_exact(&an, &ad, re) {
+                            Some(o) => o.is_eq(),
+                            None => false,
+                        }));
+                    }
+                }
+                Ok(py_not_implemented())
+            }
         }
     });
     macro_rules! frac_cmp {
@@ -5268,7 +5512,7 @@ pub fn create_fractions_dict() -> HashMap<String, PyObjectRef> {
                 match frac_operand_of(&args[1]) {
                     FracOperand::Frac(bn, bd) => Ok(py_bool($cmp((an * &bd).cmp(&(bn * &ad))))),
                     FracOperand::Float(bf) => {
-                        match frac_to_f64(&an, &ad).partial_cmp(&bf) {
+                        match frac_cmp_exact(&an, &ad, bf) {
                             Some(o) => Ok(py_bool($cmp(o))),
                             // NaN involved: every ordered comparison is False.
                             None => Ok(py_bool(false)),
@@ -5287,6 +5531,55 @@ pub fn create_fractions_dict() -> HashMap<String, PyObjectRef> {
         let (n, d) = frac_self_num_den(&args[0])?;
         Ok(py_tuple(vec![py_int(n), py_int(d)]))
     });
+    // Read-only `numerator`/`denominator` properties backed by the
+    // `_numerator`/`_denominator` slots — the raw stored objects are
+    // returned (an int-subclass or registered-Rational `numerator` from the
+    // constructor is preserved, matching CPython).
+    frac_dict.insert_str(
+        "numerator",
+        PyObjectRef::new(PyObject::Property(Box::new(PropertyData {
+            getter: Some(PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "numerator".to_string(),
+                func: |args| {
+                    if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+                        if let Some(v) = dict.get_str("_numerator") {
+                            return Ok(v.clone());
+                        }
+                    }
+                    Err(PyError::runtime_error("fraction has no _numerator"))
+                },
+            })),
+            setter: None,
+            deleter: None,
+            doc: None,
+        }))),
+    );
+    frac_dict.insert_str(
+        "denominator",
+        PyObjectRef::new(PyObject::Property(Box::new(PropertyData {
+            getter: Some(PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "denominator".to_string(),
+                func: |args| {
+                    if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+                        if let Some(v) = dict.get_str("_denominator") {
+                            return Ok(v.clone());
+                        }
+                    }
+                    Err(PyError::runtime_error("fraction has no _denominator"))
+                },
+            })),
+            setter: None,
+            deleter: None,
+            doc: None,
+        }))),
+    );
+    // Slots semantics: only `_numerator`/`_denominator` (and the usual
+    // instance internals) may be assigned; anything else raises
+    // AttributeError (CPython's `Fraction.__slots__`).
+    frac_dict.insert_str(
+        "__slots__",
+        py_tuple(vec![py_str("_numerator"), py_str("_denominator")]),
+    );
     frac_method!("is_integer", |args| {
         let (_, d) = frac_self_num_den(&args[0])?;
         Ok(py_bool(d == BigInt::one()))
@@ -5298,6 +5591,27 @@ pub fn create_fractions_dict() -> HashMap<String, PyObjectRef> {
             py_tuple(vec![py_int(n), py_int(d)]),
         ]))
     });
+    frac_method!("__copy__", |args| {
+        let (n, d) = frac_self_num_den(&args[0])?;
+        if let PyObject::Instance { typ, .. } = &*args[0].borrow() {
+            if typ.is(&get_fraction_type()) {
+                // Immutable: I am my own clone.
+                return Ok(args[0].clone());
+            }
+            return frac_make(typ, n, d);
+        }
+        Ok(args[0].clone())
+    });
+    frac_method!("__deepcopy__", |args| {
+        let (n, d) = frac_self_num_den(&args[0])?;
+        if let PyObject::Instance { typ, .. } = &*args[0].borrow() {
+            if typ.is(&get_fraction_type()) {
+                return Ok(args[0].clone());
+            }
+            return frac_make(typ, n, d);
+        }
+        Ok(args[0].clone())
+    });
 
     let frac_type = PyObjectRef::new(PyObject::Type {
         name: "Fraction".to_string(),
@@ -5305,6 +5619,12 @@ pub fn create_fractions_dict() -> HashMap<String, PyObjectRef> {
         bases: vec![],
         mro: vec![],
     });
+    // Register for `type.__subclasses__` / pickle's class lookup, with the
+    // `__module__` attribute so `pickle.dumps(Fraction(...))` can resolve it.
+    if let PyObject::Type { dict, .. } = &mut *frac_type.borrow_mut() {
+        dict.insert_str("__module__", py_str("fractions"));
+    }
+    crate::object::register_class(&frac_type);
     FRACTION_TYPE.with(|c| {
         *c.borrow_mut() = Some(frac_type.clone());
     });

@@ -2890,9 +2890,41 @@ pub fn builtin_divmod(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // truncating `/`/`%` — reuse the already-correct `py_floordiv`/`py_mod`
     // (which already raise `ZeroDivisionError` themselves) rather than
     // duplicating that sign-handling logic here.
-    let q = py_floor_div(&args[0], &args[1])?;
-    let r = py_mod(&args[0], &args[1])?;
+    let q = match py_floor_div(&args[0], &args[1]) {
+        Err(e) => return Err(translate_divmod_error(e, &args[0], &args[1])),
+        Ok(q) => q,
+    };
+    let r = match py_mod(&args[0], &args[1]) {
+        Err(e) => return Err(translate_divmod_error(e, &args[0], &args[1])),
+        Ok(r) => r,
+    };
     Ok(PyObjectRef::new(PyObject::Tuple(vec![q, r])))
+}
+
+/// `divmod(a, b)` reports an unsupported-operand failure with a `divmod()`
+/// wording rather than the `//`/`%` one CPython's own operators use.
+fn translate_divmod_error(e: PyError, a: &PyObjectRef, b: &PyObjectRef) -> PyError {
+    match &e {
+        PyError::TypeError(msg)
+            if msg.starts_with("unsupported operand type(s) for //:")
+                || msg.starts_with("unsupported operand type(s) for %:") =>
+        {
+            let dn = |o: &PyObjectRef| -> String {
+                match &*o.borrow() {
+                    PyObject::Instance { typ, .. } => {
+                        crate::object::get_type_name_for_instance(typ)
+                    }
+                    o => o.type_name(),
+                }
+            };
+            PyError::type_error(format!(
+                "unsupported operand type(s) for divmod(): '{}' and '{}'",
+                dn(a),
+                dn(b)
+            ))
+        }
+        _ => e,
+    }
 }
 
 // Exact rational form of an `f64` (as `m * 2^e`), so that `round()` can do

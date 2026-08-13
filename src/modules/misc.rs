@@ -5317,6 +5317,41 @@ fn pickle_serialize(
             pickle_serialize(&py_int(*stop), buf, memo)?;
             pickle_serialize(&py_int(*step), buf, memo)?;
         }
+        // A `fractions.Fraction` (or subclass) instance — serialize the
+        // class reference + a plain instance dict carrying numerator/
+        // denominator. `__reduce__`-style reconstruction isn't needed since
+        // the dict IS the state.
+        PyObject::Instance { typ, dict }
+            if crate::modules::frac_instance_num_den(obj).is_some() =>
+        {
+            let (module, name) = {
+                let tb = typ.borrow();
+                if let PyObject::Type {
+                    name: tname,
+                    dict: tdict,
+                    ..
+                } = &*tb
+                {
+                    let module = tdict
+                        .get_str("__module__")
+                        .map(|m| m.str())
+                        .unwrap_or_else(|| "fractions".to_string());
+                    (module, tname.clone())
+                } else {
+                    return Err(PyError::type_error("cannot pickle non-type instance"));
+                }
+            };
+            buf.push(b'C');
+            pickle_serialize(&py_str(&module), buf, memo)?;
+            pickle_serialize(&py_str(&name), buf, memo)?;
+            buf.push(b'F');
+            buf.push(b'{');
+            for (k, v) in dict.iter() {
+                pickle_serialize(&py_str(&k), buf, memo)?;
+                pickle_serialize(&v, buf, memo)?;
+            }
+            buf.push(b'}');
+        }
         // A deque-backed SUBCLASS instance (`class Deque(deque): pass; d =
         // Deque('abc')`) — serialize the class reference (module+name), the
         // deque content (iterated through the instance's own `__iter__`, so
@@ -5801,6 +5836,11 @@ fn pickle_deserialize(
                     *pos += 1;
                     PyObjectRef::new(PyObject::Dict(Box::new(dict)))
                 }
+                b'F' => {
+                    // `fractions.Fraction`-style: no native backing, the
+                    // instance dict (numerator/denominator) follows.
+                    py_none()
+                }
                 _ => {
                     return Err(PyError::type_error(format!(
                         "unknown instance backing kind: {}",
@@ -5829,7 +5869,9 @@ fn pickle_deserialize(
                 ));
             }
             *pos += 1;
-            inst_dict.insert(crate::object::NATIVE_BACKING_KEY.to_string(), backing);
+            if !matches!(&*backing.borrow(), PyObject::None) {
+                inst_dict.insert(crate::object::NATIVE_BACKING_KEY.to_string(), backing);
+            }
             if let PyObject::Instance { dict: d, .. } = &mut *instance.borrow_mut() {
                 *d = inst_dict;
             }

@@ -2657,9 +2657,18 @@ pub fn create_math_dict() -> HashMap<String, PyObjectRef> {
                 }
             }
         }
-        let x = math_arg_f64(a)
-            .ok_or_else(|| PyError::type_error("trunc() argument must be a number"))?;
-        Ok(py_float(f64::trunc(x)))
+        // A native `float` truncates to the exact integer (like
+        // `float.__trunc__`); `int` is its own truncation.
+        let v = a.borrow();
+        match &*v {
+            PyObject::Int(i) => Ok(py_int(i.clone())),
+            PyObject::Float(f) => crate::object::f64_to_int_ceil_floor_trunc(*f, 2).map(py_int),
+            _ => {
+                let x = math_arg_f64(a)
+                    .ok_or_else(|| PyError::type_error("trunc() argument must be a number"))?;
+                crate::object::f64_to_int_ceil_floor_trunc(x, 2).map(py_int)
+            }
+        }
     });
     math_func1!("cbrt", f64::cbrt);
     math_func1!("exp2", f64::exp2);

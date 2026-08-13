@@ -528,14 +528,22 @@ pub fn py_div(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
         (a, b) if matches!(a, PyObject::Complex(..)) || matches!(b, PyObject::Complex(..)) => {
             match (as_complex_parts(a), as_complex_parts(b)) {
                 (Some((ar, ai)), Some((br, bi))) => {
-                    let denom = br * br + bi * bi;
-                    if denom == 0.0 {
+                    if br == 0.0 && bi == 0.0 {
                         return Err(PyError::zero_division());
                     }
-                    Ok(PyObjectRef::imm(PyObject::Complex(
-                        (ar * br + ai * bi) / denom,
-                        (ai * br - ar * bi) / denom,
-                    )))
+                    // Smith's algorithm (CPython's `_Py_c_quot`): avoids
+                    // overflow and keeps `(1+0j) / (0.1+0j)` == 10.0 exactly,
+                    // which the naive `(a*br + b*bi)/den` form loses.
+                    let (re, im) = if br.abs() >= bi.abs() {
+                        let ratio = bi / br;
+                        let denom = br + bi * ratio;
+                        ((ar + ai * ratio) / denom, (ai - ar * ratio) / denom)
+                    } else {
+                        let ratio = br / bi;
+                        let denom = br * ratio + bi;
+                        ((ar * ratio + ai) / denom, (ai * ratio - ar) / denom)
+                    };
+                    Ok(PyObjectRef::imm(PyObject::Complex(re, im)))
                 }
                 _ => Err(PyError::type_error(format!(
                     "unsupported operand type(s) for /: '{}' and '{}'",
@@ -617,9 +625,20 @@ pub fn py_floor_div(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
         }
         _ => Err(PyError::type_error(format!(
             "unsupported operand type(s) for //: '{}' and '{}'",
-            a_obj.type_name(),
-            b_obj.type_name()
+            type_display_name(&a_obj),
+            type_display_name(&b_obj)
         ))),
+    }
+}
+
+/// Real type name for "unsupported operand type(s)" messages: an
+/// `instance` should be reported as its actual class name (`Fraction`,
+/// not `instance`), matching CPython.
+fn type_display_name(o: &PyObject) -> String {
+    if let PyObject::Instance { typ, .. } = o {
+        crate::object::get_type_name_for_instance(typ)
+    } else {
+        o.type_name()
     }
 }
 
@@ -704,8 +723,8 @@ pub fn py_mod(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
         }
         _ => Err(PyError::type_error(format!(
             "unsupported operand type(s) for %: '{}' and '{}'",
-            a_obj.type_name(),
-            b_obj.type_name()
+            type_display_name(&a_obj),
+            type_display_name(&b_obj)
         ))),
     }
 }
