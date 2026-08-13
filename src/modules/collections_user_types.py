@@ -1,3 +1,9 @@
+def _count_elements(mapping, iterable):
+    """CPython's C-accelerated `_collections._count_elements`: count each
+    element of `iterable` into `mapping`, in place."""
+    for elem in iterable:
+        mapping[elem] = mapping.get(elem, 0) + 1
+
 class UserList:
     def __init__(self, initlist=None):
         self.data = []
@@ -197,12 +203,42 @@ class UserDict:
 
 
 class Counter(dict):
-    def __init__(self, iterable=None, **kwds):
+    def __init__(self, iterable=None, /, **kwds):
         super().__init__()
         self.update(iterable, **kwds)
 
     def __missing__(self, key):
         return 0
+
+    @classmethod
+    def fromkeys(cls, iterable, v=None):
+        raise NotImplementedError(
+            'Counter.fromkeys() is undefined.  Use Counter(iterable) instead.')
+
+    def __eq__(self, other):
+        if not isinstance(other, Counter):
+            return NotImplemented
+        return all(self[e] == other[e] for c in (self, other) for e in c)
+
+    def __le__(self, other):
+        if not isinstance(other, Counter):
+            return NotImplemented
+        return all(self[e] <= other[e] for c in (self, other) for e in c)
+
+    def __lt__(self, other):
+        if not isinstance(other, Counter):
+            return NotImplemented
+        return self <= other and self != other
+
+    def __ge__(self, other):
+        if not isinstance(other, Counter):
+            return NotImplemented
+        return all(self[e] >= other[e] for c in (self, other) for e in c)
+
+    def __gt__(self, other):
+        if not isinstance(other, Counter):
+            return NotImplemented
+        return self >= other and self != other
 
     def most_common(self, n=None):
         items = list(self.items())
@@ -220,22 +256,29 @@ class Counter(dict):
                 i += 1
         return iter(result)
 
-    def update(self, iterable=None, **kwds):
+    def update(self, iterable=None, /, **kwds):
         if iterable is not None:
             if hasattr(iterable, 'keys'):
-                for elem in iterable:
-                    self[elem] = self.get(elem, 0) + iterable[elem]
+                if self:
+                    self_get = self.get
+                    for elem, count in iterable.items():
+                        self[elem] = count + self_get(elem, 0)
+                else:
+                    super().update(iterable)
             else:
-                for elem in iterable:
-                    self[elem] = self.get(elem, 0) + 1
+                _count_elements(self, iterable)
         if kwds:
             self.update(kwds)
 
-    def subtract(self, iterable=None, **kwds):
+    def subtract(self, iterable=None, /, **kwds):
         if iterable is not None:
             if hasattr(iterable, 'keys'):
-                for elem in iterable:
-                    self[elem] = self.get(elem, 0) - iterable[elem]
+                if self:
+                    self_get = self.get
+                    for elem, count in iterable.items():
+                        self[elem] = self_get(elem, 0) - count
+                else:
+                    super().update({k: -v for k, v in iterable.items()})
             else:
                 for elem in iterable:
                     self[elem] = self.get(elem, 0) - 1

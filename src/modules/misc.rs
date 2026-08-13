@@ -1682,6 +1682,34 @@ pub fn create_collections_abc_dict() -> HashMap<String, PyObjectRef> {
     d.insert_str("Coroutine", abc_class!("Coroutine"));
     d.insert_str("AsyncIterable", abc_class!("AsyncIterable"));
     d.insert_str("AsyncIterator", abc_class!("AsyncIterator"));
+    d.insert_str("AsyncGenerator", abc_class!("AsyncGenerator"));
+    d.insert_str("Generator", abc_class!("Generator"));
+    d.insert_str("Reversible", abc_class!("Reversible"));
+    d.insert_str("Collection", abc_class!("Collection"));
+    d.insert_str("ByteString", abc_class!("ByteString"));
+    d.insert_str("Buffer", abc_class!("Buffer"));
+    // Aliases CPython exposes on collections.abc (point to builtin types).
+    d.insert_str("dict_items", abc_class!("dict_items"));
+    d.insert_str("dict_keys", abc_class!("dict_keys"));
+    d.insert_str("dict_values", abc_class!("dict_values"));
+    d.insert_str("dict_itemiterator", abc_class!("dict_itemiterator"));
+    d.insert_str("dict_keyiterator", abc_class!("dict_keyiterator"));
+    d.insert_str("dict_valueiterator", abc_class!("dict_valueiterator"));
+    d.insert_str("generator", abc_class!("generator"));
+    d.insert_str("coroutine", abc_class!("coroutine"));
+    d.insert_str("async_generator", abc_class!("async_generator"));
+    d.insert_str("list_iterator", abc_class!("list_iterator"));
+    d.insert_str("list_reverseiterator", abc_class!("list_reverseiterator"));
+    d.insert_str("tuple_iterator", abc_class!("tuple_iterator"));
+    d.insert_str("set_iterator", abc_class!("set_iterator"));
+    d.insert_str("str_iterator", abc_class!("str_iterator"));
+    d.insert_str("range_iterator", abc_class!("range_iterator"));
+    d.insert_str("longrange_iterator", abc_class!("longrange_iterator"));
+    d.insert_str("zip_iterator", abc_class!("zip_iterator"));
+    d.insert_str("bytes_iterator", abc_class!("bytes_iterator"));
+    d.insert_str("bytearray_iterator", abc_class!("bytearray_iterator"));
+    d.insert_str("mappingproxy", abc_class!("mappingproxy"));
+    d.insert_str("framelocalsproxy", abc_class!("framelocalsproxy"));
 
     d
 }
@@ -6494,6 +6522,105 @@ pub(crate) fn get_builtin_class(name: &str) -> Option<PyObjectRef> {
         let id = crate::interner::intern(name);
         map.get(&id).cloned()
     })
+}
+
+/// Add `cls` to an ABC's `_abc_registry` (CPython's `ABC.register(cls)`).
+fn abc_register_class(abc: &PyObjectRef, cls: &PyObjectRef) {
+    if let PyObject::Type { dict, .. } = &mut *abc.borrow_mut() {
+        let mut items = if let Some(r) = dict.get_str("_abc_registry") {
+            if let PyObject::FrozenSet(s) = &*r.borrow() {
+                s.to_vec()
+            } else {
+                vec![]
+            }
+        } else {
+            vec![]
+        };
+        if !items.iter().any(|r| r.is(cls)) {
+            items.push(cls.clone());
+        }
+        let mut set = PySet::new();
+        for i in items {
+            let _ = set.add(i);
+        }
+        dict.insert_str("_abc_registry", PyObjectRef::imm(PyObject::FrozenSet(set)));
+    }
+}
+
+/// Register the builtin container types as virtual subclasses of their
+/// `collections.abc` ABCs (CPython's `_collections_abc` module does this at
+/// startup) — so `issubclass(dict, Mapping)`, `issubclass(list, Sequence)`
+/// etc. hold. Must run AFTER the builtins map is available.
+pub(crate) fn register_collections_abc_builtins() {
+    let abc = get_module("collections.abc");
+    let Some(abc) = abc else { return };
+    let get_name = |d: &HashMap<String, PyObjectRef>, n: &str| d.get(n).cloned();
+    let abc_entries: HashMap<String, PyObjectRef> = {
+        let b = abc.borrow();
+        if let PyObject::Module { dict, .. } = &*b {
+            dict.iter()
+                .map(|(k, v)| (crate::interner::lookup_str(*k).to_string(), v.clone()))
+                .collect()
+        } else {
+            return;
+        }
+    };
+    let builtin = |n: &str| get_builtin_class(n);
+    let reg = |abc_name: &str, builtin_name: &str| {
+        if let (Some(abc), Some(b)) = (get_name(&abc_entries, abc_name), builtin(builtin_name)) {
+            abc_register_class(&abc, &b);
+        }
+    };
+    reg("Mapping", "dict");
+    reg("MutableMapping", "dict");
+    reg("Sequence", "list");
+    reg("Sequence", "str");
+    reg("Sequence", "tuple");
+    reg("Sequence", "bytes");
+    reg("Sequence", "bytearray");
+    reg("Sequence", "range");
+    reg("MutableSequence", "list");
+    reg("MutableSequence", "bytearray");
+    reg("Set", "set");
+    reg("Set", "frozenset");
+    reg("MutableSet", "set");
+    reg("Iterable", "list");
+    reg("Iterable", "tuple");
+    reg("Iterable", "dict");
+    reg("Iterable", "set");
+    reg("Iterable", "frozenset");
+    reg("Iterable", "str");
+    reg("Iterable", "bytes");
+    reg("Iterable", "bytearray");
+    reg("Iterable", "range");
+    reg("Collection", "list");
+    reg("Collection", "tuple");
+    reg("Collection", "dict");
+    reg("Collection", "set");
+    reg("Collection", "frozenset");
+    reg("Collection", "str");
+    reg("Collection", "bytes");
+    reg("Collection", "bytearray");
+    reg("Reversible", "list");
+    reg("Reversible", "tuple");
+    reg("Reversible", "str");
+    reg("Reversible", "bytes");
+    reg("Reversible", "bytearray");
+    reg("Reversible", "range");
+    reg("Sized", "list");
+    reg("Sized", "tuple");
+    reg("Sized", "dict");
+    reg("Sized", "set");
+    reg("Sized", "frozenset");
+    reg("Sized", "str");
+    reg("Sized", "bytes");
+    reg("Sized", "bytearray");
+    reg("Sized", "range");
+    reg("Hashable", "str");
+    reg("Hashable", "bytes");
+    reg("Hashable", "tuple");
+    reg("Hashable", "frozenset");
+    reg("Iterator", "list_iterator");
 }
 
 /// Look up a module by name through the live `sys.modules` dict (no VM

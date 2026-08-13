@@ -1465,6 +1465,7 @@ impl VirtualMachine {
         // return the real ZeroDivisionError & co., not a synthetic Type —
         // test_atexit's `type(exc_value) == ZeroDivisionError`).
         crate::modules::set_builtins_ref(Rc::clone(&builtins));
+        crate::modules::register_collections_abc_builtins();
 
         // Populate the disposable-VM fast path's cache (see the doc
         // comment at the top of this function) — safe to do BEFORE the
@@ -1504,6 +1505,7 @@ impl VirtualMachine {
                 "Counter",
                 "defaultdict",
                 "ChainMap",
+                "_count_elements",
             ],
         );
         // contextlib no longer native — real Lib/contextlib.py already defines ContextDecorator
@@ -8931,7 +8933,25 @@ impl VirtualMachine {
             // test_keywords_in_subclass). Synthesize from the constructor
             // args unconditionally when there's a native base.
             if let Some(kind) = &native_kind {
-                let native = crate::object::synthesize_native_init(kind, &args, &keywords)?;
+                // A CONTAINER subclass (`class Counter(dict)`, `class
+                // MyList(list)`) with a custom Python `__init__` is
+                // different: `dict.__new__`/`list.__new__` ignore the
+                // constructor args (the backing starts EMPTY) and the
+                // custom `__init__` is what populates it (e.g.
+                // `Counter('aabbc')` counts via its own `update`). Building
+                // the backing from the args first (`builtin_dict('aabbc')`)
+                // raises "cannot convert dictionary update sequence
+                // element to a sequence" before `__init__` ever runs.
+                let custom_py_init = matches!(&init_func, Some(f) if matches!(&*f.borrow(), PyObject::Function(_)));
+                let is_container = matches!(
+                    kind.as_str(),
+                    "dict" | "list" | "set" | "tuple" | "deque" | "bytearray" | "frozenset"
+                );
+                let native = if custom_py_init && is_container {
+                    crate::object::make_native_backing(kind)
+                } else {
+                    crate::object::synthesize_native_init(kind, &args, &keywords)?
+                };
                 if let PyObject::Instance { dict, .. } = &mut *instance.borrow_mut() {
                     dict.insert(crate::object::NATIVE_BACKING_KEY.to_string(), native);
                 }
