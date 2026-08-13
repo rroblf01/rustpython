@@ -58,6 +58,13 @@ pub fn try_dunder_binop(a: &PyObjectRef, b: &PyObjectRef, method: &str) -> PyRes
     Ok(None)
 }
 
+/// CPython's `unicode_concatenate`-style in-place string growth is NOT
+/// reliably possible here: the VM clones references through the eval stack,
+/// so a `s = s + "x"` left operand arrives with strong_count 3 (local +
+/// popped value + frame), never 1. A refcount heuristic would corrupt
+/// strings that genuinely have other live references. Repeated `+` stays
+/// quadratic; `''.join(...)` is the fast path (already ~CPython speed).
+
 pub fn py_add(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
         match ai.checked_add(bi) {
