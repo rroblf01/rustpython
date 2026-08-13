@@ -4,6 +4,125 @@
 // helpers used across the numeric-tower operations.
 use super::*;
 
+// ---- CPython str/bytes hash: DJBX33A (short) + SipHash13 (long) ----
+
+/// The per-process hash secret derived from PYTHONHASHSEED, mirroring
+/// CPython's `_Py_HashSecret`: `(siphash_k0, siphash_k1, djbx33a_suffix)`.
+/// Seed 0 (or "0") disables randomization; a numeric seed fills the 24-byte
+/// secret with CPython's `lcg_urandom`; "random"/unset uses process entropy.
+fn hash_secret() -> (u64, u64, u64) {
+    use std::sync::OnceLock;
+    static SECRET: OnceLock<(u64, u64, u64)> = OnceLock::new();
+    *SECRET.get_or_init(|| {
+        let seed_text = std::env::var("PYTHONHASHSEED").unwrap_or_default();
+        let seed: u64 = if seed_text == "random" || seed_text.is_empty() {
+            let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64).unwrap_or(0);
+            t ^ (std::process::id() as u64)
+        } else {
+            seed_text.parse().unwrap_or(0)
+        };
+        if seed == 0 {
+            (0, 0, 0)
+        } else {
+            // CPython's lcg_urandom(seed, secret, 24).
+            let mut x = seed as u32;
+            let mut out = [0u8; 24];
+            for b in out.iter_mut() {
+                x = x.wrapping_mul(214013).wrapping_add(2531011);
+                *b = ((x >> 16) & 0xff) as u8;
+            }
+            let k0 = u64::from_le_bytes(out[0..8].try_into().unwrap());
+            let k1 = u64::from_le_bytes(out[8..16].try_into().unwrap());
+            let suffix = u64::from_le_bytes(out[16..24].try_into().unwrap());
+            (k0, k1, suffix)
+        }
+    })
+}
+
+fn sip_half_round(a: u64, b: u64, c: u64, d: u64, s: u32, t: u32) -> (u64, u64, u64, u64) {
+    let a = a.wrapping_add(b);
+    let c = c.wrapping_add(d);
+    let b = b.rotate_left(s) ^ a;
+    let d = d.rotate_left(t) ^ c;
+    (a.rotate_left(32), b, c, d)
+}
+
+fn sip_single_round(v0: u64, v1: u64, v2: u64, v3: u64) -> (u64, u64, u64, u64) {
+    let (v0, v1, v2, v3) = sip_half_round(v0, v1, v2, v3, 13, 16);
+    // HALF_ROUND(v2, v1, v0, v3, 17, 21): a=v2, b=v1, c=v0, d=v3.
+    let (a, b, c, d) = sip_half_round(v2, v1, v0, v3, 17, 21);
+    (c, b, a, d) // a=new_v2, b=new_v1, c=new_v0, d=new_v3
+}
+
+/// CPython's SipHash-1-3 (Python/pyhash.c), returning the raw "modified"
+/// finalization value `(v0 ^ v1) ^ (v2 ^ v3)`.
+fn siphash13(k0: u64, k1: u64, data: &[u8]) -> u64 {
+    let (mut v0, mut v1, mut v2, mut v3) = (
+        k0 ^ 0x736f6d6570736575,
+        k1 ^ 0x646f72616e646f6d,
+        k0 ^ 0x6c7967656e657261,
+        k1 ^ 0x7465646279746573,
+    );
+    let mut b: u64 = (data.len() as u64) << 56;
+    let mut chunks = data.chunks_exact(8);
+    for chunk in &mut chunks {
+        let mi = u64::from_le_bytes(chunk.try_into().unwrap());
+        v3 ^= mi;
+        (v0, v1, v2, v3) = sip_single_round(v0, v1, v2, v3);
+        v0 ^= mi;
+    }
+    let mut t = 0u64;
+    for (i, &c) in chunks.remainder().iter().enumerate() {
+        t |= (c as u64) << (8 * i);
+    }
+    b |= t;
+    v3 ^= b;
+    (v0, v1, v2, v3) = sip_single_round(v0, v1, v2, v3);
+    v0 ^= b;
+    v2 ^= 0xff;
+    (v0, v1, v2, v3) = sip_single_round(v0, v1, v2, v3);
+    (v0, v1, v2, v3) = sip_single_round(v0, v1, v2, v3);
+    (v0, v1, v2, v3) = sip_single_round(v0, v1, v2, v3);
+    (v0 ^ v1) ^ (v2 ^ v3)
+}
+
+/// CPython's `_Py_HashBytes` — SipHash13 for everything (Py_HASH_CUTOFF is 0
+/// in modern CPython, so the DJBX33A short-string path is compiled out);
+/// -1 remapped to -2.
+pub(crate) fn py_hash_bytes(data: &[u8]) -> usize {
+    if data.is_empty() {
+        return 0; // CPython's _Py_HashBytes returns 0 for len 0
+    }
+    let (k0, k1, _suffix) = hash_secret();
+    let x = siphash13(k0, k1, data) as i64;
+    (if x == -1 { -2 } else { x }) as usize
+}
+
+/// CPython's str hash: the string hashed over its NARROWEST code-point
+/// representation (UCS1/2/4, little-endian per char) — not UTF-8 bytes for
+/// non-ASCII (test_hash's test_ucs2_string).
+pub(crate) fn py_hash_str(s: &str) -> usize {
+    let max = s.chars().map(|c| c as u32).max().unwrap_or(0);
+    let mut v: Vec<u8> = Vec::with_capacity(s.len());
+    if max < 0x100 {
+        for c in s.chars() {
+            v.push((c as u32 & 0xff) as u8);
+        }
+    } else if max < 0x10000 {
+        for c in s.chars() {
+            let cp = c as u32;
+            v.push((cp & 0xff) as u8);
+            v.push((cp >> 8) as u8);
+        }
+    } else {
+        for c in s.chars() {
+            v.extend_from_slice(&(c as u32).to_le_bytes());
+        }
+    }
+    py_hash_bytes(&v)
+}
+
 /// The int hash — CPython's `long_hash`: lower bits for anything that fits in
 /// a machine word (the overwhelming common case for dict/set keys and for the
 /// `hash()` builtin), and for larger magnitudes CPython's real

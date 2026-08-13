@@ -887,12 +887,7 @@ impl PyObjectRef {
                     Ok(hash_double(*f))
                 }
             }
-            PyObjectRef::SmallStr(s) => {
-                let bytes = s.as_str().as_bytes();
-                let mut h: usize = 0;
-                for &b in bytes { h = h.wrapping_mul(31).wrapping_add(b as usize); }
-                Ok(h)
-            }
+            PyObjectRef::SmallStr(s) => Ok(py_hash_str(s.as_str())),
             PyObjectRef::None => Ok(0),
             PyObjectRef::Mut(_) | PyObjectRef::Imm(_) => {
                 // For an Instance, __hash__ (including object's own default,

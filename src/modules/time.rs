@@ -1216,7 +1216,15 @@ fn build_date_type() -> PyObjectRef {
         if instance_type_name(&args[1]) != "date" { return Err(PyError::type_error("'>=' not supported between instances of 'date' and other type")); }
         Ok(py_bool(date_ordinal(&args[0]) >= date_ordinal(&args[1])))
     }));
-    type_dict.insert_str("__hash__", bf!("__hash__", |args| Ok(py_int(date_ordinal(&args[0])))));
+    // date.__hash__: CPython hashes the packed 4-byte representation
+    // [year>>8, year, month, day] with the seeded str/bytes hash.
+    type_dict.insert_str("__hash__", bf!("__hash__", |args| {
+        let y = inst_get_i64(&args[0], "year");
+        let m = inst_get_i64(&args[0], "month");
+        let d = inst_get_i64(&args[0], "day");
+        let bytes = [(y >> 8) as u8, (y & 0xff) as u8, m as u8, d as u8];
+        Ok(py_int(crate::object::py_hash_bytes(&bytes) as i64))
+    }));
     type_dict.insert_str("__add__", bf!("__add__", |args| {
         if instance_type_name(&args[1]) != "timedelta" { return Err(PyError::type_error("unsupported operand type(s) for +: 'date' and other type")); }
         Ok(make_date_from_ordinal(date_ordinal(&args[0]) + inst_get_i64(&args[1], "days")))
@@ -1381,7 +1389,16 @@ fn build_time_type() -> PyObjectRef {
         if instance_type_name(&args[1]) != "time" { return Err(PyError::type_error("'>=' not supported between instances of 'time' and other type")); }
         Ok(py_bool(time_tuple_us(&args[0]) >= time_tuple_us(&args[1])))
     }));
-    type_dict.insert_str("__hash__", bf!("__hash__", |args| Ok(py_int(time_tuple_us(&args[0])))));
+    // time.__hash__: CPython hashes the packed 6-byte representation
+    // [hour, minute, second, us>>16, us>>8, us] with the seeded hash.
+    type_dict.insert_str("__hash__", bf!("__hash__", |args| {
+        let h = inst_get_i64(&args[0], "hour");
+        let mi = inst_get_i64(&args[0], "minute");
+        let s = inst_get_i64(&args[0], "second");
+        let us = inst_get_i64(&args[0], "microsecond");
+        let bytes = [h as u8, mi as u8, s as u8, (us >> 16) as u8, (us >> 8) as u8, us as u8];
+        Ok(py_int(crate::object::py_hash_bytes(&bytes) as i64))
+    }));
     type_dict.insert_str("utcoffset", bf!("utcoffset", |args| {
         let tzinfo = inst_get(&args[0], "tzinfo").unwrap_or_else(py_none);
         match get_utcoffset_seconds(&tzinfo, EPOCH_ORDINAL, 0) {
@@ -1683,7 +1700,22 @@ fn build_datetime_type() -> PyObjectRef {
         if datetime_is_aware(&args[0]) != datetime_is_aware(&args[1]) { return Err(PyError::type_error("can't compare offset-naive and offset-aware datetimes")); }
         Ok(py_bool(datetime_total_us_utc(&args[0]) >= datetime_total_us_utc(&args[1])))
     }));
-    type_dict.insert_str("__hash__", bf!("__hash__", |args| Ok(py_int(datetime_total_us_utc(&args[0]) as i64))));
+    // datetime.__hash__: CPython hashes the packed 10-byte representation
+    // [date 4 bytes, time 6 bytes] with the seeded hash.
+    type_dict.insert_str("__hash__", bf!("__hash__", |args| {
+        let y = inst_get_i64(&args[0], "year");
+        let mo = inst_get_i64(&args[0], "month");
+        let d = inst_get_i64(&args[0], "day");
+        let h = inst_get_i64(&args[0], "hour");
+        let mi = inst_get_i64(&args[0], "minute");
+        let s = inst_get_i64(&args[0], "second");
+        let us = inst_get_i64(&args[0], "microsecond");
+        let bytes = [
+            (y >> 8) as u8, (y & 0xff) as u8, mo as u8, d as u8,
+            h as u8, mi as u8, s as u8, (us >> 16) as u8, (us >> 8) as u8, us as u8,
+        ];
+        Ok(py_int(crate::object::py_hash_bytes(&bytes) as i64))
+    }));
     type_dict.insert_str("__add__", bf!("__add__", |args| {
         if instance_type_name(&args[1]) != "timedelta" { return Err(PyError::type_error("unsupported operand type(s) for +: 'datetime.datetime' and other type")); }
         let td_us = timedelta_total_us(&args[1]);

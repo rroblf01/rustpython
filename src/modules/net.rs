@@ -249,6 +249,39 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
         }
     }
 
+    // Extract a keyword dict argument (e.g. `env=`) from the trailing
+    // kwargs pack.
+    fn kwarg_dict(args: &[PyObjectRef], name: &str) -> Option<std::collections::HashMap<String, String>> {
+        match args.last() {
+            Some(last) if matches!(&*last.borrow(), PyObject::Dict(_)) => {
+                if let PyObject::Dict(d) = &*last.borrow() {
+                    if let Some(v) = d.get(&py_str(name)).ok().flatten() {
+                        if let PyObject::Dict(ed) = &*v.borrow() {
+                            let mut m = std::collections::HashMap::new();
+                            for (k, val) in ed.items() {
+                                m.insert(k.str(), val.str());
+                            }
+                            return Some(m);
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    // Apply the `env=` kwargs (replacing the inherited environment
+    // entirely, matching CPython) to a command.
+    fn apply_env(cmd: &mut std::process::Command, args: &[PyObjectRef]) {
+        if let Some(env_map) = kwarg_dict(args, "env") {
+            cmd.env_clear();
+            for (k, v) in env_map {
+                cmd.env(k, v);
+            }
+        }
+    }
+
     sub_func!("run", |args| {
         if args.is_empty() {
             return Err(PyError::type_error("run() missing required argument"));
@@ -259,11 +292,10 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
             return Err(PyError::ValueError("empty command".to_string()));
         }
         let output = if shell {
-            std::process::Command::new("/bin/sh")
-                .arg("-c")
-                .arg(&cmd_str)
-                .output()
-                .map_err(|e| PyError::os_error_from_io(&e))?
+            let mut cmd = std::process::Command::new("/bin/sh");
+            cmd.arg("-c").arg(&cmd_str);
+            apply_env(&mut cmd, args);
+            cmd.output().map_err(|e| PyError::os_error_from_io(&e))?
         } else {
             let cmd_args: Vec<String> = if let PyObject::List(items) = &*args[0].borrow() {
                 items.iter().map(|a| a.str()).collect()
@@ -273,10 +305,10 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
             if cmd_args.is_empty() {
                 return Err(PyError::ValueError("empty command".to_string()));
             }
-            std::process::Command::new(&cmd_args[0])
-                .args(&cmd_args[1..])
-                .output()
-                .map_err(|e| PyError::os_error_from_io(&e))?
+            let mut cmd = std::process::Command::new(&cmd_args[0]);
+            cmd.args(&cmd_args[1..]);
+            apply_env(&mut cmd, args);
+            cmd.output().map_err(|e| PyError::os_error_from_io(&e))?
         };
         let returncode = output.status.code().unwrap_or(-1) as i64;
         let stdout_str = String::from_utf8_lossy(&output.stdout).to_string();
@@ -292,11 +324,10 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
         let cmd_str = args[0].str();
         let shell = kwarg_bool(args, "shell");
         let output = if shell {
-            std::process::Command::new("sh")
-                .arg("-c")
-                .arg(&cmd_str)
-                .output()
-                .map_err(|e| PyError::os_error_from_io(&e))?
+            let mut cmd = std::process::Command::new("sh");
+            cmd.arg("-c").arg(&cmd_str);
+            apply_env(&mut cmd, args);
+            cmd.output().map_err(|e| PyError::os_error_from_io(&e))?
         } else {
             // Was: `cmd_str.split_whitespace()` — the LIST form (the common
             // case, e.g. `[sys.executable, '-E', '-c', code]`) was stringified
@@ -314,10 +345,10 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
             if cmd_args.is_empty() {
                 return Err(PyError::type_error("check_call() requires a non-empty command"));
             }
-            std::process::Command::new(&cmd_args[0])
-                .args(&cmd_args[1..])
-                .output()
-                .map_err(|e| PyError::os_error_from_io(&e))?
+            let mut cmd = std::process::Command::new(&cmd_args[0]);
+            cmd.args(&cmd_args[1..]);
+            apply_env(&mut cmd, args);
+            cmd.output().map_err(|e| PyError::os_error_from_io(&e))?
         };
         let returncode = output.status.code().unwrap_or(-1);
         if returncode != 0 {
@@ -336,11 +367,10 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
             return Err(PyError::ValueError("empty command".to_string()));
         }
         let output = if shell {
-            std::process::Command::new("/bin/sh")
-                .arg("-c")
-                .arg(&cmd_str)
-                .output()
-                .map_err(|e| PyError::os_error_from_io(&e))?
+            let mut cmd = std::process::Command::new("/bin/sh");
+            cmd.arg("-c").arg(&cmd_str);
+            apply_env(&mut cmd, args);
+            cmd.output().map_err(|e| PyError::os_error_from_io(&e))?
         } else {
             let cmd_args: Vec<String> = if let PyObject::List(items) = &*args[0].borrow() {
                 items.iter().map(|a| a.str()).collect()
@@ -350,10 +380,10 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
             if cmd_args.is_empty() {
                 return Err(PyError::ValueError("empty command".to_string()));
             }
-            std::process::Command::new(&cmd_args[0])
-                .args(&cmd_args[1..])
-                .output()
-                .map_err(|e| PyError::os_error_from_io(&e))?
+            let mut cmd = std::process::Command::new(&cmd_args[0]);
+            cmd.args(&cmd_args[1..]);
+            apply_env(&mut cmd, args);
+            cmd.output().map_err(|e| PyError::os_error_from_io(&e))?
         };
         if !output.status.success() {
             let rc = output.status.code().unwrap_or(-1) as i64;
@@ -421,6 +451,17 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
         if let Some(cwd) = get_kw("cwd") {
             if !matches!(&*cwd.borrow(), PyObject::None) {
                 command.current_dir(crate::object::path_arg_to_string(&cwd));
+            }
+        }
+        if let Some(env_kw) = get_kw("env") {
+            // An explicit env REPLACES the inherited environment entirely
+            // (CPython semantics — the test suite relies on it for
+            // PYTHONHASHSEED).
+            if let PyObject::Dict(ed) = &*env_kw.borrow() {
+                command.env_clear();
+                for (k, v) in ed.items() {
+                    command.env(k.str(), v.str());
+                }
             }
         }
         // Sentinel ints (matching this module's own PIPE/STDOUT/DEVNULL

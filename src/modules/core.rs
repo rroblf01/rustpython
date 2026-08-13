@@ -2393,7 +2393,7 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
         hash_info_dict.insert_str("inf", py_int(314159));
         hash_info_dict.insert_str("nan", py_int(0));
         hash_info_dict.insert_str("imag", py_int(1000003));
-        hash_info_dict.insert_str("algorithm", py_str("fnv"));
+        hash_info_dict.insert_str("algorithm", py_str("siphash13"));
         hash_info_dict.insert_str("hash_bits", py_int(64));
         hash_info_dict.insert_str("seed_bits", py_int(128));
         hash_info_dict.insert_str("cutoff", py_int(0));

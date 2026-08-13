@@ -752,18 +752,8 @@ impl PyObject {
                     Ok((if combined == -1 { -2 } else { combined }) as usize)
                 }
             }
-            PyObject::Str(s) => {
-                let mut h: usize = 0;
-                for c in s.chars() {
-                    h = h.wrapping_mul(1000003).wrapping_add(c as usize);
-                }
-                Ok(h)
-            }
-            PyObject::Bytes(b) => {
-                let mut h: usize = 0;
-                for &byte in b { h = h.wrapping_mul(1000003).wrapping_add(byte as usize); }
-                Ok(h)
-            }
+             PyObject::Str(s) => Ok(py_hash_str(s)),
+             PyObject::Bytes(b) => Ok(py_hash_bytes(b)),
             PyObject::Range { start, stop, step } => {
                 let mut h: usize = 0x123456;
                 h = h.wrapping_mul(1000003).wrapping_add(*start as usize);
