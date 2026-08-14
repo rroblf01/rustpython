@@ -4549,7 +4549,19 @@ impl PyObject {
                             let mut parts: Vec<String> = Vec::new();
                             loop {
                                 match crate::object::builtin_next(&[iterator.clone()]) {
-                                    Ok(v) => parts.push(v.str()),
+                                    Ok(v) => {
+                                        // join requires str items (CPython:
+                                        // 'sequence item N: expected str
+                                        // instance, int found').
+                                        if !matches!(&*v.borrow(), PyObject::Str(_)) {
+                                            return Err(PyError::type_error(format!(
+                                                "sequence item {}: expected str instance, {} found",
+                                                parts.len(),
+                                                v.borrow().type_name()
+                                            )));
+                                        }
+                                        parts.push(v.str());
+                                    }
                                     Err(PyError::StopIteration) => break,
                                     Err(e) => return Err(e),
                                 }
@@ -4585,8 +4597,25 @@ impl PyObject {
                     "strip" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "strip".to_string(),
                         func: |args| {
+                            if args.len() > 2 {
+                                return Err(PyError::type_error(
+                                    "strip() takes at most 1 argument (2 given)",
+                                ));
+                            }
+                            if args.len() == 2
+                                && !matches!(&*args[1].borrow(), PyObject::Str(_) | PyObject::None)
+                            {
+                                return Err(PyError::type_error(format!(
+                                    "strip() argument must be str or None, not {}",
+                                    args[1].borrow().type_name(),
+                                )));
+                            }
                             let chars = if args.len() > 1 {
-                                args[1].str()
+                                if let PyObject::None = &*args[1].borrow() {
+                                    " \t\n\r".to_string()
+                                } else {
+                                    args[1].str()
+                                }
                             } else {
                                 " \t\n\r".to_string()
                             };
@@ -4599,6 +4628,12 @@ impl PyObject {
                     "lstrip" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "lstrip".to_string(),
                         func: |args| {
+                            if args.len() > 2 {
+                                return Err(PyError::type_error(
+                                    "lstrip() takes at most 1 argument (2 given)",
+                                ));
+                            }
+
                             let chars = if args.len() > 1 {
                                 args[1].str()
                             } else {
@@ -4615,6 +4650,12 @@ impl PyObject {
                     "rstrip" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "rstrip".to_string(),
                         func: |args| {
+                            if args.len() > 2 {
+                                return Err(PyError::type_error(
+                                    "rstrip() takes at most 1 argument (2 given)",
+                                ));
+                            }
+
                             let chars = if args.len() > 1 {
                                 args[1].str()
                             } else {
@@ -4691,6 +4732,13 @@ impl PyObject {
                                 ));
                             }
                             let s = args[0].str();
+                            if !matches!(&*args[1].borrow(), PyObject::Str(_)) {
+                                return Err(PyError::type_error(format!(
+                                    "find() argument must be str, not {}",
+                                    args[1].borrow().type_name(),
+                                )));
+                            }
+
                             let needle = args[1].str();
                             let start = opt_i64_arg(args.get(2));
                             let end = opt_i64_arg(args.get(3));
@@ -4711,6 +4759,13 @@ impl PyObject {
                                 ));
                             }
                             let s = args[0].str();
+                            if !matches!(&*args[1].borrow(), PyObject::Str(_)) {
+                                return Err(PyError::type_error(format!(
+                                    "rfind() argument must be str, not {}",
+                                    args[1].borrow().type_name(),
+                                )));
+                            }
+
                             let needle = args[1].str();
                             let start = opt_i64_arg(args.get(2));
                             let end = opt_i64_arg(args.get(3));
@@ -4731,6 +4786,13 @@ impl PyObject {
                                 ));
                             }
                             let s = args[0].str();
+                            if !matches!(&*args[1].borrow(), PyObject::Str(_)) {
+                                return Err(PyError::type_error(format!(
+                                    "index() argument must be str, not {}",
+                                    args[1].borrow().type_name(),
+                                )));
+                            }
+
                             let needle = args[1].str();
                             let start = opt_i64_arg(args.get(2));
                             let end = opt_i64_arg(args.get(3));
@@ -4749,6 +4811,13 @@ impl PyObject {
                                 ));
                             }
                             let s = args[0].str();
+                            if !matches!(&*args[1].borrow(), PyObject::Str(_)) {
+                                return Err(PyError::type_error(format!(
+                                    "rindex() argument must be str, not {}",
+                                    args[1].borrow().type_name(),
+                                )));
+                            }
+
                             let needle = args[1].str();
                             let start = opt_i64_arg(args.get(2));
                             let end = opt_i64_arg(args.get(3));
@@ -4767,6 +4836,13 @@ impl PyObject {
                                 ));
                             }
                             let s = args[0].str();
+                            if !matches!(&*args[1].borrow(), PyObject::Str(_)) {
+                                return Err(PyError::type_error(format!(
+                                    "count() argument must be str, not {}",
+                                    args[1].borrow().type_name(),
+                                )));
+                            }
+
                             let needle = args[1].str();
                             let start = opt_i64_arg(args.get(2));
                             let end = opt_i64_arg(args.get(3));
@@ -5176,34 +5252,44 @@ impl PyObject {
                     "removeprefix" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "removeprefix".to_string(),
                         func: |a| {
-                            if a.len() < 2 {
+                            if a.len() != 2 {
                                 return Err(PyError::type_error(
-                                    "removeprefix() takes exactly 1 argument",
+                                    "removeprefix() takes exactly one argument",
                                 ));
-                            } else {
-                                let s = a[0].str();
-                                let p = a[1].str();
-                                Ok(py_str(if s.starts_with(&p) { &s[p.len()..] } else { &s }))
                             }
+                            if !matches!(&*a[1].borrow(), PyObject::Str(_)) {
+                                return Err(PyError::type_error(format!(
+                                    "removeprefix() argument must be str, not {}",
+                                    a[1].borrow().type_name(),
+                                )));
+                            }
+                            let s = a[0].str();
+                            let p = a[1].str();
+                            Ok(py_str(if s.starts_with(&p) { &s[p.len()..] } else { &s }))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
                     "removesuffix" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "removesuffix".to_string(),
                         func: |a| {
-                            if a.len() < 2 {
+                            if a.len() != 2 {
                                 return Err(PyError::type_error(
-                                    "removesuffix() takes exactly 1 argument",
+                                    "removesuffix() takes exactly one argument",
                                 ));
-                            } else {
-                                let s = a[0].str();
-                                let p = a[1].str();
-                                Ok(py_str(if s.ends_with(&p) {
-                                    &s[..s.len() - p.len()]
-                                } else {
-                                    &s
-                                }))
                             }
+                            if !matches!(&*a[1].borrow(), PyObject::Str(_)) {
+                                return Err(PyError::type_error(format!(
+                                    "removesuffix() argument must be str, not {}",
+                                    a[1].borrow().type_name(),
+                                )));
+                            }
+                            let s = a[0].str();
+                            let p = a[1].str();
+                            Ok(py_str(if s.ends_with(&p) {
+                                &s[..s.len() - p.len()]
+                            } else {
+                                &s
+                            }))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
