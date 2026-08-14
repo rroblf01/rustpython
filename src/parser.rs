@@ -3305,6 +3305,7 @@ impl Parser {
                         }
                         expr = Expr::Tuple(elts);
                     }
+
                     let mut conversion: u8 = 0;
                     let mut format_spec: Option<Box<Expr>> = None;
                     // Check for FStringConversion token
