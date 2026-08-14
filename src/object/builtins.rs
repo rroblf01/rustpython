@@ -5103,7 +5103,7 @@ fn bigint_mod_python(a: &BigInt, m: &BigInt) -> BigInt {
 // this for free, along with `extended_gcd`) isn't an explicit dependency of
 // this project (only pulled in transitively), so this is hand-rolled rather
 // than adding a new direct dependency for one small, standard algorithm.
-fn bigint_gcd(a: &BigInt, b: &BigInt) -> BigInt {
+pub(crate) fn bigint_gcd(a: &BigInt, b: &BigInt) -> BigInt {
     let (mut a, mut b) = (a.abs(), b.abs());
     while !b.is_zero() {
         let t = &a % &b;

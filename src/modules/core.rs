@@ -2318,6 +2318,15 @@ pub fn create_abc_builtins_dict() -> HashMap<String, PyObjectRef> {
 /// with a spurious `TypeError`. Found via CPython's own `test_math.py`
 /// (`hypot(0.75, FloatLike(-1.))` and similar for `isclose`/`isnan`/
 /// `copysign`/`fmod`/`atan2`/`dist`/`sumprod`).
+/// Integer value of a `math` integer argument: a native int, an int-subclass
+/// instance (its int backing), or any `__index__` object.
+fn math_int_value(v: &PyObjectRef) -> PyResult<num_bigint::BigInt> {
+    if let Some(n) = crate::object::int_value_or_backing(v) {
+        return Ok(n);
+    }
+    crate::object::to_index(v)
+}
+
 fn math_arg_f64(v: &PyObjectRef) -> Option<f64> {
     if let Some(f) = v.as_f64() {
         return Some(f);
@@ -2331,6 +2340,51 @@ fn math_arg_f64(v: &PyObjectRef) -> Option<f64> {
         lookup_dunder_via_mro(&typ, "__float__")?
     };
     call_bound_method(f, v.clone(), vec![]).ok()?.as_f64()
+}
+
+/// `math.floor`/`math.ceil`/`math.trunc` dispatch to `__floor__`/`__ceil__`/
+/// `__trunc__` on an instance when present (a Python `Function` method, a
+/// native `BuiltinFunction`/`BuiltinMethod`, or `None` = explicitly
+/// disabled, which must raise TypeError rather than fall through). Returns
+/// `Ok(None)` when no usable dunder exists.
+fn math_call_int_dunder(
+    self_obj: &PyObjectRef,
+    name: &str,
+) -> PyResult<Option<PyObjectRef>> {
+    let typ = if let PyObject::Instance { typ, .. } = &*self_obj.borrow() {
+        typ.clone()
+    } else {
+        return Ok(None);
+    };
+    let Some(f) = lookup_dunder_via_mro(&typ, name) else {
+        return Ok(None);
+    };
+    let b = f.borrow();
+    match &*b {
+        PyObject::None => Err(PyError::type_error(format!(
+            "'{}' object does not support {}",
+            crate::object::get_type_name_for_instance(&typ),
+            name
+        ))),
+        PyObject::BuiltinFunction { func, .. } => {
+            let func = *func;
+            drop(b);
+            Ok(Some(func(&[self_obj.clone()])?))
+        }
+        PyObject::BuiltinMethod { func, .. } => {
+            let func = *func;
+            drop(b);
+            Ok(Some(func(&[self_obj.clone()])?))
+        }
+        PyObject::BoundMethod { .. } => {
+            drop(b);
+            Ok(Some(call_bound_method(f, self_obj.clone(), vec![])?))
+        }
+        _ => {
+            drop(b);
+            Ok(Some(call_bound_method(f, self_obj.clone(), vec![])?))
+        }
+    }
 }
 
 pub fn create_math_dict() -> HashMap<String, PyObjectRef> {
@@ -2394,56 +2448,36 @@ pub fn create_math_dict() -> HashMap<String, PyObjectRef> {
         if args.len() != 1 {
             return Err(PyError::type_error("floor() takes exactly one argument"));
         }
-        if matches!(&*args[0].borrow(), PyObject::Instance { .. }) {
-            if let Ok(raw) = args[0].borrow().get_attribute("__floor__") {
-                let rb = raw.borrow();
-                if let PyObject::BuiltinFunction { func, .. } = &*rb {
-                    let func = *func;
-                    drop(rb);
-                    return func(&[args[0].clone()]);
-                }
-                if let PyObject::BuiltinMethod { func, self_obj, .. } = &*rb {
-                    let func = *func;
-                    let self_obj = self_obj.clone();
-                    drop(rb);
-                    return func(&[self_obj, args[0].clone()]);
-                }
-                drop(rb);
-            }
+        if let Some(r) = math_call_int_dunder(&args[0], "__floor__")? {
+            return Ok(r);
         }
         let v = args[0].borrow();
         match &*v {
             PyObject::Int(i) => Ok(py_int(i.clone())),
-            PyObject::Float(f) => Ok(py_int(f.floor() as i64)),
-            _ => Err(PyError::type_error("floor() argument must be a number")),
+            PyObject::Float(f) => crate::object::f64_to_int_ceil_floor_trunc(*f, 2).map(py_int),
+            _ => {
+                let x = math_arg_f64(&args[0])
+                    .ok_or_else(|| PyError::type_error("floor() argument must be a number"))?;
+                crate::object::f64_to_int_ceil_floor_trunc(x, 2).map(py_int)
+            }
         }
     });
     math_func!("ceil", |args| {
         if args.len() != 1 {
             return Err(PyError::type_error("ceil() takes exactly one argument"));
         }
-        if matches!(&*args[0].borrow(), PyObject::Instance { .. }) {
-            if let Ok(raw) = args[0].borrow().get_attribute("__ceil__") {
-                let rb = raw.borrow();
-                if let PyObject::BuiltinFunction { func, .. } = &*rb {
-                    let func = *func;
-                    drop(rb);
-                    return func(&[args[0].clone()]);
-                }
-                if let PyObject::BuiltinMethod { func, self_obj, .. } = &*rb {
-                    let func = *func;
-                    let self_obj = self_obj.clone();
-                    drop(rb);
-                    return func(&[self_obj, args[0].clone()]);
-                }
-                drop(rb);
-            }
+        if let Some(r) = math_call_int_dunder(&args[0], "__ceil__")? {
+            return Ok(r);
         }
         let v = args[0].borrow();
         match &*v {
             PyObject::Int(i) => Ok(py_int(i.clone())),
-            PyObject::Float(f) => Ok(py_int(f.ceil() as i64)),
-            _ => Err(PyError::type_error("ceil() argument must be a number")),
+            PyObject::Float(f) => crate::object::f64_to_int_ceil_floor_trunc(*f, 1).map(py_int),
+            _ => {
+                let x = math_arg_f64(&args[0])
+                    .ok_or_else(|| PyError::type_error("ceil() argument must be a number"))?;
+                crate::object::f64_to_int_ceil_floor_trunc(x, 1).map(py_int)
+            }
         }
     });
     math_func!("exp", |args| {
@@ -2633,29 +2667,8 @@ pub fn create_math_dict() -> HashMap<String, PyObjectRef> {
             return Err(PyError::type_error("trunc() takes exactly one argument"));
         }
         let a = &args[0];
-        if matches!(&*a.borrow(), PyObject::Instance { .. }) {
-            if let Ok(raw) = a.borrow().get_attribute("__trunc__") {
-                let call_result = {
-                    let rb = raw.borrow();
-                    match &*rb {
-                        PyObject::BuiltinFunction { func, .. } => {
-                            let func = *func;
-                            drop(rb);
-                            Some(func(&[a.clone()]))
-                        }
-                        PyObject::BuiltinMethod { func, self_obj, .. } => {
-                            let func = *func;
-                            let self_obj = self_obj.clone();
-                            drop(rb);
-                            Some(func(&[self_obj, a.clone()]))
-                        }
-                        _ => None,
-                    }
-                };
-                if let Some(r) = call_result {
-                    return r;
-                }
-            }
+        if let Some(r) = math_call_int_dunder(a, "__trunc__")? {
+            return Ok(r);
         }
         // A native `float` truncates to the exact integer (like
         // `float.__trunc__`); `int` is its own truncation.
@@ -2781,19 +2794,11 @@ pub fn create_math_dict() -> HashMap<String, PyObjectRef> {
         ))
     });
     math_func!("gcd", |args| {
-        fn gcd(a: i64, b: i64) -> i64 {
-            if b == 0 {
-                a.abs()
-            } else {
-                gcd(b, a % b)
-            }
-        }
-        let mut result = 0i64;
+        let mut result = num_bigint::BigInt::from(0);
         for a in args {
-            let v = a
-                .as_i64()
-                .ok_or_else(|| PyError::type_error("gcd() arguments must be integers"))?;
-            result = gcd(result, v);
+            let v = math_int_value(a)
+                .map_err(|_| PyError::type_error("gcd() arguments must be integers"))?;
+            result = crate::object::bigint_gcd(&result, &v);
         }
         Ok(py_int(result))
     });
@@ -2803,17 +2808,18 @@ pub fn create_math_dict() -> HashMap<String, PyObjectRef> {
                 "factorial() takes exactly one argument",
             ));
         }
-        let n = args[0]
-            .as_i64()
-            .ok_or_else(|| PyError::type_error("factorial() argument must be an integer"))?;
-        if n < 0 {
+        let n = math_int_value(&args[0])
+            .map_err(|_| PyError::type_error("factorial() argument must be an integer"))?;
+        if n.sign() == num_bigint::Sign::Minus {
             return Err(PyError::value_error(
                 "factorial() not defined for negative values",
             ));
         }
         let mut result = num_bigint::BigInt::from(1i64);
-        for i in 2..=n {
-            result *= num_bigint::BigInt::from(i);
+        let mut i = num_bigint::BigInt::from(2i64);
+        while i <= n {
+            result *= &i;
+            i += 1;
         }
         Ok(py_int(result))
     });
@@ -2828,15 +2834,125 @@ pub fn create_math_dict() -> HashMap<String, PyObjectRef> {
         if args.len() != 1 {
             return Err(PyError::type_error("isqrt() takes exactly one argument"));
         }
-        let n = match &*args[0].borrow() {
-            PyObject::Int(i) => i.clone(),
-            PyObject::Bool(b) => num_bigint::BigInt::from(if *b { 1 } else { 0 }),
-            _ => return Err(PyError::type_error("isqrt() argument must be an integer")),
-        };
+        let n = math_int_value(&args[0])
+            .map_err(|_| PyError::type_error("isqrt() argument must be an integer"))?;
         if n.sign() == num_bigint::Sign::Minus {
             return Err(PyError::value_error("isqrt() argument must be nonnegative"));
         }
         Ok(py_int(n.sqrt()))
+    });
+
+    math_func!("comb", |args| {
+        if args.len() != 2 {
+            return Err(PyError::type_error("comb() takes exactly two arguments"));
+        }
+        let n = math_int_value(&args[0])
+            .map_err(|_| PyError::type_error("comb() arguments must be integers"))?;
+        let k = math_int_value(&args[1])
+            .map_err(|_| PyError::type_error("comb() arguments must be integers"))?;
+        if n.sign() == num_bigint::Sign::Minus {
+            return Err(PyError::value_error("n must be a non-negative integer"));
+        }
+        if k.sign() == num_bigint::Sign::Minus {
+            return Err(PyError::value_error("k must be a non-negative integer"));
+        }
+        if k > n {
+            return Ok(py_int(0));
+        }
+        if k == num_bigint::BigInt::from(0) || &k == &n {
+            return Ok(py_int(1));
+        }
+        let k = if &k * 2 > n { &n - &k } else { k };
+        let mut result = num_bigint::BigInt::from(1);
+        let mut i = num_bigint::BigInt::from(1);
+        while i <= k {
+            result = &result * (&n - &i + 1) / &i;
+            i += 1;
+        }
+        Ok(py_int(result))
+    });
+    math_func!("perm", |args| {
+        if args.len() < 1 || args.len() > 2 {
+            return Err(PyError::type_error("perm() takes one or two arguments"));
+        }
+        let n = math_int_value(&args[0])
+            .map_err(|_| PyError::type_error("perm() arguments must be integers"))?;
+        if n.sign() == num_bigint::Sign::Minus {
+            return Err(PyError::value_error("n must be a non-negative integer"));
+        }
+        let k = if args.len() == 2 {
+            let k = math_int_value(&args[1])
+                .map_err(|_| PyError::type_error("perm() arguments must be integers"))?;
+            if k.sign() == num_bigint::Sign::Minus {
+                return Err(PyError::value_error("k must be a non-negative integer"));
+            }
+            if k > n {
+                return Ok(py_int(0));
+            }
+            k
+        } else {
+            n.clone()
+        };
+        let mut result = num_bigint::BigInt::from(1);
+        let mut i = num_bigint::BigInt::from(0);
+        while i < k {
+            result *= &n - &i;
+            i += 1;
+        }
+        Ok(py_int(result))
+    });
+    math_func!("lcm", |args| {
+        fn lcm_big(a: &num_bigint::BigInt, b: &num_bigint::BigInt) -> num_bigint::BigInt {
+            if a.sign() == num_bigint::Sign::NoSign || b.sign() == num_bigint::Sign::NoSign {
+                return num_bigint::BigInt::from(0);
+            }
+            let g = crate::object::bigint_gcd(a, b);
+            (a / &g) * b
+        }
+        let mut result = num_bigint::BigInt::from(1);
+        for a in args {
+            let v = math_int_value(a)
+                .map_err(|_| PyError::type_error("lcm() arguments must be integers"))?;
+            result = lcm_big(&result, &v);
+        }
+        Ok(py_int(result))
+    });
+    math_func!("dist", |args| {
+        if args.len() != 2 {
+            return Err(PyError::type_error("dist() takes exactly two arguments"));
+        }
+        let iter_a = crate::object::builtin_iter(&[args[0].clone()])
+            .map_err(|_| PyError::type_error("dist() argument must be iterable"))?;
+        let iter_b = crate::object::builtin_iter(&[args[1].clone()])
+            .map_err(|_| PyError::type_error("dist() argument must be iterable"))?;
+        let mut sum = 0.0f64;
+        let mut max_abs = 0.0f64;
+        let mut comps: Vec<(f64, f64)> = Vec::new();
+        loop {
+            let a = match crate::object::builtin_next(&[iter_a.clone()]) {
+                Ok(v) => v,
+                Err(PyError::StopIteration) => break,
+                Err(e) => return Err(e),
+            };
+            let b = crate::object::builtin_next(&[iter_b.clone()])
+                .map_err(|_| PyError::value_error("both arguments must be the same length"))?;
+            let fa = math_arg_f64(&a)
+                .ok_or_else(|| PyError::type_error("both arguments must be numeric"))?;
+            let fb = math_arg_f64(&b)
+                .ok_or_else(|| PyError::type_error("both arguments must be numeric"))?;
+            comps.push((fa, fb));
+            max_abs = max_abs.max(fa.abs()).max(fb.abs());
+        }
+        if max_abs == 0.0 {
+            return Ok(py_float(0.0));
+        }
+        // Scale by the largest coordinate to avoid overflow, like CPython.
+        for (a, b) in &comps {
+            let da = a / max_abs;
+            let db = b / max_abs;
+            sum += (da - db) * (da - db);
+        }
+        Ok(py_float(sum.sqrt() * max_abs))
     });
 
     // Additional math functions

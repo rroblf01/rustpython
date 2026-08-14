@@ -1673,6 +1673,19 @@ pub fn create_collections_abc_dict() -> HashMap<String, PyObjectRef> {
     d.insert_str("MutableSet", abc_class!("MutableSet"));
     d.insert_str("Mapping", abc_class!("Mapping"));
     d.insert_str("MutableMapping", abc_class!("MutableMapping"));
+    // CPython's Mapping/MutableMapping set `__reversed__ = None` — the
+    // documented way to explicitly DISABLE reversal on a len/getitem class
+    // (`reversed(MyMapping())` raises TypeError).
+    if let Some(m) = d.get("Mapping") {
+        if let PyObject::Type { dict, .. } = &mut *m.borrow_mut() {
+            dict.insert_str("__reversed__", py_none());
+        }
+    }
+    if let Some(m) = d.get("MutableMapping") {
+        if let PyObject::Type { dict, .. } = &mut *m.borrow_mut() {
+            dict.insert_str("__reversed__", py_none());
+        }
+    }
     d.insert_str("MappingView", abc_class!("MappingView"));
     d.insert_str("ItemsView", abc_class!("ItemsView"));
     d.insert_str("KeysView", abc_class!("KeysView"));
