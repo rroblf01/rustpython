@@ -269,6 +269,19 @@ pub fn py_mul(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
         }
     }
     if a.is_float_typed() || b.is_float_typed() {
+        // A huge int being coerced to float overflows (CPython raises
+        // OverflowError: `10**1000 * 1.0`).
+        for v in [a, b] {
+            if matches!(&*v.borrow(), PyObject::Int(_)) {
+                let overflow = match v.as_f64() {
+                    Some(f) => f.is_infinite(),
+                    None => true,
+                };
+                if overflow {
+                    return Err(PyError::overflow_error("int too large to convert to float"));
+                }
+            }
+        }
         if let (Some(af), Some(bf)) = (a.as_f64(), b.as_f64()) {
             return Ok(py_float(af * bf));
         }

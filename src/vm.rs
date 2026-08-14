@@ -2766,6 +2766,43 @@ impl VirtualMachine {
         result
     }
 
+    /// True if `val` is literally one of the objects stored in a registered
+    /// module's (or the `builtins` namespace's) dict under `name`. In real
+    /// CPython such plain builtin functions (`math.isclose`, `random.random`,
+    /// ...) have no `__get__` and are NOT descriptors — so when a Python
+    /// class body copies one (`isclose = math.isclose`) and it is later
+    /// accessed through an instance, it must be returned unbound. Genuine
+    /// native METHODS (built into a type's own dict, e.g. `hmac.HMAC.hexdigest`)
+    /// never appear in any module namespace, so they still auto-bind as
+    /// before.
+    fn is_plain_module_function(&self, name: &str, val: &PyObjectRef) -> bool {
+        let addr = &*val.borrow() as *const PyObject as usize;
+        let scan = |dict: &crate::object::TypeDict| -> bool {
+            match dict.get_str(name) {
+                Some(v) => &*v.borrow() as *const PyObject as usize == addr,
+                None => false,
+            }
+        };
+        for (_, m) in self.modules.iter() {
+            if let crate::object::PyObject::Module { dict, .. } = &*m.borrow() {
+                if scan(dict) {
+                    return true;
+                }
+            }
+        }
+        for (_, v) in self.builtins.iter() {
+            if let crate::object::PyObject::Module { dict, .. } = &*v.borrow() {
+                if scan(dict) {
+                    return true;
+                }
+            }
+            if &*v.borrow() as *const PyObject as usize == addr {
+                return true;
+            }
+        }
+        false
+    }
+
     fn execute_inner(&mut self, frame_floor: usize) -> PyResult<PyObjectRef> {
         loop {
             let result = self.execute_instruction();
@@ -4762,30 +4799,43 @@ impl VirtualMachine {
                             drop(obj_borrowed);
                             let dict = &dict;
                             let typ = &typ;
-                            let attr = dict.get_str(&name).cloned().or_else(|| {
-                                let typ_ref = typ.borrow();
-                                if let PyObject::Type { dict: type_dict, mro, .. } = &*typ_ref {
-                                    let found = type_dict.get_str(&name).cloned().or_else(|| {
-                                        for base in mro.iter().skip(1) {
-                                            if let PyObject::Type { dict: base_dict, .. } = &*base.borrow() {
-                                                if let Some(val) = base_dict.get_str(&name) {
-                                                    return Some(val.clone());
+                            let attr = if let Some(inst_attr) = dict.get_str(&name) {
+                                Ok(Some(inst_attr.clone()))
+                            } else {
+                                (|| -> PyResult<Option<PyObjectRef>> {
+                                    let typ_ref = typ.borrow();
+                                    if let PyObject::Type {
+                                        dict: type_dict,
+                                        mro,
+                                        ..
+                                    } = &*typ_ref
+                                    {
+                                        let found =
+                                            type_dict.get_str(&name).cloned().or_else(|| {
+                                                for base in mro.iter().skip(1) {
+                                                    if let PyObject::Type {
+                                                        dict: base_dict, ..
+                                                    } = &*base.borrow()
+                                                    {
+                                                        if let Some(val) = base_dict.get_str(&name)
+                                                        {
+                                                            return Some(val.clone());
+                                                        }
+                                                    }
                                                 }
-                                            }
-                                        }
-                                        None
-                                    });
-                                    // Handle descriptor protocol for Property, StaticMethod, ClassMethod, and generic __get__
-                                    if let Some(val) = found {
-                                        let val_borrowed = val.borrow();
-                                        match &*val_borrowed {
+                                                None
+                                            });
+                                        // Handle descriptor protocol for Property, StaticMethod, ClassMethod, and generic __get__
+                                        if let Some(val) = found {
+                                            let val_borrowed = val.borrow();
+                                            match &*val_borrowed {
                                             PyObject::Property(ref d) if d.getter.is_some() => {
                                                 drop(typ_ref);
                                                 let g = d.getter.as_ref().unwrap();
-                                                return Some(self.call_function(g.clone(), vec![obj.clone()], vec![]).unwrap_or_else(|_| val.clone()));
+                                                return Ok(Some(self.call_function(g.clone(), vec![obj.clone()], vec![]).unwrap_or_else(|_| val.clone())));
                                             }
                                             PyObject::StaticMethod { func } => {
-                                                return Some(func.clone());
+                                                return Ok(Some(func.clone()));
                                             }
                                             PyObject::ClassMethod { func } => {
                                                 let func_clone = func.clone();
@@ -4796,29 +4846,29 @@ impl VirtualMachine {
                                                     // Return a BoundMethod that will prepend the class when called
                                                     let class_obj = inst_typ.clone();
                                                     drop(cls);
-                                                    return Some(PyObjectRef::imm(PyObject::BoundMethod {
+                                                    return Ok(Some(PyObjectRef::imm(PyObject::BoundMethod {
                                                         func: func_clone,
                                                         self_obj: class_obj,
-                                                    }));
+                                                    })));
                                                 }
                                                 // When accessing classmethod on a type itself (e.g. MyClass.method),
                                                 // bind the type as self so it becomes the first arg on call
                                                 let class_obj = obj.clone();
                                                 drop(cls);
-                                                return Some(PyObjectRef::imm(PyObject::BoundMethod {
+                                                return Ok(Some(PyObjectRef::imm(PyObject::BoundMethod {
                                                     func: func_clone,
                                                     self_obj: class_obj,
-                                                }));
+                                                })));
                                             }
                                             PyObject::Function(_) => {
                                                 let is_instance_obj = matches!(&*obj.borrow(), PyObject::Instance { .. });
                                                 if is_instance_obj {
-                                                    return Some(PyObjectRef::imm(PyObject::BoundMethod {
+                                                    return Ok(Some(PyObjectRef::imm(PyObject::BoundMethod {
                                                         func: val.clone(),
                                                         self_obj: obj.clone(),
-                                                    }));
+                                                    })));
                                                 } else {
-                                                    return Some(val.clone());
+                                                    return Ok(Some(val.clone()));
                                                 }
                                             }
                                             PyObject::BuiltinFunction { name: n, func }
@@ -4860,21 +4910,36 @@ impl VirtualMachine {
                                                 // every real test failure as an
                                                 // error).
                                                 let _ = func;
-                                                return Some(val.clone());
+                                                return Ok(Some(val.clone()));
                                             }
                                             PyObject::BuiltinFunction { name: n, func } => {
-                                                return Some(PyObjectRef::imm(PyObject::BuiltinMethod {
-                                                    name: n.clone(),
-                                                    func: *func,
+                                                let n = n.clone();
+                                                let func = *func;
+                                                // Plain builtin module functions
+                                                // (`isclose = math.isclose`) have no
+                                                // `__get__` and must stay UNBOUND — a
+                                                // genuinely bound native method lives
+                                                // only in its type's dict, never in a
+                                                // module namespace. Drop the borrow
+                                                // first: if `val` IS a module member,
+                                                // the scan below re-borrows the same
+                                                // RefCell.
+                                                drop(val_borrowed);
+                                                if self.is_plain_module_function(&n, &val) {
+                                                    return Ok(Some(val.clone()));
+                                                }
+                                                return Ok(Some(PyObjectRef::imm(PyObject::BuiltinMethod {
+                                                    name: n,
+                                                    func,
                                                     self_obj: obj.clone(),
-                                                }));
+                                                })));
                                             }
                                             PyObject::BuiltinMethod { name: n, func, .. } => {
-                                                return Some(PyObjectRef::imm(PyObject::BuiltinMethod {
+                                                return Ok(Some(PyObjectRef::imm(PyObject::BuiltinMethod {
                                                     name: n.clone(),
                                                     func: *func,
                                                     self_obj: obj.clone(),
-                                                }));
+                                                })));
                                             }
                                             // NOTE: deliberately NOT auto-binding a bare
                                             // `PyObject::Closure` found via the class dict here
@@ -4913,25 +4978,22 @@ impl VirtualMachine {
                                                         }
                                                         let descriptor_args = vec![val.clone(), obj.clone(), cls];
                                                         match self.call_function(__get__, descriptor_args, vec![]) {
-                                                            Ok(v) => return Some(v),
-                                                            Err(e) => {
-                                                                if std::env::var("RPY_DEBUG_DESCRIPTOR").is_ok() {
-                                                                    eprintln!("DESCRIPTOR __get__ FAILED for {:?}: {}", name, e);
-                                                                }
-                                                                return Some(val.clone());
-                                                            }
+                                                            Ok(v) => return Ok(Some(v)),
+                                                            Err(e) => return Err(e),
                                                         }
                                                     }
                                                 }
-                                                return Some(val.clone());
+                                                return Ok(Some(val.clone()));
                                             }
                                         }
+                                        }
+                                        Ok(None)
+                                    } else {
+                                        Ok(None)
                                     }
-                                    None
-                                } else {
-                                    None
-                                }
-                            });
+                                })()
+                            };
+                            let attr = attr?;
                             // Not overridden anywhere in the mro: for a class
                             // that transparently subclasses list/dict/str
                             // (`class Foo(list): ...`), delegate to the real
