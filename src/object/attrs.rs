@@ -10035,80 +10035,16 @@ impl PyObject {
                                     "slice indices must be integers or None or have an __index__ method"
                                 ))
                                 };
-                                let is_none =
-                                    |v: &PyObjectRef| matches!(&*v.borrow(), PyObject::None);
                                 let length = comp(&args[0])?;
                                 if length.sign() == num_bigint::Sign::Minus {
                                     return Err(PyError::value_error(
                                         "length should not be negative",
                                     ));
                                 }
-                                let one = num_bigint::BigInt::from(1);
-                                let zero = num_bigint::BigInt::from(0);
-                                let s_step_raw = if is_none(&step_ref) {
-                                    None
-                                } else {
-                                    Some(comp(&step_ref)?)
-                                };
-                                let step = match &s_step_raw {
-                                    Some(s) if !s.is_zero() => s.clone(),
-                                    Some(_) => {
-                                        return Err(PyError::value_error(
-                                            "slice step cannot be zero",
-                                        ))
-                                    }
-                                    None => one.clone(),
-                                };
-                                let neg = step.sign() == num_bigint::Sign::Minus;
-                                let start = match &*start_ref.borrow() {
-                                    PyObject::None => {
-                                        if neg {
-                                            &length - &one
-                                        } else {
-                                            zero.clone()
-                                        }
-                                    }
-                                    _ => comp(&start_ref)?,
-                                };
-                                let stop = match &*stop_ref.borrow() {
-                                    PyObject::None => {
-                                        if neg {
-                                            -(&length + &one)
-                                        } else {
-                                            length.clone()
-                                        }
-                                    }
-                                    _ => comp(&stop_ref)?,
-                                };
-                                // clamp(v, lo, hi): negative v means length+v.
-                                let clamp = |v: num_bigint::BigInt,
-                                             lo: &num_bigint::BigInt,
-                                             hi: &num_bigint::BigInt|
-                                 -> num_bigint::BigInt {
-                                    let v = if v.sign() == num_bigint::Sign::Minus {
-                                        &length + &v
-                                    } else {
-                                        v
-                                    };
-                                    let v = if &v < lo { lo.clone() } else { v };
-                                    if &v > hi {
-                                        hi.clone()
-                                    } else {
-                                        v
-                                    }
-                                };
-                                let (res_start, res_stop) = if neg {
-                                    let lo = num_bigint::BigInt::from(-1);
-                                    let hi = &length - &one;
-                                    (clamp(start, &lo, &hi), clamp(stop, &lo, &hi))
-                                } else {
-                                    (clamp(start, &zero, &length), clamp(stop, &zero, &length))
-                                };
-                                Ok(py_tuple(vec![
-                                    py_int(res_start),
-                                    py_int(res_stop),
-                                    py_int(step),
-                                ]))
+                                let (rs, re, st) = crate::object::subscript::slice_indices_values(
+                                    &start_ref, &stop_ref, &step_ref, &length,
+                                )?;
+                                return Ok(py_tuple(vec![py_int(rs), py_int(re), py_int(st)]));
                             },
                         ))))
                     }
@@ -10186,9 +10122,9 @@ impl PyObject {
                 }
             }
             PyObject::Range { start, stop, step } => match name {
-                "start" => Ok(py_int(*start)),
-                "stop" => Ok(py_int(*stop)),
-                "step" => Ok(py_int(*step)),
+                "start" => Ok(py_int(start.clone())),
+                "stop" => Ok(py_int(stop.clone())),
+                "step" => Ok(py_int(step.clone())),
                 "__reduce__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                     name: "__reduce__".to_string(),
                     func: |args| {
@@ -10199,7 +10135,11 @@ impl PyObject {
                                     name: "range".to_string(),
                                     func: builtin_range,
                                 }),
-                                py_tuple(vec![py_int(*start), py_int(*stop), py_int(*step)]),
+                                py_tuple(vec![
+                                    py_int(start.clone()),
+                                    py_int(stop.clone()),
+                                    py_int(step.clone()),
+                                ]),
                             ]))
                         } else {
                             Err(PyError::runtime_error("__reduce__ on non-range"))
@@ -10208,9 +10148,9 @@ impl PyObject {
                     self_obj: PyObjectRef::new(PyObject::None),
                 })),
                 "__iter__" => Ok(PyObjectRef::new(PyObject::RangeIter {
-                    current: *start,
-                    stop: *stop,
-                    step: *step,
+                    current: start.clone(),
+                    stop: stop.clone(),
+                    step: step.clone(),
                 })),
                 "__contains__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                     name: "__contains__".to_string(),
@@ -10222,15 +10162,13 @@ impl PyObject {
                         }
                         let val = &args[1];
                         if let PyObject::Range { start, stop, step } = &*args[0].borrow() {
-                            let mut current = *start;
-                            while if *step > 0 {
+                            let mut current = start.clone();
+                            while if step.sign() == num_bigint::Sign::Plus {
                                 current < *stop
                             } else {
                                 current > *stop
                             } {
-                                let item = PyObjectRef::imm(PyObject::Int(
-                                    num_bigint::BigInt::from(current),
-                                ));
+                                let item = PyObjectRef::imm(PyObject::Int(current.clone()));
                                 if py_compare(&item, val, 2).unwrap_or(py_bool(false)).truthy() {
                                     return Ok(py_bool(true));
                                 }
@@ -10251,19 +10189,14 @@ impl PyObject {
                         }
                         let obj = args[0].borrow();
                         if let PyObject::Range { start, stop, step } = &*obj {
-                            if *step > 0 && *start >= *stop {
-                                return Ok(py_int(0));
+                            let len =
+                                crate::object::ops_contains::range_len_values(start, stop, step);
+                            if len.to_i64().is_none() {
+                                return Err(PyError::overflow_error(
+                                    "Python int too large to convert to C ssize_t",
+                                ));
                             }
-                            if *step < 0 && *start <= *stop {
-                                return Ok(py_int(0));
-                            }
-                            let raw_len = stop.checked_sub(*start).unwrap_or(i64::MAX);
-                            let len = raw_len.checked_div(*step).unwrap_or(0) as i64;
-                            if raw_len % *step != 0 {
-                                Ok(py_int(len.abs() + 1))
-                            } else {
-                                Ok(py_int(len.abs()))
-                            }
+                            Ok(py_int(len))
                         } else {
                             Err(PyError::runtime_error("__len__ on non-range"))
                         }
@@ -10277,24 +10210,30 @@ impl PyObject {
                             return Err(PyError::type_error("count() takes exactly 1 argument"));
                         }
                         let val = &args[1];
-                        let mut count = 0i64;
                         if let PyObject::Range { start, stop, step } = &*args[0].borrow() {
-                            let mut current = *start;
-                            while if *step > 0 {
+                            // O(1) for ints (CPython): 1 if the value is in
+                            // the range, else 0 — never iterate a huge range.
+                            if let Ok(n) = crate::object::to_index(val) {
+                                let in_range = range_contains_bigint(start, stop, step, &n);
+                                return Ok(py_int(if in_range { 1 } else { 0 }));
+                            }
+                            // Non-int: iterate with equality (matches CPython).
+                            let mut count = 0i64;
+                            let mut current = start.clone();
+                            while if step.sign() == num_bigint::Sign::Plus {
                                 current < *stop
                             } else {
                                 current > *stop
                             } {
-                                let item = PyObjectRef::imm(PyObject::Int(
-                                    num_bigint::BigInt::from(current),
-                                ));
-                                if py_compare(&item, val, 2).unwrap_or(py_bool(false)).truthy() {
+                                let item = PyObjectRef::imm(PyObject::Int(current.clone()));
+                                if py_compare(&item, val, 2)?.truthy() {
                                     count += 1;
                                 }
                                 current += step;
                             }
+                            return Ok(py_int(count));
                         }
-                        Ok(py_int(count))
+                        Ok(py_int(0))
                     },
                     self_obj: PyObjectRef::new(PyObject::None),
                 })),
@@ -10306,22 +10245,30 @@ impl PyObject {
                         }
                         let val = &args[1];
                         if let PyObject::Range { start, stop, step } = &*args[0].borrow() {
-                            let mut current = *start;
+                            // O(1) for ints: position = (val - start) / step.
+                            if let Ok(n) = crate::object::to_index(val) {
+                                if range_contains_bigint(start, stop, step, &n) {
+                                    let pos = (&n - start) / step;
+                                    return Ok(py_int(pos.abs()));
+                                }
+                                return Err(PyError::value_error("value not in range"));
+                            }
+                            // Non-int: iterate with equality.
+                            let mut current = start.clone();
                             let mut idx = 0i64;
-                            while if *step > 0 {
+                            while if step.sign() == num_bigint::Sign::Plus {
                                 current < *stop
                             } else {
                                 current > *stop
                             } {
-                                let item = PyObjectRef::imm(PyObject::Int(
-                                    num_bigint::BigInt::from(current),
-                                ));
-                                if py_compare(&item, val, 2).unwrap_or(py_bool(false)).truthy() {
+                                let item = PyObjectRef::imm(PyObject::Int(current.clone()));
+                                if py_compare(&item, val, 2)?.truthy() {
                                     return Ok(py_int(idx));
                                 }
                                 current += step;
                                 idx += 1;
                             }
+                            return Err(PyError::value_error("value not in range"));
                         }
                         Err(PyError::value_error("value not in range"))
                     },
@@ -10337,62 +10284,25 @@ impl PyObject {
                         }
                         if let PyObject::Range { start, stop, step } = &*args[0].borrow() {
                             let idx = &args[1];
-                            let length = {
-                                if *step > 0 && *start >= *stop {
-                                    0
-                                } else if *step < 0 && *start <= *stop {
-                                    0
-                                } else {
-                                    let raw_len = stop.checked_sub(*start).unwrap_or(i64::MAX);
-                                    let len = raw_len.checked_div(*step).unwrap_or(0);
-                                    if raw_len % *step != 0 {
-                                        len.abs() + 1
-                                    } else {
-                                        len.abs()
-                                    }
-                                }
-                            };
+                            let length =
+                                crate::object::ops_contains::range_len_values(start, stop, step);
                             if let PyObject::Slice {
                                 start: s,
                                 stop: e,
                                 step: p,
                             } = &*idx.borrow()
                             {
-                                let sp = p.as_i64().unwrap_or(1);
-                                let s_start = match &*s.borrow() {
-                                    PyObject::None => {
-                                        if sp > 0 {
-                                            0
-                                        } else {
-                                            length - 1
-                                        }
-                                    }
-                                    _ => s.as_i64().unwrap_or(0),
-                                };
-                                let s_stop = match &*e.borrow() {
-                                    PyObject::None => {
-                                        if sp > 0 {
-                                            length
-                                        } else {
-                                            -length - 1
-                                        }
-                                    }
-                                    _ => e.as_i64().unwrap_or(0),
-                                };
-                                let s_step = if sp == 0 { 1 } else { sp };
-                                let norm_start = if s_start < 0 {
-                                    (length + s_start).max(0)
-                                } else {
-                                    s_start.min(length)
-                                };
-                                let norm_stop = if s_stop < 0 {
-                                    (length + s_stop).max(0)
-                                } else {
-                                    s_stop.min(length)
-                                };
-                                let new_start = *start + norm_start * *step;
-                                let new_step = *step * s_step;
-                                let new_stop = *start + norm_stop * *step;
+                                let (norm_start, norm_stop, norm_step) =
+                                    crate::object::subscript::slice_indices_values(
+                                        s, e, p, &length,
+                                    )?;
+                                // Value-mapped sub-range: the sliced range's
+                                // start/stop are the ORIGINAL values at the
+                                // normalized positions, the step is the
+                                // original step scaled by the slice's step.
+                                let new_start = start + norm_start * step;
+                                let new_step = step * norm_step;
+                                let new_stop = start + norm_stop * step;
                                 Ok(PyObjectRef::imm(PyObject::Range {
                                     start: new_start,
                                     stop: new_stop,
@@ -10402,13 +10312,18 @@ impl PyObject {
                                 let i = idx.as_i64().ok_or_else(|| {
                                     PyError::type_error("range indices must be integers or slices")
                                 })?;
-                                let pos = if i < 0 { length + i } else { i };
-                                if pos < 0 || pos >= length {
+                                let pos = if i < 0 {
+                                    length.clone() + i
+                                } else {
+                                    num_bigint::BigInt::from(i)
+                                };
+                                let zero = num_bigint::BigInt::from(0);
+                                if pos < zero || pos >= length {
                                     return Err(PyError::IndexError(
                                         "range object index out of range".to_string(),
                                     ));
                                 }
-                                Ok(py_int(*start + *step * pos))
+                                Ok(py_int(start + step * pos))
                             }
                         } else {
                             Err(PyError::runtime_error("__getitem__ on non-range"))
@@ -10428,12 +10343,13 @@ impl PyObject {
             } => {
                 match name {
                     "__length_hint__" => {
-                        let remaining = if *step > 0 {
-                            stop.saturating_sub(*current).max(0) as i64
+                        let zero = num_bigint::BigInt::from(0);
+                        let remaining = if step.sign() == num_bigint::Sign::Plus {
+                            (stop - current).max(zero)
                         } else {
-                            current.saturating_sub(*stop).max(0) as i64
+                            (current - stop).max(zero)
                         };
-                        Ok(py_int(remaining / step.abs() as i64))
+                        Ok(py_int(remaining / step.abs()))
                     }
                     // Same `__next__`/`__iter__`-not-a-named-attribute gap
                     // as every other iterator shape (see the shared

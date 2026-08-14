@@ -593,7 +593,8 @@ pub fn py_floor_div(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
         }
         let big_a = BigInt::from(ai);
         let big_b = BigInt::from(bi);
-        return if big_a.sign() == Sign::Minus && &(&big_a % &big_b) != &BigInt::zero() {
+        let signs_differ = big_a.sign() != big_b.sign();
+        return if signs_differ && &(&big_a % &big_b) != &BigInt::zero() {
             Ok(py_int((&big_a / &big_b) - 1))
         } else {
             Ok(py_int(&big_a / &big_b))
@@ -612,7 +613,8 @@ pub fn py_floor_div(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
             if b.is_zero() {
                 return Err(PyError::zero_division());
             }
-            if a.sign() == Sign::Minus && &(a % b) != &BigInt::zero() {
+            let signs_differ = a.sign() != b.sign();
+            if signs_differ && &(a % b) != &BigInt::zero() {
                 Ok(py_int((a / b) - 1))
             } else {
                 Ok(py_int(a / b))

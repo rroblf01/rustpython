@@ -69,6 +69,80 @@ fn sequence_index_int(idx: &PyObject) -> Option<BigInt> {
     }
 }
 
+/// `slice.indices(length)` for an arbitrary-length sequence — mirrors
+/// CPython's `PySlice_GetIndicesEx` with arbitrary-precision arithmetic
+/// (negative start/stop are offset by `length`; for a negative step both
+/// are clamped to `[-1, length-1]`, otherwise to `[0, length]`). Shared by
+/// the `slice.indices` attribute, `range.__getitem__`, and sequence
+/// subscripting, so `range(10)[slice]` agrees exactly with
+/// `range(*slice.indices(10))` (CPython's own test_slice.py pins this).
+pub(crate) fn slice_indices_values(
+    start: &PyObjectRef,
+    stop: &PyObjectRef,
+    step: &PyObjectRef,
+    length: &BigInt,
+) -> PyResult<(BigInt, BigInt, BigInt)> {
+    let one = BigInt::from(1);
+    let zero = BigInt::from(0);
+    let comp = |v: &PyObjectRef| -> PyResult<BigInt> {
+        crate::object::to_index(v).map_err(|_| {
+            PyError::type_error(
+                "slice indices must be integers or None or have an __index__ method",
+            )
+        })
+    };
+    let is_none = |v: &PyObjectRef| matches!(&*v.borrow(), PyObject::None);
+    let step = if is_none(step) {
+        one.clone()
+    } else {
+        let s = comp(step)?;
+        if s == zero {
+            return Err(PyError::value_error("slice step cannot be zero"));
+        }
+        s
+    };
+    let neg = step.sign() == num_bigint::Sign::Minus;
+    let start = if is_none(start) {
+        if neg {
+            length - &one
+        } else {
+            zero.clone()
+        }
+    } else {
+        comp(start)?
+    };
+    let stop = if is_none(stop) {
+        if neg {
+            -(length + &one)
+        } else {
+            length.clone()
+        }
+    } else {
+        comp(stop)?
+    };
+    let clamp = |v: BigInt, lo: &BigInt, hi: &BigInt| -> BigInt {
+        let v = if v.sign() == num_bigint::Sign::Minus {
+            length + &v
+        } else {
+            v
+        };
+        let v = if &v < lo { lo.clone() } else { v };
+        if &v > hi {
+            hi.clone()
+        } else {
+            v
+        }
+    };
+    let (res_start, res_stop) = if neg {
+        let lo = BigInt::from(-1);
+        let hi = length - &one;
+        (clamp(start, &lo, &hi), clamp(stop, &lo, &hi))
+    } else {
+        (clamp(start, &zero, length), clamp(stop, &zero, length))
+    };
+    Ok((res_start, res_stop, step))
+}
+
 /// Real Python slice-index normalization for a sequence of length `len` —
 /// mirrors CPython's own `PySlice_GetIndicesEx`. Converts a possibly-
 /// negative, possibly-omitted (`None`) start/stop pair into concrete,
@@ -599,26 +673,15 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
         }
         PyObject::Range { start, stop, step } => {
             let idx = index.borrow();
+            let zero = BigInt::from(0);
+            let range_len = crate::object::ops_contains::range_len_values;
             if let Some(i) = sequence_index_int(&idx) {
-                let len = if *step > 0 && *start >= *stop {
-                    0
-                } else if *step < 0 && *start <= *stop {
-                    0
-                } else {
-                    let raw_len = stop.checked_sub(*start).unwrap_or(i64::MAX);
-                    let l = raw_len.checked_div(*step).unwrap_or(0);
-                    if raw_len % *step != 0 {
-                        l.abs() + 1
-                    } else {
-                        l.abs()
-                    }
-                };
-                let i64_val = i.to_i64().unwrap_or(0);
-                let pos = if i64_val < 0 { len + i64_val } else { i64_val };
-                if pos < 0 || pos >= len {
+                let len = range_len(start, stop, step);
+                let pos = if i < zero { &len + &i } else { i };
+                if pos < zero || pos >= len {
                     return Err(PyError::index_error("range object index out of range"));
                 }
-                return Ok(py_int(*start + *step * pos));
+                return Ok(py_int(start + step * pos));
             }
             match &*idx {
                 PyObject::Slice {
@@ -626,54 +689,11 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                     stop: e,
                     step: p,
                 } => {
-                    let len = if *step > 0 && *start >= *stop {
-                        0
-                    } else if *step < 0 && *start <= *stop {
-                        0
-                    } else {
-                        let raw_len = stop.checked_sub(*start).unwrap_or(i64::MAX);
-                        let l = raw_len.checked_div(*step).unwrap_or(0);
-                        if raw_len % *step != 0 {
-                            l.abs() + 1
-                        } else {
-                            l.abs()
-                        }
-                    };
-                    let sp = p.as_i64().unwrap_or(1);
-                    let s_start = match &*s.borrow() {
-                        PyObject::None => {
-                            if sp > 0 {
-                                0
-                            } else {
-                                len - 1
-                            }
-                        }
-                        _ => s.as_i64().unwrap_or(0),
-                    };
-                    let s_stop = match &*e.borrow() {
-                        PyObject::None => {
-                            if sp > 0 {
-                                len
-                            } else {
-                                -len - 1
-                            }
-                        }
-                        _ => e.as_i64().unwrap_or(0),
-                    };
-                    let s_step = if sp == 0 { 1 } else { sp };
-                    let norm_start = if s_start < 0 {
-                        (len + s_start).max(0)
-                    } else {
-                        s_start.min(len)
-                    };
-                    let norm_stop = if s_stop < 0 {
-                        (len + s_stop).max(0)
-                    } else {
-                        s_stop.min(len)
-                    };
-                    let new_start = *start + norm_start * *step;
-                    let new_step = *step * s_step;
-                    let new_stop = *start + norm_stop * *step;
+                    let len = range_len(start, stop, step);
+                    let (norm_start, norm_stop, norm_step) = slice_indices_values(s, e, p, &len)?;
+                    let new_start = start + norm_start * step;
+                    let new_step = step * norm_step;
+                    let new_stop = start + norm_stop * step;
                     Ok(PyObjectRef::imm(PyObject::Range {
                         start: new_start,
                         stop: new_stop,

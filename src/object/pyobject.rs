@@ -55,14 +55,14 @@ pub enum PyObject {
     Set(PySet),
     FrozenSet(PySet),
     Range {
-        start: i64,
-        stop: i64,
-        step: i64,
+        start: num_bigint::BigInt,
+        stop: num_bigint::BigInt,
+        step: num_bigint::BigInt,
     },
     RangeIter {
-        current: i64,
-        stop: i64,
-        step: i64,
+        current: num_bigint::BigInt,
+        stop: num_bigint::BigInt,
+        step: num_bigint::BigInt,
     },
     ListIter {
         list: Vec<PyObjectRef>,
@@ -573,7 +573,7 @@ impl PyObject {
                 format!("frozenset({{{}}})", items.join(", "))
             }
             PyObject::Range { start, stop, step } => {
-                if *step == 1 {
+                if *step == num_bigint::BigInt::from(1) {
                     format!("range({}, {})", start, stop)
                 } else {
                     format!("range({}, {}, {})", start, stop, step)
@@ -719,13 +719,17 @@ impl PyObject {
             PyObject::Set(s) => !s.is_empty(),
             PyObject::FrozenSet(s) => !s.is_empty(),
             PyObject::Range { start, stop, step } => {
-                *step > 0 && *start < *stop || *step < 0 && *start > *stop
+                (step.sign() == num_bigint::Sign::Plus && start < stop)
+                    || (step.sign() == num_bigint::Sign::Minus && start > stop)
             }
             PyObject::RangeIter {
                 current,
                 stop,
                 step,
-            } => *step > 0 && *current < *stop || *step < 0 && *current > *stop,
+            } => {
+                (step.sign() == num_bigint::Sign::Plus && current < stop)
+                    || (step.sign() == num_bigint::Sign::Minus && current > stop)
+            }
             // Real CPython's `enumerate` object has no `__bool__`/`__len__`
             // at all — it's always truthy regardless of remaining items
             // (matches the default object truthiness rule). The previous
@@ -820,10 +824,23 @@ impl PyObject {
             PyObject::Str(s) => Ok(py_hash_str(s)),
             PyObject::Bytes(b) => Ok(py_hash_bytes(b)),
             PyObject::Range { start, stop, step } => {
-                let mut h: usize = 0x123456;
-                h = h.wrapping_mul(1000003).wrapping_add(*start as usize);
-                h = h.wrapping_mul(1000003).wrapping_add(*stop as usize);
-                h = h.wrapping_mul(1000003).wrapping_add(*step as usize);
+                // CPython hashes (length, start, step) — NOT stop, so equal
+                // ranges hash equal regardless of differing stops.
+                let length = crate::object::ops_contains::range_len_values(start, stop, step);
+                let one = num_bigint::BigInt::from(1);
+                let mut h: usize = 0x345678;
+                let mix = |h: usize, v: &num_bigint::BigInt| -> usize {
+                    h.wrapping_mul(1000003)
+                        .wrapping_add(v.to_usize().unwrap_or(0))
+                };
+                h = mix(h, &length);
+                let zero = num_bigint::BigInt::from(0);
+                if length != zero {
+                    h = mix(h, start);
+                    if length != one {
+                        h = mix(h, step);
+                    }
+                }
                 Ok(h)
             }
             PyObject::Tuple(items) => {
@@ -1193,7 +1210,25 @@ impl PyObject {
                     stop: be,
                     step: bp,
                 },
-            ) => a == b && ae == be && ap == bp,
+            ) => {
+                // CPython's range equality: equal if same length and
+                // (both empty, or same start [and stop+step for multi-
+                // element ranges]). Two EMPTY ranges are equal regardless
+                // of their differing start/stop/step.
+                let la = crate::object::ops_contains::range_len_values(a, ae, ap);
+                let lb = crate::object::ops_contains::range_len_values(b, be, bp);
+                if la != lb {
+                    false
+                } else if la == num_bigint::BigInt::from(0)
+                    || (la == num_bigint::BigInt::from(1) && a == b)
+                {
+                    true
+                } else {
+                    // CPython compares length, start, and step — NOT stop
+                    // (range(0, 5, 2) == range(0, 6, 2), both [0, 2, 4]).
+                    a == b && ap == bp
+                }
+            }
             (
                 PyObject::CompiledRegex {
                     pattern: a,

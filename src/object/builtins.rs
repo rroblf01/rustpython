@@ -167,19 +167,13 @@ pub fn builtin_len(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         PyObject::Set(s) => Ok(py_int(s.len())),
         PyObject::FrozenSet(s) => Ok(py_int(s.len())),
         PyObject::Range { start, stop, step } => {
-            if *step > 0 && *start >= *stop {
-                Ok(py_int(0))
-            } else if *step < 0 && *start <= *stop {
-                Ok(py_int(0))
-            } else {
-                let raw_len = stop.checked_sub(*start).unwrap_or(i64::MAX);
-                let len = raw_len.checked_div(*step).unwrap_or(0) as i64;
-                if raw_len % *step != 0 {
-                    Ok(py_int(len.abs() + 1))
-                } else {
-                    Ok(py_int(len.abs()))
-                }
+            let len = crate::object::ops_contains::range_len_values(start, stop, step);
+            if len.to_i64().is_none() {
+                return Err(PyError::overflow_error(
+                    "Python int too large to convert to C ssize_t",
+                ));
             }
+            Ok(py_int(len))
         }
         PyObject::Bytes(b) => Ok(py_int(b.len())),
         PyObject::ByteArray(b) => Ok(py_int(b.len())),
@@ -228,9 +222,9 @@ pub fn builtin_len(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             // to overflow-panic in plain i64 (`stop - current + step - 1`)
             // instead of just returning the (possibly huge, but always
             // representable) remaining count.
-            let current = BigInt::from(*current);
-            let stop = BigInt::from(*stop);
-            let step = BigInt::from(*step);
+            let current = current.clone();
+            let stop = stop.clone();
+            let step = step.clone();
             let zero = BigInt::from(0);
             let remaining = if step > zero && current < stop {
                 (&stop - &current + &step - BigInt::from(1)) / &step
@@ -333,20 +327,20 @@ fn iterable_length_hint(obj: &PyObjectRef) -> Option<usize> {
 // that same "native int, or call `__index__` via mro" protocol for
 // slicing) — found via CPython's own `test_range.py`, which constructs
 // `range()` bounds from custom `__index__`-only objects.
-fn range_index_arg(obj: &PyObjectRef) -> PyResult<i64> {
-    to_index(obj)?
-        .to_i64()
-        .ok_or_else(|| PyError::type_error("range() expects int arguments"))
+fn range_index_arg(obj: &PyObjectRef) -> PyResult<num_bigint::BigInt> {
+    to_index(obj)
 }
 
 pub fn builtin_range(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    let one = num_bigint::BigInt::from(1);
+    let zero = num_bigint::BigInt::from(0);
     match args.len() {
         1 => {
             let stop = range_index_arg(&args[0])?;
             Ok(PyObjectRef::imm(PyObject::Range {
-                start: 0,
+                start: zero,
                 stop,
-                step: 1,
+                step: one,
             }))
         }
         2 => {
@@ -355,14 +349,14 @@ pub fn builtin_range(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             Ok(PyObjectRef::imm(PyObject::Range {
                 start: a,
                 stop: b,
-                step: 1,
+                step: one,
             }))
         }
         3 => {
             let a = range_index_arg(&args[0])?;
             let b = range_index_arg(&args[1])?;
             let s = range_index_arg(&args[2])?;
-            if s == 0 {
+            if s == zero {
                 return Err(PyError::value_error("range() arg 3 must not be zero"));
             }
             Ok(PyObjectRef::imm(PyObject::Range {
@@ -371,7 +365,14 @@ pub fn builtin_range(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 step: s,
             }))
         }
-        _ => Err(PyError::type_error("range() takes at most 3 arguments")),
+        _ => {
+            let msg = if args.is_empty() {
+                format!("range expected at least 1 argument, got 0")
+            } else {
+                format!("range expected at most 3 arguments, got {}", args.len())
+            };
+            Err(PyError::type_error(msg))
+        }
     }
 }
 
@@ -3868,9 +3869,9 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             index: 0,
         })),
         PyObject::Range { start, stop, step } => Ok(PyObjectRef::new(PyObject::RangeIter {
-            current: *start,
-            stop: *stop,
-            step: *step,
+            current: start.clone(),
+            stop: stop.clone(),
+            step: step.clone(),
         })),
         PyObject::List(v) => Ok(PyObjectRef::new(PyObject::ListIter {
             list: v.clone(),
@@ -3976,14 +3977,7 @@ pub fn range_iter_setstate(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     })?;
     let mut obj = args[0].borrow_mut();
     if let PyObject::RangeIter { current, step, .. } = &mut *obj {
-        let delta = state * BigInt::from(*step);
-        *current = current
-            .checked_add(delta.to_i64().unwrap_or(if delta.sign() == Sign::Minus {
-                i64::MIN
-            } else {
-                i64::MAX
-            }))
-            .unwrap_or(*current);
+        *current += &state * &*step;
     }
     Ok(py_none())
 }
@@ -4403,27 +4397,17 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             stop,
             step,
         } => {
-            if (*step > 0 && *current >= *stop) || (*step < 0 && *current <= *stop) {
+            let exhausted = (step.sign() == num_bigint::Sign::Plus && current >= stop)
+                || (step.sign() == num_bigint::Sign::Minus && current <= stop);
+            if exhausted {
                 if args.len() >= 2 {
                     Ok(args[1].clone())
                 } else {
                     Err(PyError::stop_iteration())
                 }
             } else {
-                let v = py_int(*current);
-                // A plain `+=` panics ("attempt to add with overflow") once
-                // `current` gets within `step` of i64::MAX/MIN — real,
-                // confirmed trigger: CPython's own `test_range.py` exercises
-                // ranges near those boundaries. Saturating instead just
-                // clamps `current` past `stop` on the affected side, which
-                // correctly starves the NEXT call into `StopIteration`
-                // above — the just-returned `v` here is unaffected either
-                // way.
-                *current = current.checked_add(*step).unwrap_or(if *step > 0 {
-                    i64::MAX
-                } else {
-                    i64::MIN
-                });
+                let v = py_int(current.clone());
+                *current += &*step;
                 Ok(v)
             }
         }
@@ -5268,25 +5252,25 @@ pub fn builtin_reversed(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     {
         let obj = args[0].borrow();
         if let PyObject::Range { start, stop, step } = &*obj {
-            let (start, stop, step) = (*start, *stop, *step);
-            let empty = (step > 0 && start >= stop) || (step < 0 && start <= stop);
+            let (start, stop, step) = (start.clone(), stop.clone(), step.clone());
+            let empty = (step.sign() == num_bigint::Sign::Plus && start >= stop)
+                || (step.sign() == num_bigint::Sign::Minus && start <= stop);
             if empty {
                 return Ok(PyObjectRef::new(PyObject::RangeIter {
-                    current: 0,
-                    stop: 0,
-                    step: 1,
+                    current: num_bigint::BigInt::from(0),
+                    stop: num_bigint::BigInt::from(0),
+                    step: num_bigint::BigInt::from(1),
                 }));
             }
-            let raw_len = (stop as i128) - (start as i128);
-            let step128 = step as i128;
-            let q = raw_len / step128;
-            let count: i128 = if raw_len % step128 != 0 {
+            let raw_len = &stop - &start;
+            let q = &raw_len / &step;
+            let count = if (&raw_len % &step).sign() != num_bigint::Sign::NoSign {
                 q.abs() + 1
             } else {
                 q.abs()
             };
-            let last = (start as i128 + (count - 1) * step128) as i64;
-            let new_stop = start.wrapping_sub(step);
+            let last = &start + (&count - 1) * &step;
+            let new_stop = &start - &step;
             return Ok(PyObjectRef::new(PyObject::RangeIter {
                 current: last,
                 stop: new_stop,

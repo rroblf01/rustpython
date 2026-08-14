@@ -227,13 +227,22 @@ pub fn contains_op(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<bool> {
         PyObject::Range { start, stop, step } => {
             let item = b.borrow();
             if let PyObject::Int(n) = &*item {
-                let n = n.to_i64().unwrap_or(0);
-                if *step > 0 {
-                    Ok(n >= *start && n < *stop && (n - *start) % *step == 0)
-                } else {
-                    Ok(n <= *start && n > *stop && (n - *start) % *step == 0)
-                }
+                Ok(range_contains_bigint(start, stop, step, n))
             } else {
+                // Non-int: iterate with equality (CPython's behavior —
+                // `5.0 in range(10)` is True).
+                let mut current = start.clone();
+                while if step.sign() == num_bigint::Sign::Plus {
+                    current < *stop
+                } else {
+                    current > *stop
+                } {
+                    let item = PyObjectRef::imm(PyObject::Int(current.clone()));
+                    if py_compare(&item, b, 2)?.truthy() {
+                        return Ok(true);
+                    }
+                    current += step;
+                }
                 Ok(false)
             }
         }
@@ -241,6 +250,45 @@ pub fn contains_op(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<bool> {
             "argument of type '{}' is not iterable",
             container.type_name()
         ))),
+    }
+}
+
+/// Number of elements in a range, exactly as CPython's `range_length_obj`
+/// computes it (arbitrary precision, correct for huge/negative bounds).
+pub(crate) fn range_len_values(
+    start: &num_bigint::BigInt,
+    stop: &num_bigint::BigInt,
+    step: &num_bigint::BigInt,
+) -> num_bigint::BigInt {
+    let one = num_bigint::BigInt::from(1);
+    let zero = num_bigint::BigInt::from(0);
+    let empty = (step.sign() == num_bigint::Sign::Plus && start >= stop)
+        || (step.sign() == num_bigint::Sign::Minus && start <= stop);
+    if empty {
+        return zero;
+    }
+    if step.sign() == num_bigint::Sign::Plus {
+        // len = ((stop - start) + step - 1) / step
+        ((stop - start) + step - &one) / step
+    } else {
+        // len = ((start - stop) + (-step) - 1) / (-step)
+        ((start - stop) + (-step) - &one) / (-step)
+    }
+}
+
+/// O(1) membership test for a big-int value in a range, mirroring CPython's
+/// `range_contains_long` (bounds check + stride divisibility).
+pub(crate) fn range_contains_bigint(
+    start: &num_bigint::BigInt,
+    stop: &num_bigint::BigInt,
+    step: &num_bigint::BigInt,
+    n: &num_bigint::BigInt,
+) -> bool {
+    let zero = num_bigint::BigInt::from(0);
+    if step.sign() == num_bigint::Sign::Plus {
+        n >= start && n < stop && (n - start) % step == zero
+    } else {
+        n <= start && n > stop && (n - start) % step == zero
     }
 }
 

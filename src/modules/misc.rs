@@ -5339,9 +5339,9 @@ fn pickle_serialize(
         }
         PyObject::Range { start, stop, step } => {
             buf.push(b'R');
-            pickle_serialize(&py_int(*start), buf, memo)?;
-            pickle_serialize(&py_int(*stop), buf, memo)?;
-            pickle_serialize(&py_int(*step), buf, memo)?;
+            pickle_serialize(&py_int(start.clone()), buf, memo)?;
+            pickle_serialize(&py_int(stop.clone()), buf, memo)?;
+            pickle_serialize(&py_int(step.clone()), buf, memo)?;
         }
         PyObject::ListIter { list, index } => {
             buf.push(b'i');
@@ -5354,9 +5354,9 @@ fn pickle_serialize(
             step,
         } => {
             buf.push(b'r');
-            pickle_serialize(&py_int(*current), buf, memo)?;
-            pickle_serialize(&py_int(*stop), buf, memo)?;
-            pickle_serialize(&py_int(*step), buf, memo)?;
+            pickle_serialize(&py_int(current.clone()), buf, memo)?;
+            pickle_serialize(&py_int(stop.clone()), buf, memo)?;
+            pickle_serialize(&py_int(step.clone()), buf, memo)?;
         }
         // A `fractions.Fraction` (or subclass) instance — serialize the
         // class reference + a plain instance dict carrying numerator/
@@ -5952,9 +5952,9 @@ fn pickle_deserialize(
             let start = pickle_deserialize(data, pos, memo)?;
             let stop = pickle_deserialize(data, pos, memo)?;
             let step = pickle_deserialize(data, pos, memo)?;
-            let s = start.as_i64().unwrap_or(0);
-            let e = stop.as_i64().unwrap_or(0);
-            let p = step.as_i64().unwrap_or(1);
+            let s = crate::object::to_index(&start).unwrap_or_else(|_| num_bigint::BigInt::from(0));
+            let e = crate::object::to_index(&stop).unwrap_or_else(|_| num_bigint::BigInt::from(0));
+            let p = crate::object::to_index(&step).unwrap_or_else(|_| num_bigint::BigInt::from(1));
             Ok(PyObjectRef::imm(PyObject::Range {
                 start: s,
                 stop: e,
@@ -5984,9 +5984,10 @@ fn pickle_deserialize(
             let current = pickle_deserialize(data, pos, memo)?;
             let stop = pickle_deserialize(data, pos, memo)?;
             let step = pickle_deserialize(data, pos, memo)?;
-            let c = current.as_i64().unwrap_or(0);
-            let e = stop.as_i64().unwrap_or(0);
-            let p = step.as_i64().unwrap_or(1);
+            let c =
+                crate::object::to_index(&current).unwrap_or_else(|_| num_bigint::BigInt::from(0));
+            let e = crate::object::to_index(&stop).unwrap_or_else(|_| num_bigint::BigInt::from(0));
+            let p = crate::object::to_index(&step).unwrap_or_else(|_| num_bigint::BigInt::from(1));
             Ok(PyObjectRef::new(PyObject::RangeIter {
                 current: c,
                 stop: e,

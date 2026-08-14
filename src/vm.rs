@@ -4276,9 +4276,9 @@ impl VirtualMachine {
                         }
                         PyObject::Range { start, stop, step } => {
                             self.frames[fi].push(PyObjectRef::new(PyObject::RangeIter {
-                                current: *start,
-                                stop: *stop,
-                                step: *step,
+                                current: start.clone(),
+                                stop: stop.clone(),
+                                step: step.clone(),
                             }));
                         }
                         PyObject::Dict(ref pydict) => {
@@ -4454,7 +4454,7 @@ impl VirtualMachine {
                                 stop,
                                 step,
                             } => {
-                                if *step > 0 {
+                                if step.sign() == num_bigint::Sign::Plus {
                                     *current >= *stop
                                 } else {
                                     *current <= *stop
@@ -4516,55 +4516,49 @@ impl VirtualMachine {
                         self.frames[fi].ip = arg as usize;
                     } else {
                         let val = self.frames[fi].pop()?;
-                        let item =
-                            {
-                                // Convert plain List to ListIter for O(1) iteration
-                                let is_plain_list = matches!(&*val.borrow(), PyObject::List(..));
-                                if is_plain_list {
-                                    let list_clone = {
-                                        let obj = val.borrow();
-                                        if let PyObject::List(v) = &*obj {
-                                            v.clone()
-                                        } else {
-                                            unreachable!()
-                                        }
-                                    };
-                                    *val.borrow_mut() = PyObject::ListIter {
-                                        list: list_clone,
-                                        index: 0,
-                                    };
-                                }
-                                let mut obj = val.borrow_mut();
-                                match &mut *obj {
-                                    PyObject::ListIter { list, index } => {
-                                        let v = list[*index].clone();
-                                        *index += 1;
-                                        v
+                        let item = {
+                            // Convert plain List to ListIter for O(1) iteration
+                            let is_plain_list = matches!(&*val.borrow(), PyObject::List(..));
+                            if is_plain_list {
+                                let list_clone = {
+                                    let obj = val.borrow();
+                                    if let PyObject::List(v) = &*obj {
+                                        v.clone()
+                                    } else {
+                                        unreachable!()
                                     }
-                                    PyObject::RangeIter {
-                                        current,
-                                        stop: _,
-                                        step,
-                                    } => {
-                                        let v = py_int(*current);
-                                        // See the matching fix in `object.rs`'s
-                                        // `builtin_next` `RangeIter` arm — plain
-                                        // `+=` panics near i64::MAX/MIN.
-                                        *current = current
-                                            .checked_add(*step)
-                                            .unwrap_or(if *step > 0 { i64::MAX } else { i64::MIN });
-                                        v
-                                    }
-                                    // `EnumerateIter` no longer reaches this arm at
-                                    // all — it moved to the earlier "delegate to
-                                    // builtin_next, return early" bucket above
-                                    // (alongside Zip/Map/Filter/Cycle) once it
-                                    // became a lazy `source`-wrapper instead of a
-                                    // materialized `items` list with no `len()` to
-                                    // compare against.
-                                    _ => unreachable!(),
+                                };
+                                *val.borrow_mut() = PyObject::ListIter {
+                                    list: list_clone,
+                                    index: 0,
+                                };
+                            }
+                            let mut obj = val.borrow_mut();
+                            match &mut *obj {
+                                PyObject::ListIter { list, index } => {
+                                    let v = list[*index].clone();
+                                    *index += 1;
+                                    v
                                 }
-                            };
+                                PyObject::RangeIter {
+                                    current,
+                                    stop: _,
+                                    step,
+                                } => {
+                                    let v = py_int(current.clone());
+                                    *current += &*step;
+                                    v
+                                }
+                                // `EnumerateIter` no longer reaches this arm at
+                                // all — it moved to the earlier "delegate to
+                                // builtin_next, return early" bucket above
+                                // (alongside Zip/Map/Filter/Cycle) once it
+                                // became a lazy `source`-wrapper instead of a
+                                // materialized `items` list with no `len()` to
+                                // compare against.
+                                _ => unreachable!(),
+                            }
+                        };
                         self.frames[fi].push(val);
                         self.frames[fi].push(item);
                     }
