@@ -5088,7 +5088,18 @@ impl PyObject {
                             for c in s.chars() {
                                 if c.is_uppercase() || c.is_lowercase() {
                                     if !prev_cased {
-                                        result.extend(c.to_uppercase());
+                                        // CPython's str.title uses the TITLE
+                                        // case mapping (a ligature '\uFB01'
+                                        // becomes "Fi", not "FI"): take the
+                                        // uppercase expansion and lowercase
+                                        // every char after the first.
+                                        let up: Vec<char> = c.to_uppercase().collect();
+                                        if let Some(first) = up.first() {
+                                            result.push(*first);
+                                            for rest in up.iter().skip(1) {
+                                                result.extend(rest.to_lowercase());
+                                            }
+                                        }
                                     } else {
                                         result.extend(c.to_lowercase());
                                     }
