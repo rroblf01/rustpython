@@ -3101,6 +3101,50 @@ pub fn create_math_dict() -> HashMap<String, PyObjectRef> {
             .ok_or_else(|| PyError::type_error("atan2() argument must be a number"))?;
         Ok(py_float(y.atan2(x)))
     });
+    // CPython's `vector_norm` (faithfully rounded hypot): exact squaring
+    // (Dekker two-product), compensated Neumaier-style summation, and a
+    // square-root differential correction so the result is within 1/2 ulp
+    // of the correctly rounded hypotenuse.
+    fn dl_fast_sum(a: f64, b: f64) -> (f64, f64) {
+        let x = a + b;
+        let y = (a - x) + b;
+        (x, y)
+    }
+    fn vector_norm(vals: &[f64], max: f64) -> f64 {
+        if max == 0.0 || vals.len() <= 1 {
+            return max;
+        }
+        // frexp exponent of max (max = m * 2^max_e, m in [0.5, 1))
+        let max_bits = max.to_bits();
+        let max_e = (((max_bits >> 52) & 0x7ff) as i32) - 1022;
+        if max_e < -1023 {
+            // max is subnormal: scale up, recurse, scale back.
+            let scaled: Vec<f64> = vals.iter().map(|v| v / f64::MIN_POSITIVE).collect();
+            return f64::MIN_POSITIVE * vector_norm(&scaled, max / f64::MIN_POSITIVE);
+        }
+        let scale = crate::object::ldexp_f64(1.0, -max_e);
+        let mut csum = 1.0f64;
+        let mut frac1 = 0.0f64;
+        let mut frac2 = 0.0f64;
+        for v in vals {
+            let x = v * scale; // lossless scaling; |x| < 1
+            let (pr_hi, pr_lo) = dl_mul(x, x); // exact squaring
+            let (sm_hi, sm_lo) = dl_fast_sum(csum, pr_hi); // |csum| >= |pr_hi|
+            csum = sm_hi;
+            frac1 += pr_lo;
+            frac2 += sm_lo;
+        }
+        let mut h = (csum - 1.0 + (frac1 + frac2)).sqrt();
+        // Differential correction: h ~= sqrt(h^2 + x) ~= h + x/(2h).
+        let (pr_hi, pr_lo) = dl_mul(-h, h);
+        let (sm_hi, sm_lo) = dl_fast_sum(csum, pr_hi);
+        csum = sm_hi;
+        frac1 += pr_lo;
+        frac2 += sm_lo;
+        let x = csum - 1.0 + (frac1 + frac2);
+        h += x / (2.0 * h);
+        h / scale
+    }
     math_func!("hypot", |args| {
         let mut vals = Vec::with_capacity(args.len());
         for a in args {
@@ -3127,16 +3171,7 @@ pub fn create_math_dict() -> HashMap<String, PyObjectRef> {
         if max == 0.0 {
             return Ok(py_float(0.0));
         }
-        // Scale by the largest component so the squares can neither
-        // overflow nor underflow; the final multiplication restores the
-        // magnitude (and overflows to inf exactly when the true result
-        // does).
-        let mut sum = 0.0f64;
-        for v in &vals {
-            let t = v / max;
-            sum += t * t;
-        }
-        Ok(py_float(max * sum.sqrt()))
+        Ok(py_float(vector_norm(&vals, max)))
     });
     math_func!("copysign", |args| {
         if args.len() != 2 {

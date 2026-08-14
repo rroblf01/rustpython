@@ -2652,6 +2652,53 @@ fn build_decimal_type() -> PyObjectRef {
         }),
     );
     type_dict.insert_str(
+        "sqrt",
+        bf!("sqrt", |args| {
+            if args.is_empty() {
+                return Err(PyError::type_error("sqrt() missing self"));
+            }
+            let v = instance_to_decval(&args[0])
+                .ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
+            if v.is_nan() {
+                return Err(decimal_invalid_op("NaN ** (1/2)"));
+            }
+            if v.sign && !v.is_zero() {
+                return Err(decimal_invalid_op("(-x) ** (1/2)"));
+            }
+            if v.special == DecSpecial::Infinity {
+                return Ok(decval_to_instance(&DecValue::infinity(false)));
+            }
+            if v.is_zero() {
+                return Ok(decval_to_instance(&v.clone()));
+            }
+            // Integer Newton's-method square root at the context's
+            // precision (large enough for an exact f64 conversion of the
+            // result, which is what statistics.py / test_math use it for).
+            let (precision, _rounding) = current_decimal_context();
+            let prec = (precision as i64).max(60);
+            let mut c = v.coeff.clone();
+            let mut e = v.exp;
+            if e % 2 != 0 {
+                c *= 10;
+                e -= 1;
+            }
+            // Scale the coefficient so its integer sqrt has ~`prec`
+            // significant digits, take the exact integer square root, and
+            // adjust the exponent back down.
+            let c_digits = (c.bits() as f64 * 0.30103) as i64 + 1;
+            let m = (prec - (c_digits + 1) / 2).max(0);
+            let scaled = &c * ten_pow(2 * m);
+            let root = scaled.sqrt();
+            let result = DecValue {
+                special: DecSpecial::Finite,
+                sign: false,
+                coeff: root,
+                exp: e / 2 - m,
+            };
+            Ok(decval_to_instance(&result))
+        }),
+    );
+    type_dict.insert_str(
         "__bool__",
         bf!("__bool__", |args| {
             let v = instance_to_decval(&args[0])
@@ -3638,7 +3685,6 @@ pub(crate) fn frac_instance_num_den(v: &PyObjectRef) -> Option<(BigInt, BigInt)>
     }
     None
 }
-
 
 fn frac_make(frac_type: &PyObjectRef, num: BigInt, den: BigInt) -> PyResult<PyObjectRef> {
     let (num, den) = frac_normalize(num, den)?;
@@ -4691,7 +4737,10 @@ fn frac_ctor_raw(
 /// Normalize raw numerator/denominator objects to lowest terms with a
 /// positive denominator, dividing the RAW objects by the gcd (CPython's
 /// `numerator //= g; denominator //= g` on the stored objects).
-fn frac_normalize_raw(num: &PyObjectRef, den: &PyObjectRef) -> PyResult<(PyObjectRef, PyObjectRef)> {
+fn frac_normalize_raw(
+    num: &PyObjectRef,
+    den: &PyObjectRef,
+) -> PyResult<(PyObjectRef, PyObjectRef)> {
     let ni = crate::object::int_value_or_backing(num).or_else(|| crate::object::to_index(num).ok());
     let di = crate::object::int_value_or_backing(den).or_else(|| crate::object::to_index(den).ok());
     let (ni, di) = match (ni, di) {
@@ -4756,7 +4805,6 @@ pub(crate) fn fraction_init_with_vm(
     }
     Ok(py_none())
 }
-
 
 pub fn create_fractions_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
