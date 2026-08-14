@@ -4560,12 +4560,26 @@ impl PyObject {
                     })),
                     "upper" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "upper".to_string(),
-                        func: |args| Ok(py_str(&args[0].str().to_uppercase())),
+                        func: |args| {
+                            if args.len() != 1 {
+                                return Err(PyError::type_error(
+                                    "upper() takes no arguments (1 given)",
+                                ));
+                            }
+                            Ok(py_str(&args[0].str().to_uppercase()))
+                        },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
                     "lower" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "lower".to_string(),
-                        func: |args| Ok(py_str(&args[0].str().to_lowercase())),
+                        func: |args| {
+                            if args.len() != 1 {
+                                return Err(PyError::type_error(
+                                    "lower() takes no arguments (1 given)",
+                                ));
+                            }
+                            Ok(py_str(&args[0].str().to_lowercase()))
+                        },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
                     "strip" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
@@ -4785,6 +4799,12 @@ impl PyObject {
                     "isdecimal" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "isdecimal".to_string(),
                         func: |a| {
+                            if a.len() != 1 {
+                                return Err(PyError::type_error(
+                                    "isdecimal() takes no arguments (1 given)",
+                                ));
+                            }
+
                             Ok(py_bool(
                                 !a[0].str().is_empty()
                                     && a[0]
@@ -4798,6 +4818,12 @@ impl PyObject {
                     "isnumeric" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "isnumeric".to_string(),
                         func: |a| {
+                            if a.len() != 1 {
+                                return Err(PyError::type_error(
+                                    "isnumeric() takes no arguments (1 given)",
+                                ));
+                            }
+
                             Ok(py_bool(
                                 !a[0].str().is_empty()
                                     && a[0].str().chars().any(|c| c.is_numeric()),
@@ -4807,12 +4833,31 @@ impl PyObject {
                     })),
                     "isascii" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "isascii".to_string(),
-                        func: |a| Ok(py_bool(a[0].str().is_ascii())),
+                        func: |a| {
+                            if a.len() != 1 {
+                                return Err(PyError::type_error(
+                                    "isascii() takes no arguments (1 given)",
+                                ));
+                            }
+                            Ok(py_bool(a[0].str().is_ascii()))
+                        },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
                     "isprintable" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "isprintable".to_string(),
                         func: |a| {
+                            if a.len() != 1 {
+                                return Err(PyError::type_error(
+                                    "isprintable() takes no arguments (1 given)",
+                                ));
+                            }
+
+                            if a.len() != 1 {
+                                return Err(PyError::type_error(
+                                    "isascii() takes no arguments (1 given)",
+                                ));
+                            }
+
                             Ok(py_bool(
                                 !a[0].str().is_empty()
                                     && a[0].str().chars().all(|c| c.is_ascii_graphic() || c == ' '),
@@ -4822,22 +4867,55 @@ impl PyObject {
                     })),
                     "casefold" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "casefold".to_string(),
-                        func: |a| Ok(py_str(&a[0].str().to_lowercase())),
+                        func: |a| {
+                            if a.len() != 1 {
+                                return Err(PyError::type_error(
+                                    "casefold() takes no arguments (1 given)",
+                                ));
+                            }
+                            Ok(py_str(&a[0].str().to_lowercase()))
+                        },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
                     "isdigit" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "isdigit".to_string(),
-                        func: |a| Ok(py_bool(a[0].str().chars().all(|c| c.is_ascii_digit()))),
+                        func: |a| {
+                            if a.len() != 1 {
+                                return Err(PyError::type_error(
+                                    "isdigit() takes no arguments (1 given)",
+                                ));
+                            }
+                            Ok(py_bool(a[0].str().chars().all(|c| c.is_ascii_digit())))
+                        },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
                     "isalpha" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "isalpha".to_string(),
-                        func: |a| Ok(py_bool(a[0].str().chars().all(|c| c.is_ascii_alphabetic()))),
+                        func: |a| {
+                            if a.len() != 1 {
+                                return Err(PyError::type_error(
+                                    "isalpha() takes no arguments (1 given)",
+                                ));
+                            }
+                            Ok(py_bool(a[0].str().chars().all(|c| c.is_ascii_alphabetic())))
+                        },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
                     "isalnum" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "isalnum".to_string(),
                         func: |a| {
+                            if a.len() != 1 {
+                                return Err(PyError::type_error(
+                                    "isalnum() takes no arguments (1 given)",
+                                ));
+                            }
+
+                            if a.len() != 1 {
+                                return Err(PyError::type_error(
+                                    "isalpha() takes no arguments (1 given)",
+                                ));
+                            }
+
                             Ok(py_bool(
                                 a[0].str().chars().all(|c| c.is_ascii_alphanumeric()),
                             ))
@@ -4846,22 +4924,55 @@ impl PyObject {
                     })),
                     "isspace" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "isspace".to_string(),
-                        func: |a| Ok(py_bool(a[0].str().chars().all(|c| c.is_ascii_whitespace()))),
+                        func: |a| {
+                            if a.len() != 1 {
+                                return Err(PyError::type_error(
+                                    "isspace() takes no arguments (1 given)",
+                                ));
+                            }
+                            Ok(py_bool(a[0].str().chars().all(|c| c.is_ascii_whitespace())))
+                        },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
                     "islower" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "islower".to_string(),
-                        func: |a| Ok(py_bool(a[0].str() == a[0].str().to_lowercase())),
+                        func: |a| {
+                            if a.len() != 1 {
+                                return Err(PyError::type_error(
+                                    "islower() takes no arguments (1 given)",
+                                ));
+                            }
+                            Ok(py_bool(a[0].str() == a[0].str().to_lowercase()))
+                        },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
                     "isupper" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "isupper".to_string(),
-                        func: |a| Ok(py_bool(a[0].str() == a[0].str().to_uppercase())),
+                        func: |a| {
+                            if a.len() != 1 {
+                                return Err(PyError::type_error(
+                                    "isupper() takes no arguments (1 given)",
+                                ));
+                            }
+                            Ok(py_bool(a[0].str() == a[0].str().to_uppercase()))
+                        },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
                     "istitle" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "istitle".to_string(),
                         func: |a| {
+                            if a.len() != 1 {
+                                return Err(PyError::type_error(
+                                    "istitle() takes no arguments (1 given)",
+                                ));
+                            }
+
+                            if a.len() != 1 {
+                                return Err(PyError::type_error(
+                                    "isupper() takes no arguments (1 given)",
+                                ));
+                            }
+
                             let s = a[0].str();
                             let mut prev_is_letter = false;
                             let mut is_title = true;
@@ -4889,6 +5000,12 @@ impl PyObject {
                     "title" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "title".to_string(),
                         func: |a| {
+                            if a.len() != 1 {
+                                return Err(PyError::type_error(
+                                    "title() takes no arguments (1 given)",
+                                ));
+                            }
+
                             let s = a[0].str();
                             let mut result = String::with_capacity(s.len());
                             let mut prev_cased = false;
@@ -4912,6 +5029,12 @@ impl PyObject {
                     "capitalize" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "capitalize".to_string(),
                         func: |a| {
+                            if a.len() != 1 {
+                                return Err(PyError::type_error(
+                                    "capitalize() takes no arguments (1 given)",
+                                ));
+                            }
+
                             let s = a[0].str();
                             let mut c = s.chars();
                             Ok(py_str(&match c.next() {
@@ -4927,6 +5050,12 @@ impl PyObject {
                     "swapcase" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "swapcase".to_string(),
                         func: |a| {
+                            if a.len() != 1 {
+                                return Err(PyError::type_error(
+                                    "swapcase() takes no arguments (1 given)",
+                                ));
+                            }
+
                             let s = a[0].str();
                             let mut result = String::with_capacity(s.len());
                             for c in s.chars() {
@@ -5293,6 +5422,12 @@ impl PyObject {
                     "isidentifier" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "isidentifier".to_string(),
                         func: |a| {
+                            if a.len() != 1 {
+                                return Err(PyError::type_error(
+                                    "isidentifier() takes no arguments (1 given)",
+                                ));
+                            }
+
                             let s = a[0].str();
                             if s.is_empty() {
                                 return Ok(py_bool(false));
