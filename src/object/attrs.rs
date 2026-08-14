@@ -18,6 +18,33 @@ thread_local! {
 /// f64 arithmetic DIRECTLY (NOT via py_div/py_add etc., which re-dispatch
 /// the dunder and would recurse infinitely). Referenced from non-capturing
 /// closures so it coerces to `BuiltinFunc` (fn pointer).
+/// Lowercase with CPython's GREEK FINAL SIGMA special-casing: a lowercase
+/// sigma (U+03C3) that ends a word (a cased char before, no cased char
+/// after) becomes final sigma (U+03C2). Rust's plain `to_lowercase()`
+/// always yields U+03C3, but CPython's str.lower/swapcase/title/capitalize
+/// respect the Final_Sigma context rule (`'A\u03a3'.lower() == 'a\u03c2'`).
+pub(crate) fn lower_with_final_sigma(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    for (i, &c) in chars.iter().enumerate() {
+        let prev_cased = i > 0 && (chars[i - 1].is_uppercase() || chars[i - 1].is_lowercase());
+        for lc in c.to_lowercase() {
+            if lc == '\u{03C3}' {
+                let next_cased = i + 1 < chars.len()
+                    && (chars[i + 1].is_uppercase() || chars[i + 1].is_lowercase());
+                if prev_cased && !next_cased {
+                    out.push('\u{03C2}');
+                } else {
+                    out.push('\u{03C3}');
+                }
+            } else {
+                out.push(lc);
+            }
+        }
+    }
+    out
+}
+
 /// Convert an f64 to its exact integer via ceil/floor/trunc (`mode`: 0 =
 /// trunc toward zero, 1 = ceil toward +inf, 2 = floor toward -inf). Returns
 /// an error for nan/inf. Handles values beyond i64 range (1.23e167).
@@ -4590,7 +4617,7 @@ impl PyObject {
                                     "lower() takes no arguments (1 given)",
                                 ));
                             }
-                            Ok(py_str(&args[0].str().to_lowercase()))
+                            Ok(py_str(&lower_with_final_sigma(&args[0].str())))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -5123,14 +5150,25 @@ impl PyObject {
                             }
 
                             let s = a[0].str();
-                            let mut c = s.chars();
-                            Ok(py_str(&match c.next() {
-                                Some(f) => {
-                                    f.to_uppercase().collect::<String>()
-                                        + &c.as_str().to_lowercase()
+                            // Lowercase the whole string with the Greek
+                            // final-sigma rule, then title-map the first
+                            // char (a ligature 'ﬁ' capitalizes to "Fi").
+                            let lower = lower_with_final_sigma(&s);
+                            let mut chars = lower.chars();
+                            match chars.next() {
+                                Some(first) => {
+                                    let up: Vec<char> = first.to_uppercase().collect();
+                                    let mut head = String::new();
+                                    if let Some(h) = up.first() {
+                                        head.push(*h);
+                                        for r in up.iter().skip(1) {
+                                            head.extend(r.to_lowercase());
+                                        }
+                                    }
+                                    Ok(py_str(&(head + chars.as_str())))
                                 }
-                                None => String::new(),
-                            }))
+                                None => Ok(py_str("")),
+                            }
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -5144,10 +5182,27 @@ impl PyObject {
                             }
 
                             let s = a[0].str();
+                            let chars: Vec<char> = s.chars().collect();
                             let mut result = String::with_capacity(s.len());
-                            for c in s.chars() {
+                            let cased = |c: &char| c.is_uppercase() || c.is_lowercase();
+                            for (i, &c) in chars.iter().enumerate() {
                                 if c.is_uppercase() {
-                                    result.extend(c.to_lowercase());
+                                    // A capital sigma lowercases to final
+                                    // sigma (U+03C2) at word end, else U+03C3.
+                                    for lc in c.to_lowercase() {
+                                        if lc == '\u{03C3}' {
+                                            let prev_cased = i > 0 && cased(&chars[i - 1]);
+                                            let next_cased =
+                                                i + 1 < chars.len() && cased(&chars[i + 1]);
+                                            result.push(if prev_cased && !next_cased {
+                                                '\u{03C2}'
+                                            } else {
+                                                '\u{03C3}'
+                                            });
+                                        } else {
+                                            result.push(lc);
+                                        }
+                                    }
                                 } else if c.is_lowercase() {
                                     result.extend(c.to_uppercase());
                                 } else {
