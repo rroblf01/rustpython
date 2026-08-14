@@ -3819,8 +3819,14 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
     let obj = args[0].borrow();
     match &*obj {
-        PyObject::Tuple(v) => Ok(py_list(v.clone())),
-        PyObject::Str(s) => Ok(py_list(s.chars().map(|c| py_str(&c.to_string())).collect())),
+        PyObject::Tuple(v) => Ok(PyObjectRef::new(PyObject::ListIter {
+            list: v.clone(),
+            index: 0,
+        })),
+        PyObject::Str(s) => Ok(PyObjectRef::new(PyObject::ListIter {
+            list: s.chars().map(|c| py_str(&c.to_string())).collect(),
+            index: 0,
+        })),
         PyObject::Bytes(b) => Ok(PyObjectRef::new(PyObject::ListIter {
             list: b.iter().map(|byte| py_int(*byte as i64)).collect(),
             index: 0,

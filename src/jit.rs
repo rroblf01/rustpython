@@ -1986,7 +1986,7 @@ impl JitCompiler {
         }
 
         // Evaluation stack
-        let mut eval_stack: Vec<[Value; 2]> = Vec::new();
+        let mut eval_stack: Vec<[Value; 3]> = Vec::new();
 
         // Pre-allocate temp stack slots for BINARY_OP, CALL, STORE_ATTR, etc.
         let tmp_slot1 = builder.create_sized_stack_slot(StackSlotData::new(
@@ -2054,7 +2054,8 @@ impl JitCompiler {
                     let src = builder.ins().stack_addr(types::I64, locals_slot, idx * 24);
                     let lo = builder.ins().load(types::I64, memflags, src, 0);
                     let hi = builder.ins().load(types::I64, memflags, src, 8);
-                    eval_stack.push([lo, hi]);
+                    let hi2 = builder.ins().load(types::I64, memflags, src, 16);
+                    eval_stack.push([lo, hi, hi2]);
                 }
                 Opcode::LOAD_CONST => {
                     let idx = instr.arg as i32;
@@ -2062,7 +2063,8 @@ impl JitCompiler {
                     let src = builder.ins().iadd_imm(consts_ptr, (idx * 24) as i64);
                     let lo = builder.ins().load(types::I64, memflags, src, 0);
                     let hi = builder.ins().load(types::I64, memflags, src, 8);
-                    eval_stack.push([lo, hi]);
+                    let hi2 = builder.ins().load(types::I64, memflags, src, 16);
+                    eval_stack.push([lo, hi, hi2]);
                 }
                 Opcode::LOAD_GLOBAL => {
                     let name_idx = instr.arg as i32;
@@ -2072,7 +2074,8 @@ impl JitCompiler {
                     let src = builder.ins().iadd_imm(consts_ptr, (idx * 24) as i64);
                     let lo = builder.ins().load(types::I64, memflags, src, 0);
                     let hi = builder.ins().load(types::I64, memflags, src, 8);
-                    eval_stack.push([lo, hi]);
+                    let hi2 = builder.ins().load(types::I64, memflags, src, 16);
+                    eval_stack.push([lo, hi, hi2]);
                 }
                 Opcode::BINARY_OP => {
                     let b = eval_stack.pop().unwrap();
@@ -2136,7 +2139,8 @@ impl JitCompiler {
                     }
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
-                    eval_stack.push([res_lo, res_hi]);
+                    let res_mid = builder.ins().load(types::I64, memflags, out_addr, 16);
+                    eval_stack.push([res_lo, res_hi, res_mid]);
                 }
                 Opcode::COMPARE_OP => {
                     let b = eval_stack.pop().unwrap();
@@ -2174,7 +2178,8 @@ impl JitCompiler {
                         .call(cmp_func_ref, &[a_addr, b_addr, op_val, out_addr]);
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
-                    eval_stack.push([res_lo, res_hi]);
+                    let res_mid = builder.ins().load(types::I64, memflags, out_addr, 16);
+                    eval_stack.push([res_lo, res_hi, res_mid]);
                 }
                 Opcode::STORE_FAST => {
                     let idx = instr.arg as i32;
@@ -2184,15 +2189,15 @@ impl JitCompiler {
                     let dst = builder.ins().stack_addr(types::I64, locals_slot, idx * 24);
                     builder.ins().store(memflags, val[0], dst, 0);
                     builder.ins().store(memflags, val[1], dst, 8);
-                    builder.ins().store(memflags, zero, dst, 16);
+                    builder.ins().store(memflags, val[2], dst, 16);
                 }
                 Opcode::PUSH_NULL => {
                     let zero = builder.ins().iconst(types::I64, 0);
-                    eval_stack.push([zero, zero]);
+                    eval_stack.push([zero, zero, zero]);
                 }
                 Opcode::DUP_TOP => {
                     let val = eval_stack.last().unwrap();
-                    eval_stack.push([val[0], val[1]]);
+                    eval_stack.push([val[0], val[1], val[2]]);
                 }
                 Opcode::POP_TOP | Opcode::END_FOR => {
                     // END_FOR just pops the for-loop iterator on natural
@@ -2215,6 +2220,7 @@ impl JitCompiler {
 
                     builder.ins().store(memflags, val[0], val_addr, 0);
                     builder.ins().store(memflags, val[1], val_addr, 8);
+                    builder.ins().store(memflags, val[2], val_addr, 16);
                     let truthy_inst = builder.ins().call(truthy_func_ref, &[val_addr]);
                     let truthy = builder.inst_results(truthy_inst)[0];
                     let zero = builder.ins().iconst(types::I64, 0);
@@ -2243,6 +2249,7 @@ impl JitCompiler {
 
                     builder.ins().store(memflags, val[0], val_addr, 0);
                     builder.ins().store(memflags, val[1], val_addr, 8);
+                    builder.ins().store(memflags, val[2], val_addr, 16);
                     let truthy_inst = builder.ins().call(truthy_func_ref, &[val_addr]);
                     let truthy = builder.inst_results(truthy_inst)[0];
                     let zero = builder.ins().iconst(types::I64, 0);
@@ -2284,10 +2291,12 @@ impl JitCompiler {
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
                     builder.ins().store(memflags, val[0], val_addr, 0);
                     builder.ins().store(memflags, val[1], val_addr, 8);
+                    builder.ins().store(memflags, val[2], val_addr, 16);
                     builder.ins().call(neg_func_ref, &[val_addr, out_addr]);
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
-                    eval_stack.push([res_lo, res_hi]);
+                    let res_mid = builder.ins().load(types::I64, memflags, out_addr, 16);
+                    eval_stack.push([res_lo, res_hi, res_mid]);
                 }
                 Opcode::UNARY_NOT => {
                     let val = eval_stack.pop().unwrap();
@@ -2306,15 +2315,17 @@ impl JitCompiler {
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
                     builder.ins().store(memflags, val[0], val_addr, 0);
                     builder.ins().store(memflags, val[1], val_addr, 8);
+                    builder.ins().store(memflags, val[2], val_addr, 16);
                     builder.ins().call(not_func_ref, &[val_addr, out_addr]);
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
-                    eval_stack.push([res_lo, res_hi]);
+                    let res_mid = builder.ins().load(types::I64, memflags, out_addr, 16);
+                    eval_stack.push([res_lo, res_hi, res_mid]);
                 }
                 Opcode::BUILD_LIST => {
                     let n = instr.arg as usize;
                     let memflags = cranelift::codegen::ir::MemFlags::new();
-                    let mut items: Vec<[Value; 2]> = Vec::with_capacity(n);
+                    let mut items: Vec<[Value; 3]> = Vec::with_capacity(n);
                     for _ in 0..n {
                         items.push(eval_stack.pop().unwrap());
                     }
@@ -2344,12 +2355,13 @@ impl JitCompiler {
                         .call(build_list_func_ref, &[n_val, array_addr, out_addr]);
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
-                    eval_stack.push([res_lo, res_hi]);
+                    let res_mid = builder.ins().load(types::I64, memflags, out_addr, 16);
+                    eval_stack.push([res_lo, res_hi, res_mid]);
                 }
                 Opcode::BUILD_TUPLE => {
                     let n = instr.arg as usize;
                     let memflags = cranelift::codegen::ir::MemFlags::new();
-                    let mut items: Vec<[Value; 2]> = Vec::with_capacity(n);
+                    let mut items: Vec<[Value; 3]> = Vec::with_capacity(n);
                     for _ in 0..n {
                         items.push(eval_stack.pop().unwrap());
                     }
@@ -2379,7 +2391,8 @@ impl JitCompiler {
                         .call(build_tuple_func_ref, &[n_val, array_addr, out_addr]);
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
-                    eval_stack.push([res_lo, res_hi]);
+                    let res_mid = builder.ins().load(types::I64, memflags, out_addr, 16);
+                    eval_stack.push([res_lo, res_hi, res_mid]);
                 }
                 Opcode::LIST_APPEND => {
                     let val = eval_stack.pop().unwrap();
@@ -2407,6 +2420,7 @@ impl JitCompiler {
                     builder.ins().store(memflags, lst[1], lst_addr, 8);
                     builder.ins().store(memflags, val[0], val_addr, 0);
                     builder.ins().store(memflags, val[1], val_addr, 8);
+                    builder.ins().store(memflags, val[2], val_addr, 16);
                     builder
                         .ins()
                         .call(list_append_func_ref, &[lst_addr, val_addr, out_addr]);
@@ -2442,7 +2456,8 @@ impl JitCompiler {
                         .call(contains_func_ref, &[a_addr, b_addr, out_addr]);
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
-                    eval_stack.push([res_lo, res_hi]);
+                    let res_mid = builder.ins().load(types::I64, memflags, out_addr, 16);
+                    eval_stack.push([res_lo, res_hi, res_mid]);
                 }
                 Opcode::GET_ITER => {
                     let val = eval_stack.pop().unwrap();
@@ -2461,10 +2476,12 @@ impl JitCompiler {
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
                     builder.ins().store(memflags, val[0], val_addr, 0);
                     builder.ins().store(memflags, val[1], val_addr, 8);
+                    builder.ins().store(memflags, val[2], val_addr, 16);
                     builder.ins().call(get_iter_func_ref, &[val_addr, out_addr]);
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
-                    eval_stack.push([res_lo, res_hi]);
+                    let res_mid = builder.ins().load(types::I64, memflags, out_addr, 16);
+                    eval_stack.push([res_lo, res_hi, res_mid]);
                 }
                 Opcode::CALL => {
                     // `arg` packs BOTH counts (matching vm.rs's own
@@ -2485,7 +2502,7 @@ impl JitCompiler {
                     let nkw = (instr.arg as usize >> 8) & 0xFF;
                     let total = npos + 2 * nkw;
                     let memflags = cranelift::codegen::ir::MemFlags::new();
-                    let mut args: Vec<[Value; 2]> = Vec::with_capacity(total);
+                    let mut args: Vec<[Value; 3]> = Vec::with_capacity(total);
                     for _ in 0..total {
                         args.push(eval_stack.pop().unwrap());
                     }
@@ -2533,7 +2550,8 @@ impl JitCompiler {
                     }
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
-                    eval_stack.push([res_lo, res_hi]);
+                    let res_mid = builder.ins().load(types::I64, memflags, out_addr, 16);
+                    eval_stack.push([res_lo, res_hi, res_mid]);
                 }
                 Opcode::LOAD_ATTR => {
                     let name_idx = instr.arg as i64;
@@ -2554,6 +2572,7 @@ impl JitCompiler {
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
                     builder.ins().store(memflags, val[0], val_addr, 0);
                     builder.ins().store(memflags, val[1], val_addr, 8);
+                    builder.ins().store(memflags, val[2], val_addr, 16);
                     let names_ptr = builder.ins().iadd_imm(consts_ptr, names_offset * 24);
                     let name_idx_val = builder.ins().iconst(types::I64, name_idx);
                     builder.ins().call(
@@ -2562,7 +2581,8 @@ impl JitCompiler {
                     );
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
-                    eval_stack.push([res_lo, res_hi]);
+                    let res_mid = builder.ins().load(types::I64, memflags, out_addr, 16);
+                    eval_stack.push([res_lo, res_hi, res_mid]);
                 }
                 Opcode::MAKE_FUNCTION => {
                     // MAKE_FUNCTION: pop closure, defaults, code, name, create function
@@ -2571,7 +2591,7 @@ impl JitCompiler {
                     let n_kwdefaults = ((instr.arg >> 9) & 0xFF) as usize;
                     let n_items = n_defaults + n_kwdefaults + 1 + if has_closure { 1 } else { 0 };
                     let memflags = cranelift::codegen::ir::MemFlags::new();
-                    let mut items: Vec<[Value; 2]> = Vec::with_capacity(n_items);
+                    let mut items: Vec<[Value; 3]> = Vec::with_capacity(n_items);
                     for _ in 0..n_items {
                         items.push(eval_stack.pop().unwrap());
                     }
@@ -2601,7 +2621,8 @@ impl JitCompiler {
                         .call(make_function_func_ref, &[array_addr, arg_val, out_addr]);
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
-                    eval_stack.push([res_lo, res_hi]);
+                    let res_mid = builder.ins().load(types::I64, memflags, out_addr, 16);
+                    eval_stack.push([res_lo, res_hi, res_mid]);
                 }
                 Opcode::RETURN_VALUE => {
                     let val = eval_stack.pop().unwrap();
@@ -2609,7 +2630,8 @@ impl JitCompiler {
                     let zero = builder.ins().iconst(types::I64, 0);
                     builder.ins().store(memflags, val[0], result_ptr, 0);
                     builder.ins().store(memflags, val[1], result_ptr, 8);
-                    builder.ins().store(memflags, zero, result_ptr, 16);
+                    builder.ins().store(memflags, val[2], result_ptr, 16);
+                    builder.ins().store(memflags, val[2], result_ptr, 16);
                     builder.ins().return_(&[]);
                     terminated = true;
                 }
@@ -2667,12 +2689,13 @@ impl JitCompiler {
                     blocks_entered.insert(next_block);
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
-                    eval_stack.push([res_lo, res_hi]);
+                    let res_mid = builder.ins().load(types::I64, memflags, out_addr, 16);
+                    eval_stack.push([res_lo, res_hi, res_mid]);
                 }
                 Opcode::BUILD_MAP => {
                     let n = instr.arg as usize;
                     let memflags = cranelift::codegen::ir::MemFlags::new();
-                    let mut items: Vec<[Value; 2]> = Vec::with_capacity(n * 2);
+                    let mut items: Vec<[Value; 3]> = Vec::with_capacity(n * 2);
                     for _ in 0..n * 2 {
                         items.push(eval_stack.pop().unwrap());
                     }
@@ -2702,7 +2725,8 @@ impl JitCompiler {
                         .call(build_map_func_ref, &[n_val, array_addr, out_addr]);
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
-                    eval_stack.push([res_lo, res_hi]);
+                    let res_mid = builder.ins().load(types::I64, memflags, out_addr, 16);
+                    eval_stack.push([res_lo, res_hi, res_mid]);
                 }
                 Opcode::STORE_ATTR => {
                     let name_idx = instr.arg as i64;
@@ -2732,6 +2756,7 @@ impl JitCompiler {
                     builder.ins().store(memflags, obj[1], obj_addr, 8);
                     builder.ins().store(memflags, val[0], val_addr, 0);
                     builder.ins().store(memflags, val[1], val_addr, 8);
+                    builder.ins().store(memflags, val[2], val_addr, 16);
                     let names_ptr = builder.ins().iadd_imm(consts_ptr, names_offset * 24);
                     let name_idx_val = builder.ins().iconst(types::I64, name_idx);
                     builder.ins().call(
@@ -2740,7 +2765,8 @@ impl JitCompiler {
                     );
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
-                    eval_stack.push([res_lo, res_hi]);
+                    let res_mid = builder.ins().load(types::I64, memflags, out_addr, 16);
+                    eval_stack.push([res_lo, res_hi, res_mid]);
                 }
                 Opcode::UNPACK_SEQUENCE => {
                     let n = instr.arg as usize;
@@ -2778,7 +2804,8 @@ impl JitCompiler {
                         let item_addr = builder.ins().iadd_imm(array_addr, offset as i64);
                         let ilo = builder.ins().load(types::I64, memflags, item_addr, 0);
                         let ihi = builder.ins().load(types::I64, memflags, item_addr, 8);
-                        eval_stack.push([ilo, ihi]);
+                        let imid = builder.ins().load(types::I64, memflags, item_addr, 16);
+                        eval_stack.push([ilo, ihi, imid]);
                     }
                 }
                 Opcode::LOAD_NAME => {
@@ -2820,7 +2847,8 @@ impl JitCompiler {
                     );
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
-                    eval_stack.push([res_lo, res_hi]);
+                    let res_mid = builder.ins().load(types::I64, memflags, out_addr, 16);
+                    eval_stack.push([res_lo, res_hi, res_mid]);
                 }
                 Opcode::COPY => {
                     // Mirrors vm.rs's own graceful fallback: when `depth`
@@ -2864,6 +2892,7 @@ impl JitCompiler {
                     let val_addr = builder.ins().stack_addr(types::I64, tmp_val, 0);
                     builder.ins().store(memflags, val[0], val_addr, 0);
                     builder.ins().store(memflags, val[1], val_addr, 8);
+                    builder.ins().store(memflags, val[2], val_addr, 16);
                     let truthy_inst = builder.ins().call(truthy_func_ref, &[val_addr]);
                     let truthy = builder.inst_results(truthy_inst)[0];
                     let zero = builder.ins().iconst(types::I64, 0);
@@ -2884,6 +2913,7 @@ impl JitCompiler {
                     let val_addr = builder.ins().stack_addr(types::I64, tmp_val, 0);
                     builder.ins().store(memflags, val[0], val_addr, 0);
                     builder.ins().store(memflags, val[1], val_addr, 8);
+                    builder.ins().store(memflags, val[2], val_addr, 16);
                     let truthy_inst = builder.ins().call(truthy_func_ref, &[val_addr]);
                     let truthy = builder.inst_results(truthy_inst)[0];
                     let zero = builder.ins().iconst(types::I64, 0);
@@ -2906,6 +2936,7 @@ impl JitCompiler {
                     let val_addr = builder.ins().stack_addr(types::I64, tmp_val, 0);
                     builder.ins().store(memflags, val[0], val_addr, 0);
                     builder.ins().store(memflags, val[1], val_addr, 8);
+                    builder.ins().store(memflags, val[2], val_addr, 16);
                     let truthy_inst = builder.ins().call(truthy_func_ref, &[val_addr]);
                     let truthy = builder.inst_results(truthy_inst)[0];
                     let zero = builder.ins().iconst(types::I64, 0);
@@ -2920,7 +2951,7 @@ impl JitCompiler {
                 Opcode::BUILD_SET => {
                     let n = instr.arg as usize;
                     let memflags = cranelift::codegen::ir::MemFlags::new();
-                    let mut items: Vec<[Value; 2]> = Vec::with_capacity(n);
+                    let mut items: Vec<[Value; 3]> = Vec::with_capacity(n);
                     for _ in 0..n {
                         items.push(eval_stack.pop().unwrap());
                     }
@@ -2950,12 +2981,13 @@ impl JitCompiler {
                         .call(build_set_func_ref, &[n_val, array_addr, out_addr]);
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
-                    eval_stack.push([res_lo, res_hi]);
+                    let res_mid = builder.ins().load(types::I64, memflags, out_addr, 16);
+                    eval_stack.push([res_lo, res_hi, res_mid]);
                 }
                 Opcode::BUILD_STRING => {
                     let n = instr.arg as usize;
                     let memflags = cranelift::codegen::ir::MemFlags::new();
-                    let mut items: Vec<[Value; 2]> = Vec::with_capacity(n);
+                    let mut items: Vec<[Value; 3]> = Vec::with_capacity(n);
                     for _ in 0..n {
                         items.push(eval_stack.pop().unwrap());
                     }
@@ -2985,7 +3017,8 @@ impl JitCompiler {
                         .call(build_string_func_ref, &[n_val, array_addr, out_addr]);
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
-                    eval_stack.push([res_lo, res_hi]);
+                    let res_mid = builder.ins().load(types::I64, memflags, out_addr, 16);
+                    eval_stack.push([res_lo, res_hi, res_mid]);
                 }
                 Opcode::BUILD_SLICE => {
                     let nargs = instr.arg as usize;
@@ -2993,7 +3026,7 @@ impl JitCompiler {
                         return None;
                     }
                     let memflags = cranelift::codegen::ir::MemFlags::new();
-                    let mut items: Vec<[Value; 2]> = Vec::with_capacity(3);
+                    let mut items: Vec<[Value; 3]> = Vec::with_capacity(3);
                     if nargs >= 3 {
                         items.push(eval_stack.pop().unwrap());
                     }
@@ -3027,7 +3060,8 @@ impl JitCompiler {
                         .call(build_slice_func_ref, &[n_val, array_addr, out_addr]);
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
-                    eval_stack.push([res_lo, res_hi]);
+                    let res_mid = builder.ins().load(types::I64, memflags, out_addr, 16);
+                    eval_stack.push([res_lo, res_hi, res_mid]);
                 }
                 Opcode::STORE_SUBSCR => {
                     let val = eval_stack.pop().unwrap();
@@ -3064,6 +3098,7 @@ impl JitCompiler {
                     builder.ins().store(memflags, idx[1], idx_addr, 8);
                     builder.ins().store(memflags, val[0], val_addr, 0);
                     builder.ins().store(memflags, val[1], val_addr, 8);
+                    builder.ins().store(memflags, val[2], val_addr, 16);
                     builder.ins().call(
                         store_subscr_func_ref,
                         &[obj_addr, idx_addr, val_addr, out_addr],
@@ -3116,6 +3151,7 @@ impl JitCompiler {
                     builder.ins().store(memflags, key[1], key_addr, 8);
                     builder.ins().store(memflags, val[0], val_addr, 0);
                     builder.ins().store(memflags, val[1], val_addr, 8);
+                    builder.ins().store(memflags, val[2], val_addr, 16);
                     builder.ins().call(
                         store_subscr_func_ref,
                         &[map_addr, key_addr, val_addr, out_addr],
@@ -3154,7 +3190,8 @@ impl JitCompiler {
                         .call(is_op_func_ref, &[a_addr, b_addr, invert_val, out_addr]);
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
-                    eval_stack.push([res_lo, res_hi]);
+                    let res_mid = builder.ins().load(types::I64, memflags, out_addr, 16);
+                    eval_stack.push([res_lo, res_hi, res_mid]);
                 }
                 Opcode::UNARY_INVERT => {
                     let val = eval_stack.pop().unwrap();
@@ -3173,10 +3210,12 @@ impl JitCompiler {
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
                     builder.ins().store(memflags, val[0], val_addr, 0);
                     builder.ins().store(memflags, val[1], val_addr, 8);
+                    builder.ins().store(memflags, val[2], val_addr, 16);
                     builder.ins().call(invert_func_ref, &[val_addr, out_addr]);
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
-                    eval_stack.push([res_lo, res_hi]);
+                    let res_mid = builder.ins().load(types::I64, memflags, out_addr, 16);
+                    eval_stack.push([res_lo, res_hi, res_mid]);
                 }
                 Opcode::IMPORT_NAME => {
                     let name_idx = instr.arg as i64;
@@ -3196,7 +3235,8 @@ impl JitCompiler {
                     );
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
-                    eval_stack.push([res_lo, res_hi]);
+                    let res_mid = builder.ins().load(types::I64, memflags, out_addr, 16);
+                    eval_stack.push([res_lo, res_hi, res_mid]);
                 }
                 Opcode::IMPORT_FROM => {
                     let name_idx = instr.arg as i64;
@@ -3231,7 +3271,8 @@ impl JitCompiler {
                     );
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
-                    eval_stack.push([res_lo, res_hi]);
+                    let res_mid = builder.ins().load(types::I64, memflags, out_addr, 16);
+                    eval_stack.push([res_lo, res_hi, res_mid]);
                 }
                 Opcode::UNPACK_EX => {
                     let n_before = instr.arg & 0xFF;
@@ -3272,7 +3313,8 @@ impl JitCompiler {
                         let item_addr = builder.ins().iadd_imm(array_addr, offset as i64);
                         let ilo = builder.ins().load(types::I64, memflags, item_addr, 0);
                         let ihi = builder.ins().load(types::I64, memflags, item_addr, 8);
-                        eval_stack.push([ilo, ihi]);
+                        let imid = builder.ins().load(types::I64, memflags, item_addr, 16);
+                        eval_stack.push([ilo, ihi, imid]);
                     }
                 }
                 Opcode::SETUP_WITH => {
@@ -3297,7 +3339,8 @@ impl JitCompiler {
                         .call(setup_with_func_ref, &[mgr_addr, out_addr]);
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
-                    eval_stack.push([res_lo, res_hi]);
+                    let res_mid = builder.ins().load(types::I64, memflags, out_addr, 16);
+                    eval_stack.push([res_lo, res_hi, res_mid]);
                 }
                 Opcode::WITH_EXIT => {
                     let mgr = eval_stack.pop().unwrap();
@@ -3321,7 +3364,8 @@ impl JitCompiler {
                         .call(with_exit_func_ref, &[mgr_addr, out_addr]);
                     let res_lo = builder.ins().load(types::I64, memflags, out_addr, 0);
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
-                    eval_stack.push([res_lo, res_hi]);
+                    let res_mid = builder.ins().load(types::I64, memflags, out_addr, 16);
+                    eval_stack.push([res_lo, res_hi, res_mid]);
                 }
                 _ => {
                     eprintln!("JIT: codegen unsupported {:?} at instr {}", instr.op, i);

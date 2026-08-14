@@ -8315,44 +8315,62 @@ impl VirtualMachine {
             if defaults.is_empty() && keywords.is_empty() {
                 const SENTINEL_FAILED: usize = 1;
                 let jp = jit_ptr.get();
-                if jp == 0 {
-                    // First call: try to compile; set sentinel so we don't retry
-                    jit_ptr.set(SENTINEL_FAILED);
-                    if let Some(compiled_fn) = self.jit.borrow_mut().compile(code) {
-                        let precomputed = crate::jit::JitCompiler::precompute_for_jit(
-                            code,
-                            func_globals,
-                            &self.builtins,
+                if jp == SENTINEL_FAILED {
+                    // A previous compile attempt failed — stick with the
+                    // interpreter (don't retry on every call).
+                } else {
+                    if jp == 0 {
+                        // First call: compile now and run the result
+                        // immediately (this VM's tests call most functions
+                        // once, so deferring to the second call would leave
+                        // them interpreted forever).
+                        let compiled_fn = self.jit.borrow_mut().compile(code);
+                        match compiled_fn {
+                            Some(compiled_fn) => {
+                                let precomputed = crate::jit::JitCompiler::precompute_for_jit(
+                                    code,
+                                    func_globals,
+                                    &self.builtins,
+                                );
+                                jit_ptr.set(compiled_fn as usize);
+                                *jit_consts.borrow_mut() = precomputed;
+                            }
+                            None => {
+                                jit_ptr.set(SENTINEL_FAILED);
+                            }
+                        }
+                    }
+                    let jp = jit_ptr.get();
+                    if jp != 0 && jp != SENTINEL_FAILED {
+                        // SAFETY: `jp` was just produced by
+                        // `self.jit.borrow_mut().compile(code)` above (or on
+                        // a prior call for the same `code`), which only ever
+                        // emits machine code matching this exact
+                        // `extern "C"` signature — the JIT codegen in
+                        // jit.rs is the sole producer of values stored in
+                        // `jit_ptr`.
+                        let func_ptr: extern "C" fn(
+                            *const PyObjectRef,
+                            usize,
+                            *const PyObjectRef,
+                            *mut PyObjectRef,
+                        ) = unsafe { std::mem::transmute(jp) };
+                        let n = args.len().min(code.arg_count as usize);
+                        let mut fast_locals: Vec<PyObjectRef> = Vec::with_capacity(n);
+                        for i in 0..n {
+                            fast_locals.push(args[i].clone());
+                        }
+                        let consts = jit_consts.borrow();
+                        let mut result = PyObjectRef::None;
+                        let _guard = crate::jit::set_jit_globals(func_globals.clone());
+                        func_ptr(
+                            fast_locals.as_ptr(),
+                            fast_locals.len(),
+                            consts.as_ptr(),
+                            &mut result,
                         );
-                        jit_ptr.set(compiled_fn as usize);
-                        *jit_consts.borrow_mut() = precomputed;
+                        return Ok(result);
                     }
-                } else if jp != SENTINEL_FAILED {
-                    // SAFETY: `jp` was just produced by `self.jit.borrow_mut().compile(code)`
-                    // above (or on a prior call for the same `code`), which only ever emits
-                    // machine code matching this exact `extern "C"` signature — the JIT
-                    // codegen in jit.rs is the sole producer of values stored in `jit_ptr`.
-                    let func_ptr: extern "C" fn(
-                        *const PyObjectRef,
-                        usize,
-                        *const PyObjectRef,
-                        *mut PyObjectRef,
-                    ) = unsafe { std::mem::transmute(jp) };
-                    let n = args.len().min(code.arg_count as usize);
-                    let mut fast_locals: Vec<PyObjectRef> = Vec::with_capacity(n);
-                    for i in 0..n {
-                        fast_locals.push(args[i].clone());
-                    }
-                    let consts = jit_consts.borrow();
-                    let mut result = PyObjectRef::None;
-                    let _guard = crate::jit::set_jit_globals(func_globals.clone());
-                    func_ptr(
-                        fast_locals.as_ptr(),
-                        fast_locals.len(),
-                        consts.as_ptr(),
-                        &mut result,
-                    );
-                    return Ok(result);
                 }
             }
 
@@ -8942,7 +8960,8 @@ impl VirtualMachine {
                 // the backing from the args first (`builtin_dict('aabbc')`)
                 // raises "cannot convert dictionary update sequence
                 // element to a sequence" before `__init__` ever runs.
-                let custom_py_init = matches!(&init_func, Some(f) if matches!(&*f.borrow(), PyObject::Function(_)));
+                let custom_py_init =
+                    matches!(&init_func, Some(f) if matches!(&*f.borrow(), PyObject::Function(_)));
                 let is_container = matches!(
                     kind.as_str(),
                     "dict" | "list" | "set" | "tuple" | "deque" | "bytearray" | "frozenset"

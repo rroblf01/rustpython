@@ -2843,6 +2843,11 @@ pub fn create_math_dict() -> HashMap<String, PyObjectRef> {
                 "factorial() not defined for negative values",
             ));
         }
+        if n > num_bigint::BigInt::from(i64::MAX) {
+            return Err(PyError::overflow_error(
+                "factorial() argument should not exceed 9223372036854775807",
+            ));
+        }
         let mut result = num_bigint::BigInt::from(1i64);
         let mut i = num_bigint::BigInt::from(2i64);
         while i <= n {
