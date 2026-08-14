@@ -2327,6 +2327,34 @@ fn math_int_value(v: &PyObjectRef) -> PyResult<num_bigint::BigInt> {
     crate::object::to_index(v)
 }
 
+/// `math` float argument (native float/int, or any `__float__` object —
+/// descriptors resolved so a raising `__float__` descriptor propagates).
+fn math_float_value(v: &PyObjectRef) -> PyResult<f64> {
+    if let Some(f) = v.as_f64() {
+        return Ok(f);
+    }
+    let typ = if let PyObject::Instance { typ, .. } = &*v.borrow() {
+        typ.clone()
+    } else {
+        return Err(PyError::type_error("argument must be a number"));
+    };
+    let Some(f) = lookup_dunder_via_mro(&typ, "__float__") else {
+        return Err(PyError::type_error("argument must be a number"));
+    };
+    let has_get = f.borrow().get_attribute("__get__").is_ok();
+    if has_get {
+        // Descriptor protocol: `f.__get__(instance, type)`.
+        let get = f.borrow().get_attribute("__get__").unwrap();
+        let resolved = call_bound_method(get, f.clone(), vec![v.clone(), typ.clone()])?;
+        let inner = resolved.as_f64().ok_or_else(|| {
+            PyError::type_error("__float__ returned non-float")
+        })?;
+        return Ok(inner);
+    }
+    let result = call_bound_method(f, v.clone(), vec![])?;
+    result.as_f64().ok_or_else(|| PyError::type_error("__float__ returned non-float"))
+}
+
 fn math_arg_f64(v: &PyObjectRef) -> Option<f64> {
     if let Some(f) = v.as_f64() {
         return Some(f);
@@ -2863,10 +2891,17 @@ pub fn create_math_dict() -> HashMap<String, PyObjectRef> {
             return Ok(py_int(1));
         }
         let k = if &k * 2 > n { &n - &k } else { k };
+        // A huge `k` means the result is astronomically large — cap it like
+        // CPython's `math.comb` (OverflowError: result too large), instead
+        // of looping ~2**999 times for `comb(2**1000, 2**999)`.
+        if k > num_bigint::BigInt::from(1_000_000) {
+            return Err(PyError::overflow_error("result too large to be represented"));
+        }
+        let k = k.to_u64().unwrap_or(u64::MAX) as i64;
         let mut result = num_bigint::BigInt::from(1);
-        let mut i = num_bigint::BigInt::from(1);
+        let mut i: i64 = 1;
         while i <= k {
-            result = &result * (&n - &i + 1) / &i;
+            result = &result * (&n - i + 1) / i;
             i += 1;
         }
         Ok(py_int(result))
@@ -2881,22 +2916,33 @@ pub fn create_math_dict() -> HashMap<String, PyObjectRef> {
             return Err(PyError::value_error("n must be a non-negative integer"));
         }
         let k = if args.len() == 2 {
-            let k = math_int_value(&args[1])
-                .map_err(|_| PyError::type_error("perm() arguments must be integers"))?;
-            if k.sign() == num_bigint::Sign::Minus {
-                return Err(PyError::value_error("k must be a non-negative integer"));
+            if matches!(&*args[1].borrow(), PyObject::None) {
+                n.clone()
+            } else {
+                let k = math_int_value(&args[1])
+                    .map_err(|_| PyError::type_error("perm() arguments must be integers"))?;
+                if k.sign() == num_bigint::Sign::Minus {
+                    return Err(PyError::value_error("k must be a non-negative integer"));
+                }
+                if k > n {
+                    return Ok(py_int(0));
+                }
+                k
             }
-            if k > n {
-                return Ok(py_int(0));
-            }
-            k
         } else {
             n.clone()
         };
+        // A huge `k` means the result is astronomically large — cap it like
+        // CPython's `math.perm` (OverflowError), instead of looping ~2**1000
+        // times for `perm(2**1000, 2**1000)`.
+        if k > num_bigint::BigInt::from(1_000_000) {
+            return Err(PyError::overflow_error("result too large to be represented"));
+        }
+        let k = k.to_u64().unwrap_or(u64::MAX) as i64;
         let mut result = num_bigint::BigInt::from(1);
-        let mut i = num_bigint::BigInt::from(0);
+        let mut i: i64 = 0;
         while i < k {
-            result *= &n - &i;
+            result *= &n - i;
             i += 1;
         }
         Ok(py_int(result))
@@ -2925,8 +2971,9 @@ pub fn create_math_dict() -> HashMap<String, PyObjectRef> {
             .map_err(|_| PyError::type_error("dist() argument must be iterable"))?;
         let iter_b = crate::object::builtin_iter(&[args[1].clone()])
             .map_err(|_| PyError::type_error("dist() argument must be iterable"))?;
-        let mut sum = 0.0f64;
+        let mut sum_sq = 0.0f64;
         let mut max_abs = 0.0f64;
+        let mut found_nan = false;
         let mut comps: Vec<(f64, f64)> = Vec::new();
         loop {
             let a = match crate::object::builtin_next(&[iter_a.clone()]) {
@@ -2936,23 +2983,64 @@ pub fn create_math_dict() -> HashMap<String, PyObjectRef> {
             };
             let b = crate::object::builtin_next(&[iter_b.clone()])
                 .map_err(|_| PyError::value_error("both arguments must be the same length"))?;
-            let fa = math_arg_f64(&a)
-                .ok_or_else(|| PyError::type_error("both arguments must be numeric"))?;
-            let fb = math_arg_f64(&b)
-                .ok_or_else(|| PyError::type_error("both arguments must be numeric"))?;
+            let fa = match math_float_value(&a) {
+                Ok(f) => {
+                    if f.is_infinite() && matches!(&*a.borrow(), PyObject::Int(_)) {
+                        return Err(PyError::overflow_error("int too large to convert to float"));
+                    }
+                    f
+                }
+                Err(e) => return Err(e),
+            };
+            let fb = match math_float_value(&b) {
+                Ok(f) => {
+                    if f.is_infinite() && matches!(&*b.borrow(), PyObject::Int(_)) {
+                        return Err(PyError::overflow_error("int too large to convert to float"));
+                    }
+                    f
+                }
+                Err(e) => return Err(e),
+            };
             comps.push((fa, fb));
-            max_abs = max_abs.max(fa.abs()).max(fb.abs());
+            let diff = (fa - fb).abs();
+            max_abs = max_abs.max(diff);
+            found_nan |= diff.is_nan();
+        }
+        // `q` must be exhausted too (a longer `q` than `p` is a length mismatch).
+        match crate::object::builtin_next(&[iter_b.clone()]) {
+            Err(PyError::StopIteration) => {}
+            _ => return Err(PyError::value_error("both arguments must be the same length")),
+        }
+        if max_abs.is_infinite() {
+            return Ok(py_float(f64::INFINITY));
+        }
+        if found_nan {
+            return Ok(py_float(f64::NAN));
         }
         if max_abs == 0.0 {
             return Ok(py_float(0.0));
         }
-        // Scale by the largest coordinate to avoid overflow, like CPython.
-        for (a, b) in &comps {
-            let da = a / max_abs;
-            let db = b / max_abs;
-            sum += (da - db) * (da - db);
+        // Subnormal max (CPython's `max_e < -1023` branch): scale by DBL_MIN
+        // so the diffs become normal before squaring.
+        if max_abs < f64::MIN_POSITIVE {
+            let mut sum_sq = 0.0;
+            for (a, b) in &comps {
+                let x = (a - b) / f64::MIN_POSITIVE;
+                sum_sq += x * x;
+            }
+            return Ok(py_float(f64::MIN_POSITIVE * sum_sq.sqrt()));
         }
-        Ok(py_float(sum.sqrt() * max_abs))
+        // CPython's `vector_norm`: scale by a POWER OF TWO (from frexp of the
+        // max coordinate), so the scaling is exact and `dist((14,1),(2,-4))`
+        // comes out as exactly 13.0 (scaling by `max` itself would round).
+        let max_e = max_abs.abs().log2().floor() as i32;
+        let scale = 2f64.powi(-max_e);
+        let mut sum_sq = 0.0;
+        for (a, b) in &comps {
+            let x = (a - b) * scale;
+            sum_sq += x * x;
+        }
+        Ok(py_float(sum_sq.sqrt() / scale))
     });
 
     // Additional math functions
