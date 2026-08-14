@@ -21,6 +21,10 @@ fn unicode_name_to_char(name: &str) -> Option<char> {
         "LEFT SINGLE QUOTATION MARK" => '\u{2018}',
         "RIGHT SINGLE QUOTATION MARK" => '\u{2019}',
         "LATIN SMALL LETTER SHARP S" => '\u{00DF}',
+        "AMPERSAND" => '\u{0026}',
+        "GREEK CAPITAL LETTER DELTA" => '\u{0394}',
+        "LEFT CURLY BRACKET" => '\u{007B}',
+        "RIGHT CURLY BRACKET" => '\u{007D}',
         "MICRO SIGN" => '\u{00B5}',
         "DEGREE SIGN" => '\u{00B0}',
         "PLUS-MINUS SIGN" => '\u{00B1}',
@@ -1221,26 +1225,57 @@ impl Lexer {
                     // literal in the content; the escaped char must be
                     // consumed here (see the matching fix/comment in
                     // read_string) or a following quote gets misread as
-                    // the terminator.
+                    // the terminator. EXCEPT before a brace: `\{{` /
+                    // `\}}` (deprecated CPython syntax) means a literal
+                    // backslash followed by the `{{`/`}}` doubled-brace
+                    // escape, so the brace is left for that handler.
                     literal.push(c);
-                    if let Some(next) = self.advance() {
-                        literal.push(next);
+                    if let Some(next) = self.peek() {
+                        if next != '{' && next != '}' {
+                            literal.push(self.advance().unwrap());
+                        }
                     }
                 }
                 Some(c) if c == '\\' => {
+                    if matches!(self.peek(), Some('{') | Some('}')) {
+                        // Deprecated backslash-before-brace: keep the
+                        // backslash literal so the following `{{`/`}}`
+                        // forms the doubled-brace escape.
+                        literal.push('\\');
+                        continue;
+                    }
                     let next = self.advance();
-                    literal.push(match next {
-                        Some('n') => '\n',
-                        Some('t') => '\t',
-                        Some('r') => '\r',
-                        Some('\\') => '\\',
-                        Some('\'') => '\'',
-                        Some('"') => '"',
-                        Some('{') => '{',
-                        Some('}') => '}',
-                        Some(c) => c,
-                        None => '\\',
-                    });
+                    match next {
+                        Some('N') if self.peek() == Some('{') => {
+                            // \N{...} unicode name escape: the '{' must NOT
+                            // be treated as an f-string field start.
+                            self.advance();
+                            let mut name = String::new();
+                            loop {
+                                match self.advance() {
+                                    Some('}') => break,
+                                    Some(c) => name.push(c),
+                                    None => break,
+                                }
+                            }
+                            let ch = unicode_name_to_char(&name).unwrap_or('\u{FFFD}');
+                            literal.push(ch);
+                        }
+                        Some(c) => {
+                            literal.push(match c {
+                                'n' => '\n',
+                                't' => '\t',
+                                'r' => '\r',
+                                '\\' => '\\',
+                                '\'' => '\'',
+                                '"' => '"',
+                                '{' => '{',
+                                '}' => '}',
+                                c => c,
+                            });
+                        }
+                        None => literal.push('\\'),
+                    }
                 }
                 Some(c) if c == '{' => {
                     if self.peek() == Some('{') {
@@ -1256,11 +1291,25 @@ impl Lexer {
                         let mut state: u8 = 0; // 0=expr, 1=after_conv_marker, 2=format_spec
                         let mut bracket_depth: u32 = 0; // track ()[] nesting
                         let mut str_char: char = '\0'; // track strings: '\'' or '"' or '\0'
+                        let mut triple_str: bool = false; // inside a """ / ''' string
                         while depth > 0 {
                             match self.advance() {
                                 Some(c) if str_char != '\0' && c == str_char => {
                                     expr.push(c);
-                                    str_char = '\0';
+                                    if triple_str {
+                                        // A triple-quoted string needs all
+                                        // three quotes to close.
+                                        if self.peek() == Some(c) && self.peek_ahead(1) == Some(c) {
+                                            expr.push(c);
+                                            expr.push(c);
+                                            self.advance();
+                                            self.advance();
+                                            str_char = '\0';
+                                            triple_str = false;
+                                        }
+                                    } else {
+                                        str_char = '\0';
+                                    }
                                 }
                                 Some(c) if str_char != '\0' => {
                                     expr.push(c);
@@ -1302,8 +1351,22 @@ impl Lexer {
                                     }
                                 }
                                 Some(c @ ('\'' | '"')) if str_char == '\0' && state == 0 => {
-                                    str_char = c;
-                                    expr.push(c);
+                                    // Detect a triple-quoted string (""" / '''):
+                                    // the three quotes must all be consumed
+                                    // together so the single-quote closer logic
+                                    // above doesn't fire on the first one.
+                                    if self.peek() == Some(c) && self.peek_ahead(1) == Some(c) {
+                                        str_char = c;
+                                        triple_str = true;
+                                        expr.push(c);
+                                        expr.push(c);
+                                        expr.push(c);
+                                        self.advance();
+                                        self.advance();
+                                    } else {
+                                        str_char = c;
+                                        expr.push(c);
+                                    }
                                 }
                                 Some('{') => {
                                     if state == 0 {
