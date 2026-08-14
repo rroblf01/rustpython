@@ -874,7 +874,15 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
                         // self_obj (None) — the receiver is bound by the CALL
                         // machinery on `s.strip()`. Call the underlying func
                         // directly with the receiver as the first arg.
-                        let method = args[0].borrow().get_attribute($name)?;
+                        // Resolve the real method from the NATIVE BACKING when the
+                        // receiver is a native-base subclass instance (`class
+                        // Foo(str)`) — resolving through the instance's MRO
+                        // returns THIS very same str_unbound closure, recursing
+                        // forever (stack overflow on `Foo('hi').upper()`).
+                        let method = match crate::object::native_backing_of(&args[0]) {
+                            Some(native) => native.borrow().get_attribute($name)?,
+                            None => args[0].borrow().get_attribute($name)?,
+                        };
                         let is_builtin_method = {
                             let m = method.borrow();
                             matches!(&*m, PyObject::BuiltinMethod { .. })
