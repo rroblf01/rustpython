@@ -3970,7 +3970,9 @@ impl VirtualMachine {
                             }
                             // `l *= n` — repeat in place (list.__imul__).
                             2 => {
-                                let n = right.as_i64().unwrap_or(0).max(0) as usize;
+                                let n = crate::object::to_index(&right)
+                                    .map(|n| n.to_i64().unwrap_or(0).max(0))
+                                    .unwrap_or(0) as usize;
                                 if let PyObject::List(list) = &mut *left.borrow_mut() {
                                     let items: Vec<crate::object::PyObjectRef> = list.clone();
                                     // Fail fast on overflow like list_resize

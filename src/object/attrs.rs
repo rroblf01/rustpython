@@ -314,6 +314,15 @@ fn str_encode_builtin(a: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Ok(PyObjectRef::imm(PyObject::Bytes(bytes)))
 }
 
+/// The integer VALUE of an int or bool object (bool is int's subtype).
+fn int_or_bool_value(o: &PyObjectRef) -> Option<BigInt> {
+    match &*o.borrow() {
+        PyObject::Int(i) => Some(i.clone()),
+        PyObject::Bool(b) => Some(BigInt::from(*b as i64)),
+        _ => None,
+    }
+}
+
 impl PyObject {
     /// Every real Python object has `__doc__` (defaulting to `None` if not
     /// otherwise set — `bool`/`int`/etc. all inherit it from `object`).
@@ -1570,10 +1579,9 @@ impl PyObject {
                                     args.len() - 1
                                 )));
                             }
-                            let n = args[1]
-                                .as_i64()
-                                .ok_or_else(|| PyError::type_error("an integer is required"))?
-                                .max(0) as usize;
+                            let n = crate::object::to_index(&args[1])
+                                .map(|n| n.to_i64().unwrap_or(0).max(0))
+                                .unwrap_or(0) as usize;
                             if let PyObject::List(list) = &mut *args[0].borrow_mut() {
                                 let items: Vec<PyObjectRef> = list.clone();
                                 list.clear();
@@ -9002,12 +9010,14 @@ impl PyObject {
                     ))),
                 }
             }
-            PyObject::Int(_i) => {
+            PyObject::Int(_) | PyObject::Bool(_) => {
+                let int_value =
+                    int_or_bool_value(&PyObjectRef::new(self.clone())).unwrap_or_default();
                 match name {
                     "__bool__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "__bool__".to_string(),
                         func: |args| {
-                            if let PyObject::Int(v) = &*args[0].borrow() {
+                            if let Some(v) = int_or_bool_value(&args[0]) {
                                 Ok(py_bool(!v.is_zero()))
                             } else {
                                 Err(PyError::runtime_error("__bool__ on non-int"))
@@ -9018,7 +9028,7 @@ impl PyObject {
                     "__float__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "__float__".to_string(),
                         func: |args| {
-                            if let PyObject::Int(v) = &*args[0].borrow() {
+                            if let Some(v) = int_or_bool_value(&args[0]) {
                                 Ok(py_float(v.to_f64().unwrap_or(0.0)))
                             } else {
                                 Err(PyError::runtime_error("__float__ on non-int"))
@@ -9029,7 +9039,7 @@ impl PyObject {
                     "bit_length" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "bit_length".to_string(),
                         func: |args| {
-                            if let PyObject::Int(v) = &*args[0].borrow() {
+                            if let Some(v) = int_or_bool_value(&args[0]) {
                                 Ok(py_int(v.bits() as i64))
                             } else {
                                 Err(PyError::runtime_error("bit_length on non-int"))
@@ -9040,8 +9050,8 @@ impl PyObject {
                     "bit_count" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "bit_count".to_string(),
                         func: |args| {
-                            if let PyObject::Int(v) = &*args[0].borrow() {
-                                let count: u32 = if *v < num_bigint::BigInt::from(0) {
+                            if let Some(v) = int_or_bool_value(&args[0]) {
+                                let count: u32 = if v < num_bigint::BigInt::from(0) {
                                     let neg = -(v + 1i32);
                                     neg.to_bytes_le().1.iter().map(|b| b.count_ones()).sum()
                                 } else {
@@ -9069,7 +9079,7 @@ impl PyObject {
                     "as_integer_ratio" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "as_integer_ratio".to_string(),
                         func: |args| {
-                            if let PyObject::Int(v) = &*args[0].borrow() {
+                            if let Some(v) = int_or_bool_value(&args[0]) {
                                 Ok(py_tuple(vec![py_int(v.clone()), py_int(1)]))
                             } else {
                                 Err(PyError::runtime_error("as_integer_ratio on non-int"))
@@ -9077,7 +9087,7 @@ impl PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
-                    "numerator" | "real" => Ok(py_int(_i.clone())),
+                    "numerator" | "real" => Ok(py_int(int_value.clone())),
                     "denominator" => Ok(py_int(1)),
                     "imag" => Ok(py_int(0)),
                     // `int.conjugate()` — part of the same `numbers.Complex`
@@ -9088,13 +9098,13 @@ impl PyObject {
                     "conjugate" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
                         name: "conjugate".to_string(),
                         func: |args| {
-                            if let PyObject::Int(v) = &*args[0].borrow() {
+                            if let Some(v) = int_or_bool_value(&args[0]) {
                                 Ok(py_int(v.clone()))
                             } else {
                                 Err(PyError::runtime_error("conjugate on non-int"))
                             }
                         },
-                        self_obj: PyObjectRef::imm(PyObject::Int(_i.clone())),
+                        self_obj: PyObjectRef::imm(PyObject::Int(int_value.clone())),
                     })),
                     // `int.__round__()`/`float.__round__()` — `round()` the
                     // builtin already works, but wasn't accessible as a
@@ -9104,7 +9114,7 @@ impl PyObject {
                     "__round__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "__round__".to_string(),
                         func: |args| builtin_round(args),
-                        self_obj: PyObjectRef::imm(PyObject::Int(_i.clone())),
+                        self_obj: PyObjectRef::imm(PyObject::Int(int_value.clone())),
                     })),
                     "to_bytes" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "to_bytes".to_string(),
@@ -9198,10 +9208,21 @@ impl PyObject {
                     "__index__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "__index__".to_string(),
                         func: |args| {
-                            if let PyObject::Int(v) = &*args[0].borrow() {
+                            if let Some(v) = int_or_bool_value(&args[0]) {
                                 Ok(py_int(v.clone()))
                             } else {
                                 Err(PyError::runtime_error("__index__ on non-int"))
+                            }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__int__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__int__".to_string(),
+                        func: |args| {
+                            if let Some(v) = int_or_bool_value(&args[0]) {
+                                Ok(py_int(v.clone()))
+                            } else {
+                                Err(PyError::runtime_error("__int__ on non-int"))
                             }
                         },
                         self_obj: PyObjectRef::new(PyObject::None),

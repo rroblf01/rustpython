@@ -10,6 +10,15 @@ pub fn to_index(obj: &PyObjectRef) -> PyResult<BigInt> {
     let type_name = obj.get_type_name();
     let is_instance = matches!(&*obj.borrow(), PyObject::Instance { .. });
     if is_instance {
+        // An int SUBCLASS (`class MyInt(int)`) uses its int VALUE directly —
+        // `operator.index(MyInt(7))` is 7, NOT `MyInt.__index__()` (8) —
+        // matching CPython's PyNumber_Index exact-type fast path. Only
+        // non-int objects consult their `__index__`.
+        if let Some(backing) = crate::object::native_backing_of(obj) {
+            if let PyObject::Int(i) = &*backing.borrow() {
+                return Ok(i.clone());
+            }
+        }
         let f = {
             let o = obj.borrow();
             match &*o {
@@ -67,6 +76,12 @@ fn sequence_index_int(idx: &PyObject) -> Option<BigInt> {
         PyObject::Bool(b) => Some(BigInt::from(*b as i64)),
         _ => None,
     }
+}
+
+/// Like `sequence_index_int` but via the full `__index__` protocol (a custom
+/// object with an `__index__` method is a valid index — test_index.py).
+fn try_to_index(index: &PyObjectRef) -> Option<BigInt> {
+    crate::object::to_index(index).ok()
 }
 
 /// `slice.indices(length)` for an arbitrary-length sequence — mirrors
@@ -213,24 +228,34 @@ pub(crate) fn extract_slice_fields(
     stop: &PyObjectRef,
     step: &PyObjectRef,
 ) -> PyResult<(Option<isize>, Option<isize>, isize)> {
-    let step_val = if let PyObject::Int(i) = &*step.borrow() {
-        i.to_isize().unwrap_or(1)
-    } else {
+    // Slice components must be int (or int-like via __index__) or None; a
+    // component whose __index__ misbehaves must TypeError (test_index).
+    let to_opt = |v: &PyObjectRef| -> PyResult<Option<isize>> {
+        if matches!(&*v.borrow(), PyObject::None) {
+            return Ok(None);
+        }
+        let i = crate::object::to_index(v).map_err(|_| {
+            PyError::type_error(
+                "slice indices must be integers or None or have an __index__ method",
+            )
+        })?;
+        Ok(i.to_isize())
+    };
+    let step_val = if matches!(&*step.borrow(), PyObject::None) {
         1
+    } else {
+        let i = crate::object::to_index(step).map_err(|_| {
+            PyError::type_error(
+                "slice indices must be integers or None or have an __index__ method",
+            )
+        })?;
+        i.to_isize().unwrap_or(1)
     };
     if step_val == 0 {
         return Err(PyError::value_error("slice step cannot be zero"));
     }
-    let start_val = if let PyObject::Int(i) = &*start.borrow() {
-        i.to_isize()
-    } else {
-        None
-    };
-    let stop_val = if let PyObject::Int(i) = &*stop.borrow() {
-        i.to_isize()
-    } else {
-        None
-    };
+    let start_val = to_opt(start)?;
+    let stop_val = to_opt(stop)?;
     Ok((start_val, stop_val, step_val))
 }
 
@@ -360,7 +385,7 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
     match &*o {
         PyObject::List(items) => {
             let idx = index.borrow();
-            if let Some(i) = sequence_index_int(&idx) {
+            if let Some(i) = try_to_index(index) {
                 let i = i
                     .to_isize()
                     .ok_or_else(|| PyError::index_error("list index out of range"))?;
@@ -406,7 +431,7 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
         }
         PyObject::Deque { data, .. } => {
             let idx = index.borrow();
-            if let Some(i) = sequence_index_int(&idx) {
+            if let Some(i) = try_to_index(index) {
                 let i = i
                     .to_isize()
                     .ok_or_else(|| PyError::index_error("deque index out of range"))?;
@@ -454,7 +479,7 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
         }
         PyObject::Tuple(items) => {
             let idx = index.borrow();
-            if let Some(i) = sequence_index_int(&idx) {
+            if let Some(i) = try_to_index(index) {
                 let i = i
                     .to_isize()
                     .ok_or_else(|| PyError::index_error("tuple index out of range"))?;
@@ -500,7 +525,7 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
         }
         PyObject::Str(s) => {
             let idx = index.borrow();
-            if let Some(i) = sequence_index_int(&idx) {
+            if let Some(i) = try_to_index(index) {
                 let chars: Vec<char> = s.chars().collect();
                 let i = i
                     .to_isize()
@@ -549,7 +574,7 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
         // PyObject::Dict is handled above, before this borrow is taken.
         PyObject::Bytes(b) => {
             let idx = index.borrow();
-            if let Some(i) = sequence_index_int(&idx) {
+            if let Some(i) = try_to_index(index) {
                 let i = i
                     .to_isize()
                     .ok_or_else(|| PyError::index_error("bytes index out of range"))?;
@@ -601,7 +626,7 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
         }
         PyObject::ByteArray(b) => {
             let idx = index.borrow();
-            if let Some(i) = sequence_index_int(&idx) {
+            if let Some(i) = try_to_index(index) {
                 let i = i
                     .to_isize()
                     .ok_or_else(|| PyError::index_error("bytearray index out of range"))?;
@@ -649,7 +674,7 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
         }
         PyObject::Array(arr) => {
             let idx = index.borrow();
-            if let Some(i) = sequence_index_int(&idx) {
+            if let Some(i) = try_to_index(index) {
                 let i = i
                     .to_isize()
                     .ok_or_else(|| PyError::index_error("array index out of range"))?;
@@ -675,7 +700,7 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
             let idx = index.borrow();
             let zero = BigInt::from(0);
             let range_len = crate::object::ops_contains::range_len_values;
-            if let Some(i) = sequence_index_int(&idx) {
+            if let Some(i) = try_to_index(index) {
                 let len = range_len(start, stop, step);
                 let pos = if i < zero { &len + &i } else { i };
                 if pos < zero || pos >= len {
@@ -854,7 +879,7 @@ pub fn py_setitem(obj: &PyObjectRef, index: &PyObjectRef, value: PyObjectRef) ->
     match &mut *o {
         PyObject::List(items) => {
             let idx = index.borrow();
-            if let Some(i) = sequence_index_int(&idx) {
+            if let Some(i) = try_to_index(index) {
                 let i = i
                     .to_isize()
                     .ok_or_else(|| PyError::index_error("list index out of range"))?;
@@ -873,7 +898,7 @@ pub fn py_setitem(obj: &PyObjectRef, index: &PyObjectRef, value: PyObjectRef) ->
         }
         PyObject::Deque { data, .. } => {
             let idx = index.borrow();
-            if let Some(i) = sequence_index_int(&idx) {
+            if let Some(i) = try_to_index(index) {
                 let i = i
                     .to_isize()
                     .ok_or_else(|| PyError::index_error("deque index out of range"))?;
@@ -931,7 +956,7 @@ pub fn py_delitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<()> {
     match &mut *o {
         PyObject::List(items) => {
             let idx = index.borrow();
-            if let Some(i) = sequence_index_int(&idx) {
+            if let Some(i) = try_to_index(index) {
                 let i = i
                     .to_isize()
                     .ok_or_else(|| PyError::index_error("list index out of range"))?;
@@ -983,7 +1008,7 @@ pub fn py_delitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<()> {
         }
         PyObject::Deque { data, .. } => {
             let idx = index.borrow();
-            if let Some(i) = sequence_index_int(&idx) {
+            if let Some(i) = try_to_index(index) {
                 let i = i
                     .to_isize()
                     .ok_or_else(|| PyError::index_error("deque index out of range"))?;
