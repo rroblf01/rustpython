@@ -1317,6 +1317,14 @@ impl Compiler {
                 self.emit_backward_jump(start_label);
             }
             Stmt::Return(value) => {
+                if self.scope != ScopeType::Function {
+                    // CPython rejects `return` outside a function at
+                    // compile time (module/class bodies). This used to
+                    // silently compile the return into an unreachable
+                    // LOAD/RETURN sequence — test_exceptions'
+                    // test_string_source etc. assert a SyntaxError.
+                    return Err("'return' outside function".to_string());
+                }
                 if let Some(expr) = value {
                     self.compile_expr(expr)?;
                 } else {
@@ -4256,10 +4264,16 @@ impl Compiler {
                 self.compile_expr(expr)?;
             }
             Expr::Yield(Some(expr)) => {
+                if self.scope != ScopeType::Function {
+                    return Err("'yield' outside function".to_string());
+                }
                 self.compile_expr(expr)?;
                 self.emit(Opcode::YIELD_VALUE, 0);
             }
             Expr::Yield(None) => {
+                if self.scope != ScopeType::Function {
+                    return Err("'yield' outside function".to_string());
+                }
                 let const_none = self.get_const_index(ConstValue::None) as u32;
                 self.emit(Opcode::LOAD_CONST, const_none);
                 self.emit(Opcode::YIELD_VALUE, 0);
