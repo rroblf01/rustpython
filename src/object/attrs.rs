@@ -323,6 +323,59 @@ fn int_or_bool_value(o: &PyObjectRef) -> Option<BigInt> {
     }
 }
 
+/// Direct sequence repetition for the `__mul__`/`__rmul__` dunders. NOT via
+/// `py_mul` — that would re-dispatch through `try_dunder_binop` back into the
+/// same `__mul__` (infinite recursion). Builds the repeated container.
+fn dunder_repeat(obj: &PyObjectRef, count: &PyObjectRef) -> PyResult<PyObjectRef> {
+    let idx = crate::object::to_index(count)?;
+    // A repeat count that can't fit C ssize_t must OverflowError, not be
+    // silently clamped (test_index::test_sequence_repeat: 'a' * 2**100).
+    let n = idx.to_i64().ok_or_else(|| {
+        PyError::overflow_error(if idx.sign() == num_bigint::Sign::Minus {
+            "negative count"
+        } else {
+            "repeated value is too large"
+        })
+    })?;
+    if n < 0 {
+        return Err(PyError::overflow_error("negative count"));
+    }
+    let n = n as usize;
+    let borrowed = obj.borrow();
+    match &*borrowed {
+        PyObject::List(items) => {
+            let mut out = Vec::with_capacity(items.len().saturating_mul(n));
+            for _ in 0..n {
+                out.extend(items.iter().cloned());
+            }
+            Ok(py_list(out))
+        }
+        PyObject::Tuple(items) => {
+            let mut out = Vec::with_capacity(items.len().saturating_mul(n));
+            for _ in 0..n {
+                out.extend(items.iter().cloned());
+            }
+            Ok(py_tuple(out))
+        }
+        PyObject::Str(s) => Ok(py_str(&s.repeat(n))),
+        PyObject::Bytes(b) => {
+            let mut out = Vec::with_capacity(b.len().saturating_mul(n));
+            for _ in 0..n {
+                out.extend_from_slice(b);
+            }
+            Ok(PyObjectRef::imm(PyObject::Bytes(out)))
+        }
+        PyObject::ByteArray(b) => {
+            let mut out = Vec::with_capacity(b.len().saturating_mul(n));
+            for _ in 0..n {
+                out.extend_from_slice(&b[..]);
+            }
+            Ok(PyObjectRef::imm(PyObject::ByteArray(out)))
+        }
+        _ => Err(PyError::type_error("sequence type not repeatable")),
+    }
+}
+
 impl PyObject {
     /// Every real Python object has `__doc__` (defaulting to `None` if not
     /// otherwise set — `bool`/`int`/etc. all inherit it from `object`).
@@ -1593,6 +1646,32 @@ impl PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
+                    "__mul__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__mul__".to_string(),
+                        func: |args| {
+                            if args.len() < 2 {
+                                return Err(PyError::type_error("__mul__() missing argument"));
+                            }
+                            dunder_repeat(
+                                &args[args.len().saturating_sub(2)],
+                                &args[args.len().saturating_sub(1)],
+                            )
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__rmul__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__rmul__".to_string(),
+                        func: |args| {
+                            if args.len() < 2 {
+                                return Err(PyError::type_error("__rmul__() missing argument"));
+                            }
+                            dunder_repeat(
+                                &args[args.len().saturating_sub(2)],
+                                &args[args.len().saturating_sub(1)],
+                            )
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     "append" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "append".to_string(),
                         func: |args| {
@@ -2645,6 +2724,32 @@ impl PyObject {
 
             PyObject::Tuple(_v) => {
                 match name {
+                    "__mul__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__mul__".to_string(),
+                        func: |args| {
+                            if args.len() < 2 {
+                                return Err(PyError::type_error("__mul__() missing argument"));
+                            }
+                            dunder_repeat(
+                                &args[args.len().saturating_sub(2)],
+                                &args[args.len().saturating_sub(1)],
+                            )
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__rmul__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__rmul__".to_string(),
+                        func: |args| {
+                            if args.len() < 2 {
+                                return Err(PyError::type_error("__rmul__() missing argument"));
+                            }
+                            dunder_repeat(
+                                &args[args.len().saturating_sub(2)],
+                                &args[args.len().saturating_sub(1)],
+                            )
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     "__reversed__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "__reversed__".to_string(),
                         func: |args| {
@@ -2766,6 +2871,32 @@ impl PyObject {
             }
             PyObject::Bytes(_v) => {
                 match name {
+                    "__mul__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__mul__".to_string(),
+                        func: |args| {
+                            if args.len() < 2 {
+                                return Err(PyError::type_error("__mul__() missing argument"));
+                            }
+                            dunder_repeat(
+                                &args[args.len().saturating_sub(2)],
+                                &args[args.len().saturating_sub(1)],
+                            )
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__rmul__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__rmul__".to_string(),
+                        func: |args| {
+                            if args.len() < 2 {
+                                return Err(PyError::type_error("__rmul__() missing argument"));
+                            }
+                            dunder_repeat(
+                                &args[args.len().saturating_sub(2)],
+                                &args[args.len().saturating_sub(1)],
+                            )
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     "__sizeof__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "__sizeof__".to_string(),
                         func: |args| {
@@ -4073,6 +4204,32 @@ impl PyObject {
             }
             PyObject::ByteArray(_b) => {
                 match name {
+                    "__mul__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__mul__".to_string(),
+                        func: |args| {
+                            if args.len() < 2 {
+                                return Err(PyError::type_error("__mul__() missing argument"));
+                            }
+                            dunder_repeat(
+                                &args[args.len().saturating_sub(2)],
+                                &args[args.len().saturating_sub(1)],
+                            )
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__rmul__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__rmul__".to_string(),
+                        func: |args| {
+                            if args.len() < 2 {
+                                return Err(PyError::type_error("__rmul__() missing argument"));
+                            }
+                            dunder_repeat(
+                                &args[args.len().saturating_sub(2)],
+                                &args[args.len().saturating_sub(1)],
+                            )
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     "__contains__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "__contains__".to_string(),
                         func: |args| {
@@ -4608,6 +4765,32 @@ impl PyObject {
             }
             PyObject::Str(_s) => {
                 match name {
+                    "__mul__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__mul__".to_string(),
+                        func: |args| {
+                            if args.len() < 2 {
+                                return Err(PyError::type_error("__mul__() missing argument"));
+                            }
+                            dunder_repeat(
+                                &args[args.len().saturating_sub(2)],
+                                &args[args.len().saturating_sub(1)],
+                            )
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__rmul__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__rmul__".to_string(),
+                        func: |args| {
+                            if args.len() < 2 {
+                                return Err(PyError::type_error("__rmul__() missing argument"));
+                            }
+                            dunder_repeat(
+                                &args[args.len().saturating_sub(2)],
+                                &args[args.len().saturating_sub(1)],
+                            )
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     // Gettable `__hash__` — needed so `super().__hash__()`
                     // works for a `class K(str): def __hash__(self): ...
                     // return super().__hash__()` override (the `super()`
@@ -11074,13 +11257,13 @@ impl PyObject {
                                     step: new_step,
                                 }))
                             } else {
-                                let i = idx.as_i64().ok_or_else(|| {
+                                let i = crate::object::to_index(&args[1]).map_err(|_| {
                                     PyError::type_error("range indices must be integers or slices")
                                 })?;
-                                let pos = if i < 0 {
+                                let pos = if i.sign() == num_bigint::Sign::Minus {
                                     length.clone() + i
                                 } else {
-                                    num_bigint::BigInt::from(i)
+                                    i
                                 };
                                 let zero = num_bigint::BigInt::from(0);
                                 if pos < zero || pos >= length {
