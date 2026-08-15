@@ -330,43 +330,90 @@ fn dunder_repeat(obj: &PyObjectRef, count: &PyObjectRef) -> PyResult<PyObjectRef
     let idx = crate::object::to_index(count)?;
     // A repeat count that can't fit C ssize_t must OverflowError, not be
     // silently clamped (test_index::test_sequence_repeat: 'a' * 2**100).
-    let n = idx.to_i64().ok_or_else(|| {
-        PyError::overflow_error(if idx.sign() == num_bigint::Sign::Minus {
-            "negative count"
-        } else {
-            "repeated value is too large"
-        })
-    })?;
-    if n < 0 {
-        return Err(PyError::overflow_error("negative count"));
+    // Small negatives are fine: `[1,2] * -1` -> `[]` (test_list::test_repeat).
+    let i64_n = idx.to_i64();
+    if i64_n.is_none() {
+        if idx.sign() == num_bigint::Sign::Minus {
+            // magnitude overflows ssize_t
+            return Err(PyError::overflow_error("negative count"));
+        }
+        return Err(PyError::overflow_error("repeated value is too large"));
     }
-    let n = n as usize;
+    let n = i64_n.unwrap().max(0) as usize;
+    if n == 1 {
+        // `seq * 1` returns the SAME object (CPython's immutable
+        // optimization — `id(s) == id(s*1)` for tuples).
+        return Ok(obj.clone());
+    }
     let borrowed = obj.borrow();
     match &*borrowed {
         PyObject::List(items) => {
-            let mut out = Vec::with_capacity(items.len().saturating_mul(n));
+            // Fail fast on overflow like list_resize ([0] * sys.maxsize ->
+            // MemoryError), never panic on Vec::with_capacity.
+            let total = match items.len().checked_mul(n) {
+                Some(t) => t,
+                None => return Err(PyError::memory_error("could not allocate list")),
+            };
+            let mut probe: Vec<PyObjectRef> = Vec::new();
+            if probe.try_reserve_exact(total).is_err() {
+                return Err(PyError::memory_error("could not allocate list"));
+            }
+            let mut out = Vec::with_capacity(total);
             for _ in 0..n {
                 out.extend(items.iter().cloned());
             }
             Ok(py_list(out))
         }
         PyObject::Tuple(items) => {
-            let mut out = Vec::with_capacity(items.len().saturating_mul(n));
+            let total = match items.len().checked_mul(n) {
+                Some(t) => t,
+                None => return Err(PyError::memory_error("could not allocate tuple")),
+            };
+            let mut probe: Vec<PyObjectRef> = Vec::new();
+            if probe.try_reserve_exact(total).is_err() {
+                return Err(PyError::memory_error("could not allocate tuple"));
+            }
+            let mut out = Vec::with_capacity(total);
             for _ in 0..n {
                 out.extend(items.iter().cloned());
             }
             Ok(py_tuple(out))
         }
-        PyObject::Str(s) => Ok(py_str(&s.repeat(n))),
+        PyObject::Str(s) => match s.len().checked_mul(n) {
+            Some(total) => {
+                let mut probe: Vec<u8> = Vec::new();
+                if probe.try_reserve_exact(total).is_err() {
+                    return Err(PyError::memory_error("could not allocate string"));
+                }
+                Ok(py_str(&s.repeat(n)))
+            }
+            None => Err(PyError::overflow_error("repeated string is too long")),
+        },
         PyObject::Bytes(b) => {
-            let mut out = Vec::with_capacity(b.len().saturating_mul(n));
+            let total = match b.len().checked_mul(n) {
+                Some(t) => t,
+                None => return Err(PyError::overflow_error("bytes object is too large")),
+            };
+            let mut probe: Vec<u8> = Vec::new();
+            if probe.try_reserve_exact(total).is_err() {
+                return Err(PyError::memory_error("could not allocate bytes"));
+            }
+            let mut out = Vec::with_capacity(total);
             for _ in 0..n {
                 out.extend_from_slice(b);
             }
             Ok(PyObjectRef::imm(PyObject::Bytes(out)))
         }
         PyObject::ByteArray(b) => {
-            let mut out = Vec::with_capacity(b.len().saturating_mul(n));
+            let total = match b.len().checked_mul(n) {
+                Some(t) => t,
+                None => return Err(PyError::overflow_error("bytearray object is too large")),
+            };
+            let mut probe: Vec<u8> = Vec::new();
+            if probe.try_reserve_exact(total).is_err() {
+                return Err(PyError::memory_error("could not allocate bytearray"));
+            }
+            let mut out = Vec::with_capacity(total);
             for _ in 0..n {
                 out.extend_from_slice(&b[..]);
             }
