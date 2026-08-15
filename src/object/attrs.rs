@@ -1544,6 +1544,23 @@ impl PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
+                    "__init__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__init__".to_string(),
+                        func: |args| {
+                            // `l.__init__()` clears; `l.__init__(it)` replaces
+                            // (test_list::test_init).
+                            let items: Vec<PyObjectRef> = if args.len() > 1 {
+                                crate::object::collect_iterable(&args[1])?
+                            } else {
+                                Vec::new()
+                            };
+                            if let PyObject::List(list) = &mut *args[0].borrow_mut() {
+                                *list = items;
+                            }
+                            Ok(py_none())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     "__imul__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "__imul__".to_string(),
                         func: |args| {

@@ -5519,6 +5519,11 @@ fn pickle_serialize(
             pickle_serialize(&py_list(list.clone()), buf, memo)?;
             pickle_serialize(&py_int(*index as i64), buf, memo)?;
         }
+        PyObject::GetItemIter { obj, index } => {
+            buf.push(b'g');
+            pickle_serialize(obj, buf, memo)?;
+            pickle_serialize(&py_int(*index as i64), buf, memo)?;
+        }
         PyObject::RangeIter {
             current,
             stop,
@@ -6222,6 +6227,12 @@ fn pickle_deserialize(
                 list: items,
                 index: idx,
             }))
+        }
+        b'g' => {
+            let obj = pickle_deserialize(data, pos, memo)?;
+            let index = pickle_deserialize(data, pos, memo)?;
+            let idx = index.as_i64().unwrap_or(0);
+            Ok(PyObjectRef::new(PyObject::GetItemIter { obj, index: idx }))
         }
         b'r' => {
             let current = pickle_deserialize(data, pos, memo)?;

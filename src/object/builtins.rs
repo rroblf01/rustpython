@@ -5359,8 +5359,12 @@ pub fn builtin_reversed(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             PyObject::List(v) => {
                 let mut rev = v.clone();
                 rev.reverse();
-                Ok(PyObjectRef::new(PyObject::ListIter {
-                    list: rev,
+                // A GetItemIter (no __len__), NOT a ListIter: real CPython's
+                // reversed-list iterator has no `__len__`, so
+                // `len(reversed([1,2,3]))` must raise TypeError
+                // (test_list::test_reversed).
+                Ok(PyObjectRef::new(PyObject::GetItemIter {
+                    obj: PyObjectRef::new(PyObject::List(rev)),
                     index: 0,
                 }))
             }
