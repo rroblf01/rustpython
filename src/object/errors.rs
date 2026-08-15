@@ -75,24 +75,45 @@ impl PyError {
     pub fn syntax_error(msg: impl Into<String>) -> Self {
         let msg = msg.into();
         // Most parser errors carry an "L<line>:<col>:" prefix; custom
-        // validation errors ("unexpected '/' ...") don't. Ensure a position
-        // is always present so `SyntaxError.lineno`/`.offset` are never
-        // None (test.support's check_syntax_error asserts both exist).
-        let msg = if msg.starts_with('L') {
-            msg
+        // validation errors ("unexpected '/' ...") don't. Parse it into real
+        // `lineno`/`offset` attributes and produce CPython's `str()` format
+        // `msg (<filename>, line N)`; also keep `.msg` clean (no prefix) so
+        // `test.support.check_syntax_error`'s assertRaisesRegex(SyntaxError,
+        // errtext) matches (test_exceptions' testSyntaxErrorMessage).
+        let (clean_msg, line, col) = if let Some(rest) = msg.strip_prefix('L') {
+            if let Some((ln, rest)) = rest.split_once(':') {
+                if let Some((col_s, rest)) = rest.split_once(':') {
+                    let line = ln.parse::<i64>().ok();
+                    let col = col_s.parse::<i64>().ok();
+                    (rest.to_string(), line, col)
+                } else {
+                    (msg.clone(), None, None)
+                }
+            } else {
+                (msg.clone(), None, None)
+            }
         } else {
-            format!("L1:1: {}", msg)
+            (msg.clone(), None, None)
         };
+        let line = line.unwrap_or(1);
+        let col = col.unwrap_or(1);
+        let mut extra = std::collections::HashMap::new();
+        extra.insert("msg".to_string(), py_str(&clean_msg));
+        extra.insert("filename".to_string(), py_str("<string>"));
+        extra.insert("lineno".to_string(), py_int(line));
+        extra.insert("offset".to_string(), py_int(col));
+        // CPython: `str(SyntaxError)` is `msg (filename, line N)`.
+        let display = format!("{} (<string>, line {})", clean_msg, line);
         PyError::Exception(
             "SyntaxError".to_string(),
             PyObjectRef::new(PyObject::Exception {
                 typ: "SyntaxError".to_string(),
-                args: vec![py_str(&msg)],
+                args: vec![py_str(&display)],
                 cause: None,
                 suppress_context: false,
                 context: None,
                 traceback: None,
-                extra: None,
+                extra: Some(extra),
             }),
         )
     }

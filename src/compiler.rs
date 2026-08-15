@@ -1289,7 +1289,7 @@ impl Compiler {
                         self.pending_cleanup[loop_info.cleanup_start..].to_vec(),
                     )
                 } else {
-                    return Err("'continue' outside loop".to_string());
+                    return Err("'continue' not properly in loop".to_string());
                 };
                 for entry in cleanup.iter().rev() {
                     match entry {

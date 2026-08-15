@@ -126,7 +126,56 @@ make_exception_func!(
     "StopAsyncIteration"
 );
 make_exception_func!(builtin_make_exception_eoferror, "EOFError");
-make_exception_func!(builtin_make_exception_syntaxerror, "SyntaxError");
+pub fn builtin_make_exception_syntaxerror(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    // CPython: `SyntaxError(msg, (filename, lineno, offset, text,
+    // end_lineno, end_offset))` — the location tuple drives `.msg`/
+    // `.filename`/`.lineno`/`.offset`/`.text`/`.end_lineno`/`.end_offset`;
+    // the flat `SyntaxError(msg, filename, lineno, offset, text, ...)` form
+    // stores those as positional args WITHOUT deriving the location
+    // attributes (per test_exceptions' testAttributes table).
+    let mut extra = std::collections::HashMap::new();
+    let mut clean_args: Vec<PyObjectRef> = Vec::new();
+    for a in args {
+        clean_args.push(a.clone());
+    }
+    if let Some((second, rest)) = args.split_first() {
+        if rest.len() == 1 {
+            if let PyObject::Tuple(t) = &*rest[0].borrow() {
+                // `SyntaxError(msg, (filename, lineno, offset, text,
+                // end_lineno, end_offset))`
+                let mut it = t.iter();
+                let filename = it.next();
+                let lineno = it.next();
+                let offset = it.next();
+                let text = it.next();
+                let end_lineno = it.next();
+                let end_offset = it.next();
+                let set = |extra: &mut std::collections::HashMap<String, PyObjectRef>,
+                           key: &str,
+                           v: Option<&PyObjectRef>| {
+                    if let Some(v) = v {
+                        extra.insert(key.to_string(), v.clone());
+                    }
+                };
+                set(&mut extra, "filename", filename);
+                set(&mut extra, "lineno", lineno);
+                set(&mut extra, "offset", offset);
+                set(&mut extra, "text", text);
+                set(&mut extra, "end_lineno", end_lineno);
+                set(&mut extra, "end_offset", end_offset);
+            }
+        }
+    }
+    Ok(PyObjectRef::new(PyObject::Exception {
+        typ: "SyntaxError".to_string(),
+        args: clean_args,
+        cause: None,
+        suppress_context: false,
+        context: None,
+        traceback: None,
+        extra: if extra.is_empty() { None } else { Some(extra) },
+    }))
+}
 make_exception_func!(builtin_make_exception_cycleerror, "CycleError");
 make_exception_func!(
     builtin_make_exception_incompleteinputerror,

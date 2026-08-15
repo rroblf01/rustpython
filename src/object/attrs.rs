@@ -1134,6 +1134,15 @@ impl PyObject {
                     // out lazily. Defaults to None for non-syntax errors.
                     "lineno" | "offset" => {
                         let want_lineno = name == "lineno";
+                        // A ctor-set SyntaxError location tuple wins over the
+                        // lazy "L<line>:<col>:" parsing below.
+                        if typ == "SyntaxError" {
+                            if let Some(extra) = extra {
+                                if let Some(v) = extra.get(name) {
+                                    return Ok(v.clone());
+                                }
+                            }
+                        }
                         let parsed = args.first().and_then(|a| {
                             let s = a.str();
                             if let Some(rest) = s.strip_prefix('L') {
@@ -1293,9 +1302,32 @@ impl PyObject {
                     // extra positional-args tuple. Gated to `SyntaxError`
                     // specifically — a plain `Exception`/`ValueError`/etc.
                     // genuinely has no such attributes in real Python either.
-                    "filename" | "lineno" | "offset" | "text" | "end_lineno" | "end_offset"
+                    // `SyntaxError`'s location attributes come from the
+                    // ctor's 6-tuple (`msg`, `filename`, `lineno`, `offset`,
+                    // `text`, `end_lineno`, `end_offset`); reading them
+                    // falls back to None when never set. `msg` additionally
+                    // defaults to the first positional arg (`SyntaxError
+                    // ('msgStr')` -> `.msg == 'msgStr'`).
+                    "msg"
+                    | "filename"
+                    | "lineno"
+                    | "offset"
+                    | "text"
+                    | "end_lineno"
+                    | "end_offset"
+                    | "print_file_and_line"
                         if typ == "SyntaxError" =>
                     {
+                        if let Some(extra) = extra {
+                            if let Some(v) = extra.get(name) {
+                                return Ok(v.clone());
+                            }
+                        }
+                        if name == "msg" {
+                            if let Some(first) = args.first() {
+                                return Ok(first.clone());
+                            }
+                        }
                         Ok(py_none())
                     }
                     // `AttributeError.name`/`.obj` default to None when not
