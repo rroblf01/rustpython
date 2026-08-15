@@ -2031,8 +2031,6 @@ pub fn create_marshal_dict() -> HashMap<String, PyObjectRef> {
         let data = args
             .first()
             .ok_or_else(|| PyError::type_error("loads() missing required argument 'bytes'"))?;
-        // `marshal.loads(b'')` raises EOFError (test_exceptions' testRaising
-        // exercises exactly this).
         if let PyObject::Bytes(b) = &*data.borrow() {
             if b.is_empty() {
                 return Err(PyError::Exception(
@@ -2048,14 +2046,72 @@ pub fn create_marshal_dict() -> HashMap<String, PyObjectRef> {
                     }),
                 ));
             }
+            // Decode the minimal round-trip markers emitted by dumps.
+            match b[0] {
+                0x54 => return Ok(py_bool(true)),
+                0x46 => return Ok(py_bool(false)),
+                b'i' => {
+                    let s = String::from_utf8_lossy(&b[1..])
+                        .trim_end_matches('\0')
+                        .to_string();
+                    if let Ok(n) = s.parse::<num_bigint::BigInt>() {
+                        return Ok(py_int(n));
+                    }
+                }
+                b'g' => {
+                    if b.len() >= 9 {
+                        let mut arr = [0u8; 8];
+                        arr.copy_from_slice(&b[1..9]);
+                        return Ok(py_float(f64::from_bits(u64::from_le_bytes(arr))));
+                    }
+                }
+                b's' => {
+                    if b.len() >= 5 {
+                        let len = i32::from_le_bytes([b[1], b[2], b[3], b[4]]) as usize;
+                        if b.len() >= 5 + len {
+                            return Ok(py_str(&String::from_utf8_lossy(&b[5..5 + len])));
+                        }
+                    }
+                }
+                _ => {}
+            }
         }
         Ok(data.clone())
     });
     m_func!("dumps", |args| {
-        if args.len() < 2 {
-            return Err(PyError::type_error("dumps() takes 1 argument"));
-        }
-        Ok(PyObjectRef::imm(PyObject::Bytes(vec![0u8; 4])))
+        let obj = args
+            .first()
+            .ok_or_else(|| PyError::type_error("dumps() missing required argument 'value'"))?;
+        // Minimal but real: round-trip bool/int/float/str through marshal's
+        // own marker bytes so `marshal.loads(marshal.dumps(x)) == x`
+        // (test_bool::test_marshal exercises True).
+        let bytes: Vec<u8> = match &*obj.borrow() {
+            PyObject::Bool(b) => vec![if *b { 0x54u8 } else { 0x46 }],
+            PyObject::Int(i) => {
+                let mut v = vec![b'i'];
+                v.extend_from_slice(i.to_string().as_bytes());
+                v.push(0);
+                v
+            }
+            PyObject::Float(f) => {
+                let mut v = vec![b'g'];
+                v.extend_from_slice(&f.to_bits().to_le_bytes());
+                v
+            }
+            PyObject::Str(s) => {
+                let mut v = vec![b's'];
+                v.extend_from_slice(&(s.len() as i32).to_le_bytes());
+                v.extend_from_slice(s.as_bytes());
+                v
+            }
+            _ => {
+                return Err(PyError::type_error(format!(
+                    "cannot marshal {} object",
+                    obj.borrow().type_name()
+                )))
+            }
+        };
+        Ok(PyObjectRef::imm(PyObject::Bytes(bytes)))
     });
     d
 }
@@ -2254,6 +2310,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
             name: filename.clone(),
             binary: mode.contains('b'),
             pending: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+            closed: false,
         }))
     });
 
@@ -2474,6 +2531,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
             name: path.clone(),
             binary: true,
             pending: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+            closed: false,
         }))
     });
 

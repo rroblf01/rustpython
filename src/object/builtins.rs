@@ -5068,6 +5068,7 @@ pub fn builtin_open(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         name: filename,
         binary,
         pending: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+        closed: false,
     }))
 }
 

@@ -7617,6 +7617,7 @@ impl PyObject {
                                 name: "<pipe>".to_string(),
                                 binary: true,
                                 pending: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+                                closed: false,
                             }))
                         } else if let Ok(f) =
                             std::fs::OpenOptions::new().read(true).open("/dev/null")
@@ -7626,6 +7627,7 @@ impl PyObject {
                                 name: "<pipe>".to_string(),
                                 binary: true,
                                 pending: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+                                closed: false,
                             }))
                         } else {
                             Err(PyError::runtime_error(
@@ -7870,6 +7872,7 @@ impl PyObject {
                                 name: fname.clone(),
                                 binary: true,
                                 pending: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+                                closed: false,
                             }))
                         } else {
                             Err(PyError::runtime_error("buffer access on non-file"))
@@ -7880,6 +7883,13 @@ impl PyObject {
                             Ok(py_str(fname))
                         } else {
                             Err(PyError::runtime_error("name access on non-file"))
+                        }
+                    }
+                    "closed" => {
+                        if let PyObject::File { closed, .. } = &*self {
+                            Ok(py_bool(*closed))
+                        } else {
+                            Err(PyError::runtime_error("closed access on non-file"))
                         }
                     }
                     "fileno" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
@@ -8159,7 +8169,9 @@ impl PyObject {
                     "close" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "close".to_string(),
                         func: |args| {
-                            if let PyObject::File { file, .. } = &mut *args[0].borrow_mut() {
+                            if let PyObject::File { file, closed, .. } = &mut *args[0].borrow_mut()
+                            {
+                                *closed = true;
                                 // Flush and drop by replacing with a closed file
                                 let _ = std::mem::replace(
                                     &mut *file.borrow_mut(),
@@ -8202,9 +8214,10 @@ impl PyObject {
                                 let _ = file.borrow().sync_all();
                             }
                             // Replace with /dev/null to close the actual file descriptor
-                            if let PyObject::File { file, .. } =
+                            if let PyObject::File { file, closed, .. } =
                                 &mut *args[file_obj_idx].borrow_mut()
                             {
+                                *closed = true;
                                 let _ = std::mem::replace(
                                     &mut *file.borrow_mut(),
                                     std::fs::File::open("/dev/null").unwrap_or_else(|_| {
