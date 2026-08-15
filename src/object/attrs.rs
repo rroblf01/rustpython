@@ -1758,27 +1758,32 @@ impl PyObject {
                             // bounds were previously IGNORED entirely (always
                             // scanning the whole list), so `lst.index(x, 3, 1)`
                             // returned a hit where CPython raises ValueError.
-                            // Apply CPython's slice-style clamping.
+                            // Apply CPython's slice-style clamping using
+                            // arbitrary-precision ints (start/stop can exceed
+                            // i64, e.g. `4*sys.maxsize` — as_i64 would
+                            // silently collapse them to 0/MAX and miss the
+                            // ValueError the test expects).
+                            use num_traits::ToPrimitive;
+                            let clamp = |v: &PyObjectRef, len: i64| -> i64 {
+                                let n = crate::object::to_index(v).unwrap_or_else(|_| 0.into());
+                                let len_big = num_bigint::BigInt::from(len);
+                                let c = if n.sign() == num_bigint::Sign::Minus {
+                                    (len_big.clone() + &n).max(0.into())
+                                } else {
+                                    n.min(len_big)
+                                };
+                                c.to_i64().unwrap_or(0)
+                            };
+                            let len = items.len() as i64;
                             let start = if args.len() > 2 {
-                                args[2].as_i64().unwrap_or(0)
+                                clamp(&args[2], len)
                             } else {
                                 0
                             };
                             let stop = if args.len() > 3 {
-                                args[3].as_i64().unwrap_or(i64::MAX)
+                                clamp(&args[3], len)
                             } else {
-                                i64::MAX
-                            };
-                            let len = items.len() as i64;
-                            let start = if start < 0 {
-                                (len + start).max(0)
-                            } else {
-                                start.min(len)
-                            };
-                            let stop = if stop < 0 {
-                                (len + stop).max(0)
-                            } else {
-                                stop.min(len)
+                                len
                             };
                             for i in start..stop {
                                 if items[i as usize].is(&args[1])
