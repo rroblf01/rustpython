@@ -9,6 +9,18 @@ use super::*;
 macro_rules! make_exception_func {
     ($name:ident, $typ:expr) => {
         pub fn $name(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+            // Builtin exception constructors reject keyword arguments
+            // (they arrive as a trailing kwargs dict from call_function):
+            // `BaseException(a=1)` must raise TypeError, per CPython's
+            // test_exceptions::testKeywordArgs.
+            if let Some(last) = args.last() {
+                if matches!(&*last.borrow(), PyObject::Dict(_)) {
+                    return Err(PyError::type_error(format!(
+                        "{}() takes no keyword arguments",
+                        $typ
+                    )));
+                }
+            }
             Ok(PyObjectRef::new(PyObject::Exception {
                 typ: $typ.to_string(),
                 args: args.to_vec(),

@@ -1260,7 +1260,52 @@ impl PyObject {
                             }
                             match &*args[1].borrow() {
                                 PyObject::None => Ok(py_none()),
-                                PyObject::Dict(_) => Ok(py_none()),
+                                PyObject::Dict(_) => {
+                                    // Merge the state dict into the exception's
+                                    // per-instance attrs (BaseException
+                                    // `__dict__`), with the special `args` key
+                                    // REPLACING the exception's args tuple —
+                                    // pickle round-trips and
+                                    // `e.__setstate__({'a': 1, 'args': (...)})`
+                                    // work (test_exceptions::test_setstate).
+                                    let mut m = std::collections::HashMap::new();
+                                    if let PyObject::Dict(d) = &*args[1].borrow() {
+                                        for (k, v) in d.iter() {
+                                            let key = match &*k.borrow() {
+                                                PyObject::Str(s) => s.to_string(),
+                                                _ => continue,
+                                            };
+                                            m.insert(key, v.clone());
+                                        }
+                                    }
+                                    let new_args = m.remove("args");
+                                    if let PyObject::Exception { args, extra, .. } =
+                                        &mut *args[0].borrow_mut()
+                                    {
+                                        if let Some(na) = new_args {
+                                            let is_tuple =
+                                                matches!(&*na.borrow(), PyObject::Tuple(_));
+                                            let cloned = if is_tuple {
+                                                match &*na.borrow() {
+                                                    PyObject::Tuple(t) => t.clone(),
+                                                    _ => unreachable!(),
+                                                }
+                                            } else {
+                                                vec![na.clone()]
+                                            };
+                                            *args = cloned;
+                                        }
+                                        if !m.is_empty() {
+                                            let store = extra.get_or_insert_with(|| {
+                                                std::collections::HashMap::new()
+                                            });
+                                            for (k, v) in m {
+                                                store.insert(k, v);
+                                            }
+                                        }
+                                    }
+                                    Ok(py_none())
+                                }
                                 _ => Err(PyError::type_error("state is not a dictionary")),
                             }
                         },
