@@ -2696,6 +2696,31 @@ pub fn builtin_bytearray(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 }
                 Ok(PyObjectRef::new(PyObject::ByteArray(result)))
             }
+            PyObject::Range { .. } => {
+                // Any iterable of ints (range, generators, custom __iter__)
+                // is valid (test_pprint: bytearray(range(5))).
+                drop(obj);
+                let it = builtin_iter(&[args[0].clone()])?;
+                let mut result = Vec::new();
+                loop {
+                    match builtin_next(&[it.clone()]) {
+                        Ok(item) => {
+                            let n = item.as_i64().ok_or_else(|| {
+                                PyError::value_error("bytearray() requires int in range 0-255")
+                            })?;
+                            if n < 0 || n > 255 {
+                                return Err(PyError::value_error(
+                                    "bytearray() requires int in range 0-255",
+                                ));
+                            }
+                            result.push(n as u8);
+                        }
+                        Err(PyError::StopIteration) => break,
+                        Err(e) => return Err(e),
+                    }
+                }
+                Ok(PyObjectRef::new(PyObject::ByteArray(result)))
+            }
             _ => Err(PyError::type_error(format!(
                 "cannot convert '{}' to bytearray",
                 obj.type_name()
@@ -2737,6 +2762,19 @@ pub fn builtin_frozenset(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 let mut set = PySet::new();
                 for &byte in b {
                     set.add(py_int(byte as i64))?;
+                }
+                Ok(PyObjectRef::imm(PyObject::FrozenSet(set)))
+            }
+            PyObject::Range { .. } => {
+                drop(obj);
+                let it = builtin_iter(&[args[0].clone()])?;
+                let mut set = PySet::new();
+                loop {
+                    match builtin_next(&[it.clone()]) {
+                        Ok(item) => set.add(item.clone())?,
+                        Err(PyError::StopIteration) => break,
+                        Err(e) => return Err(e),
+                    }
                 }
                 Ok(PyObjectRef::imm(PyObject::FrozenSet(set)))
             }
