@@ -5728,7 +5728,7 @@ impl PyObject {
                                     "isspace() takes no arguments (1 given)",
                                 ));
                             }
-                            Ok(py_bool(a[0].str().chars().all(|c| c.is_ascii_whitespace())))
+                            Ok(py_bool(a[0].str().chars().all(|c| c.is_whitespace())))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),

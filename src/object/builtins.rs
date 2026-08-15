@@ -1098,6 +1098,9 @@ pub fn builtin_float(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let obj = args[0].borrow();
     match &*obj {
         PyObject::Int(i) => Ok(py_float(bigint_to_float(i)?)),
+        // `float(True)` == 1.0 / `float(False)` == 0.0 (bool is int's
+        // subtype).
+        PyObject::Bool(b) => Ok(py_float(if *b { 1.0 } else { 0.0 })),
         PyObject::Float(f) => Ok(py_float(*f)),
         PyObject::Str(s) => {
             let s: &str = s;
@@ -2049,6 +2052,12 @@ pub fn builtin_repr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 }
 
 pub fn builtin_bool(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    // `bool(x=10)` -> TypeError (kwargs arrive as a trailing dict).
+    if let Some(last) = args.last() {
+        if matches!(&*last.borrow(), PyObject::Dict(_)) {
+            return Err(PyError::type_error("bool() takes no keyword arguments"));
+        }
+    }
     if args.len() > 1 {
         return Err(PyError::type_error("bool() takes at most 1 argument"));
     }
