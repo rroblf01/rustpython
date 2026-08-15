@@ -44,6 +44,9 @@ pub(crate) fn warnings_emit(msg: &str, category: &str) {
                     typ: category.to_string(),
                     args: vec![py_str(msg)],
                     cause: None,
+                    suppress_context: false,
+                    context: None,
+                    traceback: None,
                 });
                 items.push(warning_message_obj(ex));
                 recorded = true;

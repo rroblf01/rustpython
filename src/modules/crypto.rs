@@ -365,6 +365,9 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
                 typ: "Error".to_string(),
                 args: vec![py_str(&msg)],
                 cause: None,
+                suppress_context: false,
+                context: None,
+                traceback: None,
             }),
         )
     }

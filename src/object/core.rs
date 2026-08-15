@@ -618,6 +618,28 @@ impl PyObjectRef {
         }
     }
 
+    /// `borrow_mut()` but only for mutable (heap `Mut`) values — returns None
+    /// for immutable/inline values instead of panicking. The VM's exception
+    /// chaining/traceback code must mutate a possibly-Imm raised exception
+    /// (some internal error paths construct exceptions via `imm()`), so it
+    /// uses this and silently skips attaching state when the value can't be
+    /// mutated.
+    pub fn borrow_mut_if_mut(&self) -> Option<std::cell::RefMut<'_, PyObject>> {
+        match self {
+            PyObjectRef::Mut(rc) => match rc.try_borrow_mut() {
+                Ok(guard) => Some(guard),
+                Err(_) => {
+                    use std::io::Write;
+                    let _ = std::io::stderr()
+                        .write_all(b"RefCell CONFLICT - borrow_mut while borrowed\n");
+                    let _ = std::io::stderr().flush();
+                    panic!("RefCell already borrowed");
+                }
+            },
+            _ => None,
+        }
+    }
+
     /// Fast path: extract i64. Avoids borrow() for the inline variants —
     /// `py_int()` caches -5..=257 as boxed `PyObject::Int` rather than
     /// `SmallInt` (matching CPython's small-int cache range), so plain

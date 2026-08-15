@@ -1972,9 +1972,16 @@ impl Compiler {
                     self.compile_stmts(finalbody)?;
                     self.emit_jump(Opcode::JUMP, end_label);
                     self.fix_label(finally_label);
-                    self.emit(Opcode::PUSH_EXC_INFO, 0);
+                    // arg=1 marks a `finally`-block entry (vs arg=0 for an
+                    // `except` handler): the VM uses this to decide whether
+                    // the pushed exception joins the PEP 3134 `__context__`
+                    // stack. A finally block re-raises the SAME exception —
+                    // it must NOT become the implicit context for raises made
+                    // elsewhere; only the propagating-exception fallback in
+                    // the VM applies during a finally body.
+                    self.emit(Opcode::PUSH_EXC_INFO, 1);
                     self.compile_stmts(finalbody)?;
-                    self.emit(Opcode::POP_EXCEPT, 0);
+                    self.emit(Opcode::POP_EXCEPT, 1);
                     self.emit(Opcode::RERAISE, 0);
                     self.fix_label(end_label);
                 } else if !finalbody.is_empty() {
@@ -2121,9 +2128,9 @@ impl Compiler {
                     self.compile_stmts(finalbody)?;
                     self.emit_jump(Opcode::JUMP, end_label);
                     self.fix_label(finally_label);
-                    self.emit(Opcode::PUSH_EXC_INFO, 0);
+                    self.emit(Opcode::PUSH_EXC_INFO, 1);
                     self.compile_stmts(finalbody)?;
-                    self.emit(Opcode::POP_EXCEPT, 0);
+                    self.emit(Opcode::POP_EXCEPT, 1);
                     self.emit(Opcode::RERAISE, 0);
                     self.fix_label(end_label);
                 } else if !handlers.is_empty() || !handlers_star.is_empty() {
@@ -2378,7 +2385,15 @@ impl Compiler {
                     self.emit(Opcode::POP_TOP, 0); // discard exception_obj
                     self.emit(Opcode::RERAISE, 0);
                     self.fix_label(suppress_label);
-                    self.emit(Opcode::POP_TOP, 0); // discard exception_obj — suppressed
+                    // The exception was swallowed: POP_EXCEPT pops the
+                    // exception_obj from the value stack AND restores the
+                    // enclosing handler's active_exception and context-stack
+                    // entry, so a later bare `raise` re-raises the OUTER
+                    // exception (e.g. `except TypeError: with C(): raise K;
+                    // raise` with `C.__exit__` returning True must re-raise
+                    // TypeError). Must NOT POP_TOP first — POP_EXCEPT pops
+                    // the value itself.
+                    self.emit(Opcode::POP_EXCEPT, 0);
                     self.fix_label(end_label);
                 } else {
                     self.compile_stmts(body)?;

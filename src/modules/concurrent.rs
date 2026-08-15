@@ -33,6 +33,9 @@ pub fn create_concurrent_futures_dict() -> HashMap<String, PyObjectRef> {
                     typ: "InvalidStateError".to_string(),
                     args: vec![py_str(&msg)],
                     cause: None,
+                    suppress_context: false,
+                    context: None,
+                    traceback: None,
                 }))
             },
         }),
@@ -51,6 +54,9 @@ pub fn create_concurrent_futures_dict() -> HashMap<String, PyObjectRef> {
                     typ: "TimeoutError".to_string(),
                     args: vec![py_str(&msg)],
                     cause: None,
+                    suppress_context: false,
+                    context: None,
+                    traceback: None,
                 }))
             },
         }),

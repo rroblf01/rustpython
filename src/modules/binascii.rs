@@ -185,6 +185,9 @@ pub fn create_binascii_dict() -> HashMap<String, PyObjectRef> {
                     typ: "Error".to_string(),
                     args: vec![py_str(&msg)],
                     cause: None,
+                    suppress_context: false,
+                    context: None,
+                    traceback: None,
                 }))
             },
         }),

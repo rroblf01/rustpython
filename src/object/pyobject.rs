@@ -222,6 +222,9 @@ pub enum PyObject {
         typ: String,
         args: Vec<PyObjectRef>,
         cause: Option<PyObjectRef>,
+        suppress_context: bool,
+        context: Option<PyObjectRef>,
+        traceback: Option<PyObjectRef>,
     },
     ExceptionGroup {
         typ: String,
@@ -607,6 +610,8 @@ impl PyObject {
                 typ,
                 args,
                 cause: _,
+                suppress_context: _,
+                ..
             } => {
                 let args_str: Vec<String> = args.iter().map(|a| a.repr()).collect();
                 format!("{}({})", typ, args_str.join(", "))

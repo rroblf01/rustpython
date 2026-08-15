@@ -13,6 +13,9 @@ macro_rules! make_exception_func {
                 typ: $typ.to_string(),
                 args: args.to_vec(),
                 cause: None,
+                suppress_context: false,
+                context: None,
+                traceback: None,
             }))
         }
     };

@@ -2410,6 +2410,125 @@ pub fn create_types_dict() -> HashMap<String, PyObjectRef> {
         });
         d.insert_str("CodeType", code_type);
     }
+    // `types.TracebackType(next, frame, lasti, lineno)` — a real Type whose
+    // __init__ validates its 4 arguments and stores them on the instance
+    // (readable as tb_next/tb_frame/tb_lasti/tb_lineno via the normal
+    // Instance attribute path). Real trigger: CPython's own `test_raise.py`
+    // TestTracebackType tests, which construct and attribute-check one.
+    {
+        let mut tb_type_dict = HashMap::new();
+        tb_type_dict.insert_str(
+            "__init__",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__init__".to_string(),
+                func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                    if args.len() != 5 {
+                        return Err(PyError::type_error(format!(
+                            "TracebackType() takes 4 arguments ({} given)",
+                            args.len().saturating_sub(1)
+                        )));
+                    }
+                    let (next, frame, lasti, lineno) = (&args[1], &args[2], &args[3], &args[4]);
+                    if !matches!(&*next.borrow(), PyObject::None)
+                        && !matches!(&*next.borrow(), PyObject::Instance { .. })
+                    {
+                        return Err(PyError::type_error(
+                            "TracebackType.__init__(): tb_next must be a traceback or None",
+                        ));
+                    }
+                    if !matches!(&*frame.borrow(), PyObject::Instance { .. }) {
+                        return Err(PyError::type_error(
+                            "TracebackType.__init__(): frame must be a frame object",
+                        ));
+                    }
+                    if lasti.as_i64().is_none() {
+                        return Err(PyError::type_error(
+                            "TracebackType.__init__(): lasti must be an integer",
+                        ));
+                    }
+                    if lineno.as_i64().is_none() {
+                        return Err(PyError::type_error(
+                            "TracebackType.__init__(): lineno must be an integer",
+                        ));
+                    }
+                    if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
+                        dict.insert_str("tb_next", next.clone());
+                        dict.insert_str("tb_frame", frame.clone());
+                        dict.insert_str("tb_lasti", lasti.clone());
+                        dict.insert_str("tb_lineno", lineno.clone());
+                    }
+                    Ok(py_none())
+                },
+            }),
+        );
+        let tb_type = PyObjectRef::new(PyObject::Type {
+            name: "TracebackType".to_string(),
+            dict: Box::new(str_map_to_typedict(tb_type_dict)),
+            bases: vec![],
+            mro: vec![],
+        });
+        // CPython's traceback objects reject `del tb.tb_next` and validate
+        // `tb.tb_next = <value>` (must be a traceback or None; must not create
+        // a cycle). test_raise::TestTracebackType::test_attrs asserts all of
+        // this on real tracebacks.
+        if let PyObject::Type { dict, .. } = &mut *tb_type.borrow_mut() {
+            let mut setattr_dict: HashMap<String, PyObjectRef> = HashMap::new();
+            setattr_dict.insert_str(
+                "__setattr__",
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "__setattr__".to_string(),
+                    func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                        let name = match args.get(1) {
+                            Some(a) => match &*a.borrow() {
+                                PyObject::Str(s) => s.to_string(),
+                                _ => return Ok(py_none()),
+                            },
+                            None => return Ok(py_none()),
+                        };
+                        if name == "tb_next" {
+                            let value = args.get(2).cloned().unwrap_or_else(py_none);
+                            if !matches!(&*value.borrow(), PyObject::None) {
+                                if !matches!(&*value.borrow(), PyObject::Instance { .. }) {
+                                    return Err(PyError::type_error(
+                                        "tb_next must be a traceback or None",
+                                    ));
+                                }
+                                let self_obj = &args[0];
+                                let mut cur = value.clone();
+                                loop {
+                                    if cur.is(self_obj) {
+                                        return Err(PyError::value_error("cannot create cycles"));
+                                    }
+                                    let nxt = cur
+                                        .borrow()
+                                        .get_attribute("tb_next")
+                                        .unwrap_or_else(|_| py_none());
+                                    if matches!(&*nxt.borrow(), PyObject::None) {
+                                        break;
+                                    }
+                                    cur = nxt;
+                                }
+                            }
+                        }
+                        Ok(py_none())
+                    },
+                }),
+            );
+            setattr_dict.insert_str(
+                "__delattr__",
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "__delattr__".to_string(),
+                    func: |_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                        Err(PyError::type_error("read-only attribute"))
+                    },
+                }),
+            );
+            for (k, v) in setattr_dict {
+                dict.insert_str(&k, v);
+            }
+        }
+        d.insert_str("TracebackType", tb_type);
+    }
     d.insert_str("CellType", py_str("cell"));
     // `types.MappingProxyType(dict)` — a read-only view of a mapping. Only
     // a placeholder ("mappingproxy") string before, so `types.
@@ -2600,6 +2719,9 @@ fn struct_error(msg: impl Into<String>) -> PyError {
         typ: "error".to_string(),
         args: vec![py_str(&msg)],
         cause: None,
+        suppress_context: false,
+        context: None,
+        traceback: None,
     });
     PyError::Exception(msg, exc)
 }
@@ -3112,6 +3234,9 @@ pub fn create_struct_dict() -> HashMap<String, PyObjectRef> {
                     typ: "error".to_string(),
                     args: args.to_vec(),
                     cause: None,
+                    suppress_context: false,
+                    context: None,
+                    traceback: None,
                 }))
             },
         }),
@@ -4982,6 +5107,9 @@ fn toposorter_sorted_order(graph: &PyObjectRef) -> PyResult<Vec<PyObjectRef>> {
                 typ: "CycleError".to_string(),
                 args: vec![py_str("nodes are in a cycle"), py_list(cycle)],
                 cause: None,
+                suppress_context: false,
+                context: None,
+                traceback: None,
             }),
         ));
     }
@@ -6732,6 +6860,9 @@ fn build_unraisable_args(func: &PyObjectRef, err: &PyError) -> PyObjectRef {
         typ: exc_name.clone(),
         args: py_error_args(err),
         cause: None,
+        suppress_context: false,
+        context: None,
+        traceback: None,
     });
     let exc_type = CURRENT_SYS_MODULE.with(|m| {
         let mod_ref = m.borrow().clone()?;
@@ -7836,6 +7967,9 @@ pub fn create_locale_dict() -> HashMap<String, PyObjectRef> {
                     typ: "Error".to_string(),
                     args: vec![py_str(&msg)],
                     cause: None,
+                    suppress_context: false,
+                    context: None,
+                    traceback: None,
                 }))
             },
         }),
@@ -11246,6 +11380,9 @@ pub fn create_ssl_dict() -> HashMap<String, PyObjectRef> {
                     typ: "CertificateError".to_string(),
                     args: args.to_vec(),
                     cause: None,
+                    suppress_context: false,
+                    context: None,
+                    traceback: None,
                 }))
             },
         }),
@@ -11261,6 +11398,9 @@ pub fn create_ssl_dict() -> HashMap<String, PyObjectRef> {
                     typ: "SSLError".to_string(),
                     args: args.to_vec(),
                     cause: None,
+                    suppress_context: false,
+                    context: None,
+                    traceback: None,
                 }))
             },
         }),
@@ -11271,6 +11411,9 @@ pub fn create_ssl_dict() -> HashMap<String, PyObjectRef> {
             typ: "SSLWantReadError".to_string(),
             args: args.to_vec(),
             cause: None,
+            suppress_context: false,
+            context: None,
+            traceback: None,
         }))
     });
 
@@ -11279,6 +11422,9 @@ pub fn create_ssl_dict() -> HashMap<String, PyObjectRef> {
             typ: "SSLWantWriteError".to_string(),
             args: args.to_vec(),
             cause: None,
+            suppress_context: false,
+            context: None,
+            traceback: None,
         }))
     });
 
@@ -11287,6 +11433,9 @@ pub fn create_ssl_dict() -> HashMap<String, PyObjectRef> {
             typ: "SSLSyscallError".to_string(),
             args: args.to_vec(),
             cause: None,
+            suppress_context: false,
+            context: None,
+            traceback: None,
         }))
     });
 
@@ -11295,6 +11444,9 @@ pub fn create_ssl_dict() -> HashMap<String, PyObjectRef> {
             typ: "SSLEOFError".to_string(),
             args: args.to_vec(),
             cause: None,
+            suppress_context: false,
+            context: None,
+            traceback: None,
         }))
     });
 

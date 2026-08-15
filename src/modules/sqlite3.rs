@@ -26,6 +26,9 @@ pub fn create_sqlite3_dict() -> HashMap<String, PyObjectRef> {
                     typ: "OperationalError".to_string(),
                     args: vec![py_str(&msg)],
                     cause: None,
+                    suppress_context: false,
+                    context: None,
+                    traceback: None,
                 }))
             },
         }),

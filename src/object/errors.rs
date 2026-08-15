@@ -89,6 +89,9 @@ impl PyError {
                 typ: "SyntaxError".to_string(),
                 args: vec![py_str(&msg)],
                 cause: None,
+                suppress_context: false,
+                context: None,
+                traceback: None,
             }),
         )
     }
@@ -100,6 +103,9 @@ impl PyError {
                 typ: "MemoryError".to_string(),
                 args: vec![py_str(&msg)],
                 cause: None,
+                suppress_context: false,
+                context: None,
+                traceback: None,
             }),
         )
     }
@@ -115,6 +121,9 @@ impl PyError {
                 typ: "OverflowError".to_string(),
                 args: vec![py_str(&msg)],
                 cause: None,
+                suppress_context: false,
+                context: None,
+                traceback: None,
             }),
         )
     }
@@ -135,6 +144,9 @@ impl PyError {
                 typ: "UnboundLocalError".to_string(),
                 args: vec![py_str(&msg)],
                 cause: None,
+                suppress_context: false,
+                context: None,
+                traceback: None,
             }),
         )
     }
@@ -181,6 +193,9 @@ impl PyError {
                 typ: name.to_string(),
                 args: vec![py_str(&msg)],
                 cause: None,
+                suppress_context: false,
+                context: None,
+                traceback: None,
             }),
         )
     }
@@ -196,6 +211,9 @@ impl PyError {
                 typ: "FileNotFoundError".to_string(),
                 args: vec![py_str(&msg)],
                 cause: None,
+                suppress_context: false,
+                context: None,
+                traceback: None,
             }),
         )
     }
@@ -208,6 +226,9 @@ impl PyError {
                 typ: "ModuleNotFoundError".to_string(),
                 args: vec![py_str(&msg)],
                 cause: None,
+                suppress_context: false,
+                context: None,
+                traceback: None,
             }),
         )
     }

@@ -270,6 +270,9 @@ fn str_encode_builtin(a: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                                 py_str("ordinal not in range(256)"),
                             ],
                             cause: None,
+                            suppress_context: false,
+                            context: None,
+                            traceback: None,
                         }),
                     ));
                 }
@@ -294,6 +297,9 @@ fn str_encode_builtin(a: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                                 py_str("ordinal not in range(128)"),
                             ],
                             cause: None,
+                            suppress_context: false,
+                            context: None,
+                            traceback: None,
                         }),
                     ));
                 }
@@ -1094,7 +1100,14 @@ impl PyObject {
                     ))
                 }),
             },
-            PyObject::Exception { typ, args, cause } => {
+            PyObject::Exception {
+                typ,
+                args,
+                cause,
+                suppress_context,
+                context,
+                traceback,
+            } => {
                 match name {
                     "__name__" => Ok(py_str(typ)),
                     "args" => Ok(py_tuple(args.clone())),
@@ -1177,6 +1190,10 @@ impl PyObject {
                         Some(cause_exc) => Ok(cause_exc.clone()),
                         None => Ok(py_none()),
                     },
+                    "__context__" => match context {
+                        Some(ctx_exc) => Ok(ctx_exc.clone()),
+                        None => Ok(py_none()),
+                    },
                     // PEP 3134 implicit exception chaining/traceback
                     // attributes every real exception instance carries
                     // (defaulting to `None`/`False`) — this interpreter
@@ -1188,8 +1205,11 @@ impl PyObject {
                     // `for c in (value.__cause__, value.__context__): if c
                     // is not None: ...`) previously raised AttributeError
                     // just from the attribute not existing at all.
-                    "__context__" | "__traceback__" => Ok(py_none()),
-                    "__suppress_context__" => Ok(py_bool(false)),
+                    "__traceback__" => match traceback {
+                        Some(tb) => Ok(tb.clone()),
+                        None => Ok(py_none()),
+                    },
+                    "__suppress_context__" => Ok(py_bool(*suppress_context)),
                     "__notes__" => Ok(py_list(vec![])),
                     // `BaseException.__setstate__(state)` — inherited by
                     // every exception, used by pickle to restore extra
@@ -1232,6 +1252,12 @@ impl PyObject {
                                     "with_traceback() takes exactly one argument",
                                 ));
                             }
+                            // Store the traceback so `raise X().with_traceback(tb)`
+                            // yields `X.__traceback__` chaining tb (the RAISE
+                            // unwind prepends the current frame's own node).
+                            args[0]
+                                .borrow_mut()
+                                .set_attribute("__traceback__", args[1].clone())?;
                             Ok(args[0].clone())
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
@@ -1300,6 +1326,12 @@ impl PyObject {
                                 "with_traceback() takes exactly one argument",
                             ));
                         }
+                        // Store the traceback so `raise X().with_traceback(tb)`
+                        // yields `X.__traceback__` chaining tb (the RAISE
+                        // unwind prepends the current frame's own node).
+                        args[0]
+                            .borrow_mut()
+                            .set_attribute("__traceback__", args[1].clone())?;
                         Ok(args[0].clone())
                     },
                     self_obj: PyObjectRef::new(PyObject::None),
@@ -2491,6 +2523,9 @@ impl PyObject {
                                                         py_str("invalid start byte"),
                                                     ],
                                                     cause: None,
+                                                    suppress_context: false,
+                                                    context: None,
+                                                    traceback: None,
                                                 }),
                                             ))
                                         }
@@ -10810,8 +10845,27 @@ impl ObjectAccess for PyObject {
                     self.type_name()
                 )))
             }
-            PyObject::Exception { cause, .. } if name == "__cause__" => {
+            PyObject::Exception {
+                cause,
+                suppress_context,
+                ..
+            } if name == "__cause__" => {
                 *cause = Some(value);
+                Ok(())
+            }
+            PyObject::Exception { context, .. } if name == "__context__" => {
+                *context = Some(value);
+                Ok(())
+            }
+            PyObject::Exception { traceback, .. } if name == "__traceback__" => {
+                *traceback = Some(value);
+                Ok(())
+            }
+            PyObject::Exception {
+                suppress_context, ..
+            } if name == "__suppress_context__" => {
+                let b = value.borrow();
+                *suppress_context = matches!(&*b, PyObject::Bool(true));
                 Ok(())
             }
             PyObject::Exception { .. } | PyObject::ExceptionGroup { .. } => {

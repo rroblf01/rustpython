@@ -1746,6 +1746,9 @@ fn _codecs_lookup_error(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 typ: "LookupError".to_string(),
                 args: vec![py_str(&format!("unknown error handler: '{}'", name))],
                 cause: None,
+                suppress_context: false,
+                context: None,
+                traceback: None,
             }),
         )),
     }
@@ -4091,33 +4094,23 @@ pub fn sys_getframe_builtin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         if depth < 0 {
             return Err(PyError::value_error("call stack is not deep enough"));
         }
-        let idx = (vm.frames.len() as i64) - 1 - depth;
-        let frame = if idx >= 0 {
-            vm.frames.get(idx as usize)
+        let raw_idx = (vm.frames.len() as i64) - 1 - depth;
+        let idx = if raw_idx >= 0 {
+            raw_idx as usize
         } else {
             // Clamp to the deepest available frame (generator frames run in
             // a disposable VM with only their own frame — see the vm.rs
             // special-case's own comment).
-            vm.frames.first()
+            0
         };
-        let frame = frame.ok_or_else(|| PyError::value_error("call stack is not deep enough"))?;
-        let mut fg = crate::object::PyDict::new();
-        for (k, v) in frame.globals.borrow().iter() {
-            fg.set(py_str(crate::interner::lookup_str(*k)), v.clone())?;
+        if vm.frames.get(idx).is_none() {
+            return Err(PyError::value_error("call stack is not deep enough"));
         }
-        let mut attrs = crate::object::AttrMap::new();
-        attrs.insert_str("f_globals", PyObjectRef::new(PyObject::Dict(Box::new(fg))));
-        attrs.insert_str(
-            "f_code",
-            PyObjectRef::imm(PyObject::Code(frame.code.clone())),
-        );
-        let typ = PyObjectRef::new(PyObject::Type {
-            name: "frame".to_string(),
-            dict: Box::new(crate::object::TypeDict::default()),
-            bases: vec![],
-            mro: vec![],
-        });
-        Ok(PyObjectRef::new(PyObject::Instance { typ, dict: attrs }))
+        // Reuse the frame's cached Python `frame` object when it exists so
+        // `sys._getframe()` returns the SAME object an exception traceback
+        // captured for that live frame (`tb.tb_frame is sys._getframe()`).
+        vm.frame_object(idx)
+            .ok_or_else(|| PyError::value_error("call stack is not deep enough"))
     })?
 }
 

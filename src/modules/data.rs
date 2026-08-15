@@ -2061,6 +2061,9 @@ fn decval_from_pyobject(v: &PyObjectRef) -> PyResult<DecValue> {
                     typ: "InvalidOperation".to_string(),
                     args: vec![py_str(&format!("invalid literal for Decimal: '{}'", s))],
                     cause: None,
+                    suppress_context: false,
+                    context: None,
+                    traceback: None,
                 }),
             )
         }),
@@ -2253,6 +2256,9 @@ fn decimal_invalid_op(msg: &str) -> PyError {
             typ: "InvalidOperation".to_string(),
             args: vec![py_str(msg)],
             cause: None,
+            suppress_context: false,
+            context: None,
+            traceback: None,
         }),
     )
 }
@@ -2263,6 +2269,9 @@ fn decimal_division_by_zero(msg: &str) -> PyError {
             typ: "DivisionByZero".to_string(),
             args: vec![py_str(msg)],
             cause: None,
+            suppress_context: false,
+            context: None,
+            traceback: None,
         }),
     )
 }

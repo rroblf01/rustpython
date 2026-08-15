@@ -34,6 +34,17 @@ pub struct Frame {
     /// This is separate from the value stack so that POP_EXCEPT (which pops the
     /// exception from the value stack) does not break RERAISE in try/finally blocks.
     pub active_exception: Option<Box<PyObjectRef>>,
+    /// Previous `active_exception` values, one per nested PUSH_EXC_INFO.
+    /// POP_EXCEPT restores the last one, so a bare `raise` after an inner
+    /// handler finishes re-raises the OUTER handler's exception (CPython's
+    /// exc_info stack semantics) instead of the stale inner one.
+    pub active_exception_stack: Vec<Option<Box<PyObjectRef>>>,
+    /// Cached Python `frame` object for this frame — created lazily and
+    /// REUSED so that `sys._getframe()` and an exception traceback's
+    /// `tb_frame` for the same live frame are the SAME object
+    /// (`tb.tb_frame is sys._getframe()`, which CPython's own test_raise
+    /// asserts). Invalidate when the frame is released/reacquired.
+    pub frame_object: Option<PyObjectRef>,
     /// Inline attribute cache — caches LOAD_ATTR results per instruction offset.
     /// Cleared when the frame is created; populated on first attribute access.
     pub attr_cache: Box<Vec<Option<(u64, PyObjectRef)>>>, // (type_version_tag, cached_value)
@@ -96,6 +107,8 @@ impl Frame {
             exception_handlers: Box::new(Vec::new()),
             closure: Box::new(Vec::new()),
             active_exception: None,
+            active_exception_stack: Vec::new(),
+            frame_object: None,
             attr_cache: Box::new(vec![None; names_len]),
             global_cache: Box::new(vec![None; instr_count]),
             registers: Box::new(Vec::new()),
@@ -191,6 +204,23 @@ pub struct VirtualMachine {
     pub exc_type: Option<PyObjectRef>,
     pub exc_value: Option<PyObjectRef>,
     pub exc_traceback: Option<PyObjectRef>,
+    /// Stack of exceptions currently being handled (VM-global so it survives
+    /// function calls made from inside an except handler). Pushed by
+    /// PUSH_EXC_INFO, popped by POP_EXCEPT. A new `raise` inside a handler
+    /// chains the innermost handled exception as `__context__` (PEP 3134
+    /// implicit chaining); when empty but an exception is in flight
+    /// (e.g. `finally:` re-raising over a propagating exception), the
+    /// propagating exception chains instead.
+    ///
+    /// Each entry carries the value-stack depth at which the handled
+    /// exception was pushed: when a new exception's unwind truncates the
+    /// value stack below that depth (in `handle_exception`), the handler was
+    /// abandoned mid-body (its `POP_EXCEPT` epilogue never ran) and the entry
+    /// is dropped, so a later unrelated `raise` cannot be polluted by it.
+    pub exc_context_stack: Vec<(PyObjectRef, usize)>,
+    /// The most recently raised exception still propagating (cleared when it
+    /// is caught by a handler — PUSH_EXC_INFO resets it — or replaced).
+    pub propagating_exc: Option<PyObjectRef>,
     /// `sys.getrecursionlimit()`/`setrecursionlimit()` — consulted by
     /// `call_function`'s own `self.frames.len()` depth guard (see there for
     /// why this exists at all). Real trigger: CPython's own `test.support.
@@ -431,6 +461,8 @@ impl VirtualMachine {
                 exc_type: None,
                 exc_value: None,
                 exc_traceback: None,
+                exc_context_stack: Vec::new(),
+                propagating_exc: None,
                 recursion_limit: 1000,
             };
             vm.populate_type_registry();
@@ -1508,6 +1540,8 @@ impl VirtualMachine {
             exc_type: None,
             exc_value: None,
             exc_traceback: None,
+            exc_context_stack: Vec::new(),
+            propagating_exc: None,
             recursion_limit: 1000,
         };
         vm.populate_type_registry();
@@ -2850,6 +2884,21 @@ impl VirtualMachine {
                                 f.ip.saturating_sub(1)
                                     .min(f.code.instructions.len().saturating_sub(1));
                             let line = f.code.line_number(idx);
+                            // Prepend a real `types.TracebackType` node for this
+                            // frame onto the escaping exception's __traceback__.
+                            // Clone what's needed first: `prepend_traceback` needs
+                            // `&mut self`, which can't coexist with the `f` borrow.
+                            let (code, globals, ip, filename, name) = (
+                                f.code.clone(),
+                                f.globals.clone(),
+                                f.ip,
+                                crate::interner::lookup_str(f.code.filename).to_string(),
+                                crate::interner::lookup_str(f.code.name).to_string(),
+                            );
+                            let exc_obj = Self::error_to_exc_obj(&e);
+                            let frame_idx = frame_floor;
+                            drop(f);
+                            self.prepend_traceback(&exc_obj, frame_idx);
                             // Each enclosing level re-runs this same branch as
                             // the error keeps propagating outward — only the
                             // FIRST (innermost, deepest) occurrence should set
@@ -2861,17 +2910,9 @@ impl VirtualMachine {
                             // on this first, innermost pass.
                             if self.last_traceback.is_empty() {
                                 self.last_error_line = Some(line);
-                                self.last_error_file =
-                                    Some(crate::interner::lookup_str(f.code.filename).to_string());
+                                self.last_error_file = Some(filename.clone());
                             }
-                            self.last_traceback.insert(
-                                0,
-                                (
-                                    crate::interner::lookup_str(f.code.filename).to_string(),
-                                    line,
-                                    crate::interner::lookup_str(f.code.name).to_string(),
-                                ),
-                            );
+                            self.last_traceback.insert(0, (filename, line, name));
                         }
                         return Err(e);
                     } else {
@@ -2879,6 +2920,15 @@ impl VirtualMachine {
                         // entries accumulated so far (from inner frames that didn't
                         // handle it) no longer describe a real escaping error.
                         self.last_traceback.clear();
+                        // The catching frame itself is also a node in the real
+                        // __traceback__ chain (CPython: `except Exception as e:`
+                        // yields e.__traceback__ starting at this frame).
+                        if let Some(f) = self.frames.get(frame_floor) {
+                            let exc_obj = Self::error_to_exc_obj(&e);
+                            let frame_idx = frame_floor;
+                            drop(f);
+                            self.prepend_traceback(&exc_obj, frame_idx);
+                        }
                     }
                     if std::env::var("RPY_DEBUG_EXC").is_ok() {
                         eprintln!(
@@ -6092,7 +6142,40 @@ impl VirtualMachine {
                 // stays on the value stack for DUP_TOP/CHECK_EXC_MATCH below).
                 // This provides a stable source for RERAISE even after POP_EXCEPT
                 // pops the exception from the value stack (as in try/finally).
-                if let Ok(exc) = self.frames[fi].peek(0) {
+                // arg=1: a `finally`-block entry — the pushed exception is
+                // merely being re-raised, it does NOT become the implicit
+                // __context__ for later raises (the VM's propagating-exception
+                // fallback covers a raise made inside a finally body). It
+                // also does NOT push onto `active_exception_stack`: the
+                // following RERAISE consumes active_exception directly, and a
+                // POP_EXCEPT(arg=1) restore would empty it before then.
+                if arg != 1 {
+                    let frame = &mut self.frames[fi];
+                    frame
+                        .active_exception_stack
+                        .push(frame.active_exception.take());
+                    if let Ok(exc) = frame.peek(0) {
+                        frame.active_exception = Some(Box::new(exc));
+                    }
+                    // Track the handled exception for PEP 3134 implicit
+                    // __context__ chaining. VM-global so calls made from within
+                    // the handler see it too; the exception is now "handled"
+                    // (no longer propagating). The value-stack depth lets
+                    // `handle_exception`'s unwind drop entries whose handler
+                    // was abandoned mid-body.
+                    if let Ok(exc) = self.frames[fi].peek(0) {
+                        let value_depth = self.frames[fi].stack.len() - 1;
+                        if std::env::var("RPY_DEBUG_CTX").is_ok() {
+                            eprintln!(
+                                "PUSH_EXC: {} (stack now {})",
+                                exc.borrow().repr(),
+                                self.exc_context_stack.len() + 1
+                            );
+                        }
+                        self.exc_context_stack.push((exc, value_depth));
+                        self.propagating_exc = None;
+                    }
+                } else if let Ok(exc) = self.frames[fi].peek(0) {
                     self.frames[fi].active_exception = Some(Box::new(exc));
                 }
             }
@@ -6115,6 +6198,24 @@ impl VirtualMachine {
                 // STORE_NAME/STORE_FAST (handler with 'as e'), or it may
                 // still be on the stack (handler without 'as e').
                 self.frames[fi].stack.pop();
+                // Handler finished — the handled exception is no longer the
+                // active context for any later raise. (arg=1 marks the
+                // finally-block counterpart of PUSH_EXC_INFO arg=1, which
+                // never pushed onto the context stack in the first place.)
+                if arg != 1 {
+                    if std::env::var("RPY_DEBUG_CTX").is_ok() {
+                        eprintln!("POP_EXC: (stack was {})", self.exc_context_stack.len());
+                    }
+                    self.exc_context_stack.pop();
+                    // Restore the previous active_exception (exc_info stack
+                    // semantics): after an inner handler ends, a bare `raise`
+                    // re-raises the OUTER handler's exception. Deliberately
+                    // skipped for arg=1 (finally): its RERAISE still needs
+                    // the exception in active_exception.
+                    if let Some(prev) = self.frames[fi].active_exception_stack.pop() {
+                        self.frames[fi].active_exception = prev;
+                    }
+                }
             }
 
             Opcode::GET_AITER => {
@@ -6297,21 +6398,24 @@ impl VirtualMachine {
                 // RERAISE in try/finally blocks.
                 let reraise_exc = if let Some(exc) = self.frames[fi].active_exception.take() {
                     *exc
+                } else if let Ok(exc) = self.frames[fi].pop() {
+                    exc
+                } else if let Some((exc, _)) = self.exc_context_stack.last().cloned() {
+                    // Bare re-raise in a callee frame of an except handler
+                    // (`def f(): raise`; `except E: f()`): the handler's
+                    // active_exception lives in the CALLER's frame, but the
+                    // VM-global context stack still holds it.
+                    exc
                 } else {
-                    match self.frames[fi].pop() {
-                        Ok(exc) => exc,
-                        Err(_) => {
-                            if std::env::var("RPY_DEBUG_RERAISE").is_ok() {
-                                eprintln!(
-                                    "RERAISE FAIL: func={} file={} stack_len={}",
-                                    self.frames[fi].code.name,
-                                    self.frames[fi].code.filename,
-                                    self.frames[fi].stack.len()
-                                );
-                            }
-                            return Err(PyError::runtime_error("No active exception to re-raise"));
-                        }
+                    if std::env::var("RPY_DEBUG_RERAISE").is_ok() {
+                        eprintln!(
+                            "RERAISE FAIL: func={} file={} stack_len={}",
+                            self.frames[fi].code.name,
+                            self.frames[fi].code.filename,
+                            self.frames[fi].stack.len()
+                        );
                     }
+                    return Err(PyError::runtime_error("No active exception to re-raise"));
                 };
                 // Check if it's an empty ExceptionGroup (all exceptions were handled)
                 let is_empty_eg = match &*reraise_exc.borrow() {
@@ -6352,8 +6456,12 @@ impl VirtualMachine {
                         let reraise_exc = if let Some(exc) = self.frames[fi].active_exception.take()
                         {
                             Some(*exc)
+                        } else if let Some(exc) = self.frames[fi].stack.pop() {
+                            Some(exc)
                         } else {
-                            self.frames[fi].stack.pop()
+                            // Bare raise in a callee frame of an except
+                            // handler — fall back to the VM-global context.
+                            self.exc_context_stack.last().map(|(e, _)| e.clone())
                         };
                         match reraise_exc {
                             Some(exc) => {
@@ -6382,11 +6490,15 @@ impl VirtualMachine {
                             let exc_clone = exc.clone();
                             match self.call_function(exc_clone, vec![], vec![]) {
                                 Ok(instance) => instance,
-                                Err(_) => {
-                                    return Err(PyError::type_error(
-                                        "exceptions must derive from BaseException",
-                                    ))
-                                }
+                                // Propagate genuine constructor errors
+                                // (`class MyError(Exception): def __init__
+                                // (self): raise RuntimeError()` — CPython
+                                // propagates the RuntimeError, it doesn't
+                                // become "must derive from BaseException").
+                                // Non-callables (e.g. a bare string) fail in
+                                // call_function with their own TypeError,
+                                // which is still a TypeError.
+                                Err(e) => return Err(e),
                             }
                         } else {
                             exc
@@ -6497,11 +6609,113 @@ impl VirtualMachine {
                                 self.exc_value.as_ref().unwrap().repr()
                             );
                         }
+                        self.capture_exception_context(&exc);
                         return Err(PyError::Exception(msg, exc));
                     }
                     2 => {
                         let cause = self.frames[fi].pop()?;
                         let exc = self.frames[fi].pop()?;
+                        // Same class-instantiation as the nargs=1 arm:
+                        // `raise ValueError from None` puts the exception
+                        // *class* on the stack, which must be called to
+                        // produce the instance before we can attach a cause.
+                        // `cause` is also a class in `raise X from SomeClass`
+                        // and must be instantiated the same way (CPython calls
+                        // `SomeClass()` here — a `__new__` returning a
+                        // non-BaseException triggers the type-construct
+                        // validation added in `call_function`).
+                        let exc = {
+                            let is_callable = !matches!(
+                                &*exc.borrow(),
+                                PyObject::Exception { .. }
+                                    | PyObject::ExceptionGroup { .. }
+                                    | PyObject::Instance { .. }
+                            );
+                            if is_callable {
+                                let exc_clone = exc.clone();
+                                match self.call_function(exc_clone, vec![], vec![]) {
+                                    Ok(instance) => instance,
+                                    Err(e) => return Err(e),
+                                }
+                            } else {
+                                exc
+                            }
+                        };
+                        let cause_is_none = matches!(&*cause.borrow(), PyObject::None);
+                        // Validate the cause BEFORE instantiating: `raise X
+                        // from 5` must yield "exception causes must derive
+                        // from BaseException" (a plain non-exception value),
+                        // not "'int' object is not callable" from the
+                        // instantiation attempt below.
+                        if !cause_is_none {
+                            let cause_kind = match &*cause.borrow() {
+                                PyObject::Exception { .. } | PyObject::ExceptionGroup { .. } => {
+                                    "exc"
+                                }
+                                PyObject::Instance { typ, .. } => {
+                                    if crate::object::find_exception_base_name(typ).is_some() {
+                                        "exc"
+                                    } else {
+                                        "bad"
+                                    }
+                                }
+                                PyObject::Type { .. } => "class",
+                                PyObject::BuiltinFunction { name, .. } => {
+                                    // Builtin exception classes (KeyError,
+                                    // ValueError, ...) are BuiltinFunctions.
+                                    if crate::vm::is_exception_subclass(name, "BaseException") {
+                                        "class"
+                                    } else {
+                                        "bad"
+                                    }
+                                }
+                                _ => "bad",
+                            };
+                            if cause_kind == "bad" {
+                                return Err(PyError::type_error(
+                                    "exception causes must derive from BaseException",
+                                ));
+                            }
+                        }
+                        let cause = if cause_is_none {
+                            cause
+                        } else {
+                            let is_callable = !matches!(
+                                &*cause.borrow(),
+                                PyObject::Exception { .. }
+                                    | PyObject::ExceptionGroup { .. }
+                                    | PyObject::Instance { .. }
+                            );
+                            if is_callable {
+                                let cause_clone = cause.clone();
+                                match self.call_function(cause_clone, vec![], vec![]) {
+                                    Ok(instance) => instance,
+                                    Err(e) => return Err(e),
+                                }
+                            } else {
+                                cause
+                            }
+                        };
+                        // Validate the cause is None or a BaseException
+                        // (CPython: "exception causes must derive from
+                        // BaseException" — `raise X from 5` must not reach
+                        // the __cause__ assignment with a raw int).
+                        if !cause_is_none {
+                            let is_exc = match &*cause.borrow() {
+                                PyObject::Exception { .. } | PyObject::ExceptionGroup { .. } => {
+                                    true
+                                }
+                                PyObject::Instance { typ, .. } => {
+                                    crate::object::find_exception_base_name(typ).is_some()
+                                }
+                                _ => false,
+                            };
+                            if !is_exc {
+                                return Err(PyError::type_error(
+                                    "exception causes must derive from BaseException",
+                                ));
+                            }
+                        }
                         let exc_msg = match &*exc.borrow() {
                             PyObject::Exception { args, .. } => {
                                 if !args.is_empty() {
@@ -6520,6 +6734,7 @@ impl VirtualMachine {
                                     cause.str()
                                 }
                             }
+                            _ if cause_is_none => String::new(),
                             _ => cause.str(),
                         };
                         // Set __cause__ on the exception object. The native
@@ -6539,19 +6754,32 @@ impl VirtualMachine {
                         match &mut *exc.borrow_mut() {
                             PyObject::Exception {
                                 cause: ref mut cause_field,
+                                suppress_context: ref mut suppress_field,
                                 ..
                             } => {
-                                *cause_field = Some(cause.clone());
+                                // `from None` suppresses implicit chaining
+                                // (PEP 3134): cause stays None and
+                                // __suppress_context__ becomes True.
+                                let is_none = matches!(&*cause.borrow(), PyObject::None);
+                                *cause_field = if cause_is_none {
+                                    None
+                                } else {
+                                    Some(cause.clone())
+                                };
+                                *suppress_field = cause_is_none;
                             }
                             PyObject::Instance { dict, .. } => {
                                 dict.insert_str("__cause__", cause.clone());
                             }
                             _ => {}
                         }
-                        return Err(PyError::Exception(
-                            format!("{} (caused by: {})", exc_msg, cause_msg),
-                            exc,
-                        ));
+                        let err_msg = if cause_msg.is_empty() {
+                            exc_msg
+                        } else {
+                            format!("{} (caused by: {})", exc_msg, cause_msg)
+                        };
+                        self.capture_exception_context(&exc);
+                        return Err(PyError::Exception(err_msg, exc));
                     }
                     _ => return Err(PyError::runtime_error("invalid RAISE_VARARGS count")),
                 }
@@ -7852,23 +8080,20 @@ impl VirtualMachine {
                 };
                 let frame =
                     frame.ok_or_else(|| PyError::value_error("call stack is not deep enough"))?;
-                let mut fg = crate::object::PyDict::new();
-                for (k, v) in frame.globals.borrow().iter() {
-                    fg.set(py_str(interner::lookup_str(*k)), v.clone())?;
+                // Return the frame's CACHED Python `frame` object (created
+                // once, reused) so `sys._getframe()` returns the same object
+                // an exception traceback captured as `tb_frame` for this live
+                // frame (`tb.tb_frame is sys._getframe()` — CPython's own
+                // test_raise asserts exactly this identity).
+                let eff_idx = if idx >= 0 { idx as usize } else { 0 };
+                if self.frames.get(eff_idx).is_none() {
+                    return Err(PyError::value_error("call stack is not deep enough"));
                 }
-                let mut attrs = crate::object::AttrMap::new();
-                attrs.insert_str("f_globals", PyObjectRef::new(PyObject::Dict(Box::new(fg))));
-                attrs.insert_str(
-                    "f_code",
-                    PyObjectRef::imm(PyObject::Code(frame.code.clone())),
-                );
-                let typ = PyObjectRef::new(PyObject::Type {
-                    name: "frame".to_string(),
-                    dict: Box::new(crate::object::TypeDict::default()),
-                    bases: vec![],
-                    mro: vec![],
-                });
-                return Ok(PyObjectRef::new(PyObject::Instance { typ, dict: attrs }));
+                drop(frame);
+                if let Some(fo) = self.frame_object(eff_idx) {
+                    return Ok(fo);
+                }
+                return Err(PyError::value_error("call stack is not deep enough"));
             }
         }
 
@@ -9007,8 +9232,29 @@ impl VirtualMachine {
                 let mut new_args = args.clone();
                 new_args.insert(0, callable.clone());
                 let result = self.call_function(new_fn, new_args, keywords)?;
-                // The __new__ result is the instance (unless it's an
-                // incompatible type — CPython then returns it raw).
+                // A user exception class whose `__new__` returns a
+                // non-BaseException must raise TypeError (CPython: "calling
+                // <class '...'> should have returned an instance of
+                // BaseException, not <class 'list'>"). Without the check the
+                // raw non-exception value would be raised/propagated and
+                // escape every `except BaseException`.
+                if crate::object::find_exception_base_name(&callable).is_some() {
+                    let is_exc = match &*result.borrow() {
+                        PyObject::Exception { .. } | PyObject::ExceptionGroup { .. } => true,
+                        PyObject::Instance { typ, .. } => {
+                            crate::object::find_exception_base_name(typ).is_some()
+                        }
+                        _ => false,
+                    };
+                    if !is_exc {
+                        let result_typ = result.borrow().type_name();
+                        return Err(PyError::type_error(format!(
+                            "calling {} should have returned an instance of BaseException, not <class '{}'>",
+                            callable.repr(),
+                            result_typ
+                        )));
+                    }
+                }
                 return Ok(result);
             }
             let mut instance_dict = AttrMap::new();
@@ -9482,6 +9728,9 @@ impl VirtualMachine {
             typ: typ.to_string(),
             args: vec![py_str(&error.message())],
             cause: None,
+            suppress_context: false,
+            context: None,
+            traceback: None,
         })
     }
 
@@ -9512,6 +9761,196 @@ impl VirtualMachine {
             bases: vec![],
             mro: vec![],
         })
+    }
+
+    /// PEP 3134 implicit exception chaining: when a NEW exception is raised
+    /// while another is being handled (an `except` handler is on
+    /// `exc_context_stack`) or still propagating (finally-over-failure), the
+    /// new exception's `__context__` points at it. Called from RAISE_VARARGS
+    /// before the exception propagates; also records the new exception as the
+    /// currently-propagating one.
+    fn capture_exception_context(&mut self, exc: &PyObjectRef) {
+        let ctx = self
+            .exc_context_stack
+            .last()
+            .map(|(e, _)| e.clone())
+            .or_else(|| self.propagating_exc.clone());
+        if std::env::var("RPY_DEBUG_CTX").is_ok() {
+            eprintln!(
+                "CTX: exc={} stacklen={} ctx={:?}",
+                exc.borrow().repr(),
+                self.exc_context_stack.len(),
+                ctx.as_ref().map(|c| c.borrow().repr())
+            );
+        }
+        if let Some(ctx_exc) = ctx {
+            // `raise e` re-raising the SAME object that is being handled does
+            // not re-chain it as its own context (CPython checks
+            // `exc_context != exc`). Without this, `except ZDE as e: raise e`
+            // made `e.__context__ is e`.
+            if !ctx_exc.is(exc) {
+                // Some internal error paths construct exceptions as `imm()`
+                // (immutable) — those can't be mutated; skip chaining.
+                let mut borrow_guard = match exc.borrow_mut_if_mut() {
+                    Some(g) => g,
+                    None => {
+                        self.propagating_exc = Some(exc.clone());
+                        return;
+                    }
+                };
+                let borrowed = &mut *borrow_guard;
+                match borrowed {
+                    PyObject::Exception {
+                        context: ref mut ctx_field,
+                        ..
+                    } => {
+                        *ctx_field = Some(ctx_exc.clone());
+                    }
+                    PyObject::Instance { dict, .. } => {
+                        dict.insert_str("__context__", ctx_exc.clone());
+                    }
+                    _ => {}
+                }
+                drop(borrow_guard);
+                // Break chaining cycles, exactly as CPython does
+                // (`if (exc_context->context == exc) exc_context->context =
+                // NULL`): `except A: try: raise B except B: raise a` would
+                // otherwise leave a↔b circular (a.__context__=b,
+                // b.__context__=a), which CPython's own
+                // `test_raise::test_reraise_cycle_broken` asserts is broken.
+                let mut ctx_guard = match ctx_exc.borrow_mut_if_mut() {
+                    Some(g) => g,
+                    None => {
+                        self.propagating_exc = Some(exc.clone());
+                        return;
+                    }
+                };
+                match &mut *ctx_guard {
+                    PyObject::Exception {
+                        context: ref mut ctx_field,
+                        ..
+                    } => {
+                        if let Some(c) = ctx_field {
+                            if c.is(exc) {
+                                *ctx_field = None;
+                            }
+                        }
+                    }
+                    PyObject::Instance { dict, .. } => {
+                        if let Some(c) = dict.get_str("__context__") {
+                            if c.is(exc) {
+                                dict.insert_str("__context__", crate::object::py_none());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        self.propagating_exc = Some(exc.clone());
+    }
+
+    /// The Python `frame` object for live frame `idx`, created once and
+    /// cached on the Frame so `sys._getframe()` and a traceback's `tb_frame`
+    /// return the SAME object (CPython asserts this identity in test_raise).
+    pub(crate) fn frame_object(&mut self, idx: usize) -> Option<PyObjectRef> {
+        let frame = self.frames.get(idx)?;
+        if let Some(fo) = &frame.frame_object {
+            if std::env::var("RPY_DEBUG_FRAME_OBJ").is_ok() {
+                eprintln!("FRAME_OBJ reuse idx={} frames={}", idx, self.frames.len());
+            }
+            return Some(fo.clone());
+        }
+        if std::env::var("RPY_DEBUG_FRAME_OBJ").is_ok() {
+            eprintln!(
+                "FRAME_OBJ create idx={} frames={} code={}",
+                idx,
+                self.frames.len(),
+                self.frames[idx].code.name
+            );
+        }
+        let code = frame.code.clone();
+        let globals = frame.globals.clone();
+        let mut fg = PyDict::new();
+        for (k, v) in globals.borrow().iter() {
+            let _ = fg.set(py_str(crate::interner::lookup_str(*k)), v.clone());
+        }
+        let mut attrs = AttrMap::new();
+        attrs.insert_str("f_globals", PyObjectRef::new(PyObject::Dict(Box::new(fg))));
+        attrs.insert_str("f_code", PyObjectRef::imm(PyObject::Code(code)));
+        let frame_obj = PyObjectRef::new(PyObject::Instance {
+            typ: PyObjectRef::new(PyObject::Type {
+                name: "frame".to_string(),
+                dict: Box::new(TypeDict::default()),
+                bases: vec![],
+                mro: vec![],
+            }),
+            dict: attrs,
+        });
+        if let Some(f) = self.frames.get_mut(idx) {
+            f.frame_object = Some(frame_obj.clone());
+        }
+        Some(frame_obj)
+    }
+
+    /// Build a `types.TracebackType` node for live frame `frame_idx` (a real
+    /// frame object — the cached one, so `tb_frame is sys._getframe()` holds —
+    /// plus lasti/lineno), for use as that frame's entry in a raised
+    /// exception's `__traceback__` chain.
+    fn make_traceback_node(&mut self, frame_idx: usize) -> Option<PyObjectRef> {
+        let (line, lasti) = {
+            let frame = self.frames.get(frame_idx)?;
+            let idx = frame
+                .ip
+                .saturating_sub(1)
+                .min(frame.code.instructions.len().saturating_sub(1));
+            (frame.code.line_number(idx) as i64, idx as i64)
+        };
+        let frame_obj = self.frame_object(frame_idx)?;
+        let tb_type = self
+            .modules
+            .get("types")
+            .and_then(|t| t.borrow().get_attribute("TracebackType").ok())?;
+        self.call_function(
+            tb_type,
+            vec![py_none(), frame_obj, py_int(lasti), py_int(line)],
+            vec![],
+        )
+        .ok()
+    }
+
+    /// Prepend the current frame's traceback node to `exc`'s `__traceback__`
+    /// chain (CPython builds the chain outermost-first, prepending a node per
+    /// frame the exception unwinds through). Called on every frame an
+    /// exception passes through, including the frame that finally catches it.
+    fn prepend_traceback(&mut self, exc: &PyObjectRef, frame_idx: usize) {
+        let Some(new_node) = self.make_traceback_node(frame_idx) else {
+            return;
+        };
+        let old_tb = match &*exc.borrow() {
+            PyObject::Exception {
+                traceback: Some(tb),
+                ..
+            } => Some(tb.clone()),
+            PyObject::Instance { dict, .. } => dict.get_str("__traceback__").cloned(),
+            _ => None,
+        };
+        if let Some(old) = old_tb {
+            let _ = new_node.borrow_mut().set_attribute("tb_next", old);
+        }
+        let mut guard = match exc.borrow_mut_if_mut() {
+            Some(g) => g,
+            None => return,
+        };
+        match &mut *guard {
+            PyObject::Exception { traceback, .. } => {
+                *traceback = Some(new_node);
+            }
+            PyObject::Instance { dict, .. } => {
+                dict.insert_str("__traceback__", new_node);
+            }
+            _ => {}
+        }
     }
 
     /// The real exception OBJECT a `PyError` represents — shared by
@@ -9557,6 +9996,9 @@ impl VirtualMachine {
                     typ: "StopIteration".to_string(),
                     args: vec![exc.clone()],
                     cause: None,
+                    suppress_context: false,
+                    context: None,
+                    traceback: None,
                 })
             }
             PyError::Exception(_, exc) => exc.clone(),
@@ -9592,12 +10034,34 @@ impl VirtualMachine {
         // exception here — frames below `frame_floor` belong to an outer,
         // suspended execute() call and must never be touched from inside a
         // nested one (see the comment on `execute()` for why).
+        // The exception object being unwound. Capture its implicit
+        // __context__ BEFORE any handler's context-stack truncation below:
+        // the stack still holds the handlers this exception is being raised
+        // inside (e.g. `except ValueError: 1/0` — the ZeroDivisionError from
+        // the division builtin chains ValueError even though no `raise`
+        // statement produced it). Done before the loop because it borrows all
+        // of `&mut self` (method call), which cannot coexist with the
+        // per-frame mutable borrow in the loop.
+        let exc_obj = Self::error_to_exc_obj(error);
+        self.capture_exception_context(&exc_obj);
         for frame in self.frames[frame_floor..].iter_mut().rev() {
             while let Some(handler) = frame.exception_handlers.pop() {
                 // For any handler (Except or Finally), restore stack and transfer control
                 frame.stack.truncate(handler.stack_depth);
+                // Drop context-stack entries whose handled exception's value
+                // was above this truncation point: their handler bodies were
+                // abandoned mid-execution by the exception now unwinding (its
+                // POP_EXCEPT epilogue never ran), so they must not linger and
+                // pollute a later unrelated raise's __context__.
+                self.exc_context_stack
+                    .retain(|(_, depth)| *depth < handler.stack_depth);
                 frame.ip = handler.instr_addr;
-                let exc_obj = Self::error_to_exc_obj(error);
+                // The unwinding exception is now "in flight" — a `raise X`
+                // inside a `finally:` body chains it as __context__ (except
+                // handlers' PUSH_EXC_INFO immediately replaces this with the
+                // handled-exception stack entry, which is the CPython
+                // semantics: the handled exception becomes the context).
+                self.propagating_exc = Some(exc_obj.clone());
                 frame.push(exc_obj);
                 // For Finally handlers, we always execute them.
                 // For Except handlers, we also execute them — the code at the
@@ -9608,6 +10072,17 @@ impl VirtualMachine {
                 // finishes, there's no RERAISE — the exception was handled.
                 return true;
             }
+        }
+        // No handler in this execute()'s own frames. The exception keeps
+        // propagating as Err to the Rust caller (an enclosing execute() may
+        // still catch it — e.g. an exception raised inside a function called
+        // from a handler, `def f(): raise; except E: f()`). Only when this is
+        // the OUTERMOST execute call (frame_floor == 0) and nothing caught
+        // it is it truly uncaught, and only then is the propagating/context
+        // state reset so nothing stale chains into the NEXT raise.
+        if frame_floor == 0 {
+            self.exc_context_stack.clear();
+            self.propagating_exc = None;
         }
         false
     }
