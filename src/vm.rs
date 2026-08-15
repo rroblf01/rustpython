@@ -3946,6 +3946,56 @@ impl VirtualMachine {
                 // even though `d + 'bcd'` raises TypeError). Handle the
                 // in-place forms directly here.
                 if in_place {
+                    let is_list = matches!(&*left.borrow(), PyObject::List(_));
+                    if is_list {
+                        match op {
+                            // `l += iterable` — extend in place (CPython's
+                            // list.__iadd__); `u2 = u; u += [2,3]` must keep
+                            // `u is u2` (test_list::test_iadd).
+                            0 => {
+                                let it = crate::object::builtin_iter(&[right])?;
+                                let mut items = Vec::new();
+                                loop {
+                                    match crate::object::builtin_next(&[it.clone()]) {
+                                        Ok(v) => items.push(v),
+                                        Err(crate::object::PyError::StopIteration) => break,
+                                        Err(e) => return Err(e),
+                                    }
+                                }
+                                if let PyObject::List(list) = &mut *left.borrow_mut() {
+                                    list.extend(items);
+                                }
+                                self.frames[fi].push(left);
+                                return Ok(None);
+                            }
+                            // `l *= n` — repeat in place (list.__imul__).
+                            2 => {
+                                let n = right.as_i64().unwrap_or(0).max(0) as usize;
+                                if let PyObject::List(list) = &mut *left.borrow_mut() {
+                                    let items: Vec<crate::object::PyObjectRef> = list.clone();
+                                    // Fail fast on overflow like list_resize
+                                    // (`[0] *= sys.maxsize` -> MemoryError).
+                                    let mut reserve: Vec<crate::object::PyObjectRef> = Vec::new();
+                                    match items.len().checked_mul(n) {
+                                        Some(total) if reserve.try_reserve_exact(total).is_ok() => {
+                                            list.clear();
+                                            for _ in 0..n {
+                                                list.extend(items.clone());
+                                            }
+                                        }
+                                        _ => {
+                                            return Err(PyError::memory_error(
+                                                "could not allocate list",
+                                            ))
+                                        }
+                                    }
+                                }
+                                self.frames[fi].push(left);
+                                return Ok(None);
+                            }
+                            _ => {}
+                        }
+                    }
                     let is_deque = matches!(&*left.borrow(), PyObject::Deque { .. });
                     if is_deque {
                         match op {

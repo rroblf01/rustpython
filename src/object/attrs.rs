@@ -1516,6 +1516,58 @@ impl PyObject {
             },
             PyObject::List(_v) => {
                 match name {
+                    "__iadd__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__iadd__".to_string(),
+                        func: |args| {
+                            if args.len() != 2 {
+                                return Err(PyError::type_error(format!(
+                                    "__iadd__() takes exactly one argument ({} given)",
+                                    args.len() - 1
+                                )));
+                            }
+                            // Extend in place and return self (CPython's
+                            // list.__iadd__). Direct `l.__iadd__(non_iterable)`
+                            // must TypeError.
+                            let it = crate::object::builtin_iter(&[args[1].clone()])?;
+                            let mut items = Vec::new();
+                            loop {
+                                match crate::object::builtin_next(&[it.clone()]) {
+                                    Ok(v) => items.push(v),
+                                    Err(crate::object::PyError::StopIteration) => break,
+                                    Err(e) => return Err(e),
+                                }
+                            }
+                            if let PyObject::List(list) = &mut *args[0].borrow_mut() {
+                                list.extend(items);
+                            }
+                            Ok(args[0].clone())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__imul__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__imul__".to_string(),
+                        func: |args| {
+                            if args.len() != 2 {
+                                return Err(PyError::type_error(format!(
+                                    "__imul__() takes exactly one argument ({} given)",
+                                    args.len() - 1
+                                )));
+                            }
+                            let n = args[1]
+                                .as_i64()
+                                .ok_or_else(|| PyError::type_error("an integer is required"))?
+                                .max(0) as usize;
+                            if let PyObject::List(list) = &mut *args[0].borrow_mut() {
+                                let items: Vec<PyObjectRef> = list.clone();
+                                list.clear();
+                                for _ in 0..n {
+                                    list.extend(items.clone());
+                                }
+                            }
+                            Ok(args[0].clone())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     "append" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "append".to_string(),
                         func: |args| {
@@ -1536,6 +1588,12 @@ impl PyObject {
                     "pop" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "pop".to_string(),
                         func: |args| {
+                            if args.len() > 2 {
+                                return Err(PyError::type_error(format!(
+                                    "pop() takes at most one argument ({} given)",
+                                    args.len() - 1
+                                )));
+                            }
                             if let PyObject::List(list) = &mut *args[0].borrow_mut() {
                                 if args.len() > 1 {
                                     let idx = args[1].as_i64().ok_or_else(|| {
@@ -1548,9 +1606,8 @@ impl PyObject {
                                     }
                                     Ok(list.remove(idx as usize))
                                 } else {
-                                    list.pop().ok_or_else(|| {
-                                        PyError::runtime_error("pop from empty list")
-                                    })
+                                    list.pop()
+                                        .ok_or_else(|| PyError::index_error("pop from empty list"))
                                 }
                             } else {
                                 Err(PyError::runtime_error("pop on non-list"))
@@ -1598,6 +1655,12 @@ impl PyObject {
                     "clear" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "clear".to_string(),
                         func: |args| {
+                            if args.len() != 1 {
+                                return Err(PyError::type_error(format!(
+                                    "clear() takes no arguments ({} given)",
+                                    args.len() - 1
+                                )));
+                            }
                             if let PyObject::List(list) = &mut *args[0].borrow_mut() {
                                 list.clear();
                                 Ok(py_none())
@@ -1610,6 +1673,12 @@ impl PyObject {
                     "reverse" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "reverse".to_string(),
                         func: |args| {
+                            if args.len() != 1 {
+                                return Err(PyError::type_error(format!(
+                                    "reverse() takes no arguments ({} given)",
+                                    args.len() - 1
+                                )));
+                            }
                             if let PyObject::List(list) = &mut *args[0].borrow_mut() {
                                 list.reverse();
                                 Ok(py_none())
@@ -1622,25 +1691,30 @@ impl PyObject {
                     "remove" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "remove".to_string(),
                         func: |args| {
-                            if args.len() < 2 {
-                                return Err(PyError::type_error(
-                                    "remove() takes exactly one argument",
-                                ));
+                            if args.len() != 2 {
+                                return Err(PyError::type_error(format!(
+                                    "remove() takes exactly one argument ({} given)",
+                                    args.len() - 1
+                                )));
                             }
                             let items = if let PyObject::List(list) = &*args[0].borrow() {
                                 list.clone()
                             } else {
                                 return Err(PyError::runtime_error("remove on non-list"));
                             };
-                            let pos = items
-                                .iter()
-                                .position(|item| item.equals(&args[1]).unwrap_or(false))
-                                .ok_or_else(|| {
-                                    PyError::value_error(format!(
-                                        "{} is not in list",
-                                        args[1].str()
-                                    ))
-                                })?;
+                            // Propagate a raising __eq__ (test_remove's
+                            // BadCmp/BadCmp2), don't swallow it like the old
+                            // `.unwrap_or(false)` did.
+                            let mut pos: Option<usize> = None;
+                            for (i, item) in items.iter().enumerate() {
+                                if item.is(&args[1]) || item.equals(&args[1])? {
+                                    pos = Some(i);
+                                    break;
+                                }
+                            }
+                            let pos = pos.ok_or_else(|| {
+                                PyError::value_error(format!("{} is not in list", args[1].str()))
+                            })?;
                             if let PyObject::List(list) = &mut *args[0].borrow_mut() {
                                 list.remove(pos);
                                 Ok(py_none())
@@ -1706,23 +1780,26 @@ impl PyObject {
                     "count" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "count".to_string(),
                         func: |args| {
-                            if args.len() < 2 {
-                                return Err(PyError::type_error(
-                                    "count() takes at least 1 argument",
-                                ));
+                            if args.len() != 2 {
+                                return Err(PyError::type_error(format!(
+                                    "count() takes exactly one argument ({} given)",
+                                    args.len() - 1
+                                )));
                             }
                             let items = if let PyObject::List(list) = &*args[0].borrow() {
                                 list.clone()
                             } else {
                                 return Err(PyError::runtime_error("count on non-list"));
                             };
-                            let c = items
-                                .iter()
-                                .filter(|item| {
-                                    item.is(&args[1]) || item.equals(&args[1]).unwrap_or(false)
-                                })
-                                .count();
-                            Ok(py_int(c as i64))
+                            // Propagate a raising __eq__ (test_count's BadExc),
+                            // don't swallow it like `.unwrap_or(false)` did.
+                            let mut c = 0i64;
+                            for item in &items {
+                                if item.is(&args[1]) || item.equals(&args[1])? {
+                                    c += 1;
+                                }
+                            }
+                            Ok(py_int(c))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -1805,6 +1882,12 @@ impl PyObject {
                     "copy" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "copy".to_string(),
                         func: |args| {
+                            if args.len() != 1 {
+                                return Err(PyError::type_error(format!(
+                                    "copy() takes no arguments ({} given)",
+                                    args.len() - 1
+                                )));
+                            }
                             if let PyObject::List(list) = &*args[0].borrow() {
                                 Ok(py_list(list.clone()))
                             } else {
@@ -2529,8 +2612,14 @@ impl PyObject {
                         func: |args| {
                             if args.len() < 2 {
                                 return Err(PyError::type_error(
-                                    "tuple.index() takes exactly one argument",
+                                    "index() takes at least 1 argument",
                                 ));
+                            }
+                            if args.len() > 4 {
+                                return Err(PyError::type_error(format!(
+                                    "index() takes at most 3 arguments ({} given)",
+                                    args.len() - 1
+                                )));
                             }
                             if let PyObject::Tuple(tuple) = &*args[0].borrow() {
                                 let start = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0);

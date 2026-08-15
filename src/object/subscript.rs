@@ -943,10 +943,42 @@ pub fn py_delitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<()> {
                 items.remove(i as usize);
                 Ok(())
             } else {
-                Err(PyError::type_error(format!(
-                    "list indices must be integers or slices, not {}",
-                    idx.type_name()
-                )))
+                match &*idx {
+                    // `del a[slice]` (test_list::test_delslice etc.) —
+                    // previously rejected slices with the "not slice" error.
+                    PyObject::Slice { start, stop, step } => {
+                        let len = items.len();
+                        let (start_val, stop_val, step_val) =
+                            extract_slice_fields(start, stop, step)?;
+                        let (start_n, stop_n) =
+                            normalize_slice_bounds(start_val, stop_val, step_val, len);
+                        let mut to_remove: Vec<usize> = Vec::new();
+                        if step_val > 0 {
+                            let mut i = start_n;
+                            while i < stop_n {
+                                to_remove.push(i as usize);
+                                i += step_val;
+                            }
+                        } else {
+                            let mut i = start_n;
+                            while i > stop_n {
+                                to_remove.push(i as usize);
+                                match i.checked_add(step_val) {
+                                    Some(next) => i = next,
+                                    None => break,
+                                };
+                            }
+                        }
+                        for idx2 in to_remove.into_iter().rev() {
+                            items.remove(idx2);
+                        }
+                        Ok(())
+                    }
+                    _ => Err(PyError::type_error(format!(
+                        "list indices must be integers or slices, not {}",
+                        idx.type_name()
+                    ))),
+                }
             }
         }
         PyObject::Deque { data, .. } => {
