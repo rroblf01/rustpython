@@ -258,15 +258,13 @@ pub(crate) fn synthesize_native_init(
     match kind {
         "list" => {
             // `subclass(sequence=())` for a `class subclass(list)` must
-            // TypeError (test_list::test_keywords_in_subclass), not silently
-            // treat the kwargs dict as the iterable.
+            // TypeError (test_list::test_keywords_in_subclass); keyword args
+            // arrive here via `keywords` — a POSITIONAL dict is still a
+            // legitimate iterable.
             if !keywords.is_empty() {
                 return Err(PyError::type_error("list() takes no keyword arguments"));
             }
             if let Some(first) = args.first() {
-                if matches!(&*first.borrow(), PyObject::Dict(_)) {
-                    return Err(PyError::type_error("list() takes no keyword arguments"));
-                }
                 Ok(py_list(collect_iterable(first)?))
             } else {
                 Ok(py_list(vec![]))

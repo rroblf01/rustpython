@@ -8635,6 +8635,17 @@ impl VirtualMachine {
                 for (k, v) in &keywords {
                     let _ = dict.set(crate::object::py_str(k), v.clone());
                 }
+                // `list(sequence=...)` must TypeError, but a POSITIONAL dict is
+                // fine (`list({'a':1})` -> `['a']`) — the flattened
+                // trailing-dict convention can't distinguish them inside
+                // builtin_list, so the keyword rejection lives HERE, where
+                // `keywords` is known (only fires when keywords exist).
+                if std::ptr::fn_addr_eq(
+                    func,
+                    crate::object::builtin_list as crate::object::BuiltinFunc,
+                ) {
+                    return Err(PyError::type_error("list() takes no keyword arguments"));
+                }
                 let mut new_args = args;
                 new_args.push(crate::object::PyObjectRef::new(
                     crate::object::PyObject::Dict(Box::new(dict)),

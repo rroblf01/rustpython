@@ -2118,13 +2118,9 @@ pub fn builtin_bool(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 }
 
 pub fn builtin_list(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    // `list(sequence=[])` / `list(iterable, extra)` must TypeError — kwargs
-    // arrive as a trailing dict, and >1 positional arg is always wrong.
-    if let Some(last) = args.last() {
-        if matches!(&*last.borrow(), PyObject::Dict(_)) {
-            return Err(PyError::type_error("list() takes no keyword arguments"));
-        }
-    }
+    // `list(iterable, extra)` is always wrong; keyword rejection happens in
+    // call_function (where the real keyword list is visible), so a POSITIONAL
+    // dict stays valid (`list({'a': 1})` -> `['a']`).
     if args.len() > 1 {
         return Err(PyError::type_error(format!(
             "list() takes at most 1 argument ({} given)",
