@@ -2292,6 +2292,53 @@ pub fn builtin_tuple(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Ok(py_tuple(items))
 }
 
+/// `dict.__repr__` — a per-type repr so `type(x).__repr__` differs across
+/// native container types (CPython's pprint dispatches on
+/// `type(object).__repr__`; a shared identity repr made dict and deque
+/// collide and route dicts through pprint's deque formatter).
+pub fn builtin_dict_repr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() {
+        return Err(PyError::type_error("__repr__ requires 1 argument"));
+    }
+    Ok(py_str(&args[0].repr()))
+}
+
+/// `deque.__repr__` — see `builtin_dict_repr`.
+pub fn builtin_deque_repr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() {
+        return Err(PyError::type_error("__repr__ requires 1 argument"));
+    }
+    Ok(py_str(&args[0].repr()))
+}
+
+// Per-type `__repr__` functions. Each native container/type must have its
+// OWN `__repr__` function object: CPython's pprint dispatches on
+// `type(object).__repr__` (and other code compares `x.__repr__ is
+// y.__repr__`), so sharing one identity repr across all types made them
+// indistinguishable (dict routed through pprint's deque formatter, etc.).
+macro_rules! native_repr_fn {
+    ($name:ident) => {
+        pub fn $name(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+            if args.is_empty() {
+                return Err(PyError::type_error("__repr__ requires 1 argument"));
+            }
+            Ok(py_str(&args[0].repr()))
+        }
+    };
+}
+native_repr_fn!(builtin_list_repr);
+native_repr_fn!(builtin_tuple_repr);
+native_repr_fn!(builtin_str_repr);
+native_repr_fn!(builtin_bytes_repr);
+native_repr_fn!(builtin_bytearray_repr);
+native_repr_fn!(builtin_int_repr);
+native_repr_fn!(builtin_float_repr);
+native_repr_fn!(builtin_complex_repr);
+native_repr_fn!(builtin_bool_repr);
+native_repr_fn!(builtin_set_repr);
+native_repr_fn!(builtin_frozenset_repr);
+native_repr_fn!(builtin_slice_repr);
+
 pub fn builtin_dict(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
         return Ok(py_dict());

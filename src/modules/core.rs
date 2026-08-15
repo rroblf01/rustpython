@@ -795,6 +795,13 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
             func: crate::object::native_base_init_builtin,
         }),
     );
+    int_dict.insert_str(
+        "__repr__",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__repr__".to_string(),
+            func: crate::object::builtin_int_repr as BuiltinFunc,
+        }),
+    );
     let int_type = PyObjectRef::new(PyObject::Type {
         name: "int".to_string(),
         dict: Box::new(str_map_to_typedict(int_dict)),
@@ -929,6 +936,13 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     str_unbound!("zfill");
     str_unbound!("encode");
     str_unbound!("decode");
+    str_dict.insert_str(
+        "__repr__",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__repr__".to_string(),
+            func: crate::object::builtin_str_repr as BuiltinFunc,
+        }),
+    );
     let str_type = PyObjectRef::new(PyObject::Type {
         name: "str".to_string(),
         dict: Box::new(str_map_to_typedict(str_dict)),
@@ -959,6 +973,13 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
         PyObjectRef::new(PyObject::BuiltinFunction {
             name: "__init__".to_string(),
             func: crate::object::native_base_init_builtin,
+        }),
+    );
+    list_dict.insert_str(
+        "__repr__",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__repr__".to_string(),
+            func: crate::object::builtin_list_repr as BuiltinFunc,
         }),
     );
     let list_type = PyObjectRef::new(PyObject::Type {
@@ -1197,6 +1218,13 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
             },
         }),
     );
+    float_dict.insert_str(
+        "__repr__",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__repr__".to_string(),
+            func: crate::object::builtin_float_repr as BuiltinFunc,
+        }),
+    );
     let float_type = PyObjectRef::new(PyObject::Type {
         name: "float".to_string(),
         dict: Box::new(str_map_to_typedict(float_dict)),
@@ -1264,6 +1292,13 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
             func: crate::object::native_base_init_builtin,
         }),
     );
+    dict_dict.insert_str(
+        "__repr__",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__repr__".to_string(),
+            func: crate::object::builtin_dict_repr as BuiltinFunc,
+        }),
+    );
     let dict_type = PyObjectRef::new(PyObject::Type {
         name: "dict".to_string(),
         dict: Box::new(str_map_to_typedict(dict_dict)),
@@ -1296,6 +1331,13 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
         PyObjectRef::new(PyObject::BuiltinFunction {
             name: "__init__".to_string(),
             func: crate::object::native_base_init_builtin,
+        }),
+    );
+    tuple_dict.insert_str(
+        "__repr__",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__repr__".to_string(),
+            func: crate::object::builtin_tuple_repr as BuiltinFunc,
         }),
     );
     let tuple_type = PyObjectRef::new(PyObject::Type {
@@ -1343,6 +1385,13 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
             func: crate::object::native_base_init_builtin,
         }),
     );
+    bytes_dict.insert_str(
+        "__repr__",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__repr__".to_string(),
+            func: crate::object::builtin_bytes_repr as BuiltinFunc,
+        }),
+    );
     let bytes_type = PyObjectRef::new(PyObject::Type {
         name: "bytes".to_string(),
         dict: Box::new(str_map_to_typedict(bytes_dict)),
@@ -1369,6 +1418,13 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
         PyObjectRef::new(PyObject::BuiltinFunction {
             name: "__init__".to_string(),
             func: crate::object::native_base_init_builtin,
+        }),
+    );
+    set_dict.insert_str(
+        "__repr__",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__repr__".to_string(),
+            func: crate::object::builtin_set_repr as BuiltinFunc,
         }),
     );
     let set_type = PyObjectRef::new(PyObject::Type {
@@ -1415,6 +1471,13 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
             func: crate::object::native_base_init_builtin,
         }),
     );
+    complex_dict.insert_str(
+        "__repr__",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__repr__".to_string(),
+            func: crate::object::builtin_complex_repr as BuiltinFunc,
+        }),
+    );
     let complex_type = PyObjectRef::new(PyObject::Type {
         name: "complex".to_string(),
         dict: Box::new(str_map_to_typedict(complex_dict)),
@@ -1443,6 +1506,13 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
             func: crate::object::native_base_init_builtin,
         }),
     );
+    bytearray_dict.insert_str(
+        "__repr__",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__repr__".to_string(),
+            func: crate::object::builtin_bytearray_repr as BuiltinFunc,
+        }),
+    );
     let bytearray_type = PyObjectRef::new(PyObject::Type {
         name: "bytearray".to_string(),
         dict: Box::new(str_map_to_typedict(bytearray_dict)),
@@ -1469,6 +1539,13 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
         PyObjectRef::new(PyObject::BuiltinFunction {
             name: "__init__".to_string(),
             func: crate::object::native_base_init_builtin,
+        }),
+    );
+    frozenset_dict.insert_str(
+        "__repr__",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__repr__".to_string(),
+            func: crate::object::builtin_frozenset_repr as BuiltinFunc,
         }),
     );
     let frozenset_type = PyObjectRef::new(PyObject::Type {
@@ -1531,6 +1608,13 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
                 let v = crate::object::builtin_int_from_bytes(args)?;
                 Ok(py_bool(v.truthy()))
             },
+        }),
+    );
+    bool_dict.insert_str(
+        "__repr__",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__repr__".to_string(),
+            func: crate::object::builtin_bool_repr as BuiltinFunc,
         }),
     );
     let bool_type = PyObjectRef::new(PyObject::Type {

@@ -96,6 +96,13 @@ pub fn create_collections_dict(object_type: PyObjectRef) -> HashMap<String, PyOb
             func: crate::object::native_base_init_builtin,
         }),
     );
+    deque_dict.insert_str(
+        "__repr__",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__repr__".to_string(),
+            func: crate::object::builtin_deque_repr as crate::object::BuiltinFunc,
+        }),
+    );
     let deque_type = PyObjectRef::new(PyObject::Type {
         name: "deque".to_string(),
         dict: Box::new(str_map_to_typedict(deque_dict)),
