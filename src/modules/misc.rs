@@ -4267,6 +4267,46 @@ pub fn create_csv_dict() -> HashMap<String, PyObjectRef> {
     }
     d.insert_str("DictWriter", dict_writer_type);
 
+    // csv.Dialect / csv.excel — subclassable classes with the standard
+    // dialect attributes (test_csv.py defines `class EscapedExcel(csv.excel)`).
+    let mut dialect_dict: HashMap<String, PyObjectRef> = HashMap::new();
+    let mut excel_dict: HashMap<String, PyObjectRef> = HashMap::new();
+    let dialect_attrs: Vec<(&str, PyObjectRef)> = vec![
+        ("delimiter", py_str(",")),
+        ("doublequote", py_bool(true)),
+        ("escapechar", py_none()),
+        ("lineterminator", py_str("\r\n")),
+        ("quotechar", py_str("\"")),
+        ("quoting", py_int(0)),
+        ("skipinitialspace", py_bool(false)),
+    ];
+    for (name, val) in dialect_attrs.iter() {
+        dialect_dict.insert_str(name, val.clone());
+        excel_dict.insert_str(name, val.clone());
+    }
+    d.insert_str(
+        "Dialect",
+        PyObjectRef::new(PyObject::Type {
+            name: "Dialect".to_string(),
+            dict: Box::new(str_map_to_typedict(dialect_dict)),
+            bases: vec![],
+            mro: vec![],
+        }),
+    );
+    d.insert_str(
+        "excel",
+        PyObjectRef::new(PyObject::Type {
+            name: "excel".to_string(),
+            dict: Box::new(str_map_to_typedict(excel_dict)),
+            bases: vec![],
+            mro: vec![],
+        }),
+    );
+    d.insert_str("QUOTE_MINIMAL", py_int(0));
+    d.insert_str("QUOTE_ALL", py_int(1));
+    d.insert_str("QUOTE_NONNUMERIC", py_int(2));
+    d.insert_str("QUOTE_NONE", py_int(3));
+
     d
 }
 
