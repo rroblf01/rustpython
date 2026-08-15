@@ -5708,6 +5708,30 @@ fn pickle_serialize(
                 memo,
             )?;
         }
+        PyObject::Exception {
+            typ, args, extra, ..
+        } => {
+            // Exceptions serialize as: tag 'X', type name, args tuple, extra
+            // dict (or 'N'). test_exceptions' testAttributes/test_copy_pickle
+            // round-trip every exception and its attributes.
+            buf.push(b'X');
+            pickle_serialize(&py_str(typ), buf, memo)?;
+            buf.push(b'(');
+            for a in args {
+                pickle_serialize(a, buf, memo)?;
+            }
+            buf.push(b')');
+            if let Some(extra) = extra {
+                buf.push(b'{');
+                for (k, v) in extra.iter() {
+                    pickle_serialize(&py_str(k), buf, memo)?;
+                    pickle_serialize(&v, buf, memo)?;
+                }
+                buf.push(b'}');
+            } else {
+                buf.push(b'N');
+            }
+        }
         _ => {
             return Err(PyError::type_error(format!(
                 "cannot pickle {} object",
@@ -5933,6 +5957,54 @@ fn pickle_deserialize(
                     module_str, name_str
                 )))
             }
+        }
+        b'X' => {
+            let typ = pickle_deserialize(data, pos, memo)?.str();
+            // args tuple: '(' ... ')'
+            if *pos >= data.len() || data[*pos] != b'(' {
+                return Err(PyError::type_error(
+                    "malformed exception pickle data (args)",
+                ));
+            }
+            *pos += 1;
+            let mut args: Vec<PyObjectRef> = Vec::new();
+            while *pos < data.len() && data[*pos] != b')' {
+                args.push(pickle_deserialize(data, pos, memo)?);
+            }
+            if *pos >= data.len() {
+                return Err(PyError::type_error(
+                    "unterminated exception args in pickle data",
+                ));
+            }
+            *pos += 1; // ')'
+                       // extra dict or 'N'
+            let mut extra = None;
+            if let Some(marker) = data.get(*pos).copied() {
+                *pos += 1;
+                if marker == b'{' {
+                    let mut m = std::collections::HashMap::new();
+                    while *pos < data.len() && data[*pos] != b'}' {
+                        let k = pickle_deserialize(data, pos, memo)?;
+                        let v = pickle_deserialize(data, pos, memo)?;
+                        m.insert(k.str(), v);
+                    }
+                    if *pos < data.len() {
+                        *pos += 1; // '}'
+                    }
+                    if !m.is_empty() {
+                        extra = Some(m);
+                    }
+                }
+            }
+            Ok(PyObjectRef::new(PyObject::Exception {
+                typ,
+                args,
+                cause: None,
+                suppress_context: false,
+                context: None,
+                traceback: None,
+                extra,
+            }))
         }
         b'C' => {
             let module = pickle_deserialize(data, pos, memo)?;

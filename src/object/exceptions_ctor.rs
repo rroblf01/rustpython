@@ -98,8 +98,101 @@ make_exception_func!(builtin_make_exception_keyerror, "KeyError");
 make_exception_func!(builtin_make_exception_runtimeerror, "RuntimeError");
 make_exception_func!(builtin_make_exception_stopiteration, "StopIteration");
 make_exception_func!(builtin_make_exception_assertionerror, "AssertionError");
-make_exception_func!(builtin_make_exception_oserror, "OSError");
-make_exception_func!(builtin_make_exception_importerror, "ImportError");
+pub fn builtin_make_exception_oserror(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    // CPython: `OSError(errno, strerror, filename, ...)` — the FIRST TWO
+    // positional args are the exception's `.args`; a 3rd is `.filename`; a
+    // 5th `.filename2` (test_exceptions' testAttributes table). Also expose
+    // `.errno`/`.strerror`. Keyword args are rejected like other builtin
+    // exceptions.
+    if let Some(last) = args.last() {
+        if matches!(&*last.borrow(), PyObject::Dict(_)) {
+            return Err(PyError::type_error("OSError() takes no keyword arguments"));
+        }
+    }
+    let mut extra = std::collections::HashMap::new();
+    let mut clean_args: Vec<PyObjectRef> = Vec::new();
+    if let Some(a0) = args.first() {
+        clean_args.push(a0.clone());
+    }
+    if let Some(a1) = args.get(1) {
+        // errno/strerror derive only from the 2-arg form and up
+        // (`OSError('foo')` keeps errno/strerror None, per CPython).
+        if let Some(a0) = args.first() {
+            extra.insert("errno".to_string(), a0.clone());
+        }
+        extra.insert("strerror".to_string(), a1.clone());
+        clean_args.push(a1.clone());
+    }
+    if let Some(a2) = args.get(2) {
+        extra.insert("filename".to_string(), a2.clone());
+    }
+    if let Some(a4) = args.get(4) {
+        extra.insert("filename2".to_string(), a4.clone());
+    }
+    Ok(PyObjectRef::new(PyObject::Exception {
+        typ: "OSError".to_string(),
+        args: clean_args,
+        cause: None,
+        suppress_context: false,
+        context: None,
+        traceback: None,
+        extra: Some(extra),
+    }))
+}
+pub fn builtin_make_exception_importerror(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    // CPython: `ImportError('test', name=..., path=...)` stores the message
+    // positionally and name/path as attrs; any OTHER keyword is rejected
+    // (test_exceptions::ImportErrorTests::test_attributes). Kwargs arrive as
+    // a trailing dict from call_function.
+    let (positional, kwargs) = match args.split_last() {
+        Some((last, rest)) if matches!(&*last.borrow(), PyObject::Dict(_)) => {
+            (rest.to_vec(), Some(last.clone()))
+        }
+        _ => (args.to_vec(), None),
+    };
+    let mut extra = None;
+    if let Some(kw) = kwargs {
+        let mut m = std::collections::HashMap::new();
+        let mut unexpected = None;
+        let d = kw.borrow();
+        if let PyObject::Dict(d) = &*d {
+            let k_name = py_str("name");
+            let k_path = py_str("path");
+            for (k, v) in d.iter() {
+                let key = match &*k.borrow() {
+                    PyObject::Str(s) => s.to_string(),
+                    _ => continue,
+                };
+                if k.is(&k_name) {
+                    m.insert("name".to_string(), v.clone());
+                } else if k.is(&k_path) {
+                    m.insert("path".to_string(), v.clone());
+                } else {
+                    unexpected = Some(key);
+                    break;
+                }
+            }
+        }
+        if let Some(key) = unexpected {
+            return Err(PyError::type_error(format!(
+                "ImportError() got an unexpected keyword argument '{}'",
+                key
+            )));
+        }
+        if !m.is_empty() {
+            extra = Some(m);
+        }
+    }
+    Ok(PyObjectRef::new(PyObject::Exception {
+        typ: "ImportError".to_string(),
+        args: positional,
+        cause: None,
+        suppress_context: false,
+        context: None,
+        traceback: None,
+        extra,
+    }))
+}
 make_exception_func!(builtin_make_exception_pickleerror, "PickleError");
 make_exception_func!(builtin_make_exception_picklingerror, "PicklingError");
 make_exception_func!(builtin_make_exception_unpicklingerror, "UnpicklingError");

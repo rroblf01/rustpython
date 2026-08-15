@@ -2028,10 +2028,28 @@ pub fn create_marshal_dict() -> HashMap<String, PyObjectRef> {
         };
     }
     m_func!("loads", |args| {
-        if args.len() < 2 {
-            return Err(PyError::type_error("loads() takes 1 argument"));
+        let data = args
+            .first()
+            .ok_or_else(|| PyError::type_error("loads() missing required argument 'bytes'"))?;
+        // `marshal.loads(b'')` raises EOFError (test_exceptions' testRaising
+        // exercises exactly this).
+        if let PyObject::Bytes(b) = &*data.borrow() {
+            if b.is_empty() {
+                return Err(PyError::Exception(
+                    "EOFError".to_string(),
+                    PyObjectRef::new(PyObject::Exception {
+                        typ: "EOFError".to_string(),
+                        args: vec![],
+                        cause: None,
+                        suppress_context: false,
+                        context: None,
+                        traceback: None,
+                        extra: None,
+                    }),
+                ));
+            }
         }
-        Ok(args[1].clone())
+        Ok(data.clone())
     });
     m_func!("dumps", |args| {
         if args.len() < 2 {

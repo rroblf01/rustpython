@@ -1334,6 +1334,23 @@ impl PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
+                    // `e.__init__(*args)` — re-initializes the exception:
+                    // replaces `.args` and resets per-instance attrs
+                    // (test_reset_attributes: `exc.__init__()` clears
+                    // msg/name/path). Returns None like object.__init__.
+                    "__init__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__init__".to_string(),
+                        func: |args| {
+                            if let PyObject::Exception { args: a, extra, .. } =
+                                &mut *args[0].borrow_mut()
+                            {
+                                *a = args.get(1..).unwrap_or(&[]).to_vec();
+                                *extra = None;
+                            }
+                            Ok(py_none())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     // `SyntaxError`'s extra attributes (`filename`/`lineno`/
                     // `offset`/`text`/`end_lineno`/`end_offset`) — this
                     // interpreter's own `syntax_error()` constructor
@@ -1384,6 +1401,38 @@ impl PyObject {
                             }
                         }
                         Ok(py_none())
+                    }
+                    // `ImportError.name`/`.path` (ctor kwargs, default None)
+                    // and `.msg` (alias for args[0]).
+                    "name" | "path" if typ == "ImportError" => {
+                        if let Some(extra) = extra {
+                            if let Some(v) = extra.get(name) {
+                                return Ok(v.clone());
+                            }
+                        }
+                        Ok(py_none())
+                    }
+                    "msg" if typ == "ImportError" => {
+                        if let Some(first) = args.first() {
+                            return Ok(first.clone());
+                        }
+                        Ok(py_none())
+                    }
+                    // `OSError.errno`/`.strerror`/`.filename`/`.filename2`
+                    // (derived from the ctor's positional args).
+                    "errno" | "strerror" | "filename" | "filename2"
+                        if typ == "OSError" || typ == "EnvironmentError" =>
+                    {
+                        if let Some(extra) = extra {
+                            if let Some(v) = extra.get(name) {
+                                return Ok(v.clone());
+                            }
+                        }
+                        Ok(py_none())
+                    }
+                    // `SystemExit.code` — args[0] when present, else None.
+                    "code" if typ == "SystemExit" => {
+                        Ok(args.first().cloned().unwrap_or_else(py_none))
                     }
                     _ => {
                         // Per-instance extras (BaseException.__dict__) —

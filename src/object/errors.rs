@@ -205,23 +205,52 @@ impl PyError {
     pub fn os_error_from_io(e: &std::io::Error) -> Self {
         use std::io::ErrorKind;
         let msg = format!("{}", e);
+        let errno = e.raw_os_error();
         let name = match e.kind() {
             ErrorKind::NotFound => "FileNotFoundError",
             ErrorKind::PermissionDenied => "PermissionError",
             ErrorKind::AlreadyExists => "FileExistsError",
             ErrorKind::Interrupted => "InterruptedError",
-            _ => return PyError::OsError(msg),
+            _ => {
+                // Plain OSError carrying the real errno (test_exceptions'
+                // test_errno_ENOTDIR asserts `OSError.errno == errno.ENOTDIR`
+                // after os.listdir on a file).
+                let mut extra = None;
+                if let Some(no) = errno {
+                    let mut m = std::collections::HashMap::new();
+                    m.insert("errno".to_string(), py_int(no as i64));
+                    extra = Some(m);
+                }
+                return PyError::Exception(
+                    "OSError".to_string(),
+                    PyObjectRef::new(PyObject::Exception {
+                        typ: "OSError".to_string(),
+                        args: vec![py_str(&msg), py_str(&msg)],
+                        cause: None,
+                        suppress_context: false,
+                        context: None,
+                        traceback: None,
+                        extra,
+                    }),
+                );
+            }
         };
+        let mut extra = None;
+        if let Some(no) = errno {
+            let mut m = std::collections::HashMap::new();
+            m.insert("errno".to_string(), py_int(no as i64));
+            extra = Some(m);
+        }
         PyError::Exception(
             name.to_string(),
             PyObjectRef::new(PyObject::Exception {
                 typ: name.to_string(),
-                args: vec![py_str(&msg)],
+                args: vec![py_str(&msg), py_str(&msg)],
                 cause: None,
                 suppress_context: false,
                 context: None,
                 traceback: None,
-                extra: None,
+                extra,
             }),
         )
     }
