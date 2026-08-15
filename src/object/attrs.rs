@@ -1828,6 +1828,15 @@ impl PyObject {
                     "sort" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "sort".to_string(),
                         func: |args| {
+                            if args.len() > 2
+                                || (args.len() == 2
+                                    && !matches!(&*args[1].borrow(), PyObject::Dict(_)))
+                            {
+                                return Err(PyError::type_error(format!(
+                                    "sort() takes no positional arguments ({} given)",
+                                    args.len() - 1
+                                )));
+                            }
                             // Snapshot the list's items into a DETACHED `Vec`
                             // and sort THAT, rather than holding
                             // `args[0].borrow_mut()` for the whole
@@ -1850,6 +1859,41 @@ impl PyObject {
                                     _ => return Err(PyError::runtime_error("sort on non-list")),
                                 }
                             };
+                            let snapshot_len = items.len();
+                            let check_not_modified = |live: &PyObjectRef| -> PyResult<()> {
+                                // CPython's timsort raises ValueError when the
+                                // list is modified during the sort (a
+                                // self-modifying comparator) — our detached-
+                                // copy approach wouldn't otherwise notice.
+                                let b = live.borrow();
+                                let l = match &*b {
+                                    PyObject::List(l) => l.len(),
+                                    _ => return Ok(()),
+                                };
+                                if l != snapshot_len {
+                                    return Err(PyError::value_error("list modified during sort"));
+                                }
+                                Ok(())
+                            };
+                            // `sort(key=..., reverse=...)` — keyword args arrive
+                            // as a trailing kwargs dict.
+                            let mut key_func: Option<PyObjectRef> = None;
+                            let mut reverse = false;
+                            if let Some(last) = args.get(1) {
+                                if let PyObject::Dict(d) = &*last.borrow() {
+                                    if std::env::var("RPY_DEBUG_SORT").is_ok() {
+                                        eprintln!("SORT kwargs dict, len={}", d.len());
+                                    }
+                                    if let Ok(Some(k)) = d.get(&py_str("key")) {
+                                        if !matches!(&*k.borrow(), PyObject::None) {
+                                            key_func = Some(k.clone());
+                                        }
+                                    }
+                                    if let Ok(Some(r)) = d.get(&py_str("reverse")) {
+                                        reverse = r.truthy();
+                                    }
+                                }
+                            }
                             // Route through py_compare so user-defined
                             // classes' __lt__/__gt__ are consulted —
                             // this used to only compare ints/floats
@@ -1860,10 +1904,45 @@ impl PyObject {
                             // since a deliberately-inconsistent comparator
                             // (real CPython test: `test_bug453523`) makes
                             // the standard library's sort abort the whole
-                            // process.
-                            let items = py_stable_sort_by(items, &|a, b| {
-                                py_compare(a, b, 0).map(|r| r.truthy()).unwrap_or(false)
-                            });
+                            // process. With a `key=`, decorate-sort-undecorate:
+                            // compute each element's key ONCE, sort the
+                            // (key, original_item) pairs by key (stable),
+                            // then drop the keys.
+                            let items = if let Some(keyf) = key_func {
+                                let mut decorated: Vec<(PyObjectRef, PyObjectRef)> =
+                                    Vec::with_capacity(items.len());
+                                for item in items.into_iter() {
+                                    let k = crate::object::call_function_disposable(
+                                        &keyf,
+                                        vec![item.clone()],
+                                        vec![],
+                                    )?;
+                                    decorated.push((k, item));
+                                }
+                                decorated.sort_by(|a, b| {
+                                    if py_compare(&a.0, &b.0, 0)
+                                        .map(|r| r.truthy())
+                                        .unwrap_or(false)
+                                    {
+                                        std::cmp::Ordering::Less
+                                    } else {
+                                        std::cmp::Ordering::Greater
+                                    }
+                                });
+                                decorated.into_iter().map(|(_, item)| item).collect()
+                            } else {
+                                py_stable_sort_by(items, &|a, b| {
+                                    py_compare(a, b, 0).map(|r| r.truthy()).unwrap_or(false)
+                                })
+                            };
+                            let items = if reverse {
+                                let mut v = items;
+                                v.reverse();
+                                v
+                            } else {
+                                items
+                            };
+                            check_not_modified(&args[0])?;
                             if let PyObject::List(list) = &mut *args[0].borrow_mut() {
                                 *list = items;
                             }

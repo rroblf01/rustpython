@@ -733,7 +733,14 @@ pub fn create_functools_dict() -> HashMap<String, PyObjectRef> {
                 if lt_args.len() < 2 {
                     return Err(PyError::type_error("__lt__ requires 2 arguments"));
                 }
-                let cmp_result = builtin_call(&lt_mycmp, &[(*lt_obj).clone(), lt_args[1].clone()])?;
+                // `other` is a Kobj wrapper — compare its `.obj`, not the
+                // wrapper itself (real CPython's cmp_to_key: mycmp(self.obj,
+                // other.obj)).
+                let other_obj = lt_args[1]
+                    .borrow()
+                    .get_attribute("obj")
+                    .unwrap_or_else(|_| lt_args[1].clone());
+                let cmp_result = builtin_call(&lt_mycmp, &[(*lt_obj).clone(), other_obj])?;
                 Ok(py_bool(cmp_result.as_i64().map_or(false, |n| n < 0)))
             };
 
@@ -744,7 +751,11 @@ pub fn create_functools_dict() -> HashMap<String, PyObjectRef> {
                 if le_args.len() < 2 {
                     return Err(PyError::type_error("__le__ requires 2 arguments"));
                 }
-                let cmp_result = builtin_call(&le_mycmp, &[(*le_obj).clone(), le_args[1].clone()])?;
+                let other_obj = le_args[1]
+                    .borrow()
+                    .get_attribute("obj")
+                    .unwrap_or_else(|_| le_args[1].clone());
+                let cmp_result = builtin_call(&le_mycmp, &[(*le_obj).clone(), other_obj])?;
                 Ok(py_bool(cmp_result.as_i64().map_or(false, |n| n <= 0)))
             };
 
@@ -755,7 +766,11 @@ pub fn create_functools_dict() -> HashMap<String, PyObjectRef> {
                 if gt_args.len() < 2 {
                     return Err(PyError::type_error("__gt__ requires 2 arguments"));
                 }
-                let cmp_result = builtin_call(&gt_mycmp, &[(*gt_obj).clone(), gt_args[1].clone()])?;
+                let other_obj = gt_args[1]
+                    .borrow()
+                    .get_attribute("obj")
+                    .unwrap_or_else(|_| gt_args[1].clone());
+                let cmp_result = builtin_call(&gt_mycmp, &[(*gt_obj).clone(), other_obj])?;
                 Ok(py_bool(cmp_result.as_i64().map_or(false, |n| n > 0)))
             };
 
@@ -766,7 +781,11 @@ pub fn create_functools_dict() -> HashMap<String, PyObjectRef> {
                 if ge_args.len() < 2 {
                     return Err(PyError::type_error("__ge__ requires 2 arguments"));
                 }
-                let cmp_result = builtin_call(&ge_mycmp, &[(*ge_obj).clone(), ge_args[1].clone()])?;
+                let other_obj = ge_args[1]
+                    .borrow()
+                    .get_attribute("obj")
+                    .unwrap_or_else(|_| ge_args[1].clone());
+                let cmp_result = builtin_call(&ge_mycmp, &[(*ge_obj).clone(), other_obj])?;
                 Ok(py_bool(cmp_result.as_i64().map_or(false, |n| n >= 0)))
             };
 
@@ -777,7 +796,11 @@ pub fn create_functools_dict() -> HashMap<String, PyObjectRef> {
                 if eq_args.len() < 2 {
                     return Err(PyError::type_error("__eq__ requires 2 arguments"));
                 }
-                let cmp_result = builtin_call(&eq_mycmp, &[(*eq_obj).clone(), eq_args[1].clone()])?;
+                let other_obj = eq_args[1]
+                    .borrow()
+                    .get_attribute("obj")
+                    .unwrap_or_else(|_| eq_args[1].clone());
+                let cmp_result = builtin_call(&eq_mycmp, &[(*eq_obj).clone(), other_obj])?;
                 Ok(py_bool(cmp_result.as_i64().map_or(false, |n| n == 0)))
             };
 
@@ -788,7 +811,11 @@ pub fn create_functools_dict() -> HashMap<String, PyObjectRef> {
                 if ne_args.len() < 2 {
                     return Err(PyError::type_error("__ne__ requires 2 arguments"));
                 }
-                let cmp_result = builtin_call(&ne_mycmp, &[(*ne_obj).clone(), ne_args[1].clone()])?;
+                let other_obj = ne_args[1]
+                    .borrow()
+                    .get_attribute("obj")
+                    .unwrap_or_else(|_| ne_args[1].clone());
+                let cmp_result = builtin_call(&ne_mycmp, &[(*ne_obj).clone(), other_obj])?;
                 Ok(py_bool(cmp_result.as_i64().map_or(false, |n| n != 0)))
             };
 
