@@ -2273,6 +2273,11 @@ pub fn builtin_tuple(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             args.len()
         )));
     }
+    // `tuple(t)` returns the SAME tuple (identity optimization,
+    // test_tuple::test_constructors: `t0_3 is tuple(t0_3)`).
+    if let PyObject::Tuple(_) = &*args[0].borrow() {
+        return Ok(args[0].clone());
+    }
     // `tuple(x)` accepts ANY iterable in real Python, not just the handful
     // of native container shapes this used to special-case — e.g.
     // `tuple(map(...))`, generators, custom `__iter__` objects all raised

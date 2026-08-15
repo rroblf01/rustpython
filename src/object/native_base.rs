@@ -304,6 +304,9 @@ pub(crate) fn synthesize_native_init(
         "int" => builtin_int(args),
         "float" => builtin_float(args),
         "tuple" => {
+            if !keywords.is_empty() {
+                return Err(PyError::type_error("tuple() takes no keyword arguments"));
+            }
             if let Some(iterable) = args.first() {
                 Ok(py_tuple(collect_iterable(iterable)?))
             } else {

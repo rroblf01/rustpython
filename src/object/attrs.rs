@@ -2883,21 +2883,26 @@ impl PyObject {
                                 )));
                             }
                             if let PyObject::Tuple(tuple) = &*args[0].borrow() {
-                                let start = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0);
-                                let end = args
-                                    .get(3)
-                                    .and_then(|a| a.as_i64())
-                                    .unwrap_or(tuple.len() as i64);
-                                let start = if start < 0 {
-                                    (tuple.len() as i64 + start).max(0)
-                                } else {
-                                    start.min(tuple.len() as i64)
+                                // Clamp start/end with arbitrary-precision
+                                // ints (huge bounds like 4*sys.maxsize must
+                                // clamp, not silently collapse via as_i64).
+                                use num_traits::ToPrimitive;
+                                let len = tuple.len() as i64;
+                                let clamp = |v: Option<&PyObjectRef>, default: i64| -> i64 {
+                                    let Some(v) = v else {
+                                        return default;
+                                    };
+                                    let n = crate::object::to_index(v).unwrap_or_else(|_| 0.into());
+                                    let len_big = num_bigint::BigInt::from(len);
+                                    let c = if n.sign() == num_bigint::Sign::Minus {
+                                        (len_big.clone() + &n).max(0.into())
+                                    } else {
+                                        n.min(len_big.clone())
+                                    };
+                                    c.to_i64().unwrap_or(0)
                                 };
-                                let end = if end < 0 {
-                                    (tuple.len() as i64 + end).max(0)
-                                } else {
-                                    end.min(tuple.len() as i64)
-                                };
+                                let start = clamp(args.get(2), 0);
+                                let end = clamp(args.get(3), len);
                                 for i in start..end {
                                     if py_compare(&tuple[i as usize], &args[1], 2)?.truthy() {
                                         return Ok(py_int(i));
