@@ -791,12 +791,19 @@ impl VirtualMachine {
 
         // Native hashlib module
         modules.insert_str("hashlib", create_module("hashlib", create_hashlib_dict()));
+        // `_hashlib` is real CPython's C-accelerated hashlib backing module —
+        // alias it so test_hmac.py's `from _hashlib import ...` works.
+        modules.insert_str("_hashlib", create_module("_hashlib", create_hashlib_dict()));
 
         // Native secrets module
         modules.insert_str("secrets", create_module("secrets", create_secrets_dict()));
 
         // Native hmac module
         modules.insert_str("hmac", create_module("hmac", create_hmac_dict()));
+        // `_hmac` is real CPython's C-accelerated hmac backing module —
+        // alias it like `_datetime` so code importing it directly
+        // (CPython's test_hmac.py setUpClass) doesn't raise ImportError.
+        modules.insert_str("_hmac", create_module("_hmac", create_hmac_dict()));
 
         // Native base64 module
         modules.insert_str("base64", create_module("base64", create_base64_dict()));

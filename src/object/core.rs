@@ -507,6 +507,35 @@ thread_local! {
     static REPR_VISITED: std::cell::RefCell<Vec<*const ()>> = std::cell::RefCell::new(Vec::new());
 }
 
+/// True if `f` is one of the per-type native `__repr__` functions
+/// (`builtin_list_repr`, `builtin_float_repr`, ...). These call
+/// `args[0].repr()`, so dispatching one on a subclass INSTANCE would
+/// re-enter repr/str and recurse; user-defined (and type-specific native
+/// like Fraction's) `__repr__` implementations format directly and must
+/// still be invoked.
+fn is_per_type_repr(f: &PyObjectRef) -> bool {
+    match &*f.borrow() {
+        PyObject::BuiltinFunction { func, .. } => {
+            let p = *func as usize;
+            p == crate::object::builtin_list_repr as usize
+                || p == crate::object::builtin_tuple_repr as usize
+                || p == crate::object::builtin_str_repr as usize
+                || p == crate::object::builtin_bytes_repr as usize
+                || p == crate::object::builtin_bytearray_repr as usize
+                || p == crate::object::builtin_int_repr as usize
+                || p == crate::object::builtin_float_repr as usize
+                || p == crate::object::builtin_complex_repr as usize
+                || p == crate::object::builtin_bool_repr as usize
+                || p == crate::object::builtin_set_repr as usize
+                || p == crate::object::builtin_frozenset_repr as usize
+                || p == crate::object::builtin_slice_repr as usize
+                || p == crate::object::builtin_dict_repr as usize
+                || p == crate::object::builtin_deque_repr as usize
+        }
+        _ => false,
+    }
+}
+
 impl PyObjectRef {
     /// Create a MUTABLE PyObjectRef (for List, Dict, Set, Instance)
     pub fn new(obj: PyObject) -> Self {
@@ -697,8 +726,10 @@ impl PyObjectRef {
             }
         };
         if let Some(f) = repr_func {
-            if let Ok(result) = call_bound_method(f, self.clone(), vec![]) {
-                return result.str();
+            if !is_per_type_repr(&f) {
+                if let Ok(result) = call_bound_method(f, self.clone(), vec![]) {
+                    return result.str();
+                }
             }
         }
         if let Some(native) = native_backing_of(self) {
@@ -814,8 +845,10 @@ impl PyObjectRef {
             }
         };
         if let Some(f) = str_func {
-            if let Ok(result) = call_bound_method(f, self.clone(), vec![]) {
-                return result.str();
+            if !is_per_type_repr(&f) {
+                if let Ok(result) = call_bound_method(f, self.clone(), vec![]) {
+                    return result.str();
+                }
             }
         }
         if let Some(native) = native_backing_of(self) {
