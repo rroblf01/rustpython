@@ -736,7 +736,34 @@ impl Compiler {
                     }
                 }
                 Stmt::TypeAlias { value, .. } => Self::collect_names_expr(value, names),
-                Stmt::FunctionDef { .. } | Stmt::ClassDef { .. } => {}
+                Stmt::FunctionDef {
+                    args,
+                    decorator_list,
+                    returns,
+                    ..
+                } => {
+                    // A nested function's DEFAULT values, decorators, and
+                    // return annotation are evaluated in the ENCLOSING scope
+                    // (the class body or function that contains the def), so
+                    // names they reference must be counted as references of
+                    // THIS scope — e.g. a class-body `def f(self, x=module):`
+                    // needs `module` to be a free variable of the class body.
+                    for arg in args {
+                        if let Some(d) = &arg.default {
+                            Self::collect_names_expr(d, names);
+                        }
+                        if let Some(a) = &arg.annotation {
+                            Self::collect_names_expr(a, names);
+                        }
+                    }
+                    for d in decorator_list {
+                        Self::collect_names_expr(d, names);
+                    }
+                    if let Some(r) = returns {
+                        Self::collect_names_expr(r, names);
+                    }
+                }
+                Stmt::ClassDef { .. } => {}
                 Stmt::Import(_) | Stmt::ImportFrom { .. } | Stmt::Global(_) | Stmt::Nonlocal(_) => {
                 }
             }
@@ -983,6 +1010,26 @@ impl Compiler {
                     // `FunctionDef` arm's own filtering just above.
                     for name in header_refs {
                         if !local_names.contains(&name) && !global_names.contains(&name) {
+                            refs.insert(name);
+                        }
+                    }
+                    // The class BODY is its own scope, but names it references
+                    // that aren't class-body locals come from the enclosing
+                    // function (CPython resolves class-body names by skipping
+                    // class scopes) — e.g. a method default `module=module`
+                    // inside a class nested in a function needs the enclosing
+                    // function to expose `module` as a cell. Previously only
+                    // NESTED definitions inside the body were scanned, so such
+                    // direct class-body references never reached the enclosing
+                    // function's cellvar analysis -> NameError at class build.
+                    let class_local = Self::collect_assigned_names(body);
+                    let body_own_refs = Self::collect_own_referenced_names(body);
+                    for name in body_own_refs {
+                        if !class_local.contains(&name)
+                            && !local_names.contains(&name)
+                            && !global_names.contains(&name)
+                            && !nonlocal_names.contains(&name)
+                        {
                             refs.insert(name);
                         }
                     }

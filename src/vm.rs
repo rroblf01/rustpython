@@ -628,6 +628,15 @@ impl VirtualMachine {
             "_datetime",
             create_module("_datetime", create_datetime_dict()),
         );
+        // `_pydatetime` is real CPython's pure-Python datetime backing
+        // module — aliased here exactly like `_datetime` (this interpreter's
+        // datetime is a single native module), so test.support's
+        // import_fresh_module-based harnesses and `test_datetime.py`'s
+        // setUpClass (which reads `module._pydatetime`) work.
+        modules.insert_str(
+            "_pydatetime",
+            create_module("_pydatetime", create_datetime_dict()),
+        );
 
         let zoneinfo_dict = create_zoneinfo_dict();
         modules.insert_str("zoneinfo", create_module("zoneinfo", zoneinfo_dict));

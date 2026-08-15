@@ -18,7 +18,7 @@ def load_tests(loader, tests, pattern):
     finally:
         # XXX: import_fresh_module() is supposed to leave sys.module cache untouched,
         # XXX: but it does not, so we have to cleanup ourselves.
-        for modname in ['datetime', '_datetime', '_pydatetime', '_strptime']:
+        for modname in ['datetime', '_datetime', '_strptime']:
             sys.modules.pop(modname, None)
 
     test_modules = [pure_tests, fast_tests]
@@ -51,8 +51,8 @@ def load_tests(loader, tests, pattern):
                     cls_._save_sys_modules = sys.modules.copy()
                     sys.modules[TESTS] = module
                     sys.modules['datetime'] = module.datetime_module
-                    sys.modules['_pydatetime'] = module._pydatetime
-                    sys.modules['_datetime'] = module._datetime
+                    if hasattr(module, '_pydatetime'):
+                        sys.modules['_pydatetime'] = module._pydatetime
                     sys.modules['_strptime'] = module._strptime
                     super().setUpClass()
 

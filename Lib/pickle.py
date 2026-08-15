@@ -1,6 +1,7 @@
 """Pickle module with file-based serialize/deserialize."""
 
 from _pickle import *
+from _pickle import _loads
 
 
 def dump(obj, file, protocol=None, *, fix_imports=True, buffer_callback=None):

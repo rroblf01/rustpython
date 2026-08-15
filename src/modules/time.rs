@@ -1637,11 +1637,17 @@ fn build_timedelta_type() -> PyObjectRef {
             if instance_type_name(&args[1]) == "timedelta" {
                 let a = timedelta_total_us(&args[0]);
                 let b = timedelta_total_us(&args[1]);
+                if b == 0 {
+                    return Err(PyError::zero_division());
+                }
                 return Ok(py_int((a / b) as i64));
             }
             let divisor = args[1]
                 .as_i64()
                 .ok_or_else(|| PyError::type_error("unsupported operand type(s) for //"))?;
+            if divisor == 0 {
+                return Err(PyError::zero_division());
+            }
             Ok(make_timedelta_from_us(
                 timedelta_total_us(&args[0]) / divisor as i128,
             ))

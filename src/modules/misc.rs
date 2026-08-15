@@ -6115,7 +6115,7 @@ pub fn create_pickle_dict() -> HashMap<String, PyObjectRef> {
         Ok(PyObjectRef::imm(PyObject::Bytes(buf)))
     });
 
-    pickle_func!("loads", |args| {
+    fn pickle_loads_impl(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         if args.is_empty() {
             return Err(PyError::type_error("loads() missing required argument"));
         }
@@ -6131,7 +6131,6 @@ pub fn create_pickle_dict() -> HashMap<String, PyObjectRef> {
         let mut pos = 0;
         let mut memo: Vec<PyObjectRef> = Vec::new();
         let result = pickle_deserialize(&data, &mut pos, &mut memo)?;
-        // Check there's no trailing garbage (except for flat values where pos may be at end)
         if pos != data.len() {
             return Err(PyError::type_error(format!(
                 "pickle data has trailing bytes after value (pos={}, len={})",
@@ -6140,7 +6139,9 @@ pub fn create_pickle_dict() -> HashMap<String, PyObjectRef> {
             )));
         }
         Ok(result)
-    });
+    }
+    pickle_func!("loads", pickle_loads_impl);
+    pickle_func!("_loads", pickle_loads_impl);
 
     d
 }
