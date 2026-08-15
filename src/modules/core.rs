@@ -4528,6 +4528,7 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
     sys_func!("settrace", sys_settrace_builtin);
     sys_func!("gettrace", sys_gettrace_builtin);
     sys_func!("_getframe", sys_getframe_builtin);
+    sys_func!("is_remote_debug_enabled", |_args| Ok(py_bool(false)));
     sys_func!("get_int_max_str_digits", |_| {
         Ok(py_int(crate::object::INT_MAX_STR_DIGITS.with(|d| d.get())))
     });
