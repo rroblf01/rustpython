@@ -2249,6 +2249,12 @@ pub fn builtin_tuple(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
         return Ok(py_tuple(Vec::new()));
     }
+    if args.len() > 1 {
+        return Err(PyError::type_error(format!(
+            "tuple expected at most 1 argument, got {}",
+            args.len()
+        )));
+    }
     // `tuple(x)` accepts ANY iterable in real Python, not just the handful
     // of native container shapes this used to special-case — e.g.
     // `tuple(map(...))`, generators, custom `__iter__` objects all raised

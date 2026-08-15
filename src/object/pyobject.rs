@@ -844,11 +844,24 @@ impl PyObject {
                 Ok(h)
             }
             PyObject::Tuple(items) => {
-                let mut h: usize = 0x345678;
+                // CPython 3.14's exact tuple hash (xxHash-style, so
+                // hash((...)) matches real CPython on 64-bit platforms).
+                const PRIME_1: u64 = 11400714785074694791;
+                const PRIME_2: u64 = 14029467366897019727;
+                const PRIME_5: u64 = 2870177450012600261;
+                let mut acc: u64 = PRIME_5;
                 for item in items {
-                    h = h.wrapping_mul(1000003).wrapping_add(item.hash()?);
+                    let lane = item.hash()? as u64;
+                    acc = acc.wrapping_add(lane.wrapping_mul(PRIME_2));
+                    acc = acc.rotate_left(31);
+                    acc = acc.wrapping_mul(PRIME_1);
                 }
-                Ok(h)
+                let len = items.len() as u64;
+                acc = acc.wrapping_add(len ^ (PRIME_5 ^ 3527539));
+                if acc == u64::MAX {
+                    acc = 1546275796;
+                }
+                Ok(acc as usize)
             }
             PyObject::FrozenSet(items) => {
                 let mut h: usize = 0x987654;

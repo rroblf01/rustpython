@@ -2297,6 +2297,64 @@ impl PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
+                    "count" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "count".to_string(),
+                        func: |args| {
+                            if args.len() < 2 {
+                                return Err(PyError::type_error(
+                                    "count() takes exactly one argument",
+                                ));
+                            }
+                            if let PyObject::Tuple(tuple) = &*args[0].borrow() {
+                                let mut n = 0i64;
+                                for item in tuple.iter() {
+                                    if py_compare(item, &args[1], 2)?.truthy() {
+                                        n += 1;
+                                    }
+                                }
+                                Ok(py_int(n))
+                            } else {
+                                Err(PyError::runtime_error("count on non-tuple"))
+                            }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "index" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "index".to_string(),
+                        func: |args| {
+                            if args.len() < 2 {
+                                return Err(PyError::type_error(
+                                    "tuple.index() takes exactly one argument",
+                                ));
+                            }
+                            if let PyObject::Tuple(tuple) = &*args[0].borrow() {
+                                let start = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0);
+                                let end = args
+                                    .get(3)
+                                    .and_then(|a| a.as_i64())
+                                    .unwrap_or(tuple.len() as i64);
+                                let start = if start < 0 {
+                                    (tuple.len() as i64 + start).max(0)
+                                } else {
+                                    start.min(tuple.len() as i64)
+                                };
+                                let end = if end < 0 {
+                                    (tuple.len() as i64 + end).max(0)
+                                } else {
+                                    end.min(tuple.len() as i64)
+                                };
+                                for i in start..end {
+                                    if py_compare(&tuple[i as usize], &args[1], 2)?.truthy() {
+                                        return Ok(py_int(i));
+                                    }
+                                }
+                                Err(PyError::value_error("tuple.index(x): x not in tuple"))
+                            } else {
+                                Err(PyError::runtime_error("index on non-tuple"))
+                            }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     _ => Err(PyError::attribute_error(format!(
                         "'tuple' object has no attribute '{}'",
                         name
