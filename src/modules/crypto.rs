@@ -368,6 +368,7 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
                 suppress_context: false,
                 context: None,
                 traceback: None,
+                extra: None,
             }),
         )
     }

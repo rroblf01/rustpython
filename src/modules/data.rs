@@ -2064,6 +2064,7 @@ fn decval_from_pyobject(v: &PyObjectRef) -> PyResult<DecValue> {
                     suppress_context: false,
                     context: None,
                     traceback: None,
+                    extra: None,
                 }),
             )
         }),
@@ -2259,6 +2260,7 @@ fn decimal_invalid_op(msg: &str) -> PyError {
             suppress_context: false,
             context: None,
             traceback: None,
+            extra: None,
         }),
     )
 }
@@ -2272,6 +2274,7 @@ fn decimal_division_by_zero(msg: &str) -> PyError {
             suppress_context: false,
             context: None,
             traceback: None,
+            extra: None,
         }),
     )
 }

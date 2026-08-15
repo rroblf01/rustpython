@@ -5302,11 +5302,28 @@ impl VirtualMachine {
                                         // object.rs's ObjectAccess::get_attribute.
                                         Ok(py_none())
                                     } else {
-                                        Err(PyError::attribute_error(format!(
-                                            "'{}' object has no attribute '{}'",
-                                            crate::object::get_type_name_for_instance(typ),
-                                            name
-                                        )))
+                                        // Attach name/obj to the AttributeError
+                                        // (CPython: `exc.name`/`exc.obj` after
+                                        // `obj.missing_attr`).
+                                        let mut extra = std::collections::HashMap::new();
+                                        extra.insert("name".to_string(), py_str(&name));
+                                        extra.insert("obj".to_string(), obj.clone());
+                                        Err(PyError::Exception(
+                                            "AttributeError".to_string(),
+                                            PyObjectRef::new(PyObject::Exception {
+                                                typ: "AttributeError".to_string(),
+                                                args: vec![py_str(&format!(
+                                                    "'{}' object has no attribute '{}'",
+                                                    crate::object::get_type_name_for_instance(typ),
+                                                    name
+                                                ))],
+                                                cause: None,
+                                                suppress_context: false,
+                                                context: None,
+                                                traceback: None,
+                                                extra: Some(extra),
+                                            }),
+                                        ))
                                     }
                                 }
                             }
@@ -9731,6 +9748,7 @@ impl VirtualMachine {
             suppress_context: false,
             context: None,
             traceback: None,
+            extra: None,
         })
     }
 
@@ -9999,6 +10017,7 @@ impl VirtualMachine {
                     suppress_context: false,
                     context: None,
                     traceback: None,
+                    extra: None,
                 })
             }
             PyError::Exception(_, exc) => exc.clone(),

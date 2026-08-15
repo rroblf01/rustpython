@@ -473,7 +473,31 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
                     ));
                 }
                 let name = args[1].str();
-                args[0].borrow().get_attribute(&name)
+                // Use get_attribute_impl directly (not the ObjectAccess
+                // wrapper, which already rewrote the error into a full
+                // exception with a RECONSTRUCTED obj clone) so the real
+                // `args[0]` can be attached with correct identity.
+                use crate::object::ObjectAccess;
+                match args[0].borrow().get_attribute_impl(&name) {
+                    Err(PyError::AttributeError(msg)) => {
+                        let mut extra = std::collections::HashMap::new();
+                        extra.insert("name".to_string(), py_str(&name));
+                        extra.insert("obj".to_string(), args[0].clone());
+                        Err(PyError::Exception(
+                            "AttributeError".to_string(),
+                            PyObjectRef::new(PyObject::Exception {
+                                typ: "AttributeError".to_string(),
+                                args: vec![py_str(&msg)],
+                                cause: None,
+                                suppress_context: false,
+                                context: None,
+                                traceback: None,
+                                extra: Some(extra),
+                            }),
+                        ))
+                    }
+                    other => other,
+                }
             },
         }),
     );
@@ -1749,6 +1773,7 @@ fn _codecs_lookup_error(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 suppress_context: false,
                 context: None,
                 traceback: None,
+                extra: None,
             }),
         )),
     }

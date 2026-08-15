@@ -36,6 +36,7 @@ pub fn create_concurrent_futures_dict() -> HashMap<String, PyObjectRef> {
                     suppress_context: false,
                     context: None,
                     traceback: None,
+                    extra: None,
                 }))
             },
         }),
@@ -57,6 +58,7 @@ pub fn create_concurrent_futures_dict() -> HashMap<String, PyObjectRef> {
                     suppress_context: false,
                     context: None,
                     traceback: None,
+                    extra: None,
                 }))
             },
         }),

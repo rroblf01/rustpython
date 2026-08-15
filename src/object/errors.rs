@@ -92,6 +92,7 @@ impl PyError {
                 suppress_context: false,
                 context: None,
                 traceback: None,
+                extra: None,
             }),
         )
     }
@@ -106,6 +107,7 @@ impl PyError {
                 suppress_context: false,
                 context: None,
                 traceback: None,
+                extra: None,
             }),
         )
     }
@@ -124,6 +126,7 @@ impl PyError {
                 suppress_context: false,
                 context: None,
                 traceback: None,
+                extra: None,
             }),
         )
     }
@@ -147,6 +150,7 @@ impl PyError {
                 suppress_context: false,
                 context: None,
                 traceback: None,
+                extra: None,
             }),
         )
     }
@@ -196,6 +200,7 @@ impl PyError {
                 suppress_context: false,
                 context: None,
                 traceback: None,
+                extra: None,
             }),
         )
     }
@@ -214,6 +219,7 @@ impl PyError {
                 suppress_context: false,
                 context: None,
                 traceback: None,
+                extra: None,
             }),
         )
     }
@@ -229,6 +235,7 @@ impl PyError {
                 suppress_context: false,
                 context: None,
                 traceback: None,
+                extra: None,
             }),
         )
     }

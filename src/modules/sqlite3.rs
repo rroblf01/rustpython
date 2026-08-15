@@ -29,6 +29,7 @@ pub fn create_sqlite3_dict() -> HashMap<String, PyObjectRef> {
                     suppress_context: false,
                     context: None,
                     traceback: None,
+                    extra: None,
                 }))
             },
         }),

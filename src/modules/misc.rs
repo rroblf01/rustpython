@@ -2722,6 +2722,7 @@ fn struct_error(msg: impl Into<String>) -> PyError {
         suppress_context: false,
         context: None,
         traceback: None,
+        extra: None,
     });
     PyError::Exception(msg, exc)
 }
@@ -3237,6 +3238,7 @@ pub fn create_struct_dict() -> HashMap<String, PyObjectRef> {
                     suppress_context: false,
                     context: None,
                     traceback: None,
+                    extra: None,
                 }))
             },
         }),
@@ -5110,6 +5112,7 @@ fn toposorter_sorted_order(graph: &PyObjectRef) -> PyResult<Vec<PyObjectRef>> {
                 suppress_context: false,
                 context: None,
                 traceback: None,
+                extra: None,
             }),
         ));
     }
@@ -6863,6 +6866,7 @@ fn build_unraisable_args(func: &PyObjectRef, err: &PyError) -> PyObjectRef {
         suppress_context: false,
         context: None,
         traceback: None,
+        extra: None,
     });
     let exc_type = CURRENT_SYS_MODULE.with(|m| {
         let mod_ref = m.borrow().clone()?;
@@ -7970,6 +7974,7 @@ pub fn create_locale_dict() -> HashMap<String, PyObjectRef> {
                     suppress_context: false,
                     context: None,
                     traceback: None,
+                    extra: None,
                 }))
             },
         }),
@@ -11383,6 +11388,7 @@ pub fn create_ssl_dict() -> HashMap<String, PyObjectRef> {
                     suppress_context: false,
                     context: None,
                     traceback: None,
+                    extra: None,
                 }))
             },
         }),
@@ -11401,6 +11407,7 @@ pub fn create_ssl_dict() -> HashMap<String, PyObjectRef> {
                     suppress_context: false,
                     context: None,
                     traceback: None,
+                    extra: None,
                 }))
             },
         }),
@@ -11414,6 +11421,7 @@ pub fn create_ssl_dict() -> HashMap<String, PyObjectRef> {
             suppress_context: false,
             context: None,
             traceback: None,
+            extra: None,
         }))
     });
 
@@ -11425,6 +11433,7 @@ pub fn create_ssl_dict() -> HashMap<String, PyObjectRef> {
             suppress_context: false,
             context: None,
             traceback: None,
+            extra: None,
         }))
     });
 
@@ -11436,6 +11445,7 @@ pub fn create_ssl_dict() -> HashMap<String, PyObjectRef> {
             suppress_context: false,
             context: None,
             traceback: None,
+            extra: None,
         }))
     });
 
@@ -11447,6 +11457,7 @@ pub fn create_ssl_dict() -> HashMap<String, PyObjectRef> {
             suppress_context: false,
             context: None,
             traceback: None,
+            extra: None,
         }))
     });
 

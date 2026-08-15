@@ -47,6 +47,7 @@ pub(crate) fn warnings_emit(msg: &str, category: &str) {
                     suppress_context: false,
                     context: None,
                     traceback: None,
+                    extra: None,
                 });
                 items.push(warning_message_obj(ex));
                 recorded = true;

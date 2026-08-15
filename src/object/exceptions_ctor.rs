@@ -16,6 +16,7 @@ macro_rules! make_exception_func {
                 suppress_context: false,
                 context: None,
                 traceback: None,
+                extra: None,
             }))
         }
     };
@@ -34,7 +35,52 @@ make_exception_func!(
     builtin_make_exception_unboundlocalerror,
     "UnboundLocalError"
 );
-make_exception_func!(builtin_make_exception_attributeerror, "AttributeError");
+pub fn builtin_make_exception_attributeerror(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    // CPython: `AttributeError('x', name='carry', obj=sentinel)` keeps the
+    // positional args in `.args` and stores `name`/`obj` (the attribute name
+    // and owning object) as instance attrs. Here keyword args arrive as a
+    // trailing dict in `args`; extract and re-store them, then keep the
+    // positional message args clean (like real `.args`).
+    let (positional, kwargs) = match args.split_last() {
+        Some((last, rest)) if matches!(&*last.borrow(), PyObject::Dict(_)) => {
+            let mut pos: Vec<PyObjectRef> = Vec::new();
+            for a in rest {
+                pos.push(a.clone());
+            }
+            let d = last.borrow();
+            if let PyObject::Dict(d) = &*d {
+                (pos, Some(d.clone()))
+            } else {
+                (pos, None)
+            }
+        }
+        _ => (args.to_vec(), None),
+    };
+    let mut extra = None;
+    if let Some(kw) = kwargs {
+        let mut m = std::collections::HashMap::new();
+        let k_name = py_str("name");
+        let k_obj = py_str("obj");
+        if let Ok(Some(name)) = kw.get(&k_name) {
+            m.insert("name".to_string(), name.clone());
+        }
+        if let Ok(Some(obj)) = kw.get(&k_obj) {
+            m.insert("obj".to_string(), obj.clone());
+        }
+        if !m.is_empty() {
+            extra = Some(m);
+        }
+    }
+    Ok(PyObjectRef::new(PyObject::Exception {
+        typ: "AttributeError".to_string(),
+        args: positional,
+        cause: None,
+        suppress_context: false,
+        context: None,
+        traceback: None,
+        extra,
+    }))
+}
 make_exception_func!(builtin_make_exception_indexerror, "IndexError");
 make_exception_func!(builtin_make_exception_keyerror, "KeyError");
 make_exception_func!(builtin_make_exception_runtimeerror, "RuntimeError");

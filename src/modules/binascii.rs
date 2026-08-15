@@ -188,6 +188,7 @@ pub fn create_binascii_dict() -> HashMap<String, PyObjectRef> {
                     suppress_context: false,
                     context: None,
                     traceback: None,
+                    extra: None,
                 }))
             },
         }),

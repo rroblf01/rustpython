@@ -225,6 +225,10 @@ pub enum PyObject {
         suppress_context: bool,
         context: Option<PyObjectRef>,
         traceback: Option<PyObjectRef>,
+        /// Per-instance extra attributes (`BaseException.__dict__`): keyword
+        /// constructor args (e.g. `AttributeError('x', name=..., obj=...)`)
+        /// and any ad-hoc attributes assigned by user code.
+        extra: Option<HashMap<String, PyObjectRef>>,
     },
     ExceptionGroup {
         typ: String,

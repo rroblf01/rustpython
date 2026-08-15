@@ -273,6 +273,7 @@ fn str_encode_builtin(a: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                             suppress_context: false,
                             context: None,
                             traceback: None,
+                            extra: None,
                         }),
                     ));
                 }
@@ -300,6 +301,7 @@ fn str_encode_builtin(a: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                             suppress_context: false,
                             context: None,
                             traceback: None,
+                            extra: None,
                         }),
                     ));
                 }
@@ -324,7 +326,7 @@ impl PyObject {
     /// introspection over arbitrary values (e.g. something in the stdlib
     /// `email`/`dataclasses` machinery checking `.__doc__` while walking a
     /// structure that isn't guaranteed to be a function/class) hit this.
-    fn get_attribute_impl(&self, name: &str) -> PyResult<PyObjectRef> {
+    pub(crate) fn get_attribute_impl(&self, name: &str) -> PyResult<PyObjectRef> {
         // `.__class__` (equivalent to `type(x)`) universally, for every
         // variant — this was entirely missing from `get_attribute_impl`
         // (used by the `getattr()` builtin and any other generic
@@ -1107,6 +1109,7 @@ impl PyObject {
                 suppress_context,
                 context,
                 traceback,
+                extra,
             } => {
                 match name {
                     "__name__" => Ok(py_str(typ)),
@@ -1211,6 +1214,21 @@ impl PyObject {
                     },
                     "__suppress_context__" => Ok(py_bool(*suppress_context)),
                     "__notes__" => Ok(py_list(vec![])),
+                    // Per-instance attributes (BaseException.__dict__): the
+                    // constructor's keyword args (`AttributeError('x',
+                    // name=..., obj=...)`) and anything assigned by user
+                    // code. `__dict__` returns a copy; name/obj are the
+                    // AttributeError-specific ones CPython's test_exceptions
+                    // asserts.
+                    "__dict__" => {
+                        let mut d = crate::object::PyDict::new();
+                        if let Some(extra) = extra {
+                            for (k, v) in extra.iter() {
+                                let _ = d.set(py_str(k), v.clone());
+                            }
+                        }
+                        Ok(PyObjectRef::new(PyObject::Dict(Box::new(d))))
+                    }
                     // `BaseException.__setstate__(state)` — inherited by
                     // every exception, used by pickle to restore extra
                     // instance attributes on unpickling. Real semantics:
@@ -1280,10 +1298,29 @@ impl PyObject {
                     {
                         Ok(py_none())
                     }
-                    _ => Err(PyError::attribute_error(format!(
-                        "'Exception' object has no attribute '{}'",
-                        name
-                    ))),
+                    // `AttributeError.name`/`.obj` default to None when not
+                    // set by the constructor or getattr machinery.
+                    "name" | "obj" if typ == "AttributeError" => {
+                        if let Some(extra) = extra {
+                            if let Some(v) = extra.get(name) {
+                                return Ok(v.clone());
+                            }
+                        }
+                        Ok(py_none())
+                    }
+                    _ => {
+                        // Per-instance extras (BaseException.__dict__) —
+                        // e.g. `AttributeError('x', name='carry').name`.
+                        if let Some(extra) = extra {
+                            if let Some(v) = extra.get(name) {
+                                return Ok(v.clone());
+                            }
+                        }
+                        Err(PyError::attribute_error(format!(
+                            "'{}' object has no attribute '{}'",
+                            typ, name
+                        )))
+                    }
                 }
             }
             // `ExceptionGroup`/`BaseExceptionGroup` (PEP 654) had NO
@@ -2526,6 +2563,7 @@ impl PyObject {
                                                     suppress_context: false,
                                                     context: None,
                                                     traceback: None,
+                                                    extra: None,
                                                 }),
                                             ))
                                         }
@@ -10797,6 +10835,34 @@ impl ObjectAccess for PyObject {
     fn get_attribute(&self, name: &str) -> PyResult<PyObjectRef> {
         match self.get_attribute_impl(name) {
             Err(_) if name == "__doc__" => Ok(py_none()),
+            Err(e) if matches!(e, PyError::AttributeError(_)) => {
+                // Attach the attribute NAME and owning OBJECT to the raised
+                // AttributeError (CPython: `exc.name`/`exc.obj`). This is
+                // what `except AttributeError as exc: exc.name` sees after
+                // `obj.missing_attr`. The reconstructed PyObjectRef for
+                // `self` differs in identity from the original Rc, so
+                // `exc.obj is obj` may be False, but value equality and the
+                // overwhelmingly common `exc.name` checks work.
+                let mut extra = std::collections::HashMap::new();
+                extra.insert("name".to_string(), py_str(name));
+                extra.insert("obj".to_string(), PyObjectRef::new(self.clone()));
+                Err(PyError::Exception(
+                    "AttributeError".to_string(),
+                    PyObjectRef::new(PyObject::Exception {
+                        typ: "AttributeError".to_string(),
+                        args: vec![py_str(&format!(
+                            "'{}' object has no attribute '{}'",
+                            self.type_name(),
+                            name
+                        ))],
+                        cause: None,
+                        suppress_context: false,
+                        context: None,
+                        traceback: None,
+                        extra: Some(extra),
+                    }),
+                ))
+            }
             other => other,
         }
     }
@@ -10868,7 +10934,17 @@ impl ObjectAccess for PyObject {
                 *suppress_context = matches!(&*b, PyObject::Bool(true));
                 Ok(())
             }
-            PyObject::Exception { .. } | PyObject::ExceptionGroup { .. } => {
+            PyObject::Exception { extra, .. } => {
+                // Store arbitrary per-instance attributes (BaseException
+                // `__dict__` semantics): `e.name = ...`, `e.obj = ...`, etc.
+                // This also backs the AttributeError name/obj set by the
+                // getattr machinery. `__traceback__`/`__context__` etc. are
+                // handled by dedicated arms above.
+                let extra = extra.get_or_insert_with(|| std::collections::HashMap::new());
+                extra.insert(name.to_string(), value);
+                Ok(())
+            }
+            PyObject::ExceptionGroup { .. } => {
                 // No backing dict on these variants for __traceback__,
                 // __context__, __suppress_context__, __notes__, or custom
                 // attributes — but `except E as e: e.__traceback__ = tb` (and
