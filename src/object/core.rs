@@ -1235,21 +1235,25 @@ impl PyObjectRef {
         } else {
             None
         };
+        let mut self_eq_not_impl = false;
         if let Some(typ) = typ {
             if let Some(f) = lookup_dunder_via_mro(&typ, "__eq__") {
                 let result = call_bound_method(f, self.clone(), vec![other.clone()])?;
                 if !is_not_implemented(&result) {
                     return Ok(result.truthy());
                 }
+                self_eq_not_impl = true;
             }
         }
-        // If SELF is a native type (its own __eq__ was not consulted above)
-        // and OTHER is an Instance, reflect to OTHER's __eq__ — CPython:
-        // 'halibut' == HalibutProxy() calls HalibutProxy.__eq__('halibut').
-        // Without this, set/dict membership `H() in {'halibut'}` failed even
-        // though the hashes matched and `'halibut' == H()` was True (the set
-        // probes with `existing.equals(new_key)`).
-        if !matches!(&*self.borrow(), PyObject::Instance { .. }) {
+        // Reflect to OTHER's __eq__ when self's own returned NotImplemented —
+        // CPython: `'halibut' == HalibutProxy()` calls
+        // `HalibutProxy.__eq__('halibut')`, AND `X() == Y()` where both have
+        // __eq__ calls BOTH (`X.__eq__(Y())` then `Y.__eq__(X())`). Was
+        // gated on self NOT being an Instance, so two custom-__eq__ objects
+        // never reflected — the second __eq__ (and its side effects, e.g.
+        // clearing a list — test_list::test_equal_operator_modifying_operand)
+        // never ran.
+        if self_eq_not_impl || !matches!(&*self.borrow(), PyObject::Instance { .. }) {
             if let PyObject::Instance { typ, .. } = &*other.borrow() {
                 let typ = typ.clone();
                 if let Some(f) = lookup_dunder_via_mro(&typ, "__eq__") {
@@ -1312,6 +1316,43 @@ impl PyObjectRef {
                 // never-equal sentinel, must be `True`).
                 for (x, y) in my_items.iter().zip(other_items.iter()) {
                     if !(x.is(y) || x.equals(y)?) {
+                        // bpo-38588: an element's __eq__ may MUTATE the
+                        // lists mid-comparison (list1 = [X()]; list2 = [Y()];
+                        // X.__eq__ clears list2, Y.__eq__ clears list1). Real
+                        // CPython then re-compares the (now changed) live
+                        // lists — both empty -> equal. Retry on the live
+                        // contents.
+                        let (live_a, live_b): (Option<Vec<PyObjectRef>>, Option<Vec<PyObjectRef>>) = {
+                            let a = self.borrow();
+                            let b = other.borrow();
+                            (
+                                match &*a {
+                                    PyObject::List(l) => Some(l.clone()),
+                                    _ => None,
+                                },
+                                match &*b {
+                                    PyObject::List(l) => Some(l.clone()),
+                                    _ => None,
+                                },
+                            )
+                        };
+                        if let (Some(la), Some(lb)) = (live_a, live_b) {
+                            if la.len() != my_items.len() || lb.len() != other_items.len() {
+                                // mutated: re-run equality on the live lists
+                                // (both now empty in the bpo-38588 case).
+                                if la.len() != lb.len() {
+                                    return Ok(false);
+                                }
+                                let mut eq = true;
+                                for (xa, xb) in la.iter().zip(lb.iter()) {
+                                    if !(xa.is(xb) || xa.equals(xb)?) {
+                                        eq = false;
+                                        break;
+                                    }
+                                }
+                                return Ok(eq);
+                            }
+                        }
                         return Ok(false);
                     }
                 }
