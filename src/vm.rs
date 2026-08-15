@@ -3070,12 +3070,7 @@ impl VirtualMachine {
                 };
                 match val {
                     Some(v) => self.frames[fi].push(v),
-                    None => {
-                        return Err(PyError::name_error(format!(
-                            "name '{}' is not defined",
-                            name
-                        )))
-                    }
+                    None => return Err(PyError::name_error_for(name)),
                 }
             }
 
@@ -3213,12 +3208,7 @@ impl VirtualMachine {
                             }
                             self.frames[fi].push(v);
                         }
-                        None => {
-                            return Err(PyError::name_error(format!(
-                                "name '{}' is not defined",
-                                name
-                            )))
-                        }
+                        None => return Err(PyError::name_error_for(name)),
                     }
                 }
             }
@@ -3263,10 +3253,7 @@ impl VirtualMachine {
                         match &*obj {
                             PyObject::Cell { value: Some(inner) } => inner.clone(),
                             PyObject::Cell { value: None } => {
-                                return Err(PyError::name_error(format!(
-                                    "variable '{}' referenced before assignment",
-                                    name_str
-                                )));
+                                return Err(PyError::name_error_for(&name_str));
                             }
                             _ => cell.clone(),
                         }
@@ -3287,17 +3274,11 @@ impl VirtualMachine {
                         if let Some(v) = val {
                             self.frames[fi].push(v);
                         } else {
-                            return Err(PyError::name_error(format!(
-                                "variable '{}' not found",
-                                name_str
-                            )));
+                            return Err(PyError::name_error_for(&name_str));
                         }
                     }
                 } else {
-                    return Err(PyError::name_error(format!(
-                        "variable '{}' not found",
-                        name_str
-                    )));
+                    return Err(PyError::name_error_for(&name_str));
                 }
             }
 

@@ -1434,6 +1434,16 @@ impl PyObject {
                     "code" if typ == "SystemExit" => {
                         Ok(args.first().cloned().unwrap_or_else(py_none))
                     }
+                    // `NameError.name` — the undefined name (set by the VM's
+                    // LOAD_NAME path), default None.
+                    "name" if typ == "NameError" || typ == "UnboundLocalError" => {
+                        if let Some(extra) = extra {
+                            if let Some(v) = extra.get(name) {
+                                return Ok(v.clone());
+                            }
+                        }
+                        Ok(py_none())
+                    }
                     _ => {
                         // Per-instance extras (BaseException.__dict__) —
                         // e.g. `AttributeError('x', name='carry').name`.

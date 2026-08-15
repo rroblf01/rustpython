@@ -47,6 +47,24 @@ impl PyError {
     pub fn name_error(msg: impl Into<String>) -> Self {
         PyError::NameError(msg.into())
     }
+    /// `NameError: name 'x' is not defined` carrying the real attribute
+    /// `.name` (test_exceptions::NameErrorTests::test_name_error_has_name).
+    pub fn name_error_for(name: &str) -> Self {
+        let mut extra = std::collections::HashMap::new();
+        extra.insert("name".to_string(), py_str(name));
+        PyError::Exception(
+            "NameError".to_string(),
+            PyObjectRef::new(PyObject::Exception {
+                typ: "NameError".to_string(),
+                args: vec![py_str(&format!("name '{}' is not defined", name))],
+                cause: None,
+                suppress_context: false,
+                context: None,
+                traceback: None,
+                extra: Some(extra),
+            }),
+        )
+    }
     pub fn value_error(msg: impl Into<String>) -> Self {
         PyError::ValueError(msg.into())
     }
