@@ -709,16 +709,40 @@ impl PyObjectRef {
     }
 
     pub fn repr(&self) -> String {
-        // Guards against a genuinely self-referential container (`d = {};
-        // d[42] = d.values(); repr(d)` — real trigger: CPython's own
-        // `test_dictviews.py`'s `test_recursive_repr`). Real CPython's
-        // `repr()` has proper cycle detection (`Py_ReprEnter`/`Py_ReprLeave`,
-        // tracking object IDENTITY to print `[...]`/`{...}` for a repeat);
-        // this is a simpler DEPTH-based approximation — good enough to turn
-        // an unconditional stack-overflow crash into a plain "..." — since
-        // `.repr()` returns a bare `String`, not a `PyResult`, so there's
-        // nowhere to propagate a real `RecursionError` from here without a
-        // much larger signature change across every call site.
+        // Guard against self-referential containers (`l = [0, 1, 2, l]`;
+        // `repr(l)` must print `[0, 1, 2, [...]]`, CPython's `Py_ReprEnter`
+        // marker). Real CPython tracks object IDENTITY (not depth) so a
+        // recursive container prints `[...]` at the exact recursion point
+        // instead of expanding to depth 200 (the old depth-only
+        // approximation). Only CONTAINERS are tracked — a repeated string
+        // inside a list must not be marked.
+        thread_local! {
+            static REPR_STACK: std::cell::RefCell<Vec<usize>> =
+                std::cell::RefCell::new(Vec::new());
+        }
+        let is_container = matches!(
+            &*self.borrow(),
+            PyObject::List(_)
+                | PyObject::Tuple(_)
+                | PyObject::Dict(_)
+                | PyObject::Set(_)
+                | PyObject::FrozenSet(_)
+                | PyObject::Deque { .. }
+        );
+        if is_container {
+            let id = self.get_id();
+            let in_stack = REPR_STACK.with(|s| s.borrow().contains(&id));
+            if in_stack {
+                return match &*self.borrow() {
+                    PyObject::Deque { .. } => "deque([...])".to_string(),
+                    PyObject::Set(_) | PyObject::FrozenSet(_) => "{...}".to_string(),
+                    _ => "[...]".to_string(),
+                };
+            }
+            REPR_STACK.with(|s| s.borrow_mut().push(id));
+        }
+        // Depth fallback: even without identity cycles, pathological nesting
+        // (a >200-deep nested list) must not overflow the Rust stack.
         thread_local! {
             static REPR_DEPTH: std::cell::Cell<usize> = std::cell::Cell::new(0);
         }
@@ -729,10 +753,20 @@ impl PyObjectRef {
         });
         if depth > 200 {
             REPR_DEPTH.with(|c| c.set(c.get() - 1));
+            if is_container {
+                REPR_STACK.with(|s| {
+                    s.borrow_mut().pop();
+                });
+            }
             return "...".to_string();
         }
         let result = self.repr_inner();
         REPR_DEPTH.with(|c| c.set(c.get() - 1));
+        if is_container {
+            REPR_STACK.with(|s| {
+                s.borrow_mut().pop();
+            });
+        }
         result
     }
 
@@ -875,6 +909,21 @@ impl PyObjectRef {
         }
         if let Some(native) = native_backing_of(self) {
             return native.str();
+        }
+        // Containers' str == repr (including CPython's recursive `[...]`
+        // marker) — route through the recursion-guarded `repr()`, NOT the
+        // bare `PyObject::str` -> `PyObject::repr` path which lacks the
+        // identity-based cycle detection.
+        if matches!(
+            &*self.borrow(),
+            PyObject::List(_)
+                | PyObject::Tuple(_)
+                | PyObject::Dict(_)
+                | PyObject::Set(_)
+                | PyObject::FrozenSet(_)
+                | PyObject::Deque { .. }
+        ) {
+            return self.repr();
         }
         self.borrow().str()
     }
