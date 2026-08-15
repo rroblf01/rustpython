@@ -7953,10 +7953,23 @@ impl VirtualMachine {
                         self.exc_value.as_ref().map(|v| v.repr())
                     );
                 }
+                // The real __traceback__ chain lives on the exception object
+                // itself (`exc_traceback` is only ever set to None at raise
+                // time) — `sys.__excepthook__(*sys.exc_info())` needs it.
+                let tb = self
+                    .exc_value
+                    .as_ref()
+                    .and_then(|v| {
+                        v.borrow()
+                            .get_attribute("__traceback__")
+                            .ok()
+                            .filter(|t| !matches!(&*t.borrow(), PyObject::None))
+                    })
+                    .unwrap_or_else(py_none);
                 return Ok(py_tuple(vec![
                     self.exc_type.clone().unwrap_or_else(py_none),
                     self.exc_value.clone().unwrap_or_else(py_none),
-                    self.exc_traceback.clone().unwrap_or_else(py_none),
+                    tb,
                 ]));
             }
         }
@@ -7969,6 +7982,39 @@ impl VirtualMachine {
             let is_exception = matches!(&*callable.borrow(), PyObject::BuiltinFunction { func, .. } if std::ptr::fn_addr_eq(*func, crate::modules::sys_exception_builtin as crate::object::BuiltinFunc));
             if is_exception {
                 return Ok(self.exc_value.clone().unwrap_or_else(py_none));
+            }
+        }
+
+        // `sys.excepthook`/`sys.__excepthook__` — build the report with
+        // `build_excepthook_report` (VM-independent) and write it to the
+        // CURRENT `sys.stderr` via `self`. Doing the write through
+        // `with_vm_mut` from inside this live call chain segfaults (the
+        // thread-local VM pointer is stale here), and Rust's own stderr
+        // bypasses `support.captured_stderr`'s Python-level redirect.
+        {
+            let is_excepthook = matches!(&*callable.borrow(), PyObject::BuiltinFunction { func, .. } if std::ptr::fn_addr_eq(*func, crate::modules::sys_excepthook_builtin as crate::object::BuiltinFunc));
+            if is_excepthook {
+                let report = crate::modules::build_excepthook_report(&args)?;
+                let stderr = self
+                    .modules
+                    .get("sys")
+                    .and_then(|m| {
+                        if let PyObject::Module { dict, .. } = &*m.borrow() {
+                            dict.get_str("stderr").cloned()
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_else(py_none);
+                if !matches!(&*stderr.borrow(), PyObject::None) {
+                    let _ = crate::object::call_method_rebound(
+                        self,
+                        &stderr,
+                        "write",
+                        vec![py_str(&report)],
+                    );
+                }
+                return Ok(py_none());
             }
         }
 

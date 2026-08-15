@@ -4048,10 +4048,33 @@ pub fn create_math_dict() -> HashMap<String, PyObjectRef> {
 // (i.e. virtually always), not just some rare reentrant case.
 pub fn sys_exc_info_builtin(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let result = crate::object::with_vm_mut(|vm| {
+        let tb = if let Some(tb) = vm.exc_traceback.clone() {
+            if !matches!(&*tb.borrow(), PyObject::None) {
+                Some(tb)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        // `exc_traceback` is only ever `None` (set at raise time) — the real
+        // chain lives on the exception object's own `__traceback__`.
+        let tb = tb.or_else(|| {
+            vm.exc_value.as_ref().and_then(|v| {
+                let r = v.borrow().get_attribute("__traceback__").ok();
+                if std::env::var("RPY_DEBUG_EXCINFO").is_ok() {
+                    eprintln!(
+                        "exc_info tb lookup: {:?}",
+                        r.as_ref().map(|t| t.borrow().repr())
+                    );
+                }
+                r.filter(|t| !matches!(&*t.borrow(), PyObject::None))
+            })
+        });
         py_tuple(vec![
             vm.exc_type.clone().unwrap_or(py_none()),
             vm.exc_value.clone().unwrap_or(py_none()),
-            vm.exc_traceback.clone().unwrap_or(py_none()),
+            tb.unwrap_or(py_none()),
         ])
     });
     Ok(result.unwrap_or_else(|_| py_tuple(vec![py_none(), py_none(), py_none()])))
@@ -4160,6 +4183,137 @@ pub fn sys_setrecursionlimit_builtin(args: &[PyObjectRef]) -> PyResult<PyObjectR
     Ok(py_none())
 }
 
+// `sys.excepthook`/`sys.__excepthook__` — the default uncaught-exception
+// reporter: `excepthook(exc_type, exc_value, exc_tb)` walks the (now real)
+// traceback chain and prints a CPython-style report. The report BUILDING is
+// VM-independent (plain object attribute reads); the actual sys.stderr write
+// happens in `call_function`'s pointer-identified intercept in vm.rs (where
+// the live `&mut VirtualMachine` is available — `with_vm_mut` is UB from
+// inside a live call chain, see that file's own comments). This fallback
+// body only fires when the intercept doesn't (e.g. called indirectly).
+pub fn sys_excepthook_builtin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    let out = build_excepthook_report(args)?;
+    if !out.is_empty() {
+        use std::io::Write;
+        let _ = std::io::stderr().write_all(out.as_bytes());
+    }
+    Ok(py_none())
+}
+
+/// Build the CPython-style traceback report string for `(exc_type,
+/// exc_value, exc_tb)` (no VM access needed).
+pub(crate) fn build_excepthook_report(args: &[PyObjectRef]) -> PyResult<String> {
+    let (exc_type, exc_value, exc_tb) = match args.len() {
+        3 => (&args[0], &args[1], &args[2]),
+        0 => {
+            return Err(PyError::type_error(
+                "excepthook() takes exactly 3 arguments (0 given)",
+            ))
+        }
+        _ => {
+            return Err(PyError::type_error(format!(
+                "excepthook() takes exactly 3 arguments ({} given)",
+                args.len()
+            )))
+        }
+    };
+    let mut out = String::from("Traceback (most recent call last):\n");
+    let mut tb = if matches!(&*exc_tb.borrow(), PyObject::None) {
+        None
+    } else {
+        Some(exc_tb.clone())
+    };
+    let mut count = 0;
+    while let Some(node) = tb {
+        if count >= 100 {
+            out.push_str("  ...\n");
+            break;
+        }
+        let (filename, lineno, name) = {
+            let b = node.borrow();
+            let frame = b.get_attribute("tb_frame").ok();
+            let lineno = b.get_attribute("tb_lineno").ok().and_then(|l| l.as_i64());
+            let (filename, name) = match frame {
+                Some(f) => {
+                    let fb = f.borrow();
+                    let code = fb.get_attribute("f_code").ok();
+                    match code {
+                        Some(c) => {
+                            let cb = c.borrow();
+                            (
+                                cb.get_attribute("co_filename")
+                                    .ok()
+                                    .map(|s| s.str())
+                                    .unwrap_or_else(|| "<unknown>".to_string()),
+                                cb.get_attribute("co_name")
+                                    .ok()
+                                    .map(|s| s.str())
+                                    .unwrap_or_else(|| "?".to_string()),
+                            )
+                        }
+                        None => ("<unknown>".to_string(), "?".to_string()),
+                    }
+                }
+                None => ("<unknown>".to_string(), "?".to_string()),
+            };
+            (filename, lineno.unwrap_or(0), name)
+        };
+        out.push_str(&format!(
+            "  File \"{}\", line {}, in {}\n",
+            filename, lineno, name
+        ));
+        // Source line, when the file is readable (CPython prints the
+        // offending line with an indent).
+        if lineno > 0 && !filename.is_empty() {
+            if let Ok(src) = std::fs::read_to_string(&filename) {
+                if let Some(line) = src.lines().nth(lineno as usize - 1) {
+                    out.push_str(&format!("    {}\n", line));
+                }
+            }
+        }
+        count += 1;
+        tb = node.borrow().get_attribute("tb_next").ok().and_then(|n| {
+            if matches!(&*n.borrow(), PyObject::None) {
+                None
+            } else {
+                Some(n)
+            }
+        });
+    }
+    // `TypeName: message` — CPython prints `<exception str() failed>` when
+    // str(exc) itself raises; our str() swallows such errors, so the message
+    // is used directly.
+    let typ_name = exc_type
+        .borrow()
+        .get_attribute("__name__")
+        .map(|n| n.str())
+        .unwrap_or_else(|_| exc_type.str());
+    // Fallible str(): a custom __str__ that raises yields CPython's
+    // `<exception str() failed>` marker (test_unhandled's BrokenStrException),
+    // instead of silently falling back to the repr.
+    let message = {
+        let custom = match &*exc_value.borrow() {
+            PyObject::Instance { typ, .. } => crate::object::lookup_dunder_via_mro(typ, "__str__")
+                .or_else(|| crate::object::lookup_dunder_via_mro(typ, "__repr__")),
+            _ => None,
+        };
+        if let Some(f) = custom {
+            match crate::object::call_bound_method(f, exc_value.clone(), vec![]) {
+                Ok(r) => r.str(),
+                Err(_) => "<exception str() failed>".to_string(),
+            }
+        } else {
+            exc_value.str()
+        }
+    };
+    if message.is_empty() {
+        out.push_str(&format!("{}\n", typ_name));
+    } else {
+        out.push_str(&format!("{}: {}\n", typ_name, message));
+    }
+    Ok(out)
+}
+
 pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! sys_func {
@@ -4195,8 +4349,16 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
         println!("{}", val.repr());
         Ok(py_none())
     });
+    // `sys.excepthook`/`sys.__excepthook__` — the default uncaught-exception
+    // reporter. Called as `excepthook(exc_type, exc_value, exc_tb)`; walks
+    // the (now real) traceback chain and prints a CPython-style report to
+    // stderr, including the source line when the file is readable. Real
+    // trigger: CPython's own test_exceptions (test_unhandled,
+    // test_issue45826, ...) calling `sys.__excepthook__(*sys.exc_info())`
+    // and asserting on the report.
+    sys_func!("excepthook", sys_excepthook_builtin);
+    sys_func!("__excepthook__", sys_excepthook_builtin);
     // `sys.unraisablehook` (3.8+) — called by the interpreter when an
-    // exception is raised somewhere it can't propagate (a `__del__`, a
     // weakref callback, ...) and would otherwise just be silently dropped.
     // This interpreter has no internal machinery that actually detects and
     // invokes this hook, but real code (and test infra) routinely reads/
