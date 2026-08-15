@@ -6976,7 +6976,12 @@ impl VirtualMachine {
             Opcode::SETUP_WITH => {
                 // Look up __enter__ and call it, keeping manager on stack
                 let mgr = self.frames[fi].peek(0)?;
-                let _exit_method = mgr.borrow().get_attribute("__exit__").ok();
+                let exit_method = mgr.borrow().get_attribute("__exit__").ok();
+                if exit_method.is_none() {
+                    return Err(PyError::type_error(
+                        "object does not support the context manager protocol (missed __exit__ method)",
+                    ));
+                }
                 let enter_raw = mgr.borrow().get_attribute("__enter__").ok();
                 if let Some(enter_raw) = enter_raw {
                     let is_builtin = matches!(&*enter_raw.borrow(), PyObject::BuiltinMethod { .. });
@@ -7001,7 +7006,9 @@ impl VirtualMachine {
                     let result = self.call_function(enter, vec![], vec![])?;
                     self.frames[fi].push(result);
                 } else {
-                    self.frames[fi].push(py_none());
+                    return Err(PyError::type_error(
+                        "object does not support the context manager protocol (missed __enter__ method)",
+                    ));
                 }
             }
 
