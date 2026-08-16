@@ -109,6 +109,10 @@ pub fn create_collections_dict(object_type: PyObjectRef) -> HashMap<String, PyOb
         bases: vec![object_type.clone()],
         mro: vec![],
     });
+    // `deque.__module__ == 'collections'` (reprlib's dispatch keyed on it).
+    if let PyObject::Type { dict, .. } = &mut *deque_type.borrow_mut() {
+        dict.insert_str("__module__", py_str("collections"));
+    }
     if let PyObject::Type { mro, .. } = &mut *deque_type.borrow_mut() {
         *mro = vec![deque_type.clone(), object_type.clone()];
     }

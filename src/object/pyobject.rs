@@ -693,7 +693,12 @@ impl PyObject {
                         }
                     })
                     .collect();
-                format!("array('{}', [{}])", arr.typecode, items.join(", "))
+                if items.is_empty() {
+                    // CPython: an empty array reprs as `array('i')`.
+                    format!("array('{}')", arr.typecode)
+                } else {
+                    format!("array('{}', [{}])", arr.typecode, items.join(", "))
+                }
             }
             PyObject::MemoryView { .. } => {
                 format!("<memory at 0x{:012x}>", self as *const PyObject as usize)

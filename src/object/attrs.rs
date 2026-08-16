@@ -7310,12 +7310,22 @@ impl PyObject {
                                 return Ok(result);
                             }
                         }
-                        let key = self as *const PyObject as usize;
-                        if let Some(cached) = ANN_CACHE.with(|c| c.borrow().get(&key).cloned()) {
-                            return Ok(cached);
+                        // No `__annotate__`: every annotation-less function
+                        // shares ONE empty dict, so
+                        // `func1.__annotations__ is func2.__annotations__`
+                        // (test_reprlib::test_assigned_attributes asserts
+                        // this across a wrapped function pair).
+                        thread_local! {
+                            static EMPTY_ANN: std::cell::RefCell<Option<PyObjectRef>> =
+                                const { std::cell::RefCell::new(None) };
                         }
-                        let empty = crate::object::py_dict();
-                        ANN_CACHE.with(|c| c.borrow_mut().insert(key, empty.clone()));
+                        let empty = EMPTY_ANN.with(|c| {
+                            let mut opt = c.borrow_mut();
+                            if opt.is_none() {
+                                *opt = Some(crate::object::py_dict());
+                            }
+                            opt.clone().unwrap()
+                        });
                         Ok(empty)
                     }
                     // `func.__dict__` — every custom attribute set on a
