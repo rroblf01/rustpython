@@ -35,7 +35,15 @@ pub fn to_index(obj: &PyObjectRef) -> PyResult<BigInt> {
                 // `__index__` returning `True`/`False` is valid (if
                 // deprecated in modern CPython) — matches the native-`bool`
                 // arm added just below for the same reason.
-                PyObject::Bool(b) => Ok(BigInt::from(*b as i64)),
+                PyObject::Bool(b) => {
+                    // CPython emits DeprecationWarning when __index__ returns
+                    // a bool (test_index::test_index_returns_int_subclass).
+                    crate::modules::warnings_emit(
+                        "__index__ returned non-int (type bool)",
+                        "DeprecationWarning",
+                    );
+                    Ok(BigInt::from(*b as i64))
+                }
                 _ => Err(PyError::type_error("__index__ must return int")),
             }
         } else {

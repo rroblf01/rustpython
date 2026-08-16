@@ -4173,8 +4173,16 @@ impl VirtualMachine {
                     let obj = val.borrow();
                     match &*obj {
                         PyObject::Int(i) => py_int(!i),
-                        // ~bool yields ~0/~1 = -1/-2 (a plain int)
-                        PyObject::Bool(b) => py_int(if *b { -2i64 } else { -1i64 }),
+                        // ~bool yields ~0/~1 = -1/-2 (a plain int); CPython
+                        // emits DeprecationWarning (test_bool::test_math).
+                        PyObject::Bool(b) => {
+                            crate::modules::warnings_emit(
+                                "Bitwise inversion '~' on bool is deprecated. \
+                                 Use 'not' instead",
+                                "DeprecationWarning",
+                            );
+                            py_int(if *b { -2i64 } else { -1i64 })
+                        }
                         _ => return Err(PyError::type_error("bad operand type for unary ~")),
                     }
                 };

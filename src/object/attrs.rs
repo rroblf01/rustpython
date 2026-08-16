@@ -323,6 +323,24 @@ fn int_or_bool_value(o: &PyObjectRef) -> Option<BigInt> {
     }
 }
 
+/// `int.__new__(bool, ...)` is a TypeError (test_bool::test_subclass) —
+/// bool has its own allocator; everything else delegates to `int()`.
+fn int_new_checked(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if let Some(cls) = args.first() {
+        let is_bool = match &*cls.borrow() {
+            PyObject::Bool(_) => true,
+            PyObject::Type { name, .. } => name == "bool",
+            _ => false,
+        };
+        if is_bool {
+            return Err(PyError::type_error(
+                "int.__new__(bool) is not safe, use bool.__new__()",
+            ));
+        }
+    }
+    crate::object::builtin_int(args)
+}
+
 /// Direct sequence repetition for the `__mul__`/`__rmul__` dunders. NOT via
 /// `py_mul` — that would re-dispatch through `try_dunder_binop` back into the
 /// same `__mul__` (infinite recursion). Builds the repeated container.
@@ -10774,6 +10792,15 @@ impl PyObject {
                     }));
                 }
                 if name == "__new__" || name == "__init__" {
+                    // CPython: `int.__new__(bool, ...)` raises TypeError
+                    // ("int.__new__(bool) is not safe, use bool.__new__()")
+                    // — bool has its own allocator. test_bool::test_subclass.
+                    if name == "__new__" && bf_name == "int" {
+                        return Ok(PyObjectRef::imm(PyObject::BuiltinFunction {
+                            name: "int.__new__".to_string(),
+                            func: int_new_checked,
+                        }));
+                    }
                     // Pragmatic stand-in: real CPython's builtin `__new__`/
                     // `__init__` slots are the actual C-level allocators/
                     // initializers, not separately-callable Python-visible

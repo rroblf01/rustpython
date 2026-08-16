@@ -674,6 +674,14 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
                     ));
                 }
                 let cls = args[0].clone();
+                // `int.__new__(bool, ...)` / `object.__new__(bool, ...)`
+                // must TypeError — bool has its own allocator
+                // (test_bool::test_subclass).
+                if matches!(&*cls.borrow(), PyObject::Type { name, .. } if name == "bool") {
+                    return Err(PyError::type_error(
+                        "int.__new__(bool) is not safe, use bool.__new__()",
+                    ));
+                }
                 let native_kind = if let PyObject::Type { dict, .. } = &*cls.borrow() {
                     dict.get_str(crate::object::NATIVE_BASE_MARKER)
                         .map(|v| v.str())

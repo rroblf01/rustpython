@@ -605,7 +605,23 @@ impl PyObject {
             PyObject::Module { name, .. } => format!("<module '{}'>", name),
             PyObject::Type { name, .. } => format!("<class '{}'>", name),
             PyObject::Instance { typ, .. } => {
-                format!("<{} object>", typ.borrow().type_name())
+                // CPython: `<module.Class object at 0x...>` — dataclasses'
+                // repr=False instances and test_pprint's regex expect the
+                // module-qualified name, not the bare `<Class object>`.
+                let tb = typ.borrow();
+                let name = if let PyObject::Type { dict, name, .. } = &*tb {
+                    let module = dict
+                        .get_str("__module__")
+                        .map(|m| m.str())
+                        .unwrap_or_else(|| "builtins".to_string());
+                    format!("{}.{}", module, name)
+                } else {
+                    tb.type_name().to_string()
+                };
+                format!(
+                    "<{} object at 0x{:x}>",
+                    name, self as *const PyObject as usize
+                )
             }
             PyObject::Code(c) => format!("<code object {}>", c.name),
             PyObject::Cell { value: Some(v) } => v.repr(),

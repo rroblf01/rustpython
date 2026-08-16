@@ -271,10 +271,11 @@ def _process_class(cls, init, repr, eq, order, unsafe_hash, frozen, kw_only):
     fields_list = list(fields_dict.values())
 
     cls.__dataclass_fields__ = fields_dict
-    cls.__dataclass_params__ = {
-        "init": init, "repr": repr, "eq": eq, "order": order,
-        "unsafe_hash": unsafe_hash, "frozen": frozen,
-    }
+    # Attribute access (not a dict): CPython's `_DataclassParams` —
+    # `object.__dataclass_params__.repr` (pprint.py reads it).
+    cls.__dataclass_params__ = _DataclassParams(
+        init, repr, eq, order, unsafe_hash, frozen
+    )
 
     if init and "__init__" not in cls.__dict__:
         cls.__init__ = _make_init(cls, fields_list, frozen)
@@ -302,6 +303,16 @@ def _process_class(cls, init, repr, eq, order, unsafe_hash, frozen, kw_only):
         cls.__hash__ = None
 
     return cls
+
+
+class _DataclassParams:
+    def __init__(self, init, repr, eq, order, unsafe_hash, frozen):
+        self.init = init
+        self.repr = repr
+        self.eq = eq
+        self.order = order
+        self.unsafe_hash = unsafe_hash
+        self.frozen = frozen
 
 
 def dataclass(cls=None, /, *, init=True, repr=True, eq=True, order=False,
