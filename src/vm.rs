@@ -2920,15 +2920,11 @@ impl VirtualMachine {
                         // entries accumulated so far (from inner frames that didn't
                         // handle it) no longer describe a real escaping error.
                         self.last_traceback.clear();
-                        // The catching frame itself is also a node in the real
-                        // __traceback__ chain (CPython: `except Exception as e:`
-                        // yields e.__traceback__ starting at this frame).
-                        if let Some(f) = self.frames.get(frame_floor) {
-                            let exc_obj = Self::error_to_exc_obj(&e);
-                            let frame_idx = frame_floor;
-                            drop(f);
-                            self.prepend_traceback(&exc_obj, frame_idx);
-                        }
+                        // The catching frame's __traceback__ node was prepended
+                        // inside `handle_exception` (on the SAME object the
+                        // handler binds — done there, not here, because
+                        // synthesized PyErrors produce a fresh object on every
+                        // `error_to_exc_obj` call).
                     }
                     if std::env::var("RPY_DEBUG_EXC").is_ok() {
                         eprintln!(
@@ -10175,25 +10171,56 @@ impl VirtualMachine {
         // per-frame mutable borrow in the loop.
         let exc_obj = Self::error_to_exc_obj(error);
         self.capture_exception_context(&exc_obj);
-        for frame in self.frames[frame_floor..].iter_mut().rev() {
-            while let Some(handler) = frame.exception_handlers.pop() {
-                // For any handler (Except or Finally), restore stack and transfer control
-                frame.stack.truncate(handler.stack_depth);
-                // Drop context-stack entries whose handled exception's value
-                // was above this truncation point: their handler bodies were
-                // abandoned mid-execution by the exception now unwinding (its
-                // POP_EXCEPT epilogue never ran), so they must not linger and
-                // pollute a later unrelated raise's __context__.
-                self.exc_context_stack
-                    .retain(|(_, depth)| *depth < handler.stack_depth);
-                frame.ip = handler.instr_addr;
+        // Set the current exception info so `sys.exc_info()` inside the
+        // handler returns the REAL caught exception (type, value, and the
+        // traceback we're about to attach). Previously only RAISE_VARARGS
+        // populated these, so a builtin-raised error (`[1,2].blah`,
+        // `1/0`, ...) caught by `except E as e:` made `sys.exc_info()`
+        // return (None, None, None) — breaking traceback.format_exception,
+        // unittest's error reporting, and `except E as e: sys.exc_info()`
+        // introspection.
+        self.exc_type = Some(self.exception_class_of(&exc_obj));
+        self.exc_value = Some(exc_obj.clone());
+        let total = self.frames.len();
+        for i in (frame_floor..total).rev() {
+            // Pop the innermost handler of this frame and set up control
+            // transfer WITHOUT holding the frame borrow across
+            // `prepend_traceback` (which needs `&mut self`).
+            let entered = {
+                let frame = &mut self.frames[i];
+                match frame.exception_handlers.pop() {
+                    Some(handler) => {
+                        // For any handler (Except or Finally), restore stack and
+                        // transfer control.
+                        frame.stack.truncate(handler.stack_depth);
+                        // Drop context-stack entries whose handled exception's value
+                        // was above this truncation point: their handler bodies were
+                        // abandoned mid-execution by the exception now unwinding (its
+                        // POP_EXCEPT epilogue never ran), so they must not linger and
+                        // pollute a later unrelated raise's __context__.
+                        self.exc_context_stack
+                            .retain(|(_, depth)| *depth < handler.stack_depth);
+                        frame.ip = handler.instr_addr;
+                        true
+                    }
+                    None => false,
+                }
+            };
+            if entered {
+                // Prepend a real traceback node for this catching frame using
+                // the SAME exception object the handler will bind — for
+                // synthesized PyErrors (TypeError/AttributeError/...) every
+                // `error_to_exc_obj` call makes a FRESH object, so doing the
+                // prepend here (not in execute()'s else-branch) is what makes
+                // `except E as e: e.__traceback__` non-None.
+                self.prepend_traceback(&exc_obj, i);
                 // The unwinding exception is now "in flight" — a `raise X`
                 // inside a `finally:` body chains it as __context__ (except
                 // handlers' PUSH_EXC_INFO immediately replaces this with the
                 // handled-exception stack entry, which is the CPython
                 // semantics: the handled exception becomes the context).
                 self.propagating_exc = Some(exc_obj.clone());
-                frame.push(exc_obj);
+                self.frames[i].push(exc_obj);
                 // For Finally handlers, we always execute them.
                 // For Except handlers, we also execute them — the code at the
                 // handler address will check CHECK_EXC_MATCH to decide.

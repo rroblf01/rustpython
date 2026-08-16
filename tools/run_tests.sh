@@ -2,9 +2,12 @@
 # Parallel CPython test runner with fresh-binary sanity check.
 #
 # Usage:
-#   tools/run_tests.sh [--jobs N] [--timeout SEC] [test_file ...]
+#   tools/run_tests.sh [--jobs N] [--timeout SEC] [--debug] [test_file ...]
 #   tools/run_tests.sh --all        # every tests/cpython/test_*.py
 #
+# Defaults to the RELEASE binary (5-7x faster than debug — test_math goes
+# 218s -> 37s), so the ~21s incremental release build is amortized over the
+# whole batch. Use --debug to iterate a single small test with a 2s build.
 # Builds first, verifies the binary is FRESH (avoids the stale-binary trap
 # where a failed rebuild silently runs the previous executable), then runs
 # each test as an independent process with its own timeout, printing a
@@ -13,11 +16,31 @@ set -u
 
 JOBS="${JOBS:-4}"
 TOUT="${TOUT:-150}"
-BIN="${BIN:-target/debug/rustpython}"
+MODE="${MODE:-release}"
 
-if ! cargo build 2>&1 | tail -1 | grep -q "Finished"; then
-    echo "BUILD FAILED" >&2
-    exit 1
+ARGS=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --jobs) JOBS="$2"; shift 2 ;;
+        --timeout) TOUT="$2"; shift 2 ;;
+        --debug) MODE="debug"; shift ;;
+        --all) ARGS=(tests/cpython/test_*.py); shift ;;
+        *) ARGS+=("$1"); shift ;;
+    esac
+done
+
+if [ "$MODE" = "release" ]; then
+    BIN="${BIN:-target/release/rustpython}"
+    if ! cargo build --release 2>&1 | tail -1 | grep -q "Finished"; then
+        echo "BUILD FAILED" >&2
+        exit 1
+    fi
+else
+    BIN="${BIN:-target/debug/rustpython}"
+    if ! cargo build 2>&1 | tail -1 | grep -q "Finished"; then
+        echo "BUILD FAILED" >&2
+        exit 1
+    fi
 fi
 
 # Fresh-binary sanity check: the just-built binary must report the expected
@@ -28,18 +51,8 @@ if ! "$BIN" -c "import sys; sys.exit(0 if 'RustPython' in sys.version else 1)" >
     exit 1
 fi
 
-ARGS=()
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --jobs) JOBS="$2"; shift 2 ;;
-        --timeout) TOUT="$2"; shift 2 ;;
-        --all) ARGS=(tests/cpython/test_*.py); shift ;;
-        *) ARGS+=("$1"); shift ;;
-    esac
-done
-
 if [ ${#ARGS[@]} -eq 0 ]; then
-    echo "usage: $0 [--jobs N] [--timeout SEC] [test_file ...] | --all" >&2
+    echo "usage: $0 [--jobs N] [--timeout SEC] [--debug] [test_file ...] | --all" >&2
     exit 2
 fi
 
