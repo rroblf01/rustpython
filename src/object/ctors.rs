@@ -519,6 +519,22 @@ pub(crate) fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String,
                 let iter = vec.into_iter();
                 arg_iter = Some(Box::new(iter));
             }
+            // namedtuple instances are tuple subclasses in real CPython, so
+            // `'%d %d %r' % a_namedtuple` unpacks positionally like a tuple
+            // (unittest's `_Mismatch` in assertCountEqual relies on it).
+            PyObject::Instance { dict, .. } if dict.get_str("_fields").is_some() => {
+                let mut vals: Vec<PyObjectRef> = Vec::new();
+                if let Some(fields) = dict.get_str("_fields") {
+                    if let PyObject::List(fields) = &*fields.borrow() {
+                        for f in fields {
+                            if let Some(v) = dict.get(&f.str()) {
+                                vals.push(v.clone());
+                            }
+                        }
+                    }
+                }
+                arg_iter = Some(Box::new(vals.into_iter()));
+            }
             _ => {}
         }
     }
