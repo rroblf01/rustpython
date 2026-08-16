@@ -7276,9 +7276,17 @@ impl VirtualMachine {
                 let mgr = self.frames[fi].peek(0)?;
                 let exit_method = mgr.borrow().get_attribute("__exit__").ok();
                 if exit_method.is_none() {
-                    return Err(PyError::type_error(
-                        "object does not support the context manager protocol (missed __exit__ method)",
-                    ));
+                    let has_aenter = mgr
+                        .borrow()
+                        .get_attribute("__aenter__")
+                        .is_ok_and(|v| !matches!(&*v.borrow(), PyObject::None));
+                    return Err(PyError::type_error(if has_aenter {
+                        "object does not support the context manager protocol (missed __exit__ method) \
+                         but it supports the asynchronous context manager protocol. \
+                         Did you mean to use 'async with'?"
+                    } else {
+                        "object does not support the context manager protocol (missed __exit__ method)"
+                    }));
                 }
                 let enter_raw = mgr.borrow().get_attribute("__enter__").ok();
                 if let Some(enter_raw) = enter_raw {
@@ -7391,7 +7399,15 @@ impl VirtualMachine {
                         self_obj: mgr,
                     })
                 };
-                let result = self.call_function(bound, vec![typ_obj, val, py_none()], vec![])?;
+                // Pass the exception's real __traceback__ (not py_none) —
+                // `__exit__(type, value, tb)` implementations and
+                // test_with's MockContextManager assert tb is non-None after
+                // an exception (exit_args[2] is not None).
+                let tb_arg = val
+                    .borrow()
+                    .get_attribute("__traceback__")
+                    .unwrap_or_else(|_| py_none());
+                let result = self.call_function(bound, vec![typ_obj, val, tb_arg], vec![])?;
                 self.frames[fi].push(result);
             }
 
