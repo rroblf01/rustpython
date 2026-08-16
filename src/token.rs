@@ -83,6 +83,7 @@ pub enum Token {
     GreaterEqual,
     EqualEqual,
     NotEqual,
+    LessGreater,
     Equal,
     PlusEqual,
     MinusEqual,
@@ -1351,6 +1352,11 @@ impl Lexer {
                         }
                     } else if self.advance_if('=') {
                         return Token::LessEqual;
+                    } else if self.advance_if('>') {
+                        // `<>` — legacy not-equal. Only valid with the
+                        // barry_as_FLUFL future flag; the PARSER decides
+                        // (accepts it then, rejects it otherwise).
+                        return Token::LessGreater;
                     } else {
                         return Token::Less;
                     }

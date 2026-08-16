@@ -7346,6 +7346,18 @@ pub fn create_future_dict() -> HashMap<String, PyObjectRef> {
         feature(0x200, "annotations", "3.7.0", "3.11.0"),
     );
 
+    // CO_FUTURE_* constants (real CPython's __future__.py defines these as
+    // `flags` values usable with compile()) — test_flufl references
+    // CO_FUTURE_BARRY_AS_BDFL.
+    d.insert_str("CO_FUTURE_DIVISION", py_int(0x20000));
+    d.insert_str("CO_FUTURE_ABSOLUTE_IMPORT", py_int(0x40000));
+    d.insert_str("CO_FUTURE_WITH_STATEMENT", py_int(0x80000));
+    d.insert_str("CO_FUTURE_PRINT_FUNCTION", py_int(0x100000));
+    d.insert_str("CO_FUTURE_UNICODE_LITERALS", py_int(0x200000));
+    d.insert_str("CO_FUTURE_BARRY_AS_BDFL", py_int(0x400000));
+    d.insert_str("CO_FUTURE_GENERATOR_STOP", py_int(0x800000));
+    d.insert_str("CO_FUTURE_ANNOTATIONS", py_int(0x1000000));
+
     d.insert_str(
         "all_feature_names",
         py_list(vec![

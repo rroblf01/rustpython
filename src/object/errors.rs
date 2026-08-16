@@ -91,6 +91,16 @@ impl PyError {
     /// previously uncatchable by `except SyntaxError:`, an extremely
     /// standard idiom for validating/pre-checking source code).
     pub fn syntax_error(msg: impl Into<String>) -> Self {
+        Self::syntax_error_with_filename(msg, "<string>", "")
+    }
+    /// Like `syntax_error` but with the real filename and the source text
+    /// line populated (`filename`/`text` attrs — test_flufl's
+    /// `cm.exception.filename`/`.text` checks).
+    pub fn syntax_error_with_filename(
+        msg: impl Into<String>,
+        filename: &str,
+        source: &str,
+    ) -> Self {
         let msg = msg.into();
         // Most parser errors carry an "L<line>:<col>:" prefix; custom
         // validation errors ("unexpected '/' ...") don't. Parse it into real
@@ -117,11 +127,14 @@ impl PyError {
         let col = col.unwrap_or(1);
         let mut extra = std::collections::HashMap::new();
         extra.insert("msg".to_string(), py_str(&clean_msg));
-        extra.insert("filename".to_string(), py_str("<string>"));
+        extra.insert("filename".to_string(), py_str(filename));
         extra.insert("lineno".to_string(), py_int(line));
         extra.insert("offset".to_string(), py_int(col));
+        // `text` — the offending source line (real CPython exposes it).
+        let text = source.lines().nth((line - 1).max(0) as usize).unwrap_or("");
+        extra.insert("text".to_string(), py_str(text));
         // CPython: `str(SyntaxError)` is `msg (filename, line N)`.
-        let display = format!("{} (<string>, line {})", clean_msg, line);
+        let display = format!("{} ({}, line {})", clean_msg, filename, line);
         PyError::Exception(
             "SyntaxError".to_string(),
             PyObjectRef::new(PyObject::Exception {

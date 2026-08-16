@@ -16,6 +16,9 @@ pub struct Parser {
     // `compile(..., flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)` relaxes the
     // above — top-level `await`/`async for`/`async with` become legal.
     pub(crate) allow_top_level_await: bool,
+    // `compile(..., flags=__future__.CO_FUTURE_BARRY_AS_BDFL)` switches
+    // `<>`/`!=` handling (barry_as_FLUFL; test_flufl).
+    pub(crate) barry_as_bdfl: bool,
     // Guards `parse_unary`'s self-recursion (`-`/`+`/`~` chains) against a
     // native stack overflow on pathological input — real CPython's own PEG
     // parser has an equivalent C-stack-depth counter and raises `MemoryError:
@@ -64,6 +67,7 @@ impl Parser {
             async_depth: 0,
             genexpr_depth: 0,
             allow_top_level_await: false,
+            barry_as_bdfl: false,
         }
     }
 
@@ -1589,6 +1593,21 @@ impl Parser {
             None
         };
         self.expect(&Token::Import)?;
+        // `from __future__ import barry_as_FLUFL` enables the `<>`/`!=`
+        // swap even without compiler flags (test_flufl's
+        // test_barry_as_bdfl_look_ma_with_no_compiler_flags).
+        if module.as_deref() == Some("__future__") && level.is_none() {
+            let names = self.parse_import_names()?;
+            if names.iter().any(|a| a.name == "barry_as_FLUFL") {
+                self.barry_as_bdfl = true;
+            }
+            let _ = self.expect_newline_or_eof();
+            return Ok(Stmt::ImportFrom {
+                module,
+                names,
+                level,
+            });
+        }
         // Handle `from X import (a, b, c)` — parenthesized import names
         let has_paren = self.eat(&Token::LeftParen);
         if has_paren {
@@ -2035,6 +2054,7 @@ impl Parser {
             || self.at(&Token::GreaterEqual)
             || self.at(&Token::EqualEqual)
             || self.at(&Token::NotEqual)
+            || self.at(&Token::LessGreater)
             || self.at(&Token::Is)
             || self.at(&Token::In)
             || self.at(&Token::Not)
@@ -2065,7 +2085,31 @@ impl Parser {
                         CmpOp::Eq
                     }
                     Token::NotEqual => {
+                        let (line, col) = self.lexer.get_line_col();
                         self.next();
+                        if self.barry_as_bdfl {
+                            // With Barry as BDFL, `!=` is rejected (use
+                            // `<>` instead).
+                            return Err(format!(
+                                "L{}:{}:with Barry as BDFL, use '<>' instead of '!='",
+                                line,
+                                col.saturating_sub(2)
+                            ));
+                        }
+                        CmpOp::NotEq
+                    }
+                    Token::LessGreater => {
+                        let (line, col) = self.lexer.get_line_col();
+                        self.next();
+                        if !self.barry_as_bdfl {
+                            // `<>` is 2 chars; lexer col points just past it
+                            // (test_flufl expects offset at the '<').
+                            return Err(format!(
+                                "L{}:{}:invalid syntax: '<>'",
+                                line,
+                                col.saturating_sub(2)
+                            ));
+                        }
                         CmpOp::NotEq
                     }
                     Token::Is => {

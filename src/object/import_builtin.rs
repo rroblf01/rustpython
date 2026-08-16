@@ -366,22 +366,35 @@ pub fn builtin_compile(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         // `await`/`async for`/`async with` at module scope — test_builtin's
         // test_compile_top_level_await compiles those expecting success when
         // the flag is set (and SyntaxError without it).
-        let allow_top_level_await = args.iter().any(|a| {
-            if let PyObject::Dict(kw) = &*a.borrow() {
-                kw.get(&py_str("flags"))
-                    .ok()
-                    .flatten()
-                    .map(|f| f.as_i64().unwrap_or(0) & 0x8000 != 0)
-                    .unwrap_or(false)
-            } else {
-                false
+        // flags can be the 4th positional arg or a `flags=` kwarg.
+        let compile_flags = |args: &[PyObjectRef]| -> i64 {
+            let mut flags = 0;
+            if args.len() >= 4 {
+                flags |= args[3].as_i64().unwrap_or(0);
             }
-        });
+            for a in args {
+                if let PyObject::Dict(kw) = &*a.borrow() {
+                    flags |= kw
+                        .get(&py_str("flags"))
+                        .ok()
+                        .flatten()
+                        .and_then(|f| f.as_i64())
+                        .unwrap_or(0);
+                }
+            }
+            flags
+        };
+        let flags = compile_flags(args);
+        let allow_top_level_await = flags & 0x8000 != 0;
+        // `flags=__future__.CO_FUTURE_BARRY_AS_BDFL` (0x400000) switches the
+        // `<>`/`!=` comparison operators (barry_as_FLUFL, test_flufl).
+        let barry_as_bdfl = flags & 0x400000 != 0;
         let mut parser = crate::parser::Parser::new(&source);
         parser.allow_top_level_await = allow_top_level_await;
+        parser.barry_as_bdfl = barry_as_bdfl;
         parser
             .parse_program()
-            .map_err(|e| PyError::syntax_error(e))?
+            .map_err(|e| PyError::syntax_error_with_filename(e, &filename, &source))?
     };
     let mut compiler = crate::compiler::Compiler::new();
     let code = compiler
