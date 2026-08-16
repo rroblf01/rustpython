@@ -1829,10 +1829,26 @@ fn _codecs_lookup(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             }),
             py_str(&encoding),
         ]))),
-        _ => Err(PyError::value_error(format!(
-            "unknown encoding: {}",
-            encoding
-        ))),
+        _ => {
+            // Consult `codecs.register()`-ed search functions, like real
+            // CPython's lookup (test_charmapcodec registers `testcodec`).
+            let result = CODEC_SEARCH_FUNCTIONS.with(|fns| {
+                for f in fns.borrow().iter() {
+                    match crate::object::builtin_call(f, &[py_str(&args[0].str())]) {
+                        Ok(res) if !matches!(&*res.borrow(), PyObject::None) => return Some(res),
+                        _ => continue,
+                    }
+                }
+                None
+            });
+            if let Some(entry) = result {
+                return Ok(entry);
+            }
+            Err(PyError::value_error(format!(
+                "unknown encoding: {}",
+                encoding
+            )))
+        }
     }
 }
 

@@ -111,6 +111,26 @@ class StreamReader:
     def read(self, size=-1):
         return self.stream.read(size)
 
+# Base class for codec implementations (testcodec.py subclasses it).
+class Codec:
+    def encode(self, input, errors='strict'):
+        raise NotImplementedError
+
+    def decode(self, input, errors='strict'):
+        raise NotImplementedError
+
+def make_identity_dict(rng):
+    return {i: chr(i) for i in rng}
+
+def make_encoding_map(decoding_map):
+    encmap = {}
+    for k, v in decoding_map.items():
+        if not isinstance(k, int):
+            continue
+        if v is None or isinstance(v, str):
+            encmap[v] = k
+    return encmap
+
 # Real `codecs.register`/`unregister`: a search function is appended to
 # (or removed from) `_codecs`'s own search-function list, consulted by
 # `_codecs.lookup()` for encoding names it doesn't recognize directly.

@@ -1947,6 +1947,24 @@ pub fn bytes_maketrans_builtin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 pub fn builtin_str(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
         Ok(py_str(""))
+    } else if args.len() >= 2 {
+        // `str(bytes, encoding[, errors])` — decode using the given codec
+        // (test_charmapcodec's test_constructorx: `str(b'abc', 'testcodec')`).
+        if matches!(
+            &*args[0].borrow(),
+            PyObject::Bytes(_) | PyObject::ByteArray(_)
+        ) {
+            let mut call_args = vec![args[1].clone()];
+            if args.len() >= 3 {
+                call_args.push(args[2].clone());
+            }
+            let decode = args[0].borrow().get_attribute("decode")?;
+            return call_bound_method(decode, args[0].clone(), call_args);
+        }
+        // str(obj, encoding) on a non-bytes object is a TypeError in CPython.
+        return Err(PyError::type_error(
+            "decoding to str: need a bytes-like object, found type object",
+        ));
     } else {
         let f = {
             let obj_borrowed = args[0].borrow();
