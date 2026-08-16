@@ -54,6 +54,59 @@ pub fn create_json_dict() -> HashMap<String, PyObjectRef> {
 // VirtualMachine::install_source_defined_stdlib.
 pub const JSON_EXTRA_SOURCE: &str = include_str!("json_extra.py");
 
+/// `collections.OrderedDict(source)` — builds an OrderedDict instance (a
+/// real type with its own repr) from a dict or an iterable of (k, v) pairs.
+thread_local! {
+    static OD_TYPE: std::cell::RefCell<Option<PyObjectRef>> =
+        const { std::cell::RefCell::new(None) };
+}
+pub fn ordered_dict_new(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    let typ = OD_TYPE
+        .with(|c| c.borrow().clone())
+        .ok_or_else(|| PyError::runtime_error("OrderedDict type not initialized"))?;
+    let dict = crate::object::py_dict();
+    if std::env::var("RPY_DEBUG_OD").is_ok() {
+        eprintln!("OD new: nargs={}", args.len());
+    }
+    if !args.is_empty() {
+        let source = &args[0];
+        let borrowed = source.borrow();
+        if let PyObject::Dict(d) = &*borrowed {
+            for (k, v) in d.items() {
+                if let PyObject::Dict(ref mut target) = &mut *dict.borrow_mut() {
+                    let _ = target.set(k, v);
+                }
+            }
+        } else {
+            // Any iterable of (k, v) pairs.
+            drop(borrowed);
+            let it = crate::object::builtin_iter(&[args[0].clone()])?;
+            loop {
+                match crate::object::builtin_next(&[it.clone()]) {
+                    Ok(pair) => {
+                        if let PyObject::Tuple(vals) = &*pair.borrow() {
+                            if vals.len() == 2 {
+                                if let PyObject::Dict(ref mut target) = &mut *dict.borrow_mut() {
+                                    let _ = target.set(vals[0].clone(), vals[1].clone());
+                                }
+                            }
+                        }
+                    }
+                    Err(crate::object::PyError::StopIteration) => break,
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+    }
+    let backing = match &*dict.borrow() {
+        PyObject::Dict(d) => PyObjectRef::new(PyObject::Dict(d.clone())),
+        _ => unreachable!(),
+    };
+    let mut attrs = crate::object::AttrMap::new();
+    attrs.insert(crate::object::NATIVE_BACKING_KEY.to_string(), backing);
+    Ok(PyObjectRef::new(PyObject::Instance { typ, dict: attrs }))
+}
+
 pub fn create_collections_dict(object_type: PyObjectRef) -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! coll_func {
@@ -119,22 +172,171 @@ pub fn create_collections_dict(object_type: PyObjectRef) -> HashMap<String, PyOb
     crate::object::seed_primitive_type_cache("deque", deque_type.clone());
     d.insert("deque".to_string(), deque_type);
 
-    // OrderedDict: remembers insertion order
-    coll_func!("OrderedDict", |args| {
-        let dict = crate::object::py_dict();
-        if args.len() > 1 {
-            let source = &args[1];
-            let borrowed = source.borrow();
-            if let PyObject::Dict(d) = &*borrowed {
-                for (k, v) in d.items() {
-                    if let PyObject::Dict(ref mut target) = &mut *dict.borrow_mut() {
-                        let _ = target.set(k, v);
+    // OrderedDict: remembers insertion order — a real type (not a plain
+    // dict) with its own `OrderedDict()`/`OrderedDict([(k, v), ...])` repr
+    // (test_pprint::test_ordered_dict dispatches on its __repr__) and
+    // dict-like behavior via a native dict backing. The type is cached in
+    // the same thread_local `ordered_dict_new` reads.
+    {
+        let mut od_dict: HashMap<String, PyObjectRef> = HashMap::new();
+        od_dict.insert_str(
+            "__repr__",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__repr__".to_string(),
+                func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                    if args.is_empty() {
+                        return Ok(py_str("OrderedDict()"));
                     }
-                }
-            }
+                    let backing = crate::object::native_backing_of(&args[0])
+                        .ok_or_else(|| PyError::runtime_error("OrderedDict.__repr__ on non-OD"))?;
+                    let items: Vec<String> = {
+                        let b = backing.borrow();
+                        match &*b {
+                            PyObject::Dict(d) => d
+                                .items()
+                                .iter()
+                                .map(|(k, v)| format!("({}, {})", k.repr(), v.repr()))
+                                .collect(),
+                            _ => Vec::new(),
+                        }
+                    };
+                    if items.is_empty() {
+                        Ok(py_str("OrderedDict()"))
+                    } else {
+                        Ok(py_str(&format!("OrderedDict([{}])", items.join(", "))))
+                    }
+                },
+            }),
+        );
+        od_dict.insert_str(
+            "__module__",
+            PyObjectRef::new(PyObject::Str(compact_str::CompactString::from(
+                "collections",
+            ))),
+        );
+        // Dict-backed: the type-construct path builds an Instance carrying a
+        // native dict backing, so native_backing_of/len/getitem/etc. work.
+        od_dict.insert_str(crate::object::NATIVE_BASE_MARKER, py_str("dict"));
+        // `OrderedDict(source)` — the TYPE is the callable (so
+        // `OrderedDict.__repr__`/`type(od).__repr__` are the same object,
+        // which pprint's dispatch requires). __init__ populates the native
+        // dict backing from a dict or iterable of (k, v) pairs.
+        od_dict.insert_str(
+            "__init__",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__init__".to_string(),
+                func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                    if args.len() < 2 || matches!(&*args[1].borrow(), PyObject::None) {
+                        return Ok(py_none());
+                    }
+                    let source = &args[1];
+                    let borrowed = source.borrow();
+                    let mut entries: Vec<(PyObjectRef, PyObjectRef)> = Vec::new();
+                    if let PyObject::Dict(d) = &*borrowed {
+                        for (k, v) in d.items() {
+                            entries.push((k, v));
+                        }
+                    } else {
+                        drop(borrowed);
+                        let it = crate::object::builtin_iter(&[args[1].clone()])?;
+                        loop {
+                            match crate::object::builtin_next(&[it.clone()]) {
+                                Ok(pair) => {
+                                    if let PyObject::Tuple(vals) = &*pair.borrow() {
+                                        if vals.len() == 2 {
+                                            entries.push((vals[0].clone(), vals[1].clone()));
+                                        }
+                                    }
+                                }
+                                Err(crate::object::PyError::StopIteration) => break,
+                                Err(e) => return Err(e),
+                            }
+                        }
+                    }
+                    if let Some(backing) = crate::object::native_backing_of(&args[0]) {
+                        if let PyObject::Dict(d) = &mut *backing.borrow_mut() {
+                            for (k, v) in entries {
+                                let _ = d.set(k, v);
+                            }
+                        }
+                    }
+                    Ok(py_none())
+                },
+            }),
+        );
+        // dict-like behavior via the native dict backing.
+        fn od_backing(args: &[PyObjectRef]) -> PyResult<crate::object::PyObjectRef> {
+            crate::object::native_backing_of(&args[0])
+                .ok_or_else(|| PyError::runtime_error("OrderedDict operation on non-OD"))
         }
-        Ok(dict)
-    });
+        od_dict.insert_str(
+            "__len__",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__len__".to_string(),
+                func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                    let b = od_backing(args)?;
+                    let inner = b.borrow();
+                    if let PyObject::Dict(d) = &*inner {
+                        Ok(py_int(d.len() as i64))
+                    } else {
+                        Err(PyError::runtime_error("OrderedDict has no dict"))
+                    }
+                },
+            }),
+        );
+        od_dict.insert_str(
+            "__getitem__",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__getitem__".to_string(),
+                func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                    let key = args.get(1).cloned().unwrap_or_else(py_none);
+                    let b = od_backing(args)?;
+                    let inner = b.borrow();
+                    if let PyObject::Dict(d) = &*inner {
+                        match d.get(&key) {
+                            Ok(Some(v)) => Ok(v),
+                            _ => Err(PyError::KeyError(key.str())),
+                        }
+                    } else {
+                        Err(PyError::runtime_error("OrderedDict has no dict"))
+                    }
+                },
+            }),
+        );
+        od_dict.insert_str(
+            "__contains__",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__contains__".to_string(),
+                func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                    let key = args.get(1).cloned().unwrap_or_else(py_none);
+                    let b = od_backing(args)?;
+                    let inner = b.borrow();
+                    if let PyObject::Dict(d) = &*inner {
+                        match d.get(&key) {
+                            Ok(Some(_)) => Ok(py_bool(true)),
+                            _ => Ok(py_bool(false)),
+                        }
+                    } else {
+                        Ok(py_bool(false))
+                    }
+                },
+            }),
+        );
+        // iteration / keys / items / values / get via the dict-backing
+        // fallback already wired into LOAD_ATTR for dict-derived instances.
+        let od_type = PyObjectRef::new(PyObject::Type {
+            name: "OrderedDict".to_string(),
+            dict: Box::new(str_map_to_typedict(od_dict)),
+            bases: vec![],
+            mro: vec![],
+        });
+        if let PyObject::Type { mro, .. } = &mut *od_type.borrow_mut() {
+            *mro = vec![od_type.clone()];
+        }
+        OD_TYPE.with(|c| *c.borrow_mut() = Some(od_type.clone()));
+        crate::object::seed_primitive_type_cache("OrderedDict", od_type.clone());
+        d.insert("OrderedDict".to_string(), od_type.clone());
+    }
 
     // namedtuple: factory function — creates simple types with named fields
     coll_func!("namedtuple", |args| {
