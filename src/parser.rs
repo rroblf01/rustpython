@@ -1549,15 +1549,27 @@ impl Parser {
 
     fn parse_del(&mut self) -> Result<Stmt, String> {
         self.next();
-        let mut targets = vec![self.parse_expr()?];
+        let first = if self.at(&Token::Star) {
+            self.next();
+            Expr::Starred(Box::new(self.parse_expr()?))
+        } else {
+            self.parse_expr()?
+        };
+        let mut targets = vec![first];
         while self.eat(&Token::Comma) {
             if self.at(&Token::Newline) || self.at(&Token::Semicolon) || self.at(&Token::EndOfFile)
             {
                 break;
             }
-            targets.push(self.parse_expr()?);
+            let t = if self.at(&Token::Star) {
+                self.next();
+                Expr::Starred(Box::new(self.parse_expr()?))
+            } else {
+                self.parse_expr()?
+            };
+            targets.push(t);
         }
-        let _ = self.expect_newline_or_eof();
+        self.expect_newline_or_eof()?;
         Ok(Stmt::Delete(targets))
     }
 

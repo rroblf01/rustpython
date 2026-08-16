@@ -1256,7 +1256,7 @@ impl Compiler {
                         self.pending_cleanup[loop_info.cleanup_start..].to_vec(),
                     )
                 } else {
-                    return Err("'break' outside loop".to_string());
+                    return Err(format!("L{}:{}:'break' outside loop", self.current_line, 1));
                 };
                 for entry in cleanup.iter().rev() {
                     match entry {
@@ -1300,7 +1300,10 @@ impl Compiler {
                         self.pending_cleanup[loop_info.cleanup_start..].to_vec(),
                     )
                 } else {
-                    return Err("'continue' not properly in loop".to_string());
+                    return Err(format!(
+                        "L{}:{}:'continue' not properly in loop",
+                        self.current_line, 1
+                    ));
                 };
                 for entry in cleanup.iter().rev() {
                     match entry {
@@ -1930,11 +1933,11 @@ impl Compiler {
                                             }
                                         }
                                     }
-                                    _ => return Err("cannot delete expression".to_string()),
+                                    _ => return Err(delete_error_for(e).to_string()),
                                 }
                             }
                         }
-                        _ => return Err("cannot delete expression".to_string()),
+                        _ => return Err(delete_error_for(target).to_string()),
                     }
                 }
             }
@@ -4597,6 +4600,21 @@ fn contains_yield_in_stmts(stmts: &[Stmt]) -> bool {
 
 /// Top-level `await`/`async for`/`async with` (only reachable when compiled
 /// with PyCF_ALLOW_TOP_LEVEL_AWAIT) marks a module as a coroutine.
+/// CPython's per-target `del` error messages (test_syntax::test_assign_del).
+fn delete_error_for(expr: &Expr) -> &'static str {
+    match expr {
+        Expr::Name(_) => "cannot delete 'name'",
+        Expr::Constant(_) => "cannot delete literal",
+        Expr::Call { .. } => "cannot delete function call",
+        Expr::Starred(_) => "cannot delete starred",
+        Expr::NamedExpr { .. } => "cannot delete named expression",
+        Expr::IfExp { .. } => "cannot delete conditional",
+        Expr::BinOp { .. } | Expr::UnaryOp { .. } => "cannot delete expression",
+        Expr::BoolOp { .. } | Expr::Compare { .. } => "cannot delete expression",
+        _ => "cannot delete expression",
+    }
+}
+
 fn stmt_has_top_level_await(stmt: &Stmt) -> bool {
     match Compiler::unwrap_located(stmt) {
         Stmt::For { is_async: true, .. } | Stmt::With { is_async: true, .. } => true,

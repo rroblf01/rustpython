@@ -399,7 +399,7 @@ pub fn builtin_compile(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let mut compiler = crate::compiler::Compiler::new();
     let code = compiler
         .compile(&program, &filename)
-        .map_err(|e| PyError::syntax_error(e))?;
+        .map_err(|e| PyError::syntax_error_with_filename(e, &filename, &source))?;
     Ok(PyObjectRef::new(PyObject::Code(Rc::new(code))))
 }
 
