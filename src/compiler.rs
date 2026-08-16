@@ -134,6 +134,17 @@ impl Compiler {
         }
         match program {
             Program::Module(stmts) => {
+                // Top-level `await`/`async for`/`async with` (enabled by the
+                // PyCF_ALLOW_TOP_LEVEL_AWAIT compile flag) makes the module a
+                // coroutine — CPython sets CO_COROUTINE (0x80; this VM also
+                // uses its own 0x100 bit) and RETURN_GENERATOR so the code
+                // can be awaited. test_builtin::test_compile_top_level_await
+                // checks co_flags & CO_COROUTINE on such modules.
+                let has_top_await = stmts.iter().any(stmt_has_top_level_await);
+                if has_top_await {
+                    self.code.flags |= 0x180;
+                    self.emit(Opcode::RETURN_GENERATOR, 0);
+                }
                 // A bare string-literal expression as the module's FIRST
                 // statement is its docstring, matching real CPython's
                 // module `__doc__` semantics — this was never handled at
@@ -3329,9 +3340,11 @@ impl Compiler {
         if has_yield {
             self.emit(Opcode::RETURN_GENERATOR, 0);
         }
-        // Set CO_COROUTINE flag (0x100) for async functions
+        // Set CO_COROUTINE flag for async functions — both the public
+        // CPython bit (0x80, what `inspect.CO_COROUTINE` exposes) and this
+        // VM's internal 0x100 marker used by the frame driver.
         if is_async {
-            self.code.flags |= 0x100;
+            self.code.flags |= 0x180;
         }
 
         self.compile_stmts(body)?;
@@ -4580,6 +4593,15 @@ fn contains_yield_in_stmts(stmts: &[Stmt]) -> bool {
         Stmt::FunctionDef { .. } | Stmt::ClassDef { .. } => false,
         _ => false,
     })
+}
+
+/// Top-level `await`/`async for`/`async with` (only reachable when compiled
+/// with PyCF_ALLOW_TOP_LEVEL_AWAIT) marks a module as a coroutine.
+fn stmt_has_top_level_await(stmt: &Stmt) -> bool {
+    match Compiler::unwrap_located(stmt) {
+        Stmt::For { is_async: true, .. } | Stmt::With { is_async: true, .. } => true,
+        _ => contains_yield_in_stmts(std::slice::from_ref(stmt)),
+    }
 }
 
 fn contains_yield_in_expr(expr: &Expr) -> bool {

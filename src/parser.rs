@@ -5,6 +5,13 @@ pub struct Parser {
     lexer: Lexer,
     current: Token,
     peeked: Option<Token>,
+    // >0 while parsing the body of an `async def` — gates `async for`/
+    // `async with`/`await` (SyntaxError when used at top level, matching
+    // CPython; see the emit sites in parse_stmt/parse_unary).
+    async_depth: usize,
+    // `compile(..., flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)` relaxes the
+    // above — top-level `await`/`async for`/`async with` become legal.
+    pub(crate) allow_top_level_await: bool,
     // Guards `parse_unary`'s self-recursion (`-`/`+`/`~` chains) against a
     // native stack overflow on pathological input — real CPython's own PEG
     // parser has an equivalent C-stack-depth counter and raises `MemoryError:
@@ -50,6 +57,8 @@ impl Parser {
             peeked: None,
             unary_depth: 0,
             suite_depth: 0,
+            async_depth: 0,
+            allow_top_level_await: false,
         }
     }
 
@@ -253,10 +262,16 @@ impl Parser {
             return self.parse_with(false);
         }
         if self.at(&Token::Async) && self.peek() == &Token::For {
+            if self.async_depth == 0 && !self.allow_top_level_await {
+                return Err("'async for' outside async function".to_string());
+            }
             self.next(); // consume async
             return self.parse_for(true);
         }
         if self.at(&Token::Async) && self.peek() == &Token::With {
+            if self.async_depth == 0 && !self.allow_top_level_await {
+                return Err("'async with' outside async function".to_string());
+            }
             self.next(); // consume async
             return self.parse_with(true);
         }
@@ -606,7 +621,12 @@ impl Parser {
             None
         };
         self.expect(&Token::Colon)?;
+        // `async for`/`async with` (and `await`) are only legal inside an
+        // `async def` body — CPython raises SyntaxError otherwise
+        // (test_builtin::test_compile's async cases).
+        self.async_depth += usize::from(async_token);
         let body = self.parse_block()?;
+        self.async_depth -= usize::from(async_token);
         Ok(Stmt::FunctionDef {
             name,
             args,
@@ -3257,6 +3277,12 @@ impl Parser {
             Token::Yield => self.parse_yield_expr(),
 
             Token::Await => {
+                // `await` at top level is SyntaxError unless the
+                // PyCF_ALLOW_TOP_LEVEL_AWAIT flag is set (test_builtin's
+                // test_compile_top_level_await).
+                if self.async_depth == 0 && !self.allow_top_level_await {
+                    return Err("'await' outside async function".to_string());
+                }
                 self.next();
                 let expr = self.parse_unary()?;
                 Ok(Expr::Await(Box::new(expr)))

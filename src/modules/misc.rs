@@ -9947,6 +9947,13 @@ pub fn create_numbers_dict() -> HashMap<String, PyObjectRef> {
 // ---------------------------------------------------------------------------
 pub fn create_ast_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
+    // compile() flags (CPython's ast.PyCF_* constants) — test_builtin's
+    // test_compile_top_level_await references PyCF_ALLOW_TOP_LEVEL_AWAIT.
+    d.insert("PyCF_ONLY_AST".to_string(), py_int(0x40));
+    d.insert("PyCF_ALLOW_TOP_LEVEL_AWAIT".to_string(), py_int(0x8000));
+    d.insert("PyCF_TYPE_COMMENTS".to_string(), py_int(0x1000));
+    d.insert("PyCF_DONT_IMPLY_DEDENT".to_string(), py_int(0x200));
+    d.insert("PyCF_ACCEPT_NULL_BYTES".to_string(), py_int(0x10000000));
     macro_rules! ast_func {
         ($name:expr, $func:expr) => {
             d.insert(

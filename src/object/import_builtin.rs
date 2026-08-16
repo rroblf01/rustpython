@@ -362,7 +362,23 @@ pub fn builtin_compile(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let program = if mode == "eval" {
         crate::parser::try_parse_as_expression(&source).map_err(|e| PyError::syntax_error(e))?
     } else {
+        // `flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT` (0x8000) permits
+        // `await`/`async for`/`async with` at module scope — test_builtin's
+        // test_compile_top_level_await compiles those expecting success when
+        // the flag is set (and SyntaxError without it).
+        let allow_top_level_await = args.iter().any(|a| {
+            if let PyObject::Dict(kw) = &*a.borrow() {
+                kw.get(&py_str("flags"))
+                    .ok()
+                    .flatten()
+                    .map(|f| f.as_i64().unwrap_or(0) & 0x8000 != 0)
+                    .unwrap_or(false)
+            } else {
+                false
+            }
+        });
         let mut parser = crate::parser::Parser::new(&source);
+        parser.allow_top_level_await = allow_top_level_await;
         parser
             .parse_program()
             .map_err(|e| PyError::syntax_error(e))?
