@@ -534,20 +534,19 @@ impl VirtualMachine {
                 .map(|(k, v)| (interner::lookup_str(*k).to_string(), v.clone()))
                 .collect::<HashMap<String, PyObjectRef>>()
         };
+        // ONE shared `builtins` module for sys.modules, globals' `__builtins__`,
+        // and `import builtins` — mutations (`builtins.len = f`, test_dynamic)
+        // must be visible through every path, so they must all wrap the same
+        // dict rather than separate copies.
+        let builtins_module = create_module("builtins", builtins_to_module(&builtins));
         let globals_map: HashMap<StrId, PyObjectRef> = HashMap::from([
             (interner::intern("__name__"), py_str("__main__")),
-            (
-                interner::intern("__builtins__"),
-                create_module("builtins", builtins_to_module(&builtins)),
-            ),
+            (interner::intern("__builtins__"), builtins_module.clone()),
         ]);
         let globals = Rc::new(RefCell::new(globals_map));
 
         let mut modules: HashMap<String, PyObjectRef> = HashMap::new();
-        modules.insert_str(
-            "builtins",
-            create_module("builtins", builtins_to_module(&builtins)),
-        );
+        modules.insert_str("builtins", builtins_module);
         modules.insert_str("math", create_module("math", create_math_dict()));
         modules.insert_str("_codecs", create_module("_codecs", create_codecs_dict()));
 
@@ -3168,7 +3167,12 @@ impl VirtualMachine {
 
             Opcode::LOAD_GLOBAL => {
                 let instr_ip = self.frames[fi].ip - 1; // already incremented
-                                                       // Check inline cache first
+                                                       // Check inline cache first — only for globals/module-globals
+                                                       // hits. Values resolved from BUILTINS are never cached: the
+                                                       // builtins dict can be mutated at runtime
+                                                       // (`builtins.len = f`; test_dynamic's test_modify_builtins),
+                                                       // and a stale cache would keep returning the old function.
+                let mut cached_from_builtins = false;
                 if let Some(cached) = self.frames[fi]
                     .global_cache
                     .get(instr_ip)
@@ -3178,25 +3182,56 @@ impl VirtualMachine {
                 } else {
                     let name_idx = arg as usize;
                     let name = crate::interner::lookup_str(self.frames[fi].code.names[name_idx]);
-                    let val = {
+                    let mut val = None;
+                    {
                         let f = &self.frames[self.frames.len() - 1];
-                        let v = f
-                            .globals
-                            .borrow()
-                            .get(&interner::intern(name))
-                            .cloned()
-                            .or_else(|| {
-                                f.module_globals.as_ref().and_then(|mg| {
-                                    mg.borrow().get(&interner::intern(name)).cloned()
-                                })
-                            })
-                            .or_else(|| f.builtins.get(&interner::intern(name)).cloned());
-                        v
-                    };
+                        if let Some(v) = f.globals.borrow().get(&interner::intern(name)).cloned() {
+                            val = Some(v);
+                        } else if let Some(v) = f
+                            .module_globals
+                            .as_ref()
+                            .and_then(|mg| mg.borrow().get(&interner::intern(name)).cloned())
+                        {
+                            val = Some(v);
+                        } else {
+                            // Builtins: read the LIVE `__builtins__` module
+                            // dict so runtime mutations
+                            // (`builtins.len = f`; test_dynamic's
+                            // test_modify_builtins) are visible — the static
+                            // `f.builtins` map is a snapshot never updated.
+                            let builtins_mod = f
+                                .globals
+                                .borrow()
+                                .get(&interner::intern("__builtins__"))
+                                .cloned()
+                                .or_else(|| {
+                                    f.module_globals.as_ref().and_then(|mg| {
+                                        mg.borrow().get(&interner::intern("__builtins__")).cloned()
+                                    })
+                                });
+                            if let Some(bmod) = builtins_mod {
+                                let b = bmod.borrow();
+                                if let PyObject::Module { dict, .. } = &*b {
+                                    if let Some(v) = dict.get(&interner::intern(name)) {
+                                        val = Some(v.clone());
+                                    }
+                                }
+                            }
+                            if val.is_none() {
+                                if let Some(v) = f.builtins.get(&interner::intern(name)).cloned() {
+                                    val = Some(v);
+                                    cached_from_builtins = true;
+                                }
+                            }
+                        }
+                    }
                     match val {
                         Some(v) => {
-                            // Cache for next time
-                            if instr_ip < self.frames[fi].global_cache.len() {
+                            // Cache for next time (never builtins lookups —
+                            // see above).
+                            if !cached_from_builtins
+                                && instr_ip < self.frames[fi].global_cache.len()
+                            {
                                 self.frames[fi].global_cache[instr_ip] = Some(v.clone());
                             }
                             self.frames[fi].push(v);
