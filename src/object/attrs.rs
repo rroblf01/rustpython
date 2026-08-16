@@ -7290,15 +7290,25 @@ impl PyObject {
                         // test_decorators asserts `func.__annotations__ is
                         // func.__annotations__`.
                         if let Some(annotate) = dict.get_str("__annotate__").cloned() {
-                            let key = annotate.get_id();
-                            if let Some(cached) = ANN_CACHE.with(|c| c.borrow().get(&key).cloned())
-                            {
-                                return Ok(cached);
+                            // The decorator may have explicitly set
+                            // `wrapper.__annotate__ = None` (reprlib's
+                            // recursive_repr does) — None means "no lazy
+                            // annotations", not a callable to invoke.
+                            if !matches!(&*annotate.borrow(), PyObject::None) {
+                                let key = annotate.get_id();
+                                if let Some(cached) =
+                                    ANN_CACHE.with(|c| c.borrow().get(&key).cloned())
+                                {
+                                    return Ok(cached);
+                                }
+                                let result = crate::object::call_function_disposable(
+                                    &annotate,
+                                    vec![],
+                                    vec![],
+                                )?;
+                                ANN_CACHE.with(|c| c.borrow_mut().insert(key, result.clone()));
+                                return Ok(result);
                             }
-                            let result =
-                                crate::object::call_function_disposable(&annotate, vec![], vec![])?;
-                            ANN_CACHE.with(|c| c.borrow_mut().insert(key, result.clone()));
-                            return Ok(result);
                         }
                         let key = self as *const PyObject as usize;
                         if let Some(cached) = ANN_CACHE.with(|c| c.borrow().get(&key).cloned()) {
