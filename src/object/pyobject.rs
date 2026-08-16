@@ -601,7 +601,24 @@ impl PyObject {
             }
             PyObject::Function(ref f) => format!("<function {}>", f.code.name),
             PyObject::BuiltinFunction { name, .. } => format!("<built-in function {}>", name),
-            PyObject::BuiltinMethod { name, .. } => format!("<built-in method {}>", name),
+            PyObject::BuiltinMethod { name, self_obj, .. } => {
+                // CPython: `<built-in method split of str object at 0x...>`
+                // — a method bound to a native receiver reports the
+                // receiver's type (test_reprlib::test_builtin_function).
+                let receiver = self_obj.borrow();
+                let owner = if matches!(&*receiver, PyObject::None) {
+                    None
+                } else {
+                    Some(receiver.type_name().to_string())
+                };
+                match owner {
+                    Some(t) => format!(
+                        "<built-in method {} of {} object at 0x{:x}>",
+                        name, t, self as *const PyObject as usize
+                    ),
+                    None => format!("<built-in method {}>", name),
+                }
+            }
             PyObject::Module { name, .. } => format!("<module '{}'>", name),
             PyObject::Type { name, .. } => format!("<class '{}'>", name),
             PyObject::Instance { typ, .. } => {
