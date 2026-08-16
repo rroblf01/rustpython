@@ -3950,6 +3950,20 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             list: b.iter().map(|byte| py_int(*byte as i64)).collect(),
             index: 0,
         })),
+        PyObject::Array(arr) => Ok(PyObjectRef::new(PyObject::ListIter {
+            list: arr
+                .data
+                .iter()
+                .map(|v| {
+                    if crate::object::array_typecode_is_float(arr.typecode) {
+                        py_float(*v)
+                    } else {
+                        py_int(*v as i64)
+                    }
+                })
+                .collect(),
+            index: 0,
+        })),
         PyObject::MemoryView { .. } => {
             drop(obj);
             let len = mv_len(&args[0])?;

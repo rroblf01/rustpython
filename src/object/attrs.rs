@@ -638,6 +638,12 @@ impl PyObject {
                 // `test_types.py`'s `check_disallow_instantiation` helper,
                 // which unconditionally reads `tp.__module__` on ANY type.
                 if name == "__module__" && !dict.contains_key_str("__module__") {
+                    // `array`'s instances live in the `array` module —
+                    // reprlib's dispatch keys on `type(x).__module__`
+                    // (test_reprlib::test_container).
+                    if type_name == "array" {
+                        return Ok(py_str("array"));
+                    }
                     return Ok(py_str("builtins"));
                 }
                 // PEP 604 union syntax (`int | str`, `MyClass | None`) — the
@@ -8373,6 +8379,67 @@ impl PyObject {
                 match name {
                     "itemsize" => Ok(py_int(mv_itemsize(&typecode.to_string()) as i64)),
                     "typecode" => Ok(py_str(&typecode.to_string())),
+                    "__len__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__len__".to_string(),
+                        func: |args| {
+                            if let PyObject::Array(arr) = &*args[0].borrow() {
+                                Ok(py_int(arr.data.len() as i64))
+                            } else {
+                                Err(PyError::runtime_error("__len__ on non-array"))
+                            }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__iter__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__iter__".to_string(),
+                        func: |args| {
+                            if let PyObject::Array(arr) = &*args[0].borrow() {
+                                let items: Vec<PyObjectRef> = arr
+                                    .data
+                                    .iter()
+                                    .map(|v| {
+                                        if array_typecode_is_float(arr.typecode) {
+                                            py_float(*v)
+                                        } else {
+                                            py_int(*v as i64)
+                                        }
+                                    })
+                                    .collect();
+                                Ok(PyObjectRef::new(PyObject::ListIter {
+                                    list: items,
+                                    index: 0,
+                                }))
+                            } else {
+                                Err(PyError::runtime_error("__iter__ on non-array"))
+                            }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__getitem__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__getitem__".to_string(),
+                        func: |args| {
+                            if let PyObject::Array(arr) = &*args[0].borrow() {
+                                let idx =
+                                    args.get(1).and_then(|a| a.as_i64()).ok_or_else(|| {
+                                        PyError::type_error("array indices must be integers")
+                                    })?;
+                                let len = arr.data.len() as i64;
+                                let i = if idx < 0 { len + idx } else { idx };
+                                if i < 0 || i >= len {
+                                    return Err(PyError::index_error("array index out of range"));
+                                }
+                                let v = arr.data[i as usize];
+                                Ok(if array_typecode_is_float(arr.typecode) {
+                                    py_float(v)
+                                } else {
+                                    py_int(v as i64)
+                                })
+                            } else {
+                                Err(PyError::runtime_error("__getitem__ on non-array"))
+                            }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     "tobytes" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "tobytes".to_string(),
                         func: |args| {
