@@ -114,18 +114,24 @@ fn wrap_stopiteration_pep479(e: PyError) -> PyError {
         _ => None,
     };
     match stop_instance {
-        Some(inst) => PyError::Exception(
-            "RuntimeError".to_string(),
-            PyObjectRef::new(PyObject::Exception {
-                typ: "RuntimeError".to_string(),
-                args: vec![py_str("generator raised StopIteration")],
-                cause: Some(inst),
-                suppress_context: false,
-                context: None,
-                traceback: None,
-                extra: None,
-            }),
-        ),
+        Some(inst) => {
+            // __context__ mirrors __cause__ (both the StopIteration) and
+            // __suppress_context__ is True — test_generator_stop's
+            // test_stopiteration_wrapping_context asserts all three.
+            let ctx = inst.clone();
+            PyError::Exception(
+                "RuntimeError".to_string(),
+                PyObjectRef::new(PyObject::Exception {
+                    typ: "RuntimeError".to_string(),
+                    args: vec![py_str("generator raised StopIteration")],
+                    cause: Some(inst),
+                    suppress_context: true,
+                    context: Some(ctx),
+                    traceback: None,
+                    extra: None,
+                }),
+            )
+        }
         None => e,
     }
 }

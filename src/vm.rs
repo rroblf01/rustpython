@@ -8898,32 +8898,64 @@ impl VirtualMachine {
                 self.release_frame(new_frame);
                 let num_defaults = code.num_defaults;
                 let min_required = named_params.saturating_sub(num_defaults);
-                let verb = if npos == 1 { "was" } else { "were" };
+                // CPython's arg-count TypeError grammar: the noun agrees
+                // with the count, the verb agrees with the TOTAL (npos +
+                // keyword-only) — e.g. "but 1 positional argument (and 1
+                // keyword-only argument) were given". Matches the doctest in
+                // test_extcall.py exactly.
+                let noun = |n: usize| if n == 1 { "argument" } else { "arguments" };
                 let msg = if num_defaults == 0 {
                     if code.kwonlyarg_count > 0 {
-                        // Real Python: "... but M positional arguments (and K
-                        // keyword-only arguments) were given" when the
-                        // function has NO defaults but DOES have keyword-only
-                        // params. (The "takes from X to Y" form below never
-                        // gets this suffix.)
-                        format!("{}() takes {} positional argument{} but {} positional arguments (and {} keyword-only argument{}) {} given",
-                            fname, named_params, if named_params == 1 { "" } else { "s" },
-                            npos, code.kwonlyarg_count, if code.kwonlyarg_count == 1 { "" } else { "s" }, verb)
-                    } else {
+                        let total = npos + code.kwonlyarg_count;
+                        let verb = if total > 1 { "were" } else { "was" };
                         format!(
-                            "{}() takes {} positional argument{} but {} {} given",
+                            "{}() takes {} positional {} but {} positional {} (and {} keyword-only argument{}) {} given",
                             fname,
                             named_params,
-                            if named_params == 1 { "" } else { "s" },
+                            noun(named_params),
                             npos,
+                            noun(npos),
+                            code.kwonlyarg_count,
+                            if code.kwonlyarg_count == 1 { "" } else { "s" },
                             verb
+                        )
+                    } else {
+                        format!(
+                            "{}() takes {} positional {} but {} {} {} given",
+                            fname,
+                            named_params,
+                            noun(named_params),
+                            npos,
+                            noun(npos),
+                            if npos == 1 { "was" } else { "were" }
                         )
                     }
                 } else {
-                    format!(
-                        "{}() takes from {} to {} positional arguments but {} {} given",
-                        fname, min_required, named_params, npos, verb
-                    )
+                    if code.kwonlyarg_count > 0 {
+                        let total = npos + code.kwonlyarg_count;
+                        let verb = if total > 1 { "were" } else { "was" };
+                        format!(
+                            "{}() takes from {} to {} positional arguments but {} positional {} (and {} keyword-only argument{}) {} given",
+                            fname,
+                            min_required,
+                            named_params,
+                            npos,
+                            noun(npos),
+                            code.kwonlyarg_count,
+                            if code.kwonlyarg_count == 1 { "" } else { "s" },
+                            verb
+                        )
+                    } else {
+                        format!(
+                            "{}() takes from {} to {} positional arguments but {} {} {} given",
+                            fname,
+                            min_required,
+                            named_params,
+                            npos,
+                            noun(npos),
+                            if npos == 1 { "was" } else { "were" }
+                        )
+                    }
                 };
                 return Err(PyError::type_error(msg));
             }
@@ -9021,6 +9053,18 @@ impl VirtualMachine {
                         }
                     } else {
                         if let PyObject::Dict(ref mut dict) = &mut *kw_dict.borrow_mut() {
+                            // A key supplied more than once — via `**{k: v}`
+                            // expansion AND an explicit keyword (or twice via
+                            // **) — is `TypeError: ...() got multiple values
+                            // for keyword argument 'k'` (test_extcall's
+                            // doctest: `f(1, 2, **{'a': -1}, a=4, c=6)`).
+                            if dict.get(&py_str(key)).ok().flatten().is_some() {
+                                self.release_frame(new_frame);
+                                return Err(PyError::type_error(format!(
+                                    "{}() got multiple values for keyword argument '{}'",
+                                    fname, key
+                                )));
+                            }
                             dict.set(py_str(key), value.clone())?;
                         }
                     }
