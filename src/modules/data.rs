@@ -553,6 +553,19 @@ pub fn create_functools_dict() -> HashMap<String, PyObjectRef> {
         }
         Ok(wrapper)
     });
+    // `functools.WRAPPER_ASSIGNMENTS`/`WRAPPER_UPDATES` — the attribute
+    // lists `functools.wraps` copies (test_reprlib imports the former).
+    d.insert_str(
+        "WRAPPER_ASSIGNMENTS",
+        py_tuple(vec![
+            py_str("__module__"),
+            py_str("__name__"),
+            py_str("__qualname__"),
+            py_str("__annotations__"),
+            py_str("__doc__"),
+        ]),
+    );
+    d.insert_str("WRAPPER_UPDATES", py_tuple(vec![py_str("__dict__")]));
     ft_func!("wraps", |args| {
         if args.is_empty() {
             return Err(PyError::type_error("wraps() requires at least 1 argument"));
