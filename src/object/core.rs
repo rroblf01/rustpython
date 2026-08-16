@@ -734,7 +734,7 @@ impl PyObjectRef {
             let in_stack = REPR_STACK.with(|s| s.borrow().contains(&id));
             if in_stack {
                 return match &*self.borrow() {
-                    PyObject::Deque { .. } => "deque([...])".to_string(),
+                    PyObject::Deque { .. } => "[...]".to_string(),
                     PyObject::Set(_) | PyObject::FrozenSet(_) => "{...}".to_string(),
                     _ => "[...]".to_string(),
                 };
