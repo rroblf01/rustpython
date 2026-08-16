@@ -520,7 +520,7 @@ impl Parser {
             // leaves partially consumed (rt-strings, variation-selector
             // identifiers in test_unicode_identifiers) — keep it scoped to
             // the print hint above.
-            let _ = self.expect_newline_or_eof();
+            self.expect_newline_or_eof()?;
             Ok(Stmt::Expr(Box::new(expr)))
         }
     }
@@ -552,10 +552,12 @@ impl Parser {
         }
         // A trailing non-terminator token means two statements were jammed
         // together with no separator (`print "Hello World"` / `x = 1 y`) —
-        // real Python raises SyntaxError. This used to silently return Ok,
-        // leaving the token for the outer loop to parse as a SECOND
-        // statement on the same line (test_print's TestPy2MigrationHint).
-        Ok(())
+        // real Python raises SyntaxError (test_codeop::test_invalid asserts
+        // `compile_command('a b')` fails).
+        Err(format!(
+            "invalid syntax: unexpected token after statement: {:?}",
+            self.peek()
+        ))
     }
 
     // ---- Compound statements ----
@@ -1861,17 +1863,17 @@ impl Parser {
             // function's own contract (consume exactly the suite, nothing
             // more) intact rather than relying on that tolerance.
             let _ = self.eat(&Token::Newline);
-            return Ok(stmts);
+            return self.finish_block(stmts);
         }
         if self.eat(&Token::Indent) {
             loop {
                 match &self.current {
                     Token::Dedent => {
                         self.next();
-                        return Ok(stmts);
+                        return self.finish_block(stmts);
                     }
                     Token::EndOfFile => {
-                        return Ok(stmts);
+                        return self.finish_block(stmts);
                     }
                     _ => {}
                 }
@@ -1885,6 +1887,48 @@ impl Parser {
                 let line = self.lexer.get_line_col().0;
                 stmts.push(Stmt::Located(line, Box::new(self.parse_stmt()?)));
             }
+        }
+        // No Indent yet — the block may begin after one or more blank
+        // lines (`def x():\n\n pass\n` emits NEWLINE NEWLINE INDENT ...).
+        while self.at(&Token::Newline) {
+            self.next();
+        }
+        if self.eat(&Token::Indent) {
+            return self.parse_block_indented(stmts);
+        }
+        self.finish_block(stmts)
+    }
+
+    fn parse_block_indented(&mut self, mut stmts: Vec<Stmt>) -> Result<Vec<Stmt>, String> {
+        loop {
+            match &self.current {
+                Token::Dedent => {
+                    self.next();
+                    return self.finish_block(stmts);
+                }
+                Token::EndOfFile => {
+                    return self.finish_block(stmts);
+                }
+                _ => {}
+            }
+            while self.at(&Token::Newline) {
+                self.next();
+            }
+            if self.at(&Token::Dedent) || self.at(&Token::EndOfFile) {
+                continue;
+            }
+            let line = self.lexer.get_line_col().0;
+            stmts.push(Stmt::Located(line, Box::new(self.parse_stmt()?)));
+        }
+    }
+
+    fn finish_block(&self, stmts: Vec<Stmt>) -> Result<Vec<Stmt>, String> {
+        // `def x():\n\npass\n` / `if 1:` with no indented statements —
+        // CPython raises "expected an indented block ..." (an
+        // IndentationError, itself a SyntaxError). test_codeop::test_invalid
+        // asserts these inputs are rejected.
+        if stmts.is_empty() {
+            return Err("expected an indented block".to_string());
         }
         Ok(stmts)
     }
