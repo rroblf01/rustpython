@@ -522,7 +522,24 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
                 }
                 let obj = &args[0];
                 let obj_ref = obj.borrow();
-                let type_name = obj_ref.type_name();
+                // Real CPython: `<module.ClassName object at 0x...>` —
+                // dataclasses' repr=False and test_pprint's regex expect the
+                // module-qualified name (test_dataclass_no_repr).
+                let type_name = match &*obj_ref {
+                    PyObject::Instance { typ, .. } => {
+                        let tb = typ.borrow();
+                        if let PyObject::Type { dict, name, .. } = &*tb {
+                            let module = dict
+                                .get_str("__module__")
+                                .map(|m| m.str())
+                                .unwrap_or_else(|| "builtins".to_string());
+                            format!("{}.{}", module, name)
+                        } else {
+                            tb.type_name().to_string()
+                        }
+                    }
+                    _ => obj_ref.type_name().to_string(),
+                };
                 let ptr = format!("{:p}", &*obj_ref as *const _ as *const u8);
                 // Only show hex digits after 0x
                 let ptr_hex = &ptr[2..];
