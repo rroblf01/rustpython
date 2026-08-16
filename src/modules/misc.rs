@@ -1207,11 +1207,9 @@ pub fn create_copy_dict() -> HashMap<String, PyObjectRef> {
                 Ok(obj.clone())
             }
             PyObject::Tuple(items) => {
-                let mut new_items = Vec::with_capacity(items.len());
-                for item in items {
-                    new_items.push(item.clone());
-                }
-                Ok(PyObjectRef::imm(PyObject::Tuple(new_items)))
+                // `copy.copy(tuple)` returns the SAME tuple (test_copy:
+                // `self.assertIs(copy.copy(x), x)`).
+                Ok(obj.clone())
             }
             PyObject::List(items) => {
                 let new_items: Vec<PyObjectRef> = items
@@ -1298,6 +1296,7 @@ pub fn create_copy_dict() -> HashMap<String, PyObjectRef> {
                         vec![],
                     );
                 }
+                drop(borrowed);
                 Ok(obj.clone())
             }
         }
