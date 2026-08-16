@@ -994,7 +994,14 @@ pub fn deepcopy_one(obj: &PyObjectRef, memo: &PyObjectRef) -> Result<PyObjectRef
             // shallow `.clone()` instead of ever invoking its own
             // `__deepcopy__`.
             if let Ok(dc_method) = obj.borrow().get_attribute("__deepcopy__") {
-                let result = call_function(&dc_method, vec![obj.clone(), memo.clone()])?;
+                // `call_function_disposable` (a user `__deepcopy__` is a
+                // Python Function; the bare `call_function` here only handles
+                // BuiltinFunction/Closure).
+                let result = crate::object::call_function_disposable(
+                    &dc_method,
+                    vec![obj.clone(), memo.clone()],
+                    vec![],
+                )?;
                 remember(memo, obj, &result);
                 return Ok(result);
             }

@@ -1287,7 +1287,16 @@ pub fn create_copy_dict() -> HashMap<String, PyObjectRef> {
                 // For instances and custom types, try __copy__
                 if let Ok(copy_method) = borrowed.get_attribute("__copy__") {
                     drop(borrowed);
-                    return crate::object::call_function(&copy_method, vec![obj.clone()]);
+                    // `call_function_disposable` (NOT the bare
+                    // `crate::object::call_function` in exceptions_ctor.rs,
+                    // which only handles BuiltinFunction/Closure) — a
+                    // user-defined `__copy__` is a Python Function and must
+                    // route through a real VM (test_copy).
+                    return crate::object::call_function_disposable(
+                        &copy_method,
+                        vec![obj.clone()],
+                        vec![],
+                    );
                 }
                 Ok(obj.clone())
             }
