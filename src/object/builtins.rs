@@ -1954,11 +1954,23 @@ pub fn builtin_str(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             &*args[0].borrow(),
             PyObject::Bytes(_) | PyObject::ByteArray(_)
         ) {
+            // The decode BuiltinMethod is stored with self_obj=None (an
+            // unbound descriptor); call its raw `func` with [self, ...]
+            // directly rather than call_bound_method (which would prepend
+            // the stored None as an extra first arg -> "decode on non-bytes").
+            let decode = args[0].borrow().get_attribute("decode")?;
+            if let PyObject::BuiltinMethod { func: f, .. } = &*decode.borrow() {
+                let mut call_args = vec![args[0].clone()];
+                call_args.push(args[1].clone());
+                if args.len() >= 3 {
+                    call_args.push(args[2].clone());
+                }
+                return f(&call_args);
+            }
             let mut call_args = vec![args[1].clone()];
             if args.len() >= 3 {
                 call_args.push(args[2].clone());
             }
-            let decode = args[0].borrow().get_attribute("decode")?;
             return call_bound_method(decode, args[0].clone(), call_args);
         }
         // str(obj, encoding) on a non-bytes object is a TypeError in CPython.
