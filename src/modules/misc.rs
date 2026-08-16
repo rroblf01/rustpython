@@ -2636,6 +2636,23 @@ pub fn create_types_dict() -> HashMap<String, PyObjectRef> {
                                 ))),
                             );
                         }
+                        // `mappingproxy({...})` repr — a BuiltinFunction (not a
+                        // capturing Closure, which pprint's _dispatch hashing
+                        // can't key) reading the backing from the instance
+                        // (test_pprint::test_mapping_proxy).
+                        td.insert_str(
+                            "__repr__",
+                            PyObjectRef::new(PyObject::BuiltinFunction {
+                                name: "__repr__".to_string(),
+                                func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                                    let backing = crate::object::native_backing_of(&args[0])
+                                        .ok_or_else(|| {
+                                            PyError::runtime_error("mappingproxy has no backing")
+                                        })?;
+                                    Ok(py_str(&format!("mappingproxy({})", backing.repr())))
+                                },
+                            }),
+                        );
                         for (name, field) in [
                             ("get", "get"),
                             ("__getitem__", "getitem"),
@@ -2659,9 +2676,6 @@ pub fn create_types_dict() -> HashMap<String, PyObjectRef> {
                                                     Ok(py_bool(d.contains(&k).unwrap_or(false)))
                                                 }
                                                 "get" => {
-                                                    // `get` is only ever reached via
-                                                    // attribute-call (no self): args =
-                                                    // [key] or [key, default].
                                                     let key =
                                                         args.first().cloned().ok_or_else(|| {
                                                             PyError::type_error("get() missing key")
@@ -2697,6 +2711,7 @@ pub fn create_types_dict() -> HashMap<String, PyObjectRef> {
                     bases: vec![],
                     mro: vec![],
                 });
+                dict.insert(crate::object::NATIVE_BACKING_KEY.to_string(), inner.clone());
                 Ok(PyObjectRef::new(PyObject::Instance { typ, dict }))
             },
         }),
