@@ -3103,6 +3103,13 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
             func: |_: &[PyObjectRef]| Ok(py_none()),
         }),
     );
+    tiw_dict.insert_str(
+        "flush",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "flush".to_string(),
+            func: |_: &[PyObjectRef]| Ok(py_none()),
+        }),
+    );
     let tiw_cls = PyObjectRef::new(PyObject::Type {
         name: "TextIOWrapper".to_string(),
         dict: Box::new(str_map_to_typedict(tiw_dict)),
