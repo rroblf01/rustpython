@@ -3850,22 +3850,50 @@ pub fn builtin_sorted(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 }
 
 pub fn builtin_enumerate(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.is_empty() {
+    // Keyword args (iterable=/start=) arrive as a trailing dict.
+    let mut iterable: Option<PyObjectRef> = None;
+    let mut start_val: Option<PyObjectRef> = None;
+    let mut positional: Vec<PyObjectRef> = Vec::new();
+    for a in args {
+        if let PyObject::Dict(d) = &*a.borrow() {
+            if let Ok(Some(v)) = d.get(&py_str("iterable")) {
+                iterable = Some(v.clone());
+            }
+            if let Ok(Some(v)) = d.get(&py_str("start")) {
+                start_val = Some(v.clone());
+            }
+        } else {
+            positional.push(a.clone());
+        }
+    }
+    if iterable.is_none() && positional.is_empty() {
         return Err(PyError::type_error("enumerate() takes at least 1 argument"));
     }
-    let start: usize = if args.len() > 1 {
-        if let PyObject::Int(i) = &*args[1].borrow() {
-            i.to_usize().unwrap_or(0)
-        } else {
-            0
-        }
-    } else {
-        0
+    if positional.len() > 2 {
+        return Err(PyError::type_error(format!(
+            "enumerate() takes at most 2 arguments ({} given)",
+            positional.len()
+        )));
+    }
+    let iterable = iterable.or_else(|| positional.first().cloned());
+    let start_arg = start_val.or_else(|| positional.get(1).cloned());
+    let start: usize = match start_arg {
+        None => 0,
+        Some(a) => match crate::object::int_or_bool_value(&a) {
+            Some(v) => v.to_usize().unwrap_or(usize::MAX) as usize,
+            None => {
+                return Err(PyError::type_error(format!(
+                    "enumerate() argument 2 must be int, not {}",
+                    a.borrow().type_name()
+                )))
+            }
+        },
     };
+    let iterable = iterable.ok_or_else(|| PyError::type_error("enumerate() missing iterable"))?;
     // Lazily wrap the source iterator — see `PyObject::EnumerateIter`'s own
     // doc comment for why eagerly draining it here (the previous approach)
     // was a real bug, not just a style choice.
-    let iterable = builtin_iter(&[args[0].clone()])?;
+    let iterable = builtin_iter(&[iterable])?;
     Ok(PyObjectRef::new(PyObject::EnumerateIter {
         source: iterable,
         pos: 0,

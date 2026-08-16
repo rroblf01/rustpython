@@ -315,7 +315,7 @@ fn str_encode_builtin(a: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 }
 
 /// The integer VALUE of an int or bool object (bool is int's subtype).
-fn int_or_bool_value(o: &PyObjectRef) -> Option<BigInt> {
+pub(crate) fn int_or_bool_value(o: &PyObjectRef) -> Option<BigInt> {
     match &*o.borrow() {
         PyObject::Int(i) => Some(i.clone()),
         PyObject::Bool(b) => Some(BigInt::from(*b as i64)),
