@@ -567,6 +567,77 @@ pub fn create_collections_dict(object_type: PyObjectRef) -> HashMap<String, PyOb
         nt_method!("__hash__", nt_hash);
         nt_method!("_asdict", nt_asdict);
         nt_method!("_replace", nt_replace);
+        // `_make(iterable)` — classmethod building a fresh instance from a
+        // positional-value iterable (`Match._make([a, b, size])`; CPython's
+        // difflib.py uses it via `_Match.make` in SequenceMatcher.get_matching_blocks).
+        {
+            let make_fields = fields.clone();
+            let make_type_dict = type_dict.clone();
+            let make_typename = typename.clone();
+            type_dict.insert_str(
+                "_make",
+                PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| {
+                    let source = if args.is_empty() {
+                        return Err(PyError::type_error("_make() missing required argument"));
+                    } else {
+                        args[0].clone()
+                    };
+                    let vals: Vec<PyObjectRef> =
+                        if matches!(&*source.borrow(), PyObject::Tuple(_) | PyObject::List(_)) {
+                            match &*source.borrow() {
+                                PyObject::Tuple(t) => t.clone(),
+                                PyObject::List(l) => l.clone(),
+                                _ => unreachable!(),
+                            }
+                        } else {
+                            let mut out = Vec::new();
+                            let it = crate::object::builtin_iter(&[source])?;
+                            let itb = it.borrow();
+                            if let PyObject::Instance { .. } = &*itb {
+                                loop {
+                                    match crate::object::call_bound_method(
+                                        itb.get_attribute("__next__")?,
+                                        it.clone(),
+                                        vec![],
+                                    ) {
+                                        Ok(v) => out.push(v),
+                                        Err(crate::object::PyError::StopIteration) => break,
+                                        Err(e) => return Err(e),
+                                    }
+                                }
+                            }
+                            out
+                        };
+                    if vals.len() != make_fields.len() {
+                        return Err(PyError::type_error(format!(
+                            "{}._make() takes exactly {} arguments, got {}",
+                            make_typename,
+                            make_fields.len(),
+                            vals.len()
+                        )));
+                    }
+                    let mut new_dict = AttrMap::new();
+                    new_dict.insert_str(
+                        "_fields",
+                        PyObjectRef::new(PyObject::List(
+                            make_fields.iter().map(|f| py_str(f)).collect(),
+                        )),
+                    );
+                    for (f, v) in make_fields.iter().zip(vals.into_iter()) {
+                        new_dict.insert_str(f, v);
+                    }
+                    Ok(PyObjectRef::new(PyObject::Instance {
+                        typ: PyObjectRef::new(PyObject::Type {
+                            name: make_typename.clone(),
+                            dict: Box::new(str_map_to_typedict(make_type_dict.clone())),
+                            bases: vec![],
+                            mro: vec![],
+                        }),
+                        dict: new_dict,
+                    }))
+                }))),
+            );
+        }
 
         // Add field names as class-level attributes (for __doc__ setting support)
         for f in &fields {

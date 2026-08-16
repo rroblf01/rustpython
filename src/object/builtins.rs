@@ -4186,6 +4186,13 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 // Convert raise StopIteration into PyError::StopIteration for next() protocol
                 if let Err(ref e) = result {
                     if is_stop_iteration_error(e) {
+                        // `next(gen, default)` — exhausted iterators return
+                        // the default instead of raising StopIteration
+                        // (difflib.py's `_line_iterator` relies on it via
+                        // `next(diff_lines_iterator, 'X')`).
+                        if args.len() >= 2 {
+                            return Ok(args[1].clone());
+                        }
                         return Err(PyError::StopIteration);
                     }
                 }
@@ -4274,6 +4281,16 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     (k, v)
                 }
                 Err(PyError::StopIteration) => {
+                    // `next()` on a non-iterator must raise TypeError, not panic: only
+                    // Mut-wrapped values are borrow_mut-able below, so an Imm/inline value
+                    // (str, int, tuple, Function, ...) reaching this point would hit
+                    // borrow_mut's "non-Mut value" panic instead (repro: `next('abc')`).
+                    if !matches!(args[0], PyObjectRef::Mut(_)) {
+                        return Err(PyError::type_error(format!(
+                            "'{}' is not an iterator",
+                            args[0].borrow().type_name()
+                        )));
+                    }
                     let mut obj = args[0].borrow_mut();
                     if let PyObject::GroupByIter { exhausted, .. } = &mut *obj {
                         *exhausted = true;

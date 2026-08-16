@@ -898,9 +898,6 @@ impl VirtualMachine {
         // Native sunau module (Sun AU audio format stubs)
         modules.insert_str("sunau", create_module("sunau", create_sunau_dict()));
 
-        // Native difflib module (with unified_diff)
-        modules.insert_str("difflib", create_module("difflib", create_difflib_dict()));
-
         // Native csv module
         modules.insert_str("csv", create_module("csv", create_csv_dict()));
 
@@ -5912,8 +5909,12 @@ impl VirtualMachine {
                         _ => {
                             drop(val_ref);
                             let iterator =
-                                crate::object::builtin_iter(&[val.clone()]).map_err(|_| {
-                                    PyError::runtime_error("LIST_EXTEND requires an iterable")
+                                crate::object::builtin_iter(&[val.clone()]).map_err(|e| {
+                                    // `*todata` unpacking / `list.extend(x)` on a
+                                    // non-iterable raises TypeError, not RuntimeError
+                                    // (difflib's HtmlDiff._collect_lines catches
+                                    // TypeError for separator None values).
+                                    PyError::type_error(e.to_string())
                                 })?;
                             let mut result = Vec::new();
                             loop {

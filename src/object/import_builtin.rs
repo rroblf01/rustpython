@@ -498,6 +498,7 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
             PyObject::Type { .. } => 4,
             PyObject::BuildClass => 5,
             PyObject::Partial { .. } => 6,
+            PyObject::Closure(_) => 8,
             _ => 7,
         }
     };
@@ -765,6 +766,13 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
             let mut all_args = partial_args.clone();
             all_args.extend(a);
             builtin_call(&func, &all_args)
+        }
+        8 => {
+            if let PyObject::Closure(f) = &*f.borrow() {
+                f(&a)
+            } else {
+                unreachable!()
+            }
         }
         _ => Err(PyError::type_error(format!(
             "'{}' object is not callable",
