@@ -9,6 +9,10 @@ pub struct Parser {
     // `async with`/`await` (SyntaxError when used at top level, matching
     // CPython; see the emit sites in parse_stmt/parse_unary).
     async_depth: usize,
+    // >0 while parsing a generator-expression body (`(x for x in ...)`).
+    // `await` inside a genexpr is legal even in a sync function (it becomes
+    // an async generator) — test_asyncgen's `make_arange` relies on it.
+    genexpr_depth: usize,
     // `compile(..., flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)` relaxes the
     // above — top-level `await`/`async for`/`async with` become legal.
     pub(crate) allow_top_level_await: bool,
@@ -58,6 +62,7 @@ impl Parser {
             unary_depth: 0,
             suite_depth: 0,
             async_depth: 0,
+            genexpr_depth: 0,
             allow_top_level_await: false,
         }
     }
@@ -2357,6 +2362,7 @@ impl Parser {
                                 && args.is_empty()
                                 && keywords.is_empty()
                             {
+                                self.genexpr_depth += 1;
                                 let is_async = self.eat_comp_for()?.unwrap();
                                 let target = self.parse_for_target()?;
                                 self.expect(&Token::In)?;
@@ -2409,6 +2415,7 @@ impl Parser {
                                     elt: Box::new(expr),
                                     generators,
                                 });
+                                self.genexpr_depth -= 1;
                                 if !self.eat(&Token::Comma) {
                                     break;
                                 }
@@ -2922,6 +2929,7 @@ impl Parser {
                     let first = self.parse_expr()?;
                     if let Some(is_async) = self.eat_comp_for()? {
                         // Generator expression: (expr for x in iter)
+                        self.genexpr_depth += 1;
                         let target = self.parse_for_target()?;
                         self.expect(&Token::In)?;
                         let iter = self.parse_or_expr()?;
@@ -2970,6 +2978,7 @@ impl Parser {
                             }
                         }
                         self.expect(&Token::RightParen)?;
+                        self.genexpr_depth -= 1;
                         Expr::GeneratorExp {
                             elt: Box::new(first),
                             generators,
@@ -3279,8 +3288,10 @@ impl Parser {
             Token::Await => {
                 // `await` at top level is SyntaxError unless the
                 // PyCF_ALLOW_TOP_LEVEL_AWAIT flag is set (test_builtin's
-                // test_compile_top_level_await).
-                if self.async_depth == 0 && !self.allow_top_level_await {
+                // test_compile_top_level_await). Inside a generator
+                // expression it's always legal (async-generator semantics,
+                // test_asyncgen's make_arange).
+                if self.async_depth == 0 && !self.allow_top_level_await && self.genexpr_depth == 0 {
                     return Err("'await' outside async function".to_string());
                 }
                 self.next();
