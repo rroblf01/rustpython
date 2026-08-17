@@ -79,6 +79,67 @@ Unpack = _TypingType('Unpack')
 def overload(func): return func
 def cast(typ, val): return val
 def type_check_only(func): return func
+def no_type_check(func=None):
+    """Decorator to indicate that a function should not be type-checked."""
+    if func is None:
+        return lambda f: f
+    return func
+
+# CPython 3.11+ sentinel values
+class _NoDefault:
+    """Sentinel for default-argument removal."""
+    def __repr__(self): return 'typing.NoDefault'
+    def __reduce__(self): return (type(self), ())
+NoDefault = _NoDefault()
+
+# CPython 3.12+ TypeAliasType
+class TypeAliasType:
+    """A type alias type, created by type_statement."""
+    def __init__(self, name, value, *, type_params=()):
+        self.__value__ = value
+        self.__type_params__ = type_params
+        self.__name__ = name
+    def __getitem__(self, item):
+        if not isinstance(item, tuple):
+            item = (item,)
+        return self.__origin__._replace_args(item) if hasattr(self, '__origin__') else _GenericAlias(self, item)
+    def __repr__(self):
+        return self.__name__
+
+# Additional stubs needed by tests
+TypeGuard = _TypingType('TypeGuard')
+TypeIs = _TypingType('TypeIs')
+TypeAlias = _TypingType('TypeAlias')
+
+def override(func): return func
+def assert_type(val, typ): return val
+def assert_never(val): pass
+def reveal_type(val): return val
+def assert_never(val): pass
+
+def dataclass_transform(*, factory_default_sentinel=None, eq_default=True, order_default=True, kw_only_default=False, field_specifiers=(), **kwargs):
+    """Decorator for dataclass transforms."""
+    def decorator(cls_or_func):
+        return cls_or_func
+    if factory_default_sentinel is not None:
+        return decorator
+    return decorator
+
+def get_args(tp):
+    """Get type arguments from a generic type."""
+    if hasattr(tp, '__args__'):
+        return tp.__args__
+    return ()
+
+def get_origin(tp):
+    """Get the origin of a generic type."""
+    if hasattr(tp, '__origin__'):
+        return tp.__origin__
+    return None
+
+def get_overloads(func):
+    """Get overloaded implementations of a function."""
+    return getattr(func, '__overloaded__', ())
 
 def get_type_hints(obj, globalns=None, localns=None, include_extras=False):
     """Minimal stub: real semantics need the full PEP 563/649 evaluation

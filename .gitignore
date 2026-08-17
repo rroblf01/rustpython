@@ -1,21 +1,10 @@
-target/
-*.pyc
+# Test artifacts from os.path.abspath(FakePath(...))
+FakePath object*
+test.support.os_helper.FakePath*
 __pycache__/
-*.swp
-*.swo
-*~
-.DS_Store
-/tmp/*.rlib
-testproject/
-.env
-.venv/
-.claude/
-CLAUDE.md
-INSTRUCTIONS.md
-# Other AI coding tool scratch directories (not part of this project)
-.hermes/
-.opencode/
-# Temp test files
-@test_*
-b'@test_*
-<FakePath*
+*.pyc
+*.pyo
+target/
+*.so
+*.dylib
+@test_*_tmp*

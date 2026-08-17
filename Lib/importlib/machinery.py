@@ -46,3 +46,22 @@ class AppleFrameworkLoader:
 
 class NamespaceLoader:
     pass
+
+class ModuleSpec:
+    """A module specification (PEP 451)."""
+    def __init__(self, name, loader, *, origin=None, loader_state=None, is_package=False):
+        self.name = name
+        self.loader = loader
+        self.origin = origin
+        self.loader_state = loader_state
+        self.is_package = is_package
+        self.parent = None
+        self.submodule_search_locations = None
+    def __repr__(self):
+        return f"ModuleSpec(name={self.name!r}, loader={self.loader!r})"
+    def __eq__(self, other):
+        if not isinstance(other, ModuleSpec):
+            return NotImplemented
+        return self.name == other.name and self.loader == other.loader
+    def __hash__(self):
+        return hash((self.name, self.loader))
