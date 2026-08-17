@@ -632,9 +632,7 @@ pub fn dict_method_items(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         let obj_borrowed = obj.borrow();
         obj_borrowed.get_attribute("__iter__")?
     };
-    let iter_obj = crate::object::call_bound_method(
-        iter_fn, obj.clone(), vec![]
-    )?;
+    let iter_obj = crate::object::call_bound_method(iter_fn, obj.clone(), vec![])?;
     let mut keys_list = Vec::new();
     loop {
         let key = match crate::object::builtin_next(&[iter_obj.clone()]) {
@@ -650,9 +648,7 @@ pub fn dict_method_items(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     };
     let mut result = Vec::new();
     for k in keys_list {
-        let v = crate::object::call_bound_method(
-            getitem_fn.clone(), obj.clone(), vec![k.clone()],
-        )?;
+        let v = crate::object::call_bound_method(getitem_fn.clone(), obj.clone(), vec![k.clone()])?;
         result.push(py_tuple(vec![k, v]));
     }
     Ok(py_list(result))
