@@ -3606,8 +3606,25 @@ fn build_context_type() -> PyObjectRef {
             getter: Some(PyObjectRef::new(PyObject::BuiltinFunction {
                 name: "traps".to_string(),
                 func: |args| {
-                    // Return empty traps dict by default
-                    Ok(py_none())
+                    if args.is_empty() {
+                        return Err(PyError::type_error("traps requires self"));
+                    }
+                    // Return existing traps dict or create one
+                    let obj = &args[0];
+                    let existing = if let PyObject::Instance { dict, .. } = &*obj.borrow() {
+                        dict.get_str("traps").cloned()
+                    } else {
+                        None
+                    };
+                    if let Some(v) = existing {
+                        return Ok(v);
+                    }
+                    let mut d = crate::object::PyDict::new();
+                    let result = PyObjectRef::new(PyObject::Dict(Box::new(d)));
+                    if let PyObject::Instance { dict, .. } = &mut *obj.borrow_mut() {
+                        dict.insert_str("traps", result.clone());
+                    }
+                    Ok(result)
                 },
             })),
             setter: None,
@@ -3640,6 +3657,8 @@ fn make_context_instance(precision: usize, rounding: &str) -> PyObjectRef {
     let mut dict = AttrMap::new();
     dict.insert_str("prec", py_int(precision as i64));
     dict.insert_str("rounding", py_str(rounding));
+    dict.insert_str("Emax", py_int(999999999999999999i64));
+    dict.insert_str("Emin", py_int(-999999999999999999i64));
     PyObjectRef::new(PyObject::Instance { typ, dict })
 }
 
