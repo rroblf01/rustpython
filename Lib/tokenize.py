@@ -34,7 +34,10 @@ import re
 import sys
 from token import *
 from token import EXACT_TOKEN_TYPES
-import _tokenize
+try:
+    import _tokenize
+except ImportError:
+    _tokenize = None
 
 cookie_re = re.compile(br'^[ \t\f]*#.*?coding[:=][ \t]*([-\w.]+)', re.ASCII)
 blank_re = re.compile(br'^[ \t\f]*(?:[#\r\n]|$)', re.ASCII)
@@ -580,6 +583,8 @@ def _transform_msg(msg):
 
 def _generate_tokens_from_c_tokenizer(source, encoding=None, extra_tokens=False):
     """Tokenize a source reading Python code as unicode strings using the internal C tokenizer"""
+    if _tokenize is None:
+        return  # No C tokenizer available, will fall back to Python tokenizer
     if encoding is None:
         it = _tokenize.TokenizerIter(source, extra_tokens=extra_tokens)
     else:
