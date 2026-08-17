@@ -1705,9 +1705,8 @@ pub fn create_collections_abc_dict() -> HashMap<String, PyObjectRef> {
                             let obj_borrowed = obj.borrow();
                             obj_borrowed.get_attribute("__iter__")?
                         };
-                        let iter_obj = crate::object::call_bound_method(
-                            iter_fn, obj.clone(), vec![]
-                        )?;
+                        let iter_obj =
+                            crate::object::call_bound_method(iter_fn, obj.clone(), vec![])?;
                         let mut keys_list = Vec::new();
                         loop {
                             let key = match crate::object::builtin_next(&[iter_obj.clone()]) {
@@ -1724,7 +1723,9 @@ pub fn create_collections_abc_dict() -> HashMap<String, PyObjectRef> {
                         let mut result = Vec::new();
                         for k in keys_list {
                             let v = crate::object::call_bound_method(
-                                getitem_fn.clone(), obj.clone(), vec![k.clone()],
+                                getitem_fn.clone(),
+                                obj.clone(),
+                                vec![k.clone()],
                             )?;
                             result.push(py_tuple(vec![k, v]));
                         }
@@ -5452,11 +5453,28 @@ fn pickle_serialize(
     obj: &PyObjectRef,
     buf: &mut Vec<u8>,
     memo: &mut Vec<*const ()>,
+    protocol: i32,
 ) -> PyResult<()> {
     match &*obj.borrow() {
         PyObject::None => buf.push(b'N'),
-        PyObject::Bool(true) => buf.push(b'T'),
-        PyObject::Bool(false) => buf.push(b'F'),
+        PyObject::Bool(true) => {
+            // Protocol 0-1: True is serialized as integer 1 (I01\n)
+            // Protocol 2+: True is serialized as T
+            if protocol <= 1 {
+                buf.push(b'I');
+                buf.extend_from_slice(b"01\n");
+            } else {
+                buf.push(b'T');
+            }
+        }
+        PyObject::Bool(false) => {
+            if protocol <= 1 {
+                buf.push(b'I');
+                buf.extend_from_slice(b"00\n");
+            } else {
+                buf.push(b'F');
+            }
+        }
         PyObject::Int(n) => {
             buf.push(b'I');
             buf.extend_from_slice(n.to_string().as_bytes());
@@ -5507,7 +5525,7 @@ fn pickle_serialize(
             }
             buf.push(b'[');
             for item in items {
-                pickle_serialize(item, buf, memo)?;
+                pickle_serialize(item, buf, memo, protocol)?;
             }
             buf.push(b']');
         }
@@ -5532,7 +5550,7 @@ fn pickle_serialize(
             }
             buf.push(b'[');
             for item in data.iter() {
-                pickle_serialize(item, buf, memo)?;
+                pickle_serialize(item, buf, memo, protocol)?;
             }
             buf.push(b']');
         }
@@ -5542,14 +5560,14 @@ fn pickle_serialize(
             start_len,
         } => {
             buf.push(b'q');
-            pickle_serialize(deque, buf, memo)?;
-            pickle_serialize(&py_int(*index as i64), buf, memo)?;
-            pickle_serialize(&py_int(*start_len as i64), buf, memo)?;
+            pickle_serialize(deque, buf, memo, protocol)?;
+            pickle_serialize(&py_int(*index as i64), buf, memo, protocol)?;
+            pickle_serialize(&py_int(*start_len as i64), buf, memo, protocol)?;
         }
         PyObject::Tuple(items) => {
             buf.push(b'(');
             for item in items {
-                pickle_serialize(item, buf, memo)?;
+                pickle_serialize(item, buf, memo, protocol)?;
             }
             buf.push(b')');
         }
@@ -5565,32 +5583,32 @@ fn pickle_serialize(
             }
             buf.push(b'{');
             for (k, v) in d.items() {
-                pickle_serialize(&k, buf, memo)?;
-                pickle_serialize(&v, buf, memo)?;
+                pickle_serialize(&k, buf, memo, protocol)?;
+                pickle_serialize(&v, buf, memo, protocol)?;
             }
             buf.push(b'}');
         }
         PyObject::Slice { start, stop, step } => {
             buf.push(b's');
-            pickle_serialize(start, buf, memo)?;
-            pickle_serialize(stop, buf, memo)?;
-            pickle_serialize(step, buf, memo)?;
+            pickle_serialize(start, buf, memo, protocol)?;
+            pickle_serialize(stop, buf, memo, protocol)?;
+            pickle_serialize(step, buf, memo, protocol)?;
         }
         PyObject::Range { start, stop, step } => {
             buf.push(b'R');
-            pickle_serialize(&py_int(start.clone()), buf, memo)?;
-            pickle_serialize(&py_int(stop.clone()), buf, memo)?;
-            pickle_serialize(&py_int(step.clone()), buf, memo)?;
+            pickle_serialize(&py_int(start.clone()), buf, memo, protocol)?;
+            pickle_serialize(&py_int(stop.clone()), buf, memo, protocol)?;
+            pickle_serialize(&py_int(step.clone()), buf, memo, protocol)?;
         }
         PyObject::ListIter { list, index } => {
             buf.push(b'i');
-            pickle_serialize(&py_list(list.clone()), buf, memo)?;
-            pickle_serialize(&py_int(*index as i64), buf, memo)?;
+            pickle_serialize(&py_list(list.clone()), buf, memo, protocol)?;
+            pickle_serialize(&py_int(*index as i64), buf, memo, protocol)?;
         }
         PyObject::GetItemIter { obj, index } => {
             buf.push(b'g');
-            pickle_serialize(obj, buf, memo)?;
-            pickle_serialize(&py_int(*index as i64), buf, memo)?;
+            pickle_serialize(obj, buf, memo, protocol)?;
+            pickle_serialize(&py_int(*index as i64), buf, memo, protocol)?;
         }
         PyObject::RangeIter {
             current,
@@ -5598,9 +5616,9 @@ fn pickle_serialize(
             step,
         } => {
             buf.push(b'r');
-            pickle_serialize(&py_int(current.clone()), buf, memo)?;
-            pickle_serialize(&py_int(stop.clone()), buf, memo)?;
-            pickle_serialize(&py_int(step.clone()), buf, memo)?;
+            pickle_serialize(&py_int(current.clone()), buf, memo, protocol)?;
+            pickle_serialize(&py_int(stop.clone()), buf, memo, protocol)?;
+            pickle_serialize(&py_int(step.clone()), buf, memo, protocol)?;
         }
         // A `fractions.Fraction` (or subclass) instance — serialize the
         // class reference + a plain instance dict carrying numerator/
@@ -5627,13 +5645,13 @@ fn pickle_serialize(
                 }
             };
             buf.push(b'C');
-            pickle_serialize(&py_str(&module), buf, memo)?;
-            pickle_serialize(&py_str(&name), buf, memo)?;
+            pickle_serialize(&py_str(&module), buf, memo, protocol)?;
+            pickle_serialize(&py_str(&name), buf, memo, protocol)?;
             buf.push(b'F');
             buf.push(b'{');
             for (k, v) in dict.iter() {
-                pickle_serialize(&py_str(&k), buf, memo)?;
-                pickle_serialize(&v, buf, memo)?;
+                pickle_serialize(&py_str(&k), buf, memo, protocol)?;
+                pickle_serialize(&v, buf, memo, protocol)?;
             }
             buf.push(b'}');
         }
@@ -5683,8 +5701,8 @@ fn pickle_serialize(
                 }
             };
             buf.push(b'C');
-            pickle_serialize(&py_str(&module), buf, memo)?;
-            pickle_serialize(&py_str(&name), buf, memo)?;
+            pickle_serialize(&py_str(&module), buf, memo, protocol)?;
+            pickle_serialize(&py_str(&name), buf, memo, protocol)?;
             // kind byte selects how the backing is (re)built
             let backing = crate::object::native_backing_of(obj).unwrap();
             let kind: u8 = {
@@ -5727,8 +5745,8 @@ fn pickle_serialize(
                     }
                 };
                 for (k, v) in items {
-                    pickle_serialize(&k, buf, memo)?;
-                    pickle_serialize(&v, buf, memo)?;
+                    pickle_serialize(&k, buf, memo, protocol)?;
+                    pickle_serialize(&v, buf, memo, protocol)?;
                 }
                 buf.push(b'}');
             } else {
@@ -5740,7 +5758,7 @@ fn pickle_serialize(
                 let it = builtin_iter(&[obj.clone()])?;
                 loop {
                     match builtin_next(&[it.clone()]) {
-                        Ok(v) => pickle_serialize(&v, buf, memo)?,
+                        Ok(v) => pickle_serialize(&v, buf, memo, protocol)?,
                         Err(PyError::StopIteration) => break,
                         Err(e) => return Err(e),
                     }
@@ -5753,8 +5771,8 @@ fn pickle_serialize(
                 if k == crate::object::NATIVE_BACKING_KEY {
                     continue;
                 }
-                pickle_serialize(&py_str(&k), buf, memo)?;
-                pickle_serialize(&v, buf, memo)?;
+                pickle_serialize(&py_str(&k), buf, memo, protocol)?;
+                pickle_serialize(&v, buf, memo, protocol)?;
             }
             buf.push(b'}');
         }
@@ -5774,11 +5792,12 @@ fn pickle_serialize(
                         .map(|m| m.str())
                 })
                 .unwrap_or_else(|| "builtins".to_string());
-            pickle_serialize(&py_str(&module), buf, memo)?;
+            pickle_serialize(&py_str(&module), buf, memo, protocol)?;
             pickle_serialize(
                 &py_str(&crate::interner::lookup_str(f.code.name)),
                 buf,
                 memo,
+                protocol,
             )?;
         }
         PyObject::Exception {
@@ -5788,17 +5807,17 @@ fn pickle_serialize(
             // dict (or 'N'). test_exceptions' testAttributes/test_copy_pickle
             // round-trip every exception and its attributes.
             buf.push(b'X');
-            pickle_serialize(&py_str(typ), buf, memo)?;
+            pickle_serialize(&py_str(typ), buf, memo, protocol)?;
             buf.push(b'(');
             for a in args {
-                pickle_serialize(a, buf, memo)?;
+                pickle_serialize(a, buf, memo, protocol)?;
             }
             buf.push(b')');
             if let Some(extra) = extra {
                 buf.push(b'{');
                 for (k, v) in extra.iter() {
-                    pickle_serialize(&py_str(k), buf, memo)?;
-                    pickle_serialize(&v, buf, memo)?;
+                    pickle_serialize(&py_str(k), buf, memo, protocol)?;
+                    pickle_serialize(&v, buf, memo, protocol)?;
                 }
                 buf.push(b'}');
             } else {
@@ -5848,6 +5867,14 @@ fn pickle_deserialize(
             let n: num_bigint::BigInt = s
                 .parse()
                 .map_err(|_| PyError::type_error(format!("invalid integer: {}", s)))?;
+            // Protocol 0: integers 0 and 1 followed by stop marker (.) are booleans
+            if *pos < data.len() && data[*pos] == b'.' {
+                if s == "0" || s == "00" {
+                    return Ok(py_bool(false));
+                } else if s == "1" || s == "01" {
+                    return Ok(py_bool(true));
+                }
+            }
             Ok(py_int(n))
         }
         b'G' => {
@@ -6431,9 +6458,18 @@ pub fn create_pickle_dict() -> HashMap<String, PyObjectRef> {
         if args.is_empty() {
             return Err(PyError::type_error("dumps() missing required argument"));
         }
+        let protocol = if args.len() > 1 {
+            args[1].as_i64().unwrap_or(4) as i32
+        } else {
+            4
+        };
         let mut buf = Vec::new();
         let mut memo: Vec<*const ()> = Vec::new();
-        pickle_serialize(&args[0], &mut buf, &mut memo)?;
+        pickle_serialize(&args[0], &mut buf, &mut memo, protocol)?;
+        // Protocol 0-1 ends with a stop marker (.)
+        if protocol <= 1 {
+            buf.push(b'.');
+        }
         Ok(PyObjectRef::imm(PyObject::Bytes(buf)))
     });
 
@@ -6453,6 +6489,10 @@ pub fn create_pickle_dict() -> HashMap<String, PyObjectRef> {
         let mut pos = 0;
         let mut memo: Vec<PyObjectRef> = Vec::new();
         let result = pickle_deserialize(&data, &mut pos, &mut memo)?;
+        // Skip protocol 0 stop marker (.) if present
+        if pos < data.len() && data[pos] == b'.' {
+            pos += 1;
+        }
         if pos != data.len() {
             return Err(PyError::type_error(format!(
                 "pickle data has trailing bytes after value (pos={}, len={})",
