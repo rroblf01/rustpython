@@ -85,8 +85,8 @@ test-rust:
 
 build-test:
 	@echo -e "$(CYAN)==> Building test binary (features: $(RUSTPYTHON_TEST_FEATURES))...$(RESET)"
-	cargo build --features $(RUSTPYTHON_TEST_FEATURES) --bin rustpython
-	@cp target/debug/rustpython $(RUSTPYTHON_TEST)
+	cargo build --release --features $(RUSTPYTHON_TEST_FEATURES) --bin rustpython
+	@cp target/release/rustpython $(RUSTPYTHON_TEST)
 
 test-python: build-test
 	@echo -e "$(CYAN)==> Running Python tests...$(RESET)"
