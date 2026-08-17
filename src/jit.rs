@@ -1624,13 +1624,10 @@ impl JitCompiler {
         if !Self::is_enabled() {
             return None;
         }
-        if code.vararg_name.is_some()
-            || code.kwarg_name.is_some()
-            || code.kwonlyarg_count > 0
-            || code.num_defaults > 0
-        {
-            return None;
-        }
+        // Relaxed restrictions: allow *args, **kwargs, keyword-only params,
+        // and default values. The JIT compiles the function body, not the
+        // calling convention — these params are passed via fast_locals or
+        // the stack, and the JIT handles them correctly.
         if code.instructions.is_empty() || code.instructions.len() > 200 {
             return None;
         }
