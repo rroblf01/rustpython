@@ -1853,6 +1853,12 @@ impl Compiler {
                 let level_idx = self.get_const_index(ConstValue::Int(level_val.to_string())) as u32;
                 self.emit(Opcode::LOAD_CONST, level_idx);
                 self.emit(Opcode::IMPORT_NAME, name_idx);
+                // `from x import *` — star-import, handled specially
+                // (copy all non-underscore names from the module; test_pkg).
+                if names.len() == 1 && names[0].name == "*" {
+                    self.emit(Opcode::IMPORT_STAR, 0);
+                    return Ok(());
+                }
                 for alias in names {
                     let import_name_idx = self.get_name_index(&alias.name) as u32;
                     self.emit(Opcode::IMPORT_FROM, import_name_idx);

@@ -33,8 +33,9 @@ pub enum Opcode {
     GET_ITER = 67,
     IMPORT_FROM = 68,
     IMPORT_NAME = 69,
-    IS_OP = 70,
-    JUMP_BACKWARD = 71,
+    IMPORT_STAR = 70,
+    IS_OP = 71,
+    JUMP_BACKWARD = 72,
     JUMP_FORWARD = 73,
     LIST_APPEND = 74,
     LIST_EXTEND = 75,
@@ -218,8 +219,9 @@ impl Opcode {
             67 => GET_ITER,
             68 => IMPORT_FROM,
             69 => IMPORT_NAME,
-            70 => IS_OP,
-            71 => JUMP_BACKWARD,
+            70 => IMPORT_STAR,
+            71 => IS_OP,
+            72 => JUMP_BACKWARD,
             73 => JUMP_FORWARD,
             74 => LIST_APPEND,
             75 => LIST_EXTEND,
@@ -317,6 +319,7 @@ pub(crate) fn needs_arg(op: Opcode) -> bool {
             | FOR_ITER
             | IMPORT_FROM
             | IMPORT_NAME
+            | IMPORT_STAR
             | IS_OP
             | JUMP_BACKWARD
             | JUMP_FORWARD

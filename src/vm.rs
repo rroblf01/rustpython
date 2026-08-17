@@ -7222,6 +7222,59 @@ impl VirtualMachine {
                 }
             }
 
+            Opcode::IMPORT_STAR => {
+                // `from x import *` — copy every public (non-underscore,
+                // subject to `__all__`) name from the module into the current
+                // namespace (test_pkg::test_2). The module is on the stack.
+                let module = self.frames[fi].pop()?;
+                let names: Vec<String> = {
+                    let obj = module.borrow();
+                    match &*obj {
+                        PyObject::Module { dict, .. } => {
+                            if let Some(all) = dict.get_str("__all__").cloned() {
+                                match &*all.borrow() {
+                                    PyObject::List(items) | PyObject::Tuple(items) => {
+                                        items.iter().map(|i| i.str()).collect()
+                                    }
+                                    _ => Vec::new(),
+                                }
+                            } else {
+                                let mut v: Vec<String> = dict
+                                    .iter()
+                                    .map(|(k, _)| interner::lookup_str(*k))
+                                    .filter(|k| !k.starts_with('_'))
+                                    .map(|k| k.to_string())
+                                    .collect();
+                                v.sort();
+                                v
+                            }
+                        }
+                        _ => return Err(PyError::runtime_error("IMPORT_STAR on non-module")),
+                    }
+                };
+                let mut g = self.frames[fi].globals.borrow_mut();
+                for n in &names {
+                    let obj = module.borrow();
+                    if let PyObject::Module { dict, .. } = &*obj {
+                        if let Some(v) = dict.get(&interner::intern(n)).cloned() {
+                            g.insert(interner::intern(n), v);
+                        }
+                    }
+                }
+                drop(g);
+                // Also mirror into frame.locals so subsequent LOAD_NAME in
+                // the same scope sees the names (exec with separate locals).
+                let mut locals = self.frames[fi].locals.clone();
+                for n in &names {
+                    let obj = module.borrow();
+                    if let PyObject::Module { dict, .. } = &*obj {
+                        if let Some(v) = dict.get(&interner::intern(n)).cloned() {
+                            locals.insert(interner::intern(n), v);
+                        }
+                    }
+                }
+            }
+
             Opcode::LOAD_BUILD_CLASS => {
                 self.frames[fi].push(PyObjectRef::imm(PyObject::BuildClass));
             }
