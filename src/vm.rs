@@ -771,7 +771,10 @@ impl VirtualMachine {
         modules.insert_str("copy", create_module("copy", create_copy_dict()));
 
         // Native types module (replaces CPython types.py)
-        modules.insert_str("_types_native", create_module("_types_native", create_types_dict()));
+        modules.insert_str(
+            "_types_native",
+            create_module("_types_native", create_types_dict()),
+        );
 
         // Native struct module for binary packing
         modules.insert_str("struct", create_module("struct", create_struct_dict()));
