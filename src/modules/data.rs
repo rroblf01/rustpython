@@ -3581,6 +3581,40 @@ fn build_context_type() -> PyObjectRef {
             Ok(py_str(&format!("Context(prec={})", prec)))
         }),
     );
+    type_dict.insert_str(
+        "copy",
+        bf!("copy", |args| {
+            // Context.copy() creates a shallow copy of the context
+            let prec = if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+                dict.get_str("prec").and_then(|v| v.as_i64()).unwrap_or(28)
+            } else {
+                28
+            };
+            let rounding = if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+                dict.get_str("rounding")
+                    .map(|v| v.str())
+                    .unwrap_or_else(|| "ROUND_HALF_EVEN".to_string())
+            } else {
+                "ROUND_HALF_EVEN".to_string()
+            };
+            Ok(make_context_instance(prec as usize, &rounding))
+        }),
+    );
+    type_dict.insert_str(
+        "traps",
+        PyObjectRef::new(PyObject::Property(Box::new(PropertyData {
+            getter: Some(PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "traps".to_string(),
+                func: |args| {
+                    // Return empty traps dict by default
+                    Ok(py_none())
+                },
+            })),
+            setter: None,
+            deleter: None,
+            doc: None,
+        }))),
+    );
     PyObjectRef::new(PyObject::Type {
         name: "Context".to_string(),
         dict: Box::new(str_map_to_typedict(type_dict)),
