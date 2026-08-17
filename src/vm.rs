@@ -719,11 +719,7 @@ impl VirtualMachine {
             create_module("sysconfig", create_sysconfig_dict()),
         );
 
-        // Native linecache module (CPython stdlib replacement)
-        modules.insert_str(
-            "linecache",
-            create_module("linecache", create_linecache_dict()),
-        );
+        // linecache: using Lib/linecache.py (native stub removed)
 
         // Native calendar module
         modules.insert_str(
