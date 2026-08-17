@@ -8,3 +8,13 @@ target/
 *.so
 *.dylib
 @test_*_tmp*
+.opencode/
+.hermes/
+INSTRUCTIONS.md
+CLAUDE.md
+.claude/
+<test.*
+<FakePath*
+b'@test_*
+6
+7

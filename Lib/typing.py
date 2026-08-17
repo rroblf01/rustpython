@@ -111,6 +111,19 @@ TypeGuard = _TypingType('TypeGuard')
 TypeIs = _TypingType('TypeIs')
 TypeAlias = _TypingType('TypeAlias')
 
+# PEP 616+ type string literals
+AnyStr = _TypingType('AnyStr')
+
+# Additional type stubs needed by tests
+T = TypeVar('T')
+T_co = TypeVar('T_co')
+KT = TypeVar('KT')
+VT = TypeVar('VT')
+VT_co = TypeVar('VT_co')
+T_contra = TypeVar('T_contra')
+F = TypeVar('F')
+P = ParamSpec('P')
+
 def override(func): return func
 def assert_type(val, typ): return val
 def assert_never(val): pass
@@ -140,6 +153,10 @@ def get_origin(tp):
 def get_overloads(func):
     """Get overloaded implementations of a function."""
     return getattr(func, '__overloaded__', ())
+
+def clear_overloads():
+    """Clear all overloaded implementations."""
+    pass
 
 def get_type_hints(obj, globalns=None, localns=None, include_extras=False):
     """Minimal stub: real semantics need the full PEP 563/649 evaluation

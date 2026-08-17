@@ -1553,6 +1553,59 @@ pub fn create_pathlib_dict() -> HashMap<String, PyObjectRef> {
         }))
     });
 
+    // .write_text(data, encoding=None) -> number of characters written
+    path_func!("write_text", |args| {
+        if args.len() < 2 {
+            return Err(PyError::type_error("write_text() missing data argument"));
+        }
+        let s = path_instance_str(&args[0]);
+        let data = args[1].str();
+        match std::fs::write(&s, data.as_bytes()) {
+            Ok(_) => Ok(py_int(data.len() as i64)),
+            Err(e) => Err(PyError::os_error_from_io(&e)),
+        }
+    });
+
+    // .read_text(encoding=None) -> str
+    path_func!("read_text", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("read_text() missing argument"));
+        }
+        let s = path_instance_str(&args[0]);
+        match std::fs::read_to_string(&s) {
+            Ok(data) => Ok(py_str(&data)),
+            Err(e) => Err(PyError::os_error_from_io(&e)),
+        }
+    });
+
+    // .write_bytes(data) -> None
+    path_func!("write_bytes", |args| {
+        if args.len() < 2 {
+            return Err(PyError::type_error("write_bytes() missing data argument"));
+        }
+        let s = path_instance_str(&args[0]);
+        let data = match &*args[1].borrow() {
+            PyObject::Bytes(b) => b.clone(),
+            _ => args[1].str().into_bytes(),
+        };
+        match std::fs::write(&s, &data) {
+            Ok(_) => Ok(py_none()),
+            Err(e) => Err(PyError::os_error_from_io(&e)),
+        }
+    });
+
+    // .read_bytes() -> bytes
+    path_func!("read_bytes", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("read_bytes() missing argument"));
+        }
+        let s = path_instance_str(&args[0]);
+        match std::fs::read(&s) {
+            Ok(data) => Ok(PyObjectRef::imm(PyObject::Bytes(data))),
+            Err(e) => Err(PyError::os_error_from_io(&e)),
+        }
+    });
+
     // Create the Path Type object
     let path_type = PyObjectRef::new(PyObject::Type {
         name: "Path".to_string(),

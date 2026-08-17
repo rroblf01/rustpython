@@ -1687,6 +1687,51 @@ pub fn create_collections_abc_dict() -> HashMap<String, PyObjectRef> {
     if let Some(m) = d.get("Mapping") {
         if let PyObject::Type { dict, .. } = &mut *m.borrow_mut() {
             dict.insert_str("__reversed__", py_none());
+            // Add items/keys/values methods — ThemeSection uses items()
+            // which inherits from Mapping, but the native Mapping ABC
+            // doesn't define these Python-level methods yet.
+            dict.insert_str(
+                "items",
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "items".to_string(),
+                    func: |args| {
+                        if args.is_empty() {
+                            return Err(PyError::type_error("items() missing self"));
+                        }
+                        let obj = &args[0];
+                        // Use call_function to invoke __iter__ and __getitem__
+                        // via the normal calling path to avoid RefCell borrow conflicts
+                        let iter_fn = {
+                            let obj_borrowed = obj.borrow();
+                            obj_borrowed.get_attribute("__iter__")?
+                        };
+                        let iter_obj = crate::object::call_bound_method(
+                            iter_fn, obj.clone(), vec![]
+                        )?;
+                        let mut keys_list = Vec::new();
+                        loop {
+                            let key = match crate::object::builtin_next(&[iter_obj.clone()]) {
+                                Ok(v) => v,
+                                Err(e) if crate::object::is_stop_iteration_error(&e) => break,
+                                Err(e) => return Err(e),
+                            };
+                            keys_list.push(key);
+                        }
+                        let getitem_fn = {
+                            let obj_borrowed = obj.borrow();
+                            obj_borrowed.get_attribute("__getitem__")?
+                        };
+                        let mut result = Vec::new();
+                        for k in keys_list {
+                            let v = crate::object::call_bound_method(
+                                getitem_fn.clone(), obj.clone(), vec![k.clone()],
+                            )?;
+                            result.push(py_tuple(vec![k, v]));
+                        }
+                        Ok(py_list(result))
+                    },
+                }),
+            );
         }
     }
     if let Some(m) = d.get("MutableMapping") {

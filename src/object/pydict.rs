@@ -614,22 +614,48 @@ pub fn dict_method_items(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
         return Err(PyError::type_error("items() requires self"));
     }
-    match resolve_dict_like(&args[0]) {
-        Some(d) => {
-            let items = if let PyObject::Dict(pd) = &*d.borrow() {
-                pd.items()
-            } else {
-                unreachable!()
-            };
-            Ok(py_list(
+    // Handle native dicts directly
+    if let Some(d) = resolve_dict_like(&args[0]) {
+        if let PyObject::Dict(pd) = &*d.borrow() {
+            let items = pd.items();
+            return Ok(py_list(
                 items
                     .into_iter()
                     .map(|(k, v)| py_tuple(vec![k, v]))
                     .collect(),
-            ))
+            ));
         }
-        None => Err(PyError::type_error("items() requires a dict-like instance")),
     }
+    // For Mapping-like objects (ThemeSection etc.), use __getitem__ + __iter__
+    let obj = &args[0];
+    let iter_fn = {
+        let obj_borrowed = obj.borrow();
+        obj_borrowed.get_attribute("__iter__")?
+    };
+    let iter_obj = crate::object::call_bound_method(
+        iter_fn, obj.clone(), vec![]
+    )?;
+    let mut keys_list = Vec::new();
+    loop {
+        let key = match crate::object::builtin_next(&[iter_obj.clone()]) {
+            Ok(v) => v,
+            Err(e) if crate::object::is_stop_iteration_error(&e) => break,
+            Err(e) => return Err(e),
+        };
+        keys_list.push(key);
+    }
+    let getitem_fn = {
+        let obj_borrowed = obj.borrow();
+        obj_borrowed.get_attribute("__getitem__")?
+    };
+    let mut result = Vec::new();
+    for k in keys_list {
+        let v = crate::object::call_bound_method(
+            getitem_fn.clone(), obj.clone(), vec![k.clone()],
+        )?;
+        result.push(py_tuple(vec![k, v]));
+    }
+    Ok(py_list(result))
 }
 
 /// Static dict method: keys
