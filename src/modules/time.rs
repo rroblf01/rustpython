@@ -1761,6 +1761,47 @@ fn build_date_type() -> PyObjectRef {
             )))
         }),
     );
+    // isocalendar() -> (ISO year, ISO week, ISO weekday)
+    type_dict.insert_str(
+        "isocalendar",
+        bf!("isocalendar", |args| {
+            let year = inst_get_i64(&args[0], "year");
+            let month = inst_get_i64(&args[0], "month");
+            let day = inst_get_i64(&args[0], "day");
+            // Calculate ordinal day of year
+            let leap = if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 { 1 } else { 0 };
+            let days_in_month = [0i64,31,28+leap,31,30,31,30,31,31,30,31,30,31];
+            let mut yday = day;
+            for m in 1..month {
+                yday += days_in_month[m as usize];
+            }
+            // ISO weekday: 1=Monday ... 7=Sunday (1-indexed)
+            let wday = weekday_from_ordinal(date_ordinal(&args[0])) + 1;
+            // ISO week number using a simple calculation
+            // Find the weekday of January 1st
+            let mut jan1_yday = 1i64;
+            let m_jan = month;
+            let y_jan = year;
+            let a_jan = (14 - 1) / 12;
+            let y_j = y_jan + 4800 - a_jan;
+            let m_j = 1 + 12 * a_jan - 3;
+            let jd_jan = 1 + (153 * m_j + 2) / 5 + 365 * y_j + y_j / 4 - y_j / 100 + y_j / 400 - 32045;
+            let a_j = (14 - month) / 12;
+            let y = year + 4800 - a_j;
+            let m = month + 12 * a_j - 3;
+            let jd = day + (153 * m + 2) / 5 + 365 * y + y / 4 - y / 100 + y / 400 - 32045;
+            let day_diff = jd - jd_jan;
+            let week_of_year = day_diff / 7 + 1;
+            let iso_year = if week_of_year == 0 {
+                year - 1
+            } else if week_of_year > 52 {
+                year + 1
+            } else {
+                year
+            };
+            Ok(py_tuple(vec![py_int(iso_year), py_int(week_of_year), py_int(wday)]))
+        }),
+    );
     type_dict.insert_str(
         "__str__",
         bf!("__str__", |args| {
@@ -1837,6 +1878,43 @@ fn build_date_type() -> PyObjectRef {
                 0,
                 0,
                 0,
+                weekday_from_ordinal(ord),
+                day_of_year(year, ord),
+            )))
+        }),
+    );
+    // ctime() for date objects — returns "Mon Jan 01 00:00:00 2024"
+    type_dict.insert_str(
+        "ctime",
+        bf!("ctime", |args| {
+            let year = inst_get_i64(&args[0], "year");
+            let month = inst_get_i64(&args[0], "month");
+            let day = inst_get_i64(&args[0], "day");
+            let ord = date_ordinal(&args[0]);
+            let wd = weekday_from_ordinal(ord);
+            let day_name = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][wd as usize % 7];
+            let month_name = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                              "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][month as usize];
+            Ok(py_str(&format!("{} {} {:02} 00:00:00 {}", day_name, month_name, day, year)))
+        }),
+    );
+    // __format__ for date objects — supports strftime-style format specs
+    type_dict.insert_str(
+        "__format__",
+        bf!("__format__", |args| {
+            let fmt = if args.len() > 1 {
+                args[1].str()
+            } else {
+                "%Y-%m-%d".to_string()
+            };
+            let ord = date_ordinal(&args[0]);
+            let year = inst_get_i64(&args[0], "year");
+            Ok(py_str(&format_strftime(
+                &fmt,
+                year,
+                inst_get_i64(&args[0], "month"),
+                inst_get_i64(&args[0], "day"),
+                0, 0, 0,
                 weekday_from_ordinal(ord),
                 day_of_year(year, ord),
             )))
