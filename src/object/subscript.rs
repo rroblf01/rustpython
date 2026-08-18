@@ -298,7 +298,24 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                                 }
                             }
                         }
-                        None
+                        // Fallback: if no __class_getitem__ found, return
+                        // a GenericAlias for Generic subclasses (PEP 560).
+                        // This allows `SimpleMapping[XK, XV]` to work even
+                        // when the class doesn't explicitly define __class_getitem__.
+                        Some(PyObjectRef::new(PyObject::BuiltinFunction {
+                            name: "__class_getitem__".to_string(),
+                            func: |args| {
+                                if args.len() < 2 {
+                                    return Err(PyError::type_error(
+                                        "__class_getitem__ requires 2 arguments"
+                                    ));
+                                }
+                                Ok(PyObjectRef::new(PyObject::BuiltinFunction {
+                                    name: "_GenericAlias".to_string(),
+                                    func: |_args| Ok(py_none()),
+                                }))
+                            },
+                        }))
                     })
                 })
             }
