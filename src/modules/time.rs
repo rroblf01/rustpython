@@ -1769,8 +1769,12 @@ fn build_date_type() -> PyObjectRef {
             let month = inst_get_i64(&args[0], "month");
             let day = inst_get_i64(&args[0], "day");
             // Calculate ordinal day of year
-            let leap = if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 { 1 } else { 0 };
-            let days_in_month = [0i64,31,28+leap,31,30,31,30,31,31,30,31,30,31];
+            let leap = if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 {
+                1
+            } else {
+                0
+            };
+            let days_in_month = [0i64, 31, 28 + leap, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
             let mut yday = day;
             for m in 1..month {
                 yday += days_in_month[m as usize];
@@ -1785,7 +1789,8 @@ fn build_date_type() -> PyObjectRef {
             let a_jan = (14 - 1) / 12;
             let y_j = y_jan + 4800 - a_jan;
             let m_j = 1 + 12 * a_jan - 3;
-            let jd_jan = 1 + (153 * m_j + 2) / 5 + 365 * y_j + y_j / 4 - y_j / 100 + y_j / 400 - 32045;
+            let jd_jan =
+                1 + (153 * m_j + 2) / 5 + 365 * y_j + y_j / 4 - y_j / 100 + y_j / 400 - 32045;
             let a_j = (14 - month) / 12;
             let y = year + 4800 - a_j;
             let m = month + 12 * a_j - 3;
@@ -1799,7 +1804,11 @@ fn build_date_type() -> PyObjectRef {
             } else {
                 year
             };
-            Ok(py_tuple(vec![py_int(iso_year), py_int(week_of_year), py_int(wday)]))
+            Ok(py_tuple(vec![
+                py_int(iso_year),
+                py_int(week_of_year),
+                py_int(wday),
+            ]))
         }),
     );
     type_dict.insert_str(
@@ -1893,9 +1902,14 @@ fn build_date_type() -> PyObjectRef {
             let ord = date_ordinal(&args[0]);
             let wd = weekday_from_ordinal(ord);
             let day_name = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][wd as usize % 7];
-            let month_name = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                              "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][month as usize];
-            Ok(py_str(&format!("{} {} {:02} 00:00:00 {}", day_name, month_name, day, year)))
+            let month_name = [
+                "", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov",
+                "Dec",
+            ][month as usize];
+            Ok(py_str(&format!(
+                "{} {} {:02} 00:00:00 {}",
+                day_name, month_name, day, year
+            )))
         }),
     );
     // __format__ for date objects — supports strftime-style format specs
@@ -1914,7 +1928,9 @@ fn build_date_type() -> PyObjectRef {
                 year,
                 inst_get_i64(&args[0], "month"),
                 inst_get_i64(&args[0], "day"),
-                0, 0, 0,
+                0,
+                0,
+                0,
                 weekday_from_ordinal(ord),
                 day_of_year(year, ord),
             )))
@@ -2089,7 +2105,12 @@ fn build_date_type() -> PyObjectRef {
             } else {
                 String::new()
             };
-            let parts: Vec<&str> = s.splitn(3, '-').collect();
+            let s = s.trim();
+            let date_str = match s.find(|c: char| c == 'T' || c == ' ') {
+                Some(idx) => &s[..idx],
+                None => s,
+            };
+            let parts: Vec<&str> = date_str.splitn(3, '-').collect();
             if parts.len() != 3 {
                 return Err(PyError::value_error("Invalid isoformat string"));
             }
@@ -2103,6 +2124,43 @@ fn build_date_type() -> PyObjectRef {
                 .parse()
                 .map_err(|_| PyError::value_error("Invalid isoformat string"))?;
             Ok(make_date(y, m, d))
+        }),
+    );
+    type_dict.insert_str(
+        "fromisocalendar",
+        bf!("fromisocalendar", |args| {
+            if args.len() < 3 {
+                return Err(PyError::type_error(
+                    "fromisocalendar() missing required arguments: 'year', 'week', 'weekday'",
+                ));
+            }
+            let year = args[0]
+                .as_i64()
+                .ok_or_else(|| PyError::type_error("an integer is required for 'year'"))?;
+            let week = args[1]
+                .as_i64()
+                .ok_or_else(|| PyError::type_error("an integer is required for 'week'"))?;
+            let weekday = args[2]
+                .as_i64()
+                .ok_or_else(|| PyError::type_error("an integer is required for 'weekday'"))?;
+            if !(1..=9999).contains(&year) {
+                return Err(PyError::value_error("year is out of range"));
+            }
+            if !(1..=53).contains(&week) {
+                return Err(PyError::value_error("week is out of range"));
+            }
+            if !(1..=7).contains(&weekday) {
+                return Err(PyError::value_error("weekday is out of range"));
+            }
+            // The Monday of week 1 is the first day on or after January 4th.
+            // Jan 4 is always in week 1.
+            let jan4_ord = ymd_to_ordinal(year, 1, 4);
+            // ord % 7 gives 0=Sunday,1=Monday,...,6=Saturday
+            // Convert to 0=Monday..6=Sunday
+            let jan4_weekday = ((jan4_ord % 7) + 6) % 7;
+            let week1_monday = jan4_ord - jan4_weekday;
+            let target_ord = week1_monday + (week - 1) * 7 + (weekday - 1);
+            Ok(make_date_from_ordinal(target_ord))
         }),
     );
 
@@ -2501,9 +2559,22 @@ fn parse_datetime_isoformat(s: &str) -> PyResult<PyObjectRef> {
         Some(r) => r,
         None => return Ok(make_date(year, month, day)),
     };
-    let (time_part, tz_part) = match rest.rfind(['+', '-']) {
-        Some(pos) => (&rest[..pos], Some(&rest[pos..])),
-        None => (rest, None),
+    let rest = rest.trim_end_matches(|c: char| c == 'Z' || c == 'z');
+    let (time_part, tz_part, tz_is_utc) = if rest.is_empty() {
+        ("", None, true)
+    } else {
+        let tz_start = rest.rfind(['+', '-']);
+        match tz_start {
+            Some(pos) if pos > 0 => {
+                let time_str = &rest[..pos];
+                if time_str.ends_with(':') {
+                    (time_str.trim_end_matches(':'), Some(&rest[pos..]), false)
+                } else {
+                    (time_str, Some(&rest[pos..]), false)
+                }
+            }
+            _ => (rest, None, false),
+        }
     };
     let tparts: Vec<&str> = time_part.splitn(3, ':').collect();
     let hour: i64 = tparts.first().and_then(|v| v.parse().ok()).unwrap_or(0);
@@ -2521,16 +2592,21 @@ fn parse_datetime_isoformat(s: &str) -> PyResult<PyObjectRef> {
         },
         None => (0, 0),
     };
-    let tzinfo = match tz_part {
-        Some(tz_str) if !tz_str.is_empty() => {
-            let sign: i64 = if tz_str.starts_with('-') { -1 } else { 1 };
-            let tz_body = &tz_str[1..];
-            let tzp: Vec<&str> = tz_body.splitn(2, ':').collect();
-            let th: i64 = tzp.first().and_then(|v| v.parse().ok()).unwrap_or(0);
-            let tm: i64 = tzp.get(1).and_then(|v| v.parse().ok()).unwrap_or(0);
-            make_timezone(sign * (th * 3600 + tm * 60), None)
+    let tzinfo = if tz_is_utc {
+        make_timezone(0, Some("UTC".to_string()))
+    } else {
+        match tz_part {
+            Some(tz_str) if !tz_str.is_empty() => {
+                let sign: i64 = if tz_str.starts_with('-') { -1 } else { 1 };
+                let tz_body = &tz_str[1..];
+                let tzp: Vec<&str> = tz_body.splitn(3, ':').collect();
+                let th: i64 = tzp.first().and_then(|v| v.parse().ok()).unwrap_or(0);
+                let tm: i64 = tzp.get(1).and_then(|v| v.parse().ok()).unwrap_or(0);
+                let ts: i64 = tzp.get(2).and_then(|v| v.parse().ok()).unwrap_or(0);
+                make_timezone(sign * (th * 3600 + tm * 60 + ts), None)
+            }
+            _ => py_none(),
         }
-        _ => py_none(),
     };
     Ok(make_datetime(
         year, month, day, hour, minute, second, micro, tzinfo, 0,

@@ -1524,6 +1524,42 @@ pub fn create_pathlib_dict() -> HashMap<String, PyObjectRef> {
         }))
     });
 
+    // .resolve(strict=False) -> new Path with resolved absolute path (resolves symlinks)
+    path_func!("resolve", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("resolve() missing argument"));
+        }
+        let s = path_instance_str(&args[0]);
+        let _strict = if args.len() > 1 {
+            match &*args[1].borrow() {
+                PyObject::Bool(b) => *b,
+                _ => false,
+            }
+        } else {
+            false
+        };
+        let result = match std::path::Path::new(&s).canonicalize() {
+            Ok(p) => p.to_string_lossy().to_string(),
+            Err(_) => {
+                // Fallback: current_dir + path (mirrors absolute() behavior)
+                let cwd = std::env::current_dir()
+                    .map(|d| d.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let joined = std::path::Path::new(&cwd).join(&s);
+                joined.to_string_lossy().to_string()
+            }
+        };
+        let path_type = PATH_TYPE
+            .with(|cell| cell.borrow().clone())
+            .ok_or_else(|| PyError::runtime_error("Path type not initialized".to_string()))?;
+        let mut instance_dict = AttrMap::new();
+        instance_dict.insert_str("_path", py_str(&result));
+        Ok(PyObjectRef::new(PyObject::Instance {
+            typ: path_type,
+            dict: instance_dict,
+        }))
+    });
+
     // .absolute() -> new Path with absolute path
     path_func!("absolute", |args| {
         if args.is_empty() {

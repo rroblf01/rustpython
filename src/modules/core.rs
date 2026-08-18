@@ -7436,7 +7436,15 @@ pub fn create_errno_dict() -> HashMap<String, PyObjectRef> {
     d.insert_str("ERANGE", py_int(34));
     d.insert_str("ENOSYS", py_int(38));
     d.insert_str("EOPNOTSUPP", py_int(95));
+    d.insert_str("ENOTSUP", py_int(95));
+    d.insert_str("ENOTSOCK", py_int(88));
+    d.insert_str("ECONNABORTED", py_int(103));
+    d.insert_str("ENOTCONN", py_int(107));
     d.insert_str("EALREADY", py_int(114));
+    d.insert_str("EINPROGRESS", py_int(115));
+    d.insert_str("EPROTOTYPE", py_int(91));
+    d.insert_str("ENOPROTOOPT", py_int(92));
+    d.insert_str("EISCONN", py_int(113));
     d.insert_str("__name__", py_str("errno"));
     // `errno.errorcode` — real CPython's reverse mapping (errno NUMBER ->
     // its symbolic NAME string, e.g. `errorcode[2] == 'ENOENT'`). Was

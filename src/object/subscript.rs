@@ -307,7 +307,7 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                             func: |args| {
                                 if args.len() < 2 {
                                     return Err(PyError::type_error(
-                                        "__class_getitem__ requires 2 arguments"
+                                        "__class_getitem__ requires 2 arguments",
                                     ));
                                 }
                                 Ok(PyObjectRef::new(PyObject::BuiltinFunction {

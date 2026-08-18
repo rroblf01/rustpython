@@ -280,7 +280,12 @@ pub fn builtin_exec(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if let Some(ref orig) = original_globals {
         if let PyObject::Dict(orig_dict) = &mut *orig.borrow_mut() {
             // Check if original dict had __annotations__
-            if orig_dict.get(&py_str("__annotations__")).ok().flatten().is_some() {
+            if orig_dict
+                .get(&py_str("__annotations__"))
+                .ok()
+                .flatten()
+                .is_some()
+            {
                 // The original dict already has __annotations__ — restore it
                 // (the compiled code created a new __annotations__ which
                 // overwrites the original, but we want to preserve the original)
