@@ -485,20 +485,47 @@ class UserString:
     def rstrip(self, *args, **kwargs):
         return self.__class__(self.data.rstrip(*args, **kwargs))
 
+    def _convert_args(self, args):
+        """Convert UserString arguments to strings for delegation."""
+        converted = []
+        for arg in args:
+            if isinstance(arg, UserString):
+                converted.append(arg.data)
+            elif isinstance(arg, bytes):
+                converted.append(arg.decode('latin-1'))
+            else:
+                converted.append(arg)
+        return tuple(converted)
+
     def find(self, *args, **kwargs):
-        return self.data.find(*args, **kwargs)
+        return self.data.find(*self._convert_args(args), **kwargs)
 
     def rfind(self, *args, **kwargs):
-        return self.data.rfind(*args, **kwargs)
+        return self.data.rfind(*self._convert_args(args), **kwargs)
 
     def index(self, *args, **kwargs):
-        return self.data.index(*args, **kwargs)
+        return self.data.index(*self._convert_args(args), **kwargs)
 
     def rindex(self, *args, **kwargs):
-        return self.data.rindex(*args, **kwargs)
+        return self.data.rindex(*self._convert_args(args), **kwargs)
 
     def count(self, *args, **kwargs):
-        return self.data.count(*args, **kwargs)
+        return self.data.count(*self._convert_args(args), **kwargs)
+
+    def startswith(self, *args, **kwargs):
+        return self.data.startswith(*self._convert_args(args), **kwargs)
+
+    def endswith(self, *args, **kwargs):
+        return self.data.endswith(*self._convert_args(args), **kwargs)
+
+    def replace(self, *args, **kwargs):
+        return self.__class__(self.data.replace(*self._convert_args(args), **kwargs))
+
+    def format(self, *args, **kwargs):
+        return self.__class__(self.data.format(*args, **kwargs))
+
+    def format_map(self, mapping):
+        return self.__class__(self.data.format_map(mapping))
 
     def title(self):
         return self.__class__(self.data.title())
@@ -569,12 +596,6 @@ class UserString:
     def isascii(self):
         return self.data.isascii()
 
-    def format(self, *args, **kwargs):
-        return self.data.format(*args, **kwargs)
-
-    def format_map(self, *args, **kwargs):
-        return self.data.format_map(*args, **kwargs)
-
     def removesuffix(self, *args, **kwargs):
         return self.__class__(self.data.removesuffix(*args, **kwargs))
 
@@ -587,24 +608,11 @@ class UserString:
     def __rmod__(self, other):
         return self.__class__(other % self.data)
 
-    def split(self, sep=None):
-        return self.data.split(sep)
+    def split(self, *args, **kwargs):
+        return self.data.split(*args, **kwargs)
 
     def join(self, seq):
         return self.__class__(self.data.join(seq))
-
-    def replace(self, old, new):
-        if isinstance(old, UserString):
-            old = old.data
-        if isinstance(new, UserString):
-            new = new.data
-        return self.__class__(self.data.replace(old, new))
-
-    def startswith(self, prefix):
-        return self.data.startswith(prefix)
-
-    def endswith(self, suffix):
-        return self.data.endswith(suffix)
 
 
 class ChainMap:
