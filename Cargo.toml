@@ -43,6 +43,7 @@ compact_str = "0.10"
 md-5 = "0.11"
 sha1 = "0.11"
 sha2 = "0.11"
+sha3 = "0.11"
 flate2 = "1"
 rustyline = "18"
 mimalloc = { version = "0.1", default-features = false }

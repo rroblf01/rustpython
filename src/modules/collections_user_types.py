@@ -476,8 +476,116 @@ class UserString:
     def lower(self):
         return self.__class__(self.data.lower())
 
-    def strip(self):
-        return self.__class__(self.data.strip())
+    def strip(self, *args, **kwargs):
+        return self.__class__(self.data.strip(*args, **kwargs))
+
+    def lstrip(self, *args, **kwargs):
+        return self.__class__(self.data.lstrip(*args, **kwargs))
+
+    def rstrip(self, *args, **kwargs):
+        return self.__class__(self.data.rstrip(*args, **kwargs))
+
+    def find(self, *args, **kwargs):
+        return self.data.find(*args, **kwargs)
+
+    def rfind(self, *args, **kwargs):
+        return self.data.rfind(*args, **kwargs)
+
+    def index(self, *args, **kwargs):
+        return self.data.index(*args, **kwargs)
+
+    def rindex(self, *args, **kwargs):
+        return self.data.rindex(*args, **kwargs)
+
+    def count(self, *args, **kwargs):
+        return self.data.count(*args, **kwargs)
+
+    def title(self):
+        return self.__class__(self.data.title())
+
+    def capitalize(self):
+        return self.__class__(self.data.capitalize())
+
+    def swapcase(self):
+        return self.__class__(self.data.swapcase())
+
+    def casefold(self):
+        return self.__class__(self.data.casefold())
+
+    def center(self, *args, **kwargs):
+        return self.__class__(self.data.center(*args, **kwargs))
+
+    def ljust(self, *args, **kwargs):
+        return self.__class__(self.data.ljust(*args, **kwargs))
+
+    def rjust(self, *args, **kwargs):
+        return self.__class__(self.data.rjust(*args, **kwargs))
+
+    def zfill(self, *args, **kwargs):
+        return self.__class__(self.data.zfill(*args, **kwargs))
+
+    def expandtabs(self, *args, **kwargs):
+        return self.__class__(self.data.expandtabs(*args, **kwargs))
+
+    def encode(self, *args, **kwargs):
+        return self.data.encode(*args, **kwargs)
+
+    def decode(self, *args, **kwargs):
+        return self.data.decode(*args, **kwargs)
+
+    def splitlines(self, *args, **kwargs):
+        return self.data.splitlines(*args, **kwargs)
+
+    def partition(self, *args, **kwargs):
+        return self.data.partition(*args, **kwargs)
+
+    def rpartition(self, *args, **kwargs):
+        return self.data.rpartition(*args, **kwargs)
+
+    def rsplit(self, *args, **kwargs):
+        return self.data.rsplit(*args, **kwargs)
+
+    def isalpha(self):
+        return self.data.isalpha()
+
+    def isdigit(self):
+        return self.data.isdigit()
+
+    def isalnum(self):
+        return self.data.isalnum()
+
+    def isspace(self):
+        return self.data.isspace()
+
+    def isupper(self):
+        return self.data.isupper()
+
+    def islower(self):
+        return self.data.islower()
+
+    def istitle(self):
+        return self.data.istitle()
+
+    def isascii(self):
+        return self.data.isascii()
+
+    def format(self, *args, **kwargs):
+        return self.data.format(*args, **kwargs)
+
+    def format_map(self, *args, **kwargs):
+        return self.data.format_map(*args, **kwargs)
+
+    def removesuffix(self, *args, **kwargs):
+        return self.__class__(self.data.removesuffix(*args, **kwargs))
+
+    def removeprefix(self, *args, **kwargs):
+        return self.__class__(self.data.removeprefix(*args, **kwargs))
+
+    def __mod__(self, other):
+        return self.__class__(self.data % other)
+
+    def __rmod__(self, other):
+        return self.__class__(other % self.data)
 
     def split(self, sep=None):
         return self.data.split(sep)

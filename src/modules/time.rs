@@ -2152,14 +2152,45 @@ fn build_date_type() -> PyObjectRef {
             if !(1..=7).contains(&weekday) {
                 return Err(PyError::value_error("weekday is out of range"));
             }
-            // The Monday of week 1 is the first day on or after January 4th.
+            // The Monday of week 1 is the first Monday on or before Jan 4.
             // Jan 4 is always in week 1.
             let jan4_ord = ymd_to_ordinal(year, 1, 4);
-            // ord % 7 gives 0=Sunday,1=Monday,...,6=Saturday
-            // Convert to 0=Monday..6=Sunday
+            // Convert ordinal day-of-week: 0=Monday..6=Sunday
             let jan4_weekday = ((jan4_ord % 7) + 6) % 7;
             let week1_monday = jan4_ord - jan4_weekday;
             let target_ord = week1_monday + (week - 1) * 7 + (weekday - 1);
+
+            // Compute the ISO year of the target date.
+            // The ISO year is the year containing the Thursday of the ISO week,
+            // which equals the calendar year unless the date falls in the
+            // trailing days of the previous/leading days of the next year's
+            // week 1.
+            let (result_y, _result_m, _result_d) = ordinal_to_ymd(target_ord);
+            let result_jan4 = ymd_to_ordinal(result_y, 1, 4);
+            let result_jan4_wd = ((result_jan4 % 7) + 6) % 7;
+            let result_w1_monday = result_jan4 - result_jan4_wd;
+            let iso_year = if target_ord < result_w1_monday {
+                result_y - 1
+            } else {
+                let next_jan4 = ymd_to_ordinal(result_y + 1, 1, 4);
+                let next_jan4_wd = ((next_jan4 % 7) + 6) % 7;
+                let next_w1_monday = next_jan4 - next_jan4_wd;
+                if target_ord >= next_w1_monday {
+                    result_y + 1
+                } else {
+                    result_y
+                }
+            };
+
+            if iso_year != year {
+                return Err(PyError::value_error(&format!("Invalid week: {}", week)));
+            }
+            if !(1..=9999).contains(&result_y) {
+                return Err(PyError::value_error(&format!(
+                    "year must be in 1..9999, not {}",
+                    result_y
+                )));
+            }
             Ok(make_date_from_ordinal(target_ord))
         }),
     );
@@ -2557,23 +2588,32 @@ fn parse_datetime_isoformat(s: &str) -> PyResult<PyObjectRef> {
         .map_err(|_| PyError::value_error("Invalid isoformat string"))?;
     let rest = match rest {
         Some(r) => r,
-        None => return Ok(make_date(year, month, day)),
+        None => {
+            return Ok(make_datetime(
+                year, month, day, 0, 0, 0, 0, py_none(), 0,
+            ))
+        }
     };
-    let rest = rest.trim_end_matches(|c: char| c == 'Z' || c == 'z');
+    let tz_is_utc = rest.ends_with(|c: char| c == 'Z' || c == 'z');
+    let rest = if tz_is_utc {
+        &rest[..rest.len() - 1]
+    } else {
+        rest
+    };
     let (time_part, tz_part, tz_is_utc) = if rest.is_empty() {
-        ("", None, true)
+        ("", None, tz_is_utc)
     } else {
         let tz_start = rest.rfind(['+', '-']);
         match tz_start {
             Some(pos) if pos > 0 => {
                 let time_str = &rest[..pos];
                 if time_str.ends_with(':') {
-                    (time_str.trim_end_matches(':'), Some(&rest[pos..]), false)
+                    (time_str.trim_end_matches(':'), Some(&rest[pos..]), tz_is_utc)
                 } else {
-                    (time_str, Some(&rest[pos..]), false)
+                    (time_str, Some(&rest[pos..]), tz_is_utc)
                 }
             }
-            _ => (rest, None, false),
+            _ => (rest, None, tz_is_utc),
         }
     };
     let tparts: Vec<&str> = time_part.splitn(3, ':').collect();
@@ -2599,10 +2639,26 @@ fn parse_datetime_isoformat(s: &str) -> PyResult<PyObjectRef> {
             Some(tz_str) if !tz_str.is_empty() => {
                 let sign: i64 = if tz_str.starts_with('-') { -1 } else { 1 };
                 let tz_body = &tz_str[1..];
-                let tzp: Vec<&str> = tz_body.splitn(3, ':').collect();
-                let th: i64 = tzp.first().and_then(|v| v.parse().ok()).unwrap_or(0);
-                let tm: i64 = tzp.get(1).and_then(|v| v.parse().ok()).unwrap_or(0);
-                let ts: i64 = tzp.get(2).and_then(|v| v.parse().ok()).unwrap_or(0);
+                let th: i64;
+                let tm: i64;
+                let ts: i64;
+                if let Some(colon_pos) = tz_body.find(':') {
+                    let hours_str = &tz_body[..colon_pos];
+                    let mins_str = &tz_body[colon_pos + 1..];
+                    if let Some(colon2) = mins_str.find(':') {
+                        th = hours_str.parse().unwrap_or(0);
+                        tm = mins_str[..colon2].parse().unwrap_or(0);
+                        ts = mins_str[colon2 + 1..].parse().unwrap_or(0);
+                    } else {
+                        th = hours_str.parse().unwrap_or(0);
+                        tm = mins_str.parse().unwrap_or(0);
+                        ts = 0;
+                    }
+                } else {
+                    th = tz_body.parse().unwrap_or(0);
+                    tm = 0;
+                    ts = 0;
+                }
                 make_timezone(sign * (th * 3600 + tm * 60 + ts), None)
             }
             _ => py_none(),

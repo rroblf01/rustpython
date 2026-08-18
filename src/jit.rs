@@ -1689,6 +1689,7 @@ impl JitCompiler {
             Opcode::MAKE_FUNCTION,
             Opcode::END_FOR,
             Opcode::MAP_ADD,
+            Opcode::SETUP_FINALLY,
         ];
         for instr in &code.instructions {
             if !supported.contains(&instr.op) {
@@ -3363,6 +3364,11 @@ impl JitCompiler {
                     let res_hi = builder.ins().load(types::I64, memflags, out_addr, 8);
                     let res_mid = builder.ins().load(types::I64, memflags, out_addr, 16);
                     eval_stack.push([res_lo, res_hi, res_mid]);
+                }
+                Opcode::SETUP_FINALLY => {
+                    // No-op: exception handlers are managed by the VM's interpreter.
+                    // Any exceptions will propagate out of JIT-compiled code and be
+                    // caught by the VM's exception handling at a higher level.
                 }
                 _ => {
                     eprintln!("JIT: codegen unsupported {:?} at instr {}", instr.op, i);

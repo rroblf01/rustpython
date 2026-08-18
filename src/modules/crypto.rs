@@ -128,6 +128,87 @@ pub fn create_hashlib_dict() -> HashMap<String, PyObjectRef> {
         Ok(PyObjectRef::imm(PyObject::Bytes(hash.to_vec())))
     });
 
+    d.insert(
+        "sha3_224".to_string(),
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "sha3_224".to_string(),
+            func: |args| {
+                if args.len() != 1 {
+                    return Err(PyError::type_error("sha3_224() takes exactly one argument"));
+                }
+                let data = args[0].borrow();
+                let bytes = match &*data {
+                    PyObject::Bytes(b) => b.clone(),
+                    PyObject::Str(s) => s.as_bytes().to_vec(),
+                    _ => return Err(PyError::type_error("sha3_224() argument must be bytes or str")),
+                };
+                use sha3::Digest;
+                let hash = sha3::Sha3_224::digest(&bytes);
+                Ok(PyObjectRef::imm(PyObject::Bytes(hash.to_vec())))
+            },
+        }),
+    );
+    d.insert(
+        "sha3_256".to_string(),
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "sha3_256".to_string(),
+            func: |args| {
+                if args.len() != 1 {
+                    return Err(PyError::type_error("sha3_256() takes exactly one argument"));
+                }
+                let data = args[0].borrow();
+                let bytes = match &*data {
+                    PyObject::Bytes(b) => b.clone(),
+                    PyObject::Str(s) => s.as_bytes().to_vec(),
+                    _ => return Err(PyError::type_error("sha3_256() argument must be bytes or str")),
+                };
+                use sha3::Digest;
+                let hash = sha3::Sha3_256::digest(&bytes);
+                Ok(PyObjectRef::imm(PyObject::Bytes(hash.to_vec())))
+            },
+        }),
+    );
+    d.insert(
+        "sha3_384".to_string(),
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "sha3_384".to_string(),
+            func: |args| {
+                if args.len() != 1 {
+                    return Err(PyError::type_error("sha3_384() takes exactly one argument"));
+                }
+                let data = args[0].borrow();
+                let bytes = match &*data {
+                    PyObject::Bytes(b) => b.clone(),
+                    PyObject::Str(s) => s.as_bytes().to_vec(),
+                    _ => return Err(PyError::type_error("sha3_384() argument must be bytes or str")),
+                };
+                use sha3::Digest;
+                let hash = sha3::Sha3_384::digest(&bytes);
+                Ok(PyObjectRef::imm(PyObject::Bytes(hash.to_vec())))
+            },
+        }),
+    );
+    d.insert(
+        "sha3_512".to_string(),
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "sha3_512".to_string(),
+            func: |args| {
+                if args.len() != 1 {
+                    return Err(PyError::type_error("sha3_512() takes exactly one argument"));
+                }
+                let data = args[0].borrow();
+                let bytes = match &*data {
+                    PyObject::Bytes(b) => b.clone(),
+                    PyObject::Str(s) => s.as_bytes().to_vec(),
+                    _ => return Err(PyError::type_error("sha3_512() argument must be bytes or str")),
+                };
+                use sha3::Digest;
+                let hash = sha3::Sha3_512::digest(&bytes);
+                Ok(PyObjectRef::imm(PyObject::Bytes(hash.to_vec())))
+            },
+        }),
+    );
+
     d
 }
 
@@ -1035,6 +1116,71 @@ pub fn create_zlib_dict() -> HashMap<String, PyObjectRef> {
             PyError::value_error(format!("Error -3 while decompressing data: {}", e))
         })?;
         Ok(PyObjectRef::imm(PyObject::Bytes(out)))
+    });
+
+    z_func!("compressobj", |args| {
+        let level = if args.is_empty() {
+            6
+        } else {
+            args[0].as_i64().unwrap_or(6).clamp(-1, 9) as u32
+        };
+        let wbits = if args.len() > 2 {
+            args[2].as_i64().unwrap_or(15) as i32
+        } else {
+            15
+        };
+        let mem_level = if args.len() > 3 {
+            args[3].as_i64().unwrap_or(8) as u32
+        } else {
+            8
+        };
+        let strategy = if args.len() > 4 {
+            args[4].as_i64().unwrap_or(0) as u32
+        } else {
+            0
+        };
+        let mut state = Vec::new();
+        state.extend_from_slice(&(level as u32).to_le_bytes());
+        state.extend_from_slice(&(wbits as u32).to_le_bytes());
+        state.extend_from_slice(&mem_level.to_le_bytes());
+        state.extend_from_slice(&strategy.to_le_bytes());
+        Ok(PyObjectRef::new(PyObject::Instance {
+            typ: PyObjectRef::new(PyObject::Type {
+                name: "compress".to_string(),
+                dict: Box::new(str_map_to_typedict(HashMap::new())),
+                bases: vec![],
+                mro: vec![],
+            }),
+            dict: {
+                let mut m = AttrMap::new();
+                m.insert("state".to_string(), PyObjectRef::imm(PyObject::Bytes(state)));
+                m.insert("buffer".to_string(), py_none());
+                m.insert("unfinished".to_string(), py_bool(true));
+                m
+            },
+        }))
+    });
+    z_func!("decompressobj", |args| {
+        let wbits = if args.is_empty() {
+            15
+        } else {
+            args[0].as_i64().unwrap_or(15) as i32
+        };
+        Ok(PyObjectRef::new(PyObject::Instance {
+            typ: PyObjectRef::new(PyObject::Type {
+                name: "decompress".to_string(),
+                dict: Box::new(str_map_to_typedict(HashMap::new())),
+                bases: vec![],
+                mro: vec![],
+            }),
+            dict: {
+                let mut m = AttrMap::new();
+                m.insert("unconsumed_tail".to_string(), PyObjectRef::imm(PyObject::Bytes(Vec::new())));
+                m.insert("unused_data".to_string(), PyObjectRef::imm(PyObject::Bytes(Vec::new())));
+                m.insert("unfinished".to_string(), py_bool(true));
+                m
+            },
+        }))
     });
 
     d

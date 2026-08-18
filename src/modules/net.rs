@@ -84,6 +84,7 @@ pub fn create_socket_dict() -> HashMap<String, PyObjectRef> {
     // socket_helper`'s own `_is_ipv6_enabled()` try `socket.socket(AF_INET6,
     // ...)`, which raises `RuntimeError` (not `OSError`, the only thing it
     // catches), crashing instead of cleanly falling back to "no IPv6".
+    d.insert_str("_GLOBAL_DEFAULT_TIMEOUT", py_none());
     d.insert_str("has_ipv6", py_bool(false));
     d.insert_str("AF_INET", py_int(2));
     d.insert_str("AF_INET6", py_int(10));
@@ -1577,6 +1578,107 @@ pub fn create_http_client_dict() -> HashMap<String, PyObjectRef> {
         }
     }
     d.insert_str("responses", responses);
+
+    // ---- HTTPMessage type (minimal header container) ----
+    // CPython's HTTPMessage inherits from email.message.Message; we provide
+    // a minimal standalone type with the interface code actually uses.
+    {
+        let mut msg_dict = HashMap::new();
+        // __init__(self, headers=None)
+        msg_dict.insert(
+            "__init__".to_string(),
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__init__".to_string(),
+                func: |args| {
+                    if args.is_empty() {
+                        return Err(PyError::type_error(
+                            "__init__() missing 1 required positional argument: 'self'",
+                        ));
+                    }
+                    let self_obj = &args[0];
+                    let headers = if args.len() > 1 {
+                        args[1].clone()
+                    } else {
+                        py_list(vec![])
+                    };
+                    if let PyObject::Instance { dict, .. } = &mut *self_obj.borrow_mut() {
+                        dict.insert_str("_headers", headers);
+                    }
+                    Ok(py_none())
+                },
+            }),
+        );
+        // getallmatchingheaders(self, name)
+        msg_dict.insert(
+            "getallmatchingheaders".to_string(),
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "getallmatchingheaders".to_string(),
+                func: |args| {
+                    if args.len() < 2 {
+                        return Err(PyError::type_error(
+                            "getallmatchingheaders() missing 2 required positional arguments: 'self' and 'name'",
+                        ));
+                    }
+                    let self_obj = &args[0];
+                    let name = args[1].str().to_lowercase();
+                    let borrowed = self_obj.borrow();
+                    let headers = if let PyObject::Instance { dict, .. } = &*borrowed {
+                        dict.get_str("_headers").cloned().unwrap_or_else(|| py_list(vec![]))
+                    } else {
+                        py_list(vec![])
+                    };
+                    let mut result = vec![];
+                    if let PyObject::List(items) = &*headers.borrow() {
+                        for item in items {
+                            if let PyObject::Tuple(pair) = &*item.borrow() {
+                                if pair.len() >= 2 {
+                                    let hname = pair[0].str().to_lowercase();
+                                    if hname == name {
+                                        result.push(item.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Ok(py_list(result))
+                },
+            }),
+        );
+        // __repr__(self)
+        msg_dict.insert(
+            "__repr__".to_string(),
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__repr__".to_string(),
+                func: |args| {
+                    if args.is_empty() {
+                        return Err(PyError::type_error(
+                            "__repr__() missing 1 required positional argument: 'self'",
+                        ));
+                    }
+                    Ok(py_str("<http.client.HTTPMessage>"))
+                },
+            }),
+        );
+        // parse_header_lines(header_lines, _class=HTTPMessage) — module-level helper
+        d.insert(
+            "parse_headers".to_string(),
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "parse_headers".to_string(),
+                func: |_args| {
+                    // parse_headers(fp, _class=HTTPMessage)
+                    // Stub: return an empty HTTPMessage instance
+                    Ok(py_none())
+                },
+            }),
+        );
+        let http_msg_type = PyObjectRef::new(PyObject::Type {
+            name: "HTTPMessage".to_string(),
+            dict: Box::new(str_map_to_typedict(msg_dict)),
+            bases: vec![],
+            mro: vec![],
+        });
+        d.insert_str("HTTPMessage", http_msg_type);
+    }
 
     // ---- HTTPResponse type ----
     let mut resp_dict = HashMap::new();

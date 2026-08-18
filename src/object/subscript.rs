@@ -900,6 +900,15 @@ pub fn py_setitem(obj: &PyObjectRef, index: &PyObjectRef, value: PyObjectRef) ->
         return pydict_safe_set(obj, index.clone(), value);
     }
 
+    // Non-mutable (inline/Imm) objects cannot be assigned into — raise
+    // TypeError before borrow_mut would panic on them.
+    if !matches!(obj, PyObjectRef::Mut(_)) {
+        return Err(PyError::type_error(format!(
+            "'{}' object does not support item assignment",
+            obj.borrow().type_name()
+        )));
+    }
+
     let mut o = obj.borrow_mut();
     match &mut *o {
         PyObject::List(items) => {
@@ -976,6 +985,14 @@ pub fn py_delitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<()> {
             d.remove_with_hash(index, h)?;
             return Ok(());
         }
+    }
+    // Non-mutable (inline/Imm) objects cannot be deleted from — raise
+    // TypeError before borrow_mut would panic on them.
+    if !matches!(obj, PyObjectRef::Mut(_)) {
+        return Err(PyError::type_error(format!(
+            "'{}' object does not support item deletion",
+            obj.borrow().type_name()
+        )));
     }
     let mut o = obj.borrow_mut();
     match &mut *o {

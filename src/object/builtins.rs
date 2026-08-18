@@ -3773,7 +3773,7 @@ pub fn call_bound_method(
                         .collect::<Vec<_>>()
                 );
             }
-            vm.frames.push(frame);
+            vm.push_frame(frame);
             vm.execute()
         }
         PyObject::BoundMethod { func, .. } => {
@@ -4161,7 +4161,7 @@ pub fn range_iter_setstate(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             args[1].borrow().type_name()
         ))
     })?;
-    let mut obj = args[0].borrow_mut();
+    let mut obj = args[0].try_borrow_mut()?;
     if let PyObject::RangeIter { current, step, .. } = &mut *obj {
         *current += &state * &*step;
     }
@@ -4184,7 +4184,7 @@ pub fn list_iter_setstate(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             args[1].borrow().type_name()
         ))
     })?;
-    let mut obj = args[0].borrow_mut();
+    let mut obj = args[0].try_borrow_mut()?;
     if let PyObject::ListIter { list, index } = &mut *obj {
         let n = state.to_usize().unwrap_or(0).min(list.len());
         *index = n;
@@ -4246,14 +4246,16 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         return result;
     }
     // Fallback to list-based iteration
-    // Inline types (SmallInt etc.) are not iterable — return TypeError
-    // without calling borrow_mut on something that doesn't support it.
+    // Inline types (SmallInt etc.) and Imm types (Str, Tuple, Int, etc.)
+    // are not iterable iterators — return TypeError without calling
+    // borrow_mut on something that doesn't support it.
     match args[0] {
         PyObjectRef::SmallInt(_)
         | PyObjectRef::SmallBool(_)
         | PyObjectRef::SmallFloat(_)
         | PyObjectRef::SmallStr(_)
-        | PyObjectRef::None => {
+        | PyObjectRef::None
+        | PyObjectRef::Imm(_) => {
             return Err(PyError::type_error(format!(
                 "'{}' object is not an iterator",
                 args[0].get_type_name()

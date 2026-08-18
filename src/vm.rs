@@ -78,6 +78,9 @@ pub struct Frame {
     /// same effect generally, for every module, not just via IMPORT_FROM's
     /// narrower ancestor-frame fallback.
     pub live_module: Option<PyObjectRef>,
+    /// Index of the previous (calling) frame in `vm.frames`, if any.
+    /// Used to implement `frame.f_back` — the previous frame in the call stack.
+    pub back: Option<usize>,
 }
 
 #[derive(Clone)]
@@ -115,6 +118,7 @@ impl Frame {
             module_globals,
             name_order: None,
             live_module: None,
+            back: None,
         }
     }
 
@@ -1750,6 +1754,7 @@ impl VirtualMachine {
             frame.registers.clear();
             frame.name_order = None;
             frame.live_module = None;
+            frame.back = None;
             frame
         } else {
             Frame::new(code, globals, builtins, module_globals)
@@ -1760,6 +1765,17 @@ impl VirtualMachine {
         if self.frame_pool.len() < 32 {
             self.frame_pool.push(frame);
         }
+    }
+
+    /// Push a frame onto the VM's frame stack, setting its `back` field
+    /// to point to the current frame (if any) for `frame.f_back` support.
+    pub(crate) fn push_frame(&mut self, mut frame: Frame) {
+        frame.back = if self.frames.is_empty() {
+            None
+        } else {
+            Some(self.frames.len() - 1)
+        };
+        self.frames.push(frame);
     }
 
     pub fn run(&mut self, code: CodeObject) -> PyResult<PyObjectRef> {
@@ -1806,7 +1822,7 @@ impl VirtualMachine {
             None,
         );
         frame.live_module = Some(main_module);
-        self.frames.push(frame);
+        self.push_frame(frame);
         let result = self.execute();
         if let Some(frame) = self.frames.pop() {
             self.release_frame(frame);
@@ -1836,7 +1852,7 @@ impl VirtualMachine {
         let g = globals.unwrap_or_else(|| self.globals.clone());
         let mut frame = self.acquire_frame(Rc::new(code), g, Rc::clone(&self.builtins), None);
         frame.live_module = live_module;
-        self.frames.push(frame);
+        self.push_frame(frame);
         let result = self.execute();
         if let Some(frame) = self.frames.pop() {
             self.release_frame(frame);
@@ -9330,7 +9346,7 @@ impl VirtualMachine {
                 )));
             }
 
-            self.frames.push(new_frame);
+            self.push_frame(new_frame);
             let result = self.execute();
             if let Some(frame) = self.frames.pop() {
                 self.release_frame(frame);
@@ -9760,7 +9776,7 @@ impl VirtualMachine {
                     );
                     new_frame.closure = Box::new(closure);
                     new_frame.name_order = Some(name_order.clone());
-                    self.frames.push(new_frame);
+                    self.push_frame(new_frame);
                     // Must pop this frame unconditionally, including on
                     // error — `self.execute()?` used to return early on a
                     // class body raising mid-execution (e.g. a metaclass's
@@ -10145,13 +10161,40 @@ impl VirtualMachine {
         }
         let code = frame.code.clone();
         let globals = frame.globals.clone();
+        let builtins = frame.builtins.clone();
+        let back_idx = frame.back;
+        let f_lineno = {
+            let idx = frame
+                .ip
+                .saturating_sub(1)
+                .min(frame.code.instructions.len().saturating_sub(1));
+            frame.code.line_number(idx) as i64
+        };
+        let f_lasti = frame.ip.saturating_sub(1) as i64;
         let mut fg = PyDict::new();
         for (k, v) in globals.borrow().iter() {
             let _ = fg.set(py_str(crate::interner::lookup_str(*k)), v.clone());
         }
+        let mut fb = PyDict::new();
+        for (k, v) in builtins.iter() {
+            let _ = fb.set(py_str(crate::interner::lookup_str(*k)), v.clone());
+        }
         let mut attrs = AttrMap::new();
         attrs.insert_str("f_globals", PyObjectRef::new(PyObject::Dict(Box::new(fg))));
+        attrs.insert_str("f_builtins", PyObjectRef::new(PyObject::Dict(Box::new(fb))));
         attrs.insert_str("f_code", PyObjectRef::imm(PyObject::Code(code)));
+        attrs.insert_str("f_lineno", py_int(f_lineno));
+        attrs.insert_str("f_lasti", py_int(f_lasti));
+        // f_back: the previous frame in the call stack, or None
+        if let Some(back_i) = back_idx {
+            if let Some(back_frame_obj) = self.frame_object(back_i) {
+                attrs.insert_str("f_back", back_frame_obj);
+            } else {
+                attrs.insert_str("f_back", py_none());
+            }
+        } else {
+            attrs.insert_str("f_back", py_none());
+        }
         let frame_obj = PyObjectRef::new(PyObject::Instance {
             typ: PyObjectRef::new(PyObject::Type {
                 name: "frame".to_string(),

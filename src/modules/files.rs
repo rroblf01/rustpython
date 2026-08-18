@@ -1245,6 +1245,24 @@ pub fn create_tarfile_dict() -> HashMap<String, PyObjectRef> {
         }))
     });
 
+    // tarfile.TarFile type — real CPython exposes TarFile as a class so
+    // `from tarfile import TarFile` / `isinstance(t, tarfile.TarFile)` work.
+    let mut tarfile_type_dict = HashMap::new();
+    tarfile_type_dict.insert(
+        "__init__".to_string(),
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__init__".to_string(),
+            func: |_args| Ok(py_none()),
+        }),
+    );
+    let tar_file_type = PyObjectRef::new(PyObject::Type {
+        name: "TarFile".to_string(),
+        dict: Box::new(str_map_to_typedict(tarfile_type_dict)),
+        bases: vec![],
+        mro: vec![],
+    });
+    d.insert_str("TarFile", tar_file_type);
+
     d
 }
 

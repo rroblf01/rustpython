@@ -58,7 +58,7 @@ pub(crate) fn generator_next_fallback(args: &[PyObjectRef]) -> PyResult<PyObject
             f.stack.push(crate::object::py_none());
         }
         let mut vm = crate::vm::VirtualMachine::new();
-        vm.frames.push((**f).clone());
+        vm.push_frame((**f).clone());
         match vm.execute() {
             Ok(val) => {
                 let modified = vm.frames.pop().unwrap();
@@ -160,7 +160,7 @@ pub(crate) fn coroutine_send_fallback(args: &[PyObjectRef]) -> PyResult<PyObject
                 f.stack.push(crate::object::py_none());
             }
             let mut vm = crate::vm::VirtualMachine::new();
-            vm.frames.push((**f).clone());
+            vm.push_frame((**f).clone());
             match vm.execute() {
                 Ok(val) => {
                     let modified = vm.frames.pop().unwrap();
@@ -233,7 +233,7 @@ pub(crate) fn coroutine_throw_fallback(args: &[PyObjectRef]) -> PyResult<PyObjec
                 _ => "Exception".to_string(),
             };
             let err = PyError::Exception(typ, exc_obj);
-            vm.frames.push((**f).clone());
+            vm.push_frame((**f).clone());
             match vm.throw_into_frame(err) {
                 Ok(val) => {
                     let modified = vm.frames.pop().unwrap();
@@ -320,7 +320,7 @@ pub(crate) fn generator_throw_with_vm(
                 _ => "Exception".to_string(),
             };
             let err = PyError::Exception(typ, exc_obj);
-            vm.frames.push((**f).clone());
+            vm.push_frame((**f).clone());
             match vm.throw_into_frame(err) {
                 Ok(val) => {
                     let modified = vm.frames.pop().unwrap();

@@ -2078,6 +2078,12 @@ pub fn create_marshal_dict() -> HashMap<String, PyObjectRef> {
         }
         Ok(data.clone())
     });
+    m_func!("intern", |args| {
+        let obj = args
+            .first()
+            .ok_or_else(|| PyError::type_error("intern() missing required argument 'string'"))?;
+        Ok(obj.clone())
+    });
     m_func!("dumps", |args| {
         let obj = args
             .first()

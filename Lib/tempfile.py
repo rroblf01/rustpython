@@ -43,6 +43,12 @@ def gettempprefix():
     return template
 
 
+_text_openflags = _os.O_RDWR | _os.O_CREAT | _os.O_EXCL
+if hasattr(_os, "O_NOFOLLOW"):
+    _text_openflags |= _os.O_NOFOLLOW
+_bin_openflags = _text_openflags
+
+
 def _candidate_filename(suffix="", prefix="tmp", dir=None):
     import uuid
     if dir is None:

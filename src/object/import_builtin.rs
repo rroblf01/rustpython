@@ -755,7 +755,7 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
                         frame.insert_local(kwarg_name.as_str(), py_dict());
                     }
                 }
-                vm.frames.push(frame);
+                vm.push_frame(frame);
                 vm.execute()
             }
         }

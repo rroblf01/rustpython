@@ -599,6 +599,33 @@ impl PyObjectRef {
         }
     }
 
+    /// Fallible version of `borrow_mut()` — returns a `TypeError` instead
+    /// of panicking when called on an immutable or inline value. Use this
+    /// for any code path that receives a user-provided `PyObjectRef` which
+    /// might not be a heap-allocated mutable (`Mut`) object.
+    pub fn try_borrow_mut(&self) -> Result<std::cell::RefMut<'_, PyObject>, PyError> {
+        match self {
+            PyObjectRef::Mut(rc) => match rc.try_borrow_mut() {
+                Ok(guard) => Ok(guard),
+                Err(_) => {
+                    use std::io::Write;
+                    let _ = std::io::stderr()
+                        .write_all(b"RefCell CONFLICT - borrow_mut while borrowed\n");
+                    let _ = std::io::stderr().flush();
+                    panic!("RefCell already borrowed");
+                }
+            },
+            PyObjectRef::Imm(_) => Err(PyError::type_error(format!(
+                "'{}' object is immutable",
+                self.borrow().type_name()
+            ))),
+            _ => Err(PyError::type_error(format!(
+                "'{}' object does not support item assignment",
+                self.borrow().type_name()
+            ))),
+        }
+    }
+
     pub fn borrow_mut(&self) -> std::cell::RefMut<'_, PyObject> {
         match self {
             PyObjectRef::Mut(rc) => {

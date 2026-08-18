@@ -1098,6 +1098,15 @@ pub fn create_threading_dict() -> HashMap<String, PyObjectRef> {
         Ok(PyObjectRef::new(PyObject::RLock(inner)))
     });
 
+    // _PyRLock is an alias for RLock (used by threading module internals)
+    thr_func!("_PyRLock", |_| {
+        let inner = std::sync::Arc::new(std::sync::Mutex::new(RLockInner {
+            owner: None,
+            count: 0,
+        }));
+        Ok(PyObjectRef::new(PyObject::RLock(inner)))
+    });
+
     thr_func!("Event", |_| {
         let inner = std::sync::Arc::new(EventInner {
             flag: std::sync::Mutex::new(false),
@@ -4099,6 +4108,32 @@ pub fn create_uuid_dict() -> HashMap<String, PyObjectRef> {
 
     uuid_func!("uuid1", |_args| { Ok(make_uuid(random_uuid_hex(1))) });
 
+    // uuid._ifconfig_getnode — get MAC address via ifconfig (Unix).
+    // CPython's Lib/uuid.py calls this to obtain the hardware address.
+    uuid_func!("_ifconfig_getnode", |_args| {
+        // Try to read MAC from /sys/class/net/*/address (Linux) or
+        // parse `ifconfig` output. In this single-process interpreter
+        // we fall back to a random address if the real lookup fails.
+        if let Ok(entries) = std::fs::read_dir("/sys/class/net") {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str == "lo" {
+                    continue;
+                }
+                let addr_path = format!("/sys/class/net/{}/address", name_str);
+                if let Ok(mac) = std::fs::read_to_string(&addr_path) {
+                    let mac = mac.trim().replace(':', "");
+                    if mac.len() == 12 && mac.chars().all(|c| c.is_ascii_hexdigit()) {
+                        return Ok(py_int(i64::from_str_radix(&mac, 16).unwrap_or(0)));
+                    }
+                }
+            }
+        }
+        // Fallback: random MAC
+        Ok(py_int(i64::from_str_radix(&random_uuid_hex(0)[..12], 16).unwrap_or(0)))
+    });
+
     // UUID(hex=None, int=None, bytes=None) — supports the common construction forms.
     uuid_func!("UUID", |args| {
         if args.is_empty() {
@@ -4565,6 +4600,7 @@ pub fn create_platform_dict() -> HashMap<String, PyObjectRef> {
     plat_func!("python_implementation", |_| { Ok(py_str("RustPython")) });
     plat_func!("python_version", |_| { Ok(py_str("3.12.0")) });
     plat_func!("system", |_| { Ok(py_str(std::env::consts::OS)) });
+    plat_func!("release", |_| { Ok(py_str("")) });
     // Real signature: libc_ver(executable=None, lib='', version='',
     // chunksize=16384) -> (lib, version) — detects glibc/musl via parsing
     // the executable's dynamic-linker strings on real CPython. Honest
@@ -7795,6 +7831,25 @@ pub fn create_thread_module_dict() -> HashMap<String, PyObjectRef> {
         Ok(PyObjectRef::new(PyObject::Lock(inner)))
     });
 
+    // _thread.RLock — reentrant lock (CPython C extension replacement).
+    // Threading module internals and user code use `_thread.RLock`.
+    thr_func!("RLock", |_| {
+        let inner = std::sync::Arc::new(std::sync::Mutex::new(RLockInner {
+            owner: None,
+            count: 0,
+        }));
+        Ok(PyObjectRef::new(PyObject::RLock(inner)))
+    });
+
+    // _PyRLock is an alias for RLock (used by threading module internals)
+    thr_func!("_PyRLock", |_| {
+        let inner = std::sync::Arc::new(std::sync::Mutex::new(RLockInner {
+            owner: None,
+            count: 0,
+        }));
+        Ok(PyObjectRef::new(PyObject::RLock(inner)))
+    });
+
     // `_thread._count()` — was missing entirely (`AttributeError`), breaking
     // `Lib/test/support/threading_helper.py`'s `threading_setup`/
     // `threading_cleanup` (used by a wide range of tests, e.g.
@@ -8903,6 +8958,48 @@ pub fn create_wave_dict() -> HashMap<String, PyObjectRef> {
                     }
                     Err(e) => Err(PyError::type_error(e)),
                 }
+            },
+        }),
+    );
+
+    // wave._byteswap — byte-swap helper for multi-byte samples.
+    // CPython's Lib/wave.py defines this; some code imports it directly.
+    d.insert(
+        "_byteswap".to_string(),
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "_byteswap".to_string(),
+            func: |args| {
+                if args.len() < 2 {
+                    return Err(PyError::type_error(
+                        "_byteswap() missing 2 required positional arguments: 'data' and 'width'",
+                    ));
+                }
+                let data_bytes = args[0].borrow();
+                let data = match &*data_bytes {
+                    PyObject::Bytes(b) => b.clone(),
+                    _ => {
+                        return Err(PyError::type_error(
+                            "_byteswap() argument 'data' must be bytes",
+                        ))
+                    }
+                };
+                let width = args[1]
+                    .as_i64()
+                    .ok_or_else(|| PyError::type_error("_byteswap() argument 'width' must be an int"))?
+                    as usize;
+                if width < 1 || width > 8 {
+                    return Err(PyError::type_error(
+                        "_byteswap() argument 'width' must be between 1 and 8",
+                    ));
+                }
+                // Reverse each sample of `width` bytes
+                let mut out = Vec::with_capacity(data.len());
+                for chunk in data.chunks(width) {
+                    let mut sample = chunk.to_vec();
+                    sample.reverse();
+                    out.extend_from_slice(&sample);
+                }
+                Ok(PyObjectRef::imm(PyObject::Bytes(out)))
             },
         }),
     );
@@ -11065,7 +11162,7 @@ pub(crate) fn asyncio_run_impl(
             coro_frame_clone.module_globals = None;
             drop(frame_borrowed);
             drop(coro_borrowed);
-            vm.frames.push(coro_frame_clone);
+            vm.push_frame(coro_frame_clone);
             let result = vm.execute();
             vm.frames.pop();
             return result;
