@@ -851,6 +851,19 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
             func: crate::object::builtin_int_repr as BuiltinFunc,
         }),
     );
+    // int.__itemsize__ — Python arbitrary-precision ints have no fixed size
+    int_dict.insert_str(
+        "__itemsize__",
+        PyObjectRef::new(PyObject::Property(Box::new(PropertyData {
+            getter: Some(PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__itemsize__".to_string(),
+                func: |_args| Ok(py_int(0)),
+            })),
+            setter: None,
+            deleter: None,
+            doc: None,
+        }))),
+    );
     let int_type = PyObjectRef::new(PyObject::Type {
         name: "int".to_string(),
         dict: Box::new(str_map_to_typedict(int_dict)),
@@ -7423,6 +7436,7 @@ pub fn create_errno_dict() -> HashMap<String, PyObjectRef> {
     d.insert_str("ERANGE", py_int(34));
     d.insert_str("ENOSYS", py_int(38));
     d.insert_str("EOPNOTSUPP", py_int(95));
+    d.insert_str("EALREADY", py_int(114));
     d.insert_str("__name__", py_str("errno"));
     // `errno.errorcode` — real CPython's reverse mapping (errno NUMBER ->
     // its symbolic NAME string, e.g. `errorcode[2] == 'ENOENT'`). Was
