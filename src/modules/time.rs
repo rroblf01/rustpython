@@ -3544,14 +3544,14 @@ fn build_datetime_type() -> PyObjectRef {
     type_dict.insert_str(
         "fromisocalendar",
         bf!("fromisocalendar", |args| {
-            if args.len() < 4 {
+            if args.len() < 3 {
                 return Err(PyError::type_error(
                     "fromisocalendar() missing required arguments: 'year', 'week', 'weekday'",
                 ));
             }
-            let year = args[1].as_i64().ok_or_else(|| PyError::type_error("year must be an integer"))? as i64;
-            let week = args[2].as_i64().ok_or_else(|| PyError::type_error("week must be an integer"))? as i64;
-            let weekday = args[3].as_i64().ok_or_else(|| PyError::type_error("weekday must be an integer"))? as i64;
+            let year = args[0].as_i64().ok_or_else(|| PyError::type_error("year must be an integer"))? as i64;
+            let week = args[1].as_i64().ok_or_else(|| PyError::type_error("week must be an integer"))? as i64;
+            let weekday = args[2].as_i64().ok_or_else(|| PyError::type_error("weekday must be an integer"))? as i64;
             // Calculate the date from ISO week
             let jan4_wday = ((year * 365 + (year - 1) / 4 - (year - 1) / 100 + (year - 1) / 400 + 4) % 7 + 1) % 7 + 1;
             let mon_of_week1 = 4 - jan4_wday;
@@ -3731,12 +3731,23 @@ fn build_timezone_type() -> PyObjectRef {
         }),
     );
 
-    PyObjectRef::new(PyObject::Type {
+    let typ = PyObjectRef::new(PyObject::Type {
         name: "timezone".to_string(),
         dict: Box::new(str_map_to_typedict(type_dict)),
         bases: vec![],
         mro: vec![],
-    })
+    });
+
+    // timezone.min and timezone.max — created AFTER the type exists
+    // to avoid circular reference (make_timezone calls get_timezone_type)
+    let tz_min = make_timezone_with_type(typ.clone(), -86400, None);
+    let tz_max = make_timezone_with_type(typ.clone(), 86400, None);
+    if let PyObject::Type { dict, .. } = &mut *typ.borrow_mut() {
+        dict.insert_str("min", tz_min);
+        dict.insert_str("max", tz_max);
+    }
+
+    typ
 }
 
 fn make_timezone_with_type(
