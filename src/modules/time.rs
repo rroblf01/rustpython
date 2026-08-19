@@ -2498,6 +2498,43 @@ fn build_time_type() -> PyObjectRef {
             }
         }),
     );
+    // time.fromisoformat — parse ISO time string HH:MM[:SS[.us]][+HH:MM]
+    type_dict.insert_str(
+        "fromisoformat",
+        bf!("fromisoformat", |args| {
+            if args.is_empty() {
+                return Err(PyError::type_error(
+                    "fromisoformat() requires an argument",
+                ));
+            }
+            let s = args[0].str();
+            let parts: Vec<&str> = s.splitn(2, 'T').collect();
+            let time_str = if parts.len() == 2 { parts[1] } else { parts[0] };
+            let (time_part, _tz_str) = if let Some(idx) = time_str.rfind('+') {
+                (&time_str[..idx], &time_str[idx..])
+            } else if let Some(idx) = time_str.rfind('-') {
+                (&time_str[..idx], &time_str[idx..])
+            } else {
+                (time_str, "")
+            };
+            let time_parts: Vec<&str> = time_part.splitn(4, ':').collect();
+            if time_parts.len() < 2 {
+                return Err(PyError::value_error("Invalid isoformat string"));
+            }
+            let hour: i64 = time_parts[0].parse().map_err(|_| PyError::value_error("Invalid isoformat string"))?;
+            let minute: i64 = time_parts[1].parse().map_err(|_| PyError::value_error("Invalid isoformat string"))?;
+            let second: i64 = if time_parts.len() > 2 {
+                let sec_str = time_parts[2].split('.').next().unwrap_or("0");
+                sec_str.parse().map_err(|_| PyError::value_error("Invalid isoformat string"))?
+            } else { 0 };
+            let microsecond: i64 = if time_parts.len() > 2 && time_parts[2].contains('.') {
+                let us_str = time_parts[2].split('.').nth(1).unwrap_or("0");
+                let padded = format!("{:0<6}", us_str);
+                padded[..6].parse().map_err(|_| PyError::value_error("Invalid isoformat string"))?
+            } else { 0 };
+            Ok(make_time(hour, minute, second, microsecond, py_none(), 0))
+        }),
+    );
 
     PyObjectRef::new(PyObject::Type {
         name: "time".to_string(),
@@ -3466,6 +3503,74 @@ fn build_datetime_type() -> PyObjectRef {
                 String::new()
             };
             parse_datetime_isoformat(&s)
+        }),
+    );
+    // datetime.datetime.isocalendar() — delegates to date.isocalendar
+    type_dict.insert_str(
+        "isocalendar",
+        bf!("isocalendar", |args| {
+            // Get the date portion and call date.isocalendar logic
+            let year = inst_get_i64(&args[0], "year");
+            let month = inst_get_i64(&args[0], "month");
+            let day = inst_get_i64(&args[0], "day");
+            // ISO weekday: 1=Monday ... 7=Sunday
+            let leap = if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 { 1 } else { 0 };
+            let days_in_month = [0i64,31,28+leap,31,30,31,30,31,31,30,31,30,31];
+            let mut yday = day;
+            for m in 1..month {
+                yday += days_in_month[m as usize];
+            }
+            let wday = weekday_from_ordinal(date_ordinal(&args[0])) + 1;
+            // ISO week number using Julian Day
+            let a_j = (14 - 1) / 12;
+            let y_j = year + 4800 - a_j;
+            let m_j = 1 + 12 * a_j - 3;
+            let jd_jan1 = 1 + (153 * m_j + 2) / 5 + 365 * y_j + y_j / 4 - y_j / 100 + y_j / 400 - 32045;
+            let a_d = (14 - month) / 12;
+            let y_d = year + 4800 - a_d;
+            let m_d = month + 12 * a_d - 3;
+            let jd = day + (153 * m_d + 2) / 5 + 365 * y_d + y_d / 4 - y_d / 100 + y_d / 400 - 32045;
+            let day_diff = jd - jd_jan1;
+            let week_of_year = day_diff / 7 + 1;
+            let iso_year = if week_of_year == 0 {
+                year - 1
+            } else if week_of_year > 52 {
+                year + 1
+            } else {
+                year
+            };
+            Ok(py_tuple(vec![py_int(iso_year), py_int(week_of_year), py_int(wday)]))
+        }),
+    );
+    // datetime.datetime.fromisocalendar(year, week, weekday) — classmethod
+    type_dict.insert_str(
+        "fromisocalendar",
+        bf!("fromisocalendar", |args| {
+            if args.len() < 4 {
+                return Err(PyError::type_error(
+                    "fromisocalendar() missing required arguments: 'year', 'week', 'weekday'",
+                ));
+            }
+            let year = args[1].as_i64().ok_or_else(|| PyError::type_error("year must be an integer"))? as i64;
+            let week = args[2].as_i64().ok_or_else(|| PyError::type_error("week must be an integer"))? as i64;
+            let weekday = args[3].as_i64().ok_or_else(|| PyError::type_error("weekday must be an integer"))? as i64;
+            // Calculate the date from ISO week
+            let jan4_wday = ((year * 365 + (year - 1) / 4 - (year - 1) / 100 + (year - 1) / 400 + 4) % 7 + 1) % 7 + 1;
+            let mon_of_week1 = 4 - jan4_wday;
+            let mon_of_week1_adj = if mon_of_week1 <= 0 { mon_of_week1 + 7 } else { mon_of_week1 };
+            let day_of_year = mon_of_week1_adj + (week - 1) * 7 + (weekday - 1);
+            let leap = if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 { 1 } else { 0 };
+            let days_in_month = [0i64,31,28+leap,31,30,31,30,31,31,30,31,30,31];
+            let mut remaining = day_of_year;
+            let mut month_out: i64 = 1;
+            for m in 1i64..13 {
+                if remaining <= days_in_month[m as usize] {
+                    month_out = m;
+                    break;
+                }
+                remaining -= days_in_month[m as usize];
+            }
+            Ok(make_datetime(year, month_out, remaining, 0, 0, 0, 0, py_none(), 0))
         }),
     );
 
