@@ -1747,6 +1747,93 @@ pub fn create_collections_abc_dict() -> HashMap<String, PyObjectRef> {
     if let Some(m) = d.get("MutableMapping") {
         if let PyObject::Type { dict, .. } = &mut *m.borrow_mut() {
             dict.insert_str("__reversed__", py_none());
+            dict.insert_str(
+                "update",
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "update".to_string(),
+                    func: |args| {
+                        if args.is_empty() {
+                            return Err(PyError::type_error("update() missing self"));
+                        }
+                        let self_obj = &args[0];
+                        let other = if args.len() > 1 {
+                            args[1].clone()
+                        } else {
+                            py_none()
+                        };
+
+                        if !matches!(&*other.borrow(), PyObject::None) {
+                            // Determine if `other` is a mapping-like (dict or
+                            // dict subclass) or an iterable of (key, value) pairs.
+                            let is_dict_based = {
+                                let other_borrow = other.borrow();
+                                match &*other_borrow {
+                                    PyObject::Dict(_) => true,
+                                    PyObject::Instance { typ, .. } => {
+                                        let typ_borrow = typ.borrow();
+                                        if let PyObject::Type { mro, .. } = &*typ_borrow {
+                                            mro.iter().any(|base| {
+                                                if let PyObject::Type { name, .. } = &*base.borrow()
+                                                {
+                                                    name == "dict"
+                                                } else {
+                                                    false
+                                                }
+                                            })
+                                        } else {
+                                            false
+                                        }
+                                    }
+                                    _ => false,
+                                }
+                            };
+
+                            if is_dict_based {
+                                // Dict or dict subclass: for k in other: self[k] = other[k]
+                                let iter_obj = crate::object::builtin_iter(&[other.clone()])?;
+                                loop {
+                                    let key = match crate::object::builtin_next(&[iter_obj.clone()])
+                                    {
+                                        Ok(v) => v,
+                                        Err(e) if crate::object::is_stop_iteration_error(&e) => {
+                                            break
+                                        }
+                                        Err(e) => return Err(e),
+                                    };
+                                    let value = crate::object::py_getitem(&other, &key)?;
+                                    crate::object::py_setitem(self_obj, &key, value)?;
+                                }
+                            } else {
+                                // Iterable of (key, value) pairs
+                                let iter_obj = crate::object::builtin_iter(&[other.clone()])?;
+                                loop {
+                                    let pair =
+                                        match crate::object::builtin_next(&[iter_obj.clone()]) {
+                                            Ok(v) => v,
+                                            Err(e)
+                                                if crate::object::is_stop_iteration_error(&e) =>
+                                            {
+                                                break
+                                            }
+                                            Err(e) => return Err(e),
+                                        };
+                                    let key = crate::object::py_getitem(&pair, &py_int(0))?;
+                                    let value = crate::object::py_getitem(&pair, &py_int(1))?;
+                                    crate::object::py_setitem(self_obj, &key, value)?;
+                                }
+                            }
+                        }
+                        // Process keyword arguments
+                        let remaining = &args[2..];
+                        for chunk in remaining.chunks(2) {
+                            if chunk.len() == 2 {
+                                crate::object::py_setitem(self_obj, &chunk[0], chunk[1].clone())?;
+                            }
+                        }
+                        Ok(py_none())
+                    },
+                }),
+            );
         }
     }
     d.insert_str("MappingView", abc_class!("MappingView"));
@@ -4131,7 +4218,9 @@ pub fn create_uuid_dict() -> HashMap<String, PyObjectRef> {
             }
         }
         // Fallback: random MAC
-        Ok(py_int(i64::from_str_radix(&random_uuid_hex(0)[..12], 16).unwrap_or(0)))
+        Ok(py_int(
+            i64::from_str_radix(&random_uuid_hex(0)[..12], 16).unwrap_or(0),
+        ))
     });
 
     // UUID(hex=None, int=None, bytes=None) — supports the common construction forms.
@@ -8983,10 +9072,9 @@ pub fn create_wave_dict() -> HashMap<String, PyObjectRef> {
                         ))
                     }
                 };
-                let width = args[1]
-                    .as_i64()
-                    .ok_or_else(|| PyError::type_error("_byteswap() argument 'width' must be an int"))?
-                    as usize;
+                let width = args[1].as_i64().ok_or_else(|| {
+                    PyError::type_error("_byteswap() argument 'width' must be an int")
+                })? as usize;
                 if width < 1 || width > 8 {
                     return Err(PyError::type_error(
                         "_byteswap() argument 'width' must be between 1 and 8",

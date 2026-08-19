@@ -926,10 +926,14 @@ impl VirtualMachine {
         // `with`-statement `__exit__(exc_type, exc_value, tb)` for any
         // custom exception (`unittest.assertRaises` reported ANY custom
         // exception as "not raised" even when it genuinely was).
-        modules.insert_str(
-            "statistics",
-            create_module("statistics", create_statistics_dict()),
-        );
+        // Native statistics module DISABLED: real Lib/statistics.py is used instead
+        // (the native implementation only had mean/median/stdev/harmonic_mean/mode/
+        //  median_low/median_high — missing variance, pvariance, pstdev,
+        //  median_grouped, geometric_mean, NormalDist, fmean, quantiles, etc.)
+        // modules.insert_str(
+        //     "statistics",
+        //     create_module("statistics", create_statistics_dict()),
+        // );
 
         // Native contextlib module — DISABLED: real Lib/contextlib.py is used instead
         // modules.insert_str("contextlib", create_module("contextlib", create_contextlib_dict()));

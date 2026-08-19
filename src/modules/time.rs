@@ -2110,20 +2110,63 @@ fn build_date_type() -> PyObjectRef {
                 Some(idx) => &s[..idx],
                 None => s,
             };
+            // Try YYYY-MM-DD format
             let parts: Vec<&str> = date_str.splitn(3, '-').collect();
-            if parts.len() != 3 {
-                return Err(PyError::value_error("Invalid isoformat string"));
+            if parts.len() == 3
+                && parts[0].chars().all(|c| c.is_ascii_digit())
+                && parts[1].chars().all(|c| c.is_ascii_digit())
+                && parts[2].chars().all(|c| c.is_ascii_digit())
+            {
+                let y: i64 = parts[0]
+                    .parse()
+                    .map_err(|_| PyError::value_error("Invalid isoformat string"))?;
+                let m: i64 = parts[1]
+                    .parse()
+                    .map_err(|_| PyError::value_error("Invalid isoformat string"))?;
+                let d: i64 = parts[2]
+                    .parse()
+                    .map_err(|_| PyError::value_error("Invalid isoformat string"))?;
+                return Ok(make_date(y, m, d));
             }
-            let y: i64 = parts[0]
-                .parse()
-                .map_err(|_| PyError::value_error("Invalid isoformat string"))?;
-            let m: i64 = parts[1]
-                .parse()
-                .map_err(|_| PyError::value_error("Invalid isoformat string"))?;
-            let d: i64 = parts[2]
-                .parse()
-                .map_err(|_| PyError::value_error("Invalid isoformat string"))?;
-            Ok(make_date(y, m, d))
+            // Try YYYYMMDD format (8 digits)
+            if date_str.len() == 8 && date_str.chars().all(|c| c.is_ascii_digit()) {
+                let y: i64 = date_str[..4]
+                    .parse()
+                    .map_err(|_| PyError::value_error("Invalid isoformat string"))?;
+                let m: i64 = date_str[4..6]
+                    .parse()
+                    .map_err(|_| PyError::value_error("Invalid isoformat string"))?;
+                let d: i64 = date_str[6..8]
+                    .parse()
+                    .map_err(|_| PyError::value_error("Invalid isoformat string"))?;
+                return Ok(make_date(y, m, d));
+            }
+            // Try ISO week format: YYYYWww, YYYY-Www, YYYYWwwd, YYYY-Www-d
+            let compact: String = date_str.chars().filter(|c| *c != '-').collect();
+            if compact.len() >= 6 && compact.len() <= 8 {
+                let w_pos = compact.find(|c: char| c == 'W' || c == 'w');
+                if let Some(wp) = w_pos {
+                    if wp == 4 && compact.len() >= 6 {
+                        if let (Ok(y), Ok(wk)) =
+                            (compact[..4].parse::<i64>(), compact[5..7].parse::<i64>())
+                        {
+                            let wd: i64 = if compact.len() >= 8 {
+                                compact[7..8].parse().unwrap_or(1)
+                            } else {
+                                1
+                            };
+                            if y >= 1 && y <= 9999 && wk >= 1 && wk <= 53 && wd >= 1 && wd <= 7 {
+                                let jan4_ord = ymd_to_ordinal(y, 1, 4);
+                                let jan4_weekday = ((jan4_ord % 7) + 6) % 7;
+                                let week1_monday = jan4_ord - jan4_weekday;
+                                let target_ord = week1_monday + (wk - 1) * 7 + (wd - 1);
+                                return Ok(make_date_from_ordinal(target_ord));
+                            }
+                        }
+                    }
+                }
+            }
+            Err(PyError::value_error("Invalid isoformat string"))
         }),
     );
     type_dict.insert_str(
@@ -2569,30 +2612,20 @@ fn datetime_isoformat(obj: &PyObjectRef, sep: char) -> String {
 
 fn parse_datetime_isoformat(s: &str) -> PyResult<PyObjectRef> {
     let s = s.trim();
+    if s.is_empty() {
+        return Err(PyError::value_error("Invalid isoformat string"));
+    }
     let (date_part, rest) = match s.find(|c: char| c == 'T' || c == ' ') {
         Some(idx) => (&s[..idx], Some(&s[idx + 1..])),
         None => (s, None),
     };
-    let dparts: Vec<&str> = date_part.splitn(3, '-').collect();
-    if dparts.len() != 3 {
-        return Err(PyError::value_error("Invalid isoformat string"));
-    }
-    let year: i64 = dparts[0]
-        .parse()
-        .map_err(|_| PyError::value_error("Invalid isoformat string"))?;
-    let month: i64 = dparts[1]
-        .parse()
-        .map_err(|_| PyError::value_error("Invalid isoformat string"))?;
-    let day: i64 = dparts[2]
-        .parse()
-        .map_err(|_| PyError::value_error("Invalid isoformat string"))?;
+
+    // Parse date part: YYYY-MM-DD, YYYYMMDD, or ISO week
+    let (year, month, day) = parse_date_part(date_part)?;
+
     let rest = match rest {
         Some(r) => r,
-        None => {
-            return Ok(make_datetime(
-                year, month, day, 0, 0, 0, 0, py_none(), 0,
-            ))
-        }
+        None => return Ok(make_datetime(year, month, day, 0, 0, 0, 0, py_none(), 0)),
     };
     let tz_is_utc = rest.ends_with(|c: char| c == 'Z' || c == 'z');
     let rest = if tz_is_utc {
@@ -2608,7 +2641,11 @@ fn parse_datetime_isoformat(s: &str) -> PyResult<PyObjectRef> {
             Some(pos) if pos > 0 => {
                 let time_str = &rest[..pos];
                 if time_str.ends_with(':') {
-                    (time_str.trim_end_matches(':'), Some(&rest[pos..]), tz_is_utc)
+                    (
+                        time_str.trim_end_matches(':'),
+                        Some(&rest[pos..]),
+                        tz_is_utc,
+                    )
                 } else {
                     (time_str, Some(&rest[pos..]), tz_is_utc)
                 }
@@ -2616,29 +2653,21 @@ fn parse_datetime_isoformat(s: &str) -> PyResult<PyObjectRef> {
             _ => (rest, None, tz_is_utc),
         }
     };
-    let tparts: Vec<&str> = time_part.splitn(3, ':').collect();
-    let hour: i64 = tparts.first().and_then(|v| v.parse().ok()).unwrap_or(0);
-    let minute: i64 = tparts.get(1).and_then(|v| v.parse().ok()).unwrap_or(0);
-    let (second, micro): (i64, i64) = match tparts.get(2) {
-        Some(sec_str) => match sec_str.find('.') {
-            Some(dotpos) => {
-                let sec: i64 = sec_str[..dotpos].parse().unwrap_or(0);
-                let frac = &sec_str[dotpos + 1..];
-                let padded = format!("{:0<6}", frac);
-                let us: i64 = padded[..6.min(padded.len())].parse().unwrap_or(0);
-                (sec, us)
-            }
-            None => (sec_str.parse().unwrap_or(0), 0),
-        },
-        None => (0, 0),
-    };
+
+    // Parse time part (supports both HH:MM:SS and compact HHMMSS)
+    let (hour, minute, second, micro) = parse_time_part(time_part)?;
+
     let tzinfo = if tz_is_utc {
-        make_timezone(0, Some("UTC".to_string()))
+        get_utc_singleton()
     } else {
         match tz_part {
             Some(tz_str) if !tz_str.is_empty() => {
                 let sign: i64 = if tz_str.starts_with('-') { -1 } else { 1 };
                 let tz_body = &tz_str[1..];
+                // Validate tz_body: must be non-empty and contain only digits and colons
+                if tz_body.is_empty() || !tz_body.chars().all(|c| c.is_ascii_digit() || c == ':') {
+                    return Err(PyError::value_error("Invalid isoformat string"));
+                }
                 let th: i64;
                 let tm: i64;
                 let ts: i64;
@@ -2655,11 +2684,36 @@ fn parse_datetime_isoformat(s: &str) -> PyResult<PyObjectRef> {
                         ts = 0;
                     }
                 } else {
-                    th = tz_body.parse().unwrap_or(0);
-                    tm = 0;
-                    ts = 0;
+                    // Compact tz offset: +HH, +HHMM, +HHMMSS
+                    match tz_body.len() {
+                        2 => {
+                            th = tz_body.parse().unwrap_or(0);
+                            tm = 0;
+                            ts = 0;
+                        }
+                        4 => {
+                            th = tz_body[..2].parse().unwrap_or(0);
+                            tm = tz_body[2..].parse().unwrap_or(0);
+                            ts = 0;
+                        }
+                        6 => {
+                            th = tz_body[..2].parse().unwrap_or(0);
+                            tm = tz_body[2..4].parse().unwrap_or(0);
+                            ts = tz_body[4..].parse().unwrap_or(0);
+                        }
+                        _ => {
+                            th = tz_body.parse().unwrap_or(0);
+                            tm = 0;
+                            ts = 0;
+                        }
+                    }
                 }
-                make_timezone(sign * (th * 3600 + tm * 60 + ts), None)
+                let off = sign * (th * 3600 + tm * 60 + ts);
+                if off == 0 {
+                    get_utc_singleton()
+                } else {
+                    make_timezone(off, None)
+                }
             }
             _ => py_none(),
         }
@@ -2667,6 +2721,157 @@ fn parse_datetime_isoformat(s: &str) -> PyResult<PyObjectRef> {
     Ok(make_datetime(
         year, month, day, hour, minute, second, micro, tzinfo, 0,
     ))
+}
+
+fn parse_date_part(date_part: &str) -> PyResult<(i64, i64, i64)> {
+    // Try YYYY-MM-DD format
+    let parts: Vec<&str> = date_part.splitn(3, '-').collect();
+    if parts.len() == 3
+        && parts[0].chars().all(|c| c.is_ascii_digit())
+        && parts[1].chars().all(|c| c.is_ascii_digit())
+        && parts[2].chars().all(|c| c.is_ascii_digit())
+    {
+        let y: i64 = parts[0]
+            .parse()
+            .map_err(|_| PyError::value_error("Invalid isoformat string"))?;
+        let m: i64 = parts[1]
+            .parse()
+            .map_err(|_| PyError::value_error("Invalid isoformat string"))?;
+        let d: i64 = parts[2]
+            .parse()
+            .map_err(|_| PyError::value_error("Invalid isoformat string"))?;
+        return Ok((y, m, d));
+    }
+    // Try YYYYMMDD format (8 digits)
+    if date_part.len() == 8 && date_part.chars().all(|c| c.is_ascii_digit()) {
+        let y: i64 = date_part[..4]
+            .parse()
+            .map_err(|_| PyError::value_error("Invalid isoformat string"))?;
+        let m: i64 = date_part[4..6]
+            .parse()
+            .map_err(|_| PyError::value_error("Invalid isoformat string"))?;
+        let d: i64 = date_part[6..8]
+            .parse()
+            .map_err(|_| PyError::value_error("Invalid isoformat string"))?;
+        return Ok((y, m, d));
+    }
+    // Try ISO week format: YYYYWww, YYYY-Www, YYYYWwwd, YYYY-Www-d
+    let compact: String = date_part.chars().filter(|c| *c != '-').collect();
+    if compact.len() >= 6 && compact.len() <= 8 {
+        let w_pos = compact.find(|c: char| c == 'W' || c == 'w');
+        if let Some(wp) = w_pos {
+            if wp == 4 && compact.len() >= 6 {
+                if let (Ok(y), Ok(wk)) = (compact[..4].parse::<i64>(), compact[5..7].parse::<i64>())
+                {
+                    let wd: i64 = if compact.len() >= 8 {
+                        compact[7..8].parse().unwrap_or(1)
+                    } else {
+                        1
+                    };
+                    if y >= 1 && y <= 9999 && wk >= 1 && wk <= 53 && wd >= 1 && wd <= 7 {
+                        let jan4_ord = ymd_to_ordinal(y, 1, 4);
+                        let jan4_weekday = ((jan4_ord % 7) + 6) % 7;
+                        let week1_monday = jan4_ord - jan4_weekday;
+                        let target_ord = week1_monday + (wk - 1) * 7 + (wd - 1);
+                        return Ok(ordinal_to_ymd(target_ord));
+                    }
+                }
+            }
+        }
+    }
+    Err(PyError::value_error("Invalid isoformat string"))
+}
+
+fn parse_time_part(time_part: &str) -> PyResult<(i64, i64, i64, i64)> {
+    if time_part.is_empty() {
+        return Ok((0, 0, 0, 0));
+    }
+    // Compact time format (no colons): HH, HHMM, HHMMSS, or with fractional
+    if !time_part.contains(':') {
+        let (int_part, frac_part) =
+            if let Some(pos) = time_part.find(|c: char| c == '.' || c == ',') {
+                if pos + 1 >= time_part.len() {
+                    return Err(PyError::value_error("Invalid isoformat string"));
+                }
+                (&time_part[..pos], Some(&time_part[pos + 1..]))
+            } else {
+                (time_part, None)
+            };
+        // Validate int_part is all digits
+        if !int_part.chars().all(|c| c.is_ascii_digit()) {
+            return Err(PyError::value_error("Invalid isoformat string"));
+        }
+        let (h, m, s) = match int_part.len() {
+            1 | 2 => (int_part.parse().unwrap_or(0), 0, 0),
+            4 => (
+                int_part[..2].parse().unwrap_or(0),
+                int_part[2..].parse().unwrap_or(0),
+                0,
+            ),
+            6 => (
+                int_part[..2].parse().unwrap_or(0),
+                int_part[2..4].parse().unwrap_or(0),
+                int_part[4..].parse().unwrap_or(0),
+            ),
+            _ => {
+                return Err(PyError::value_error("Invalid isoformat string"));
+            }
+        };
+        let us = match frac_part {
+            Some(frac) => {
+                let padded = format!("{:0<6}", frac);
+                padded[..6.min(padded.len())].parse().unwrap_or(0)
+            }
+            None => 0,
+        };
+        return Ok((h, m, s, us));
+    }
+    // Colon-separated: HH:MM, HH:MM:SS, HH:MM:SS.fff, HH:MM:SS,fff
+    // Reject trailing colons
+    if time_part.ends_with(':') {
+        return Err(PyError::value_error("Invalid isoformat string"));
+    }
+    let tparts: Vec<&str> = time_part.splitn(3, ':').collect();
+    // Validate each part is non-empty and digits (or has fractional)
+    for (i, part) in tparts.iter().enumerate() {
+        if part.is_empty() {
+            return Err(PyError::value_error("Invalid isoformat string"));
+        }
+        if i < 2 {
+            // hour and minute must be all digits
+            if !part.chars().all(|c| c.is_ascii_digit()) {
+                return Err(PyError::value_error("Invalid isoformat string"));
+            }
+        } else {
+            // second part: digits possibly followed by . or , and fraction
+            let clean: String = part.chars().filter(|c| c.is_ascii_digit()).collect();
+            if clean.is_empty() {
+                return Err(PyError::value_error("Invalid isoformat string"));
+            }
+        }
+    }
+    let hour: i64 = tparts.first().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let minute: i64 = tparts.get(1).and_then(|v| v.parse().ok()).unwrap_or(0);
+    let (second, micro): (i64, i64) = match tparts.get(2) {
+        Some(sec_str) => {
+            let frac_pos = sec_str.find('.').or_else(|| sec_str.find(','));
+            match frac_pos {
+                Some(dotpos) => {
+                    if dotpos + 1 >= sec_str.len() {
+                        return Err(PyError::value_error("Invalid isoformat string"));
+                    }
+                    let sec: i64 = sec_str[..dotpos].parse().unwrap_or(0);
+                    let frac = &sec_str[dotpos + 1..];
+                    let padded = format!("{:0<6}", frac);
+                    let us: i64 = padded[..6.min(padded.len())].parse().unwrap_or(0);
+                    (sec, us)
+                }
+                None => (sec_str.parse().unwrap_or(0), 0),
+            }
+        }
+        None => (0, 0),
+    };
+    Ok((hour, minute, second, micro))
 }
 
 fn build_datetime_type() -> PyObjectRef {
@@ -3444,6 +3649,18 @@ fn get_timezone_type() -> PyObjectRef {
         *c.borrow_mut() = Some(typ.clone());
     });
     typ
+}
+
+fn get_utc_singleton() -> PyObjectRef {
+    let tz_type = get_timezone_type();
+    let borrowed = tz_type.borrow();
+    if let PyObject::Type { dict, .. } = &*borrowed {
+        dict.get_str("utc")
+            .cloned()
+            .unwrap_or_else(|| make_timezone(0, None))
+    } else {
+        make_timezone(0, None)
+    }
 }
 
 // ---- zoneinfo.ZoneInfo ----

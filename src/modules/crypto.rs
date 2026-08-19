@@ -140,7 +140,11 @@ pub fn create_hashlib_dict() -> HashMap<String, PyObjectRef> {
                 let bytes = match &*data {
                     PyObject::Bytes(b) => b.clone(),
                     PyObject::Str(s) => s.as_bytes().to_vec(),
-                    _ => return Err(PyError::type_error("sha3_224() argument must be bytes or str")),
+                    _ => {
+                        return Err(PyError::type_error(
+                            "sha3_224() argument must be bytes or str",
+                        ))
+                    }
                 };
                 use sha3::Digest;
                 let hash = sha3::Sha3_224::digest(&bytes);
@@ -160,7 +164,11 @@ pub fn create_hashlib_dict() -> HashMap<String, PyObjectRef> {
                 let bytes = match &*data {
                     PyObject::Bytes(b) => b.clone(),
                     PyObject::Str(s) => s.as_bytes().to_vec(),
-                    _ => return Err(PyError::type_error("sha3_256() argument must be bytes or str")),
+                    _ => {
+                        return Err(PyError::type_error(
+                            "sha3_256() argument must be bytes or str",
+                        ))
+                    }
                 };
                 use sha3::Digest;
                 let hash = sha3::Sha3_256::digest(&bytes);
@@ -180,7 +188,11 @@ pub fn create_hashlib_dict() -> HashMap<String, PyObjectRef> {
                 let bytes = match &*data {
                     PyObject::Bytes(b) => b.clone(),
                     PyObject::Str(s) => s.as_bytes().to_vec(),
-                    _ => return Err(PyError::type_error("sha3_384() argument must be bytes or str")),
+                    _ => {
+                        return Err(PyError::type_error(
+                            "sha3_384() argument must be bytes or str",
+                        ))
+                    }
                 };
                 use sha3::Digest;
                 let hash = sha3::Sha3_384::digest(&bytes);
@@ -200,7 +212,11 @@ pub fn create_hashlib_dict() -> HashMap<String, PyObjectRef> {
                 let bytes = match &*data {
                     PyObject::Bytes(b) => b.clone(),
                     PyObject::Str(s) => s.as_bytes().to_vec(),
-                    _ => return Err(PyError::type_error("sha3_512() argument must be bytes or str")),
+                    _ => {
+                        return Err(PyError::type_error(
+                            "sha3_512() argument must be bytes or str",
+                        ))
+                    }
                 };
                 use sha3::Digest;
                 let hash = sha3::Sha3_512::digest(&bytes);
@@ -1153,7 +1169,10 @@ pub fn create_zlib_dict() -> HashMap<String, PyObjectRef> {
             }),
             dict: {
                 let mut m = AttrMap::new();
-                m.insert("state".to_string(), PyObjectRef::imm(PyObject::Bytes(state)));
+                m.insert(
+                    "state".to_string(),
+                    PyObjectRef::imm(PyObject::Bytes(state)),
+                );
                 m.insert("buffer".to_string(), py_none());
                 m.insert("unfinished".to_string(), py_bool(true));
                 m
@@ -1175,8 +1194,14 @@ pub fn create_zlib_dict() -> HashMap<String, PyObjectRef> {
             }),
             dict: {
                 let mut m = AttrMap::new();
-                m.insert("unconsumed_tail".to_string(), PyObjectRef::imm(PyObject::Bytes(Vec::new())));
-                m.insert("unused_data".to_string(), PyObjectRef::imm(PyObject::Bytes(Vec::new())));
+                m.insert(
+                    "unconsumed_tail".to_string(),
+                    PyObjectRef::imm(PyObject::Bytes(Vec::new())),
+                );
+                m.insert(
+                    "unused_data".to_string(),
+                    PyObjectRef::imm(PyObject::Bytes(Vec::new())),
+                );
                 m.insert("unfinished".to_string(), py_bool(true));
                 m
             },
