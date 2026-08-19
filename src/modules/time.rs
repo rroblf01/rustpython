@@ -3574,6 +3574,22 @@ fn build_datetime_type() -> PyObjectRef {
         }),
     );
 
+    // datetime.min and datetime.max
+    type_dict.insert_str(
+        "min",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "min".to_string(),
+            func: |_args| Ok(make_datetime(1, 1, 1, 0, 0, 0, 0, py_none(), 0)),
+        }),
+    );
+    type_dict.insert_str(
+        "max",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "max".to_string(),
+            func: |_args| Ok(make_datetime(9999, 12, 31, 23, 59, 59, 999999, py_none(), 0)),
+        }),
+    );
+
     PyObjectRef::new(PyObject::Type {
         name: "datetime".to_string(),
         dict: Box::new(str_map_to_typedict(type_dict)),
