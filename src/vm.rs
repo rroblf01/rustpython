@@ -795,7 +795,8 @@ impl VirtualMachine {
         modules.insert_str("_bisect", create_module("_bisect", create_bisect_dict()));
 
         // Native heapq module for heap queue operations
-        modules.insert_str("heapq", create_module("heapq", create_heapq_dict()));
+        // Native heapq DISABLED: use Lib/heapq.py (CPython 3.14) for full functionality
+        // modules.insert_str("heapq", create_module("heapq", create_heapq_dict()));
 
         // enum module — real Enum/IntEnum/StrEnum/EnumType semantics
         // (metaclass, real members, auto/unique) are far easier and more
@@ -6361,7 +6362,7 @@ impl VirtualMachine {
                 let aenter_method = mgr.borrow().get_attribute("__aenter__").map_err(|_| {
                     PyError::attribute_error("async context manager has no __aenter__")
                 })?;
-                let result = self.call_function(aenter_method, vec![], vec![])?;
+                let result = self.call_function(aenter_method, vec![mgr.clone()], vec![])?;
                 self.frames[fi].push(mgr);
                 self.frames[fi].push(result);
             }
