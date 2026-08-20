@@ -49,6 +49,54 @@ fn print_traceback(vm: &VirtualMachine, e: &PyError, fallback_file: &str) {
     eprintln!("{}", e);
 }
 
+/// Print a PyError with SyntaxError formatting (source line + caret).
+fn print_py_error(err: &PyError, fallback_file: &str) {
+    match err {
+        PyError::Exception(type_name, exc_obj) => {
+            // Extract attributes from the exception object
+            let lineno = exc_obj.borrow().get_attribute("lineno")
+                .ok().and_then(|v| v.as_i64()).unwrap_or(0);
+            let offset = exc_obj.borrow().get_attribute("offset")
+                .ok().and_then(|v| v.as_i64()).unwrap_or(0);
+            let text = exc_obj.borrow().get_attribute("text")
+                .ok().map(|v| v.str());
+            let msg = exc_obj.str();
+
+            eprintln!("Traceback (most recent call last):");
+            let file = exc_obj.borrow().get_attribute("filename")
+                .ok().map(|v| v.str())
+                .unwrap_or_else(|| fallback_file.to_string());
+            if lineno > 0 {
+                eprintln!("  File \"{}\", line {}, in <module>", file, lineno);
+                let display_text = text.as_deref().unwrap_or("");
+                if !display_text.is_empty() || (offset >= 1 && type_name == "SyntaxError") {
+                    eprintln!("    {}", display_text.trim_end());
+                    // SyntaxError caret display
+                    if offset >= 1 && type_name == "SyntaxError" {
+                        let indent = "    ";
+                        let spaces = (offset - 1) as usize;
+                        let trimmed = display_text.trim_end();
+                        let caret_len = if trimmed.is_empty() {
+                            1
+                        } else {
+                            std::cmp::max(1, trimmed.len() - offset as usize + 1)
+                        };
+                        eprintln!("{}{}{}", indent, " ".repeat(spaces), "^".repeat(caret_len));
+                    }
+                }
+            } else {
+                eprintln!("  File \"{}\", line ??, in <module>", file);
+            }
+            if msg.is_empty() {
+                eprintln!("{}", type_name);
+            } else {
+                eprintln!("{}: {}", type_name, msg);
+            }
+        }
+        _ => eprintln!("{}", err),
+    }
+}
+
 fn call_displayhook(vm: &VirtualMachine, val: &object::PyObjectRef) {
     if let Some(sys_mod) = vm.modules.get("sys") {
         if let Ok(hook) = sys_mod.borrow().get_attribute("displayhook") {
@@ -480,7 +528,10 @@ fn real_main() {
                 let program = match parser.parse_program() {
                     Ok(p) => p,
                     Err(e) => {
-                        eprintln!("Parse error: {}", e);
+                        let err = crate::object::PyError::syntax_error_with_filename(
+                            e, "<string>", &code,
+                        );
+                        print_py_error(&err, "<string>");
                         std::process::exit(1);
                     }
                 };
@@ -488,7 +539,10 @@ fn real_main() {
                 let code_obj = match compiler.compile(&program, "<string>") {
                     Ok(c) => c,
                     Err(e) => {
-                        eprintln!("Compile error: {}", e);
+                        let err = crate::object::PyError::syntax_error_with_filename(
+                            e, "<string>", &code,
+                        );
+                        print_py_error(&err, "<string>");
                         std::process::exit(1);
                     }
                 };
@@ -622,7 +676,10 @@ fn real_main() {
                 let program = match parser.parse_program() {
                     Ok(p) => p,
                     Err(e) => {
-                        eprintln!("Parse error in '{}': {}", filename, e);
+                        let err = crate::object::PyError::syntax_error_with_filename(
+                            e, filename, &source,
+                        );
+                        print_py_error(&err, filename);
                         std::process::exit(1);
                     }
                 };
@@ -630,7 +687,10 @@ fn real_main() {
                 let code = match compiler.compile(&program, filename) {
                     Ok(c) => c,
                     Err(e) => {
-                        eprintln!("Compile error in '{}': {}", filename, e);
+                        let err = crate::object::PyError::syntax_error_with_filename(
+                            e, filename, &source,
+                        );
+                        print_py_error(&err, filename);
                         std::process::exit(1);
                     }
                 };
@@ -657,7 +717,8 @@ fn real_main() {
                             crate::modules::run_atexit_handlers(&mut vm);
                             std::process::exit(*exit_code);
                         }
-                        print_traceback(&vm, &e, filename);
+                        // Use sys.excepthook for proper formatting (SyntaxError caret, etc.)
+                        print_py_error(&e, filename);
                         crate::modules::run_atexit_handlers(&mut vm);
                         std::process::exit(1);
                     }
