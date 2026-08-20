@@ -5601,12 +5601,12 @@ fn pickle_serialize(
         PyObject::None => buf.push(b'N'),
         PyObject::Bool(true) => {
             // Protocol 0-1: True is serialized as integer 1 (I01\n)
-            // Protocol 2+: True is serialized as T
+            // Protocol 2+: NEWTRUE opcode (\x88)
             if protocol <= 1 {
                 buf.push(b'I');
                 buf.extend_from_slice(b"01\n");
             } else {
-                buf.push(b'T');
+                buf.push(0x88); // NEWTRUE
             }
         }
         PyObject::Bool(false) => {
@@ -5614,7 +5614,7 @@ fn pickle_serialize(
                 buf.push(b'I');
                 buf.extend_from_slice(b"00\n");
             } else {
-                buf.push(b'F');
+                buf.push(0x89); // NEWFALSE
             }
         }
         PyObject::Int(n) => {
@@ -6023,6 +6023,13 @@ fn pickle_deserialize(
         b'N' => Ok(py_none()),
         b'T' => Ok(py_bool(true)),
         b'F' => Ok(py_bool(false)),
+        0x80 => {
+            // PROTO: protocol version byte — skip it
+            *pos += 1;
+            pickle_deserialize(data, pos, memo)
+        }
+        0x88 => Ok(py_bool(true)),  // NEWTRUE
+        0x89 => Ok(py_bool(false)), // NEWFALSE
         b'I' => {
             let start = *pos;
             while *pos < data.len() && data[*pos] != b'\n' {
@@ -6748,18 +6755,27 @@ pub fn create_pickle_dict() -> HashMap<String, PyObjectRef> {
         if args.is_empty() {
             return Err(PyError::type_error("dumps() missing required argument"));
         }
-        let protocol = if args.len() > 1 {
-            args[1].as_i64().unwrap_or(4) as i32
-        } else {
-            4
-        };
+        let mut protocol = 4i32;
+        // Check positional args and kwargs for protocol
+        for arg in args.iter().skip(1) {
+            if let PyObject::Dict(d) = &*arg.borrow() {
+                if let Ok(Some(p)) = d.get(&py_str("protocol")) {
+                    protocol = p.as_i64().unwrap_or(4) as i32;
+                }
+            } else {
+                protocol = arg.as_i64().unwrap_or(4) as i32;
+            }
+        }
         let mut buf = Vec::new();
         let mut memo: Vec<*const ()> = Vec::new();
-        pickle_serialize(&args[0], &mut buf, &mut memo, protocol)?;
-        // Protocol 0-1 ends with a stop marker (.)
-        if protocol <= 1 {
-            buf.push(b'.');
+        // Protocol 2+ starts with PROTO header
+        if protocol >= 2 {
+            buf.push(0x80); // PROTO
+            buf.push(protocol as u8); // protocol version
         }
+        pickle_serialize(&args[0], &mut buf, &mut memo, protocol)?;
+        // All protocols end with a stop marker (.)
+        buf.push(b'.');
         Ok(PyObjectRef::imm(PyObject::Bytes(buf)))
     });
 
