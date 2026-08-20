@@ -987,6 +987,23 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
     d.insert_str("M", py_int(8));
     d.insert_str("X", py_int(64));
 
+    // re.Pattern and re.Match type stubs (needed by typing and type-checking code)
+    let re_pattern_type = PyObjectRef::new(PyObject::Type {
+        name: "Pattern".to_string(),
+        dict: Box::new(str_map_to_typedict(HashMap::new())),
+        bases: vec![],
+        mro: vec![],
+    });
+    d.insert_str("Pattern", re_pattern_type);
+
+    let re_match_type = PyObjectRef::new(PyObject::Type {
+        name: "Match".to_string(),
+        dict: Box::new(str_map_to_typedict(HashMap::new())),
+        bases: vec![],
+        mro: vec![],
+    });
+    d.insert_str("Match", re_match_type);
+
     d
 }
 
@@ -6579,6 +6596,36 @@ pub fn create_pickle_dict() -> HashMap<String, PyObjectRef> {
         }),
     );
 
+    // pickle.decode_long(data): Decode a long integer from little-endian bytes
+    pickle_func!("decode_long", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("decode_long() missing required argument: 'data'"));
+        }
+        let bytes: Vec<u8> = match &*args[0].borrow() {
+            PyObject::Bytes(b) => b.clone(),
+            PyObject::Str(s) => s.as_bytes().to_vec(),
+            _ => return Err(PyError::type_error("decode_long() argument must be bytes-like")),
+        };
+        if bytes.is_empty() {
+            return Ok(py_int(0));
+        }
+        use num_bigint::BigInt;
+        use num_traits::ToPrimitive;
+        let sign_negative = bytes.last().map_or(false, |&b| b & 0x80 != 0);
+        let mut magnitude = BigInt::from(0u32);
+        for &b in bytes.iter().rev() {
+            magnitude = (magnitude << 8) | BigInt::from(b);
+        }
+        let result = if sign_negative {
+            let bits = (bytes.len() * 8) as u32;
+            let modulus = BigInt::from(1u32) << bits;
+            magnitude - modulus
+        } else {
+            magnitude
+        };
+        Ok(py_int(result))
+    });
+
     pickle_func!("dumps", |args| {
         if args.is_empty() {
             return Err(PyError::type_error("dumps() missing required argument"));
@@ -8256,6 +8303,7 @@ pub fn create_sysconfig_dict() -> HashMap<String, PyObjectRef> {
     });
 
     syscfg_func!("get_python_version", |_| { Ok(py_str("3.13")) });
+    syscfg_func!("_get_python_version_abi", |_| { Ok(py_str("3.13")) });
 
     syscfg_func!("is_python_build", |_| { Ok(py_bool(false)) });
 

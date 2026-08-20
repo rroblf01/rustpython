@@ -6696,6 +6696,16 @@ pub fn create_os_path_dict() -> HashMap<String, PyObjectRef> {
         Ok(py_str(&prefix))
     });
 
+    // os.path.splitdrive(p): Split a pathname into drive/UNC sharepoint
+    // and relative path specifiers. On POSIX, the drive is always empty.
+    path_func!("splitdrive", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("splitdrive() missing required argument: 'p'"));
+        }
+        let p = args[0].str();
+        Ok(py_tuple(vec![py_str(""), py_str(&p)]))
+    });
+
     d
 }
 

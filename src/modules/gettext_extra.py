@@ -2,6 +2,10 @@ __all__ = ['NullTranslations', 'GNUTranslations', 'find', 'translation', 'instal
            'textdomain', 'bindtextdomain', 'gettext', 'ngettext', 'pgettext',
            'npgettext', 'dgettext', 'dngettext']
 
+_localedirs = {}
+_current_domain = 'messages'
+_default_localedir = '/usr/share/locale'
+
 
 class NullTranslations:
     def __init__(self, fp=None):

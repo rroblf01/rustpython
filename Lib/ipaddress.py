@@ -24,6 +24,11 @@ def _is_ipv4_multicast(ip):
 def _is_ipv4_link_local(ip):
     return (ip & 0xFFFF0000) == 0xA9FE0000
 
+class AddressValueError(ValueError):
+    """Raised when an address value is invalid."""
+    pass
+
+
 class IPv4Address:
     def __init__(self, address):
         if isinstance(address, int):

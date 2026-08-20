@@ -520,6 +520,9 @@ impl VirtualMachine {
                     "npgettext",
                     "dgettext",
                     "dngettext",
+                    "_localedirs",
+                    "_current_domain",
+                    "_default_localedir",
                     "__all__",
                 ],
             );
@@ -1601,6 +1604,9 @@ impl VirtualMachine {
                 "npgettext",
                 "dgettext",
                 "dngettext",
+                "_localedirs",
+                "_current_domain",
+                "_default_localedir",
                 "__all__",
             ],
         );
