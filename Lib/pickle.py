@@ -3,6 +3,15 @@
 from _pickle import *
 from _pickle import _loads
 
+__all__ = [
+    'PickleError', 'PicklingError', 'UnpicklingError',
+    'Pickler', 'Unpickler',
+    'dump', 'dumps', 'load', 'loads',
+    'encode_long', 'decode_long',
+    'HIGHEST_PROTOCOL', 'DEFAULT_PROTOCOL',
+    'PickleBuffer', 'bytes_types',
+]
+
 
 def dump(obj, file, protocol=None, *, fix_imports=True, buffer_callback=None):
     """Serialize object to open file."""
