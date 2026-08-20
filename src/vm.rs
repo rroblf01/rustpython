@@ -3107,7 +3107,7 @@ impl VirtualMachine {
                     .insert(interner::intern(&name), val);
             }
 
-            Opcode::LOAD_FAST => {
+             Opcode::LOAD_FAST => {
                 let var_idx = arg as usize;
                 let val = {
                     let f = &self.frames[self.frames.len() - 1];
@@ -4254,7 +4254,7 @@ impl VirtualMachine {
                 }
             }
 
-            Opcode::POP_JUMP_IF_FALSE => {
+             Opcode::POP_JUMP_IF_FALSE => {
                 let val = self.frames[fi].pop()?;
                 if !val.try_truthy()? {
                     self.frames[fi].ip = arg as usize;
@@ -6247,18 +6247,7 @@ impl VirtualMachine {
                 }
             }
 
-            Opcode::PUSH_EXC_INFO => {
-                // Save TOS to active_exception without popping (the exception
-                // stays on the value stack for DUP_TOP/CHECK_EXC_MATCH below).
-                // This provides a stable source for RERAISE even after POP_EXCEPT
-                // pops the exception from the value stack (as in try/finally).
-                // arg=1: a `finally`-block entry — the pushed exception is
-                // merely being re-raised, it does NOT become the implicit
-                // __context__ for later raises (the VM's propagating-exception
-                // fallback covers a raise made inside a finally body). It
-                // also does NOT push onto `active_exception_stack`: the
-                // following RERAISE consumes active_exception directly, and a
-                // POP_EXCEPT(arg=1) restore would empty it before then.
+             Opcode::PUSH_EXC_INFO => {
                 if arg != 1 {
                     let frame = &mut self.frames[fi];
                     frame

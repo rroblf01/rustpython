@@ -45,6 +45,7 @@ pub struct Compiler {
     // `__annotations__`, matching real Python (local variable annotations
     // are evaluated for side effects only, never stored anywhere).
     annotations_initialized: bool,
+    comprehension_depth: usize,
 }
 
 #[derive(Clone)]
@@ -123,6 +124,7 @@ impl Compiler {
             class_name_stack: Vec::new(),
             current_line: 1,
             annotations_initialized: false,
+            comprehension_depth: 0,
         }
     }
 
@@ -253,6 +255,56 @@ impl Compiler {
         }
         self.code.names.push(crate::interner::intern(name));
         self.code.names.len() - 1
+    }
+
+    fn emit_load_name(&mut self, name: &str) {
+        if self.scope == ScopeType::Module
+            || self.scope == ScopeType::ClassBody
+            || self.global_names.contains(name)
+        {
+            let name_idx = self.get_name_index(name) as u32;
+            self.emit(Opcode::LOAD_NAME, name_idx);
+        } else if self.scope == ScopeType::Function && self.code.freevars.contains(&name.to_string()) {
+            let fv_idx = self.code.freevars.iter().position(|n| n == name).unwrap();
+            let idx = self.code.cellvars.len() + fv_idx;
+            self.emit(Opcode::LOAD_DEREF, idx as u32);
+        } else if self.scope == ScopeType::Function && self.code.cellvars.contains(&name.to_string()) {
+            let idx = self.code.cellvars.iter().position(|n| n == name).unwrap() as u32;
+            self.emit(Opcode::LOAD_DEREF, idx);
+        } else if self.scope == ScopeType::Function {
+            if let Some(idx) = self.get_var_index(name) {
+                self.emit(Opcode::LOAD_FAST, idx as u32);
+            } else {
+                let name_idx = self.get_name_index(name) as u32;
+                self.emit(Opcode::LOAD_GLOBAL, name_idx);
+            }
+        } else {
+            let name_idx = self.get_name_index(name) as u32;
+            self.emit(Opcode::LOAD_NAME, name_idx);
+        }
+    }
+
+    fn emit_store_name(&mut self, name: &str) {
+        if self.scope == ScopeType::Module
+            || self.scope == ScopeType::ClassBody
+            || self.global_names.contains(name)
+        {
+            let idx = self.get_name_index(name) as u32;
+            self.emit(Opcode::STORE_NAME, idx);
+        } else if self.scope == ScopeType::Function && self.code.cellvars.contains(&name.to_string()) {
+            let idx = self.code.cellvars.iter().position(|n| n == name).unwrap() as u32;
+            self.emit(Opcode::STORE_DEREF, idx);
+        } else if self.scope == ScopeType::Function && self.code.freevars.contains(&name.to_string()) {
+            let fv_idx = self.code.freevars.iter().position(|n| n == name).unwrap();
+            let idx = (self.code.cellvars.len() + fv_idx) as u32;
+            self.emit(Opcode::STORE_DEREF, idx);
+        } else if self.scope == ScopeType::Function {
+            let idx = self.add_varname(name) as u32;
+            self.emit(Opcode::STORE_FAST, idx);
+        } else {
+            let idx = self.get_name_index(name) as u32;
+            self.emit(Opcode::STORE_NAME, idx);
+        }
     }
 
     fn get_const_index(&mut self, c: ConstValue) -> usize {
@@ -4405,6 +4457,43 @@ impl Compiler {
             return Err("Comprehension must have at least one generator".to_string());
         }
 
+        let mut target_names: Vec<String> = Vec::new();
+        for gen in generators {
+            let mut names = HashSet::new();
+            Self::collect_assign_target_names(&gen.target, &mut names);
+            for n in names {
+                target_names.push(n);
+            }
+        }
+        target_names.sort();
+        target_names.dedup();
+
+        let comp_id = self.comprehension_depth;
+        self.comprehension_depth += 1;
+
+        let mut saved_indices: Vec<(String, u32)> = Vec::new();
+        if !target_names.is_empty() {
+            for name in &target_names {
+                let tmp_name = format!("_comp_save_{}_{}", comp_id, name);
+                let idx = self.add_varname(&tmp_name) as u32;
+                saved_indices.push((name.clone(), idx));
+                let handler = self.new_label();
+                let end = self.new_label();
+                self.emit_jump(Opcode::SETUP_FINALLY, handler);
+                self.emit_load_name(name);
+                self.emit(Opcode::STORE_FAST, idx);
+                self.emit(Opcode::POP_BLOCK, 0);
+                self.emit_jump(Opcode::JUMP, end);
+                self.fix_label(handler);
+                self.emit(Opcode::PUSH_EXC_INFO, 0);
+                let none_idx = self.get_const_index(ConstValue::None) as u32;
+                self.emit(Opcode::LOAD_CONST, none_idx);
+                self.emit(Opcode::STORE_FAST, idx);
+                self.emit(Opcode::POP_EXCEPT, 1);
+                self.fix_label(end);
+            }
+        }
+
         if is_set {
             self.emit(Opcode::BUILD_SET, 0);
         } else {
@@ -4474,6 +4563,20 @@ impl Compiler {
         self.fix_label(end_label);
         self.emit(Opcode::POP_ITER, 0);
 
+        if !saved_indices.is_empty() {
+            let none_idx = self.get_const_index(ConstValue::None) as u32;
+            for (name, save_idx) in &saved_indices {
+                let skip_restore = self.new_label();
+                self.emit(Opcode::LOAD_FAST, *save_idx);
+                self.emit(Opcode::LOAD_CONST, none_idx);
+                self.emit(Opcode::IS_OP, 1);
+                self.emit_jump(Opcode::POP_JUMP_IF_FALSE, skip_restore);
+                self.emit(Opcode::LOAD_FAST, *save_idx);
+                self.emit_store_name(name);
+                self.fix_label(skip_restore);
+            }
+        }
+
         Ok(())
     }
 
@@ -4485,6 +4588,43 @@ impl Compiler {
     ) -> Result<(), String> {
         if generators.is_empty() {
             return Err("Comprehension must have at least one generator".to_string());
+        }
+
+        let mut target_names: Vec<String> = Vec::new();
+        for gen in generators {
+            let mut names = HashSet::new();
+            Self::collect_assign_target_names(&gen.target, &mut names);
+            for n in names {
+                target_names.push(n);
+            }
+        }
+        target_names.sort();
+        target_names.dedup();
+
+        let comp_id = self.comprehension_depth;
+        self.comprehension_depth += 1;
+
+        let mut saved_indices: Vec<(String, u32)> = Vec::new();
+        if !target_names.is_empty() {
+            for name in &target_names {
+                let tmp_name = format!("_comp_save_{}_{}", comp_id, name);
+                let idx = self.add_varname(&tmp_name) as u32;
+                saved_indices.push((name.clone(), idx));
+                let handler = self.new_label();
+                let end = self.new_label();
+                self.emit_jump(Opcode::SETUP_FINALLY, handler);
+                self.emit_load_name(name);
+                self.emit(Opcode::STORE_FAST, idx);
+                self.emit(Opcode::POP_BLOCK, 0);
+                self.emit_jump(Opcode::JUMP, end);
+                self.fix_label(handler);
+                self.emit(Opcode::PUSH_EXC_INFO, 0);
+                let none_idx = self.get_const_index(ConstValue::None) as u32;
+                self.emit(Opcode::LOAD_CONST, none_idx);
+                self.emit(Opcode::STORE_FAST, idx);
+                self.emit(Opcode::POP_EXCEPT, 1);
+                self.fix_label(end);
+            }
         }
 
         self.emit(Opcode::BUILD_MAP, 0);
@@ -4511,9 +4651,6 @@ impl Compiler {
 
             self.compile_assign_target(&gen.target)?;
 
-            // See the matching fix in compile_comprehension for why this
-            // can't use the forward-label/NOP pattern (it made the filter
-            // condition a no-op — every item passed regardless).
             let continue_pos = self.label_positions[*start_labels.last().unwrap()] as u32;
             for if_expr in &gen.ifs {
                 self.compile_expr(if_expr)?;
@@ -4535,6 +4672,20 @@ impl Compiler {
 
         self.fix_label(end_label);
         self.emit(Opcode::POP_ITER, 0);
+
+        if !saved_indices.is_empty() {
+            let none_idx = self.get_const_index(ConstValue::None) as u32;
+            for (name, save_idx) in &saved_indices {
+                let skip_restore = self.new_label();
+                self.emit(Opcode::LOAD_FAST, *save_idx);
+                self.emit(Opcode::LOAD_CONST, none_idx);
+                self.emit(Opcode::IS_OP, 1);
+                self.emit_jump(Opcode::POP_JUMP_IF_FALSE, skip_restore);
+                self.emit(Opcode::LOAD_FAST, *save_idx);
+                self.emit_store_name(name);
+                self.fix_label(skip_restore);
+            }
+        }
 
         Ok(())
     }
