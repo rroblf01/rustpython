@@ -3648,13 +3648,6 @@ impl Compiler {
         let old_annotations_initialized = self.annotations_initialized;
         self.annotations_initialized = false;
 
-        // Always create __annotations__ = {} for class bodies, even if no
-        // annotations are present. CPython always exposes this attribute on classes.
-        self.emit(Opcode::BUILD_MAP, 0);
-        let ann_idx = self.get_name_index("__annotations__") as u32;
-        self.emit(Opcode::STORE_NAME, ann_idx);
-        self.annotations_initialized = true;
-
         self.code.arg_count = 0;
 
         // Class bodies are skipped when Python resolves enclosing scope, but

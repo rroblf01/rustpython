@@ -6556,6 +6556,46 @@ fn pickle_deserialize(
                 step: p,
             }))
         }
+        b'c' => {
+            // GLOBAL: module\nname\n
+            let module = {
+                let start = *pos;
+                while *pos < data.len() && data[*pos] != b'\n' {
+                    *pos += 1;
+                }
+                let s = std::str::from_utf8(&data[start..*pos])
+                    .map_err(|_| PyError::type_error("invalid utf-8 in pickle GLOBAL"))?
+                    .to_string();
+                *pos += 1; // skip '\n'
+                s
+            };
+            let name = {
+                let start = *pos;
+                while *pos < data.len() && data[*pos] != b'\n' {
+                    *pos += 1;
+                }
+                let s = std::str::from_utf8(&data[start..*pos])
+                    .map_err(|_| PyError::type_error("invalid utf-8 in pickle GLOBAL"))?
+                    .to_string();
+                *pos += 1; // skip '\n'
+                s
+            };
+            // Resolve the global — for now, handle common cases
+            match (module.as_str(), name.as_str()) {
+                ("__builtin__" | "builtins", "iter") => {
+                    // iter(...) will be handled by INST/REDUCE below
+                    Ok(py_str("iter"))
+                }
+                ("__builtin__" | "builtins", "xrange" | "range") => {
+                    // range(stop) or range(start, stop, step) — deserialized via REDUCE
+                    Ok(py_str("range"))
+                }
+                _ => Err(PyError::type_error(format!(
+                    "cannot resolve global {}.{} in pickle data",
+                    module, name
+                ))),
+            }
+        }
         _ => Err(PyError::type_error(format!(
             "unknown pickle marker byte: 0x{:02x}",
             marker
