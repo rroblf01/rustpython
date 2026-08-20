@@ -5967,10 +5967,38 @@ fn pickle_serialize(
             }
         }
         _ => {
-            return Err(PyError::type_error(format!(
-                "cannot pickle {} object",
-                obj.borrow().type_name()
-            )));
+            // Try set/frozenset/complex before failing
+            let type_name = obj.borrow().type_name().to_string();
+            match type_name.as_str() {
+                "set" => {
+                    if let PyObject::Set(s) = &*obj.borrow() {
+                        // Use dedicated set opcode 'Y' with [elements]
+                        buf.push(b'Y');
+                        buf.push(b'[');
+                        for item in s.iter() {
+                            pickle_serialize(&item, buf, memo, protocol)?;
+                        }
+                        buf.push(b']');
+                    }
+                }
+                "frozenset" => {
+                    if let PyObject::FrozenSet(s) = &*obj.borrow() {
+                        // Use dedicated frozenset opcode 'Z' with [elements]
+                        buf.push(b'Z');
+                        buf.push(b'[');
+                        for item in s.iter() {
+                            pickle_serialize(&item, buf, memo, protocol)?;
+                        }
+                        buf.push(b']');
+                    }
+                }
+                _ => {
+                    return Err(PyError::type_error(format!(
+                        "cannot pickle {} object",
+                        type_name
+                    )));
+                }
+            }
         }
     }
     Ok(())
@@ -6414,6 +6442,42 @@ fn pickle_deserialize(
             *pos += 1; // skip ')'
             Ok(py_tuple(items))
         }
+        b'Y' => {
+            // set: [elements]
+            if *pos >= data.len() || data[*pos] != b'[' {
+                return Err(PyError::type_error("malformed set pickle data"));
+            }
+            *pos += 1;
+            let mut items = Vec::new();
+            while *pos < data.len() && data[*pos] != b']' {
+                items.push(pickle_deserialize(data, pos, memo)?);
+            }
+            if *pos >= data.len() {
+                return Err(PyError::type_error("unterminated set in pickle data"));
+            }
+            *pos += 1;
+            let s = crate::object::PySet::from_vec(items)
+                .map_err(|e| PyError::type_error(format!("failed to create set: {}", e)))?;
+            Ok(PyObjectRef::new(PyObject::Set(s)))
+        }
+        b'Z' => {
+            // frozenset: [elements]
+            if *pos >= data.len() || data[*pos] != b'[' {
+                return Err(PyError::type_error("malformed frozenset pickle data"));
+            }
+            *pos += 1;
+            let mut items = Vec::new();
+            while *pos < data.len() && data[*pos] != b']' {
+                items.push(pickle_deserialize(data, pos, memo)?);
+            }
+            if *pos >= data.len() {
+                return Err(PyError::type_error("unterminated frozenset in pickle data"));
+            }
+            *pos += 1;
+            let s = crate::object::PySet::from_vec(items)
+                .map_err(|e| PyError::type_error(format!("failed to create frozenset: {}", e)))?;
+            Ok(PyObjectRef::new(PyObject::FrozenSet(s)))
+        }
         b'{' => {
             let dict_ref = PyObjectRef::new(PyObject::Dict(Box::new(crate::object::PyDict::new())));
             memo.push(dict_ref.clone());
@@ -6508,6 +6572,26 @@ pub fn create_pickle_dict() -> HashMap<String, PyObjectRef> {
 
     d.insert_str("HIGHEST_PROTOCOL", py_int(5));
     d.insert_str("DEFAULT_PROTOCOL", py_int(4));
+    d.insert_str(
+        "__all__",
+        py_list(vec![
+            py_str("PickleError"),
+            py_str("PicklingError"),
+            py_str("UnpicklingError"),
+            py_str("Pickler"),
+            py_str("Unpickler"),
+            py_str("dump"),
+            py_str("dumps"),
+            py_str("load"),
+            py_str("loads"),
+            py_str("encode_long"),
+            py_str("decode_long"),
+            py_str("HIGHEST_PROTOCOL"),
+            py_str("DEFAULT_PROTOCOL"),
+            py_str("PickleBuffer"),
+            py_str("bytes_types"),
+        ]),
+    );
     // Real CPython's `pickle.py` internal constant, used for isinstance
     // checks in the pure-Python pickler fallback path — `isinstance()`
     // here does its own name-based comparison against a `PyObject::Type`
@@ -6624,6 +6708,40 @@ pub fn create_pickle_dict() -> HashMap<String, PyObjectRef> {
             magnitude
         };
         Ok(py_int(result))
+    });
+
+    // pickle.encode_long(n): Encode an integer as little-endian bytes
+    pickle_func!("encode_long", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("encode_long() missing required argument: 'n'"));
+        }
+        let n: num_bigint::BigInt = match &*args[0].borrow() {
+            PyObject::Int(i) => i.clone(),
+            PyObject::Bool(b) => num_bigint::BigInt::from(if *b { 1i32 } else { 0i32 }),
+            _ => return Err(PyError::type_error("encode_long() argument must be an integer")),
+        };
+        let is_negative = n.sign() == num_bigint::Sign::Minus;
+        let abs_bytes = n.magnitude().to_bytes_le();
+        let mut result = abs_bytes;
+        // Add sign byte if the high bit of the last byte is set (or if negative and no bytes)
+        if result.is_empty() {
+            if is_negative {
+                result.push(0x80);
+            } else {
+                result.push(0x00);
+            }
+        } else if is_negative {
+            let last = *result.last().unwrap();
+            if last < 0x80 {
+                result.push(0x80);
+            }
+        } else {
+            let last = *result.last().unwrap();
+            if last >= 0x80 {
+                result.push(0x00);
+            }
+        }
+        Ok(PyObjectRef::imm(PyObject::Bytes(result)))
     });
 
     pickle_func!("dumps", |args| {

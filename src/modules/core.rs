@@ -4296,6 +4296,7 @@ pub(crate) fn build_excepthook_report(args: &[PyObjectRef]) -> PyResult<String> 
         }
     };
     let mut out = String::from("Traceback (most recent call last):\n");
+    let mut last_source_line_end = out.len(); // track where to insert caret
     let mut tb = if matches!(&*exc_tb.borrow(), PyObject::None) {
         None
     } else {
@@ -4346,6 +4347,7 @@ pub(crate) fn build_excepthook_report(args: &[PyObjectRef]) -> PyResult<String> 
             if let Ok(src) = std::fs::read_to_string(&filename) {
                 if let Some(line) = src.lines().nth(lineno as usize - 1) {
                     out.push_str(&format!("    {}\n", line));
+                    last_source_line_end = out.len();
                 }
             }
         }
@@ -4384,6 +4386,36 @@ pub(crate) fn build_excepthook_report(args: &[PyObjectRef]) -> PyResult<String> 
             exc_value.str()
         }
     };
+    // SyntaxError caret display: insert the '^' indicator line after the
+    // source line but before the error message.
+    if typ_name == "SyntaxError" || typ_name == "IndentationError" || typ_name == "TabError" {
+        let eb = exc_value.borrow();
+        let offset = eb.get_attribute("offset").ok().and_then(|v| v.as_i64());
+        let text = eb.get_attribute("text").ok().map(|v| v.str());
+        let end_offset = eb.get_attribute("end_offset").ok().and_then(|v| v.as_i64());
+        drop(eb);
+
+        if let (Some(offset), Some(ref text)) = (offset, text) {
+            if offset >= 1 && !text.is_empty() {
+                let indent = "    "; // 4-space indent
+                let text_stripped = text.trim_end_matches('\n');
+                let caret_len = if let Some(end) = end_offset {
+                    // Use end_offset for caret length
+                    let start = (offset - 1) as usize;
+                    let end = (end - 1) as usize;
+                    std::cmp::max(1, end - start + 1)
+                } else {
+                    // Fallback: caret extends to end of line
+                    std::cmp::max(1, text_stripped.len() - offset as usize + 1)
+                };
+                let spaces = (offset - 1) as usize;
+                let caret_line = format!("{}{}{}\n", indent, " ".repeat(spaces), "^".repeat(caret_len));
+                // Insert caret after the source line
+                out.insert_str(last_source_line_end, &caret_line);
+            }
+        }
+    }
+
     if message.is_empty() {
         out.push_str(&format!("{}\n", typ_name));
     } else {
