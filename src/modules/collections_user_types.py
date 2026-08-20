@@ -371,6 +371,8 @@ class Counter(dict):
 
 class defaultdict(dict):
     def __init__(self, default_factory=None, *args, **kwargs):
+        if default_factory is not None and not callable(default_factory):
+            raise TypeError('first argument must be callable or None')
         self.default_factory = default_factory
         if args or kwargs:
             self.update(*args, **kwargs)
@@ -384,7 +386,7 @@ class defaultdict(dict):
 
     def __repr__(self):
         items = ', '.join('%r: %r' % (k, v) for k, v in self.items())
-        return 'defaultdict(%r, {%s})' % (self.default_factory, items)
+        return '%s(%r, {%s})' % (type(self).__name__, self.default_factory, items)
 
     def copy(self):
         result = defaultdict(self.default_factory)

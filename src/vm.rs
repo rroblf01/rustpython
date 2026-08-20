@@ -9009,57 +9009,26 @@ impl VirtualMachine {
                 // test_extcall.py exactly.
                 let noun = |n: usize| if n == 1 { "argument" } else { "arguments" };
                 let msg = if num_defaults == 0 {
-                    if code.kwonlyarg_count > 0 {
-                        let total = npos + code.kwonlyarg_count;
-                        let verb = if total > 1 { "were" } else { "was" };
-                        format!(
-                            "{}() takes {} positional {} but {} positional {} (and {} keyword-only argument{}) {} given",
-                            fname,
-                            named_params,
-                            noun(named_params),
-                            npos,
-                            noun(npos),
-                            code.kwonlyarg_count,
-                            if code.kwonlyarg_count == 1 { "" } else { "s" },
-                            verb
-                        )
-                    } else {
-                        format!(
-                            "{}() takes {} positional {} but {} {} {} given",
-                            fname,
-                            named_params,
-                            noun(named_params),
-                            npos,
-                            noun(npos),
-                            if npos == 1 { "was" } else { "were" }
-                        )
-                    }
+                    format!(
+                        "{}() takes {} positional {} but {} {} {} given",
+                        fname,
+                        named_params,
+                        noun(named_params),
+                        npos,
+                        noun(npos),
+                        if npos == 1 { "was" } else { "were" }
+                    )
                 } else {
-                    if code.kwonlyarg_count > 0 {
-                        let total = npos + code.kwonlyarg_count;
-                        let verb = if total > 1 { "were" } else { "was" };
-                        format!(
-                            "{}() takes from {} to {} positional arguments but {} positional {} (and {} keyword-only argument{}) {} given",
-                            fname,
-                            min_required,
-                            named_params,
-                            npos,
-                            noun(npos),
-                            code.kwonlyarg_count,
-                            if code.kwonlyarg_count == 1 { "" } else { "s" },
-                            verb
-                        )
-                    } else {
-                        format!(
-                            "{}() takes from {} to {} positional arguments but {} {} {} given",
-                            fname,
-                            min_required,
-                            named_params,
-                            npos,
-                            noun(npos),
-                            if npos == 1 { "was" } else { "were" }
-                        )
-                    }
+                    let verb = if npos > 1 { "were" } else { "was" };
+                    format!(
+                        "{}() takes from {} to {} positional arguments but {} {} {} given",
+                        fname,
+                        min_required,
+                        named_params,
+                        npos,
+                        noun(npos),
+                        verb
+                    )
                 };
                 return Err(PyError::type_error(msg));
             }

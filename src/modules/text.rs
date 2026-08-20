@@ -863,6 +863,7 @@ pub fn create_mimetypes_dict() -> HashMap<String, PyObjectRef> {
     );
     // list of known types, init, read_mime_types, etc. can be added as needed
     d.insert_str("known_types", py_dict());
+    d.insert_str("knownfiles", py_list(vec![]));
     d.insert_str("inited", py_bool(false));
     d
 }
