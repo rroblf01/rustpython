@@ -3455,7 +3455,12 @@ pub fn builtin_hex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         return Err(PyError::type_error("hex() takes exactly one argument"));
     }
     let n = to_index(&args[0])?;
-    Ok(py_str(&format!("0x{:x}", n)))
+    let digits = format!("{:x}", n.magnitude());
+    if n.sign() == num_bigint::Sign::Minus {
+        Ok(py_str(&format!("-0x{}", digits)))
+    } else {
+        Ok(py_str(&format!("0x{}", digits)))
+    }
 }
 
 pub fn builtin_oct(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
@@ -3463,7 +3468,12 @@ pub fn builtin_oct(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         return Err(PyError::type_error("oct() takes exactly one argument"));
     }
     let n = to_index(&args[0])?;
-    Ok(py_str(&format!("0o{:o}", n)))
+    let digits = format!("{:o}", n.magnitude());
+    if n.sign() == num_bigint::Sign::Minus {
+        Ok(py_str(&format!("-0o{}", digits)))
+    } else {
+        Ok(py_str(&format!("0o{}", digits)))
+    }
 }
 
 pub fn builtin_bin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
@@ -3471,7 +3481,12 @@ pub fn builtin_bin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         return Err(PyError::type_error("bin() takes exactly one argument"));
     }
     let n = to_index(&args[0])?;
-    Ok(py_str(&format!("0b{:b}", n)))
+    let digits = format!("{:b}", n.magnitude());
+    if n.sign() == num_bigint::Sign::Minus {
+        Ok(py_str(&format!("-0b{}", digits)))
+    } else {
+        Ok(py_str(&format!("0b{}", digits)))
+    }
 }
 
 pub fn builtin_ascii(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {

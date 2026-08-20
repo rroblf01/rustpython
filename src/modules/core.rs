@@ -851,6 +851,30 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
             func: crate::object::builtin_int_repr as BuiltinFunc,
         }),
     );
+    // int.__format__(self, format_spec): format integer with format spec mini-language
+    int_dict.insert_str(
+        "__format__",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__format__".to_string(),
+            func: |args| {
+                if args.is_empty() {
+                    return Err(PyError::type_error(
+                        "__format__ requires at least 1 argument (self)",
+                    ));
+                }
+                let spec = if args.len() > 1 {
+                    args[1].str()
+                } else {
+                    String::new()
+                };
+                if spec.is_empty() {
+                    Ok(py_str(&args[0].repr()))
+                } else {
+                    crate::vm::format_with_spec(&args[0], &spec).map(|s| py_str(&s))
+                }
+            },
+        }),
+    );
     // int.__itemsize__ — Python arbitrary-precision ints have no fixed size
     int_dict.insert_str(
         "__itemsize__",

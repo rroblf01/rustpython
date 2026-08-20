@@ -11301,6 +11301,13 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
         None
     };
 
+    // Digit grouping width: 4 for hex/oct/bin, 3 for everything else.
+    // CPython groups hex/oct/bin by 4 digits with '_' (e.g. '0x1234_5678').
+    let int_group_width = match fmt_type {
+        Some('x' | 'X' | 'b' | 'o') => 4,
+        _ => 3,
+    };
+
     // Any characters left unconsumed mean an invalid specifier — real
     // CPython raises `ValueError: Invalid format specifier '<spec>' for
     // object of type '<type>'` (test_format's
@@ -11436,11 +11443,18 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
         // Integer: hex lowercase
         (Some('x'), true, _) => {
             if let PyObject::Int(i) = &*val_borrowed {
-                if alternate {
-                    format!("0x{:x}", i)
+                let digits = format!("{:x}", i.magnitude());
+                let prefix = if alternate { "0x" } else { "" };
+                let sign_str = if i.sign() == num_bigint::Sign::Minus {
+                    "-".to_string()
                 } else {
-                    format!("{:x}", i)
-                }
+                    match sign {
+                        '+' => "+".to_string(),
+                        ' ' => " ".to_string(),
+                        _ => String::new(),
+                    }
+                };
+                format!("{}{}{}", sign_str, prefix, digits)
             } else {
                 val.str()
             }
@@ -11448,11 +11462,18 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
         // Integer: hex uppercase
         (Some('X'), true, _) => {
             if let PyObject::Int(i) = &*val_borrowed {
-                if alternate {
-                    format!("0X{:X}", i)
+                let digits = format!("{:X}", i.magnitude());
+                let prefix = if alternate { "0X" } else { "" };
+                let sign_str = if i.sign() == num_bigint::Sign::Minus {
+                    "-".to_string()
                 } else {
-                    format!("{:X}", i)
-                }
+                    match sign {
+                        '+' => "+".to_string(),
+                        ' ' => " ".to_string(),
+                        _ => String::new(),
+                    }
+                };
+                format!("{}{}{}", sign_str, prefix, digits)
             } else {
                 val.str()
             }
@@ -11460,11 +11481,18 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
         // Integer: binary
         (Some('b'), true, _) => {
             if let PyObject::Int(i) = &*val_borrowed {
-                if alternate {
-                    format!("0b{:b}", i)
+                let digits = format!("{:b}", i.magnitude());
+                let prefix = if alternate { "0b" } else { "" };
+                let sign_str = if i.sign() == num_bigint::Sign::Minus {
+                    "-".to_string()
                 } else {
-                    format!("{:b}", i)
-                }
+                    match sign {
+                        '+' => "+".to_string(),
+                        ' ' => " ".to_string(),
+                        _ => String::new(),
+                    }
+                };
+                format!("{}{}{}", sign_str, prefix, digits)
             } else {
                 val.str()
             }
@@ -11472,11 +11500,18 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
         // Integer: octal
         (Some('o'), true, _) => {
             if let PyObject::Int(i) = &*val_borrowed {
-                if alternate {
-                    format!("0o{:o}", i)
+                let digits = format!("{:o}", i.magnitude());
+                let prefix = if alternate { "0o" } else { "" };
+                let sign_str = if i.sign() == num_bigint::Sign::Minus {
+                    "-".to_string()
                 } else {
-                    format!("{:o}", i)
-                }
+                    match sign {
+                        '+' => "+".to_string(),
+                        ' ' => " ".to_string(),
+                        _ => String::new(),
+                    }
+                };
+                format!("{}{}{}", sign_str, prefix, digits)
             } else {
                 val.str()
             }
@@ -11617,7 +11652,7 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
     let zero_pad_group = |base: &str, width: usize| -> String {
         let mut s = base.to_string();
         loop {
-            let grouped = apply_grouping(&s, int_grouping, frac_grouping);
+            let grouped = apply_grouping(&s, int_grouping, frac_grouping, int_group_width);
             if grouped.len() >= width {
                 return grouped;
             }
@@ -11641,7 +11676,7 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
     {
         zero_pad_group(&base, width.unwrap_or(0))
     } else {
-        apply_grouping(&base, int_grouping, frac_grouping)
+        apply_grouping(&base, int_grouping, frac_grouping, int_group_width)
     };
 
     // The `z` flag coerces a NEGATIVE ZERO RESULT (after rounding) to
@@ -11669,8 +11704,16 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
         base
     };
 
-    // Apply final width and alignment
-    let result = apply_padding(&base, width, align, fill_char, false);
+    // Apply final width and alignment.
+    // The '0' flag WITHOUT explicit alignment implies '=' alignment with fill='0'
+    // for numeric types. '=' alignment inserts padding after sign AND after
+    // any alternate-form prefix (0x, 0b, 0o).
+    let (effective_align, effective_fill) = if zero_pad && !align_explicit {
+        ('=', '0')
+    } else {
+        (align, fill_char)
+    };
+    let result = apply_padding(&base, width, effective_align, effective_fill, false);
 
     Ok(result)
 }
@@ -11747,11 +11790,12 @@ fn format_float_with_sign(val: f64, sign: char, precision: Option<usize>) -> Str
     apply_sign(&s, val, sign)
 }
 
-/// Insert ',' or '_' every 3 digits of the integer part (from the right) and
-////or of the fraction part (from the left) of a formatted number. Handles
-/// scientific suffixes (`e+05`) and the `%` suffix so the mantissa/percent
-/// fraction can be grouped too.
-fn apply_grouping(s: &str, int_sep: Option<char>, frac_sep: Option<char>) -> String {
+/// Insert ',' or '_' every N digits of the integer part (from the right) and
+/// or of the fraction part (from the left) of a formatted number. For decimal
+/// types ('d', 'n', etc.) N=3; for hex/oct/bin ('x', 'X', 'b', 'o') N=4.
+/// Handles scientific suffixes (`e+05`) and the `%` suffix so the
+/// mantissa/percent fraction can be grouped too.
+fn apply_grouping(s: &str, int_sep: Option<char>, frac_sep: Option<char>, int_group_width: usize) -> String {
     if int_sep.is_none() && frac_sep.is_none() {
         return s.to_string();
     }
@@ -11778,7 +11822,7 @@ fn apply_grouping(s: &str, int_sep: Option<char>, frac_sep: Option<char>) -> Str
             Some(sep) => {
                 let mut g = String::new();
                 for (i, c) in t.chars().enumerate() {
-                    if i > 0 && (t.len() - i) % 3 == 0 {
+                    if i > 0 && (t.len() - i) % int_group_width == 0 {
                         g.push(sep);
                     }
                     g.push(c);
@@ -11842,15 +11886,25 @@ fn apply_padding(
             )
         }
         '=' => {
-            // Insert padding after sign (if any) but before digits
+            // Insert padding after sign (if any) and after any alternate-form
+            // prefix (0x, 0X, 0b, 0o) but before digits.
             if zero_mode {
-                // For zero-pad mode, just left-pad
                 format!("{}{}", pad_str, s)
             } else {
-                // For '=' alignment with custom fill, insert after any leading sign
-                if s.starts_with('+') || s.starts_with('-') || s.starts_with(' ') {
-                    let (sign_byte, rest) = s.split_at(1);
-                    format!("{}{}{}", sign_byte, pad_str, rest)
+                let mut skip = 0;
+                let bytes = s.as_bytes();
+                if !bytes.is_empty() && matches!(bytes[0], b'+' | b'-' | b' ') {
+                    skip = 1;
+                }
+                if skip < bytes.len() && bytes[skip] == b'0'
+                    && skip + 1 < bytes.len()
+                    && matches!(bytes[skip + 1], b'x' | b'X' | b'b' | b'o')
+                {
+                    skip += 2;
+                }
+                if skip > 0 {
+                    let (prefix, rest) = s.split_at(skip);
+                    format!("{}{}{}", prefix, pad_str, rest)
                 } else {
                     format!("{}{}", pad_str, s)
                 }
