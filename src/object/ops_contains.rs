@@ -189,6 +189,14 @@ pub fn contains_op(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<bool> {
             drop(container);
             d.contains(b)
         }
+        PyObject::Globals(g) => {
+            let g = g.clone();
+            drop(container);
+            match &*b.borrow() {
+                PyObject::Str(s) => Ok(g.borrow().contains_key(&interner::intern(s.as_str()))),
+                _ => Ok(false),
+            }
+        }
         PyObject::Set(items) => {
             let items = items.clone();
             drop(container);

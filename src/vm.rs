@@ -2479,19 +2479,30 @@ impl VirtualMachine {
         };
 
         let is_package = path.ends_with("__init__.py");
-        let mut globals_map: HashMap<StrId, PyObjectRef> = HashMap::from([
-            (interner::intern("__name__"), py_str(name)),
-            (interner::intern("__file__"), py_str(path)),
-            (
-                interner::intern("__builtins__"),
+        // `__builtins__` must be the SAME shared `builtins` module that
+        // `import builtins` returns and that `LOAD_GLOBAL` consults — not a
+        // fresh frozen copy. Otherwise mutations like `builtins.len = f`
+        // (test_dynamic::test_modify_builtins) are invisible to code in the
+        // imported module, since its `LOAD_GLOBAL` would read a different
+        // object. The shared module lives in `self.modules["builtins"]`
+        // (populated at VM construction).
+        let builtins_module = self
+            .modules
+            .get("builtins")
+            .cloned()
+            .unwrap_or_else(|| {
                 create_module(
                     "builtins",
                     self.builtins
                         .iter()
                         .map(|(k, v)| (interner::lookup_str(*k).to_string(), v.clone()))
                         .collect(),
-                ),
-            ),
+                )
+            });
+        let mut globals_map: HashMap<StrId, PyObjectRef> = HashMap::from([
+            (interner::intern("__name__"), py_str(name)),
+            (interner::intern("__file__"), py_str(path)),
+            (interner::intern("__builtins__"), builtins_module),
         ]);
         if is_package {
             if let Some(pkg_dir) = std::path::Path::new(path).parent() {
@@ -4444,6 +4455,17 @@ impl VirtualMachine {
                         }
                         PyObject::Dict(ref pydict) => {
                             let keys: Vec<PyObjectRef> = pydict.keys();
+                            self.frames[fi].push(PyObjectRef::new(PyObject::ListIter {
+                                list: keys,
+                                index: 0,
+                            }));
+                        }
+                        PyObject::Globals(g) => {
+                            let keys: Vec<PyObjectRef> = g
+                                .borrow()
+                                .keys()
+                                .map(|k| py_str(crate::interner::lookup_str(*k)))
+                                .collect();
                             self.frames[fi].push(PyObjectRef::new(PyObject::ListIter {
                                 list: keys,
                                 index: 0,
@@ -8229,30 +8251,33 @@ impl VirtualMachine {
                     .frames
                     .last()
                     .ok_or_else(|| PyError::runtime_error("no frame"))?;
-                let mut d = crate::object::PyDict::new();
                 if is_globals {
-                    for (k, v) in frame.globals.borrow().iter() {
-                        d.set(py_str(interner::lookup_str(*k)), v.clone())?;
-                    }
-                } else {
-                    // Merge fast-locals (function-scope named params/vars,
-                    // keyed by position against `code.varnames`) with the
-                    // name-keyed `locals` map (module/class-scope variables,
-                    // which never go through STORE_FAST at all) — a real
-                    // snapshot needs both; the pre-fix version only ever
-                    // read the latter, so a function's own locals() always
-                    // came back empty regardless of the frame lookup bug.
-                    for (i, slot) in frame.fast_locals.iter().enumerate() {
-                        if let Some(v) = slot {
-                            if let Some(&name) = frame.code.varnames.get(i) {
-                                d.set(py_str(crate::interner::lookup_str(name)), v.clone())?;
-                            }
+                    // Return a LIVE view of the frame's globals (same backing
+                    // `Rc<RefCell<HashMap>>` that LOAD_GLOBAL reads) so
+                    // mutations like `globals()['len'] = f` are visible to
+                    // name resolution — matching real CPython, where
+                    // `globals()` IS the module dict, not a copy
+                    // (test_dynamic::test_globals_shadow_builtins).
+                    return Ok(PyObjectRef::new(PyObject::Globals(frame.globals.clone())));
+                }
+                let mut d = crate::object::PyDict::new();
+                // Merge fast-locals (function-scope named params/vars,
+                // keyed by position against `code.varnames`) with the
+                // name-keyed `locals` map (module/class-scope variables,
+                // which never go through STORE_FAST at all) — a real
+                // snapshot needs both; the pre-fix version only ever
+                // read the latter, so a function's own locals() always
+                // came back empty regardless of the frame lookup bug.
+                for (i, slot) in frame.fast_locals.iter().enumerate() {
+                    if let Some(v) = slot {
+                        if let Some(&name) = frame.code.varnames.get(i) {
+                            d.set(py_str(crate::interner::lookup_str(name)), v.clone())?;
                         }
                     }
-                    for (k, v) in frame.locals.iter() {
-                        let name = crate::interner::lookup(k);
-                        d.set(py_str(&name), v.clone())?;
-                    }
+                }
+                for (k, v) in frame.locals.iter() {
+                    let name = crate::interner::lookup(k);
+                    d.set(py_str(&name), v.clone())?;
                 }
                 return Ok(PyObjectRef::new(PyObject::Dict(Box::new(d))));
             }

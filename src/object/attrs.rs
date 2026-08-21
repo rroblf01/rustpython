@@ -6347,6 +6347,257 @@ impl PyObject {
                     ))),
                 }
             }
+            // dict-protocol methods on the live `globals()` view — same
+            // surface as `dict` below, but operating on the backing
+            // `Rc<RefCell<HashMap<StrId, PyObjectRef>>>` so mutators
+            // (`update`/`setdefault`/`pop`/`clear`) stay visible to
+            // LOAD_GLOBAL.
+            PyObject::Globals(_) => {
+                fn globals_key<'a>(args: &'a [PyObjectRef], i: usize) -> Result<crate::interner::StrId, PyError> {
+                    match &*args[i].borrow() {
+                        PyObject::Str(s) => Ok(crate::interner::intern(s.as_str())),
+                        _ => Err(PyError::key_error(args[i].str())),
+                    }
+                }
+                match name {
+                    "keys" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "keys".to_string(),
+                        func: |args| {
+                            if let PyObject::Globals(g) = &*args[0].borrow() {
+                                let keys: Vec<PyObjectRef> = g
+                                    .borrow()
+                                    .keys()
+                                    .map(|k| py_str(crate::interner::lookup_str(*k)))
+                                    .collect();
+                                Ok(py_list(keys))
+                            } else {
+                                Err(PyError::runtime_error("keys on non-dict"))
+                            }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "values" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "values".to_string(),
+                        func: |args| {
+                            if let PyObject::Globals(g) = &*args[0].borrow() {
+                                let values: Vec<PyObjectRef> =
+                                    g.borrow().values().cloned().collect();
+                                Ok(py_list(values))
+                            } else {
+                                Err(PyError::runtime_error("values on non-dict"))
+                            }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "items" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "items".to_string(),
+                        func: |args| {
+                            if let PyObject::Globals(g) = &*args[0].borrow() {
+                                let items: Vec<PyObjectRef> = g
+                                    .borrow()
+                                    .iter()
+                                    .map(|(k, v)| {
+                                        py_tuple(vec![
+                                            py_str(crate::interner::lookup_str(*k)),
+                                            v.clone(),
+                                        ])
+                                    })
+                                    .collect();
+                                Ok(py_list(items))
+                            } else {
+                                Err(PyError::runtime_error("items on non-dict"))
+                            }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "get" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "get".to_string(),
+                        func: |args| {
+                            if args.len() < 2 {
+                                return Err(PyError::type_error("get() takes at least 1 argument"));
+                            }
+                            if let PyObject::Globals(g) = &*args[0].borrow() {
+                                let key = globals_key(args, 1)?;
+                                Ok(g.borrow().get(&key).cloned().unwrap_or_else(|| {
+                                    if args.len() > 2 {
+                                        args[2].clone()
+                                    } else {
+                                        py_none()
+                                    }
+                                }))
+                            } else {
+                                Err(PyError::runtime_error("get on non-dict"))
+                            }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "setdefault" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "setdefault".to_string(),
+                        func: |args| {
+                            if args.len() < 2 {
+                                return Err(PyError::type_error(
+                                    "setdefault() takes at least 1 argument",
+                                ));
+                            }
+                            let default = if args.len() > 2 {
+                                args[2].clone()
+                            } else {
+                                py_none()
+                            };
+                            if let PyObject::Globals(g) = &*args[0].borrow() {
+                                let key = globals_key(args, 1)?;
+                                let mut map = g.borrow_mut();
+                                if let Some(v) = map.get(&key) {
+                                    return Ok(v.clone());
+                                }
+                                map.insert(key, default.clone());
+                                Ok(default)
+                            } else {
+                                Err(PyError::runtime_error("setdefault on non-dict"))
+                            }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "pop" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "pop".to_string(),
+                        func: |args| {
+                            if args.len() < 2 {
+                                return Err(PyError::type_error("pop() takes at least 1 argument"));
+                            }
+                            if let PyObject::Globals(g) = &*args[0].borrow() {
+                                let key = globals_key(args, 1)?;
+                                match g.borrow_mut().remove(&key) {
+                                    Some(v) => Ok(v),
+                                    None => {
+                                        if args.len() > 2 {
+                                            Ok(args[2].clone())
+                                        } else {
+                                            Err(PyError::key_error(args[1].str()))
+                                        }
+                                    }
+                                }
+                            } else {
+                                Err(PyError::runtime_error("pop on non-dict"))
+                            }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "popitem" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "popitem".to_string(),
+                        func: |args| {
+                            if args.len() > 1 {
+                                return Err(PyError::type_error(format!(
+                                    "dict.popitem() takes no arguments ({} given)",
+                                    args.len() - 1
+                                )));
+                            }
+                            if let PyObject::Globals(g) = &*args[0].borrow() {
+                                let mut map = g.borrow_mut();
+                                let first = map.iter().next().map(|(k, v)| {
+                                    (
+                                        *k,
+                                        py_str(crate::interner::lookup_str(*k)),
+                                        v.clone(),
+                                    )
+                                });
+                                if let Some((key, kobj, v)) = first {
+                                    map.remove(&key);
+                                    Ok(py_tuple(vec![kobj, v]))
+                                } else {
+                                    Err(PyError::key_error(
+                                        "popitem(): dictionary is empty".to_string(),
+                                    ))
+                                }
+                            } else {
+                                Err(PyError::runtime_error("popitem on non-dict"))
+                            }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "clear" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "clear".to_string(),
+                        func: |args| {
+                            if let PyObject::Globals(g) = &*args[0].borrow() {
+                                g.borrow_mut().clear();
+                                Ok(py_none())
+                            } else {
+                                Err(PyError::runtime_error("clear on non-dict"))
+                            }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "copy" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "copy".to_string(),
+                        func: |args| {
+                            if let PyObject::Globals(g) = &*args[0].borrow() {
+                                let mut d = crate::object::PyDict::new();
+                                for (k, v) in g.borrow().iter() {
+                                    d.set(py_str(crate::interner::lookup_str(*k)), v.clone())?;
+                                }
+                                Ok(PyObjectRef::new(PyObject::Dict(Box::new(d))))
+                            } else {
+                                Err(PyError::runtime_error("copy on non-dict"))
+                            }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "update" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "update".to_string(),
+                        func: |args| {
+                            if args.len() < 2 {
+                                return Err(PyError::type_error(
+                                    "update() takes at least 1 argument",
+                                ));
+                            }
+                            if let PyObject::Globals(g) = &*args[0].borrow() {
+                                let src = args[1].borrow();
+                                match &*src {
+                                    PyObject::Dict(d) => {
+                                        let mut map = g.borrow_mut();
+                                        for (k, v) in d.items() {
+                                            if let PyObject::Str(s) = &*k.borrow() {
+                                                map.insert(
+                                                    crate::interner::intern(s.as_str()),
+                                                    v,
+                                                );
+                                            }
+                                        }
+                                        Ok(py_none())
+                                    }
+                                    PyObject::Globals(other) => {
+                                        let pairs: Vec<(String, PyObjectRef)> = other
+                                            .borrow()
+                                            .iter()
+                                            .map(|(k, v)| {
+                                                (
+                                                    crate::interner::lookup_str(*k).to_string(),
+                                                    v.clone(),
+                                                )
+                                            })
+                                            .collect();
+                                        drop(src);
+                                        let mut map = g.borrow_mut();
+                                        for (k, v) in pairs {
+                                            map.insert(crate::interner::intern(&k), v);
+                                        }
+                                        Ok(py_none())
+                                    }
+                                    _ => Err(PyError::type_error(
+                                        "update() argument must be a dict".to_string(),
+                                    )),
+                                }
+                            } else {
+                                Err(PyError::runtime_error("update on non-dict"))
+                            }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    _ => Err(PyError::attribute_error(format!(
+                        "'dict' object has no attribute '{}'",
+                        name
+                    ))),
+                }
+            }
             PyObject::Dict(_d) => {
                 match name {
                     "keys" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {

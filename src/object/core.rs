@@ -895,6 +895,19 @@ impl PyObjectRef {
                     .collect();
                 format!("{{{}}}", parts.join(", "))
             }
+            PyObject::Globals(g) => {
+                let entries: Vec<(PyObjectRef, PyObjectRef)> = g
+                    .borrow()
+                    .iter()
+                    .map(|(k, v)| (py_str(interner::lookup_str(*k)), v.clone()))
+                    .collect();
+                drop(obj);
+                let parts: Vec<String> = entries
+                    .iter()
+                    .map(|(k, v)| format!("{}: {}", k.repr(), v.repr()))
+                    .collect();
+                format!("{{{}}}", parts.join(", "))
+            }
             PyObject::Set(s) => {
                 let items = s.to_vec();
                 drop(obj);

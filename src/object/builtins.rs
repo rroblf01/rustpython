@@ -164,6 +164,7 @@ pub fn builtin_len(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         PyObject::Deque { data, .. } => Ok(py_int(data.len())),
         PyObject::Tuple(v) => Ok(py_int(v.len())),
         PyObject::Dict(d) => Ok(py_int(d.len())),
+        PyObject::Globals(g) => Ok(py_int(g.borrow().len())),
         PyObject::Set(s) => Ok(py_int(s.len())),
         PyObject::FrozenSet(s) => Ok(py_int(s.len())),
         PyObject::Range { start, stop, step } => {
@@ -2987,12 +2988,10 @@ pub fn builtin_globals(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             .frames
             .last()
             .ok_or_else(|| PyError::runtime_error("no frame"))?;
-        let globals = frame.globals.borrow();
-        let mut d = crate::object::PyDict::new();
-        for (k, v) in globals.iter() {
-            d.set(py_str(interner::lookup_str(*k)), v.clone())?;
-        }
-        Ok(PyObjectRef::new(PyObject::Dict(Box::new(d))))
+        // Return a LIVE view of the frame's globals so mutations
+        // (`globals()['len'] = f`, test_dynamic::test_globals_shadow_builtins)
+        // are visible to `LOAD_GLOBAL`, which reads the same backing map.
+        Ok(PyObjectRef::new(PyObject::Globals(frame.globals.clone())))
     })?
 }
 
@@ -4087,6 +4086,17 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             list: d.keys(),
             index: 0,
         })),
+        PyObject::Globals(g) => {
+            let keys: Vec<PyObjectRef> = g
+                .borrow()
+                .keys()
+                .map(|k| py_str(interner::lookup_str(*k)))
+                .collect();
+            Ok(PyObjectRef::new(PyObject::ListIter {
+                list: keys,
+                index: 0,
+            }))
+        }
         // `iter(f)`/`for line in f:` — see the matching `GET_ITER` opcode
         // handling in `vm.rs` for the full story; this is the SEPARATE
         // free-function path (`iter(f)` called explicitly, or anything

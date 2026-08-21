@@ -52,6 +52,12 @@ pub enum PyObject {
     },
     Tuple(Vec<PyObjectRef>),
     Dict(Box<PyDict>),
+    /// Live view of a frame's `globals` (`Rc<RefCell<HashMap<StrId, ..>>>`)
+    /// returned by the `globals()` builtin. Mutations go straight to the
+    /// backing globals map, so `globals()['len'] = f` is visible to
+    /// `LOAD_GLOBAL` (test_dynamic::test_globals_shadow_builtins) — unlike a
+    /// copied `PyDict`.
+    Globals(Rc<RefCell<HashMap<StrId, PyObjectRef>>>),
     Set(PySet),
     FrozenSet(PySet),
     Range {
@@ -438,6 +444,7 @@ impl PyObject {
             PyObject::Deque { .. } => "deque",
             PyObject::Tuple(_) => "tuple",
             PyObject::Dict(_) => "dict",
+            PyObject::Globals(_) => "dict",
             PyObject::Set(_) => "set",
             PyObject::FrozenSet(_) => "frozenset",
             PyObject::Range { .. } => "range",
@@ -569,6 +576,18 @@ impl PyObject {
                     .map(|(k, v)| format!("{}: {}", k.repr(), v.repr()))
                     .collect();
                 format!("{{{}}}", items.join(", "))
+            }
+            PyObject::Globals(g) => {
+                let entries: Vec<(PyObjectRef, PyObjectRef)> = g
+                    .borrow()
+                    .iter()
+                    .map(|(k, v)| (py_str(interner::lookup_str(*k)), v.clone()))
+                    .collect();
+                let parts: Vec<String> = entries
+                    .iter()
+                    .map(|(k, v)| format!("{}: {}", k.repr(), v.repr()))
+                    .collect();
+                format!("{{{}}}", parts.join(", "))
             }
             PyObject::Set(items) => {
                 let vec = items.to_vec();

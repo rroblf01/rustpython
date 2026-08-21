@@ -406,6 +406,16 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
             };
         }
     }
+    if let PyObject::Globals(g) = &*obj.borrow() {
+        let key = match &*index.borrow() {
+            PyObject::Str(s) => interner::intern(s.as_str()),
+            _ => return Err(PyError::key_error(index.str())),
+        };
+        return match g.borrow().get(&key).cloned() {
+            Some(val) => Ok(val),
+            None => Err(PyError::key_error(index.str())),
+        };
+    }
     let o = obj.borrow();
     match &*o {
         PyObject::List(items) => {
@@ -899,6 +909,18 @@ pub fn py_setitem(obj: &PyObjectRef, index: &PyObjectRef, value: PyObjectRef) ->
     if matches!(&*obj.borrow(), PyObject::Dict(_)) {
         return pydict_safe_set(obj, index.clone(), value);
     }
+    if let PyObject::Globals(g) = &*obj.borrow() {
+        let key = match &*index.borrow() {
+            PyObject::Str(s) => interner::intern(s.as_str()),
+            _ => {
+                return Err(PyError::type_error(
+                    "globals keys must be strings".to_string(),
+                ))
+            }
+        };
+        g.borrow_mut().insert(key, value);
+        return Ok(());
+    }
 
     // Non-mutable (inline/Imm) objects cannot be assigned into — raise
     // TypeError before borrow_mut would panic on them.
@@ -985,6 +1007,14 @@ pub fn py_delitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<()> {
             d.remove_with_hash(index, h)?;
             return Ok(());
         }
+    }
+    if let PyObject::Globals(g) = &*obj.borrow() {
+        let key = match &*index.borrow() {
+            PyObject::Str(s) => interner::intern(s.as_str()),
+            _ => return Err(PyError::key_error(index.str())),
+        };
+        g.borrow_mut().remove(&key);
+        return Ok(());
     }
     // Non-mutable (inline/Imm) objects cannot be deleted from — raise
     // TypeError before borrow_mut would panic on them.
