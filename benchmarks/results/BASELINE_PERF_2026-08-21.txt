@@ -1,0 +1,10 @@
+# Baseline pre-optimización — 2026-08-21T14:26:53+02:00
+# rustpython: 7fd4eb1 (release, jit default)
+
+loop-arith     rust=   278.2ms cpython=    45.0ms ratio=  6.2x
+fn-calls       rust=   220.3ms cpython=    19.1ms ratio= 11.5x
+attr+method    rust=   398.3ms cpython=    18.8ms ratio= 21.2x
+dict-ops       rust=   130.2ms cpython=    22.9ms ratio=  5.7x
+list-append    rust=   144.8ms cpython=     8.4ms ratio= 17.2x
+str-build      rust=    72.9ms cpython=     1.5ms ratio= 48.6x
+bigint-add     rust=    49.3ms cpython=     9.0ms ratio=  5.5x

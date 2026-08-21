@@ -14,9 +14,12 @@
 # PASS/FAIL table and a one-line reason for each failure.
 set -u
 
-JOBS="${JOBS:-4}"
+# Default to ALL cores — the sweep is embarrassingly parallel (one process
+# per test) and was leaving 2/3 of the machine idle at the old JOBS=4.
+JOBS="${JOBS:-$(nproc)}"
 TOUT="${TOUT:-150}"
 MODE="${MODE:-release}"
+SHOW_TIME="${SHOW_TIME:-0}"
 
 ARGS=()
 while [ $# -gt 0 ]; do
@@ -24,6 +27,7 @@ while [ $# -gt 0 ]; do
         --jobs) JOBS="$2"; shift 2 ;;
         --timeout) TOUT="$2"; shift 2 ;;
         --debug) MODE="debug"; shift ;;
+        --time) SHOW_TIME=1; shift ;;
         --all) ARGS=(tests/cpython/test_*.py); shift ;;
         *) ARGS+=("$1"); shift ;;
     esac
@@ -60,10 +64,12 @@ mkdir -p /tmp/rustpython-test-logs
 
 declare -a PIDS=()
 declare -a NAMES=()
+declare -a T0MS=()
 run_one() {
     local f="$1"
     local base
     base="$(basename "$f" .py)"
+    T0MS+=("$(date +%s%3N)")
     timeout "$TOUT" "$BIN" "$f" > "/tmp/rustpython-test-logs/$base.log" 2>&1 &
     PIDS+=("$!")
     NAMES+=("$base")
@@ -86,18 +92,24 @@ wait_batch() {
     local i=0
     for pid in "${PIDS[@]}"; do
         local base="${NAMES[$i]}"
+        local suffix=""
+        if [ "$SHOW_TIME" = 1 ]; then
+            local elapsed=$(( ($(date +%s%3N) - ${T0MS[$i]}) ))
+            suffix=" [$((elapsed / 1000)).$(( (elapsed % 1000) / 100 ))s]"
+        fi
         if wait "$pid"; then
-            echo "PASS $base"
+            echo "PASS $base$suffix"
         else
             local reason
             reason="$(grep -vE '^JIT:' "/tmp/rustpython-test-logs/$base.log" | tail -1 | cut -c1-80)"
-            echo "FAIL $base :: $reason"
+            echo "FAIL $base :: $reason$suffix"
         fi
         i=$((i + 1))
     done
 }
 
 remaining=("${ARGS[@]}")
+SWEEP_T0=${SECONDS}
 while [ ${#remaining[@]} -gt 0 ]; do
     launch_batch "${remaining[@]}"
     total=${#PIDS[@]}
@@ -105,3 +117,6 @@ while [ ${#remaining[@]} -gt 0 ]; do
     remaining=("${remaining[@]:$total}")
     wait_batch
 done
+if [ "$SHOW_TIME" = 1 ] || [ "${#ARGS[@]}" -gt 5 ]; then
+    echo "TOTAL_WALL $(( SECONDS - SWEEP_T0 ))s jobs=$JOBS tests=${#ARGS[@]}"
+fi

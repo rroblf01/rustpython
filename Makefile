@@ -29,7 +29,7 @@ YELLOW := \033[33m
 CYAN   := \033[36m
 RESET  := \033[0m
 
-.PHONY: all build release static test test-rust test-python test-cpython
+.PHONY: all build release dev static test test-rust test-python test-cpython
 .PHONY: lint lint-clippy lint-ruff lint-typos lint-fmt
 .PHONY: check clean clean-logs clean-pycache run bench fmt docs install-tools
 .PHONY: help
@@ -48,6 +48,16 @@ release:
 	cargo build --release
 	@echo -e "$(GREEN)✔  $(RUSTPYTHON_REL)$(RESET)"
 	@echo -e "    Binary size: $$(stat --printf='%s' $(RUSTPYTHON_REL) 2>/dev/null | numfmt --to=iec || echo '?')"
+
+# Fast inner-loop dev build: no LTO, opt-level=1, 16 codegen units.
+# Much faster incremental builds than `make release` (~2-4x); the binary
+# is somewhat slower at runtime, so use it for iteration, not benchmarks.
+RUSTPYTHON_DEV := target/release-lite/rustpython
+
+dev:
+	@echo -e "$(CYAN)==> Building (release-lite: fast dev iteration)...$(RESET)"
+	cargo build --profile release-lite
+	@echo -e "$(GREEN)✔  $(RUSTPYTHON_DEV)$(RESET)"
 
 # ── Static binary (Docker FROM scratch) ───────────
 static:
