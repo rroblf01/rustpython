@@ -6370,6 +6370,9 @@ impl PyObject {
                                     .map(|k| py_str(crate::interner::lookup_str(*k)))
                                     .collect();
                                 Ok(py_list(keys))
+                            } else if let PyObject::Dict(d) = &*args[0].borrow() {
+                                let keys: Vec<PyObjectRef> = d.keys();
+                                Ok(py_list(keys))
                             } else {
                                 Err(PyError::runtime_error("keys on non-dict"))
                             }
@@ -6383,6 +6386,8 @@ impl PyObject {
                                 let values: Vec<PyObjectRef> =
                                     g.borrow().values().cloned().collect();
                                 Ok(py_list(values))
+                            } else if let PyObject::Dict(d) = &*args[0].borrow() {
+                                Ok(py_list(d.values()))
                             } else {
                                 Err(PyError::runtime_error("values on non-dict"))
                             }
@@ -6404,6 +6409,13 @@ impl PyObject {
                                     })
                                     .collect();
                                 Ok(py_list(items))
+                            } else if let PyObject::Dict(d) = &*args[0].borrow() {
+                                let items: Vec<PyObjectRef> = d
+                                    .items()
+                                    .iter()
+                                    .map(|(k, v)| py_tuple(vec![k.clone(), v.clone()]))
+                                    .collect();
+                                Ok(py_list(items))
                             } else {
                                 Err(PyError::runtime_error("items on non-dict"))
                             }
@@ -6419,6 +6431,14 @@ impl PyObject {
                             if let PyObject::Globals(g) = &*args[0].borrow() {
                                 let key = globals_key(args, 1)?;
                                 Ok(g.borrow().get(&key).cloned().unwrap_or_else(|| {
+                                    if args.len() > 2 {
+                                        args[2].clone()
+                                    } else {
+                                        py_none()
+                                    }
+                                }))
+                            } else if let PyObject::Dict(d) = &*args[0].borrow() {
+                                Ok(d.get(&args[1])?.unwrap_or_else(|| {
                                     if args.len() > 2 {
                                         args[2].clone()
                                     } else {
@@ -6452,6 +6472,19 @@ impl PyObject {
                                 }
                                 map.insert(key, default.clone());
                                 Ok(default)
+                            } else if matches!(&*args[0].borrow(), PyObject::Dict(_)) {
+                                let mut b = args[0].borrow_mut();
+                                if let PyObject::Dict(d) = &mut *b {
+                                    match d.get(&args[1])? {
+                                        Some(v) => Ok(v),
+                                        None => {
+                                            d.set(args[1].clone(), default.clone())?;
+                                            Ok(default)
+                                        }
+                                    }
+                                } else {
+                                    unreachable!()
+                                }
                             } else {
                                 Err(PyError::runtime_error("setdefault on non-dict"))
                             }
@@ -6475,6 +6508,17 @@ impl PyObject {
                                             Err(PyError::key_error(args[1].str()))
                                         }
                                     }
+                                }
+                            } else if matches!(&*args[0].borrow(), PyObject::Dict(_)) {
+                                let mut b = args[0].borrow_mut();
+                                if let PyObject::Dict(d) = &mut *b {
+                                    match d.remove(&args[1]) {
+                                        Ok(val) => Ok(val),
+                                        Err(_) if args.len() > 2 => Ok(args[2].clone()),
+                                        Err(e) => Err(e),
+                                    }
+                                } else {
+                                    unreachable!()
                                 }
                             } else {
                                 Err(PyError::runtime_error("pop on non-dict"))
@@ -6508,6 +6552,21 @@ impl PyObject {
                                         "popitem(): dictionary is empty".to_string(),
                                     ))
                                 }
+                            } else if matches!(&*args[0].borrow(), PyObject::Dict(_)) {
+                                let mut b = args[0].borrow_mut();
+                                if let PyObject::Dict(d) = &mut *b {
+                                    let items = d.items();
+                                    if items.is_empty() {
+                                        return Err(PyError::key_error(
+                                            "popitem(): dictionary is empty".to_string(),
+                                        ));
+                                    }
+                                    let (k, v) = items.into_iter().last().unwrap();
+                                    d.remove(&k)?;
+                                    Ok(py_tuple(vec![k, v]))
+                                } else {
+                                    unreachable!()
+                                }
                             } else {
                                 Err(PyError::runtime_error("popitem on non-dict"))
                             }
@@ -6519,6 +6578,12 @@ impl PyObject {
                         func: |args| {
                             if let PyObject::Globals(g) = &*args[0].borrow() {
                                 g.borrow_mut().clear();
+                                Ok(py_none())
+                            } else if matches!(&*args[0].borrow(), PyObject::Dict(_)) {
+                                let mut b = args[0].borrow_mut();
+                                if let PyObject::Dict(d) = &mut *b {
+                                    d.clear();
+                                }
                                 Ok(py_none())
                             } else {
                                 Err(PyError::runtime_error("clear on non-dict"))
@@ -6535,6 +6600,8 @@ impl PyObject {
                                     d.set(py_str(crate::interner::lookup_str(*k)), v.clone())?;
                                 }
                                 Ok(PyObjectRef::new(PyObject::Dict(Box::new(d))))
+                            } else if let PyObject::Dict(src) = &*args[0].borrow() {
+                                Ok(PyObjectRef::new(PyObject::Dict(Box::new((**src).clone()))))
                             } else {
                                 Err(PyError::runtime_error("copy on non-dict"))
                             }
@@ -6586,6 +6653,41 @@ impl PyObject {
                                         "update() argument must be a dict".to_string(),
                                     )),
                                 }
+                            } else if matches!(&*args[0].borrow(), PyObject::Dict(_)) {
+                                let mut db = args[0].borrow_mut();
+                                let dst = match &mut *db {
+                                    PyObject::Dict(d) => d,
+                                    _ => unreachable!(),
+                                };
+                                let src = args[1].borrow();
+                                match &*src {
+                                    PyObject::Dict(d) => {
+                                        for (k, v) in d.items() {
+                                            dst.set(k.clone(), v)?;
+                                        }
+                                        Ok(py_none())
+                                    }
+                                    PyObject::Globals(other) => {
+                                        let pairs: Vec<(PyObjectRef, PyObjectRef)> = other
+                                            .borrow()
+                                            .iter()
+                                            .map(|(k, v)| {
+                                                (
+                                                    py_str(crate::interner::lookup_str(*k)),
+                                                    v.clone(),
+                                                )
+                                            })
+                                            .collect();
+                                        drop(src);
+                                        for (k, v) in pairs {
+                                            dst.set(k, v)?;
+                                        }
+                                        Ok(py_none())
+                                    }
+                                    _ => Err(PyError::type_error(
+                                        "update() argument must be a dict".to_string(),
+                                    )),
+                                }
                             } else {
                                 Err(PyError::runtime_error("update on non-dict"))
                             }
@@ -6606,6 +6708,13 @@ impl PyObject {
                             let d = args[0].borrow();
                             if let PyObject::Dict(dict) = &*d {
                                 Ok(py_list(dict.keys()))
+                            } else if let PyObject::Globals(g) = &*d {
+                                let keys: Vec<PyObjectRef> = g
+                                    .borrow()
+                                    .keys()
+                                    .map(|k| py_str(crate::interner::lookup_str(*k)))
+                                    .collect();
+                                Ok(py_list(keys))
                             } else {
                                 Err(PyError::runtime_error("keys on non-dict"))
                             }
@@ -6618,6 +6727,10 @@ impl PyObject {
                             let d = args[0].borrow();
                             if let PyObject::Dict(dict) = &*d {
                                 Ok(py_list(dict.values()))
+                            } else if let PyObject::Globals(g) = &*d {
+                                let values: Vec<PyObjectRef> =
+                                    g.borrow().values().cloned().collect();
+                                Ok(py_list(values))
                             } else {
                                 Err(PyError::runtime_error("values on non-dict"))
                             }
@@ -6635,6 +6748,18 @@ impl PyObject {
                                     .map(|(k, v)| py_tuple(vec![k.clone(), v.clone()]))
                                     .collect();
                                 Ok(py_list(items))
+                            } else if let PyObject::Globals(g) = &*d {
+                                let items: Vec<PyObjectRef> = g
+                                    .borrow()
+                                    .iter()
+                                    .map(|(k, v)| {
+                                        py_tuple(vec![
+                                            py_str(crate::interner::lookup_str(*k)),
+                                            v.clone(),
+                                        ])
+                                    })
+                                    .collect();
+                                Ok(py_list(items))
                             } else {
                                 Err(PyError::runtime_error("items on non-dict"))
                             }
@@ -6650,6 +6775,18 @@ impl PyObject {
                             let dict = &*args[0].borrow();
                             if let PyObject::Dict(d) = dict {
                                 Ok(d.get(&args[1])?.unwrap_or_else(|| {
+                                    if args.len() > 2 {
+                                        args[2].clone()
+                                    } else {
+                                        py_none()
+                                    }
+                                }))
+                            } else if let PyObject::Globals(g) = dict {
+                                let key = match &*args[1].borrow() {
+                                    PyObject::Str(s) => crate::interner::intern(s.as_str()),
+                                    _ => return Ok(py_none()),
+                                };
+                                Ok(g.borrow().get(&key).cloned().unwrap_or_else(|| {
                                     if args.len() > 2 {
                                         args[2].clone()
                                     } else {
