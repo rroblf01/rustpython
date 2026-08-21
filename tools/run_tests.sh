@@ -96,11 +96,11 @@ reap_finished() {
         if [ -f "$log" ] && grep -q "^END_EPOCH " "$log" 2>/dev/null; then
             wait "$pid" 2>/dev/null
             local rc
-            rc="$(grep -oE '^RC=-?[0-9]+' "$log" | head -1 | cut -d= -f2)"
+            rc="$(grep -oE '^RC=-?[0-9]+' "$log" 2>/dev/null | head -1 | cut -d= -f2)"
             local suffix=""
             if [ "$SHOW_TIME" = 1 ]; then
                 local end
-                end="$(grep -oE 'END_EPOCH [0-9]+' "$log" | awk '{print $2}')"
+                end="$(grep -oE 'END_EPOCH [0-9]+' "$log" 2>/dev/null | awk '{print $2}')"
                 if [ -n "$end" ]; then
                     local el=$(( end - ${T0MS[$i]} ))
                     suffix=" [$((el / 1000)).$(( (el % 1000) / 100 ))s]"
@@ -110,7 +110,7 @@ reap_finished() {
                 echo "PASS $base$suffix"
             else
                 local reason
-                reason="$(grep -vE "^JIT:" "$log" | grep -v "^RC=" | grep -v "^END_EPOCH" | tail -1 | cut -c1-80)"
+                reason="$(grep -vE "^JIT:" "$log" 2>/dev/null | grep -v "^RC=" | grep -v "^END_EPOCH" | tail -1 | cut -c1-80)"
                 echo "FAIL $base :: $reason$suffix"
             fi
         else
