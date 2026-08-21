@@ -61,6 +61,8 @@ pub enum Token {
     Dedent,
     Newline,
     EndOfFile,
+    /// Lexer-detected error (e.g. unindent does not match) — carries the message.
+    LexerError(String),
 
     // Operators
     Plus,
@@ -181,6 +183,8 @@ pub struct Lexer {
     fstring_parts: Vec<(String, String, String, u8)>, // (literal, expr_text, format_spec, conversion)
     fstring_part_idx: usize,
     fstring_expr_pending: Vec<Token>,
+    /// Lexer-detected error pending emission (e.g. unindent does not match).
+    pending_error: Option<String>,
 }
 
 impl Lexer {
@@ -199,6 +203,7 @@ impl Lexer {
             fstring_parts: Vec::new(),
             fstring_part_idx: 0,
             fstring_expr_pending: Vec::new(),
+            pending_error: None,
         }
     }
 
@@ -1064,6 +1069,10 @@ impl Lexer {
     }
 
     pub fn next_token(&mut self) -> Token {
+        // Emit any lexer-detected error (e.g. unindent does not match).
+        if let Some(err) = self.pending_error.take() {
+            return Token::LexerError(err);
+        }
         // If we have pending f-string expression tokens, return them
         if let Some(tok) = self.fstring_expr_pending.pop() {
             return tok;
@@ -1124,6 +1133,12 @@ impl Lexer {
         if self.at_line_start && self.paren_level == 0 {
             self.handle_indent();
             self.at_line_start = false;
+            // A lexer-detected indentation error (e.g. unindent does not
+            // match) must be surfaced immediately, before the line's first
+            // token is consumed.
+            if let Some(err) = self.pending_error.take() {
+                return Token::LexerError(err);
+            }
             if let Some(tok) = self.pending.pop() {
                 return tok;
             }
@@ -1546,17 +1561,27 @@ impl Lexer {
             self.indent_stack.push(indent);
             self.pending.push(Token::Indent);
         } else if indent < current {
-            let mut dedents = Vec::new();
-            while let Some(&level) = self.indent_stack.last() {
-                if level == indent {
-                    break;
+            // `indent` must match some level already on the stack; otherwise
+            // it's an "unindent does not match any outer indentation level"
+            // error (e.g. dedenting to a column that was never an indent).
+            let matches = self.indent_stack.iter().any(|&level| level == indent);
+            if !matches {
+                self.pending_error = Some(
+                    "unindent does not match any outer indentation level".to_string(),
+                );
+            } else {
+                let mut dedents = Vec::new();
+                while let Some(&level) = self.indent_stack.last() {
+                    if level == indent {
+                        break;
+                    }
+                    self.indent_stack.pop();
+                    dedents.push(Token::Dedent);
                 }
-                self.indent_stack.pop();
-                dedents.push(Token::Dedent);
-            }
-            // Push dedents in reverse so that innermost dedent is emitted first
-            for d in dedents.into_iter().rev() {
-                self.pending.push(d);
+                // Push dedents in reverse so that innermost dedent is emitted first
+                for d in dedents.into_iter().rev() {
+                    self.pending.push(d);
+                }
             }
         }
     }

@@ -38,6 +38,10 @@ pub struct Parser {
     // body itself starts another single-line suite (`if True: if False: a
     // = 1`), though that's a rare style choice, not the common trigger.
     suite_depth: usize,
+    // Stack of the enclosing function's parameter names, used to reject
+    // `global`/`nonlocal` applied to a parameter (test_syntax's
+    // test_global_param_err_first / test_nonlocal_param_err_first).
+    fn_params_stack: Vec<std::collections::HashSet<String>>,
 }
 
 const MAX_UNARY_DEPTH: usize = 2000;
@@ -68,6 +72,7 @@ impl Parser {
             genexpr_depth: 0,
             allow_top_level_await: false,
             barry_as_bdfl: false,
+            fn_params_stack: Vec::new(),
         }
     }
 
@@ -189,11 +194,16 @@ impl Parser {
     pub fn parse_program(&mut self) -> Result<Program, String> {
         let mut stmts = Vec::new();
         while !self.at(&Token::EndOfFile) {
-            while self.at(&Token::Newline) || self.at(&Token::Indent) || self.at(&Token::Dedent) {
+            while self.at(&Token::Newline) {
                 self.next();
             }
             if self.at(&Token::EndOfFile) {
                 break;
+            }
+            // A stray Indent/Dedent at module level is an indentation error.
+            if self.at(&Token::Indent) || self.at(&Token::Dedent) {
+                let (line, col) = self.lexer.get_line_col();
+                return Err(format!("L{}:{}: unexpected indent", line, col));
             }
             let line = self.lexer.get_line_col().0;
             stmts.push(Stmt::Located(line, Box::new(self.parse_stmt()?)));
@@ -212,6 +222,17 @@ impl Parser {
     // ---- Statements ----
 
     fn parse_stmt(&mut self) -> Result<Stmt, String> {
+        // Lexer-detected errors (e.g. unindent does not match) surface as a
+        // special current token; surface them as parser errors.
+        if let Token::LexerError(msg) = &self.current {
+            return Err(msg.clone());
+        }
+        // An Indent token here means indentation that doesn't belong to any
+        // compound-statement suite — i.e. an unexpected indent.
+        if self.at(&Token::Indent) {
+            let (line, col) = self.lexer.get_line_col();
+            return Err(format!("L{}:{}: unexpected indent", line, col));
+        }
         self.parse_simple_stmt()
     }
 
@@ -629,6 +650,12 @@ impl Parser {
         } else {
             None
         };
+        // Record this function's parameter names so that `global`/`nonlocal`
+        // inside the body can be validated against them (a parameter may not
+        // also be declared global/nonlocal).
+        let param_names: std::collections::HashSet<String> =
+            args.iter().map(|a| a.arg.clone()).collect();
+        self.fn_params_stack.push(param_names);
         self.expect(&Token::Colon)?;
         // `async for`/`async with` (and `await`) are only legal inside an
         // `async def` body — CPython raises SyntaxError otherwise
@@ -636,6 +663,7 @@ impl Parser {
         self.async_depth += usize::from(async_token);
         let body = self.parse_block()?;
         self.async_depth -= usize::from(async_token);
+        self.fn_params_stack.pop();
         Ok(Stmt::FunctionDef {
             name,
             args,
@@ -1000,6 +1028,15 @@ impl Parser {
         while self.eat(&Token::Except) {
             // Check for except* (PEP 654)
             if self.eat(&Token::Star) {
+                // Mixing `except` and `except*` on the same `try` is illegal;
+                // report the conflict at the position of this `except*`.
+                if !handlers.is_empty() {
+                    let (line, col) = self.lexer.get_line_col();
+                    return Err(format!(
+                        "L{}:{}: cannot have both 'except' and 'except*' on the same 'try'",
+                        line, col
+                    ));
+                }
                 let typ = if !self.at(&Token::Colon) {
                     let first = self.parse_expr()?;
                     if self.at(&Token::Comma) {
@@ -1033,6 +1070,15 @@ impl Parser {
                     body: handler_body,
                 });
             } else {
+                // Mixing `except` and `except*` on the same `try` is illegal;
+                // report the conflict at the position of this `except`.
+                if !handlers_star.is_empty() {
+                    let (line, col) = self.lexer.get_line_col();
+                    return Err(format!(
+                        "L{}:{}: cannot have both 'except' and 'except*' on the same 'try'",
+                        line, col
+                    ));
+                }
                 let typ = if !self.at(&Token::Colon) {
                     let first = self.parse_expr()?;
                     // except Exc1, Exc2, ...:  (comma-separated tuple, Python 3.14+)
@@ -1513,20 +1559,46 @@ impl Parser {
     }
 
     fn parse_global(&mut self) -> Result<Stmt, String> {
+        let (gline, gcol) = self.lexer.get_line_col();
         self.next();
         let mut names = vec![self.expect_name()?];
         while self.eat(&Token::Comma) {
             names.push(self.expect_name()?);
+        }
+        // A parameter may not be declared global (test_syntax:
+        // test_global_param_err_first).
+        if let Some(params) = self.fn_params_stack.last() {
+            for n in &names {
+                if params.contains(n) {
+                    return Err(format!(
+                        "L{}:{}: name '{}' is parameter and global",
+                        gline, gcol, n
+                    ));
+                }
+            }
         }
         let _ = self.expect_newline_or_eof();
         Ok(Stmt::Global(names))
     }
 
     fn parse_nonlocal(&mut self) -> Result<Stmt, String> {
+        let (nline, ncol) = self.lexer.get_line_col();
         self.next();
         let mut names = vec![self.expect_name()?];
         while self.eat(&Token::Comma) {
             names.push(self.expect_name()?);
+        }
+        // A parameter may not be declared nonlocal (test_syntax:
+        // test_nonlocal_param_err_first).
+        if let Some(params) = self.fn_params_stack.last() {
+            for n in &names {
+                if params.contains(n) {
+                    return Err(format!(
+                        "L{}:{}: name '{}' is parameter and nonlocal",
+                        nline, ncol, n
+                    ));
+                }
+            }
         }
         let _ = self.expect_newline_or_eof();
         Ok(Stmt::Nonlocal(names))
@@ -2353,6 +2425,7 @@ impl Parser {
                 let mut args = Vec::new();
                 let mut keywords = Vec::new();
                 let mut seen_keyword = false;
+                let mut seen_double_star = false;
                 let mut seen_kw_names: std::collections::HashSet<String> =
                     std::collections::HashSet::new();
                 if !self.at(&Token::RightParen) {
@@ -2365,10 +2438,20 @@ impl Parser {
                             // dispatch lambdas do exactly this) — only a
                             // POSITIONAL arg after a keyword is an error, and
                             // a duplicate keyword is caught below.
+                            if seen_double_star {
+                                return Err(
+                                    "iterable argument unpacking follows keyword argument unpacking"
+                                        .to_string(),
+                                );
+                            }
                             self.next(); // consume *
                             let starred = self.parse_expr()?;
                             args.push(Expr::Starred(Box::new(starred)));
                         } else if self.at(&Token::DoubleStar) {
+                            // Multiple `**kwargs` unpackings are valid
+                            // (`f(**a, **b)` merges them) — only a
+                            // positional/`*args`/`k=v` after a `**` is an
+                            // error, handled in the branches below.
                             self.next();
                             let value = self.parse_expr()?;
                             keywords.push(Keyword {
@@ -2376,10 +2459,17 @@ impl Parser {
                                 value: Box::new(value),
                             });
                             seen_keyword = true;
+                            seen_double_star = true;
                         } else if self.peek() == &Token::Equal
                             && (matches!(&self.current, Token::Name(_))
                                 || self.at(&Token::Underscore))
                         {
+                            if seen_double_star {
+                                return Err(
+                                    "keyword argument follows keyword argument unpacking"
+                                        .to_string(),
+                                );
+                            }
                             let arg = Some(if self.eat(&Token::Underscore) {
                                 "_".to_string()
                             } else {
@@ -2398,6 +2488,12 @@ impl Parser {
                             });
                             seen_keyword = true;
                         } else {
+                            if seen_double_star {
+                                return Err(
+                                    "positional argument follows keyword argument unpacking"
+                                        .to_string(),
+                                );
+                            }
                             if seen_keyword {
                                 return Err(
                                     "positional argument follows keyword argument".to_string()

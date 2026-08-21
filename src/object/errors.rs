@@ -109,19 +109,29 @@ impl PyError {
         // `test.support.check_syntax_error`'s assertRaisesRegex(SyntaxError,
         // errtext) matches (test_exceptions' testSyntaxErrorMessage).
         let (clean_msg, line, col) = if let Some(rest) = msg.strip_prefix('L') {
-            if let Some((ln, rest)) = rest.split_once(':') {
-                if let Some((col_s, rest)) = rest.split_once(':') {
-                    let line = ln.parse::<i64>().ok();
-                    let col = col_s.parse::<i64>().ok();
-                    (rest.to_string(), line, col)
-                } else {
-                    (msg.clone(), None, None)
-                }
-            } else {
-                (msg.clone(), None, None)
-            }
+             if let Some((ln, rest)) = rest.split_once(':') {
+                 if let Some((col_s, rest)) = rest.split_once(':') {
+                     let line = ln.parse::<i64>().ok();
+                     let col = col_s.parse::<i64>().ok();
+                     (rest.to_string(), line, col)
+                 } else {
+                     (msg.clone(), None, None)
+                 }
+             } else {
+                 (msg.clone(), None, None)
+             }
+         } else {
+             (msg.clone(), None, None)
+         };
+        // Indentation-related errors are `IndentationError`, a `SyntaxError`
+        // subclass in CPython (test_syntax asserts `subclass=IndentationError`).
+        let typ = if clean_msg.contains("unexpected indent")
+            || clean_msg.contains("unindent does not match")
+            || clean_msg.contains("expected an indented block")
+        {
+            "IndentationError"
         } else {
-            (msg.clone(), None, None)
+            "SyntaxError"
         };
         let line = line.unwrap_or(1);
         let col = col.unwrap_or(1);
@@ -136,9 +146,9 @@ impl PyError {
         // CPython: `str(SyntaxError)` is `msg (filename, line N)`.
         let display = format!("{} ({}, line {})", clean_msg, filename, line);
         PyError::Exception(
-            "SyntaxError".to_string(),
+            typ.to_string(),
             PyObjectRef::new(PyObject::Exception {
-                typ: "SyntaxError".to_string(),
+                typ: typ.to_string(),
                 args: vec![py_str(&display)],
                 cause: None,
                 suppress_context: false,
