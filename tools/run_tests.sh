@@ -65,58 +65,83 @@ mkdir -p /tmp/rustpython-test-logs
 declare -a PIDS=()
 declare -a NAMES=()
 declare -a T0MS=()
-run_one() {
+
+# Launch ONE test as a detached job. The wrapper subshell records the true
+# end time and exit code INTO THE LOG, so the reaper can detect completion
+# by polling the file — no barrier waits, no process-state races.
+launch_one() {
     local f="$1"
     local base
     base="$(basename "$f" .py)"
+    local log="/tmp/rustpython-test-logs/$base.log"
     T0MS+=("$(date +%s%3N)")
-    timeout "$TOUT" "$BIN" "$f" > "/tmp/rustpython-test-logs/$base.log" 2>&1 &
+    (
+        timeout -k 5 "$TOUT" "$BIN" "$f" > "$log" 2>&1
+        echo "RC=$?" >> "$log"
+        echo "END_EPOCH $(date +%s%3N)" >> "$log"
+    ) &
     PIDS+=("$!")
     NAMES+=("$base")
 }
 
-launch_batch() {
-    PIDS=()
-    NAMES=()
-    local n=0
-    for f in "$@"; do
-        run_one "$f"
-        n=$((n + 1))
-        if [ "$n" -ge "$JOBS" ]; then
-            break
-        fi
-    done
-}
-
-wait_batch() {
-    local i=0
-    for pid in "${PIDS[@]}"; do
-        local base="${NAMES[$i]}"
-        local suffix=""
-        if [ "$SHOW_TIME" = 1 ]; then
-            local elapsed=$(( ($(date +%s%3N) - ${T0MS[$i]}) ))
-            suffix=" [$((elapsed / 1000)).$(( (elapsed % 1000) / 100 ))s]"
-        fi
-        if wait "$pid"; then
-            echo "PASS $base$suffix"
+# Reap every in-flight job whose log already carries its END_EPOCH marker,
+# printing PASS/FAIL (+ true duration with --time) and compacting the
+# in-flight arrays. Completion-order output, not launch-order.
+reap_finished() {
+    local keep_pids=() keep_names=() keep_t0=()
+    local i
+    for i in "${!PIDS[@]}"; do
+        local pid="${PIDS[$i]}" base="${NAMES[$i]}"
+        local log="/tmp/rustpython-test-logs/$base.log"
+        if [ -f "$log" ] && grep -q "^END_EPOCH " "$log" 2>/dev/null; then
+            wait "$pid" 2>/dev/null
+            local rc
+            rc="$(grep -oE '^RC=-?[0-9]+' "$log" | head -1 | cut -d= -f2)"
+            local suffix=""
+            if [ "$SHOW_TIME" = 1 ]; then
+                local end
+                end="$(grep -oE 'END_EPOCH [0-9]+' "$log" | awk '{print $2}')"
+                if [ -n "$end" ]; then
+                    local el=$(( end - ${T0MS[$i]} ))
+                    suffix=" [$((el / 1000)).$(( (el % 1000) / 100 ))s]"
+                fi
+            fi
+            if [ "$rc" = "0" ]; then
+                echo "PASS $base$suffix"
+            else
+                local reason
+                reason="$(grep -vE "^JIT:" "$log" | grep -v "^RC=" | grep -v "^END_EPOCH" | tail -1 | cut -c1-80)"
+                echo "FAIL $base :: $reason$suffix"
+            fi
         else
-            local reason
-            reason="$(grep -vE '^JIT:' "/tmp/rustpython-test-logs/$base.log" | tail -1 | cut -c1-80)"
-            echo "FAIL $base :: $reason$suffix"
+            keep_pids+=("$pid")
+            keep_names+=("$base")
+            keep_t0+=("${T0MS[$i]}")
         fi
-        i=$((i + 1))
     done
+    PIDS=("${keep_pids[@]}")
+    NAMES=("${keep_names[@]}")
+    T0MS=("${keep_t0[@]}")
 }
 
-remaining=("${ARGS[@]}")
+# Job-server main loop: keep exactly min(JOBS, remaining) tests in flight,
+# refilling the instant any slot frees up (no batch barriers — one hung or
+# core-dumping test no longer stalls eleven healthy slots).
 SWEEP_T0=${SECONDS}
-while [ ${#remaining[@]} -gt 0 ]; do
-    launch_batch "${remaining[@]}"
-    total=${#PIDS[@]}
-    # remove the launched batch from remaining
-    remaining=("${remaining[@]:$total}")
-    wait_batch
+next=0
+total=${#ARGS[@]}
+while [ "$next" -lt "$total" ] && [ "${#PIDS[@]}" -lt "$JOBS" ]; do
+    launch_one "${ARGS[$next]}"
+    next=$((next + 1))
 done
-if [ "$SHOW_TIME" = 1 ] || [ "${#ARGS[@]}" -gt 5 ]; then
-    echo "TOTAL_WALL $(( SECONDS - SWEEP_T0 ))s jobs=$JOBS tests=${#ARGS[@]}"
+while [ "${#PIDS[@]}" -gt 0 ]; do
+    sleep 0.1
+    reap_finished
+    while [ "$next" -lt "$total" ] && [ "${#PIDS[@]}" -lt "$JOBS" ]; do
+        launch_one "${ARGS[$next]}"
+        next=$((next + 1))
+    done
+done
+if [ "$SHOW_TIME" = 1 ] || [ "$total" -gt 5 ]; then
+    echo "TOTAL_WALL $(( SECONDS - SWEEP_T0 ))s jobs=$JOBS tests=$total"
 fi
