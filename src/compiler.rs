@@ -182,6 +182,11 @@ impl Compiler {
         // Remove NOP instructions (dead code elimination)
         self.code.instructions.retain(|i| i.op != Opcode::NOP);
 
+        // Peephole fusion of hot straight-line sequences into
+        // superinstructions (see superinstr.rs). Runs after dead-code
+        // elimination so the NOPs it introduces are the only ones present.
+        crate::superinstr::apply(&mut self.code);
+
         Ok(self.code.clone())
     }
 

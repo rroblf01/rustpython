@@ -153,6 +153,20 @@ pub enum Opcode {
     // splits ExceptionGroup into matched/unmatched subgroups, pushes
     // [unmatched_eg, matched_eg, True] on match or [exc_orig, False] on no match.
     CHECK_EXC_MATCH_STAR = 120,
+
+    // ── Superinstructions (peephole-fused sequences) ─────────────────
+    // Emitted by `superinstr::apply` after compilation. Each fuses a short
+    // hot sequence into ONE dispatch; the handler advances ip past the
+    // (NOP-filled) fused slots, so jump targets stay valid without any
+    // remapping. Fused slots are never jump targets themselves.
+    /// LOAD_FAST a, LOAD_FAST b, BINARY_OP op(non-inplace), STORE_FAST z
+    /// arg = a | b<<8 | op<<16 | z<<24  (all < 256, else not fused)
+    SUPER_FAST2_BIN = 124,
+    /// LOAD_FAST a, LOAD_CONST c, BINARY_OP op(non-inplace), STORE_FAST z
+    /// arg = a | c<<8 | op<<24  (a,z < 256; c < 65536, else not fused)
+    SUPER_FASTC_BIN = 125,
+    /// LOAD_FAST a, STORE_FAST z   arg = a | z<<16
+    SUPER_FAST_MOV = 126,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -268,6 +282,9 @@ impl Opcode {
             202 => DICT_MERGE,
             218 => UNPACK_SEQUENCE_TWO_TUPLE,
             120 => CHECK_EXC_MATCH_STAR,
+            124 => SUPER_FAST2_BIN,
+            125 => SUPER_FASTC_BIN,
+            126 => SUPER_FAST_MOV,
             _ => return None,
         })
     }

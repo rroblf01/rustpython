@@ -17,6 +17,7 @@ mod jit;
 mod modules;
 mod object;
 mod parser;
+mod superinstr;
 mod token;
 mod vm;
 
@@ -425,6 +426,7 @@ fn real_main() {
         }
         std::process::exit(0);
     }
+    crate::vm::opcode_hist_init_from_env();
     let raw_args: Vec<String> = env::args().collect();
 
     // Strip program name

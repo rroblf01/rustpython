@@ -7659,6 +7659,9 @@ pub fn create_atexit_dict() -> HashMap<String, PyObjectRef> {
 
 /// Run all registered atexit handlers, using the provided VM.
 pub fn run_atexit_handlers(vm: &mut crate::vm::VirtualMachine) {
+    // Opcode histogram dump (RPY_OPCODE_HIST=1) — every normal exit path
+    // funnels through here, so this is the one reliable dump point.
+    crate::vm::opcode_hist_dump();
     // Real CPython runs exit handlers in LIFO order (last registered runs
     // FIRST) — `test_shutdown`'s `atexit.register(print, "one"); atexit.
     // register(print, "two")` expects output `two` then `one`.

@@ -1693,7 +1693,12 @@ impl JitCompiler {
         ];
         for instr in &code.instructions {
             if !supported.contains(&instr.op) {
-                eprintln!("JIT: unsupported opcode {:?} in '{}'", instr.op, code.name);
+                // Gated behind RPY_DEBUG_JIT: this fires for most real
+                // functions (generators, closures, try/except...) and used
+                // to print unconditionally, polluting every test's stderr.
+                if std::env::var("RPY_DEBUG_JIT").is_ok() {
+                    eprintln!("JIT: unsupported opcode {:?} in '{}'", instr.op, code.name);
+                }
                 return None;
             }
             // BINARY_OP's arg encodes: 0..=12 a plain operator (see

@@ -17,7 +17,7 @@ set -u
 # Default to ALL cores — the sweep is embarrassingly parallel (one process
 # per test) and was leaving 2/3 of the machine idle at the old JOBS=4.
 JOBS="${JOBS:-$(nproc)}"
-TOUT="${TOUT:-150}"
+TOUT="${TOUT:-60}"   # 150s made legitimately-slow tests (getrandbits_2G etc.) stall the sweep
 MODE="${MODE:-release}"
 SHOW_TIME="${SHOW_TIME:-0}"
 
