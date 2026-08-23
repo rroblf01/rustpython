@@ -1696,7 +1696,7 @@ impl JitCompiler {
                 // Gated behind RPY_DEBUG_JIT: this fires for most real
                 // functions (generators, closures, try/except...) and used
                 // to print unconditionally, polluting every test's stderr.
-                if std::env::var("RPY_DEBUG_JIT").is_ok() {
+                if std::env::var("RPY_DEBUG_JIT").is_ok() || std::env::var("RPY_DEBUG_JIT_ALL").is_ok() {
                     eprintln!("JIT: unsupported opcode {:?} in '{}'", instr.op, code.name);
                 }
                 return None;

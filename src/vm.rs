@@ -4000,12 +4000,65 @@ impl VirtualMachine {
             Opcode::CALL => {
                 let npos = arg as usize & 0xFF;
                 let nkw = (arg as usize >> 8) & 0xFF;
-                // Pop only the items for THIS call, not the entire stack.
-                // The stack has: [callable, arg1, ..., argN, kw1_name, kw1_val, ..., or **kwargs_dict]
-                // Total items to pop: npos positional + up to 2*nkw keyword items + 1 callable
-                // But **kwargs pushes only 1 item (the dict), not 2.
-                // We pop npos + 2*nkw items (generous upper bound) then the callable.
-                // The keyword scanner below handles both named kws (2 items) and **kwargs (1 item).
+                let stack_len = self.frames[fi].stack.len();
+
+                // FAST PATH: plain positional call -- stack is exactly
+                // [callable, a1..aN]. split_off moves everything out in one
+                // allocation; no per-item clone, no reverse, no intermediate
+                // items Vec. `tail.remove(0)` shifts at most a handful of
+                // elements for typical arities.
+                if nkw == 0 && npos + 1 <= stack_len {
+                    let split = stack_len - 1 - npos;
+                    let callable = self.frames[fi].stack.remove(split);
+                    let args: Vec<PyObjectRef> =
+                        self.frames[fi].stack.drain(split..).collect();
+
+                    // METHOD FAST PATH: bound native method with positional
+                    // args only -- invoke the fn pointer directly instead of
+                    // re-entering call_function (which would rebuild yet
+                    // another Vec and re-dispatch).
+                    {
+                        let is_special_throw = matches!(
+                            &*callable.borrow(),
+                            PyObject::BuiltinMethod { func, .. }
+                                if std::ptr::fn_addr_eq(
+                                    *func,
+                                    crate::object::generator_throw_fallback as crate::object::BuiltinFunc,
+                                )
+                        );
+                        if !is_special_throw {
+                            if let PyObject::BuiltinMethod { name, func, self_obj } =
+                                &*callable.borrow()
+                            {
+                                // Ultra-hot primitive: list.append(x) -> None
+                                if name == "append" && args.len() == 1 {
+                                    let so = self_obj.clone();
+                                    let mut b = so.borrow_mut();
+                                    if let PyObject::List(items) = &mut *b {
+                                        items.push(args[0].clone());
+                                        drop(b);
+                                        self.frames[fi].push(py_none());
+                                        return Ok(None);
+                                    }
+                                }
+                                let mut na = Vec::with_capacity(args.len() + 1);
+                                na.push(self_obj.clone());
+                                na.extend(args.iter().cloned());
+                                drop(callable.borrow());
+                                let r = func(&na)?;
+                                self.frames[fi].push(r);
+                                return Ok(None);
+                            }
+                        }
+                    }
+
+                    let result = self.call_function(callable, args, vec![])?;
+                    self.frames[fi].push(result);
+                    return Ok(None);
+                }
+
+                // General path: kwargs and/or **kwargs present. Stack shape:
+                // [callable, args..., kw_name, kw_val, ..., **kwargs_dict]
                 let total_to_pop = npos + 2 * nkw;
                 let mut items = Vec::with_capacity(total_to_pop);
                 for _ in 0..total_to_pop {
@@ -4021,25 +4074,21 @@ impl VirtualMachine {
                 let mut args = Vec::new();
                 let mut keywords = Vec::new();
                 let mut i = 0;
-                // Use npos to determine positional args count
                 while i < npos && i < items.len() {
                     args.push(items[i].clone());
                     i += 1;
                 }
-                // Remaining items are keyword name+value pairs or **kwargs dict
                 while i + 1 < items.len() {
                     if let PyObject::Str(name) = &*items[i].borrow() {
                         keywords.push((name.to_string(), items[i + 1].clone()));
                         i += 2;
                     } else {
-                        // **kwargs dict or packed arg
                         break;
                     }
                 }
                 let result = self.call_function(callable, args, keywords)?;
                 self.frames[fi].push(result);
             }
-
             Opcode::MAKE_CELL => {
                 let idx = arg as usize;
                 let frame = &mut self.frames[fi];

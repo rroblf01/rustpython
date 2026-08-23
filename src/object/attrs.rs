@@ -5290,6 +5290,35 @@ impl PyObject {
                                 ));
                             }
                             let sep = args[0].str();
+                            // FAST PATH: a plain List of strs -- single
+                            // allocation with precomputed capacity, no
+                            // per-item iterator dispatch, no String clones.
+                            if let PyObject::List(items) = &*args[1].borrow() {
+                                let mut cap = sep.len().saturating_mul(items.len().saturating_sub(1));
+                                for it in items.iter() {
+                                    let b = it.borrow();
+                                    match &*b {
+                                        PyObject::Str(sv) => cap += sv.len(),
+                                        _ => {
+                                            return Err(PyError::type_error(format!(
+                                                "sequence item {}: expected str instance, {} found",
+                                                items.iter().position(|x| std::ptr::eq(x, it)).map(|_| 0).unwrap_or(0),
+                                                b.type_name()
+                                            )));
+                                        }
+                                    }
+                                }
+                                let mut out = String::with_capacity(cap);
+                                for (i, it) in items.iter().enumerate() {
+                                    if i > 0 {
+                                        out.push_str(&sep);
+                                    }
+                                    if let PyObject::Str(sv) = &*it.borrow() {
+                                        out.push_str(sv);
+                                    }
+                                }
+                                return Ok(py_str(&out));
+                            }
                             // Real `str.join` accepts any iterable, not just a
                             // list (tuples/generators/dict_keys/etc. are all
                             // common in real code, e.g. `''.join(chunk for
