@@ -596,6 +596,10 @@ pub(crate) fn eval_const_value(const_val: ConstValue) -> PyResult<PyObjectRef> {
 }
 
 thread_local! {
+    pub(crate) static SHARED_BUILTINS_MODULE_REF: RefCell<Option<PyObjectRef>> = const { RefCell::new(None) };
+}
+
+thread_local! {
     static DISPOSABLE_VM_POOL: RefCell<Vec<VirtualMachine>> = const { RefCell::new(Vec::new()) };
 }
 
@@ -809,6 +813,7 @@ impl VirtualMachine {
         let globals = Rc::new(RefCell::new(globals_map));
 
         let mut modules: HashMap<String, PyObjectRef> = HashMap::new();
+        SHARED_BUILTINS_MODULE_REF.with(|c| *c.borrow_mut() = Some(builtins_module.clone()));
         modules.insert_str("builtins", builtins_module);
         modules.insert_str("math", create_module("math", create_math_dict()));
         modules.insert_str("_codecs", create_module("_codecs", create_codecs_dict()));
@@ -11170,6 +11175,12 @@ pub(crate) static OPCODE_HIST: [std::sync::atomic::AtomicU64; 256] = {
     const ZERO: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     [ZERO; 256]
 };
+
+pub(crate) fn get_shared_builtins_module() -> PyObjectRef {
+    SHARED_BUILTINS_MODULE_REF.with(|c| {
+        c.borrow().clone().expect("shared builtins module not initialized")
+    })
+}
 
 pub(crate) fn opcode_hist_init_from_env() {
     if std::env::var("RPY_OPCODE_HIST").is_ok() {

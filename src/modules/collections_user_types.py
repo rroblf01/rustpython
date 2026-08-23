@@ -369,6 +369,9 @@ class Counter(dict):
         return self
 
 
+_defaultdict_repr_guard = set()
+
+
 class defaultdict(dict):
     def __init__(self, default_factory=None, *args, **kwargs):
         if default_factory is not None and not callable(default_factory):
@@ -385,8 +388,18 @@ class defaultdict(dict):
         return value
 
     def __repr__(self):
-        items = ', '.join('%r: %r' % (k, v) for k, v in self.items())
-        return '%s(%r, {%s})' % (type(self).__name__, self.default_factory, items)
+        # Recursion guard (gh-145492): a factory whose __repr__ calls
+        # repr(dd) must not recurse forever -- CPython's Py_ReprEnter
+        # returns the standard '...' cycle marker instead.
+        key = id(self)
+        if key in _defaultdict_repr_guard:
+            return '%s(...)' % type(self).__name__
+        _defaultdict_repr_guard.add(key)
+        try:
+            items = ', '.join('%r: %r' % (k, v) for k, v in self.items())
+            return '%s(%r, {%s})' % (type(self).__name__, self.default_factory, items)
+        finally:
+            _defaultdict_repr_guard.discard(key)
 
     def copy(self):
         result = defaultdict(self.default_factory)

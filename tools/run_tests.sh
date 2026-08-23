@@ -28,7 +28,19 @@ while [ $# -gt 0 ]; do
         --timeout) TOUT="$2"; shift 2 ;;
         --debug) MODE="debug"; shift ;;
         --time) SHOW_TIME=1; shift ;;
-        --all) ARGS=(tests/cpython/test_*.py); shift ;;
+        --skip)
+            # --skip name1,name2,... exclude files by basename
+            IFS=',' read -ra SKIP_LIST <<< "$2"; shift 2 ;;
+        --all)
+            for f in tests/cpython/test_*.py; do
+                base="$(basename "$f" .py)"
+                skip_it=0
+                for sk in ${SKIP_LIST[@]:-}; do
+                    [ "$base" = "$sk" ] && skip_it=1 && break
+                done
+                [ $skip_it = 0 ] && ARGS+=("$f")
+            done
+            shift ;;
         *) ARGS+=("$1"); shift ;;
     esac
 done
