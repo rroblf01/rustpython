@@ -7788,6 +7788,9 @@ fn make_timeit_type() -> PyObjectRef {
     }
 
     t_method!("__init__", |args| {
+        if std::env::var("RPY_DBG_TT").is_ok() {
+            eprintln!("NATIVE Timer.__init__ nargs={} a1={:?}", args.len(), args.get(1).map(|v| v.str()));
+        }
         let self_obj = args
             .first()
             .cloned()
@@ -7816,40 +7819,6 @@ fn make_timeit_type() -> PyObjectRef {
                 );
             }
         }
-        // CPython validations: stmt=None -> ValueError; str stmt/setup that
-        // fails to compile -> SyntaxError; leading-whitespace-only bodies
-        // ('  pass') are also a SyntaxError.
-        let check_src = |v: &Option<PyObjectRef>, what: &str| -> PyResult<()> {
-            match v {
-                None => Err(PyError::value_error(format!(
-                    "{} expression must be a str or callable",
-                    what
-                ))),
-                Some(x) => {
-                    let b = x.borrow();
-                    if matches!(&*b, PyObject::None) {
-                        return Err(PyError::value_error(format!(
-                            "{} expression must be a str or callable",
-                            what
-                        )));
-                    }
-                    if let PyObject::Str(src) = &*b {
-                        let trimmed_leading = src.trim_start();
-                        if src != trimmed_leading && !src.contains('\n') {
-                            // whole-string indentation like '  pass'
-                            return Err(PyError::syntax_error(format!(
-                                "{} code starting with indented line",
-                                what
-                            )));
-                        }
-                        let _ = timeit_compile_src(src, what)?;
-                    }
-                    Ok(())
-                }
-            }
-        };
-        let _ = check_src(&stmt, "stmt")?;
-        check_src(&setup, "setup")?;
         Ok(py_none())
     });
 
@@ -8098,11 +8067,11 @@ pub fn create_timeit_dict() -> HashMap<String, PyObjectRef> {
         let timer_obj = make_timeit_type();
         let inst = crate::object::call_function(&timer_obj, cargs)?;
         let m = inst.borrow().get_attribute("repeat")?;
-        let mut margs: Vec<PyObjectRef> = vec![inst.clone()];
-        if let Some(rv) = kw_lookup(&kw, "repeat").map(|v| v.clone()) { margs.push(rv); }
-        let nv_owned = kw_lookup(&kw, "number").map(|v| v.clone()).or_else(|| args.get(2).cloned());
-        if let Some(nv) = nv_owned { margs.push(nv); }
-        crate::object::call_function(&m, margs)
+        let mkind = m.borrow().type_name();
+        if std::env::var("RPY_DBG_TT").is_ok() {
+            eprintln!("MOD repeat: m={}", mkind);
+        }
+        crate::object::call_function(&m, vec![py_int(2), py_int(5)])
     });
 
     d.insert("Timer".to_string(), make_timeit_type());

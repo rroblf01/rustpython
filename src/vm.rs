@@ -970,7 +970,7 @@ impl VirtualMachine {
         );
 
         // Native timeit module
-        modules.insert_str("timeit", create_module("timeit", create_timeit_dict()));
+        modules.insert_str("_timeit", create_module("_timeit", create_timeit_dict()));
 
         let threading_dict = create_threading_dict();
         modules.insert_str("threading", create_module("threading", threading_dict));
@@ -1312,7 +1312,7 @@ impl VirtualMachine {
         modules.insert_str("_logging", create_module("_logging", create_logging_dict()));
 
         // Native timeit module
-        modules.insert_str("timeit", create_module("timeit", create_timeit_dict()));
+        modules.insert_str("_timeit", create_module("_timeit", create_timeit_dict()));
 
         // Native json.tool module
         modules.insert_str(
