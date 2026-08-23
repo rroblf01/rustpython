@@ -57,36 +57,41 @@ pub(crate) fn generator_next_fallback(args: &[PyObjectRef]) -> PyResult<PyObject
         } else {
             f.stack.push(crate::object::py_none());
         }
-        let mut vm = crate::vm::VirtualMachine::new();
-        vm.push_frame((**f).clone());
-        match vm.execute() {
-            Ok(val) => {
-                let modified = vm.frames.pop().unwrap();
-                if modified.ip > 0
-                    && matches!(
-                        &modified.code.instructions[modified.ip - 1].op,
-                        crate::bytecode::Opcode::YIELD_VALUE
-                    )
-                {
-                    *f = Box::new(modified);
-                    Ok(val)
-                } else {
+        let mut vm = crate::vm::VirtualMachine::take_disposable();
+        let result = {
+            vm.push_frame((**f).clone());
+
+            match vm.execute() {
+                Ok(val) => {
+                    let modified = vm.frames.pop().unwrap();
+                    if modified.ip > 0
+                        && matches!(
+                            &modified.code.instructions[modified.ip - 1].op,
+                            crate::bytecode::Opcode::YIELD_VALUE
+                        )
+                    {
+                        *f = Box::new(modified);
+                        Ok(val)
+                    } else {
+                        *frame_opt = None;
+                        Err(crate::object::PyError::Exception(
+                            "StopIteration".to_string(),
+                            val,
+                        ))
+                    }
+                }
+                Err(e) => {
                     *frame_opt = None;
-                    Err(crate::object::PyError::Exception(
-                        "StopIteration".to_string(),
-                        val,
-                    ))
+                    Err(wrap_stopiteration_pep479(e))
                 }
             }
-            Err(e) => {
-                *frame_opt = None;
-                Err(wrap_stopiteration_pep479(e))
-            }
-        }
+        };
+        result
     } else {
         Err(PyError::StopIteration)
     }
 }
+
 
 /// PEP 479: a `StopIteration` that escapes from a generator's OWN body code
 /// (as opposed to the generator's normal exhaustion, which this interpreter
@@ -159,36 +164,40 @@ pub(crate) fn coroutine_send_fallback(args: &[PyObjectRef]) -> PyResult<PyObject
             } else {
                 f.stack.push(crate::object::py_none());
             }
-            let mut vm = crate::vm::VirtualMachine::new();
-            vm.push_frame((**f).clone());
-            match vm.execute() {
-                Ok(val) => {
-                    let modified = vm.frames.pop().unwrap();
-                    if modified.ip > 0
-                        && matches!(
-                            &modified.code.instructions[modified.ip - 1].op,
-                            crate::bytecode::Opcode::YIELD_VALUE
-                        )
-                    {
-                        *f = Box::new(modified);
-                        Ok(val)
-                    } else {
+            let mut vm = crate::vm::VirtualMachine::take_disposable();
+            let result = {
+                vm.push_frame((**f).clone());
+                match vm.execute() {
+                    Ok(val) => {
+                        let modified = vm.frames.pop().unwrap();
+                        if modified.ip > 0
+                            && matches!(
+                                &modified.code.instructions[modified.ip - 1].op,
+                                crate::bytecode::Opcode::YIELD_VALUE
+                            )
+                        {
+                            *f = Box::new(modified);
+                            Ok(val)
+                        } else {
+                            *frame_opt = None;
+                            // Propagate the return value via StopIteration for SEND
+                            Err(crate::object::PyError::Exception(
+                                "StopIteration".to_string(),
+                                val,
+                            ))
+                        }
+                    }
+                    Err(e) => {
                         *frame_opt = None;
-                        // Propagate the return value via StopIteration for SEND
-                        Err(crate::object::PyError::Exception(
-                            "StopIteration".to_string(),
-                            val,
-                        ))
+                        // Propagate the coroutine's own unhandled
+                        // exception as-is; only genuine exhaustion
+                        // is signaled as StopIteration.
+                        Err(e)
                     }
                 }
-                Err(e) => {
-                    *frame_opt = None;
-                    // Propagate the coroutine's own unhandled
-                    // exception as-is; only genuine exhaustion
-                    // is signaled as StopIteration.
-                    Err(e)
-                }
-            }
+            };
+            crate::vm::VirtualMachine::release_disposable(vm);
+            result
         } else {
             Err(PyError::StopIteration)
         }
@@ -211,7 +220,7 @@ pub(crate) fn coroutine_throw_fallback(args: &[PyObjectRef]) -> PyResult<PyObjec
             Err(_) => return Err(PyError::value_error("coroutine already executing")),
         };
         if let Some(f) = frame_opt.as_mut() {
-            let mut vm = crate::vm::VirtualMachine::new();
+            let mut vm = crate::vm::VirtualMachine::take_disposable();
             let raw = args[1].clone();
             let is_callable = !matches!(
                 &*raw.borrow(),
@@ -234,7 +243,7 @@ pub(crate) fn coroutine_throw_fallback(args: &[PyObjectRef]) -> PyResult<PyObjec
             };
             let err = PyError::Exception(typ, exc_obj);
             vm.push_frame((**f).clone());
-            match vm.throw_into_frame(err) {
+            let result = match vm.throw_into_frame(err) {
                 Ok(val) => {
                     let modified = vm.frames.pop().unwrap();
                     if modified.ip > 0
@@ -257,7 +266,9 @@ pub(crate) fn coroutine_throw_fallback(args: &[PyObjectRef]) -> PyResult<PyObjec
                     *frame_opt = None;
                     Err(e)
                 }
-            }
+            };
+            crate::vm::VirtualMachine::release_disposable(vm);
+            result
         } else {
             Err(PyError::StopIteration)
         }

@@ -20,7 +20,7 @@ mod ops_contains;
 pub use ops_contains::*;
 mod builtins;
 pub use builtins::*;
-mod generators;
+pub mod generators;
 pub use generators::*;
 pub(crate) mod import_builtin;
 pub use import_builtin::*;
