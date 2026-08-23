@@ -4411,6 +4411,9 @@ impl Compiler {
                 self.compile_dict_comprehension(key, value, generators)?;
             }
             Expr::YieldFrom(expr) => {
+                // Mark this code object so the VM knows FOR_ITER loops here
+                // belong to a `yield from` (generator.throw() delegation).
+                self.code.flags |= 0x0200;
                 // Simple yield from: iterate and yield each value
                 self.compile_expr(expr)?;
                 self.emit(Opcode::GET_ITER, 0);

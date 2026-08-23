@@ -331,7 +331,84 @@ pub(crate) fn generator_throw_with_vm(
                 PyObject::Exception { typ, .. } => typ.clone(),
                 _ => "Exception".to_string(),
             };
-            let err = PyError::Exception(typ, exc_obj);
+            let err = PyError::Exception(typ, exc_obj.clone());
+
+            // `yield from` delegation: if the generator is suspended inside
+            // a yield-from loop, the exception belongs to the SUB-iterator.
+            // Call its own .throw(); if it produces a value (i.e. it handled
+            // the exception), resume the outer generator normally -- the
+            // FOR_ITER will pull the sub-iterator's next value. If the
+            // sub-iterator has no .throw or raises StopIteration, fall
+            // through to injecting into the outer frame (CPython closes the
+            // sub-generator and re-raises at the yield point).
+            let exc_for_throw = exc_obj.clone();
+            let delegated: Option<PyResult<PyObjectRef>> = f
+                .yield_from_iter
+                .as_ref()
+                .map(|it| {
+                    // get_attribute already binds methods to the instance.
+                    let res = it.borrow().get_attribute("throw");
+                    match res {
+                        Ok(bound) => {
+                            // 'method' objects are not directly callable by
+                            // call_function; use call_bound_method which
+                            // handles every method shape.
+                            if let PyObject::BuiltinMethod { func, self_obj, .. } = &*bound.borrow()
+                            {
+                                let mut na = vec![self_obj.clone()];
+                                na.push(exc_for_throw.clone());
+                                (func)(&na)
+                            } else {
+                                crate::object::call_bound_method(bound.clone(), it.clone(), vec![exc_for_throw.clone()])
+                            }
+                        }
+                        Err(e) => Err(e),
+                    }
+                });
+            if let Some(res) = delegated {
+                match res {
+                    Ok(_handled_val) => {
+                        // Sub-iterator handled it: resume outer generator with
+                        // no injected exception; its FOR_ITER pulls next().
+                        vm.push_frame((**f).clone());
+                        let resumed = vm.execute();
+                        vm.frames.pop();
+                        return match resumed {
+                            Ok(val) => {
+                                let modified = vm.frames.pop().unwrap();
+                                if modified.ip > 0
+                                    && matches!(
+                                        &modified.code.instructions[modified.ip - 1].op,
+                                        crate::bytecode::Opcode::YIELD_VALUE
+                                    )
+                                {
+                                    *f = Box::new(modified);
+                                    Ok(val)
+                                } else {
+                                    *frame_opt = None;
+                                    Err(crate::object::PyError::Exception(
+                                        "StopIteration".to_string(),
+                                        val,
+                                    ))
+                                }
+                            }
+                            Err(e) => {
+                                *frame_opt = None;
+                                Err(wrap_stopiteration_pep479(e))
+                            }
+                        };
+                    }
+                    Err(stop_it) if crate::object::is_stop_iteration_error(&stop_it) => {
+                        // Sub-iter exhausted by the throw: fall through to
+                        // injecting into the outer frame below.
+                    }
+                    Err(other) => {
+                        *frame_opt = None;
+                        return Err(wrap_stopiteration_pep479(other));
+                    }
+                }
+            }
+
             vm.push_frame((**f).clone());
             match vm.throw_into_frame(err) {
                 Ok(val) => {

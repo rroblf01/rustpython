@@ -78,6 +78,11 @@ pub struct Frame {
     /// same effect generally, for every module, not just via IMPORT_FROM's
     /// narrower ancestor-frame fallback.
     pub live_module: Option<PyObjectRef>,
+    /// While resuming a generator whose body contains `yield from`, the
+    /// currently-active sub-iterator. `generator.throw()` delegates to this
+    /// iterator's own `.throw()` instead of injecting the exception into the
+    /// outer generator's frame (CPython semantics).
+    pub yield_from_iter: Option<PyObjectRef>,
     /// Index of the previous (calling) frame in `vm.frames`, if any.
     /// Used to implement `frame.f_back` — the previous frame in the call stack.
     pub back: Option<usize>,
@@ -118,6 +123,7 @@ impl Frame {
             module_globals,
             name_order: None,
             live_module: None,
+            yield_from_iter: None,
             back: None,
         }
     }
@@ -2026,6 +2032,7 @@ impl VirtualMachine {
             frame.registers.clear();
             frame.name_order = None;
             frame.live_module = None;
+            frame.yield_from_iter = None;
             frame.back = None;
             frame
         } else {
@@ -11066,17 +11073,27 @@ impl VirtualMachine {
         jump_offset: u32,
     ) -> PyResult<Option<PyObjectRef>> {
         use crate::object::ObjectAccess;
-        let dbg = std::env::var("RPY_DBG_FIN").is_ok();
-        if dbg { eprintln!("FIN enter"); }
-        // builtin_next resolves AND binds __next__ correctly for Instances.
+        // If this generator's body contains `yield from`, remember the active
+        // sub-iterator so an incoming .throw() delegates to it (CPython
+        // semantics) instead of injecting into the outer frame.
+        let has_yf = self
+            .frames
+            .last()
+            .map(|f| f.code.flags & 0x0200 != 0)
+            .unwrap_or(false);
+        if has_yf {
+            self.frames.last_mut().unwrap().yield_from_iter = Some(iter_val.clone());
+        }
         match crate::object::builtin_next(&[iter_val.clone()]) {
             Ok(val) => {
-                if dbg { eprintln!("FIN got val"); }
                 self.frames.last_mut().unwrap().push(iter_val);
                 self.frames.last_mut().unwrap().push(val);
                 Ok(None)
             }
             Err(e) if crate::object::is_stop_iteration_error(&e) => {
+                if has_yf {
+                    self.frames.last_mut().unwrap().yield_from_iter = None;
+                }
                 self.frames.last_mut().unwrap().ip = jump_offset as usize;
                 Ok(None)
             }
