@@ -4556,24 +4556,10 @@ impl VirtualMachine {
                         func: raw_method,
                         self_obj: val_clone,
                     });
+                    // LAZY iteration (CPython semantics): `__iter__` returns
+                    // THE iterator; FOR_ITER advances it one step at a time.
                     let iterator = self.call_function(iter_method, vec![], vec![])?;
-                    // Eagerly consume via builtin_next(), which — unlike a raw
-                    // get_attribute("__next__") — correctly handles both a
-                    // user Instance with its own __next__ AND a native iterator
-                    // (e.g. ListIter) that __iter__ delegated to, such as
-                    // `def __iter__(self): return iter(self.data)`.
-                    let mut items: Vec<PyObjectRef> = Vec::new();
-                    loop {
-                        match crate::object::builtin_next(&[iterator.clone()]) {
-                            Ok(val) => items.push(val),
-                            Err(PyError::StopIteration) => break,
-                            Err(e) => return Err(e),
-                        }
-                    }
-                    self.frames[fi].push(PyObjectRef::new(PyObject::ListIter {
-                        list: items,
-                        index: 0,
-                    }));
+                    self.frames[fi].push(iterator);
                 } else {
                     let obj = val.borrow();
                     match &*obj {
@@ -4887,8 +4873,17 @@ impl VirtualMachine {
                                 return Ok(None);
                             }
                             _ => {
-                                // Not a built-in iterator — check for __next__ protocol
-                                if obj.type_name() == "instance" {
+                                // Not a built-in iterator — check for __next__ protocol.
+                                // MUST drop(obj) before delegating: `obj` is a live
+                                // borrow of the iterator, and __next__ legitimately
+                                // mutates it (self.i += 1 in user code) -> borrow_mut
+                                // on the same object while this borrow is held
+                                // panicked with "RefCell already borrowed" for ANY
+                                // `yield from custom_iter` / `for x in custom:`
+                                // whose __next__ stores attributes.
+                                let is_inst = obj.type_name() == "instance";
+                                drop(obj);
+                                if is_inst {
                                     return self.for_iter_next(iter_val.clone(), arg);
                                 }
                                 return Err(PyError::type_error("for_iter on non-iterable"));
@@ -11066,23 +11061,21 @@ impl VirtualMachine {
         jump_offset: u32,
     ) -> PyResult<Option<PyObjectRef>> {
         use crate::object::ObjectAccess;
-        let next_method = iter_val.borrow().get_attribute("__next__");
-        if let Ok(func) = next_method {
-            match self.call_function(func, vec![], vec![]) {
-                Ok(val) => {
-                    self.frames.last_mut().unwrap().push(iter_val);
-                    self.frames.last_mut().unwrap().push(val);
-                    Ok(None)
-                }
-                Err(e) if crate::object::is_stop_iteration_error(&e) => {
-                    self.frames.last_mut().unwrap().ip = jump_offset as usize;
-                    Ok(None)
-                }
-                Err(e) => Err(e),
+        let dbg = std::env::var("RPY_DBG_FIN").is_ok();
+        if dbg { eprintln!("FIN enter"); }
+        // builtin_next resolves AND binds __next__ correctly for Instances.
+        match crate::object::builtin_next(&[iter_val.clone()]) {
+            Ok(val) => {
+                if dbg { eprintln!("FIN got val"); }
+                self.frames.last_mut().unwrap().push(iter_val);
+                self.frames.last_mut().unwrap().push(val);
+                Ok(None)
             }
-        } else {
-            self.frames.last_mut().unwrap().ip = jump_offset as usize;
-            Ok(None)
+            Err(e) if crate::object::is_stop_iteration_error(&e) => {
+                self.frames.last_mut().unwrap().ip = jump_offset as usize;
+                Ok(None)
+            }
+            Err(e) => Err(e),
         }
     }
 }
