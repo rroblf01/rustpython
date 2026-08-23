@@ -8458,6 +8458,58 @@ pub fn create_array_dict() -> HashMap<String, PyObjectRef> {
 // a strictly better outcome for this interpreter's fake-single-threaded
 // execution model than a real hang, so deliberately left AS THE ORIGINAL,
 // restrictive `object::call_function`-based behavior rather than "fixed".
+// ── Cooperative thread scheduler ─────────────────────────────────────
+// PyObjectRef is !Send so Python-level threads cannot be OS threads.
+// Instead of running targets synchronously inside .start() (which made
+// producer/consumeter and lock-handoff tests hang or fail), targets are
+// queued as closures and only executed when someone JOINS them or when a
+// potentially-blocking operation finds nothing to read — that operation
+// drains the queue first and retries once, which is exactly the
+// happens-before relationship those tests rely on.
+thread_local! {
+    static COOP_QUEUE: RefCell<std::collections::VecDeque<Box<dyn FnOnce()>>> =
+        const { RefCell::new(std::collections::VecDeque::new()) };
+}
+
+/// Run every queued thread-body (FIFO). Bodies may enqueue more work;
+/// bounded to avoid pathological infinite feedback loops.
+thread_local! {
+    static IN_DRAIN: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// True when called while draining deferred thread bodies AND the pending
+/// queue is empty -- nothing else can make progress, so a blocked waiter
+/// should unwind (internal StopIteration) instead of spinning forever.
+pub(crate) fn coop_blocked_forever() -> bool {
+    let in_drain = IN_DRAIN.with(|c| c.get()) > 0;
+    let queue_empty = COOP_QUEUE.with(|q| q.borrow_mut().is_empty());
+    in_drain && queue_empty
+}
+
+pub fn coop_threads_drain() {
+    const MAX_JOBS: usize = 10_000;
+    let mut ran = 0usize;
+    IN_DRAIN.with(|c| c.set(c.get() + 1));
+    loop {
+        let next = COOP_QUEUE.with(|q| q.borrow_mut().pop_front());
+        match next {
+            Some(job) => {
+                job();
+                ran += 1;
+                if ran >= MAX_JOBS {
+                    break;
+                }
+            }
+            None => break,
+        }
+    }
+    IN_DRAIN.with(|c| c.set(c.get() - 1));
+}
+
+pub(crate) fn coop_threads_enqueue(job: Box<dyn FnOnce()>) {
+    COOP_QUEUE.with(|q| q.borrow_mut().push_back(job));
+}
+
 pub fn create_thread_module_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     // Real CPython's max `Lock.acquire(timeout=...)` value (platform max C

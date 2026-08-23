@@ -9348,20 +9348,30 @@ impl PyObject {
                                 locked.started = true;
                                 let target = locked.target.clone();
                                 let thread_args = locked.args.clone();
-                                // Don't create a real thread (PyObjectRef is !Send)
-                                // Thread runs synchronously instead
+                                // Cooperative scheduling: DEFER the target into the
+                                // global pending-queue. It runs when someone joins
+                                // this thread or when a potentially-blocking op
+                                // (Queue.get on empty, Lock.acquire contention,
+                                // Event.wait) drains the queue — giving deferred
+                                // bodies their happens-before with the main flow.
                                 let result = locked.result.clone();
                                 drop(locked);
-                                let call_result =
-                                    crate::object::builtin_call(&target, &thread_args);
-                                match call_result {
-                                    Ok(val) => {
-                                        *result.lock().unwrap() = Some(val);
+                                crate::modules::coop_threads_enqueue(Box::new(move || {
+                                    let call_result =
+                                        crate::object::builtin_call(&target, &thread_args);
+                                    match call_result {
+                                        Ok(val) => {
+                                            *result.lock().unwrap() = Some(val);
+                                        }
+                                        Err(e) => {
+                                            // Cooperative-scheduler unwind
+                                            // (blocked-forever) is internal.
+                                            if !crate::object::is_stop_iteration_error(&e) {
+                                                eprintln!("Thread raised: {}", e);
+                                            }
+                                        }
                                     }
-                                    Err(e) => {
-                                        eprintln!("Thread raised: {}", e);
-                                    }
-                                }
+                                }));
                             }
                             Ok(py_none())
                         },
@@ -9372,6 +9382,9 @@ impl PyObject {
                         func: |args| {
                             let obj = args[0].borrow();
                             if let PyObject::Thread(inner_arc) = &*obj {
+                                // Drain cooperative queue so this join's target
+                                // (and everything queued before it) runs now.
+                                crate::modules::coop_threads_drain();
                                 let mut locked = inner_arc.lock().unwrap();
                                 if let Some(handle) = locked.handle.take() {
                                     handle
@@ -9434,10 +9447,39 @@ impl PyObject {
                             let obj = args[0].borrow();
                             if let PyObject::Lock(inner_arc) = &*obj {
                                 let locked = inner_arc.lock().unwrap();
-                                while locked.lock.load(std::sync::atomic::Ordering::SeqCst) {
-                                    std::thread::yield_now();
+                                if locked
+                                    .lock
+                                    .compare_exchange(
+                                        false,
+                                        true,
+                                        std::sync::atomic::Ordering::SeqCst,
+                                        std::sync::atomic::Ordering::SeqCst,
+                                    )
+                                    .is_err()
+                                {
+                                    // Contended: run deferred threads once (they may
+                                    // release), then retry; otherwise report deadlock
+                                    // instead of spinning forever.
+                                    drop(locked);
+                                    crate::modules::coop_threads_drain();
+                                    let locked = inner_arc.lock().unwrap();
+                                    if locked
+                                        .lock
+                                        .compare_exchange(
+                                            false,
+                                            true,
+                                            std::sync::atomic::Ordering::SeqCst,
+                                            std::sync::atomic::Ordering::SeqCst,
+                                        )
+                                        .is_err()
+                                    {
+                                        return Err(PyError::runtime_error(
+                                            "lock acquire deadlock in single-threaded interpreter",
+                                        ));
+                                    }
+                                } else {
+                                    locked.lock.store(true, std::sync::atomic::Ordering::SeqCst);
                                 }
-                                locked.lock.store(true, std::sync::atomic::Ordering::SeqCst);
                             }
                             Ok(args[0].clone())
                         },
@@ -9712,11 +9754,23 @@ impl PyObject {
                         func: |args| {
                             let obj = args[0].borrow();
                             if let PyObject::Event(inner_arc) = &*obj {
-                                let mut flag = inner_arc.flag.lock().unwrap();
-                                while !*flag {
-                                    flag = inner_arc.condvar.wait(flag).unwrap();
+                                // Cooperative scheduling: first run any deferred
+                                // thread bodies (they may set() the event), then
+                                // report the flag. If the pending queue is empty
+                                // and the event is still unset, NOTHING left in
+                                // this single-threaded interpreter can ever set
+                                // it -- spinning here would deadlock against the
+                                // very continuation that would call set()
+                                // (bpo-17141-style), so return the current flag.
+                                crate::modules::coop_threads_drain();
+                                let flag = inner_arc.flag.lock().unwrap();
+                                if !*flag && crate::modules::coop_blocked_forever() {
+                                    // Deferred body blocked on an event that
+                                    // nothing left can set: unwind this body.
+                                    drop(flag);
+                                    return Err(PyError::StopIteration);
                                 }
-                                return Ok(py_bool(true));
+                                return Ok(py_bool(*flag));
                             }
                             Ok(py_bool(true))
                         },
@@ -9753,6 +9807,13 @@ impl PyObject {
                             let obj = args[0].borrow();
                             if let PyObject::Queue(inner_arc) = &*obj {
                                 let mut q = inner_arc.lock().unwrap();
+                                // Cooperative scheduling: an empty queue may be
+                                // waiting on a deferred producer thread.
+                                if q.queue.is_empty() {
+                                    drop(q);
+                                    crate::modules::coop_threads_drain();
+                                    q = inner_arc.lock().unwrap();
+                                }
                                 return q
                                     .queue
                                     .pop_front()
