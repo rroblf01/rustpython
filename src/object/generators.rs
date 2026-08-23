@@ -86,6 +86,7 @@ pub(crate) fn generator_next_fallback(args: &[PyObjectRef]) -> PyResult<PyObject
                 }
             }
         };
+        crate::vm::VirtualMachine::release_disposable(vm);
         result
     } else {
         Err(PyError::StopIteration)
