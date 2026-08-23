@@ -17,68 +17,43 @@ __all__ = [
 # ── Core RNG ─────────────────────────────────────────────────────────────────
 
 
-class Random:
-    """Random number generator based on a pseudo-random algorithm.
+import _random as _pyrandom
 
-    Implements the same API as CPython's random.Random.
+
+class Random(_pyrandom.Random):
+    """Random number generator — MT19937 via the native `_random` module.
+
+    Subclasses the native `_random.Random` exactly like real CPython's
+    `random.py` does; only the version=2 str/bytes seeding conversion and
+    gauss bookkeeping live here.
     """
 
+    VERSION = 3
+
     def __init__(self, x=None):
-        self._seed = 123456789
-        self._gauss_next = None
+        self.gauss_next = None
         self.seed(x)
 
-    def __repr__(self):
-        return "<Random object at 0x{:x}>".format(id(self))
-
-    def seed(self, n=None, version=2):
-        """Initialize internal state from a seed value.
-
-        If n is None, use system time.
-        """
-        import time
-        if n is None:
-            n = int(time.time() * 1000000) & 0xFFFFFFFF
-        elif isinstance(n, (float, str, bytes, bytearray)):
-            # Hash-like: convert to int via hash
+    def seed(self, a=None, version=2):
+        if version == 2 and isinstance(a, (str, bytes, bytearray)):
+            if isinstance(a, str):
+                a = a.encode()
             import hashlib
-            if isinstance(n, str):
-                n = n.encode("utf-8")
-            if isinstance(n, bytes):
-                n = int(hashlib.sha512(n).hexdigest()[:16], 16)
-            else:
-                n = int(n * 1000000) & 0xFFFFFFFF
-        self._seed = int(n) & 0xFFFFFFFFFFFFFFFF
-
-    def random(self):
-        """Return a random float in [0.0, 1.0)."""
-        # Simple MWC64X algorithm (period ~ 2^127)
-        self._seed = (self._seed * 6364136223846793005 + 1) & 0xFFFFFFFFFFFFFFFF
-        # Use upper 53 bits for double precision
-        return (self._seed >> 11) / 9007199254740992.0
-
-    def getrandbits(self, k):
-        """Return k random bits as a Python integer."""
-        if k <= 0:
-            return 0
-        result = 0
-        # Generate 64-bit chunks
-        num_chunks = (k + 63) // 64
-        for _ in range(num_chunks):
-            result = (result << 64) | (int(self.random() * (1 << 64)))
-        # Mask to k bits
-        if k % 64:
-            result >>= (num_chunks * 64 - k)
-        return result
+            a = int.from_bytes(a + hashlib.sha512(a).digest())
+        elif isinstance(a, float):
+            a = int(a)
+        _pyrandom.Random.seed(self, a if a is not None else None)
+        self.gauss_next = None
 
     def getstate(self):
-        """Return the internal state for pickling."""
-        return (3, self._seed, self._gauss_next)
+        return (self.VERSION,) + _pyrandom.Random.getstate(self)[1:] + (self.gauss_next,)
 
     def setstate(self, state):
-        """Restore internal state from a state object."""
-        self._seed = state[1]
-        self._gauss_next = state[2] if len(state) > 2 else None
+        # Native setstate consumes (mt words..., index); gauss rides along.
+        _pyrandom.Random.setstate(self, (None,) + tuple(state[1:-1]))
+        self.gauss_next = state[-1] if len(state) > 2 else None
+    def __repr__(self):
+        return "<Random object at 0x{:x}>".format(id(self))
 
     # ── Integer generation ───────────────────────────────────────────────
 
@@ -221,14 +196,14 @@ class Random:
 
     def gauss(self, mu=0.0, sigma=1.0):
         """Gaussian (normal) distribution using Box-Muller transform."""
-        if self._gauss_next is not None:
-            z = self._gauss_next
-            self._gauss_next = None
+        if self.gauss_next is not None:
+            z = self.gauss_next
+            self.gauss_next = None
         else:
             x2pi = self.random() * _math.pi * 2
             g2rad = _math.sqrt(-2.0 * _math.log(1.0 - self.random()))
             z = _math.cos(x2pi) * g2rad
-            self._gauss_next = _math.sin(x2pi) * g2rad
+            self.gauss_next = _math.sin(x2pi) * g2rad
         return mu + z * sigma
 
     def betavariate(self, alpha, beta):
@@ -270,7 +245,6 @@ class Random:
 
 
 # ── SystemRandom (uses OS randomness) ────────────────────────────────────────
-
 
 class SystemRandom(Random):
     """Random number generator that uses os.urandom()."""

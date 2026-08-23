@@ -1,3 +1,4 @@
+pub mod rand;
 mod core;
 pub use core::*;
 mod crypto;
@@ -23,6 +24,7 @@ mod concurrent;
 pub use concurrent::*;
 mod unicodedata;
 pub use unicodedata::*;
+pub use rand::*;
 #[cfg(feature = "sqlite3")]
 mod sqlite3;
 #[cfg(feature = "sqlite3")]
