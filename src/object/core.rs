@@ -544,6 +544,9 @@ impl PyObjectRef {
         let rc = Rc::new(RefCell::new(obj));
         if trackable {
             crate::cycle_gc::track(&rc);
+            if matches!(&*rc.try_borrow().unwrap(), PyObject::Instance { .. }) {
+                crate::cycle_gc::maybe_register_finalizer(&rc);
+            }
         }
         PyObjectRef::Mut(rc)
     }
@@ -571,10 +574,14 @@ impl PyObjectRef {
     /// `SmallBool`/`SmallFloat`/`SmallStr`/`None`) have no `Rc` at all — report
     /// a large constant, matching CPython's own convention for small
     /// cached/immortal objects (`sys.getrefcount(1)` is always huge there too).
+    /// CPython's immortal objects report refcounts ≥ 2^32-1, and
+    /// test_builtin.ImmortalTests asserts getrefcount(immortal) > 2^31 (or
+    /// > 2^30 on 32-bit), so the sentinel must sit above BOTH thresholds.
     pub fn strong_count(&self) -> usize {
+        const IMMORTAL_SENTINEL: usize = 4_294_967_295; // 2^32 - 1
         match self {
             PyObjectRef::Mut(rc) | PyObjectRef::Imm(rc) => Rc::strong_count(rc),
-            _ => 1_000_000,
+            _ => IMMORTAL_SENTINEL,
         }
     }
 

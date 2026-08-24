@@ -8861,8 +8861,10 @@ pub fn create_gc_dict() -> HashMap<String, PyObjectRef> {
     // actual `Rc<RefCell<PyObject>>`-based object model every build uses,
     // unlike `gc.rs`'s separate experimental tracing heap (feature `gc`,
     // not wired into the object model at all).
-    gc_func!("collect", |_| {
+    gc_func!("collect", |args| {
         let collected = crate::cycle_gc::collect();
+        let _ = crate::object::with_vm_mut(|vm| vm.run_pending_finalizers());
+        let _ = args;
         Ok(py_int(collected as i64))
     });
 

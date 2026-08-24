@@ -59,6 +59,16 @@ dev:
 	cargo build --profile release-lite
 	@echo -e "$(GREEN)✔  $(RUSTPYTHON_DEV)$(RESET)"
 
+# Fastest iteration loop: type-check first (~7s, catches all compile errors),
+# then the cheap release-lite binary. Use this between every code edit;
+# reserve `make release` (~40s) for sweep/benchmark/commit moments only.
+it:
+	@echo -e "$(CYAN)==> cargo check (fast error gate)...$(RESET)"
+	cargo check --release 2>&1 | grep -E "^error" -A5 || true
+	@echo -e "$(CYAN)==> release-lite build...$(RESET)"
+	cargo build --profile release-lite
+	@echo -e "$(GREEN)✔ iterate with $(RUSTPYTHON_DEV)$(RESET)"
+
 # ── Static binary (Docker FROM scratch) ───────────
 static:
 	@echo -e "$(CYAN)==> Building static binary...$(RESET)"

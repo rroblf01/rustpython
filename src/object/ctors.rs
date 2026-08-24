@@ -6,7 +6,10 @@
 use super::*;
 
 thread_local! {
-    pub static VM_PTR: std::cell::RefCell<Option<*mut crate::vm::VirtualMachine>> = std::cell::RefCell::new(None);
+    /// The active VirtualMachine for this thread. `Cell` (not RefCell) so
+    /// save/restore around nested executes never conflicts; raw pointers are
+    /// Copy, which Cell::get/set require.
+    pub static VM_PTR: std::cell::Cell<Option<*mut crate::vm::VirtualMachine>> = const { std::cell::Cell::new(None) };
 }
 
 thread_local! {
@@ -22,22 +25,19 @@ pub fn with_vm_mut<F, R>(f: F) -> PyResult<R>
 where
     F: FnOnce(&mut crate::vm::VirtualMachine) -> R,
 {
-    VM_PTR.with(|p| {
-        let opt = p.borrow();
-        if let Some(ptr) = *opt {
-            // SAFETY:
-            // - VM_PTR is set in `VirtualMachine::execute()` before execution begins
-            //   and remains valid for the duration of the call.
-            // - It is only set on the current thread (thread_local!).
-            // - The pointer is cleared after execution completes.
-            // - Therefore, while we are inside a builtin function being called by the VM,
-            //   the pointer is guaranteed to point to a live VirtualMachine.
-            let vm = unsafe { &mut *ptr };
-            Ok(f(vm))
-        } else {
-            Err(PyError::runtime_error("no active VM"))
-        }
-    })
+    // Save/restore via Cell::get/set (no held borrow): nested with_vm_mut /
+    // execute() calls during `f` see the SAME active VM, and finalizer code
+    // that pins its own pointer cannot hit a RefCell conflict.
+    let ptr = VM_PTR.get();
+    if let Some(ptr) = ptr {
+        // SAFETY: see historical note — set by execute() while running.
+        let vm = unsafe { &mut *ptr };
+        let out = f(vm);
+        VM_PTR.set(Some(ptr));
+        Ok(out)
+    } else {
+        Err(PyError::runtime_error("no active VM"))
+    }
 }
 
 thread_local! {

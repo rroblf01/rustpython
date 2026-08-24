@@ -1725,6 +1725,75 @@ fn make_date_from_ordinal(ord: i64) -> PyObjectRef {
     make_date(y, m, d)
 }
 
+
+/// Build an `IsoCalendarDate`-like instance (CPython returns a
+/// tuple subclass with named fields year/week/weekday). Our version is an
+/// Instance exposing attribute access, iteration, indexing and equality
+/// against plain tuples so `isocalendar()` results behave like the real
+/// thing for both attribute-style and tuple-style consumers.
+fn make_isocalendar(year: i64, week: i64, weekday: i64) -> PyObjectRef {
+    thread_local! {
+        static ISO_TYPE: std::cell::RefCell<Option<PyObjectRef>> = const { std::cell::RefCell::new(None) };
+    }
+    let typ = ISO_TYPE.with(|c| {
+        if let Some(t) = &*c.borrow() { return t.clone(); }
+        let mut td: HashMap<String, PyObjectRef> = HashMap::new();
+        let bf = |name: &str, f: crate::object::BuiltinFunc| {
+            PyObjectRef::new(PyObject::BuiltinFunction { name: name.to_string(), func: f })
+        };
+        td.insert("__iter__".into(), bf("__iter__", |args| {
+            let o = &args[0];
+            let g = |n: &str| inst_get_i64(o, n);
+            let tup = py_tuple(vec![
+                py_int(g("year")),
+                py_int(g("week")),
+                py_int(g("weekday")),
+            ]);
+            crate::object::builtin_iter(&[tup])
+        }));
+        td.insert("__len__".into(), bf("__len__", |_a| Ok(py_int(3))));
+        td.insert("__getitem__".into(), bf("__getitem__", |args| {
+            let i = args[1].as_i64().unwrap_or(-999);
+            let o = &args[0];
+            let vals = [inst_get_i64(o, "year"), inst_get_i64(o, "week"), inst_get_i64(o, "weekday")];
+            let idx = if i < 0 { 3 + i } else { i };
+            if !(0..3).contains(&idx) { return Err(PyError::index_error("IsoCalendarDate index out of range")); }
+            Ok(py_int(vals[idx as usize]))
+        }));
+        td.insert("__eq__".into(), bf("__eq__", |args| {
+            let o = &args[0]; let other = &args[1];
+            let vals = [inst_get_i64(o, "year"), inst_get_i64(o, "week"), inst_get_i64(o, "weekday")];
+            let eq = match &*other.borrow() {
+                PyObject::Tuple(t) => t.len() == 3 && t.iter().zip(vals.iter()).all(|(v, iv)| v.as_i64() == Some(*iv)),
+                _ => {
+                    if other.borrow().type_name() == "IsoCalendarDate" {
+                        [inst_get_i64(other, "year"), inst_get_i64(other, "week"), inst_get_i64(other, "weekday")] == vals
+                    } else { false }
+                }
+            };
+            Ok(py_bool(eq))
+        }));
+        td.insert("__repr__".into(), bf("__repr__", |args| {
+            let o = args[0].clone();
+            Ok(py_str(&format!("IsoCalendarDate(year={}, week={}, weekday={})",
+                inst_get_i64(&o,"year"), inst_get_i64(&o,"week"), inst_get_i64(&o,"weekday"))))
+        }));
+        let t = PyObjectRef::new(PyObject::Type {
+            name: "IsoCalendarDate".into(),
+            dict: Box::new(crate::object::str_map_to_typedict(td)),
+            bases: vec![],
+            mro: vec![],
+        });
+        *c.borrow_mut() = Some(t.clone());
+        t
+    });
+    let mut dict = AttrMap::new();
+    dict.insert_str("year", py_int(year));
+    dict.insert_str("week", py_int(week));
+    dict.insert_str("weekday", py_int(weekday));
+    PyObjectRef::new(PyObject::Instance { typ, dict })
+}
+
 fn build_date_type() -> PyObjectRef {
     let mut type_dict: HashMap<String, PyObjectRef> = HashMap::new();
     macro_rules! bf {
@@ -1812,11 +1881,7 @@ fn build_date_type() -> PyObjectRef {
             } else {
                 year
             };
-            Ok(py_tuple(vec![
-                py_int(iso_year),
-                py_int(week_of_year),
-                py_int(wday),
-            ]))
+            Ok(make_isocalendar(iso_year, week_of_year, wday))
         }),
     );
     type_dict.insert_str(
@@ -2113,68 +2178,186 @@ fn build_date_type() -> PyObjectRef {
             } else {
                 String::new()
             };
-            let s = s.trim();
-            let date_str = match s.find(|c: char| c == 'T' || c == ' ') {
-                Some(idx) => &s[..idx],
-                None => s,
-            };
-            // Try YYYY-MM-DD format
-            let parts: Vec<&str> = date_str.splitn(3, '-').collect();
-            if parts.len() == 3
-                && parts[0].chars().all(|c| c.is_ascii_digit())
-                && parts[1].chars().all(|c| c.is_ascii_digit())
-                && parts[2].chars().all(|c| c.is_ascii_digit())
-            {
-                let y: i64 = parts[0]
-                    .parse()
-                    .map_err(|_| PyError::value_error("Invalid isoformat string"))?;
-                let m: i64 = parts[1]
-                    .parse()
-                    .map_err(|_| PyError::value_error("Invalid isoformat string"))?;
-                let d: i64 = parts[2]
-                    .parse()
-                    .map_err(|_| PyError::value_error("Invalid isoformat string"))?;
-                return Ok(make_date(y, m, d));
+            // CPython 3.11+-style ISO 8601 parser: most formats the stdlib
+            // accepts — basic/extended dates, ISO weeks, ordinal dates,
+            // arbitrary single-char date/time separator, optional fractional
+            // seconds (truncated to microseconds), and 'Z'/±HH:MM[:SS] zones.
+            let bad = || PyError::value_error("Invalid isoformat string");
+            let mut t = s.as_str();
+            if t.is_empty() {
+                return Err(bad());
             }
-            // Try YYYYMMDD format (8 digits)
-            if date_str.len() == 8 && date_str.chars().all(|c| c.is_ascii_digit()) {
-                let y: i64 = date_str[..4]
-                    .parse()
-                    .map_err(|_| PyError::value_error("Invalid isoformat string"))?;
-                let m: i64 = date_str[4..6]
-                    .parse()
-                    .map_err(|_| PyError::value_error("Invalid isoformat string"))?;
-                let d: i64 = date_str[6..8]
-                    .parse()
-                    .map_err(|_| PyError::value_error("Invalid isoformat string"))?;
-                return Ok(make_date(y, m, d));
-            }
-            // Try ISO week format: YYYYWww, YYYY-Www, YYYYWwwd, YYYY-Www-d
-            let compact: String = date_str.chars().filter(|c| *c != '-').collect();
-            if compact.len() >= 6 && compact.len() <= 8 {
-                let w_pos = compact.find(|c: char| c == 'W' || c == 'w');
-                if let Some(wp) = w_pos {
-                    if wp == 4 && compact.len() >= 6 {
-                        if let (Ok(y), Ok(wk)) =
-                            (compact[..4].parse::<i64>(), compact[5..7].parse::<i64>())
+            // Trailing timezone: Z/z, or +/-HH[:]MM[:SS][.frac]
+            let mut tz_off: Option<i64> = None;
+            let bytes = t.as_bytes();
+            if bytes[t.len() - 1] == b'Z' || bytes[t.len() - 1] == b'z' {
+                tz_off = Some(0);
+                t = &t[..t.len() - 1];
+            } else {
+                // Search for the last '+' or '-' that starts a valid zone.
+                let idx = t.rfind(|c| c == '+' || c == '-');
+                if let Some(pos) = idx {
+                    if pos >= 9 {
+                        let zone = &t[pos..];
+                        let zc: String =
+                            zone.chars().filter(|c| *c != ':').collect();
+                        let zbody = &zc[1..];
+                        let neg = zc.starts_with('-');
+                        let digits: Vec<&str> = if zc.contains('.') {
+                            let dot = zbody.find('.').unwrap();
+                            let intpart = &zbody[..dot];
+                            let _frac = &zbody[dot + 1..];
+                            // fractional offsets are accepted but truncated
+                            vec![&intpart[0..intpart.len().min(6)], ""]
+                        } else {
+                            match zbody.len() {
+                                2 => vec![&zbody[0..2], "0000"],
+                                4 => vec![&zbody[0..2], &zbody[2..4]],
+                                6 => vec![&zbody[0..2], &zbody[2..4], &zbody[4..6]],
+                                _ => vec!["", ""],
+                            }
+                        };
+                        if !digits[0].is_empty()
+                            && digits[0].chars().all(|c| c.is_ascii_digit())
+                            && digits.get(1).map(|d| {
+                                d.chars().all(|c| c.is_ascii_digit()) || d.is_empty()
+                            }) == Some(true)
                         {
-                            let wd: i64 = if compact.len() >= 8 {
-                                compact[7..8].parse().unwrap_or(1)
+                            let hh: i64 = digits[0].parse().unwrap_or(99);
+                            let mm: i64 = if digits[1].len() >= 2 {
+                                digits[1][..2].parse().unwrap_or(99)
                             } else {
-                                1
+                                0
                             };
-                            if y >= 1 && y <= 9999 && wk >= 1 && wk <= 53 && wd >= 1 && wd <= 7 {
-                                let jan4_ord = ymd_to_ordinal(y, 1, 4);
-                                let jan4_weekday = ((jan4_ord % 7) + 6) % 7;
-                                let week1_monday = jan4_ord - jan4_weekday;
-                                let target_ord = week1_monday + (wk - 1) * 7 + (wd - 1);
-                                return Ok(make_date_from_ordinal(target_ord));
+                            if hh <= 24 && mm < 60 {
+                                let total = hh * 3600 + mm * 60;
+                                tz_off = Some(if neg { -total } else { total });
+                                t = &t[..pos];
                             }
                         }
                     }
                 }
             }
-            Err(PyError::value_error("Invalid isoformat string"))
+            // Split date / time at first separator (any single non-digit,
+            // non-'-' char per 3.11 relaxation; T/t/space are the real ones).
+            let (date_s, time_s) = match t.find(|c: char| c == 'T' || c == 't' || c == ' ') {
+                Some(idx) => (&t[..idx], &t[idx + 1..]),
+                None => (t, ""),
+            };
+
+            fn parse_date(ds: &str) -> Option<(i64, i64, i64)> {
+                let ds = ds.trim();
+                if std::env::var("RPY_DBG_ISO").is_ok() { eprintln!("parse_date({})", ds); }
+                // Extended YYYY-MM-DD
+                if ds.len() == 10 && ds.as_bytes()[4] == b'-' && ds.as_bytes()[7] == b'-' {
+                    let (y, m, d) = (
+                        ds.get(0..4)?.parse::<i64>().ok()?,
+                        ds.get(5..7)?.parse::<i64>().ok()?,
+                        ds.get(8..10)?.parse::<i64>().ok()?,
+                    );
+                    return Some((y, m, d));
+                }
+                // Basic YYYYMMDD
+                if ds.len() == 8 && ds.chars().all(|c| c.is_ascii_digit()) {
+                    return Some((
+                        ds.get(0..4)?.parse().ok()?,
+                        ds.get(4..6)?.parse().ok()?,
+                        ds.get(6..8)?.parse().ok()?,
+                    ));
+                }
+                // Ordinal YYYY-DDD / YYYYDDD
+                let compact: String = ds.chars().filter(|c| *c != '-').collect();
+                if compact.len() == 7 && compact.chars().all(|c| c.is_ascii_digit())
+                    && !compact.contains(['W', 'w'])
+                {
+                    let y: i64 = compact.get(0..4)?.parse().ok()?;
+                    let doy: i64 = compact.get(4..7)?.parse().ok()?;
+                    if !(1..=366).contains(&doy) {
+                        return None;
+                    }
+                    let jan1 = ymd_to_ordinal(y, 1, 1);
+                    return {
+                        let ord = jan1 + doy - 1;
+                        // invert via the existing helpers
+                        Some(ordinal_to_ymd(ord))
+                    };
+                }
+                // ISO week YYYY-Www-D / YYYYWwwD
+                let w_pos = compact.find(|c: char| c == 'W' || c == 'w');
+                if let Some(wp) = w_pos {
+                    if wp == 4 && (compact.len() == 7 || compact.len() == 8) {
+                        let y: i64 = compact.get(0..4)?.parse().ok()?;
+                        let wk: i64 = compact.get(5..7)?.parse().ok()?;
+                        let wd: i64 = if compact.len() == 8 {
+                            compact.get(7..8)?.parse().ok()?
+                        } else {
+                            1
+                        };
+                        if !(1..=53).contains(&wk) || !(1..=7).contains(&wd) {
+                            return None;
+                        }
+                        let jan4_ord = ymd_to_ordinal(y, 1, 4);
+                        let jan4_wd = ((jan4_ord % 7) + 6) % 7;
+                        let week1_monday = jan4_ord - jan4_wd;
+                        let ord = week1_monday + (wk - 1) * 7 + (wd - 1);
+                        return Some(ordinal_to_ymd(ord));
+                    }
+                }
+                None
+            }
+
+            let (y, mo, d) = parse_date(date_s).ok_or_else(bad)?;
+            if !(1..=12).contains(&mo) || !(1..=31).contains(&d) {
+                return Err(bad());
+            }
+
+            let (mut hh, mut mi, mut ss, mut us) = (0i64, 0i64, 0i64, 0i64);
+            if !time_s.is_empty() {
+                // Zone already stripped above; reject embedded zones here.
+                let tp = time_s;
+                let (tp, frac) = match tp.find(|c| c == '.' || c == ',') {
+                    Some(dot) => (&tp[..dot], &tp[dot + 1..]),
+                    None => (tp, ""),
+                };
+                let digits: String = tp.chars().filter(|&c| c != ':').collect();
+                if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+                    return Err(bad());
+                }
+                match digits.len() {
+                    2 => hh = digits.parse().unwrap_or(99),
+                    4 => {
+                        hh = digits.get(0..2).and_then(|x| x.parse().ok()).unwrap_or(99);
+                        mi = digits.get(2..4).and_then(|x| x.parse().ok()).unwrap_or(99);
+                    }
+                    6 => {
+                        hh = digits.get(0..2).and_then(|x| x.parse().ok()).unwrap_or(99);
+                        mi = digits.get(2..4).and_then(|x| x.parse().ok()).unwrap_or(99);
+                        ss = digits.get(4..6).and_then(|x| x.parse().ok()).unwrap_or(99);
+                    }
+                    _ => return Err(bad()),
+                }
+                if hh > 23 || mi > 59 || ss > 59 {
+                    return Err(bad());
+                }
+                if !frac.is_empty() {
+                    if !frac.chars().all(|c| c.is_ascii_digit()) {
+                        return Err(bad());
+                    }
+                    let f6: String = frac.chars().take(6).collect();
+                    let padded = format!("{:<06}", f6);
+                    us = padded.parse().unwrap_or(0);
+                }
+            }
+
+            if let Some(off) = tz_off {
+                let tz = if off == 0 {
+                    get_utc_singleton()
+                } else {
+                    make_timezone(off, None)
+                };
+                return Ok(make_datetime(y, mo, d, hh, mi, ss, us, tz, 0));
+            }
+            Ok(make_datetime(y, mo, d, hh, mi, ss, us, py_none(), 0))
         }),
     );
     type_dict.insert_str(
@@ -2634,6 +2817,12 @@ fn make_datetime_from_total_us(total: i128, tzinfo: PyObjectRef) -> PyObjectRef 
 }
 
 fn datetime_isoformat(obj: &PyObjectRef, sep: char) -> String {
+    datetime_isoformat_ts(obj, sep, None)
+}
+
+/// timespec: None => auto (omit fraction when us==0); Some(n) => emit exactly
+/// n fractional digits (0,3,6 are the meaningful ones; others truncated).
+fn datetime_isoformat_ts(obj: &PyObjectRef, sep: char, timespec: Option<usize>) -> String {
     let y = inst_get_i64(obj, "year");
     let mo = inst_get_i64(obj, "month");
     let d = inst_get_i64(obj, "day");
@@ -2641,11 +2830,51 @@ fn datetime_isoformat(obj: &PyObjectRef, sep: char) -> String {
     let mi = inst_get_i64(obj, "minute");
     let s = inst_get_i64(obj, "second");
     let us = inst_get_i64(obj, "microsecond");
-    let mut out = format!(
-        "{:04}-{:02}-{:02}{}{:02}:{:02}:{:02}",
-        y, mo, d, sep, h, mi, s
-    );
-    if us != 0 {
+    // Shared timezone suffix builder for every early-return path below.
+    fn tz_suffix(obj: &PyObjectRef, h: i64, mi: i64, s: i64) -> String {
+        let tz = datetime_tzinfo(obj);
+        if let Some(off) =
+            get_utcoffset_seconds(&tz, datetime_ordinal(obj), h * 3600 + mi * 60 + s)
+        {
+            format_offset_iso(off)
+        } else {
+            String::new()
+        }
+    }
+    let tzs = tz_suffix(obj, h, mi, s);
+    // timespec codes: 1=hours 2=minutes 3=seconds 4=milliseconds 5=micros
+    // 0=auto (fraction only when nonzero). Hours/minutes drop seconds.
+    match timespec {
+        Some(1) => {
+            return format!("{:04}-{:02}-{:02}{}{:02}{}", y, mo, d, sep, h, tzs);
+        }
+        Some(2) => {
+            return format!("{:04}-{:02}-{:02}{}{:02}:{:02}{}", y, mo, d, sep, h, mi, tzs);
+        }
+        Some(3) => {
+            return format!(
+                "{:04}-{:02}-{:02}{}{:02}:{:02}:{:02}.000{}",
+                y, mo, d, sep, h, mi, s, tzs
+            );
+        }
+        Some(4) => {
+            return format!(
+                "{:04}-{:02}-{:02}{}{:02}:{:02}:{:02}.{:03}{}",
+                y,
+                mo,
+                d,
+                sep,
+                h,
+                mi,
+                s,
+                us / 1000,
+                tzs
+            );
+        }
+        _ => {}
+    }
+    let mut out = format!("{:04}-{:02}-{:02}{}{:02}:{:02}:{:02}", y, mo, d, sep, h, mi, s);
+    if timespec == Some(5) || us != 0 {
         out.push_str(&format!(".{:06}", us));
     }
     let tz = datetime_tzinfo(obj);
@@ -2981,12 +3210,45 @@ fn build_datetime_type() -> PyObjectRef {
     type_dict.insert_str(
         "isoformat",
         bf!("isoformat", |args| {
-            let sep = if args.len() > 1 {
-                args[1].str().chars().next().unwrap_or('T')
-            } else {
-                'T'
-            };
-            Ok(py_str(&datetime_isoformat(&args[0], sep)))
+            // kwargs arrive packed as a trailing Dict argument; the old code
+            // stringified that dict and took its first char as the separator,
+            // producing "2025-01-02{03:04:05" for isoformat(timespec=...).
+            let mut sep = 'T';
+            let mut timespec: Option<usize> = None;
+            if args.len() > 1 {
+                match &*args[1].borrow() {
+                    PyObject::Str(sv) => {
+                        sep = sv.chars().next().unwrap_or('T');
+                    }
+                    PyObject::Dict(d) => {
+                        for (k, v) in d.items() {
+                            let key = k.str();
+                            match key.as_str() {
+                                "sep" => sep = v.str().chars().next().unwrap_or('T'),
+                                "timespec" => {
+                                    timespec = match v.str().as_str() {
+                                        "hours" => Some(1),
+                                        "minutes" => Some(2),
+                                        "seconds" => Some(3),
+                                        "milliseconds" => Some(4),
+                                        "microseconds" => Some(5),
+                                        "auto" => None,
+                                        other => {
+                                            return Err(PyError::value_error(format!(
+                                                "Invalid timespec {}",
+                                                other
+                                            )))
+                                        }
+                                    };
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(py_str(&datetime_isoformat_ts(&args[0], sep, timespec)))
         }),
     );
     type_dict.insert_str(
@@ -3547,7 +3809,7 @@ fn build_datetime_type() -> PyObjectRef {
             } else {
                 year
             };
-            Ok(py_tuple(vec![py_int(iso_year), py_int(week_of_year), py_int(wday)]))
+            Ok(make_isocalendar(iso_year, week_of_year, wday))
         }),
     );
     // datetime.datetime.fromisocalendar(year, week, weekday) — classmethod

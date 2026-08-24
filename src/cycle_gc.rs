@@ -29,13 +29,26 @@
 //! `PyObjectRef`s are tracked (matching CPython's own `gc`, which likewise
 //! never tracks plain ints/strings/etc.) — see `is_trackable`.
 
-use crate::object::{PyDict, PyObject, PyObjectRef, PySet};
+use crate::object::{PyDict, PyError, PyObject, PyObjectRef, PySet, ObjectAccess};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::{Rc, Weak};
 
 thread_local! {
+    /// True while a __del__ finalizer is executing — the VM's Function-call
+    /// arm consults this to skip JIT compilation (compilation re-enters
+    /// internal caches that are already mutably borrowed mid-collection).
+    pub static IN_FINALIZER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static REGISTRY: RefCell<Vec<Weak<RefCell<PyObject>>>> = RefCell::new(Vec::new());
+    /// Instances whose type defines __del__, held STRONGLY until their last
+    /// other reference drops, so we can still invoke the finalizer after the
+    /// program releases them (plain Rc drop would otherwise free them before
+    /// any code could run __del__).
+    static FINALIZERS: RefCell<Vec<Rc<RefCell<PyObject>>>> = RefCell::new(Vec::new());
+    /// Pointer set of instances whose __del__ already ran.
+    static FINALIZED: RefCell<HashSet<*const RefCell<PyObject>>> = RefCell::new(HashSet::new());
+    /// Types known to define (or not define) __del__ — creation-time cache.
+    static HAS_DEL_CACHE: RefCell<HashMap<usize, bool>> = RefCell::new(HashMap::new());
     static ALLOCS_SINCE_COLLECT: Cell<usize> = Cell::new(0);
     static ENABLED: Cell<bool> = Cell::new(true);
     static LAST_STATS: Cell<(usize, usize)> = Cell::new((0, 0)); // (tracked, collected) as of last collect()
@@ -110,6 +123,134 @@ pub fn is_enabled() -> bool {
 pub fn stats() -> (usize, usize) {
     LAST_STATS.with(Cell::get)
 }
+
+
+/// Called from PyObjectRef::new for every fresh Instance: if the instance's
+/// type defines __del__, retain a strong reference in FINALIZERS so the
+/// finalizer can run later even after user code drops its references.
+pub fn maybe_register_finalizer(rc: &Rc<RefCell<PyObject>>) {
+    if std::env::var("RPY_DBG_UR").is_ok() {
+        eprintln!("maybe_register_finalizer called");
+    }
+    let typ_ptr = {
+        let b = match rc.try_borrow() {
+            Ok(b) => b,
+            Err(_) => return,
+        };
+        match &*b {
+            PyObject::Instance { typ, .. } => match typ {
+                PyObjectRef::Mut(r) | PyObjectRef::Imm(r) => Rc::as_ptr(r) as usize,
+                _ => return,
+            },
+            _ => return,
+        }
+    };
+    let has_del = HAS_DEL_CACHE.with(|c| {
+        if let Some(v) = c.borrow().get(&typ_ptr) {
+            return *v;
+        }
+        let has = {
+            let b = rc.try_borrow().ok();
+            let found = match b {
+                Some(b) => match &*b {
+                    PyObject::Instance { typ, .. } =>
+                        crate::object::lookup_dunder_via_mro(typ, "__del__").is_some(),
+                    _ => false,
+                },
+                None => false,
+            };
+            found
+        };
+        c.borrow_mut().insert(typ_ptr, has);
+        has
+    });
+    if has_del {
+        if std::env::var("RPY_DBG_UR").is_ok() { eprintln!("finalizer REGISTERED"); }
+        FINALIZERS.with(|q| q.borrow_mut().push(rc.clone()));
+    }
+}
+
+/// Run pending __del__ methods whose only remaining reference is our own
+/// retention slot. Called from collect() (and safe to call anywhere a VM is
+/// active).
+pub fn drain_finalizers() {
+    if std::env::var("RPY_DBG_UR").is_ok() {
+        let n = FINALIZERS.with(|q| q.borrow().len());
+        eprintln!("drain_finalizers: queued={}", n);
+    }
+    loop {
+        let target = FINALIZERS.with(|q| {
+            let q = q.borrow_mut();
+            q.iter()
+                .position(|rc| {
+                    let sc = Rc::strong_count(rc);
+                    if std::env::var("RPY_DBG_UR").is_ok() {
+                        eprintln!("drain cand strong={} type={}", sc,
+                            rc.try_borrow().map(|b| b.type_name().to_string()).unwrap_or_default());
+                    }
+                    sc == 1 && !FINALIZED.with(|f| f.borrow().contains(&Rc::as_ptr(rc)))
+                })
+                .map(|i| q[i].clone())
+        });
+        let Some(rc) = target else { return };
+        FINALIZED.with(|f| f.borrow_mut().insert(Rc::as_ptr(&rc)));
+        run_finalizer(&rc);
+        FINALIZERS.with(|q| {
+            let mut q = q.borrow_mut();
+            if let Some(i) = q.iter().position(|x| Rc::as_ptr(x) == Rc::as_ptr(&rc)) {
+                q.remove(i);
+            }
+        });
+    }
+}
+
+/// Queue the pending `__del__` invocation for a garbage instance. Actual
+/// execution happens OUTSIDE the collector pass (see
+/// `take_pending_finalizers`, consumed by the `gc.collect` builtin) so a
+/// raising finalizer never unwinds through live borrow snapshots.
+fn run_finalizer(rc: &Rc<RefCell<PyObject>>) {
+    use crate::object::{lookup_dunder_via_mro, PyObject};
+    let (del_fn, self_obj) = {
+        let borrowed = match rc.try_borrow() {
+            Ok(b) => b,
+            Err(_) => return,
+        };
+        match &*borrowed {
+            PyObject::Instance { typ, .. } => {
+                match lookup_dunder_via_mro(typ, "__del__") {
+                    Some(f) => (
+                        f,
+                        crate::object::PyObjectRef::Mut(rc.clone()),
+                    ),
+                    None => return,
+                }
+            }
+            _ => return,
+        }
+    };
+    PENDING_FINALIZERS.with(|q| q.borrow_mut().push((self_obj, del_fn)));
+}
+
+/// Cheap gate for hot paths: true when any instance whose type defines
+/// __del__ is awaiting finalization.
+pub fn has_pending_finalizers() -> bool {
+    FINALIZERS.with(|q| !q.borrow().is_empty())
+}
+
+/// Take the queued finalizer invocations (self_obj, bound_fn) so the caller
+/// (gc.collect builtin, holding the live VM) can execute them safely.
+pub fn take_pending_finalizers() -> Vec<(crate::object::PyObjectRef, crate::object::PyObjectRef)> {
+    FINALIZED_LOCKED.with(|_| {});
+    PENDING_FINALIZERS.with(|q| std::mem::take(&mut *q.borrow_mut()))
+}
+
+thread_local! {
+    static PENDING_FINALIZERS: RefCell<Vec<(crate::object::PyObjectRef, crate::object::PyObjectRef)>> =
+        RefCell::new(Vec::new());
+    static FINALIZED_LOCKED: std::cell::Cell<()> = const { std::cell::Cell::new(()) };
+}
+
+
 
 fn extract_rc(r: &PyObjectRef) -> Option<Rc<RefCell<PyObject>>> {
     match r {
@@ -258,6 +399,7 @@ fn clear_children(obj: &mut PyObject) {
 /// codebase — a live conflicting borrow panics rather than corrupting
 /// state).
 pub fn collect() -> usize {
+    drain_finalizers();
     // Snapshot every still-alive tracked object, dropping dead registry
     // entries (already collected by refcounting alone) as we go. Holding a
     // real `Rc` per entry for the rest of this function is deliberate — it
@@ -435,6 +577,12 @@ pub fn collect() -> usize {
     let mut marked_but_zero = 0;
     for (i, rc) in live_rcs.iter().enumerate() {
         if !live[i] {
+            // Finalizer protocol: call __del__ BEFORE severing references so
+            // the object is still intact while it runs (CPython order).
+            // Exceptions escaping __del__ are routed to
+            // `sys.unraisablehook` with an UnraisableHookArgs-style carrier,
+            // matching real interpreter behavior.
+            run_finalizer(rc);
             clear_children(&mut rc.borrow_mut());
             collected += 1;
         } else if gc_refs[i] == 0 {

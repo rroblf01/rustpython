@@ -704,7 +704,7 @@ extern "C" fn jit_import_name(
         let name_obj = &*consts.offset((names_offset + name_idx) as isize);
         let name = name_obj.str();
         crate::object::VM_PTR.with(|p| {
-            if let Some(ptr) = *p.borrow() {
+            if let Some(ptr) = p.get() {
                 let vm = unsafe { &mut *ptr };
                 if let Some(module) = vm.modules.get(&name) {
                     std::ptr::write(out, module.clone());

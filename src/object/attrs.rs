@@ -6400,8 +6400,15 @@ impl PyObject {
                                     .collect();
                                 Ok(py_list(keys))
                             } else if let PyObject::Dict(d) = &*args[0].borrow() {
+                                // dict_keys is set-like in CPython (supports
+                                // | & ^ - and membership); a frozenset gives
+                                // all of that plus len/iter for free, vs the
+                                // previous plain list which made every view
+                                // set-operation raise TypeError.
                                 let keys: Vec<PyObjectRef> = d.keys();
-                                Ok(py_list(keys))
+                                Ok(PyObjectRef::new(PyObject::FrozenSet(
+                                    crate::object::PySet::from_vec(keys)?,
+                                )))
                             } else {
                                 Err(PyError::runtime_error("keys on non-dict"))
                             }
@@ -6736,7 +6743,12 @@ impl PyObject {
                         func: |args| {
                             let d = args[0].borrow();
                             if let PyObject::Dict(dict) = &*d {
-                                Ok(py_list(dict.keys()))
+                                // dict_keys is set-like (| & ^ -); frozenset
+                                // provides all of it (see twin arm above).
+                                let keys: Vec<PyObjectRef> = dict.keys();
+                                Ok(PyObjectRef::new(PyObject::FrozenSet(
+                                    crate::object::PySet::from_vec(keys)?,
+                                )))
                             } else if let PyObject::Globals(g) = &*d {
                                 let keys: Vec<PyObjectRef> = g
                                     .borrow()
@@ -9134,6 +9146,61 @@ impl PyObject {
                             } else {
                                 Err(PyError::runtime_error("listen on non-socket"))
                             }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    // setblocking(flag): our sockets are internally
+                    // non-blocking with retry loops emulating blocking
+                    // semantics at the operation level, so this only
+                    // validates and accepts the flag.
+                    "setblocking" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "setblocking".to_string(),
+                        func: |args| {
+                            if args.len() < 2 {
+                                return Err(PyError::type_error(
+                                    "setblocking() takes exactly 1 argument",
+                                ));
+                            }
+                            if !matches!(&*args[1].borrow(), PyObject::Bool(_) | PyObject::Int(_))
+                            {
+                                return Err(PyError::type_error(
+                                    "argument must be an int or bool",
+                                ));
+                            }
+                            Ok(py_none())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    // settimeout(value): accepted for API compatibility;
+                    // timeouts are emulated by bounded retry loops.
+                    "settimeout" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "settimeout".to_string(),
+                        func: |args| {
+                            if args.len() < 2 {
+                                return Err(PyError::type_error(
+                                    "settimeout() takes exactly 1 argument",
+                                ));
+                            }
+                            Ok(py_none())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    // fileno(): OS-level descriptor when one exists.
+                    "fileno" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "fileno".to_string(),
+                        func: |args| {
+                            let sock = &*args[0].borrow();
+                            if let PyObject::Socket { inner } = sock {
+                                let inner = inner.borrow();
+                                use std::os::fd::AsRawFd;
+                                let fd = match &*inner {
+                                    SocketInner::TcpListener(l) => l.as_raw_fd(),
+                                    SocketInner::TcpStream(s) => s.as_raw_fd(),
+                                    _ => -1,
+                                };
+                                return Ok(py_int(fd as i64));
+                            }
+                            Err(PyError::runtime_error("fileno on non-socket"))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),

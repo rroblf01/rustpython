@@ -185,7 +185,18 @@ impl Frame {
     }
 
     pub fn remove_local(&mut self, name: &str) -> Option<PyObjectRef> {
-        self.locals.remove(interner::intern(name))
+        let sid = interner::intern(name);
+        let mut out = self.locals.remove(sid);
+        // `del x` in a function must ALSO clear the fast-local slot, or the
+        // frame keeps the only meaningful reference alive forever (observed:
+        // __del__ finalizers never fired because the retained slot kept
+        // Rc::strong_count above the release threshold).
+        if let Some(idx) = self.code.varnames.iter().position(|&n| n == sid) {
+            if idx < self.fast_locals.len() {
+                out = self.fast_locals[idx].take().or(out);
+            }
+        }
+        out
     }
 
     pub fn contains_local(&self, name: &str) -> bool {
@@ -1377,11 +1388,11 @@ impl VirtualMachine {
         // Native shelve module (persistent dict wrapper)
         modules.insert_str("shelve", create_module("shelve", create_shelve_dict()));
 
-        // Native mimetypes module
-        modules.insert_str(
-            "mimetypes",
-            create_module("mimetypes", create_mimetypes_dict()),
-        );
+        // "mimetypes" intentionally NOT registered natively: the
+        // pure-Python Lib/mimetypes.py is the full CPython module
+        // (incl. _default_mime_types, init(), MimeTypes class); the old
+        // native stub shadowed it and broke its own test suite at
+        // setUpModule. Re-enable only if import-from-Lib breaks.
 
         // Native dis module for bytecode disassembly
         modules.insert_str("dis", create_module("dis", create_dis_dict()));
@@ -3028,12 +3039,18 @@ impl VirtualMachine {
     }
 
     pub fn execute(&mut self) -> PyResult<PyObjectRef> {
-        crate::object::VM_PTR.with(|p| {
-            let needs_set = p.borrow().is_none();
-            if needs_set {
-                *p.borrow_mut() = Some(self as *mut VirtualMachine);
-            }
-        });
+        // ALWAYS install this machine and RESTORE the previous one on exit:
+        // leaving a pooled/disposable machine's pointer installed after it
+        // was recycled made later with_vm_mut calls read garbage fields
+        // (observed: recursion_limit=16, frames.len()=garbage).
+        let prev_vm_ptr =
+            crate::object::VM_PTR.with(|p| p.replace(Some(self as *mut VirtualMachine)));
+        // Stack discipline for the global exc_info slot as well: nested
+        // executes must restore what their caller saw, otherwise a transient
+        // exception's traceback keeps its origin frame_object (and through
+        // it, the frame's f_locals snapshot) alive forever.
+        let prev_exc_type = self.exc_type.take();
+        let prev_exc_value = self.exc_value.take();
         // Every call site that pushes a frame onto `self.frames` immediately
         // calls `execute()` and pops exactly that one frame once it returns
         // (see exec_code, call_function's Function arm, __build_class__,
@@ -3068,6 +3085,11 @@ impl VirtualMachine {
             self.exc_type = Some(self.exception_class_of(&exc_obj));
             self.exc_value = Some(exc_obj);
         }
+        // Restore the caller's machine and exception context (see saves at
+        // the top of this function).
+        crate::object::VM_PTR.with(|p| p.set(prev_vm_ptr));
+        self.exc_type = prev_exc_type;
+        self.exc_value = prev_exc_value;
         result
     }
 
@@ -3742,6 +3764,9 @@ impl VirtualMachine {
                 let var_idx = arg as usize;
                 let name = self.frames[fi].code.varnames[var_idx].to_string();
                 self.frames[fi].remove_local(&name);
+                if self.frames[fi].frame_locals_obj.is_some() {
+                    self.sync_frame_locals(fi);
+                }
             }
 
             Opcode::DELETE_NAME => {
@@ -3756,6 +3781,9 @@ impl VirtualMachine {
                     .globals
                     .borrow_mut()
                     .remove(&interner::intern(&name));
+                if self.frames[fi].frame_locals_obj.is_some() {
+                    self.sync_frame_locals(fi);
+                }
             }
 
             Opcode::POP_TOP => {
@@ -8137,6 +8165,111 @@ impl VirtualMachine {
         }
     }
 
+    
+
+    /// Execute queued `__del__` finalizers left by the last cycle-collector pass.
+    /// Runs with the live `&mut VirtualMachine`; converts escaping exceptions
+    /// into `sys.unraisablehook` calls — never propagates into caller bytecode.
+    pub(crate) fn run_pending_finalizers(&mut self) {
+        use crate::object::{ObjectAccess, VM_PTR};
+        // Nested execute() calls swap the thread-local VM_PTR; nested generator
+        // resumes can leave it pointing at a pooled (recycled) machine whose
+        // fields read as garbage. Pin OUR pointer around every finalizer/hook
+        // invocation so they always run on this, fully-initialized VM.
+        fn with_pinned_vm<R>(vm: *mut VirtualMachine, f: impl FnOnce() -> R) -> R {
+            let prev = VM_PTR.get().or(Some(vm));
+            VM_PTR.set(Some(vm));
+            let out = f();
+            VM_PTR.set(prev);
+            out
+        }
+        let self_ptr: *mut VirtualMachine = self;
+        let pending = crate::cycle_gc::take_pending_finalizers();
+        let saved_active = self
+            .frames
+            .last()
+            .and_then(|f| f.active_exception.clone());
+        let saved_ctx_stack = std::mem::take(&mut self.exc_context_stack);
+        let saved_propagating = self.propagating_exc.take();
+        for (self_obj, del_fn) in pending {
+            crate::cycle_gc::IN_FINALIZER.with(|f| f.set(true));
+            let bound = PyObjectRef::imm(PyObject::BoundMethod {
+                func: del_fn,
+                self_obj: self_obj.clone(),
+            });
+            let result =
+                with_pinned_vm(self_ptr, || self.call_function(bound, vec![], vec![]));
+            crate::cycle_gc::IN_FINALIZER.with(|f| f.set(false));
+            if let Err(err) = result {
+                let carrier_typ = PyObjectRef::new(PyObject::Type {
+                    name: "UnraisableHookArgs".into(),
+                    dict: Box::new(crate::object::TypeDict::default()),
+                    bases: vec![],
+                    mro: vec![],
+                });
+                // exc_type must be the exception CLASS object (the test
+                // compares it against e.g. ZeroDivisionError), not its name.
+                // Prefer the REAL exception object's class when the error
+                // carries one (bare `raise` re-raise arrives as
+                // PyError::Exception with a generic "Exception" type_name).
+                let exc_type_obj = {
+                    let name = err.type_name();
+                    // Resolve the exception object's CLASS NAME, then hand
+                    // back the SAME object Python code sees for that name in
+                    // builtins (this interpreter represents builtin exception
+                    // classes as builtin-function stubs; tests compare by
+                    // identity against those).
+                    let cls_name: Option<String> = match &err {
+                        PyError::Exception(_, exc_obj) => ObjectAccess::get_attribute(
+                            &*exc_obj.borrow(),
+                            "__class__",
+                        )
+                        .ok()
+                        .map(|c| c.borrow().type_name()),
+                        _ => None,
+                    };
+                    let lookup = cls_name.as_deref().unwrap_or(name);
+                    self.builtins
+                        .get(&interner::intern(lookup))
+                        .cloned()
+                        .unwrap_or_else(|| py_str(name))
+                };
+                let mut dict = AttrMap::new();
+                dict.insert_str("exc_type", exc_type_obj);
+                dict.insert_str("exc_value", py_str(&err.message()));
+                dict.insert_str("object", self_obj);
+                dict.insert_str("truncated", py_bool(false));
+                dict.insert_str("traceback", py_none());
+                let carrier =
+                    PyObjectRef::new(PyObject::Instance { typ: carrier_typ, dict });
+                let hook = self
+                    .modules
+                    .get("sys")
+                    .and_then(|m| ObjectAccess::get_attribute(&*m.borrow(), "unraisablehook").ok());
+                match hook {
+                    Some(hook_obj) => {
+                        let _ = with_pinned_vm(self_ptr, || {
+                            self.call_function(hook_obj, vec![carrier], vec![])
+                        });
+                    }
+                    None => eprintln!(
+                        "Exception ignored in __del__: {}: {}",
+                        err.type_name(),
+                        err.message()
+                    ),
+                }
+            }
+        }
+        // Restore caller's active-exception state clobbered by the nested
+        // execution of this finalizer (CPython keeps unraisable exceptions
+        // invisible to the running frame's context chaining).
+        if let Some(top) = self.frames.last_mut() {
+            top.active_exception = saved_active.clone();
+        }
+        self.exc_context_stack = saved_ctx_stack;
+        self.propagating_exc = saved_propagating;
+    }
+
     pub(crate) fn call_function(
         &mut self,
         callable: PyObjectRef,
@@ -9172,7 +9305,10 @@ impl VirtualMachine {
             let jit_consts = &inner_f.jit_consts;
             // Try JIT compiled execution (fast path for hot functions)
             #[cfg(feature = "jit")]
-            if defaults.is_empty() && keywords.is_empty() {
+            if defaults.is_empty()
+                && keywords.is_empty()
+                && !crate::cycle_gc::IN_FINALIZER.with(std::cell::Cell::get)
+            {
                 const SENTINEL_FAILED: usize = 1;
                 let jp = jit_ptr.get();
                 if jp == SENTINEL_FAILED {
