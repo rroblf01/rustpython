@@ -4787,22 +4787,22 @@ fn frac_format_exact(num: BigInt, den: BigInt, spec: &str) -> PyResult<String> {
 /// Fallback that gets routed (by address, see vm.rs's call_function) to the
 /// real `fraction_init_with_vm` — Fraction's constructor needs a live VM to
 /// invoke user-provided `as_integer_ratio()` methods.
-pub(crate) fn fraction_init_fallback(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    Err(PyError::runtime_error(
-        "Fraction.__init__ not dispatched with a VM",
-    ))
+///
+/// The address-based routing in call_function only fires for the *raw*
+/// BuiltinFunction/BoundMethod objects; a bound copy produced through some
+/// attribute-binding paths loses the original fn identity, so as a last
+/// resort the fallback itself grabs the active VM via the VM_PTR
+/// thread-local (always set while interpreter bytecode is running).
+pub(crate) fn fraction_init_fallback(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    Ok(crate::object::with_vm_mut(|vm| fraction_init_with_vm(vm, args))??)
 }
 
-pub(crate) fn fraction_from_number_fallback(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    Err(PyError::runtime_error(
-        "Fraction.from_number not dispatched with a VM",
-    ))
+pub(crate) fn fraction_from_number_fallback(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    Ok(crate::object::with_vm_mut(|vm| fraction_from_number_with_vm(vm, args))??)
 }
 
-pub(crate) fn fraction_from_decimal_fallback(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    Err(PyError::runtime_error(
-        "Fraction.from_decimal not dispatched with a VM",
-    ))
+pub(crate) fn fraction_from_decimal_fallback(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    Ok(crate::object::with_vm_mut(|vm| fraction_from_decimal_with_vm(vm, args))??)
 }
 
 pub(crate) fn fraction_from_number_with_vm(

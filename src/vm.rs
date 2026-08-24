@@ -8622,6 +8622,12 @@ impl VirtualMachine {
                         return None;
                     }
                     let mt = crate::object::metatype_of(cls)?;
+                    if std::env::var("RPY_TRACE_IS").is_ok() {
+                        eprintln!("FIND-HOOK cls={} mt={:?} has_hook={}",
+                                  cls.borrow().type_name(),
+                                  mt.borrow().type_name(),
+                                  if let PyObject::Type { dict, .. } = &*mt.borrow() { dict.contains_key_str(hook_name) } else { false });
+                    }
                     let hook = if let PyObject::Type { dict, .. } = &*mt.borrow() {
                         dict.get_str(hook_name).cloned()
                     } else {
@@ -9666,6 +9672,64 @@ impl VirtualMachine {
                 );
             }
             return crate::object::builtin_type_of(&args);
+        }
+
+        // Calling a METACLASS itself with `(name, bases, namespace)` — e.g.
+        // `Meta('D', (object,), {})`, the dynamic equivalent of
+        // `class D(metaclass=Meta): ...` — must build a CLASS whose
+        // metaclass is `Meta`. Real Python routes this through
+        // `type.__call__` → `type.__new__`, which recognizes that the
+        // callable is not bare `type` and performs metaclass-tagged class
+        // construction. Without this, every dynamically created custom-
+        // metaclass class silently lost its metaclass (its `__dict__` even
+        // came up empty — real casualties: `typing._ProtocolMeta` protocol
+        // classes, `abc.ABCMeta` registries, enum's `EnumType` when built
+        // dynamically). Only the exact 3-arg shape is intercepted so
+        // ordinary instantiation of such classes is untouched.
+        {
+            let looks_like_class_call = args.len() == 3
+                && matches!(&*args[0].borrow(), PyObject::Str(_))
+                && matches!(&*args[2].borrow(), PyObject::Dict(_));
+            if std::env::var("RPY_TRACE_MC").is_ok() {
+                let tn = callable.borrow().type_name();
+                let mt = crate::object::metatype_of(&callable).map(|m| m.borrow().type_name());
+                eprintln!("MC-TRACE type-call: callable={} args={} looks3={} mt={:?}",
+                          tn, args.len(), looks_like_class_call, mt);
+            }
+            if looks_like_class_call {
+                let plain_type = self
+                    .builtins
+                    .get(&interner::intern("type"))
+                    .cloned();
+                let callable_is_bare_type =
+                    plain_type.as_ref().map(|t| t.is(&callable)).unwrap_or(false);
+                // The callable must itself be a SUBCLASS of `type` (its MRO
+                // contains bare `type`) — i.e. it's a metaclass. NOTE: do
+                // NOT gate this on `metatype_of(callable)` being custom: a
+                // metaclass declared via `class M(type): ...` has plain
+                // `type` as ITS OWN metaclass, so that lookup is None even
+                // though calling M must build a class tagged with M.
+                let callable_is_metaclass = matches!(
+                    &*callable.borrow(),
+                    PyObject::Type { mro, .. } if plain_type
+                        .as_ref()
+                        .map(|t| mro.iter().any(|b| t.is(b)))
+                        .unwrap_or(false)
+                );
+                if !callable_is_bare_type && callable_is_metaclass {
+                    let mut new_args = vec![callable.clone()];
+                    new_args.extend(args.iter().cloned());
+                    let built = self.type_new_impl(&new_args)?;
+                    if std::env::var("RPY_TRACE_MC").is_ok() {
+                        let tn = built.borrow().type_name();
+                        let dn = if let PyObject::Type { dict, .. } = &*built.borrow() {
+                            format!("{:?}", dict.get_str("marker").is_some())
+                        } else { "?".into() };
+                        eprintln!("MC-TRACE built via type_new_impl: type={} has_marker={}", tn, dn);
+                    }
+                    return Ok(built);
+                }
+            }
         }
 
         // A class built by a custom metaclass that itself defines

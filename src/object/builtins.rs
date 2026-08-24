@@ -4835,6 +4835,15 @@ impl Drop for IsinstanceRecursionGuard {
 }
 
 pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    let trace = std::env::var("RPY_TRACE_IS").is_ok();
+    if trace {
+        let o_t = args[0].borrow().type_name();
+        let c_t = args[1].borrow().type_name();
+        let c_meta = crate::object::metatype_of(&args[1])
+            .map(|m| m.borrow().type_name())
+            .unwrap_or_else(|| "None".into());
+        eprintln!("IS-ENTER obj={} class={} class_meta={}", o_t, c_t, c_meta);
+    }
     if args.len() != 2 {
         return Err(PyError::type_error(
             "isinstance() takes exactly 2 arguments",
@@ -4872,6 +4881,27 @@ pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         if let Some(ic) = dict.get_str("__instancecheck__") {
             if !matches!(&*ic.borrow(), PyObject::None) {
                 let result = call_bound_method(ic.clone(), args[1].clone(), vec![args[0].clone()])?;
+                return Ok(result);
+            }
+        }
+    }
+    // Fallback: `__instancecheck__` defined on the class's METACLASS (the
+    // standard CPython placement). The dict-level lookup above only fires
+    // for the non-standard in-class placement; dynamically built protocol
+    // /ABC classes (`_ProtocolMeta('X', (object,), ns)`) carry the hook on
+    // their metaclass instead, and — because dynamic class creation with a
+    // custom metaclass currently drops the provided namespace into the
+    // new Type's dict — the metaclass MRO is the ONLY place the hook is
+    // reachable from for them.
+    if let Some(meta) = crate::object::metatype_of(&args[1]) {
+        if std::env::var("RPY_TRACE_IS").is_ok() {
+            eprintln!("IS-TRACE fallback: class={} meta={}",
+                      class.type_name(), meta.borrow().type_name());
+        }
+        if !meta.is(&args[1]) {
+            if let Some(f) = crate::object::lookup_dunder_via_mro(&meta, "__instancecheck__") {
+                let result =
+                    call_bound_method(f, args[1].clone(), vec![args[0].clone()])?;
                 return Ok(result);
             }
         }

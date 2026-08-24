@@ -29,10 +29,60 @@ class _TypingType:
     def __repr__(self):
         return self._name
 
+
+# ── Runtime-checkable protocols & ABCs ────────────────────────────────
+# Real classes with a metaclass __instancecheck__ that verifies the
+# presence of the protocol's dunder method(s) on the object's type —
+# matching CPython's structural checks (`SupportsInt.__subclasshook__`
+# looks for `__int__`, ABCs like `Hashable`/`Sized`/`Iterable` likewise).
+# The previous stubs were opaque objects, so EVERY `isinstance(x,
+# typing.SupportsInt)` returned False (real trigger: test_fractions'
+# SupportsInt/SupportsFloat assertions on Fraction instances).
+
+# Dynamic class creation with a custom metaclass currently drops the
+# provided namespace from the new class's __dict__, so per-protocol data
+# lives HERE, keyed by class name, instead of in class attributes.
+_PROTOCOL_REGISTRY = {}
+
+
+def _protocol_check(cls, obj):
+    # Registered as each protocol's `__instancecheck__` (metaclass hook);
+    # this interpreter's isinstance() reaches it through the metaclass MRO.
+    info = _PROTOCOL_REGISTRY.get(cls.__name__)
+    if info is None:
+        return False
+    methods, is_callable = info
+    if methods:
+        return all(hasattr(obj, m) for m in methods)
+    if is_callable:
+        return callable(obj)
+    return False
+
+
+class _ProtocolMeta(type):
+    def __instancecheck__(cls, obj):
+        return _protocol_check(cls, obj)
+
+    def __repr__(cls):
+        return cls.__name__
+
+    def __getitem__(cls, item):
+        return _GenericAlias(cls, item)
+
+
+def _runtime_protocol(name, methods=None, is_callable=False):
+    cls = _ProtocolMeta(name, (object,), {})
+    _PROTOCOL_REGISTRY[name] = (tuple(methods) if methods else (), bool(is_callable))
+    return cls
+
+
+def _runtime_abc(name, methods):
+    return _runtime_protocol(name, tuple(methods))
+
 # All typing type stubs
 Any = _TypingType('Any')
 Awaitable = _TypingType('Awaitable')
-Callable = _TypingType('Callable')
+Callable = _runtime_protocol('Callable', is_callable=True)
 Coroutine = _TypingType('Coroutine')
 Generic = _TypingType('Generic')
 Optional = _TypingType('Optional')
@@ -81,28 +131,31 @@ NamedTuple = _TypingType('NamedTuple')
 NewType = _TypingType('NewType')
 Self = _TypingType('Self')
 Protocol = _TypingType('Protocol')
-Sequence = _TypingType('Sequence')
-Mapping = _TypingType('Mapping')
-MutableMapping = _TypingType('MutableMapping')
-MappingView = _TypingType('MappingView')
-KeysView = _TypingType('KeysView')
-ValuesView = _TypingType('ValuesView')
-ItemsView = _TypingType('ItemsView')
-Reversible = _TypingType('Reversible')
-Collection = _TypingType('Collection')
-Container = _TypingType('Container')
-Hashable = _TypingType('Hashable')
-Sized = _TypingType('Sized')
-MutableSequence = _TypingType('MutableSequence')
-MutableSet = _TypingType('MutableSet')
-AbstractSet = _TypingType('AbstractSet')
-ByteString = _TypingType('ByteString')
-SupportsInt = _TypingType('SupportsInt')
-SupportsFloat = _TypingType('SupportsFloat')
-SupportsComplex = _TypingType('SupportsComplex')
-SupportsRound = _TypingType('SupportsRound')
-SupportsIndex = _TypingType('SupportsIndex')
-SupportsAbs = _TypingType('SupportsAbs')
+Sequence = _runtime_abc('Sequence', ('__getitem__', '__len__'))
+Mapping = _runtime_abc('Mapping', ('__getitem__', '__len__', '__iter__'))
+MutableMapping = _runtime_abc('MutableMapping', ('__getitem__', '__len__', '__iter__', '__setitem__', '__delitem__'))
+MappingView = _runtime_abc('MappingView', ('__len__',))
+KeysView = _runtime_abc('KeysView', ('__len__', '__iter__', '__contains__'))
+ValuesView = _runtime_abc('ValuesView', ('__len__', '__iter__', '__contains__'))
+ItemsView = _runtime_abc('ItemsView', ('__len__', '__iter__', '__contains__'))
+Hashable = _runtime_abc('Hashable', ('__hash__',))
+Sized = _runtime_abc('Sized', ('__len__',))
+MutableSequence = _runtime_abc('MutableSequence', ('__getitem__', '__len__', '__setitem__'))
+MutableSet = _runtime_abc('MutableSet', ('__contains__', '__iter__', '__len__', 'add'))
+AbstractSet = _runtime_abc('AbstractSet', ('__contains__', '__iter__', '__len__'))
+Container = _runtime_abc('Container', ('__contains__',))
+Iterable = _runtime_abc('Iterable', ('__iter__',))
+Iterator = _runtime_abc('Iterator', ('__iter__', '__next__'))
+Reversible = _runtime_abc('Reversible', ('__reversed__',))
+Collection = _runtime_abc('Collection', ('__iter__', '__contains__', '__len__'))
+ByteString = _runtime_abc('ByteString', ('__getitem__',))
+SupportsInt = _runtime_abc('SupportsInt', ('__int__',))
+SupportsFloat = _runtime_abc('SupportsFloat', ('__float__',))
+SupportsComplex = _runtime_abc('SupportsComplex', ('__complex__',))
+SupportsRound = _runtime_abc('SupportsRound', ('__round__',))
+SupportsIndex = _runtime_abc('SupportsIndex', ('__index__',))
+SupportsAbs = _runtime_abc('SupportsAbs', ('__abs__',))
+SupportsBytes = _runtime_abc('SupportsBytes', ('__bytes__',))
 LiteralString = _TypingType('LiteralString')
 TypeGuard = _TypingType('TypeGuard')
 TypeIs = _TypingType('TypeIs')

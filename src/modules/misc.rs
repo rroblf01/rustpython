@@ -1701,9 +1701,29 @@ pub fn create_collections_abc_dict() -> HashMap<String, PyObjectRef> {
                                     "Hashable" => &["__hash__"],
                                     "Iterable" => &["__iter__"],
                                     "Sized" => &["__len__"],
+                                    "SupportsInt" => &["__int__"],
+                                    "SupportsFloat" => &["__float__"],
+                                    "SupportsComplex" => &["__complex__"],
+                                    "SupportsRound" => &["__round__"],
+                                    "SupportsIndex" => &["__index__"],
+                                    "SupportsAbs" => &["__abs__"],
+                                    "SupportsBytes" => &["__bytes__"],
+                                    "Container" => &["__contains__"],
+                                    "Reversible" => &["__reversed__"],
+                                    "Collection" => &["__iter__", "__len__", "__contains__"],
+                                    "Iterator" => &["__iter__", "__next__"],
+                                    "Sequence" => &["__getitem__", "__len__"],
+                                    "Mapping" => &["__getitem__", "__len__", "__iter__"],
                                     _ => &[],
                                 };
                                 if required.is_empty() {
+                                    // `Callable`: the one protocol whose check
+                                    // is `callable(obj)` rather than a dunder.
+                                    if cls_name == "Callable" {
+                                        return Ok(crate::object::builtin_callable(&[
+                                            args[1].clone(),
+                                        ])?);
+                                    }
                                     return Ok(crate::object::py_not_implemented());
                                 }
                                 let typ = crate::object::builtin_type_of(&[args[1].clone()])?;
