@@ -6399,16 +6399,11 @@ impl PyObject {
                                     .map(|k| py_str(crate::interner::lookup_str(*k)))
                                     .collect();
                                 Ok(py_list(keys))
-                            } else if let PyObject::Dict(d) = &*args[0].borrow() {
-                                // dict_keys is set-like in CPython (supports
-                                // | & ^ - and membership); a frozenset gives
-                                // all of that plus len/iter for free, vs the
-                                // previous plain list which made every view
-                                // set-operation raise TypeError.
-                                let keys: Vec<PyObjectRef> = d.keys();
-                                Ok(PyObjectRef::new(PyObject::FrozenSet(
-                                    crate::object::PySet::from_vec(keys)?,
-                                )))
+                            } else if let PyObject::Dict(_d) = &*args[0].borrow() {
+                                return Ok(crate::object::pydict::make_dict_view(
+                                    "dict_keys",
+                                    args[0].clone(),
+                                ));
                             } else {
                                 Err(PyError::runtime_error("keys on non-dict"))
                             }
@@ -6418,12 +6413,15 @@ impl PyObject {
                     "values" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "values".to_string(),
                         func: |args| {
-                            if let PyObject::Globals(g) = &*args[0].borrow() {
+                            if let PyObject::Dict(_d) = &*args[0].borrow() {
+                                return Ok(crate::object::pydict::make_dict_view(
+                                    "dict_values",
+                                    args[0].clone(),
+                                ));
+                            } else if let PyObject::Globals(g) = &*args[0].borrow() {
                                 let values: Vec<PyObjectRef> =
                                     g.borrow().values().cloned().collect();
                                 Ok(py_list(values))
-                            } else if let PyObject::Dict(d) = &*args[0].borrow() {
-                                Ok(py_list(d.values()))
                             } else {
                                 Err(PyError::runtime_error("values on non-dict"))
                             }
@@ -6433,7 +6431,12 @@ impl PyObject {
                     "items" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "items".to_string(),
                         func: |args| {
-                            if let PyObject::Globals(g) = &*args[0].borrow() {
+                            if let PyObject::Dict(_d) = &*args[0].borrow() {
+                                return Ok(crate::object::pydict::make_dict_view(
+                                    "dict_items",
+                                    args[0].clone(),
+                                ));
+                            } else if let PyObject::Globals(g) = &*args[0].borrow() {
                                 let items: Vec<PyObjectRef> = g
                                     .borrow()
                                     .iter()
@@ -6443,13 +6446,6 @@ impl PyObject {
                                             v.clone(),
                                         ])
                                     })
-                                    .collect();
-                                Ok(py_list(items))
-                            } else if let PyObject::Dict(d) = &*args[0].borrow() {
-                                let items: Vec<PyObjectRef> = d
-                                    .items()
-                                    .iter()
-                                    .map(|(k, v)| py_tuple(vec![k.clone(), v.clone()]))
                                     .collect();
                                 Ok(py_list(items))
                             } else {
@@ -6743,12 +6739,10 @@ impl PyObject {
                         func: |args| {
                             let d = args[0].borrow();
                             if let PyObject::Dict(dict) = &*d {
-                                // dict_keys is set-like (| & ^ -); frozenset
-                                // provides all of it (see twin arm above).
-                                let keys: Vec<PyObjectRef> = dict.keys();
-                                Ok(PyObjectRef::new(PyObject::FrozenSet(
-                                    crate::object::PySet::from_vec(keys)?,
-                                )))
+                                return Ok(crate::object::pydict::make_dict_view(
+                                    "dict_keys",
+                                    args[0].clone(),
+                                ));
                             } else if let PyObject::Globals(g) = &*d {
                                 let keys: Vec<PyObjectRef> = g
                                     .borrow()
@@ -6767,7 +6761,10 @@ impl PyObject {
                         func: |args| {
                             let d = args[0].borrow();
                             if let PyObject::Dict(dict) = &*d {
-                                Ok(py_list(dict.values()))
+                                return Ok(crate::object::pydict::make_dict_view(
+                                    "dict_values",
+                                    args[0].clone(),
+                                ));
                             } else if let PyObject::Globals(g) = &*d {
                                 let values: Vec<PyObjectRef> =
                                     g.borrow().values().cloned().collect();
@@ -6782,13 +6779,11 @@ impl PyObject {
                         name: "items".to_string(),
                         func: |args| {
                             let d = args[0].borrow();
-                            if let PyObject::Dict(dict) = &*d {
-                                let items: Vec<PyObjectRef> = dict
-                                    .items()
-                                    .iter()
-                                    .map(|(k, v)| py_tuple(vec![k.clone(), v.clone()]))
-                                    .collect();
-                                Ok(py_list(items))
+                            if let PyObject::Dict(_dict) = &*d {
+                                return Ok(crate::object::pydict::make_dict_view(
+                                    "dict_items",
+                                    args[0].clone(),
+                                ));
                             } else if let PyObject::Globals(g) = &*d {
                                 let items: Vec<PyObjectRef> = g
                                     .borrow()

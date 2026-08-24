@@ -818,3 +818,186 @@ pub fn builtin_dict_getitem(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         py_getitem(instance, key_ref)
     }
 }
+
+/// Build a live dict-view instance (`dict_keys` / `dict_values` /
+/// `dict_items`) over `d`. Views expose iteration, len, contains, `.mapping`,
+/// equality against sets/lists, and — for keys/items — the full set
+/// operators (`|`, `&`, `-`, `^`), returning plain sets like CPython.
+pub fn make_dict_view(kind: &str, d: PyObjectRef) -> crate::object::PyObjectRef {
+    use std::cell::RefCell;
+    use std::collections::HashMap as StdHashMap;
+    thread_local! {
+        static VIEW_TYPES: RefCell<StdHashMap<String, crate::object::PyObjectRef>> =
+            RefCell::new(StdHashMap::new());
+    }
+    use crate::object::{
+        py_bool, py_int, py_str, builtin_iter, AttrMap, ObjectAccess, PyError, PyObject,
+        PyObjectRef, PySet,
+    };
+
+    let is_items = kind == "dict_items";
+    let is_values = kind == "dict_values";
+
+    fn view_kind(view: &PyObjectRef) -> String {
+        match view.borrow().get_attribute("kind_name") {
+            Ok(k) => k.borrow().str(),
+            Err(_) => String::new(),
+        }
+    }
+
+    fn view_elems(view: &PyObjectRef) -> Vec<PyObjectRef> {
+        let mapping = match view.borrow().get_attribute("mapping") {
+            Ok(m) => m,
+            Err(_) => return Vec::new(),
+        };
+        let items = match &*mapping.borrow() {
+            PyObject::Dict(dd) => dd.items(),
+            _ => return Vec::new(),
+        };
+        let tn = view_kind(view);
+        if tn == "items" {
+            items
+                .into_iter()
+                .map(|(k, v)| py_tuple(vec![k, v]))
+                .collect()
+        } else if tn == "values" {
+            items.into_iter().map(|(_, v)| v).collect()
+        } else {
+            items.into_iter().map(|(k, _)| k).collect()
+        }
+    }
+
+    fn elems_of(other: &PyObjectRef) -> Option<Vec<PyObjectRef>> {
+        match &*other.borrow() {
+            PyObject::Set(s2) | PyObject::FrozenSet(s2) => Some(s2.to_vec()),
+            PyObject::List(l2) => Some(l2.clone()),
+            PyObject::Tuple(t2) => Some(t2.clone()),
+            _ => {
+                let is_view = other.borrow().get_attribute("kind_name").is_ok();
+                if is_view {
+                    Some(view_elems(other))
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    fn lin_contains(hay: &[PyObjectRef], needle: &PyObjectRef) -> PyResult<bool> {
+        for h in hay {
+            if h.is(needle) || h.equals(needle)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn view_setop(
+        args: &[PyObjectRef],
+        f: impl Fn(&Vec<PyObjectRef>, &Vec<PyObjectRef>, &dyn Fn(&PyObjectRef, &Vec<PyObjectRef>) -> PyResult<bool>) -> PyResult<Vec<PyObjectRef>>,
+    ) -> PyResult<PyObjectRef> {
+        let a = view_elems(&args[0]);
+        let b = elems_of(&args[1]).ok_or_else(|| {
+            PyError::type_error("unsupported operand type(s) for set operation with dictview")
+        })?;
+        let pred = |needle: &PyObjectRef, hay: &Vec<PyObjectRef>| lin_contains(hay, needle);
+        let out = f(&a, &b, &pred)?;
+        let mut s = PySet::new();
+        for e in out {
+            s.add(e)?;
+        }
+        Ok(PyObjectRef::new(PyObject::Set(s)))
+    }
+
+    let typ = VIEW_TYPES.with(|c| {
+        if let Some(t) = c.borrow().get(kind) {
+            return t.clone();
+        }
+        let bf = |name: &'static str, f: BuiltinFunc| {
+            PyObjectRef::new(PyObject::BuiltinFunction { name: name.to_string(), func: f })
+        };
+        let mut td: StdHashMap<String, PyObjectRef> = StdHashMap::new();
+
+        td.insert("__iter__".into(), bf("__iter__", |args| {
+            builtin_iter(&[py_list(view_elems(&args[0]))])
+        }));
+        td.insert("__len__".into(), bf("__len__", |args| {
+            Ok(py_int(view_elems(&args[0]).len() as i64))
+        }));
+        td.insert("__contains__".into(), bf("__contains__", |args| {
+            let elems = view_elems(&args[0]);
+            lin_contains(&elems, &args[1]).map(py_bool)
+        }));
+        td.insert("__repr__".into(), bf("__repr__", |args| {
+            let tn = format!("dict_{}", view_kind(&args[0]));
+            let inner: Vec<String> =
+                view_elems(&args[0]).into_iter().map(|e| e.repr()).collect();
+            Ok(py_str(&format!("{}([{}])", tn, inner.join(", "))))
+        }));
+        td.insert("__eq__".into(), bf("__eq__", |args| {
+            let mine = view_elems(&args[0]);
+            match elems_of(&args[1]) {
+                Some(theirs) => {
+                    if mine.len() != theirs.len() {
+                        return Ok(py_bool(false));
+                    }
+                    for m in &mine {
+                        if !lin_contains(&theirs, m)? {
+                            return Ok(py_bool(false));
+                        }
+                    }
+                    Ok(py_bool(true))
+                }
+                None => Ok(py_bool(false)),
+            }
+        }));
+        td.insert("__or__".into(), bf("__or__", |args| {
+            view_setop(args, |a, b, has| {
+                let mut out = a.clone();
+                for e in b {
+                    if !has(e, a)? {
+                        out.push(e.clone());
+                    }
+                }
+                Ok(out)
+            })
+        }));
+        td.insert("__and__".into(), bf("__and__", |args| {
+            view_setop(args, |a, b, has| {
+                Ok(a.iter().filter(|e| has(e, b).unwrap_or(false)).cloned().collect())
+            })
+        }));
+        td.insert("__sub__".into(), bf("__sub__", |args| {
+            view_setop(args, |a, b, has| {
+                Ok(a.iter().filter(|e| !has(e, b).unwrap_or(false)).cloned().collect())
+            })
+        }));
+        td.insert("__xor__".into(), bf("__xor__", |args| {
+            view_setop(args, |a, b, has| {
+                let mut out: Vec<PyObjectRef> =
+                    a.iter().filter(|e| !has(e, b).unwrap_or(false)).cloned().collect();
+                for e in b {
+                    if !has(e, a)? {
+                        out.push(e.clone());
+                    }
+                }
+                Ok(out)
+            })
+        }));
+
+        let t = PyObjectRef::new(PyObject::Type {
+            name: kind.to_string(),
+            dict: Box::new(crate::object::str_map_to_typedict(td)),
+            bases: vec![],
+            mro: vec![],
+        });
+        c.borrow_mut().insert(kind.to_string(), t.clone());
+        t
+    });
+
+    let mut attrs = AttrMap::new();
+    attrs.insert_str("mapping", d);
+    let kn = if is_items { "items" } else if is_values { "values" } else { "keys" };
+    attrs.insert_str("kind_name", py_str(kn));
+    PyObjectRef::new(PyObject::Instance { typ, dict: attrs })
+}
