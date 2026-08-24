@@ -5392,12 +5392,12 @@ impl PyObject {
                             }
                             let chars = if args.len() > 1 {
                                 if let PyObject::None = &*args[1].borrow() {
-                                    " \t\n\r".to_string()
+                                    " \t\n\r\x0b\x0c".to_string()
                                 } else {
                                     args[1].str()
                                 }
                             } else {
-                                " \t\n\r".to_string()
+                                " \t\n\r\x0b\x0c".to_string()
                             };
                             Ok(py_str(
                                 args[0].str().trim_matches(|c: char| chars.contains(c)),
@@ -5417,7 +5417,7 @@ impl PyObject {
                             let chars = if args.len() > 1 {
                                 args[1].str()
                             } else {
-                                " \t\n\r".to_string()
+                                " \t\n\r\x0b\x0c".to_string()
                             };
                             Ok(py_str(
                                 args[0]
@@ -5439,7 +5439,7 @@ impl PyObject {
                             let chars = if args.len() > 1 {
                                 args[1].str()
                             } else {
-                                " \t\n\r".to_string()
+                                " \t\n\r\x0b\x0c".to_string()
                             };
                             Ok(py_str(
                                 args[0].str().trim_end_matches(|c: char| chars.contains(c)),

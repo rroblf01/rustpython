@@ -42,13 +42,16 @@ default_timer = _time.perf_counter
 
 
 def reindent(src, indent):
-    """Helper to reindent a multi-line statement."""
+    """Add 'indent' spaces of extra indentation to every line except the
+    first (CPython semantics)."""
     if indent == 0:
         return src
     pad = " " * indent
-    return "\n".join(
-        line if not line.strip() else pad + line for line in src.split("\n")
-    )
+    lines = src.split("\n")
+    out = [lines[0]]
+    for line in lines[1:]:
+        out.append(line if not line.strip() else pad + line)
+    return "\n".join(out)
 
 
 def _template_func(setup, func):
@@ -65,26 +68,46 @@ class Timer(_NativeTimerBase):
                  globals=None):
         if stmt is None:
             raise ValueError("stmt expression must be a str or callable")
+        # Drop whitespace-only lines and dedent; normalize blank body to pass.
         if isinstance(stmt, str):
-            compile(stmt, "<timeit-stmt>", "exec")   # SyntaxError on bad code
+            stmt = "\n".join(l for l in stmt.split("\n") if l.strip())
+            if not stmt.strip():
+                stmt = "pass"
+        if isinstance(setup, str):
+            setup = "\n".join(l for l in setup.split("\n") if l.strip()) or "pass"
+        if isinstance(stmt, str):
+            compile(stmt, "<timeit-stmt>", "exec")
         if isinstance(setup, str) and setup.strip():
             compile(setup, "<timeit-setup>", "exec")
-        self._stmt_v = stmt
-        self._setup_v = setup
         self._timer_fn = timer if callable(timer) else default_timer
         self._globals_v = dict(globals) if globals else {}
-        # native base does the heavy lifting (compiles str bodies, honors an
-        # injected timer callable via _timer attribute)
-        _NativeTimer.__init__(self, stmt if not isinstance(stmt, str) else stmt,
-                              setup if isinstance(setup, str) else "pass",
-                              timer or None)
+        self._stmt_v = stmt
+        self._setup_v = setup
+        _NativeTimer.__init__(self, stmt, setup, timer,
+                              globals=self._globals_v or None)
 
     def print_exc(self, file=None):
-        """Convenience to print the traceback of the last failed run."""
+        """Print the traceback of the currently-handled exception, without
+        the chained-context noise (matches CPython Timer.print_exc)."""
         import traceback
         if file is None:
             file = _sys.stderr
-        traceback.print_exc(file=file)
+        info = _sys.exc_info()
+        if info[0] is None:
+            return
+        exc = info[1]
+        saved_ctx = getattr(exc, '__context__', None)
+        try:
+            try:
+                exc.__context__ = None
+            except Exception:
+                pass
+            traceback.print_exception(info[0], exc, info[2], file=file)
+        finally:
+            try:
+                exc.__context__ = saved_ctx
+            except Exception:
+                pass
 
     # alias used by some callers
 
@@ -117,16 +140,21 @@ def repeat(stmt="pass", setup="pass", timer=default_timer,
 
 # ── CLI ──────────────────────────────────────────────────────────────
 
-_units = ["nsec", "usec", "msec", "sec"]
-_scales = [1e-9, 1e-6, 1e-3, 1.0]
+_units = ["sec", "msec", "usec", "nsec"]
+_scales = [1.0, 1e-3, 1e-6, 1e-9]
 
 
-def _format_time(usecs):
-    usecs = float(usecs)
-    for unit, scale in zip(_units[::-1], _scales[::-1]):
-        if usecs / scale >= 1.0:
+def _format_time(secs):
+    """Format seconds choosing the largest unit giving a value >= 1."""
+    secs = float(secs)
+    unit = _units[-1]
+    val = secs / _scales[-1]
+    for u, sc in zip(_units, _scales):
+        if secs / sc >= 1.0:
+            unit = u
+            val = secs / sc
             break
-    return "%g %s" % (round(usecs / scale, 3), unit)
+    return "%g %s" % (round(val, 3), unit)
 
 
 def main(args=None, *, _wrap_timer=None):
@@ -144,7 +172,8 @@ def main(args=None, *, _wrap_timer=None):
     while i < len(arglist):
         a = arglist[i]
         if a == "-h" or a == "--help":
-            print(__doc__)
+            # Exact bytes: tests capture stdout and compare with __doc__.
+            _sys.stdout.write(__doc__)
             return
         elif a.startswith("--number="):
             opts_number = int(a.split("=", 1)[1])
@@ -157,9 +186,9 @@ def main(args=None, *, _wrap_timer=None):
             opts_repeat = int(a.split("=", 1)[1])
         elif a == "-r":
             i += 1
-            opts_repeat = int(arglist[i])
-        elif a.startswith("-r") and len(a) > 2 and                 arglist[i][2:].lstrip("-").isdigit():
-            opts_repeat = int(a[2:])
+            opts_repeat = max(1, int(arglist[i]))
+        elif a.startswith("-r") and len(a) > 2 and a[2:].lstrip("-").isdigit():
+            opts_repeat = max(1, int(a[2:]))
         elif a.startswith("--setup="):
             setups.append(a.split("=", 1)[1])
         elif a == "-s":
@@ -197,12 +226,12 @@ def main(args=None, *, _wrap_timer=None):
     results = t.repeat(opts_repeat, num_loops)
     best = min(results)
 
-    usecs = best * 1e6
     if unit is not None:
         scale = {"nsec": 1e-9, "usec": 1e-6, "msec": 1e-3, "sec": 1.0}[unit]
         printed = "%g %s" % (round(best / scale, 3), unit)
     else:
-        printed = _format_time(usecs)
+        per_loop = best / num_loops if num_loops else best
+        printed = _format_time(per_loop)
 
     loops_word = "loop" if num_loops == 1 else "loops"
     print("%d %s, best of %d: %s per loop"

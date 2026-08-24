@@ -607,6 +607,7 @@ thread_local! {
 
 thread_local! {
     static DISPOSABLE_VM_POOL: RefCell<Vec<VirtualMachine>> = const { RefCell::new(Vec::new()) };
+    static SYS_MODULES_PRIORITY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 impl VirtualMachine {
@@ -2205,52 +2206,6 @@ impl VirtualMachine {
     /// a fresh object is the faithful equivalent (test_atexit's
     /// test_atexit_instances asserts `atexit2 is not atexit1` while both
     /// share the same callback registry).
-    pub fn import_cached_or_fresh(&mut self, name: &str) -> Option<PyObjectRef> {
-        let module = self.modules.get(name)?.clone();
-        let in_sys_modules = if let Some(sys_mod) = self.modules.get("sys") {
-            if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
-                if let Some(mod_dict) = dict.get_str("modules") {
-                    let md = mod_dict.borrow();
-                    if let PyObject::Dict(d) = &*md {
-                        d.get(&crate::object::py_str(name)).ok().flatten().is_some()
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                }
-            } else {
-                false
-            }
-        } else {
-            false
-        };
-        if in_sys_modules {
-            return Some(module);
-        }
-        let fresh = PyObjectRef::new(PyObject::Module {
-            name: name.to_string(),
-            dict: {
-                let b = module.borrow();
-                if let PyObject::Module { dict, .. } = &*b {
-                    dict.clone()
-                } else {
-                    Box::new(crate::object::TypeDict::default())
-                }
-            },
-        });
-        self.modules.insert(name.to_string(), fresh.clone());
-        if let Some(sys_mod) = self.modules.get("sys") {
-            if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
-                if let Some(mod_dict) = dict.get_str("modules") {
-                    if let PyObject::Dict(d) = &mut *mod_dict.borrow_mut() {
-                        let _ = d.set(crate::object::py_str(name), fresh.clone());
-                    }
-                }
-            }
-        }
-        Some(fresh)
-    }
 
     pub fn import_module_from_file(&mut self, name: &str) -> PyResult<PyObjectRef> {
         // Guard against genuine infinite import recursion with a clean
@@ -3094,6 +3049,71 @@ impl VirtualMachine {
     /// exception and run its cleanup, exactly as CPython's generator throw
     /// does. Returns Err(err) unchanged if the generator's own code has no
     /// handler for it (caller propagates it to whoever called .throw()).
+    pub fn import_cached_or_fresh(&mut self, name: &str) -> Option<PyObjectRef> {
+
+        let prioritize_sys = SYS_MODULES_PRIORITY.with(|c| c.get());
+        if prioritize_sys {
+            if let Some(sys_mod) = self.modules.get("sys") {
+                if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
+                    if let Some(mod_dict) = dict.get_str("modules") {
+                        let md = mod_dict.borrow();
+                        if let PyObject::Dict(d) = &*md {
+                            if let Some(real) =
+                                d.get(&crate::object::py_str(name)).ok().flatten()
+                            {
+                                return Some(real);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let module = self.modules.get(name)?.clone();
+        let in_sys_modules = if let Some(sys_mod) = self.modules.get("sys") {
+            if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
+                if let Some(mod_dict) = dict.get_str("modules") {
+                    let md = mod_dict.borrow();
+                    if let PyObject::Dict(d) = &*md {
+                        d.get(&crate::object::py_str(name)).ok().flatten().is_some()
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if in_sys_modules {
+            return Some(module);
+        }
+        let fresh = PyObjectRef::new(PyObject::Module {
+            name: name.to_string(),
+            dict: {
+                let b = module.borrow();
+                if let PyObject::Module { dict, .. } = &*b {
+                    dict.clone()
+                } else {
+                    Box::new(crate::object::TypeDict::default())
+                }
+            },
+        });
+        self.modules.insert(name.to_string(), fresh.clone());
+        if let Some(sys_mod) = self.modules.get("sys") {
+            if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
+                if let Some(mod_dict) = dict.get_str("modules") {
+                    if let PyObject::Dict(d) = &mut *mod_dict.borrow_mut() {
+                        let _ = d.set(crate::object::py_str(name), fresh.clone());
+                    }
+                }
+            }
+        }
+        Some(fresh)
+    }
     pub(crate) fn throw_into_frame(&mut self, err: PyError) -> PyResult<PyObjectRef> {
         let frame_floor = self.frames.len() - 1;
         if !self.handle_exception(&err, frame_floor) {
@@ -11192,6 +11212,10 @@ pub(crate) static OPCODE_HIST: [std::sync::atomic::AtomicU64; 256] = {
     const ZERO: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     [ZERO; 256]
 };
+
+pub(crate) fn set_sys_modules_priority(on: bool) {
+        SYS_MODULES_PRIORITY.with(|c| c.set(on));
+}
 
 pub(crate) fn get_shared_builtins_module() -> PyObjectRef {
     SHARED_BUILTINS_MODULE_REF.with(|c| {

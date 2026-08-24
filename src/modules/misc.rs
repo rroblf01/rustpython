@@ -7723,9 +7723,14 @@ fn timeit_native_run_in_globals(code_obj: &PyObjectRef, globals: &PyObjectRef) -
     }
     let bmod = crate::vm::get_shared_builtins_module();
     map.insert(crate::interner::intern("__builtins__"), bmod);
+    // Inside this pooled-VM execution, sys.modules is the shared truth:
+    // `import timeit` must resolve to the REAL module object (with
+    // test-injected attributes like _fake_timer), not a stale snapshot.
+    crate::vm::set_sys_modules_priority(true);
     let mut vm = crate::vm::VirtualMachine::take_disposable();
     vm.globals = Rc::new(RefCell::new(map));
     let r = vm.run((*code_rc).clone());
+    crate::vm::set_sys_modules_priority(false);
     crate::vm::VirtualMachine::release_disposable(vm);
     r
 }
@@ -7784,7 +7789,8 @@ fn make_timeit_type() -> PyObjectRef {
             }
             return Err(PyError::type_error("object is not callable"));
         }
-        crate::object::call_function(&f, args)
+        // Python functions need a VM; use the disposable-VM caller.
+        crate::object::call_function_disposable(&f, args, vec![])
     }
 
     t_method!("__init__", |args| {
@@ -7912,10 +7918,16 @@ fn make_timeit_type() -> PyObjectRef {
 
         // Clock
         use std::time::Instant;
-        let has_py_timer = timer_v
-            .as_ref()
-            .map(|t| !matches!(&*t.borrow(), PyObject::None))
-            .unwrap_or(false);
+        let timer_is_usable = timer_v.as_ref().map(|t| {
+            match &*t.borrow() {
+                PyObject::None => false,
+                PyObject::Instance { typ, .. } => {
+                    crate::object::lookup_dunder_via_mro(typ, "__call__").is_some()
+                }
+                _ => true,
+            }
+        }).unwrap_or(false);
+        let has_py_timer = timer_is_usable;
 
         if has_py_timer {
             let timer = timer_v.clone().unwrap();
@@ -7975,8 +7987,10 @@ fn make_timeit_type() -> PyObjectRef {
     t_method!("repeat", |args| {
         let self_obj = args.first().cloned().unwrap();
         let (n, kw) = split_kwargs(args);
+        // positional fallback: bound-method args are [self, repeat, number]
         let repeat = kw_lookup(&kw, "repeat")
             .and_then(|v| v.as_i64())
+            .or_else(|| args.get(1).and_then(|v| v.as_i64()))
             .unwrap_or(3)
             .max(0) as u64;
         let number = kw_lookup(&kw, "number")
@@ -7992,20 +8006,42 @@ fn make_timeit_type() -> PyObjectRef {
         Ok(py_list(times))
     });
 
-    // autorange(callback=None) -> (num_loops, time_per_loop)
+    // autorange(callback=None) -> (num_loops, time_per_loop).
+    // Uses CPython's 1-2-5-per-decade search sequence.
     t_method!("autorange", |args| {
         let self_obj = args.first().cloned().unwrap();
-        let mut number = 1usize;
-        let mut total = 0.0f64;
-        for _round in 0..10 {
-            let secs = run_timed(&self_obj, number as u64)?;
-            if secs > 0.2 {
-                return Ok(py_tuple(vec![py_int(number as i64), py_float(secs / number as f64)]));
+        let callback: Option<PyObjectRef> = args.get(1).and_then(|c| {
+            if matches!(&*c.borrow(), PyObject::None) { None } else { Some(c.clone()) }
+        });
+        let report = |callback: &Option<PyObjectRef>, n: usize, secs: f64| -> PyResult<()> {
+            if let Some(cb) = callback {
+                crate::object::call_function_disposable(
+                    cb,
+                    vec![py_int(n as i64), py_float(secs)],
+                    vec![],
+                )?;
             }
-            total += secs;
-            number *= 10;
+            Ok(())
+        };
+        let mut base = 1usize;
+        loop {
+            for j in [1usize, 2, 5] {
+                let number = base * j;
+                let secs = run_timed(&self_obj, number as u64)?;
+                report(&callback, number, secs)?;
+                if secs >= 0.2 {
+                    // CPython returns TOTAL time for the whole run.
+                    return Ok(py_tuple(vec![
+                        py_int(number as i64),
+                        py_float(secs),
+                    ]));
+                }
+            }
+            base *= 10;
+            if base > 1_000_000_000 {
+                return Ok(py_tuple(vec![py_int(base as i64), py_float(0.0)]));
+            }
         }
-        Ok(py_tuple(vec![py_int(number as i64), py_float(total / number as f64)]))
     });
 
     PyObjectRef::new(PyObject::Type {
@@ -8031,47 +8067,79 @@ pub fn create_timeit_dict() -> HashMap<String, PyObjectRef> {
     }
 
     timeit_func!("timeit", |args| {
-        let (n, kw) = split_kwargs(args);
-        let mut cargs: Vec<PyObjectRef> = args.iter().take(n.min(4)).cloned().collect();
-        while cargs.len() < 2 {
-            cargs.push(py_str("pass"));
-        }
-        if let Some(t) = kw_lookup(&kw, "timer") {
-            cargs.push(t.clone());
-        }
-        if let Some(g) = kw_lookup(&kw, "globals") {
-            cargs.push(g.clone());
-        }
+        // Trailing Dict = kwargs appended by the dispatcher.
+        let (pos, kw) = match args.last() {
+            Some(d) => {
+                let b = d.borrow();
+                if let PyObject::Dict(dd) = &*b {
+                    let mut p: Vec<PyObjectRef> = args[..args.len()-1].to_vec();
+                    // drop a positional None/placeholder setup if kw supplies one
+                    let wrapped = PyObjectRef::imm(PyObject::Dict(dd.clone()));
+                    let (_, kwd) = split_kwargs(&[py_none(), wrapped]);
+                    if let Some(sv) = kw_lookup(&kwd, "setup") { if p.len() > 1 { p.truncate(1); } }
+                    (p, kwd)
+                } else { (args.to_vec(), Vec::new()) }
+            }
+            None => (args.to_vec(), Vec::new()),
+        };
+        let stmt_v = pos.first().cloned().unwrap_or_else(|| py_str("pass"));
+        let setup_v = kw_lookup(&kw, "setup").cloned()
+            .or_else(|| pos.get(1).cloned())
+            .unwrap_or_else(|| py_str("pass"));
+        let timer_v = kw_lookup(&kw, "timer").cloned()
+            .or_else(|| pos.get(2).cloned())
+            .unwrap_or_else(|| py_none());
+        let globals_v = kw_lookup(&kw, "globals").cloned()
+            .or_else(|| pos.get(3).cloned())
+            .unwrap_or_else(|| py_none());
+        let mut cargs = vec![stmt_v, setup_v, timer_v, globals_v];
         let timer_obj = make_timeit_type();
         let inst = crate::object::call_function(&timer_obj, cargs)?;
         let m = inst.borrow().get_attribute("timeit")?;
-        let mut margs: Vec<PyObjectRef> = vec![inst.clone()];
-        if let Some(nv) = kw_lookup(&kw, "number").map(|v| v.clone()).or_else(|| args.get(1).cloned()) { margs.push(nv); }
+        let nv_owned = kw_lookup(&kw, "number").map(|v| v.clone())
+            .or_else(|| pos.get(1).cloned());
+        let mut margs: Vec<PyObjectRef> = vec![];
+        if let Some(nv) = nv_owned { margs.push(nv); }
         crate::object::call_function(&m, margs)
     });
 
     // Also provide a repeat function for convenience — delegates to Timer
     // so callables/timer/globals behave exactly like the class methods.
     timeit_func!("repeat", |args| {
-        let (n, kw) = split_kwargs(args);
-        let mut cargs: Vec<PyObjectRef> = args.iter().take(n.min(4)).cloned().collect();
-        while cargs.len() < 3 {
-            cargs.push(py_str("pass"));
-        }
-        if let Some(t) = kw_lookup(&kw, "timer") {
-            cargs.push(t.clone());
-        }
-        if let Some(g) = kw_lookup(&kw, "globals") {
-            cargs.push(g.clone());
-        }
+        let (pos, kw) = match args.last() {
+            Some(d) => {
+                let b = d.borrow();
+                if let PyObject::Dict(dd) = &*b {
+                    let wrapped = PyObjectRef::imm(PyObject::Dict(dd.clone()));
+                    let (_, kwd) = split_kwargs(&[py_none(), wrapped]);
+                    let p: Vec<PyObjectRef> = args[..args.len()-1].to_vec();
+                    (p, kwd)
+                } else { (args.to_vec(), Vec::new()) }
+            }
+            None => (args.to_vec(), Vec::new()),
+        };
+        let stmt_v = pos.first().cloned().unwrap_or_else(|| py_str("pass"));
+        let setup_v = kw_lookup(&kw, "setup").cloned()
+            .or_else(|| pos.get(1).cloned())
+            .unwrap_or_else(|| py_str("pass"));
+        let timer_v = kw_lookup(&kw, "timer").cloned()
+            .or_else(|| pos.get(2).cloned())
+            .unwrap_or_else(|| py_none());
+        let globals_v = kw_lookup(&kw, "globals").cloned()
+            .or_else(|| pos.get(3).cloned())
+            .unwrap_or_else(|| py_none());
+        let mut cargs = vec![stmt_v, setup_v, timer_v, globals_v];
         let timer_obj = make_timeit_type();
         let inst = crate::object::call_function(&timer_obj, cargs)?;
         let m = inst.borrow().get_attribute("repeat")?;
-        let mkind = m.borrow().type_name();
-        if std::env::var("RPY_DBG_TT").is_ok() {
-            eprintln!("MOD repeat: m={}", mkind);
-        }
-        crate::object::call_function(&m, vec![py_int(2), py_int(5)])
+        let rv_owned = kw_lookup(&kw, "repeat").map(|v| v.clone())
+            .or_else(|| pos.get(1).cloned());
+        let nv_owned = kw_lookup(&kw, "number").map(|v| v.clone())
+            .or_else(|| pos.get(2).cloned());
+        let mut margs: Vec<PyObjectRef> = vec![];
+        if let Some(rv) = rv_owned { margs.push(rv); }
+        if let Some(nv) = nv_owned { margs.push(nv); }
+        crate::object::call_function(&m, margs)
     });
 
     d.insert("Timer".to_string(), make_timeit_type());
