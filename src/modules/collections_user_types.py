@@ -406,6 +406,28 @@ class defaultdict(dict):
         result.update(self)
         return result
 
+    @staticmethod
+    def _is_dict_like(o):
+        # Our isinstance() doesn't currently resolve native bases through
+        # Python-level subclasses, so probe structurally.
+        if isinstance(o, dict):
+            return True
+        return hasattr(o, "keys") and hasattr(o, "__getitem__")
+
+    def __or__(self, other):
+        if not self._is_dict_like(other):
+            return NotImplemented
+        result = defaultdict(self.default_factory, self)
+        result.update(other)
+        return result
+
+    def __ror__(self, other):
+        if not self._is_dict_like(other):
+            return NotImplemented
+        result = defaultdict(self.default_factory, other)
+        result.update(self)
+        return result
+
 
 class UserString:
     def __init__(self, seq):
