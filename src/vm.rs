@@ -45,6 +45,11 @@ pub struct Frame {
     /// (`tb.tb_frame is sys._getframe()`, which CPython's own test_raise
     /// asserts). Invalidate when the frame is released/reacquired.
     pub frame_object: Option<PyObjectRef>,
+    /// Cached f_locals dict handed out via the Python `frame` object; kept
+    /// here so STORE_FAST/STORE_NAME/etc. can refresh its contents in place
+    /// (the frame object's attribute stays the SAME PyObject across accesses
+    /// — CPython identity requirement) while still reflecting new values.
+    pub frame_locals_obj: Option<PyObjectRef>,
     /// Inline attribute cache — caches LOAD_ATTR results per instruction offset.
     /// Cleared when the frame is created; populated on first attribute access.
     pub attr_cache: Box<Vec<Option<(u64, PyObjectRef)>>>, // (type_version_tag, cached_value)
@@ -117,6 +122,7 @@ impl Frame {
             active_exception: None,
             active_exception_stack: Vec::new(),
             frame_object: None,
+            frame_locals_obj: None,
             attr_cache: Box::new(vec![None; names_len]),
             global_cache: Box::new(vec![None; instr_count]),
             registers: Box::new(Vec::new()),
@@ -2034,6 +2040,8 @@ impl VirtualMachine {
             frame.name_order = None;
             frame.live_module = None;
             frame.yield_from_iter = None;
+            frame.frame_object = None;
+            frame.frame_locals_obj = None;
             frame.back = None;
             frame
         } else {
@@ -2063,6 +2071,8 @@ impl VirtualMachine {
             frame.name_order = None;
             frame.live_module = None;
             frame.yield_from_iter = None;
+            frame.frame_object = None;
+            frame.frame_locals_obj = None;
             frame.back = None;
             self.frame_pool.push(frame);
         }
@@ -3438,6 +3448,9 @@ impl VirtualMachine {
                     .globals
                     .borrow_mut()
                     .insert(interner::intern(&name), val);
+                if self.frames[fi].frame_locals_obj.is_some() {
+                    self.sync_frame_locals(fi);
+                }
             }
 
              Opcode::LOAD_FAST => {
@@ -3516,6 +3529,9 @@ impl VirtualMachine {
                 }
                 let name = crate::interner::lookup_str(frame.code.varnames[var_idx]);
                 frame.insert_local(name, val);
+                if frame.frame_locals_obj.is_some() {
+                    self.sync_frame_locals(fi);
+                }
             }
 
             Opcode::LOAD_GLOBAL => {
@@ -10462,17 +10478,54 @@ impl VirtualMachine {
         self.propagating_exc = Some(exc.clone());
     }
 
+    /// Refresh the cached f_locals dict (`frame_locals_obj`) of live frame
+    /// `idx` in place — same PyObject, updated contents. No-op when the
+    /// frame has never handed out a frame object (the common case: frames
+    /// nobody introspects pay nothing).
+    pub(crate) fn sync_frame_locals(&mut self, idx: usize) {
+        let Some(f) = self.frames.get(idx) else { return };
+        let Some(obj) = &f.frame_locals_obj else { return };
+        if f.code.varnames.is_empty() {
+            return; // module frame: f_locals IS f_globals, already live
+        }
+        let obj = obj.clone();
+        let f = self.frames.get(idx).unwrap();
+        let pairs: Vec<(String, PyObjectRef)> = f
+            .code
+            .varnames
+            .iter()
+            .enumerate()
+            .filter_map(|(i, name_id)| {
+                f.fast_locals
+                    .get(i)
+                    .and_then(|slot| slot.as_ref())
+                    .map(|v| (crate::interner::lookup_str(*name_id).to_string(), v.clone()))
+            })
+            .collect();
+        if let PyObjectRef::Mut(rc) = &obj {
+            if let Ok(mut b) = rc.try_borrow_mut() {
+                if let PyObject::Dict(d) = &mut *b {
+                    d.clear();
+                    for (k, v) in pairs {
+                        let _ = d.set(py_str(&k), v);
+                    }
+                }
+            }
+        }
+    }
+
     /// The Python `frame` object for live frame `idx`, created once and
     /// cached on the Frame so `sys._getframe()` and a traceback's `tb_frame`
     /// return the SAME object (CPython asserts this identity in test_raise).
     pub(crate) fn frame_object(&mut self, idx: usize) -> Option<PyObjectRef> {
-        let frame = self.frames.get(idx)?;
-        if let Some(fo) = &frame.frame_object {
+        if let Some(fo) = self.frames.get(idx).and_then(|f| f.frame_object.clone()) {
             if std::env::var("RPY_DEBUG_FRAME_OBJ").is_ok() {
                 eprintln!("FRAME_OBJ reuse idx={} frames={}", idx, self.frames.len());
             }
-            return Some(fo.clone());
+            self.sync_frame_locals(idx);
+            return Some(fo);
         }
+        let frame = self.frames.get(idx)?;
         if std::env::var("RPY_DEBUG_FRAME_OBJ").is_ok() {
             eprintln!(
                 "FRAME_OBJ create idx={} frames={} code={}",
@@ -10493,20 +10546,68 @@ impl VirtualMachine {
             frame.code.line_number(idx) as i64
         };
         let f_lasti = frame.ip.saturating_sub(1) as i64;
-        let mut fg = PyDict::new();
-        for (k, v) in globals.borrow().iter() {
-            let _ = fg.set(py_str(crate::interner::lookup_str(*k)), v.clone());
+        thread_local! {
+            static BUILTINS_MIRROR: std::cell::RefCell<Option<(*const HashMap<StrId, PyObjectRef>, PyObjectRef)>> =
+                const { std::cell::RefCell::new(None) };
         }
-        let mut fb = PyDict::new();
-        for (k, v) in builtins.iter() {
-            let _ = fb.set(py_str(crate::interner::lookup_str(*k)), v.clone());
+        let fb_obj: PyObjectRef = {
+            let ptr = std::rc::Rc::as_ptr(&frame.builtins);
+            BUILTINS_MIRROR.with(|m| {
+                let mut m = m.borrow_mut();
+                match &*m {
+                    Some((p, obj)) if *p == ptr => obj.clone(),
+                    _ => {
+                        let mut fb = PyDict::new();
+                        for (k, v) in builtins.iter() {
+                            let _ =
+                                fb.set(py_str(crate::interner::lookup_str(*k)), v.clone());
+                        }
+                        let obj = PyObjectRef::new(PyObject::Dict(Box::new(fb)));
+                        *m = Some((ptr, obj.clone()));
+                        obj
+                    }
+                }
+            })
+        };
+        // f_locals: snapshot of the frame's local variables at frame-object
+        // creation time. For function frames that's every varname slot that
+        // currently holds a value (cellvar slots live in fast_locals too, as
+        // LOAD_DEREF's own lookup confirms). For module/exec frames
+        // (no varnames) CPython defines f_locals IS f_globals, so copy those.
+        // f_globals: LIVE view over the frame's globals map
+        // (PyObject::Globals — full dict protocol, O(1) to create). The old
+        // code copied the whole map on EVERY frame-object creation, which
+        // made introspection-heavy tests (mapping_tests builds 150k frames)
+        // pay O(globals) each time and effectively hang. Module/exec frames
+        // share this same object as f_locals (CPython identity rule).
+        let fg_obj = PyObjectRef::imm(PyObject::Globals(globals.clone()));
+        let fl_obj_owned;
+        if !frame.code.varnames.is_empty() {
+            let mut fl = PyDict::new();
+            for (i, name_id) in frame.code.varnames.iter().enumerate() {
+                if let Some(Some(v)) = frame.fast_locals.get(i) {
+                    let _ = fl.set(py_str(crate::interner::lookup_str(*name_id)), v.clone());
+                }
+            }
+            fl_obj_owned = PyObjectRef::new(PyObject::Dict(Box::new(fl)));
+        } else {
+            fl_obj_owned = fg_obj.clone();
         }
         let mut attrs = AttrMap::new();
-        attrs.insert_str("f_globals", PyObjectRef::new(PyObject::Dict(Box::new(fg))));
-        attrs.insert_str("f_builtins", PyObjectRef::new(PyObject::Dict(Box::new(fb))));
+        attrs.insert_str("f_globals", fg_obj);
+        attrs.insert_str("f_builtins", fb_obj);
+        let fl_obj = fl_obj_owned;
+        attrs.insert_str("f_locals", fl_obj.clone());
         attrs.insert_str("f_code", PyObjectRef::imm(PyObject::Code(code)));
         attrs.insert_str("f_lineno", py_int(f_lineno));
         attrs.insert_str("f_lasti", py_int(f_lasti));
+        // Tracing hooks and generator back-reference: present with inert
+        // defaults so attribute access doesn't AttributeError (real tracing
+        // support is a separate feature).
+        attrs.insert_str("f_trace", py_none());
+        attrs.insert_str("f_trace_lines", py_bool(true));
+        attrs.insert_str("f_trace_opcodes", py_bool(false));
+        attrs.insert_str("f_generator", py_none());
         // f_back: the previous frame in the call stack, or None
         if let Some(back_i) = back_idx {
             if let Some(back_frame_obj) = self.frame_object(back_i) {
@@ -10528,6 +10629,7 @@ impl VirtualMachine {
         });
         if let Some(f) = self.frames.get_mut(idx) {
             f.frame_object = Some(frame_obj.clone());
+            f.frame_locals_obj = Some(fl_obj);
         }
         Some(frame_obj)
     }

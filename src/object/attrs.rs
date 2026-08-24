@@ -7007,6 +7007,22 @@ impl PyObject {
                             // `.equals()` call (real CPython test:
                             // `test_dict.py`'s `test_clear_at_lookup`, which
                             // exercises this exact method).
+                            //
+                            // Globals receivers are Imm and wrap their own
+                            // RefCell'd map — the safe-or-insert helper
+                            // requires a Mut Dict wrapper and would panic.
+                            if matches!(&*args[0].borrow(), PyObject::Globals(_)) {
+                                let sid = crate::interner::intern(&key.str());
+                                let g = match &*args[0].borrow() {
+                                    PyObject::Globals(g) => g.clone(),
+                                    _ => unreachable!(),
+                                };
+                                if let Some(existing) = g.borrow().get(&sid) {
+                                    return Ok(existing.clone());
+                                }
+                                g.borrow_mut().insert(sid, default.clone());
+                                return Ok(default);
+                            }
                             pydict_safe_get_or_insert(&args[0], key, default)
                         },
                         self_obj: PyObjectRef::new(PyObject::None),

@@ -798,6 +798,33 @@ impl PyObjectRef {
     }
 
     fn repr_inner(&self) -> String {
+        // Depth limit (mirrors CPython's Py_EnterRecursiveCall during repr):
+        // deeply NESTED (non-cyclic) containers — e.g. mapping-tests'
+        // test_repr_deep building 1000 levels — previously recursed without
+        // bound and hung the interpreter. The per-object identity guard
+        // below only catches direct cycles, so this depth cap is what
+        // bounds legitimate-but-deep nesting.
+        thread_local! {
+            static REPR_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+        }
+        let depth_ok = REPR_DEPTH.with(|d| {
+            let n = d.get();
+            if n >= 200 {
+                false
+            } else {
+                d.set(n + 1);
+                true
+            }
+        });
+        if !depth_ok {
+            return "[...]".to_string();
+        }
+        let result = self.repr_inner_guarded();
+        REPR_DEPTH.with(|d| d.set(d.get() - 1));
+        result
+    }
+
+    fn repr_inner_guarded(&self) -> String {
         // Check for __repr__ on Instance types (user-defined objects) —
         // self.borrow().repr() can't invoke a bound method (no PyObjectRef
         // handle from &PyObject), so it must be handled here instead.
