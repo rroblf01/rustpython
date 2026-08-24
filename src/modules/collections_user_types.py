@@ -384,8 +384,12 @@ class defaultdict(dict):
         if self.default_factory is None:
             raise KeyError(key)
         value = self.default_factory()
-        self[key] = value
-        return value
+        # Don't clobber a value a deeper (reentrant) __missing__ frame
+        # already stored for this key — CPython's dict storage order makes
+        # the innermost result win, which test_factory_conflict... asserts.
+        if key not in self:
+            self[key] = value
+        return self[key]
 
     def __repr__(self):
         # Recursion guard (gh-145492): a factory whose __repr__ calls
@@ -393,7 +397,9 @@ class defaultdict(dict):
         # returns the standard '...' cycle marker instead.
         key = id(self)
         if key in _defaultdict_repr_guard:
-            return '%s(...)' % type(self).__name__
+            # CPython dict-subclass recursion marker keeps the items part.
+            items = ', '.join('%r: %r' % (k, v) for k, v in self.items())
+            return '%s(..., {%s})' % (type(self).__name__, items)
         _defaultdict_repr_guard.add(key)
         try:
             items = ', '.join('%r: %r' % (k, v) for k, v in self.items())
@@ -406,24 +412,61 @@ class defaultdict(dict):
         result.update(self)
         return result
 
+    def __reduce__(self):
+        # CPython-style reduce: (class, args, state, listitems, dictitems).
+        # The factory is pickled by reference (int, None, callables...).
+        return (
+            self.__class__,
+            (self.default_factory,),
+            None,
+            None,
+            iter(self.items()),
+        )
+
     @staticmethod
     def _is_dict_like(o):
         # Our isinstance() doesn't currently resolve native bases through
-        # Python-level subclasses, so probe structurally.
+        # Python-level subclasses, so probe structurally. Lists/tuples of
+        # (k, v) pairs are accepted too (dict |= items-list semantics).
         if isinstance(o, dict):
             return True
         return hasattr(o, "keys") and hasattr(o, "__getitem__")
 
+    def __ior__(self, other):
+        if isinstance(other, (list, tuple)):
+            for k, v in other:
+                self[k] = v
+            return self
+        # Mapping: route through the native backing's update via the same
+        # mechanism dict.update(self, other) would use, but our native base
+        # doesn't expose update as an unbound callable — so iterate manually.
+        if hasattr(other, "keys"):
+            for k in other.keys():
+                self[k] = other[k]
+        else:
+            for k, v in other:
+                self[k] = v
+        return self
+
     def __or__(self, other):
         if not self._is_dict_like(other):
-            return NotImplemented
+            # Raise directly: our binary-op dispatch doesn't convert
+            # NotImplemented to TypeError like real CPython's slot
+            # machinery does.
+            raise TypeError(
+                "unsupported operand type(s) for |: '%s' and '%s'"
+                % (type(self).__name__, type(other).__name__)
+            )
         result = defaultdict(self.default_factory, self)
         result.update(other)
         return result
 
     def __ror__(self, other):
         if not self._is_dict_like(other):
-            return NotImplemented
+            raise TypeError(
+                "unsupported operand type(s) for |: '%s' and '%s'"
+                % (type(other).__name__, type(self).__name__)
+            )
         result = defaultdict(self.default_factory, other)
         result.update(self)
         return result

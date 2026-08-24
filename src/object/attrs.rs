@@ -7169,24 +7169,99 @@ impl PyObject {
                                     "__or__() takes exactly one argument",
                                 ));
                             };
-                            let other = args[other_idx].borrow();
-                            if let PyObject::Dict(other_dict) = &*other {
-                                let d = args[self_idx].borrow();
-                                if let PyObject::Dict(dict) = &*d {
-                                    let mut new_dict = PyDict::new();
-                                    for (k, v) in dict.items() {
-                                        new_dict.set(k, v)?;
-                                    }
-                                    for (k, v) in other_dict.items() {
-                                        new_dict.set(k, v)?;
-                                    }
-                                    Ok(PyObjectRef::new(PyObject::Dict(Box::new(new_dict))))
-                                } else {
-                                    Err(PyError::runtime_error("__or__ on non-dict"))
+                            // Accept dict-subclass instances on either side
+                            // (defaultdict etc.) by falling back to their
+                            // keys()/__getitem__ mapping protocol.
+                            fn dict_like_items(o: &PyObjectRef) -> Option<Vec<(PyObjectRef, PyObjectRef)>> {
+                                let b = o.borrow();
+                                if let PyObject::Dict(dd) = &*b {
+                                    return Some(dd.items());
+                                }
+                                if b.get_attribute("keys").is_ok() {
+                                    return None; // handled by caller via update-style path
+                                }
+                                None
+                            }
+                            // Reflected priority: a dict-subclass Instance
+                            // (defaultdict etc.) with __ror__ must win over
+                            // this native implementation.
+                            if let PyObject::Instance { typ, .. } =
+                                &*args[other_idx].borrow()
+                            {
+                                if crate::object::lookup_dunder_via_mro(typ, "__ror__")
+                                    .is_some()
+                                {
+                                    let ror = crate::object::lookup_dunder_via_mro(
+                                        typ,
+                                        "__ror__",
+                                    )
+                                    .unwrap();
+                                    return crate::object::call_bound_method(
+                                        ror,
+                                        args[other_idx].clone(),
+                                        vec![args[self_idx].clone()],
+                                    );
+                                }
+                            }
+                            // Accept list/tuple of (k, v) pairs too:
+                            // `defaultdict |= [(1,'a'), ...]` is real CPython
+                            // dict.__ior__ semantics (in-place update).
+                            let other_is_pairs = matches!(
+                                &*args[other_idx].borrow(),
+                                PyObject::List(_) | PyObject::Tuple(_)
+                            );
+                            let other_ok = matches!(&*args[other_idx].borrow(), PyObject::Dict(_))
+                                || args[other_idx].borrow().get_attribute("keys").is_ok()
+                                || other_is_pairs;
+                            if !other_ok {
+                                return Err(PyError::type_error(
+                                    "__or__() argument must be a dict",
+                                ));
+                            }
+                            // Build result: start from self's mapping view.
+                            let self_obj_clone = args[self_idx].clone();
+                            let mut new_dict = PyDict::new();
+                            if let PyObject::Dict(dict) = &*self_obj_clone.borrow() {
+                                for (k, v) in dict.items() {
+                                    new_dict.set(k.clone(), v.clone())?;
                                 }
                             } else {
-                                Err(PyError::type_error("__or__() argument must be a dict"))
+                                // dict subclass instance: read via its own
+                                // mapping protocol (keys + getitem).
+                                let keys_m = self_obj_clone.borrow().get_attribute("keys")?;
+                                let keys_it = crate::object::builtin_iter(&[crate::object::call_bound_method(keys_m, self_obj_clone.clone(), vec![])?])?;
+                                loop {
+                                    match crate::object::builtin_next(&[keys_it.clone()]) {
+                                        Ok(k) => {
+                                            let v = crate::object::py_getitem(&self_obj_clone, &k)?;
+                                            new_dict.set(k, v)?;
+                                        }
+                                        Err(crate::object::PyError::StopIteration) => break,
+                                        Err(e) => return Err(e),
+                                    }
+                                }
                             }
+                            // Then merge other: prefer its items for dup keys.
+                            if let PyObject::Dict(other_dict) = &*args[other_idx].borrow() {
+                                for (k, v) in other_dict.items() {
+                                    new_dict.set(k.clone(), v.clone())?;
+                                }
+                            } else {
+                                let keys_m = args[other_idx].borrow().get_attribute("keys")?;
+                                let keys_it = crate::object::builtin_iter(&[crate::object::call_bound_method(keys_m, args[other_idx].clone(), vec![])?])?;
+                                loop {
+                                    match crate::object::builtin_next(&[keys_it.clone()]) {
+                                        Ok(k) => {
+                                            let v = crate::object::py_getitem(&args[other_idx], &k)?;
+                                            new_dict.set(k, v)?;
+                                        }
+                                        Err(crate::object::PyError::StopIteration) => break,
+                                        Err(e) => return Err(e),
+                                    }
+                                }
+                            }
+                            let _ = dict_like_items; // (kept for reference)
+                            Ok(PyObjectRef::new(PyObject::Dict(Box::new(new_dict))))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),

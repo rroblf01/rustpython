@@ -683,8 +683,55 @@ impl PyObject {
                 format!("{}({}, {})", typ, args_str.join(", "), exc_str.join(", "))
             }
             PyObject::BuildClass => "<builtin function __build_class__>".to_string(),
-            PyObject::BoundMethod { func, .. } => {
-                format!("<bound method {}>", func.borrow().type_name())
+            PyObject::BoundMethod { func, self_obj } => {
+                // CPython-style: <bound method Class.method of <owner repr>>.
+                // Method name prefers the function's __qualname__; when it
+                // carries no class prefix, synthesize one from the owner's
+                // type name.
+                let fb = func.borrow();
+                let mname = match &*fb {
+                    PyObject::Function(f) => {
+                        let qn = f
+                            .dict
+                            .get("__qualname__")
+                            .and_then(|v| {
+                                let b = v.borrow();
+                                if let PyObject::Str(s) = &*b {
+                                    Some(s.to_string())
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or_else(|| crate::interner::lookup_str(f.code.name).to_string());
+                        // Prefer the user-visible CLASS name: instances of
+                        // Python-level classes report generic 'instance' as
+                        // their runtime type_name, but CPython's bound-method
+                        // repr uses the class qualifier (sub._factory).
+                        let tn = match &*self_obj.borrow() {
+                            PyObject::Instance { typ, .. } => {
+                                let tb = typ.borrow();
+                                match &*tb {
+                                    PyObject::Type { name, .. } => name.clone(),
+                                    _ => tb.type_name().to_string(),
+                                }
+                            }
+                            other => other.type_name().to_string(),
+                        };
+                        let tn = tn.as_str();
+                        if qn.contains('.') || qn == tn {
+                            qn
+                        } else {
+                            format!("{}.{}", tn, qn)
+                        }
+                    }
+                    _ => fb.type_name(),
+                };
+                drop(fb);
+                format!(
+                    "<bound method {} of {}>",
+                    mname,
+                    self_obj.repr()
+                )
             }
             PyObject::Partial { func, .. } => format!("<partial {}>", func.borrow().type_name()),
             PyObject::File { name, .. } => format!("<_io.FileIO '{}'>", name),

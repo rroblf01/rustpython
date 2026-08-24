@@ -567,12 +567,22 @@ pub fn create_time_dict() -> HashMap<String, PyObjectRef> {
         };
         let nanos = (secs * 1e9) as u64;
         let start = SystemTime::now();
+        // Cooperative scheduling: a sleeping thread yields so deferred
+        // thread bodies (producers, signal senders, event setters) can run
+        // — exactly the happens-before real OS sleep provides. Drain once
+        // per ~1ms of virtual wait; pure busy-wait otherwise starves them.
+        let mut drained = false;
         loop {
             if let Ok(elapsed) = SystemTime::now().duration_since(start) {
                 if elapsed.as_nanos() >= nanos as u128 {
                     break;
                 }
+                if !drained && elapsed.as_millis() >= 0 {
+                    crate::modules::coop_threads_drain();
+                    drained = true;
+                }
             }
+            std::thread::yield_now();
         }
         Ok(py_none())
     });
