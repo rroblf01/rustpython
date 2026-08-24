@@ -74,6 +74,7 @@ pub fn is_trackable(obj: &PyObject) -> bool {
             | PyObject::BoundMethod { .. }
             | PyObject::Cell { .. }
             | PyObject::Partial { .. }
+            | PyObject::Slice { .. }
     )
 }
 
@@ -241,6 +242,11 @@ fn clear_children(obj: &mut PyObject) {
         }
         PyObject::Cell { value } => *value = None,
         PyObject::Partial { args, .. } => args.clear(),
+        PyObject::Slice { start, stop, step } => {
+            *start = crate::object::py_none();
+            *stop = crate::object::py_none();
+            *step = crate::object::py_none();
+        }
         _ => {}
     }
 }
@@ -333,7 +339,63 @@ pub fn collect() -> usize {
         }
     }
     if std::env::var("RPY_DEBUG_GC").is_ok() {
-        eprintln!("cycle_gc: seed_count={} (gc_refs>0 before BFS)", seed_count);
+        let mut zero = 0;
+        let mut pos = 0;
+        let mut neg = 0;
+        for &r in &gc_refs {
+            if r == 0 { zero += 1; } else if r > 0 { pos += 1; } else { neg += 1; }
+        }
+        eprintln!(
+            "cycle_gc: post-trial: tracked={} seeds={} zero={} neg={}",
+            live_rcs.len(), pos, zero, neg
+        );
+        // Print zero-ref objects and their types
+        for (i, rc) in live_rcs.iter().enumerate() {
+            if gc_refs[i] == 0 {
+                let name = rc.try_borrow().map(|b| b.type_name().to_string()).unwrap_or("?".into());
+                let sc = Rc::strong_count(rc);
+                eprintln!("  zero[{}] {} strong={} ptr={:?}", i, name, sc, Rc::as_ptr(rc));
+            }
+        }
+        // Also check interesting seed types
+        for (i, rc) in live_rcs.iter().enumerate() {
+            if gc_refs[i] > 0 {
+                let name = rc.try_borrow().map(|b| b.type_name().to_string()).unwrap_or("?".into());
+                if matches!(name.as_str(), "instance" | "slice" | "list" | "dict") {
+                    let sc = Rc::strong_count(rc);
+                    eprintln!("  SEED[{}] {} strong={} gc_refs={} ptr={:?}", i, name, sc, gc_refs[i], Rc::as_ptr(rc));
+                }
+            }
+        }
+        // Reverse map: which tracked objects hold refs to each small-gc_refs seed?
+        if std::env::var("RPY_DEBUG_GC").map(|v| v == "2").unwrap_or(false) {
+            let mut rev: HashMap<usize, Vec<usize>> = HashMap::new();
+            for (i, rc) in live_rcs.iter().enumerate() {
+                scratch.clear();
+                if let Ok(b) = rc.try_borrow() {
+                    trace_children(&b, &mut scratch);
+                }
+                for child in &scratch {
+                    if let Some(child_rc) = extract_rc(child) {
+                        if let Some(&j) = index_of.get(&Rc::as_ptr(&child_rc)) {
+                            rev.entry(j).or_default().push(i);
+                        }
+                    }
+                }
+            }
+            for (i, rc) in live_rcs.iter().enumerate() {
+                if gc_refs[i] >= 0 && gc_refs[i] <= 2 {
+                    let name = rc.try_borrow().map(|b| b.type_name().to_string()).unwrap_or("?".into());
+                    let holders = rev.get(&i).cloned().unwrap_or_default();
+                    let hnames: Vec<String> = holders.iter().map(|&h| {
+                        let hn = live_rcs[h].try_borrow().map(|b| b.type_name().to_string()).unwrap_or("?".into());
+                        format!("{}[{}](gc={})", hn, h, gc_refs[h])
+                    }).collect();
+                    eprintln!("  REV[{}] {} strong={} gc={} held-by: {}", i, name,
+                              Rc::strong_count(rc), gc_refs[i], hnames.join(", "));
+                }
+            }
+        }
     }
     while let Some(rc) = stack.pop() {
         scratch.clear();
@@ -370,19 +432,69 @@ pub fn collect() -> usize {
     // the whole point). Sever its outgoing references so the graph can
     // actually collapse.
     let mut collected = 0;
+    let mut marked_but_zero = 0;
     for (i, rc) in live_rcs.iter().enumerate() {
         if !live[i] {
             clear_children(&mut rc.borrow_mut());
             collected += 1;
+        } else if gc_refs[i] == 0 {
+            marked_but_zero += 1;
         }
     }
     LAST_STATS.with(|c| c.set((live_rcs.len(), collected)));
     if std::env::var("RPY_DEBUG_GC").is_ok() {
         eprintln!(
-            "cycle_gc: tracked={} collected={}",
-            live_rcs.len(),
-            collected
+            "cycle_gc: tracked={} collected={} marked_but_zero={}",
+            live_rcs.len(), collected, marked_but_zero
         );
     }
     collected
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::object::py_none;
+
+    fn list_self_cycle() -> PyObjectRef {
+        let lst = PyObjectRef::new(PyObject::List(Vec::new()));
+        if let PyObjectRef::Mut(rc) = &lst {
+            let mut b = rc.try_borrow_mut().unwrap();
+            if let PyObject::List(v) = &mut *b {
+                v.push(lst.clone());
+            }
+        }
+        lst
+    }
+
+    #[test]
+    fn test_self_cycle_list_collected() {
+        set_enabled(true);
+        let lst = list_self_cycle();
+        drop(lst);
+        let collected = collect();
+        assert!(collected >= 1, "self-cycle list must be collected, got {}", collected);
+    }
+
+    #[test]
+    fn test_mutual_cycle_dicts_collected() {
+        set_enabled(true);
+        let d1 = PyObjectRef::new(PyObject::Dict(Box::new(PyDict::new())));
+        let d2 = PyObjectRef::new(PyObject::Dict(Box::new(PyDict::new())));
+        {
+            let k = crate::object::py_str("other");
+            if let PyObjectRef::Mut(rc) = &d1 {
+                let mut b = rc.try_borrow_mut().unwrap();
+                if let PyObject::Dict(dd) = &mut *b { dd.set(k.clone(), d2.clone()).unwrap(); }
+            }
+            if let PyObjectRef::Mut(rc) = &d2 {
+                let mut b = rc.try_borrow_mut().unwrap();
+                if let PyObject::Dict(dd) = &mut *b { dd.set(k, d1.clone()).unwrap(); }
+            }
+        }
+        drop(d1);
+        drop(d2);
+        let collected = collect();
+        assert!(collected >= 2, "mutual dict cycle must be collected, got {}", collected);
+    }
 }

@@ -1476,20 +1476,48 @@ pub fn create_weakref_dict() -> HashMap<String, PyObjectRef> {
         };
     }
 
-    // ref(obj) returns a weak reference object (callable)
-    // If the object is still alive, calling it returns the object
-    // Since we don't have full GC, we use a simple Rc-based weak reference
+    // ref(obj) returns a REAL weak reference backed by `Rc::downgrade` —
+    // it does NOT keep the referent alive (the old implementation wrapped
+    // the object as a BuiltinMethod's `self_obj`, i.e. a strong reference,
+    // which defeated the entire point and made every `weakref.ref(x)`
+    // permanently pin x). Calling the returned object yields the referent
+    // while it lives, `None` once collected.
     wr_func!("ref", |args| {
         if args.is_empty() {
             return Err(PyError::type_error("ref() requires at least 1 argument"));
         }
-        let obj = args[0].clone();
-        // Return a BuiltinMethod that when called returns the original object
-        Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
-            name: "weakref".to_string(),
-            func: |args| Ok(args[0].clone()),
-            self_obj: obj,
-        }))
+        let obj = &args[0];
+        // Types that don't support weak references (matching CPython's list:
+        // atomics plus tuple/bytes and plain builtin functions).
+        let unsupported = matches!(
+            &*obj.borrow(),
+            PyObject::None
+                | PyObject::Bool(_)
+                | PyObject::Int(_)
+                | PyObject::Float(_)
+                | PyObject::Complex(..)
+                | PyObject::Str(_)
+                | PyObject::Bytes(_)
+                | PyObject::Tuple(_)
+                | PyObject::Code { .. }
+                | PyObject::BuiltinFunction { .. }
+        );
+        if unsupported {
+            return Err(PyError::type_error(format!(
+                "cannot create weak reference to '{}' object",
+                obj.borrow().type_name()
+            )));
+        }
+        let target = match obj {
+            PyObjectRef::Mut(rc) | PyObjectRef::Imm(rc) => std::rc::Rc::downgrade(rc),
+            _ => {
+                return Err(PyError::type_error(format!(
+                    "cannot create weak reference to '{}' object",
+                    obj.borrow().type_name()
+                )))
+            }
+        };
+        Ok(PyObjectRef::imm(PyObject::WeakRef { target }))
     });
 
     wr_func!("proxy", |args| {
@@ -7991,7 +8019,7 @@ fn make_timeit_type() -> PyObjectRef {
         let repeat = kw_lookup(&kw, "repeat")
             .and_then(|v| v.as_i64())
             .or_else(|| args.get(1).and_then(|v| v.as_i64()))
-            .unwrap_or(3)
+            .unwrap_or(5)
             .max(0) as u64;
         let number = kw_lookup(&kw, "number")
             .and_then(|v| v.as_i64())
@@ -8012,6 +8040,16 @@ fn make_timeit_type() -> PyObjectRef {
         let self_obj = args.first().cloned().unwrap();
         let callback: Option<PyObjectRef> = args.get(1).and_then(|c| {
             if matches!(&*c.borrow(), PyObject::None) { None } else { Some(c.clone()) }
+        }).or_else(|| {
+            // kwargs form: callback=<callable> in trailing Dict
+            args.last().and_then(|d| {
+                let b = d.borrow();
+                if let PyObject::Dict(dd) = &*b {
+                    dd.items().into_iter()
+                        .find(|(k, _)| k.str() == "callback")
+                        .map(|(_, v)| v.clone())
+                } else { None }
+            })
         });
         let report = |callback: &Option<PyObjectRef>, n: usize, secs: f64| -> PyResult<()> {
             if let Some(cb) = callback {

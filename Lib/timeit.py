@@ -42,16 +42,13 @@ default_timer = _time.perf_counter
 
 
 def reindent(src, indent):
-    """Add 'indent' spaces of extra indentation to every line except the
-    first (CPython semantics)."""
+    """Add 'indent' spaces of extra indentation to every line AFTER the
+    first (CPython semantics: blanks included, first line untouched)."""
     if indent == 0:
         return src
     pad = " " * indent
     lines = src.split("\n")
-    out = [lines[0]]
-    for line in lines[1:]:
-        out.append(line if not line.strip() else pad + line)
-    return "\n".join(out)
+    return "\n".join([lines[0]] + [pad + l for l in lines[1:]])
 
 
 def _template_func(setup, func):
@@ -61,13 +58,33 @@ def _template_func(setup, func):
 _NativeTimerBase = getattr(_native, "Timer", object)
 
 
+
+
+_INVALID_TIMEIT_FIRST = ("return", "yield", "break", "continue")
+
+def _reject_invalid_timeit_src(src, what):
+    stripped = src.lstrip()
+    toks = stripped.replace(",", " , ").replace(";", " ; ").split()
+    if len(toks) >= 3 and toks[0] == "from" and toks[-1] == "*" and toks[-2] == "import":
+        raise SyntaxError(
+            "%s statement must not contain a wildcard import" % what
+        )
+    first_word = toks[0] if toks else ""
+    if False and first_word.startswith("from ") and first_word.endswith("*"):
+        # 'from timeit import *' etc. are valid Python but invalid timeit
+        raise SyntaxError(
+            "%s statement must not contain a wildcard import" % what
+        )
+    if first_word in _INVALID_TIMEIT_FIRST:
+        raise SyntaxError("%s statement contains %r" % (what, first_word))
+
 class Timer(_NativeTimerBase):
     """Class for timing execution speed of small code snippets."""
 
     def __init__(self, stmt="pass", setup="pass", timer=default_timer,
                  globals=None):
-        if stmt is None:
-            raise ValueError("stmt expression must be a str or callable")
+        if stmt is None or setup is None:
+            raise ValueError("stmt/setup expression must be a str or callable")
         # Drop whitespace-only lines and dedent; normalize blank body to pass.
         if isinstance(stmt, str):
             stmt = "\n".join(l for l in stmt.split("\n") if l.strip())
@@ -76,11 +93,13 @@ class Timer(_NativeTimerBase):
         if isinstance(setup, str):
             setup = "\n".join(l for l in setup.split("\n") if l.strip()) or "pass"
         if isinstance(stmt, str):
+            _reject_invalid_timeit_src(stmt, "statement")
             compile(stmt, "<timeit-stmt>", "exec")
-        if isinstance(setup, str) and setup.strip():
+        if isinstance(setup, str):
+            _reject_invalid_timeit_src(setup, "setup")
             compile(setup, "<timeit-setup>", "exec")
         self._timer_fn = timer if callable(timer) else default_timer
-        self._globals_v = dict(globals) if globals else {}
+        self._globals_v = _safe_dict(globals) if globals else {}
         self._stmt_v = stmt
         self._setup_v = setup
         _NativeTimer.__init__(self, stmt, setup, timer,
@@ -116,24 +135,30 @@ def _exec_stmt(code, g):
     _native._run_in_globals(code, _pydict(g))
 
 
-def _pydict(d):
-    """Convert our dict to a plain dict usable by the bridge."""
+def _safe_dict(d):
+    """Convert a dict-like object (including PyObject::Globals views) to a
+    plain dict, avoiding internal .keys() calls that may fail on views."""
+    if d is None:
+        return {}
     out = {}
-    for k, v in d.items():
-        out[k] = v
+    try:
+        for k in d:
+            out[k] = d[k]
+    except TypeError:
+        pass
     return out
 
 
 def timeit(stmt="pass", setup="pass", timer=default_timer,
            number=default_number, globals=None):
-    g = dict(globals) if globals else {}
+    g = _safe_dict(globals) if globals else {}
     t = Timer(stmt=stmt, setup=setup, timer=timer, globals=g)
     return t.timeit(number)
 
 
 def repeat(stmt="pass", setup="pass", timer=default_timer,
            repeat=default_repeat, number=default_number, globals=None):
-    g = dict(globals) if globals else {}
+    g = _safe_dict(globals) if globals else {}
     t = Timer(stmt=stmt, setup=setup, timer=timer, globals=g)
     return t.repeat(repeat, number)
 
@@ -166,7 +191,7 @@ def main(args=None, *, _wrap_timer=None):
     setups = []
     unit = None
     verbose = False
-    stmt = None
+    stmt_parts = []
     arglist = list(args)
     i = 0
     while i < len(arglist):
@@ -199,8 +224,12 @@ def main(args=None, *, _wrap_timer=None):
         elif a == "-u":
             i += 1
             unit = arglist[i]
+        elif a == "-vv" or a == "--verbose" and verbose:
+            verbose = 2
+        elif a == "-vv" or (a.startswith("-v") and a.count("v") > 1):
+            verbose = 2
         elif a == "-v" or a == "--verbose":
-            verbose = True
+            verbose = max(1, verbose if isinstance(verbose, int) else 0)
         elif a == "-p" or a == "--process":
             pass
         elif a == "--":
@@ -210,8 +239,10 @@ def main(args=None, *, _wrap_timer=None):
             print("use -h/--help for command line help")
             return
         else:
-            stmt = a
+            stmt_parts.append(a)
         i += 1
+
+    stmt = "\n".join(stmt_parts) if stmt_parts else None
 
     setup_src = "\n".join(setups) if setups else "pass"
     timer_fn = default_timer
@@ -219,18 +250,37 @@ def main(args=None, *, _wrap_timer=None):
         timer_fn = _wrap_timer(timer_fn)
     t = Timer(stmt=stmt or "pass", setup=setup_src, timer=timer_fn)
 
-    if opts_number is None:
-        num_loops, _t = t.autorange()
-    else:
-        num_loops = opts_number
-    results = t.repeat(opts_repeat, num_loops)
+    try:
+        if opts_number is None:
+            def _cb(n, t_taken):
+                if verbose >= 1:
+                    print("%d loop%s -> %g sec" % (
+                        n, "s" if n != 1 else "", t_taken
+                    ))
+            num_loops, _t = t.autorange(_cb if verbose else None)
+        else:
+            num_loops = opts_number
+        results = t.repeat(opts_repeat, num_loops)
+    except:
+        t.print_exc()
+        return
     best = min(results)
-
+    if verbose >= 1:
+        print()
+        raw = ", ".join(_format_time(r) for r in results) if isinstance(results, list) else ""
+        print("raw times: %s" % raw)
+        print()
+    per_loop = best / num_loops if num_loops else best
     if unit is not None:
-        scale = {"nsec": 1e-9, "usec": 1e-6, "msec": 1e-3, "sec": 1.0}[unit]
-        printed = "%g %s" % (round(best / scale, 3), unit)
+        valid_units = {"nsec": 1e-9, "usec": 1e-6, "msec": 1e-3, "sec": 1.0}
+        if unit not in valid_units:
+            _sys.stderr.write(
+                "Unrecognized unit. Please select nsec, usec, msec, or sec.\n"
+            )
+            return
+        scale = valid_units[unit]
+        printed = "%.3g %s" % (per_loop / scale, unit)
     else:
-        per_loop = best / num_loops if num_loops else best
         printed = _format_time(per_loop)
 
     loops_word = "loop" if num_loops == 1 else "loops"

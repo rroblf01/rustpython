@@ -2043,6 +2043,27 @@ impl VirtualMachine {
 
     fn release_frame(&mut self, frame: Frame) {
         if self.frame_pool.len() < 32 {
+            let mut frame = frame;
+            // Drop every retained reference to Python objects BEFORE pooling.
+            // Without this, pooled frames keep the last call's fast_locals /
+            // stack / caches alive indefinitely, which (a) pins arbitrary
+            // user objects as invisible GC roots (cycle_gc sees them as
+            // eternal external referrers and can never collect any cycle
+            // whose members passed through a function call), and (b) delays
+            // memory reclamation until the slot happens to be reused.
+            frame.fast_locals.clear();
+            frame.locals.clear();
+            frame.stack.clear();
+            frame.closure.clear();
+            frame.exception_handlers.clear();
+            frame.active_exception = None;
+            frame.attr_cache.clear();
+            frame.global_cache.clear();
+            frame.registers.clear();
+            frame.name_order = None;
+            frame.live_module = None;
+            frame.yield_from_iter = None;
+            frame.back = None;
             self.frame_pool.push(frame);
         }
     }
@@ -9082,6 +9103,22 @@ impl VirtualMachine {
                 return crate::modules::fraction_init_with_vm(self, &new_args);
             }
             return func(&new_args);
+        }
+
+        // Calling a weak reference (`w()`) dereferences it: yields the
+        // referent while alive, otherwise `None` — or the caller-supplied
+        // default when one is passed (`w(default)`), matching CPython.
+        if let PyObject::WeakRef { target } = &*callable.borrow() {
+            return Ok(match target.upgrade() {
+                Some(rc) => PyObjectRef::Imm(rc),
+                None => {
+                    if let Some(default) = args.first() {
+                        default.clone()
+                    } else {
+                        crate::object::py_none()
+                    }
+                }
+            });
         }
 
         if let PyObject::BoundMethod { func, self_obj } = &*callable.borrow() {

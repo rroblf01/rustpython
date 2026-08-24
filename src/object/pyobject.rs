@@ -217,6 +217,12 @@ pub enum PyObject {
     Cell {
         value: Option<PyObjectRef>,
     },
+    /// A real weak reference (`weakref.ref(obj)`): holds only a `Weak` to the
+    /// target, so it never keeps the target alive. Calling it yields the
+    /// target (or `None`, or a caller-supplied default once dead).
+    WeakRef {
+        target: std::rc::Weak<std::cell::RefCell<PyObject>>,
+    },
     // Reserved for future C-extension capsule support (ffi_bridge.rs); not
     // constructed anywhere yet.
     #[allow(dead_code)]
@@ -466,6 +472,7 @@ impl PyObject {
             PyObject::Type { name, .. } => name,
             PyObject::Instance { .. } => "instance",
             PyObject::Cell { .. } => "cell",
+            PyObject::WeakRef { .. } => "weakref",
             PyObject::Capsule { .. } => "capsule",
             PyObject::Exception { typ, .. } => typ,
             PyObject::ExceptionGroup { typ, .. } => typ,
@@ -662,6 +669,25 @@ impl PyObject {
             PyObject::Code(c) => format!("<code object {}>", c.name),
             PyObject::Cell { value: Some(v) } => v.repr(),
             PyObject::Cell { value: None } => "None".to_string(),
+            PyObject::WeakRef { target } => match target.upgrade() {
+                Some(rc) => {
+                    let (tname, tptr) = {
+                        let b = rc.borrow();
+                        // Stable identity address of the target PyObject
+                        (b.type_name(), std::ptr::from_ref::<PyObject>(&*b) as usize)
+                    };
+                    format!(
+                        "<weakref at {:#x}; to '{}' at {:#x}>",
+                        std::ptr::from_ref::<PyObject>(self) as usize,
+                        tname,
+                        tptr
+                    )
+                }
+                None => format!(
+                    "<weakref at {:#x}; dead>",
+                    std::ptr::from_ref::<PyObject>(self) as usize
+                ),
+            },
             PyObject::Capsule { name, .. } => format!("<capsule object '{}'>", name),
             PyObject::Exception {
                 typ,
