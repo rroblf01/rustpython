@@ -9480,12 +9480,11 @@ impl VirtualMachine {
                 } else {
                     let verb = if npos > 1 { "were" } else { "was" };
                     format!(
-                        "{}() takes from {} to {} positional arguments but {} {} {} given",
+                        "{}() takes from {} to {} positional arguments but {} {} given",
                         fname,
                         min_required,
                         named_params,
                         npos,
-                        noun(npos),
                         verb
                     )
                 };
