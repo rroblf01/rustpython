@@ -1387,6 +1387,7 @@ impl VirtualMachine {
 
         // Native shelve module (persistent dict wrapper)
         modules.insert_str("shelve", create_module("shelve", create_shelve_dict()));
+        modules.insert_str("selectors", create_module("selectors", create_selectors_dict()));
 
         // "mimetypes" intentionally NOT registered natively: the
         // pure-Python Lib/mimetypes.py is the full CPython module

@@ -79,6 +79,29 @@ pub fn create_socket_dict() -> HashMap<String, PyObjectRef> {
         }))
     });
 
+    /// Wrap a raw TcpStream as our Socket object.
+    fn wrap_tcp_stream(stream: std::net::TcpStream) -> PyObjectRef {
+        PyObjectRef::new(PyObject::Socket {
+            inner: Rc::new(RefCell::new(SocketInner::TcpStream(stream))),
+        })
+    }
+
+    // socketpair(): std has no AF_UNIX pair in this codebase's socket model
+    // (TcpListener/TcpStream only), so emulate with a loopback TCP pair --
+    // semantically identical for the select()/send/recv patterns tests use.
+    sock_func!("socketpair", |args| {
+        let _family = args.get(0).and_then(|a| a.as_i64()).unwrap_or(2);
+        let _stype = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
+        let l = std::net::TcpListener::bind("127.0.0.1:0")
+            .map_err(|e| PyError::OsError(format!("socketpair bind: {}", e)))?;
+        let addr = l.local_addr().map_err(|e| PyError::OsError(format!("{}", e)))?;
+        let c = std::net::TcpStream::connect(addr)
+            .map_err(|e| PyError::OsError(format!("socketpair connect: {}", e)))?;
+        let (a_end, _l) = l.accept()
+            .map_err(|e| PyError::OsError(format!("socketpair accept: {}", e)))?;
+        Ok(py_list(vec![wrap_tcp_stream(a_end), wrap_tcp_stream(c)]))
+    });
+
     // Honest: this interpreter's `socket()` only supports AF_INET (see
     // below) — reporting `has_ipv6 = True` would make `test.support.
     // socket_helper`'s own `_is_ipv6_enabled()` try `socket.socket(AF_INET6,
