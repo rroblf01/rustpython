@@ -470,6 +470,16 @@ impl PyObject {
         // Type → itself; anything else → a freshly-built placeholder Type
         // sharing just the name, same as `type(x)` already does for
         // natives).
+        // Per-instance attributes stored on `functools.partial` objects
+        // (CPython's partial has a real __dict__; configparser assigns
+        // `self.converter = ...` on one).
+        if !name.starts_with("__") {
+            if let PyObject::Partial { dict, .. } = self {
+                if let Some(v) = dict.get(name) {
+                    return Ok(v.clone());
+                }
+            }
+        }
         if name == "__class__" {
             match self {
                 PyObject::Instance { typ, .. } => return Ok(typ.clone()),
@@ -12282,6 +12292,10 @@ impl ObjectAccess for PyObject {
                 // handled by dedicated arms above.
                 let extra = extra.get_or_insert_with(|| std::collections::HashMap::new());
                 extra.insert(name.to_string(), value);
+                Ok(())
+            }
+            PyObject::Partial { dict, .. } => {
+                dict.insert_str(name, value);
                 Ok(())
             }
             PyObject::ExceptionGroup { .. } => {

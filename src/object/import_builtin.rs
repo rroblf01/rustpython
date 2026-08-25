@@ -836,7 +836,7 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
         6 => {
             let (func, partial_args) = {
                 let obj = f.borrow();
-                if let PyObject::Partial { func: bf, args: pa } = &*obj {
+                if let PyObject::Partial { func: bf, args: pa, .. } = &*obj {
                     (bf.clone(), pa.clone())
                 } else {
                     return Err(PyError::type_error("not a partial"));

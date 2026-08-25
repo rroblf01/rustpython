@@ -3046,12 +3046,7 @@ impl VirtualMachine {
         // (observed: recursion_limit=16, frames.len()=garbage).
         let prev_vm_ptr =
             crate::object::VM_PTR.with(|p| p.replace(Some(self as *mut VirtualMachine)));
-        // Stack discipline for the global exc_info slot as well: nested
-        // executes must restore what their caller saw, otherwise a transient
-        // exception's traceback keeps its origin frame_object (and through
-        // it, the frame's f_locals snapshot) alive forever.
-        let prev_exc_type = self.exc_type.take();
-        let prev_exc_value = self.exc_value.take();
+
         // Every call site that pushes a frame onto `self.frames` immediately
         // calls `execute()` and pops exactly that one frame once it returns
         // (see exec_code, call_function's Function arm, __build_class__,
@@ -3089,8 +3084,6 @@ impl VirtualMachine {
         // Restore the caller's machine and exception context (see saves at
         // the top of this function).
         crate::object::VM_PTR.with(|p| p.set(prev_vm_ptr));
-        self.exc_type = prev_exc_type;
-        self.exc_value = prev_exc_value;
         result
     }
 
@@ -6635,6 +6628,23 @@ impl VirtualMachine {
                     if let Some(prev) = self.frames[fi].active_exception_stack.pop() {
                         self.frames[fi].active_exception = prev;
                     }
+                    // Global exc_info cleanup: when the OUTERMOST handler for
+                    // an exception finishes, sys.exc_info() must go back to
+                    // (None, None, None). Without this the handled
+                    // exception's traceback kept its origin frame_object (and
+                    // through it, that frame's f_locals snapshot) alive
+                    // indefinitely -- a real leak observed as weakrefs to
+                    // handler-local objects never clearing.
+                    if self.frames[fi].active_exception.is_none() {
+                        let in_outer_handler = self
+                            .frames
+                            .iter()
+                            .any(|f| f.active_exception.is_some());
+                        if !in_outer_handler {
+                            self.exc_type = None;
+                            self.exc_value = None;
+                        }
+                    }
                 }
             }
 
@@ -9288,6 +9298,7 @@ impl VirtualMachine {
         if let PyObject::Partial {
             func,
             args: partial_args,
+            ..
         } = &*callable.borrow()
         {
             let func = func.clone();
@@ -9703,27 +9714,50 @@ impl VirtualMachine {
                         }
                     });
                 let kwonly_start = code.arg_count + if code.vararg_name.is_some() { 1 } else { 0 };
-                let mut kwdefault_idx = code.num_defaults;
-                for (k, &has_default) in code.kwonly_defaults_mask.iter().enumerate() {
-                    let idx = kwonly_start + k;
-                    if idx >= new_frame.fast_locals.len() || new_frame.fast_locals[idx].is_some() {
-                        continue;
-                    }
-                    let name_str = interner::lookup_str(new_frame.code.varnames[idx]).to_string();
-                    let default_val = match &live_kwdefaults {
-                        Some(d) => d.get(&py_str(&name_str)).ok().flatten(),
+                // Build the name -> default map FIRST by consuming the
+                // compiled-in defaults list sequentially over the FULL
+                // kwonly parameter list. Applying per-slot while iterating
+                // skipped explicitly-bound params WITHOUT consuming their
+                // default, shifting every later default onto the wrong
+                // parameter (observed: ConfigParser(interpolation=<bool>)).
+                let name_to_default: std::collections::HashMap<String, PyObjectRef> =
+                    match &live_kwdefaults {
+                        Some(d) => d
+                            .items()
+                            .into_iter()
+                            .filter_map(|(k, v)| Some((k.str(), v)))
+                            .collect(),
                         None => {
-                            if !has_default {
-                                continue;
+                            let mut m = std::collections::HashMap::new();
+                            let mut idx = code.num_defaults;
+                            for (k, has_default) in code.kwonly_defaults_mask.iter().enumerate() {
+                                let _ = k;
+                                if *has_default {
+                                    if let Some(v) = defaults.get(idx).cloned() {
+                                        let name_str = interner::lookup_str(
+                                            new_frame.code.varnames[kwonly_start + k],
+                                        )
+                                        .to_string();
+                                        m.insert(name_str, v);
+                                    }
+                                    idx += 1;
+                                }
                             }
-                            let v = defaults.get(kwdefault_idx).cloned();
-                            kwdefault_idx += 1;
-                            v
+                            m
                         }
                     };
-                    if let Some(val) = default_val {
+                for k in 0..code.kwonly_defaults_mask.len() {
+                    let idx = kwonly_start + k;
+                    if idx >= new_frame.fast_locals.len()
+                        || new_frame.fast_locals[idx].is_some()
+                    {
+                        continue;
+                    }
+                    let name_str =
+                        interner::lookup_str(new_frame.code.varnames[idx]).to_string();
+                    if let Some(val) = name_to_default.get(&name_str) {
                         new_frame.insert_local(&name_str, val.clone());
-                        new_frame.fast_locals[idx] = Some(val);
+                        new_frame.fast_locals[idx] = Some(val.clone());
                     }
                 }
             }

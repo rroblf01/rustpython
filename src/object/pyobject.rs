@@ -255,6 +255,8 @@ pub enum PyObject {
     Partial {
         func: PyObjectRef,
         args: Vec<PyObjectRef>,
+        /// Per-instance attribute storage (CPython's partial has __dict__).
+        dict: crate::object::core::AttrMap,
     },
     File {
         file: std::rc::Rc<std::cell::RefCell<std::fs::File>>,

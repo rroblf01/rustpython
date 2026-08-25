@@ -299,7 +299,7 @@ fn trace_children(obj: &PyObject, out: &mut Vec<PyObjectRef>) {
             out.push(self_obj.clone());
         }
         PyObject::Cell { value: Some(v) } => out.push(v.clone()),
-        PyObject::Partial { func, args } => {
+        PyObject::Partial { func, args, .. } => {
             out.push(func.clone());
             out.extend(args.iter().cloned());
         }

@@ -6,6 +6,7 @@ mod pyset;
 pub use pyset::*;
 mod pydict;
 pub use pydict::*;
+pub(crate) use subscript::extract_slice_fields;
 mod pyobject;
 pub use pyobject::*;
 mod ctors;

@@ -777,6 +777,7 @@ pub fn create_functools_dict() -> HashMap<String, PyObjectRef> {
         Ok(PyObjectRef::new(PyObject::Partial {
             func,
             args: partial_args,
+            dict: crate::object::AttrMap::new(),
         }))
     });
 
@@ -796,6 +797,7 @@ pub fn create_functools_dict() -> HashMap<String, PyObjectRef> {
         Ok(PyObjectRef::new(PyObject::Partial {
             func,
             args: partial_args,
+            dict: crate::object::AttrMap::new(),
         }))
     });
 

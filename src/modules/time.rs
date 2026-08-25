@@ -84,10 +84,59 @@ fn build_struct_time_type() -> PyObjectRef {
                     "__getitem__() takes exactly one argument",
                 ));
             }
-            let idx = args[1]
-                .as_i64()
-                .ok_or_else(|| PyError::type_error("indices must be integers"))?;
             if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+                // Slice support (st[:3], st[2:6]) returns a plain tuple,
+                // matching structseq semantics; the test suite slices
+                // heavily (`strp_output[:3]`, `tm[7]`).
+                if let PyObject::Slice {
+                    start,
+                    stop,
+                    step,
+                } = &*args[1].borrow()
+                {
+                    use crate::object::extract_slice_fields;
+                    let n = STRUCT_TIME_FIELDS.len() as isize;
+                    let (s0, s1, step_v) =
+                        extract_slice_fields(start, stop, step)?;
+                    let norm = |v: Option<isize>, dflt: isize| -> isize {
+                        match v {
+                            Some(v) => {
+                                if v < 0 {
+                                    (n + v).max(0)
+                                } else {
+                                    v.min(n)
+                                }
+                            }
+                            None => dflt,
+                        }
+                    };
+                    let mut out = Vec::new();
+                    if step_v > 0 {
+                        let start = norm(s0, 0);
+                        let stop = norm(s1, n);
+                        let mut i = start;
+                        while i < stop {
+                            let name = STRUCT_TIME_FIELDS.get(i as usize)
+                                .ok_or_else(|| PyError::index_error("struct_time index out of range"))?;
+                            out.push(dict.get(name).cloned().unwrap_or_else(py_none));
+                            i += step_v;
+                        }
+                    } else {
+                        let start = match s0 { Some(v) => if v < 0 { (n+v).max(-1) } else { v.min(n-1) }, None => n - 1 };
+                        let stop = norm(s1, -1);
+                        let mut i = start;
+                        while i > stop {
+                            if let Some(name) = STRUCT_TIME_FIELDS.get(i as usize) {
+                                out.push(dict.get(name).cloned().unwrap_or_else(py_none));
+                            }
+                            i += step_v;
+                        }
+                    }
+                    return Ok(py_tuple(out));
+                }
+                let idx = args[1]
+                    .as_i64()
+                    .ok_or_else(|| PyError::type_error("indices must be integers"))?;
                 let i = if idx < 0 { idx + 9 } else { idx };
                 let name = STRUCT_TIME_FIELDS
                     .get(i as usize)
@@ -245,6 +294,37 @@ fn format_strftime(
                 Some('j') => result.push_str(&format!("{:03}", yday + 1)),
                 Some('w') => result.push_str(&format!("{}", (wday + 1) % 7)),
                 Some('u') => result.push_str(&format!("{}", if wday == 0 { 7 } else { wday })),
+                // %G (ISO year) / %V (ISO week): computed from the date's
+                // ordinal via the same Jan-4 anchor `isocalendar` uses.
+                gv @ (Some('G') | Some('V')) => {
+                    let c = gv.unwrap();
+                    let ord = ymd_to_ordinal(y, m, d);
+                    let jan4 = ymd_to_ordinal(y, 1, 4);
+                    let jan4_wd = ((jan4 % 7) + 6) % 7; // 0=Mon
+                    let week1_mon = jan4 - jan4_wd;
+                    let (iso_year, iso_week) = if ord < week1_mon {
+                        // belongs to last ISO year's final week
+                        let py_ = y - 1;
+                        let p = |yy: i64| (yy + yy / 4 - yy / 100 + yy / 400).rem_euclid(7);
+                        let w53 = p(py_) == 4 || p(py_ - 1) == 3;
+                        (py_, if w53 { 53 } else { 52 })
+                    } else {
+                        let wk = ((ord - week1_mon) / 7 + 1) as i64;
+                        let p = |yy: i64| (yy + yy / 4 - yy / 100 + yy / 400).rem_euclid(7);
+                        let w53 = p(y) == 4 || p(y - 1) == 3;
+                        let maxw = if w53 { 53 } else { 52 };
+                        if wk > maxw {
+                            (y + 1, 1)
+                        } else {
+                            (y, wk)
+                        }
+                    };
+                    if c == 'G' {
+                        result.push_str(&format!("{:04}", iso_year));
+                    } else {
+                        result.push_str(&format!("{:02}", iso_week));
+                    }
+                }
                 // `%U`/`%W` — week numbers (Sunday-first / Monday-first),
                 // matching the exact formula `test_strftime.py` itself uses
                 // (`(tm_yday + jan1_tm_wday)//7` with the Monday-based

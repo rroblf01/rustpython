@@ -2912,9 +2912,41 @@ pub fn builtin_dir(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let obj = args[0].borrow();
     let mut names = Vec::new();
     match &*obj {
-        PyObject::Instance { dict, .. } => {
+        PyObject::Instance { dict, typ } => {
             for key in dict.keys() {
                 names.push(py_str(key));
+            }
+            // Instance dir() must also surface the class's own and inherited
+            // members (CPython: dir(x) == sorted(set(vars(x)) | union of
+            // vars over type(x).__mro__)). Without this, `dir(obj)` on any
+            // user class omitted every method -- breaking patterns like
+            // configparser's ConverterMapping, which discovers getters via
+            // dir(parser).
+            if let PyObject::Type {
+                dict: tdict,
+                mro,
+                ..
+            } = &*typ.borrow()
+            {
+                let mut seen = std::collections::HashSet::new();
+                for key in tdict.keys() {
+                    if seen.insert(*key) {
+                        names.push(py_str(interner::lookup_str(*key)));
+                    }
+                }
+                for base in mro {
+                    if let PyObject::Type {
+                        dict: base_dict, ..
+                    } = &*base.borrow()
+                    {
+                        for key in base_dict.keys() {
+                            if seen.insert(*key) {
+                                names
+                                    .push(py_str(interner::lookup_str(*key)));
+                            }
+                        }
+                    }
+                }
             }
         }
         PyObject::Module { dict, .. } => {
