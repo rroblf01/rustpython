@@ -2267,6 +2267,154 @@ pub fn create_zipimport_dict() -> HashMap<String, PyObjectRef> {
 }
 
 /// Native _io module — CPython C extension replacement
+
+
+fn io_get_raw(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+        if let Some(r) = dict.get("_raw") {
+            return Ok(r.clone());
+        }
+    }
+    Err(PyError::attribute_error("no underlying raw object"))
+}
+fn io_ensure_open(args: &[PyObjectRef]) -> PyResult<()> {
+    // Only buffered wrapper instances have _closed. Use try_borrow: the
+    // caller may already hold a borrow (e.g. readinto called from within
+    // another operation on the same object).
+    if let PyObjectRef::Mut(rc) | PyObjectRef::Imm(rc) = &args[0] {
+        if let Ok(b) = rc.try_borrow() {
+            if let PyObject::Instance { dict, .. } = &*b {
+                if let Some(c) = dict.get("_closed") {
+                    if c.truthy() {
+                        return Err(PyError::value_error(
+                            "I/O operation on closed file",
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Build one of the io delegation wrapper classes (BufferedReader etc.):
+/// stores `_raw` on the instance and forwards every I/O method through it.
+macro_rules! buffered_class {
+    ($name:expr, $buf:expr) => {{
+        let mut td: HashMap<String, PyObjectRef> = HashMap::new();
+        let bf = |name: &'static str, f: crate::object::BuiltinFunc| {
+            PyObjectRef::new(PyObject::BuiltinFunction { name: name.to_string(), func: f })
+        };
+        td.insert("__init__".into(), bf("__init__", |args| {
+            if args.len() < 2 {
+                return Err(PyError::type_error("missing required argument 'raw'"));
+            }
+            if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
+                dict.insert_str("_raw", args[1].clone());
+                dict.insert_str("_closed", py_bool(false));
+            }
+            Ok(py_none())
+        }));
+        macro_rules! read_arm {
+            ($m:literal) => { bf($m, |args: &[PyObjectRef]| {
+                io_ensure_open(args)?;
+                let raw = io_get_raw(args)?;
+                let mut margs: Vec<PyObjectRef> = Vec::new();
+                if let Some(n) = args.get(1) { margs.push(n.clone()); }
+                match crate::object::with_vm_mut(|vm| {
+                    crate::object::call_method_rebound(vm, &raw, $m, margs)
+                }) {
+                    Ok(Ok(v)) => Ok(v),
+                    Ok(Err(e)) => Err(e),
+                    Err(e) => Err(e),
+                }
+            })};
+        }
+        td.insert("read".into(), read_arm!("read"));
+        td.insert("read1".into(), read_arm!("read1"));
+        td.insert("readline".into(), read_arm!("readline"));
+        td.insert("readlines".into(), bf("readlines", |args: &[PyObjectRef]| {
+            io_ensure_open(args)?;
+            let raw = io_get_raw(args)?;
+            crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "readlines", vec![]))?
+        }));
+        td.insert("readinto".into(), bf("readinto", |args: &[PyObjectRef]| {
+            io_ensure_open(args)?;
+            // Validate argument is a writable buffer BEFORE forwarding.
+            if args.len() > 1 {
+                match &*args[1].borrow() {
+                    PyObject::ByteArray(_) | PyObject::MemoryView { .. } => {}
+                    _ => return Err(PyError::type_error(
+                        "'int' object does not support the buffer interface",
+                    )),
+                }
+            }
+            let raw = io_get_raw(args)?;
+            let b = args.get(1).cloned().unwrap_or_else(py_none);
+            crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "readinto", vec![b]))?
+        }));
+        td.insert("write".into(), bf("write", |args: &[PyObjectRef]| {
+            io_ensure_open(args)?;
+            let data = args.get(1).cloned().ok_or_else(|| PyError::type_error("write missing data"))?;
+            let n = match &*data.borrow() {
+                PyObject::Bytes(b) => b.len() as i64,
+                PyObject::Str(s2) => s2.chars().count() as i64,
+                _ => 0,
+            };
+            let raw = io_get_raw(args)?;
+            let r = crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "write", vec![data]))??;
+            if matches!(&*r.borrow(), PyObject::None) {
+                Ok(py_int(n))
+            } else { Ok(r) }
+        }));
+        td.insert("seek".into(), bf("seek", |args: &[PyObjectRef]| {
+            io_ensure_open(args)?;
+            let raw = io_get_raw(args)?;
+            let pos = args.get(1).cloned().unwrap_or_else(|| py_int(0));
+            let wh = args.get(2).cloned().unwrap_or_else(|| py_int(0));
+            crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "seek", vec![pos, wh]))?
+        }));
+        td.insert("tell".into(), bf("tell", |args: &[PyObjectRef]| {
+            io_ensure_open(args)?;
+            let raw = io_get_raw(args)?;
+            crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "tell", vec![]))?
+        }));
+        td.insert("truncate".into(), bf("truncate", |args: &[PyObjectRef]| {
+            io_ensure_open(args)?;
+            let raw = io_get_raw(args)?;
+            let pos = args.get(1).cloned().unwrap_or_else(py_none);
+            crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "truncate", vec![pos]))?
+        }));
+        td.insert("flush".into(), bf("flush", |args: &[PyObjectRef]| {
+            io_ensure_open(args)?;
+            let raw = io_get_raw(args)?;
+            crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "flush", vec![]))?
+        }));
+        td.insert("close".into(), bf("close", |args: &[PyObjectRef]| {
+            let already = args[0].borrow().get_attribute("_closed").ok().map(|v| v.truthy()).unwrap_or(false);
+            if !already {
+                let raw = io_get_raw(args)?;
+                let _ = crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "close", vec![]));
+                if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
+                    dict.insert_str("_closed", py_bool(true));
+                }
+            }
+            Ok(py_none())
+        }));
+        td.insert("readable".into(), bf("readable", |_a| Ok(py_bool(true))));
+        td.insert("writable".into(), bf("writable", |_a| Ok(py_bool(true))));
+        td.insert("seekable".into(), bf("seekable", |_a| Ok(py_bool(true))));
+        td.insert("__enter__".into(), bf("__enter__", |args: &[PyObjectRef]| Ok(args[0].clone())));
+        td.insert("__exit__".into(), bf("__exit__", |_a| Ok(py_bool(false))));
+        PyObjectRef::new(PyObject::Type {
+            name: $name.to_string(),
+            dict: Box::new(str_map_to_typedict(td)),
+            bases: vec![$buf.clone()],
+            mro: vec![$buf.clone()],
+        })
+    }};
+}
+
 pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! io_func {
@@ -2514,7 +2662,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
                         return Err(PyError::type_error("decode() takes 1 argument"));
                     }
                     match &*m_args[1].borrow() {
-                        PyObject::Bytes(b) => Ok(py_str(&String::from_utf8_lossy(b))),
+                        PyObject::Bytes(b) => Ok(py_str(&String::from_utf8_lossy(&b[..]))),
                         _ => Err(PyError::type_error("decode() argument must be bytes")),
                     }
                 },
@@ -2808,6 +2956,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
     // CPython's own `shlex.py` (`shlex.split(...)` hung indefinitely on any
     // input). Position is tracked in a `Rc<RefCell<usize>>` (char offset,
     // not byte offset) alongside the buffer.
+    let text_cls_tiw = text_cls.clone(); // for TextIOWrapper below
     let stringio_closure: Rc<dyn Fn(&[PyObjectRef]) -> PyResult<PyObjectRef>> =
         Rc::new(move |args: &[PyObjectRef]| {
             let initial_value = if !args.is_empty() && !matches!(&*args[0].borrow(), PyObject::None)
@@ -3052,75 +3201,107 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
         PyObjectRef::new(PyObject::Closure(stringio_closure)),
     );
 
-    // BufferedReader, BufferedWriter, BufferedRWPair, BufferedRandom — stubs
-    let br_dict = HashMap::new();
-    let br_cls = PyObjectRef::new(PyObject::Type {
-        name: "BufferedReader".to_string(),
-        dict: Box::new(str_map_to_typedict(br_dict)),
-        bases: vec![buf_cls.clone()],
-        mro: vec![buf_cls.clone()],
-    });
+    let br_cls = buffered_class!("BufferedReader", buf_cls);
     d.insert_str("BufferedReader", br_cls.clone());
-    let bw_dict = HashMap::new();
-    let bw_cls = PyObjectRef::new(PyObject::Type {
-        name: "BufferedWriter".to_string(),
-        dict: Box::new(str_map_to_typedict(bw_dict)),
-        bases: vec![buf_cls.clone()],
-        mro: vec![buf_cls.clone()],
-    });
+    let bw_cls = buffered_class!("BufferedWriter", buf_cls);
     d.insert_str("BufferedWriter", bw_cls.clone());
-    let brp_dict = HashMap::new();
-    let brp_cls = PyObjectRef::new(PyObject::Type {
-        name: "BufferedRWPair".to_string(),
-        dict: Box::new(str_map_to_typedict(brp_dict)),
-        bases: vec![buf_cls.clone()],
-        mro: vec![buf_cls.clone()],
-    });
+    let brp_cls = buffered_class!("BufferedRWPair", buf_cls);
     d.insert_str("BufferedRWPair", brp_cls.clone());
-    let brnd_dict = HashMap::new();
-    let brnd_cls = PyObjectRef::new(PyObject::Type {
-        name: "BufferedRandom".to_string(),
-        dict: Box::new(str_map_to_typedict(brnd_dict)),
-        bases: vec![buf_cls.clone()],
-        mro: vec![buf_cls.clone()],
-    });
+    let brnd_cls = buffered_class!("BufferedRandom", buf_cls);
     d.insert_str("BufferedRandom", brnd_cls.clone());
 
-    // TextIOWrapper — stub type needed by io.py
-    let mut tiw_dict = HashMap::new();
-    tiw_dict.insert_str(
-        "read",
-        PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "read".to_string(),
-            func: |_: &[PyObjectRef]| Ok(py_str("")),
-        }),
-    );
-    tiw_dict.insert_str(
-        "write",
-        PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "write".to_string(),
-            func: |_: &[PyObjectRef]| Ok(py_none()),
-        }),
-    );
-    tiw_dict.insert_str(
-        "close",
-        PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "close".to_string(),
-            func: |_: &[PyObjectRef]| Ok(py_none()),
-        }),
-    );
-    tiw_dict.insert_str(
-        "flush",
-        PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "flush".to_string(),
-            func: |_: &[PyObjectRef]| Ok(py_none()),
-        }),
-    );
+    // TextIOWrapper shares the delegation behavior, adding text-mode bits.
+    let tiw_inner = {
+        let mut td: HashMap<String, PyObjectRef> = HashMap::new();
+        let bf = |name: &'static str, f: crate::object::BuiltinFunc| {
+            PyObjectRef::new(PyObject::BuiltinFunction { name: name.to_string(), func: f })
+        };
+        td.insert("__init__".into(), bf("__init__", |args| {
+            if args.len() < 2 {
+                return Err(PyError::type_error("missing required argument 'buffer'"));
+            }
+            if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
+                dict.insert_str("_raw", args[1].clone());
+                dict.insert_str("_closed", py_bool(false));
+                dict.insert_str("encoding", py_str("utf-8"));
+                dict.insert_str("errors", py_str("strict"));
+                dict.insert_str("newlines", py_none());
+            }
+            Ok(py_none())
+        }));
+        td.insert("read".into(), bf("read", |args: &[PyObjectRef]| {
+            io_ensure_open(args)?;
+            let raw = io_get_raw(args)?;
+            let n = args.get(1).cloned().unwrap_or_else(|| py_int(-1));
+            let data = match crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "read", vec![n])) {
+                Ok(Ok(v)) => v,
+                Ok(Err(e)) => return Err(e),
+                Err(e) => return Err(e),
+            };
+            if let PyObject::Bytes(ref b) = &*data.borrow() {
+                return Ok(py_str(&String::from_utf8_lossy(&b[..])));
+            }
+            Ok(data)
+        }));
+        td.insert("write".into(), bf("write", |args: &[PyObjectRef]| {
+            io_ensure_open(args)?;
+            let text = args.get(1).cloned().ok_or_else(|| PyError::type_error("write missing text"))?;
+            let raw = io_get_raw(args)?;
+            let payload = match &*text.borrow() {
+                PyObject::Str(s2) => PyObjectRef::imm(PyObject::Bytes(s2.as_bytes().to_vec())),
+                _ => text.clone(),
+            };
+            let r = match crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "write", vec![payload])) {
+                Ok(Ok(v)) => v,
+                Ok(Err(e)) => return Err(e),
+                Err(e) => return Err(e),
+            };
+            if matches!(&*r.borrow(), PyObject::None) {
+                let n = match &*text.borrow() { PyObject::Str(s2) => s2.chars().count() as i64, _ => 0 };
+                Ok(py_int(n))
+            } else { Ok(r) }
+        }));
+        td.insert("reconfigure".into(), bf("reconfigure", |_a| Ok(py_none())));
+        td.insert("seek".into(), bf("seek", |args: &[PyObjectRef]| {
+            io_ensure_open(args)?;
+            let raw = io_get_raw(args)?;
+            let pos = args.get(1).cloned().unwrap_or_else(|| py_int(0));
+            let wh = args.get(2).cloned().unwrap_or_else(|| py_int(0));
+            crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "seek", vec![pos, wh]))?
+        }));
+        td.insert("tell".into(), bf("tell", |args: &[PyObjectRef]| {
+            io_ensure_open(args)?;
+            let raw = io_get_raw(args)?;
+            crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "tell", vec![]))?
+        }));
+        td.insert("flush".into(), bf("flush", |args: &[PyObjectRef]| {
+            io_ensure_open(args)?;
+            let raw = io_get_raw(args)?;
+            crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "flush", vec![]))?
+        }));
+        td.insert("close".into(), bf("close", |args: &[PyObjectRef]| {
+            let already = args[0].borrow().get_attribute("_closed").ok().map(|v| v.truthy()).unwrap_or(false);
+            if !already {
+                let raw = io_get_raw(args)?;
+                let _ = crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "close", vec![]));
+                if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
+                    dict.insert_str("_closed", py_bool(true));
+                }
+            }
+            Ok(py_none())
+        }));
+        td.insert("readable".into(), bf("readable", |_a| Ok(py_bool(true))));
+        td.insert("writable".into(), bf("writable", |_a| Ok(py_bool(true))));
+        td.insert("seekable".into(), bf("seekable", |_a| Ok(py_bool(true))));
+        td.insert("__enter__".into(), bf("__enter__", |args: &[PyObjectRef]| Ok(args[0].clone())));
+        td.insert("__exit__".into(), bf("__exit__", |_a| Ok(py_bool(false))));
+        td
+    };
     let tiw_cls = PyObjectRef::new(PyObject::Type {
         name: "TextIOWrapper".to_string(),
-        dict: Box::new(str_map_to_typedict(tiw_dict)),
-        bases: vec![],
-        mro: vec![],
+        dict: Box::new(str_map_to_typedict(tiw_inner)),
+        bases: vec![text_cls_tiw.clone()],
+        mro: vec![text_cls_tiw.clone()],
     });
     d.insert_str("TextIOWrapper", tiw_cls);
 
