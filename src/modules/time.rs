@@ -1731,6 +1731,26 @@ fn make_date_from_ordinal(ord: i64) -> PyObjectRef {
 /// Instance exposing attribute access, iteration, indexing and equality
 /// against plain tuples so `isocalendar()` results behave like the real
 /// thing for both attribute-style and tuple-style consumers.
+
+/// Correct an approximate ISO week number for year boundaries: week 0
+/// belongs to the last week of the previous year; anything beyond that
+/// year's week count rolls into week 1 of the next.
+fn iso_week_corrected(year: i64, approx_week: i64) -> (i64, i64) {
+    fn p(y: i64) -> i64 {
+        (y + y / 4 - y / 100 + y / 400) % 7
+    }
+    fn weeks_in_year(y: i64) -> i64 {
+        if p(y) == 4 || p(y - 1) == 3 { 53 } else { 52 }
+    }
+    if approx_week <= 0 {
+        return (year - 1, weeks_in_year(year - 1));
+    }
+    if approx_week > weeks_in_year(year) {
+        return (year + 1, 1);
+    }
+    (year, approx_week)
+}
+
 fn make_isocalendar(year: i64, week: i64, weekday: i64) -> PyObjectRef {
     thread_local! {
         static ISO_TYPE: std::cell::RefCell<Option<PyObjectRef>> = const { std::cell::RefCell::new(None) };
@@ -1867,20 +1887,13 @@ fn build_date_type() -> PyObjectRef {
             let week1_monday = jan4_ord - jan4_wday;
             // Current date ordinal
             let cur_ord = date_ordinal(&args[0]);
-            // Week number
-            let week_of_year = if cur_ord < week1_monday {
-                // Date is before ISO week 1 → belongs to previous year's last week
-                52 // simplified; actual value is 52 or 53
+            // Week number (approximate; boundary-corrected below)
+            let approx_week = if cur_ord < week1_monday {
+                0
             } else {
                 (cur_ord - week1_monday) / 7 + 1
             };
-            let iso_year = if cur_ord < week1_monday {
-                year - 1
-            } else if week_of_year > 52 {
-                year + 1
-            } else {
-                year
-            };
+            let (iso_year, week_of_year) = iso_week_corrected(year, approx_week);
             Ok(make_isocalendar(iso_year, week_of_year, wday))
         }),
     );
@@ -2173,19 +2186,30 @@ fn build_date_type() -> PyObjectRef {
     type_dict.insert_str(
         "fromisoformat",
         bf!("fromisoformat", |args| {
-            let s = if !args.is_empty() {
-                args[0].str()
-            } else {
+            let bad = || PyError::value_error("Invalid isoformat string");
+            let s = if args.is_empty() {
                 String::new()
+            } else if let PyObject::Bytes(b) = &*args[0].borrow() {
+                // CPython accepts ASCII/UTF-8 bytes too.
+                match std::str::from_utf8(&b.iter().map(|x| *x as u8).collect::<Vec<u8>>()) {
+                    Ok(txt) => txt.to_string(),
+                    Err(_) => return Err(bad()),
+                }
+            } else {
+                args[0].str()
             };
             // CPython 3.11+-style ISO 8601 parser: most formats the stdlib
             // accepts — basic/extended dates, ISO weeks, ordinal dates,
             // arbitrary single-char date/time separator, optional fractional
             // seconds (truncated to microseconds), and 'Z'/±HH:MM[:SS] zones.
-            let bad = || PyError::value_error("Invalid isoformat string");
             let mut t = s.as_str();
             if t.is_empty() {
-                return Err(bad());
+                {
+                    if std::env::var("RPY_ISO_LOG").is_ok() {
+                        eprintln!("ISO-REJ generic {:?}", s);
+                    }
+                    return Err(bad());
+                }
             }
             // Trailing timezone: Z/z, or +/-HH[:]MM[:SS][.frac]
             let mut tz_off: Option<i64> = None;
@@ -2240,9 +2264,18 @@ fn build_date_type() -> PyObjectRef {
             }
             // Split date / time at first separator (any single non-digit,
             // non-'-' char per 3.11 relaxation; T/t/space are the real ones).
-            let (date_s, time_s) = match t.find(|c: char| c == 'T' || c == 't' || c == ' ') {
-                Some(idx) => (&t[..idx], &t[idx + 1..]),
-                None => (t, ""),
+            // 3.11 relaxation: ANY single character may separate date and
+            // time. The separator is the first non-digit/non-'-'/'+' char
+            // after a plausible date prefix; what follows must parse as a
+            // time (validated below anyway).
+            let (date_s, time_s) = 'found: {
+                // Extended date YYYY-MM-DD ends at index 10.
+                for (i, ch) in t.char_indices() {
+                    if i >= 8 && !ch.is_ascii_digit() {
+                        break 'found (&t[..i], &t[i + ch.len_utf8()..]);
+                    }
+                }
+                (t, "")
             };
 
             fn parse_date(ds: &str) -> Option<(i64, i64, i64)> {
@@ -2306,9 +2339,27 @@ fn build_date_type() -> PyObjectRef {
                 None
             }
 
-            let (y, mo, d) = parse_date(date_s).ok_or_else(bad)?;
+            let (y, mo, d) = match parse_date(date_s) {
+                Some(v) => v,
+                None => {
+                    if std::env::var("RPY_ISO_LOG").is_ok() {
+                        eprintln!("ISO-REJ date of {:?}", s);
+                    }
+                    {
+                    if std::env::var("RPY_ISO_LOG").is_ok() {
+                        eprintln!("ISO-REJ generic {:?}", s);
+                    }
+                    return Err(bad());
+                }
+                }
+            };
             if !(1..=12).contains(&mo) || !(1..=31).contains(&d) {
-                return Err(bad());
+                {
+                    if std::env::var("RPY_ISO_LOG").is_ok() {
+                        eprintln!("ISO-REJ generic {:?}", s);
+                    }
+                    return Err(bad());
+                }
             }
 
             let (mut hh, mut mi, mut ss, mut us) = (0i64, 0i64, 0i64, 0i64);
@@ -2321,7 +2372,15 @@ fn build_date_type() -> PyObjectRef {
                 };
                 let digits: String = tp.chars().filter(|&c| c != ':').collect();
                 if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+                    {
+                    if std::env::var("RPY_ISO_LOG").is_ok() {
+                        eprintln!("ISO-REJ generic {:?}", s);
+                    }
                     return Err(bad());
+                }
+                }
+                if std::env::var("RPY_ISO_LOG").is_ok() && digits.is_empty() {
+                    eprintln!("ISO-REJ empty time of {:?}", s);
                 }
                 match digits.len() {
                     2 => hh = digits.parse().unwrap_or(99),
@@ -2337,11 +2396,21 @@ fn build_date_type() -> PyObjectRef {
                     _ => return Err(bad()),
                 }
                 if hh > 23 || mi > 59 || ss > 59 {
+                    {
+                    if std::env::var("RPY_ISO_LOG").is_ok() {
+                        eprintln!("ISO-REJ generic {:?}", s);
+                    }
                     return Err(bad());
+                }
                 }
                 if !frac.is_empty() {
                     if !frac.chars().all(|c| c.is_ascii_digit()) {
-                        return Err(bad());
+                        {
+                    if std::env::var("RPY_ISO_LOG").is_ok() {
+                        eprintln!("ISO-REJ generic {:?}", s);
+                    }
+                    return Err(bad());
+                }
                     }
                     let f6: String = frac.chars().take(6).collect();
                     let padded = format!("{:<06}", f6);
@@ -3800,16 +3869,13 @@ fn build_datetime_type() -> PyObjectRef {
             let y_d = year + 4800 - a_d;
             let m_d = month + 12 * a_d - 3;
             let jd = day + (153 * m_d + 2) / 5 + 365 * y_d + y_d / 4 - y_d / 100 + y_d / 400 - 32045;
-            let day_diff = jd - jd_jan1;
-            let week_of_year = day_diff / 7 + 1;
-            let iso_year = if week_of_year == 0 {
-                year - 1
-            } else if week_of_year > 52 {
-                year + 1
-            } else {
-                year
-            };
-            Ok(make_isocalendar(iso_year, week_of_year, wday))
+            // Delegate to the date-type implementation: identical math,
+            // and it carries the year-boundary correction.
+            let d_obj = make_date(year, month, day);
+            let iso_fn =
+                crate::object::lookup_dunder_via_mro(&get_date_type(), "isocalendar")
+                    .expect("date.isocalendar missing");
+            call_bound_method(iso_fn, d_obj, vec![])
         }),
     );
     // datetime.datetime.fromisocalendar(year, week, weekday) — classmethod

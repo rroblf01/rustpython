@@ -5639,6 +5639,15 @@ fn container_ptr(o: &PyObjectRef) -> Option<*const ()> {
     }
 }
 
+thread_local! {
+    /// Class objects seen by the serializer, by simple class name. The
+    /// custom pickle format is same-process only (round-trips inside one
+    /// interpreter run), so a name -> type map lets the deserializer
+    /// rebuild user-class instances without touching import machinery.
+    static PICKLE_CLASS_REGISTRY: std::cell::RefCell<HashMap<String, PyObjectRef>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
 fn pickle_serialize(
     obj: &PyObjectRef,
     buf: &mut Vec<u8>,
@@ -6014,6 +6023,71 @@ fn pickle_serialize(
                 buf.push(b'N');
             }
         }
+        PyObject::Type { name, dict: tdict, .. } => {
+            // Classes-as-values (e.g. defaultdict's factory argument):
+            // register in the same name->type registry the instance
+            // deserializer uses, then emit 'T' <name>.
+            let cname = name.clone();
+            if let Some(ptr) = container_ptr(obj) {
+                if let Some(id) = memo.iter().position(|&p| p == ptr) {
+                    buf.push(b'@');
+                    buf.extend_from_slice(id.to_string().as_bytes());
+                    buf.push(b'\n');
+                    return Ok(());
+                }
+                memo.push(ptr);
+            }
+            let module = tdict
+                .get_str("__module__")
+                .map(|m| m.str())
+                .unwrap_or_else(|| "builtins".into());
+            let _ = module;
+            PICKLE_CLASS_REGISTRY.with(|r| {
+                r.borrow_mut().insert(cname.clone(), obj.clone());
+            });
+            buf.push(b'P');
+            pickle_serialize(&py_str(&cname), buf, memo, protocol)?;
+        }
+        PyObject::Instance { typ, dict } => {
+            // Plain user-class instance (no native backing): memoize by
+            // pointer, register the CLASS for the deserializer, emit
+            //   'K' <class-name-str> <attrs-as-dict>
+            if let Some(ptr) = container_ptr(obj) {
+                if let Some(id) = memo.iter().position(|&p| p == ptr) {
+                    buf.push(b'@');
+                    buf.extend_from_slice(id.to_string().as_bytes());
+                    buf.push(b'\n');
+                    return Ok(());
+                }
+                memo.push(ptr);
+            }
+            let cname = {
+                let tb = typ.borrow();
+                match &*tb {
+                    PyObject::Type { name, .. } => name.clone(),
+                    _ => {
+                        return Err(PyError::type_error("cannot pickle non-type instance"))
+                    }
+                }
+            };
+            PICKLE_CLASS_REGISTRY.with(|r| {
+                r.borrow_mut().insert(cname.clone(), typ.clone());
+            });
+            buf.push(b'K');
+            pickle_serialize(&py_str(&cname), buf, memo, protocol)?;
+            let mut flat = crate::object::PyDict::new();
+            for k in dict.keys() {
+                if let Some(v) = dict.get(k) {
+                    let _ = flat.set(crate::object::py_str(k), v.clone());
+                }
+            }
+            pickle_serialize(
+                &PyObjectRef::new(PyObject::Dict(Box::new(flat))),
+                buf,
+                memo,
+                protocol,
+            )?;
+        }
         _ => {
             // Try set/frozenset/complex before failing
             let type_name = obj.borrow().type_name().to_string();
@@ -6067,7 +6141,7 @@ fn pickle_deserialize(
     }
     let marker = data[*pos];
     *pos += 1;
-    match marker {
+            match marker {
         b'N' => Ok(py_none()),
         b'T' => Ok(py_bool(true)),
         b'F' => Ok(py_bool(false)),
@@ -6142,6 +6216,71 @@ fn pickle_deserialize(
             *pos += len;
             Ok(py_str(s))
         }
+        b'P' => {
+            // Class reference by name.
+            let name_val = pickle_deserialize(data, pos, memo)?;
+            let cname = name_val.str();
+            if let Some(t) =
+                PICKLE_CLASS_REGISTRY.with(|r| r.borrow().get(&cname).cloned())
+            {
+                return Ok(t);
+            }
+            // Fallback: resolve through live builtins/modules tables.
+            match crate::object::with_vm_mut(|vm| {
+                if let Some(b) = vm.builtins.get(&crate::interner::intern(&cname)) {
+                    return Ok(b.clone());
+                }
+                for m in vm.modules.values() {
+                    if let Ok(v) = crate::object::ObjectAccess::get_attribute(
+                        &*m.borrow(),
+                        &cname,
+                    ) {
+                        if matches!(&*v.borrow(), PyObject::Type { .. }) {
+                            return Ok(v);
+                        }
+                    }
+                }
+                Err(PyError::type_error(format!(
+                    "cannot unpickle class '{}'",
+                    cname
+                )))
+            }) {
+                Ok(v) => v,
+                Err(e) => return Err(e),
+            }
+        }
+        b'K' => {
+            // User-class instance: 'K' <class-name-str> <attrs-dict>.
+            // The instance is created and REGISTERED IN MEMO before its
+            // attributes are read, mirroring the serializer's order -- that
+            // is what makes self-referencing attributes resolve to the same
+            // object instead of duplicating it.
+            let name_val = pickle_deserialize(data, pos, memo)?;
+            let cname = name_val.str();
+            let typ = PICKLE_CLASS_REGISTRY
+                .with(|r| r.borrow().get(&cname).cloned())
+                .ok_or_else(|| {
+                    PyError::type_error(format!(
+                        "cannot unpickle class '{}' (not seen in this process)",
+                        cname
+                    ))
+                })?;
+            let inst = PyObjectRef::new(PyObject::Instance {
+                typ,
+                dict: crate::object::AttrMap::new(),
+            });
+            memo.push(inst.clone());
+            let attrs = pickle_deserialize(data, pos, memo)?;
+            if let PyObject::Dict(dd) = &*attrs.borrow() {
+                for (k, v) in dd.items() {
+                    if let PyObject::Instance { dict, .. } = &mut *inst.borrow_mut() {
+                        dict.insert(k.str(), v.clone());
+                    }
+                }
+            }
+            Ok(inst)
+        }
+
         b'B' => {
             let start = *pos;
             while *pos < data.len() && data[*pos] != b':' {
