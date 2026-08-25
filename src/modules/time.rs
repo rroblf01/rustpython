@@ -3034,116 +3034,288 @@ fn datetime_isoformat_ts(obj: &PyObjectRef, sep: char, timespec: Option<usize>) 
 }
 
 fn parse_datetime_isoformat(s: &str) -> PyResult<PyObjectRef> {
-    let s = s.trim();
-    if s.is_empty() {
-        return Err(PyError::value_error("Invalid isoformat string"));
+    // Full CPython-3.11-style parser: same grammar as the date-type
+    // fromisoformat above (basic/extended dates, ISO weeks, ordinal dates,
+    // ANY single-char separator incl. multi-byte ones, fractional seconds
+    // with ',' or '.', truncated to microseconds, 'Z'/+-HH[:MM[:SS]] zones).
+    let bad = || {
+        if std::env::var("RPY_ISO_LOG").is_ok() { eprintln!("DTI-REJ {:?}", s); }
+        PyError::value_error("Invalid isoformat string")
+    };
+    // Accept ASCII/UTF-8 bytes like the date-type parser does.
+    let owned;
+    let s_str: &str = if let Some(stripped) = s.strip_prefix("b'").and_then(|x| x.strip_suffix('\'')) {
+        owned = stripped.to_string();
+        &owned
+    } else {
+        s
+    };
+    let mut t = s_str.trim();
+    if t.is_empty() {
+        return Err(bad());
     }
-    let (date_part, rest) = match s.find(|c: char| c == 'T' || c == ' ') {
-        Some(idx) => (&s[..idx], Some(&s[idx + 1..])),
-        None => (s, None),
-    };
-
-    // Parse date part: YYYY-MM-DD, YYYYMMDD, or ISO week
-    let (year, month, day) = parse_date_part(date_part)?;
-
-    let rest = match rest {
-        Some(r) => r,
-        None => return Ok(make_datetime(year, month, day, 0, 0, 0, 0, py_none(), 0)),
-    };
-    let tz_is_utc = rest.ends_with(|c: char| c == 'Z' || c == 'z');
-    let rest = if tz_is_utc {
-        &rest[..rest.len() - 1]
-    } else {
-        rest
-    };
-    let (time_part, tz_part, tz_is_utc) = if rest.is_empty() {
-        ("", None, tz_is_utc)
-    } else {
-        let tz_start = rest.rfind(['+', '-']);
-        match tz_start {
-            Some(pos) if pos > 0 => {
-                let time_str = &rest[..pos];
-                if time_str.ends_with(':') {
-                    (
-                        time_str.trim_end_matches(':'),
-                        Some(&rest[pos..]),
-                        tz_is_utc,
-                    )
+    let mut tz_off: Option<i64> = None;
+    if t.ends_with(['Z', 'z']) {
+        tz_off = Some(0);
+        t = &t[..t.len() - 1];
+    } else if let Some(pos) = t.rfind(['+', '-']) {
+        // A '+'/'-' sitting EXACTLY at the date/time boundary is the
+        // SEPARATOR (test_fromisoformat_ambiguous): '2018-01-31+12:15' means
+        // 12:15 as the TIME, not a +12:15 zone. Only positions past the
+        // boundary start a real zone.
+        let boundary_is_sep = pos == 10 || pos == 8;
+        if !boundary_is_sep && pos > 8 {
+            let zone = &t[pos..];
+            let zc: String = zone.chars().filter(|c| *c != ':').collect();
+            let neg = zc.starts_with('-');
+            let zbody = &zc[1..];
+            let digits_ok = !zbody.is_empty() && zbody.chars().all(|c| c.is_ascii_digit());
+            if digits_ok && (zbody.len() == 2 || zbody.len() == 4 || zbody.len() == 6) {
+                let hh: i64 = zbody[0..2].parse().unwrap_or(99);
+                let mm: i64 = if zbody.len() >= 4 {
+                    zbody[2..4].parse().unwrap_or(99)
                 } else {
-                    (time_str, Some(&rest[pos..]), tz_is_utc)
+                    0
+                };
+                let ss: i64 = if zbody.len() == 6 {
+                    zbody[4..6].parse().unwrap_or(99)
+                } else {
+                    0
+                };
+                if hh <= 23 && mm < 60 && ss < 60 {
+                    let total = hh * 3600 + mm * 60 + ss;
+                    tz_off = Some(if neg { -total } else { total });
+                    t = &t[..pos];
                 }
             }
-            _ => (rest, None, tz_is_utc),
         }
-    };
-
-    // Parse time part (supports both HH:MM:SS and compact HHMMSS)
-    let (hour, minute, second, micro) = parse_time_part(time_part)?;
-
-    let tzinfo = if tz_is_utc {
-        get_utc_singleton()
-    } else {
-        match tz_part {
-            Some(tz_str) if !tz_str.is_empty() => {
-                let sign: i64 = if tz_str.starts_with('-') { -1 } else { 1 };
-                let tz_body = &tz_str[1..];
-                // Validate tz_body: must be non-empty and contain only digits and colons
-                if tz_body.is_empty() || !tz_body.chars().all(|c| c.is_ascii_digit() || c == ':') {
-                    return Err(PyError::value_error("Invalid isoformat string"));
-                }
-                let th: i64;
-                let tm: i64;
-                let ts: i64;
-                if let Some(colon_pos) = tz_body.find(':') {
-                    let hours_str = &tz_body[..colon_pos];
-                    let mins_str = &tz_body[colon_pos + 1..];
-                    if let Some(colon2) = mins_str.find(':') {
-                        th = hours_str.parse().unwrap_or(0);
-                        tm = mins_str[..colon2].parse().unwrap_or(0);
-                        ts = mins_str[colon2 + 1..].parse().unwrap_or(0);
-                    } else {
-                        th = hours_str.parse().unwrap_or(0);
-                        tm = mins_str.parse().unwrap_or(0);
-                        ts = 0;
-                    }
+    }
+    // Split date / time at ANY single non-digit char after index 8.
+    fn parse_date(ds: &str) -> Option<(i64, i64, i64)> {
+        let ds = ds.trim();
+        if ds.len() == 10 && ds.as_bytes()[4] == b'-' && ds.as_bytes()[7] == b'-' {
+            return Some((
+                ds.get(0..4)?.parse().ok()?,
+                ds.get(5..7)?.parse().ok()?,
+                ds.get(8..10)?.parse().ok()?,
+            ));
+        }
+        let compact: String = ds.chars().filter(|&c| c != '-').collect();
+        if compact.len() == 8 && compact.chars().all(|c| c.is_ascii_digit()) {
+            return Some((
+                compact.get(0..4)?.parse().ok()?,
+                compact.get(4..6)?.parse().ok()?,
+                compact.get(6..8)?.parse().ok()?,
+            ));
+        }
+        if compact.len() == 7 && compact.chars().all(|c| c.is_ascii_digit())
+            && !compact.contains(['W', 'w'])
+        {
+            let y: i64 = compact.get(0..4)?.parse().ok()?;
+            let doy: i64 = compact.get(4..7)?.parse().ok()?;
+            if !(1..=366).contains(&doy) {
+                return None;
+            }
+            let jan1 = ymd_to_ordinal(y, 1, 1);
+            return Some(ordinal_to_ymd(jan1 + doy - 1));
+        }
+        if let Some(wp) = compact.find(|c: char| c == 'W' || c == 'w') {
+            if wp == 4 && compact.len() >= 7 && compact.len() <= 9 {
+                let y: i64 = compact.get(0..4)?.parse().ok()?;
+                let wk: i64 = compact.get(5..7)?.parse().ok()?;
+                let wd: i64 = if compact.len() >= 8 {
+                    compact.get(7..8)?.parse().ok()?
                 } else {
-                    // Compact tz offset: +HH, +HHMM, +HHMMSS
-                    match tz_body.len() {
-                        2 => {
-                            th = tz_body.parse().unwrap_or(0);
-                            tm = 0;
-                            ts = 0;
-                        }
+                    1
+                };
+                if !(1..=53).contains(&wk) || !(1..=7).contains(&wd) {
+                    return None;
+                }
+                let jan4_ord = ymd_to_ordinal(y, 1, 4);
+                let jan4_wd = ((jan4_ord % 7) + 6) % 7;
+                let ord = jan4_ord - jan4_wd + (wk - 1) * 7 + (wd - 1);
+                return Some(ordinal_to_ymd(ord));
+            }
+        }
+        None
+    }
+
+    // ISO-week BASIC with trailing time ('2026W01516' = 2026-W01-5 16:00):
+    // fixed-width fields -- YYYY W ww [D] [HH[MM[SS]]]. Handled before the
+    // generic separator scan because every position here is a digit.
+    {
+        let wb = t.as_bytes();
+        if t.len() >= 7
+            && wb[4] == b'W'
+            && wb[..4].iter().all(|b| b.is_ascii_digit())
+            && wb[5..7].iter().all(|b| b.is_ascii_digit())
+            && !t.contains('-')
+            && !t.contains('+')
+        {
+            let mut day_end = 7;
+            let mut day = 1i64;
+            if t.len() > 7 && wb[7].is_ascii_digit() {
+                day = (wb[7] - b'0') as i64;
+                day_end = 8;
+            }
+            let time_part = &t[day_end.min(t.len())..];
+            let hour_ok = time_part.len() % 2 == 0;
+            if !(1..=7).contains(&day)
+                && !(time_part.is_empty() || (hour_ok && !time_part.is_empty()))
+            {
+                return Err(bad());
+            }
+            let ds = format!("{}W{:02}{}", &t[..4], &t[5..7], day);
+            if let Some((yy, mm_, dd_)) = (|| {
+                let y_: i64 = ds.get(0..4)?.parse().ok()?;
+                let wk: i64 = ds.get(5..7)?.parse().ok()?;
+                if !(1..=53).contains(&wk) {
+                    return None;
+                }
+                let jan4_ord = ymd_to_ordinal(y_, 1, 4);
+                let jan4_wd = ((jan4_ord % 7) + 6) % 7;
+                Some(ordinal_to_ymd(jan4_ord - jan4_wd + (wk - 1) * 7 + (day - 1)))
+            })() {
+                let (mut hh, mut mi, mut ss, mut us) = (0i64, 0i64, 0i64, 0i64);
+                if !time_part.is_empty() {
+                    if !time_part.chars().all(|c| c.is_ascii_digit()) {
+                        return Err(bad());
+                    }
+                    match time_part.len() {
+                        2 => hh = time_part.parse().unwrap_or(99),
                         4 => {
-                            th = tz_body[..2].parse().unwrap_or(0);
-                            tm = tz_body[2..].parse().unwrap_or(0);
-                            ts = 0;
+                            hh = time_part.get(0..2).and_then(|x| x.parse().ok()).unwrap_or(99);
+                            mi = time_part.get(2..4).and_then(|x| x.parse().ok()).unwrap_or(99);
                         }
                         6 => {
-                            th = tz_body[..2].parse().unwrap_or(0);
-                            tm = tz_body[2..4].parse().unwrap_or(0);
-                            ts = tz_body[4..].parse().unwrap_or(0);
+                            hh = time_part.get(0..2).and_then(|x| x.parse().ok()).unwrap_or(99);
+                            mi = time_part.get(2..4).and_then(|x| x.parse().ok()).unwrap_or(99);
+                            ss = time_part.get(4..6).and_then(|x| x.parse().ok()).unwrap_or(99);
                         }
-                        _ => {
-                            th = tz_body.parse().unwrap_or(0);
-                            tm = 0;
-                            ts = 0;
-                        }
+                        _ => return Err(bad()),
                     }
+                    if hh > 23 || mi > 59 || ss > 59 {
+                        return Err(bad());
+                    }
+                    let _ = us;
                 }
-                let off = sign * (th * 3600 + tm * 60 + ts);
-                if off == 0 {
-                    get_utc_singleton()
+                if let Some(off) = tz_off {
+                    let tz = if off == 0 {
+                        get_utc_singleton()
+                    } else {
+                        make_timezone(off, None)
+                    };
+                    return Ok(make_datetime(yy, mm_, dd_, hh, mi, ss, us, tz, 0));
+                }
+                return Ok(make_datetime(yy, mm_, dd_, hh, mi, ss, us, py_none(), 0));
+            }
+        }
+    }
+
+    // Separator discovery:
+    //  a) '+'/'-' EXACTLY at the date/time boundary is the separator
+    //     (test_fromisoformat_ambiguous: '2018-01-31+12:15' -> time 12:15).
+    //  b) otherwise the first NON-DIGIT at byte index >= 8 that is not a
+    //     '+'/'-' (those belong to zones or to extended week/ordinal dates
+    //     like '2026-W01-3'); with backtracking if the resulting date part
+    //     does not validate.
+    fn time_like(rest: &str) -> bool {
+        let core = match rest.find(['.', ',']) {
+            Some(k) => &rest[..k],
+            None => rest,
+        };
+        let dgs: String = core.chars().filter(|&c| c != ':').collect();
+        if dgs.is_empty() || !dgs.chars().all(|c| c.is_ascii_digit()) {
+            return false;
+        }
+        if !matches!(dgs.len(), 2 | 4 | 6) {
+            return false;
+        }
+        let hh: i64 = dgs.get(0..2).and_then(|x| x.parse().ok()).unwrap_or(99);
+        let mi: i64 = if dgs.len() >= 4 {
+            dgs.get(2..4).and_then(|x| x.parse().ok()).unwrap_or(99)
+        } else {
+            0
+        };
+        let ss: i64 = if dgs.len() == 6 {
+            dgs.get(4..6).and_then(|x| x.parse().ok()).unwrap_or(99)
+        } else {
+            0
+        };
+        hh <= 23 && mi < 60 && ss < 60
+    }
+    let (date_s, time_s) = if let Some(sep_pos) =
+        t.rfind(['+', '-'])
+            .filter(|&p| (p == 8 || p == 10) && time_like(&t[p + 1..]))
+    {
+        (&t[..sep_pos], &t[sep_pos + 1..])
+    } else {
+        match t
+            .char_indices()
+            .find(|(i, ch)| *i >= 8 && !ch.is_ascii_digit() && !matches!(ch, '+' | '-'))
+        {
+            Some((i, ch)) => {
+                let ds = &t[..i];
+                if parse_date(ds).is_some() {
+                    (&t[..i], &t[i + ch.len_utf8()..])
                 } else {
-                    make_timezone(off, None)
+                    (t, "")
                 }
             }
-            _ => py_none(),
+            None => (t, ""),
         }
     };
-    Ok(make_datetime(
-        year, month, day, hour, minute, second, micro, tzinfo, 0,
-    ))
+    let (y, mo, d) = match parse_date(date_s) {
+        Some(v) => v,
+        None => return Err(bad()),
+    };
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) {
+        return Err(bad());
+    }
+    let (mut hh, mut mi, mut ss, mut us) = (0i64, 0i64, 0i64, 0i64);
+    if !time_s.is_empty() {
+        let tp = time_s;
+        let (tp, frac) = match tp.find(['.', ',']) {
+            Some(dot) => (&tp[..dot], &tp[dot + 1..]),
+            None => (tp, ""),
+        };
+        let digits: String = tp.chars().filter(|&c| c != ':').collect();
+        if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+            return Err(bad());
+        }
+        match digits.len() {
+            2 => hh = digits.parse().unwrap_or(99),
+            4 => {
+                hh = digits.get(0..2).and_then(|x| x.parse().ok()).unwrap_or(99);
+                mi = digits.get(2..4).and_then(|x| x.parse().ok()).unwrap_or(99);
+            }
+            6 => {
+                hh = digits.get(0..2).and_then(|x| x.parse().ok()).unwrap_or(99);
+                mi = digits.get(2..4).and_then(|x| x.parse().ok()).unwrap_or(99);
+                ss = digits.get(4..6).and_then(|x| x.parse().ok()).unwrap_or(99);
+            }
+            _ => return Err(bad()),
+        }
+        if hh > 23 || mi > 59 || ss > 59 {
+            return Err(bad());
+        }
+        if !frac.is_empty() {
+            if !frac.chars().all(|c| c.is_ascii_digit()) {
+                return Err(bad());
+            }
+            let f6: String = frac.chars().take(6).collect();
+            us = format!("{:<06}", f6).parse().unwrap_or(0);
+        }
+    }
+    if let Some(off) = tz_off {
+        let tz = if off == 0 {
+            get_utc_singleton()
+        } else {
+            make_timezone(off, None)
+        };
+        return Ok(make_datetime(y, mo, d, hh, mi, ss, us, tz, 0));
+    }
+    Ok(make_datetime(y, mo, d, hh, mi, ss, us, py_none(), 0))
 }
 
 fn parse_date_part(date_part: &str) -> PyResult<(i64, i64, i64)> {
