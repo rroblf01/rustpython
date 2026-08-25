@@ -301,3 +301,7 @@ def prepare_predicate(next, link):  # kept for API parity (unused)
 
 
 ElementPath = None  # module-level alias marker used by some tooling
+
+# CPython compat: test_xml_etree accesses ElementPath._cache
+_cache = _token_join_cache
+
