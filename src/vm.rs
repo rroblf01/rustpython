@@ -7200,6 +7200,7 @@ impl VirtualMachine {
                             }
                             PyObject::Instance { dict, .. } => {
                                 dict.insert_str("__cause__", cause.clone());
+                                dict.insert_str("__suppress_context__", py_bool(cause_is_none));
                             }
                             _ => {}
                         }
