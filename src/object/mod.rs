@@ -31,7 +31,7 @@ mod native_base;
 pub use native_base::*;
 mod attrs;
 pub use attrs::*;
-mod subscript;
+pub(crate) mod subscript;
 pub use subscript::*;
 mod exceptions_ctor;
 pub use exceptions_ctor::*;
