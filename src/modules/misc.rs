@@ -11617,6 +11617,8 @@ pub fn create_xml_etree_dict() -> HashMap<String, PyObjectRef> {
         };
     }
 
+    et_func!("register_namespace", |_args| Ok(py_none()));
+
     // Build Element type with methods
     let mut element_type_dict = HashMap::new();
     macro_rules! e_method {
