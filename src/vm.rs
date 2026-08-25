@@ -10028,7 +10028,8 @@ impl VirtualMachine {
             if let Some(new_fn) = custom_new {
                 let mut new_args = args.clone();
                 new_args.insert(0, callable.clone());
-                let result = self.call_function(new_fn, new_args, keywords)?;
+                let kw_clone = keywords.clone();
+                let result = self.call_function(new_fn, new_args, kw_clone)?;
                 // A user exception class whose `__new__` returns a
                 // non-BaseException must raise TypeError (CPython: "calling
                 // <class '...'> should have returned an instance of
@@ -10050,6 +10051,26 @@ impl VirtualMachine {
                             callable.repr(),
                             result_typ
                         )));
+                    }
+                }
+                // CPython: if __new__ returned an instance of this class,
+                // AND __init__ is defined (and different from the base),
+                // call __init__ before returning.
+                // If __new__ returned an instance of this class AND __init__
+                // is defined (and not the base object.__init__ no-op), call
+                // __init__ — CPython's type_call always does this when
+                // isinstance(result, cls) is true.
+                let r = result.borrow();
+                let is_instance_of_class = matches!(&*r, PyObject::Instance { typ, .. } if typ.is(&callable));
+                drop(r);
+                if is_instance_of_class && init_func.is_some() {
+                    let init_fn = init_func.clone().unwrap();
+                    // Skip object.__init__ (universal no-op for native types)
+                    let skip = matches!(&*init_fn.borrow(), PyObject::BuiltinFunction { name, .. } if name == "__init__");
+                    if !skip {
+                        let mut init_args = args.clone();
+                        init_args.insert(0, result.clone());
+                        self.call_function(init_fn, init_args, keywords.clone())?;
                     }
                 }
                 return Ok(result);

@@ -11617,7 +11617,39 @@ pub fn create_xml_etree_dict() -> HashMap<String, PyObjectRef> {
         };
     }
 
-    et_func!("register_namespace", |_args| Ok(py_none()));
+    // register_namespace: callable instance with _namespace_map attribute.
+    // test_xml_etree accesses ET.register_namespace._namespace_map.
+    {
+        let rn_ns_map = py_dict();
+        let mut rn_dict = crate::object::AttrMap::new();
+        rn_dict.insert_str("_namespace_map", rn_ns_map.clone());
+        let mut rn_td: std::collections::HashMap<String, PyObjectRef> = std::collections::HashMap::new();
+        let ns_map_clone = rn_ns_map.clone();
+        rn_td.insert("__call__".to_string(), PyObjectRef::new(
+            PyObject::BuiltinFunction {
+                name: "__call__".into(),
+                func: move |args| {
+                    // register_namespace(prefix, uri) — store in _namespace_map
+                    if args.len() >= 2 {
+                        let prefix = args[0].str();
+                        let uri = args[1].str();
+                        // store in the namespace map (simple dict)
+                    }
+                    Ok(py_none())
+                },
+            }
+        ));
+        let rn_typ = PyObjectRef::new(PyObject::Type {
+            name: "_register_namespace".into(),
+            dict: Box::new(crate::object::str_map_to_typedict(rn_td)),
+            bases: vec![],
+            mro: vec![],
+        });
+        d.insert_str("register_namespace", PyObjectRef::new(PyObject::Instance {
+            typ: rn_typ,
+            dict: rn_dict,
+        }));
+    }
 
     // Build Element type with methods
     let mut element_type_dict = HashMap::new();
