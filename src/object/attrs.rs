@@ -4950,6 +4950,7 @@ impl PyObject {
                                         if in_field
                                             && !name_part.is_empty()
                                             && !name_part.chars().all(|ch| ch.is_ascii_digit())
+                                            && !name_part.starts_with(|ch: char| ch.is_ascii_digit())
                                         {
                                             saw_named = true;
                                         }
@@ -5128,21 +5129,53 @@ impl PyObject {
                                         pos_args.get(n).cloned()
                                             .ok_or_else(|| PyError::index_error("Replacement index out of range for positional args tuple"))
                                     } else {
-                                        // Named field — bare name only (no
-                                        // `.attr`/`[index]` sub-access in
-                                        // this simplified implementation).
-                                        kwargs_dict
-                                            .as_ref()
-                                            .and_then(|d| {
-                                                if let PyObject::Dict(dd) = &*d.borrow() {
-                                                    dd.get(&py_str(name_part)).ok().flatten()
+                                        // Could be "N[...]" (positional index
+                                        // with subscript) or a named field.
+                                        // CPython handles {0[0]} as arg[0][0],
+                                        // while {name} does dict lookup.
+                                        if let Some(bracket_pos) = name_part.find('[') {
+                                            // Positional with subscript: "{0[0]}"
+                                            let idx_str = &name_part[..bracket_pos];
+                                            let sub_str = &name_part[bracket_pos+1..name_part.len()-1];
+                                            if let Ok(idx) = idx_str.parse::<usize>() {
+                                                if let Some(obj) = pos_args.get(idx) {
+                                                    // Apply subscript: obj[sub_str]
+                                                    if let Ok(sub_idx) = sub_str.parse::<usize>() {
+                                                        let sub_obj = match &*obj.borrow() {
+                                                            PyObject::Tuple(t) => t.get(sub_idx).cloned(),
+                                                            PyObject::List(l) => l.get(sub_idx).cloned(),
+                                                            PyObject::Str(s) => s.chars().nth(sub_idx).map(|c| py_str(&c.to_string())),
+                                                            _ => None,
+                                                        };
+                                                        match sub_obj {
+                                                            Some(v) => Ok(v),
+                                                            None => Err(PyError::index_error("index out of range")),
+                                                        }
+                                                    } else {
+                                                        Ok(obj.borrow().get_attribute(sub_str).unwrap_or_else(|_| py_none()))
+                                                    }
                                                 } else {
-                                                    None
+                                                    return Err(PyError::index_error("index out of range for positional args"));
                                                 }
-                                            })
-                                            .ok_or_else(|| {
-                                                PyError::key_error(format!("'{}'", name_part))
-                                            })
+                                            } else {
+                                                return Err(PyError::key_error(format!("'{}'", name_part)));
+                                            }
+                                        } else {
+                                            // Named field — bare name (no
+                                            // `.attr`/`[index]` sub-access).
+                                            kwargs_dict
+                                                .as_ref()
+                                                .and_then(|d| {
+                                                    if let PyObject::Dict(dd) = &*d.borrow() {
+                                                        dd.get(&py_str(name_part)).ok().flatten()
+                                                    } else {
+                                                        None
+                                                    }
+                                                })
+                                                .ok_or_else(|| {
+                                                    PyError::key_error(format!("'{}'", name_part))
+                                                })
+                                        }
                                     };
                                     let val = val?;
                                     // Apply `!conversion` (repr/str/ascii).
