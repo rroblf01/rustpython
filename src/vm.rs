@@ -10074,6 +10074,15 @@ impl VirtualMachine {
                 }
             }
         }
+        // Placeholder iterator types (range_iterator, etc.) are not directly constructible
+        if let PyObject::Type { name, .. } = &*callable.borrow() {
+            if name.contains("iterator") {
+                return Err(PyError::type_error(format!(
+                    "cannot create '{}' instances",
+                    name
+                )));
+            }
+        }
 
         // A real native value type (`int`, and eventually more — see
         // `NATIVE_VALUE_CTOR_KEY`'s doc comment) called DIRECTLY (`int(5)`,
