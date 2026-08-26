@@ -9464,7 +9464,35 @@ impl VirtualMachine {
                 // keyword-only argument) were given". Matches the doctest in
                 // test_extcall.py exactly.
                 let noun = |n: usize| if n == 1 { "argument" } else { "arguments" };
-                let msg = if num_defaults == 0 {
+                // count how many passed keywords target kwonly params, for the
+                // extended error message "and N keyword-only arguments"
+                let kwonly_given = if code.kwonlyarg_count > 0 && !keywords.is_empty() {
+                    let kwonly_start_tmp =
+                        code.arg_count + if code.vararg_name.is_some() { 1 } else { 0 };
+                    let kwonly_names = &code.varnames
+                        [kwonly_start_tmp..kwonly_start_tmp + code.kwonlyarg_count];
+                    keywords
+                        .iter()
+                        .filter(|(k, _)| {
+                            kwonly_names.iter().any(|&n| crate::interner::intern_eq(n, k))
+                        })
+                        .count()
+                } else {
+                    0
+                };
+                let msg = if kwonly_given > 0 {
+                    // CPython 3.14: "takes X positional arguments but Y positional arguments (and Z keyword-only arguments) were given"
+                    format!(
+                        "{}() takes {} positional {} but {} positional {} (and {} keyword-only {}) were given",
+                        fname,
+                        named_params,
+                        noun(named_params),
+                        npos,
+                        noun(npos),
+                        kwonly_given,
+                        noun(kwonly_given),
+                    )
+                } else if num_defaults == 0 {
                     format!(
                         "{}() takes {} positional {} but {} {} given",
                         fname,
