@@ -371,17 +371,20 @@ pub fn create_abc_dict() -> HashMap<String, PyObjectRef> {
     // the correct simplification when there's no cache to invalidate.
     abc_func!("get_cache_token", |_args| Ok(py_int(0)));
 
-    // ABC class — returns a simple Instance with a type marker
-    abc_func!("ABC", |args| {
-        let _ = args;
-        Ok(PyObjectRef::new(PyObject::Instance {
-            typ: PyObjectRef::new(PyObject::Module {
-                name: "abc".to_string(),
-                dict: Box::new(str_map_to_typedict(HashMap::new())),
-            }),
-            dict: AttrMap::new(),
-        }))
-    });
+    // ABC class — a REAL Type that can be used as a base class.
+    // Previously was a BuiltinFunction returning an Instance, which meant
+    // `class C(abc.ABC): ...` had a non-Type as its base, breaking the
+    // entire inheritance chain and preventing __abstractmethods__ from ever
+    // being computed.
+    {
+        let abc_type = PyObjectRef::new(PyObject::Type {
+            name: "ABC".to_string(),
+            dict: Box::new(str_map_to_typedict(HashMap::new())),
+            bases: vec![],
+            mro: vec![],
+        });
+        d.insert_str("ABC", abc_type);
+    }
 
     // abstractmethod — marks the function with `__isabstractmethod__ =
     // True` (previously just returned it unchanged, with no marker at
@@ -398,6 +401,57 @@ pub fn create_abc_dict() -> HashMap<String, PyObjectRef> {
             .borrow_mut()
             .set_attribute("__isabstractmethod__", py_bool(true));
         Ok(f.clone())
+    });
+
+    // abstractclassmethod — deprecated alias for classmethod + abstractmethod.
+    abc_func!("abstractclassmethod", |args| {
+        let f = &args[0];
+        let _ = f
+            .borrow_mut()
+            .set_attribute("__isabstractmethod__", py_bool(true));
+        let cm_fn = crate::object::builtin_classmethod as crate::object::BuiltinFunc;
+        let cm = PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "classmethod".to_string(),
+            func: cm_fn,
+        });
+        crate::object::with_vm_mut(|vm| vm.call_function(cm, vec![f.clone()], vec![]))?
+    });
+
+    // abstractstaticmethod — deprecated alias for staticmethod + abstractmethod.
+    abc_func!("abstractstaticmethod", |args| {
+        let f = &args[0];
+        let _ = f
+            .borrow_mut()
+            .set_attribute("__isabstractmethod__", py_bool(true));
+        let sm_fn = crate::object::builtin_staticmethod as crate::object::BuiltinFunc;
+        let sm = PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "staticmethod".to_string(),
+            func: sm_fn,
+        });
+        crate::object::with_vm_mut(|vm| vm.call_function(sm, vec![f.clone()], vec![]))?
+    });
+
+    // abstractproperty — deprecated alias for property + abstractmethod.
+    // Marks the getter/setter/deleter with __isabstractmethod__, creates
+    // the property, AND sets __isabstractmethod__ on the property itself
+    // so update_abstractmethods can detect it during class creation.
+    abc_func!("abstractproperty", |args| {
+        // First mark all function arguments as abstract
+        for arg in args.iter() {
+            let _ = arg.borrow_mut().set_attribute("__isabstractmethod__", py_bool(true));
+        }
+        // Create the property
+        let prop_fn = crate::object::builtin_property as crate::object::BuiltinFunc;
+        let prop_ctor = PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "property".to_string(),
+            func: prop_fn,
+        });
+        let result = crate::object::with_vm_mut(|vm| {
+            vm.call_function(prop_ctor, args.to_vec(), vec![])
+        })??;
+        // Mark the property object itself as abstract
+        let _ = result.borrow_mut().set_attribute("__isabstractmethod__", py_bool(true));
+        Ok(result)
     });
 
     // update_abstractmethods(cls) — recomputes `cls.__abstractmethods__`

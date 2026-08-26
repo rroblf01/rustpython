@@ -10076,6 +10076,39 @@ impl VirtualMachine {
                 }
                 return Ok(result);
             }
+            // ABC enforcement: if the class has __abstractmethods__ that is
+            // non-empty, instantiation must raise TypeError (CPython:
+            // "Can't instantiate abstract class ... with abstract methods").
+            let abstracts_opt: Option<PyObjectRef> = (|| {
+                match callable.borrow().get_attribute("__abstractmethods__") {
+                    Ok(v) => Some(v),
+                    Err(_) => None,
+                }
+            })();
+            if let Some(abstracts) = abstracts_opt {
+                let n = match &*abstracts.borrow() {
+                    PyObject::FrozenSet(s) => s.len(),
+                    PyObject::Set(s) => s.len(),
+                    _ => 0,
+                };
+                if n > 0 {
+                    // Collect the abstract method names for the error message.
+                    let names: Vec<String> = match &*abstracts.borrow() {
+                        PyObject::FrozenSet(s) => s.iter().map(|v| v.str()).collect(),
+                        PyObject::Set(s) => s.iter().map(|v| v.str()).collect(),
+                        _ => vec![],
+                    };
+                    let mut sorted = names;
+                    sorted.sort();
+                    return Err(PyError::type_error(format!(
+                        "Can't instantiate abstract class {} with abstract method{} {}",
+                        callable.borrow().type_name(),
+                        if sorted.len() == 1 { "" } else { "s" },
+                        sorted.join(", ")
+                    )));
+                }
+            }
+
             let mut instance_dict = AttrMap::new();
             if let Some(kind) = &native_kind {
                 instance_dict.insert(
@@ -11476,6 +11509,36 @@ impl VirtualMachine {
                 vec![cls.clone(), name_obj, bases_tuple, namespace_py_dict],
                 init_subclass_kwargs,
             );
+        }
+
+        // ABC support: same as default_build_class — trigger when any MRO
+        // entry is abc.ABC OR when the metaclass is abc.ABCMeta.
+        {
+            let abc_mod = self.modules.get("abc");
+            let (abc_type, update_fn) = match &abc_mod {
+                Some(m) => (
+                    m.borrow().get_attribute("ABC").ok(),
+                    m.borrow().get_attribute("update_abstractmethods").ok(),
+                ),
+                None => (None, None),
+            };
+            let has_abc = abc_type.map(|abc_t| {
+                let cls_mro = if let PyObject::Type { mro, .. } = &*cls.borrow() {
+                    mro.clone()
+                } else { vec![] };
+                cls_mro.iter().any(|base| base.is(&abc_t))
+            }).unwrap_or(false);
+            // Also trigger if the metaclass is ABCMeta itself
+            let is_abc_meta = abc_mod.as_ref().map(|m| {
+                m.borrow().get_attribute("ABCMeta").ok()
+                    .map(|meta| meta.is(&metaclass))
+                    .unwrap_or(false)
+            }).unwrap_or(false);
+            if has_abc || is_abc_meta {
+                if let Some(update) = update_fn {
+                    let _ = self.call_function(update, vec![cls.clone()], vec![]);
+                }
+            }
         }
 
         Ok(cls)
