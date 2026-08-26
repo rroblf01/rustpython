@@ -578,32 +578,36 @@ pub(crate) fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String,
                     _ => break,
                 }
             }
-            // Parse width (digits)
+            // Parse width (digits or `*` for dynamic width from arg)
             let mut width_str = String::new();
-            loop {
-                let mut peek2 = chars.clone();
-                match peek2.next() {
-                    Some(c) if c.is_ascii_digit() => {
-                        width_str.push(c);
-                        chars.next();
-                    }
-                    _ => break,
-                }
-            }
-            if !width_str.is_empty() {
-                let w = width_str
-                    .parse::<usize>()
-                    .map_err(|_| "invalid width".to_string())?;
-                // A width like `sys.maxsize + 1` parses into a valid `usize`
-                // but then panics trying to actually pad a string/number out
-                // to that length — real CPython raises `ValueError` instead
-                // (`test_str.py::test_formatting_huge_width`: `"%{}f" %
-                // (sys.maxsize + 1)`). Same cap as the `.precision` check
-                // just below, for consistency.
+            if chars.clone().next() == Some('*') {
+                chars.next();
+                let w_arg = get_arg();
+                let w = w_arg.as_i64().unwrap_or(0).max(0) as usize;
                 if w > 1000 {
                     return Err("width too big".to_string());
                 }
                 width = Some(w);
+            } else {
+                loop {
+                    let mut peek2 = chars.clone();
+                    match peek2.next() {
+                        Some(c) if c.is_ascii_digit() => {
+                            width_str.push(c);
+                            chars.next();
+                        }
+                        _ => break,
+                    }
+                }
+                if !width_str.is_empty() {
+                    let w = width_str
+                        .parse::<usize>()
+                        .map_err(|_| "invalid width".to_string())?;
+                    if w > 1000 {
+                        return Err("width too big".to_string());
+                    }
+                    width = Some(w);
+                }
             }
             // Parse optional `.precision` (e.g. `%.3f`, `%6.2f`) — this was
             // entirely unparsed before, so any precision-qualified float

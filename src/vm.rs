@@ -1013,11 +1013,7 @@ impl VirtualMachine {
 
         // linecache: using Lib/linecache.py (native stub removed)
 
-        // Native calendar module
-        modules.insert_str(
-            "calendar",
-            create_module("calendar", create_calendar_dict()),
-        );
+        // calendar: using Lib/calendar.py (pure Python, full CPython compat)
 
         // Native locale module
         modules.insert_str("locale", create_module("locale", create_locale_dict()));
