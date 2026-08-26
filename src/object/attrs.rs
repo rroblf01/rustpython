@@ -3016,6 +3016,22 @@ impl PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
+                    "__len__" => {
+                        let len = _v.len() as i64;
+                        Ok(PyObjectRef::new(PyObject::Closure(Rc::new(
+                            move |_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                                Ok(py_int(len))
+                            },
+                        ))))
+                    }
+                    "__iter__" => {
+                        let tuple_clone = _v.clone();
+                        Ok(PyObjectRef::new(PyObject::Closure(Rc::new(
+                            move |_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                                crate::object::builtin_iter(&[PyObjectRef::new(PyObject::Tuple(tuple_clone.clone()))])
+                            },
+                        ))))
+                    }
                     _ => Err(PyError::attribute_error(format!(
                         "'tuple' object has no attribute '{}'",
                         name
@@ -4349,6 +4365,14 @@ impl PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
+                    "__iter__" => {
+                        let bytes_clone = _v.clone();
+                        Ok(PyObjectRef::new(PyObject::Closure(Rc::new(
+                            move |_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                                crate::object::builtin_iter(&[PyObjectRef::new(PyObject::Bytes(bytes_clone.clone()))])
+                            },
+                        ))))
+                    }
                     _ => Err(PyError::attribute_error(format!(
                         "'bytes' object has no attribute '{}'",
                         name
@@ -6480,6 +6504,22 @@ impl PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
+                    "__len__" => {
+                        let len = _s.chars().count() as i64;
+                        Ok(PyObjectRef::new(PyObject::Closure(Rc::new(
+                            move |_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                                Ok(py_int(len))
+                            },
+                        ))))
+                    }
+                    "__iter__" => {
+                        let str_clone = _s.clone();
+                        Ok(PyObjectRef::new(PyObject::Closure(Rc::new(
+                            move |_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                                crate::object::builtin_iter(&[PyObjectRef::new(PyObject::Str(str_clone.clone()))])
+                            },
+                        ))))
+                    }
                     _ => Err(PyError::attribute_error(format!(
                         "'str' object has no attribute '{}'",
                         name
@@ -7857,6 +7897,22 @@ impl PyObject {
                             },
                             self_obj: PyObjectRef::new(PyObject::None),
                         }))
+                    }
+                    "__len__" => {
+                        let len = _s.len() as i64;
+                        Ok(PyObjectRef::new(PyObject::Closure(Rc::new(
+                            move |_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                                Ok(py_int(len))
+                            },
+                        ))))
+                    }
+                    "__iter__" => {
+                        let set_clone = _s.clone();
+                        Ok(PyObjectRef::new(PyObject::Closure(Rc::new(
+                            move |_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                                crate::object::builtin_iter(&[PyObjectRef::new(PyObject::Set(set_clone.clone()))])
+                            },
+                        ))))
                     }
                     _ => Err(PyError::attribute_error(format!(
                         "'set' object has no attribute '{}'",
