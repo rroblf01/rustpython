@@ -237,25 +237,34 @@ pub(crate) fn extract_slice_fields(
     step: &PyObjectRef,
 ) -> PyResult<(Option<isize>, Option<isize>, isize)> {
     // Slice components must be int (or int-like via __index__) or None; a
-    // component whose __index__ misbehaves must TypeError (test_index).
+    // component whose __index__ misbehaves must propagate its own
+    // exception (e.g. RuntimeError), not be masked as TypeError.
     let to_opt = |v: &PyObjectRef| -> PyResult<Option<isize>> {
         if matches!(&*v.borrow(), PyObject::None) {
             return Ok(None);
         }
-        let i = crate::object::to_index(v).map_err(|_| {
-            PyError::type_error(
-                "slice indices must be integers or None or have an __index__ method",
-            )
+        let i = crate::object::to_index(v).map_err(|e| {
+            if e.type_name() == "TypeError" {
+                PyError::type_error(
+                    "slice indices must be integers or None or have an __index__ method",
+                )
+            } else {
+                e
+            }
         })?;
         Ok(i.to_isize())
     };
     let step_val = if matches!(&*step.borrow(), PyObject::None) {
         1
     } else {
-        let i = crate::object::to_index(step).map_err(|_| {
-            PyError::type_error(
-                "slice indices must be integers or None or have an __index__ method",
-            )
+        let i = crate::object::to_index(step).map_err(|e| {
+            if e.type_name() == "TypeError" {
+                PyError::type_error(
+                    "slice indices must be integers or None or have an __index__ method",
+                )
+            } else {
+                e
+            }
         })?;
         i.to_isize().unwrap_or(1)
     };
