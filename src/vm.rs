@@ -9466,12 +9466,11 @@ impl VirtualMachine {
                 let noun = |n: usize| if n == 1 { "argument" } else { "arguments" };
                 let msg = if num_defaults == 0 {
                     format!(
-                        "{}() takes {} positional {} but {} {} {} given",
+                        "{}() takes {} positional {} but {} {} given",
                         fname,
                         named_params,
                         noun(named_params),
                         npos,
-                        noun(npos),
                         if npos == 1 { "was" } else { "were" }
                     )
                 } else {
