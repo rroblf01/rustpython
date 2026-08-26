@@ -7398,6 +7398,33 @@ impl PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
+                    "__len__" => {
+                        let len = _d.len() as i64;
+                        Ok(PyObjectRef::new(PyObject::Closure(Rc::new(
+                            move |_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                                Ok(py_int(len))
+                            },
+                        ))))
+                    }
+                    "__iter__" => {
+                        let keys: Vec<PyObjectRef> = _d.keys();
+                        Ok(PyObjectRef::new(PyObject::Closure(Rc::new(
+                            move |_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                                Ok(py_list(keys.clone()))
+                            },
+                        ))))
+                    }
+                    "__contains__" => {
+                        let d_clone = _d.clone();
+                        Ok(PyObjectRef::new(PyObject::Closure(Rc::new(
+                            move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                                if args.is_empty() {
+                                    return Err(PyError::type_error("__contains__() takes exactly 1 argument"));
+                                }
+                                Ok(py_bool(d_clone.contains(&args[0])?))
+                            },
+                        ))))
+                    }
                     _ => Err(PyError::attribute_error(format!(
                         "'dict' object has no attribute '{}'",
                         name
