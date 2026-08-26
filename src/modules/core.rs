@@ -4722,6 +4722,16 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
         }),
     );
     d.insert_str("platform", py_str(std::env::consts::OS));
+    // sys.__stdout__/__stderr__/__stdin__ — saved originals for
+    // capture/restore patterns (test_calendar, etc.)
+    {
+        let std_in = d.get_str("stdin").cloned().unwrap();
+        let std_out = d.get_str("stdout").cloned().unwrap();
+        let std_err = d.get_str("stderr").cloned().unwrap();
+        d.insert_str("__stdin__", std_in);
+        d.insert_str("__stdout__", std_out);
+        d.insert_str("__stderr__", std_err);
+    }
     // sys.implementation — CPython returns a namespace with name, cache_tag, etc.
     {
         let mut imp_dict = HashMap::new();
