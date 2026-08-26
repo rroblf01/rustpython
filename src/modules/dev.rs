@@ -2691,6 +2691,13 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
         );
 
         type_dict.insert_str(
+            "flush",
+            PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
+                Ok(py_none())
+            }))),
+        );
+
+        type_dict.insert_str(
             "close",
             PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
                 Ok(py_none())
