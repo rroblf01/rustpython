@@ -1077,7 +1077,7 @@ impl PyObject {
                     "fdel" => deleter.clone().ok_or_else(|| {
                         PyError::attribute_error("property has no deleter".to_string())
                     }),
-                    "doc" => Ok(doc.clone().map_or_else(py_none, |d| py_str(&d))),
+                    "doc" | "__doc__" => Ok(doc.clone().map_or_else(py_none, |d| py_str(&d))),
                     "__get__" => {
                         if let Some(_) = getter {
                             Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
@@ -1770,6 +1770,73 @@ impl PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
+                    "__iter__" => {
+                        let list_clone = _v.clone();
+                        Ok(PyObjectRef::new(PyObject::Closure(Rc::new(
+                            move |_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                                crate::object::builtin_iter(&[PyObjectRef::new(PyObject::List(list_clone.clone()))])
+                            },
+                        ))))
+                    }
+                    "__len__" => {
+                        let len = _v.len() as i64;
+                        Ok(PyObjectRef::new(PyObject::Closure(Rc::new(
+                            move |_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                                Ok(py_int(len))
+                            },
+                        ))))
+                    }
+                    "__contains__" => {
+                        let list_clone = _v.clone();
+                        Ok(PyObjectRef::new(PyObject::Closure(Rc::new(
+                            move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                                if args.is_empty() {
+                                    return Err(PyError::type_error("__contains__() takes exactly 1 argument"));
+                                }
+                                for item in &list_clone {
+                                    if item.borrow().equals(&args[0])? {
+                                        return Ok(py_bool(true));
+                                    }
+                                }
+                                Ok(py_bool(false))
+                            },
+                        ))))
+                    }
+                    "__getitem__" => {
+                        let list_clone = _v.clone();
+                        Ok(PyObjectRef::new(PyObject::Closure(Rc::new(
+                            move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                                if args.is_empty() {
+                                    return Err(PyError::type_error("__getitem__() takes exactly 1 argument"));
+                                }
+                                crate::object::py_getitem(&PyObjectRef::new(PyObject::List(list_clone.clone())), &args[0])
+                            },
+                        ))))
+                    }
+                    "__setitem__" => {
+                        let list_clone = _v.clone();
+                        Ok(PyObjectRef::new(PyObject::Closure(Rc::new(
+                            move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                                if args.len() < 2 {
+                                    return Err(PyError::type_error("__setitem__() takes exactly 2 arguments"));
+                                }
+                                crate::object::py_setitem(&PyObjectRef::new(PyObject::List(list_clone.clone())), &args[0], args[1].clone())?;
+                                Ok(py_none())
+                            },
+                        ))))
+                    }
+                    "__delitem__" => {
+                        let list_clone = _v.clone();
+                        Ok(PyObjectRef::new(PyObject::Closure(Rc::new(
+                            move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                                if args.is_empty() {
+                                    return Err(PyError::type_error("__delitem__() takes exactly 1 argument"));
+                                }
+                                crate::object::py_delitem(&PyObjectRef::new(PyObject::List(list_clone.clone())), &args[0])?;
+                                Ok(py_none())
+                            },
+                        ))))
+                    }
                     "pop" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "pop".to_string(),
                         func: |args| {

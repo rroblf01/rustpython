@@ -25,7 +25,11 @@ pub fn builtin_property(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let doc = if args.len() > 3 {
         Some(args[3].str())
     } else {
-        None
+        // CPython property falls back to getter's __doc__
+        getter.as_ref().and_then(|g| {
+            let d = g.borrow().get_attribute("__doc__").ok()?;
+            if matches!(&*d.borrow(), PyObject::None) { None } else { Some(d.str()) }
+        })
     };
     Ok(PyObjectRef::new(PyObject::Property(Box::new(
         PropertyData {
