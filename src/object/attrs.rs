@@ -1813,30 +1813,54 @@ impl PyObject {
                             },
                         ))))
                     }
-                    "__setitem__" => {
-                        let list_clone = _v.clone();
-                        Ok(PyObjectRef::new(PyObject::Closure(Rc::new(
-                            move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
-                                if args.len() < 2 {
-                                    return Err(PyError::type_error("__setitem__() takes exactly 2 arguments"));
+                    "__setitem__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__setitem__".to_string(),
+                        func: |args| {
+                            if args.len() < 3 {
+                                return Err(PyError::type_error("__setitem__() takes exactly 2 arguments"));
+                            }
+                            if let PyObject::List(list) = &mut *args[0].borrow_mut() {
+                                let idx = crate::object::to_index(&args[1]).map_err(|_| {
+                                    PyError::type_error("list indices must be integers or slices, not custom object")
+                                })?;
+                                let i = idx.to_isize().ok_or_else(|| PyError::index_error("list index out of range"))?;
+                                let len = list.len() as isize;
+                                let i = if i < 0 { len + i } else { i };
+                                if i < 0 || i >= len {
+                                    return Err(PyError::index_error("list assignment index out of range"));
                                 }
-                                crate::object::py_setitem(&PyObjectRef::new(PyObject::List(list_clone.clone())), &args[0], args[1].clone())?;
+                                list[i as usize] = args[2].clone();
                                 Ok(py_none())
-                            },
-                        ))))
-                    }
-                    "__delitem__" => {
-                        let list_clone = _v.clone();
-                        Ok(PyObjectRef::new(PyObject::Closure(Rc::new(
-                            move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
-                                if args.is_empty() {
-                                    return Err(PyError::type_error("__delitem__() takes exactly 1 argument"));
+                            } else {
+                                Err(PyError::runtime_error("__setitem__ on non-list"))
+                            }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__delitem__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__delitem__".to_string(),
+                        func: |args| {
+                            if args.len() < 2 {
+                                return Err(PyError::type_error("__delitem__() takes exactly 1 argument"));
+                            }
+                            if let PyObject::List(list) = &mut *args[0].borrow_mut() {
+                                let idx = crate::object::to_index(&args[1]).map_err(|_| {
+                                    PyError::type_error("list indices must be integers or slices, not custom object")
+                                })?;
+                                let i = idx.to_isize().ok_or_else(|| PyError::index_error("list index out of range"))?;
+                                let len = list.len() as isize;
+                                let i = if i < 0 { len + i } else { i };
+                                if i < 0 || i >= len {
+                                    return Err(PyError::index_error("list index out of range"));
                                 }
-                                crate::object::py_delitem(&PyObjectRef::new(PyObject::List(list_clone.clone())), &args[0])?;
+                                list.remove(i as usize);
                                 Ok(py_none())
-                            },
-                        ))))
-                    }
+                            } else {
+                                Err(PyError::runtime_error("__delitem__ on non-list"))
+                            }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     "pop" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "pop".to_string(),
                         func: |args| {
