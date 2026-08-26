@@ -11530,9 +11530,9 @@ impl VirtualMachine {
             }).unwrap_or(false);
             // Also trigger if the metaclass is ABCMeta itself
             let is_abc_meta = abc_mod.as_ref().map(|m| {
-                m.borrow().get_attribute("ABCMeta").ok()
-                    .map(|meta| meta.is(&metaclass))
-                    .unwrap_or(false)
+                let name = metaclass.borrow().type_name();
+                name == "ABCMeta" || name == "builtin_function_or_method"
+                    && metaclass.borrow().repr().contains("ABCMeta")
             }).unwrap_or(false);
             if has_abc || is_abc_meta {
                 if let Some(update) = update_fn {

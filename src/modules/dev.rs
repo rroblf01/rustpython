@@ -468,6 +468,10 @@ pub fn create_abc_dict() -> HashMap<String, PyObjectRef> {
             ));
         }
         let cls = args[0].clone();
+    // Always scan for abstract methods — don't skip even if cls
+    // doesn't have __abstractmethods__ yet. CPython's ABCMeta.__new__
+    // always calls this after class creation.
+    {}
         let mut abstracts: Vec<String> = Vec::new();
         let extracted: Option<(Vec<PyObjectRef>, Vec<String>)> =
             if let PyObject::Type { dict, bases, .. } = &*cls.borrow() {
