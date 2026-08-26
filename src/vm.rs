@@ -893,6 +893,111 @@ impl VirtualMachine {
 
         // Native os module
         let os_mod = create_module("os", create_os_dict());
+        // Add os.PathLike (PEP 519) — virtual subclass via __fspath__
+        {
+            use std::collections::HashMap as OsMap;
+            let mut d: OsMap<String, PyObjectRef> = OsMap::new();
+            // __abstractmethods__ = frozenset({'__fspath__'})
+            {
+                let mut s = crate::object::PySet::new();
+                let _ = s.add(py_str("__fspath__"));
+                d.insert(
+                    "__abstractmethods__".to_string(),
+                    PyObjectRef::new(PyObject::FrozenSet(s)),
+                );
+            }
+            d.insert(
+                "__fspath__".to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "__fspath__".to_string(),
+                    func: |_args: &[PyObjectRef]| {
+                        Err(PyError::type_error(
+                            "PathLike.__fspath__() not implemented".to_string(),
+                        ))
+                    },
+                }),
+            );
+            d.insert(
+                "__instancecheck__".to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "__instancecheck__".to_string(),
+                    func: |args: &[PyObjectRef]| {
+                        if args.len() < 2 {
+                            return Ok(crate::object::py_bool(false));
+                        }
+                        let has = args[1].borrow().get_attribute("__fspath__").is_ok();
+                        Ok(crate::object::py_bool(has))
+                    },
+                }),
+            );
+            d.insert(
+                "__subclasscheck__".to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "__subclasscheck__".to_string(),
+                    func: |args: &[PyObjectRef]| {
+                        if args.len() < 2 {
+                            return Ok(crate::object::py_bool(false));
+                        }
+                        let sub = args[1].clone();
+                        let has = crate::object::lookup_dunder_via_mro(&sub, "__fspath__").is_some()
+                            || sub.borrow().get_attribute("__fspath__").is_ok();
+                        Ok(crate::object::py_bool(has))
+                    },
+                }),
+            );
+            d.insert(
+                "__class_getitem__".to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "__class_getitem__".to_string(),
+                    func: |args: &[PyObjectRef]| {
+                        if args.len() < 2 {
+                            return Err(PyError::type_error(
+                                "__class_getitem__() takes exactly 1 argument".to_string(),
+                            ));
+                        }
+                        let origin = args[0].clone();
+                        let item = args[1].clone();
+                        let ga_type = crate::modules::get_generic_alias_type();
+                        // GenericAlias instance stores origin and args
+                        let mut ga_dict = std::collections::HashMap::new();
+                        ga_dict.insert(
+                            crate::interner::intern("__origin__"),
+                            origin.clone(),
+                        );
+                        let tup = if let PyObject::Tuple(v) = &*item.borrow() {
+                            item.clone()
+                        } else {
+                            crate::object::py_tuple(vec![item.clone()])
+                        };
+                        // Use the generic alias storage via instance dict is not enough;
+                        // construct via the helper that creates a proper GenericAlias object.
+                        // Fallback: create instance of GenericAlias type with _origin/_args
+                        let ga = PyObjectRef::new(PyObject::Instance {
+                            typ: ga_type.clone(),
+                            dict: {
+                                let mut m = crate::object::AttrMap::new();
+                                m.insert("__origin__".to_string(), origin);
+                                m.insert("__args__".to_string(), tup);
+                                m
+                            },
+                        });
+                        Ok(ga)
+                    },
+                }),
+            );
+            let pathlike_type = PyObjectRef::new(PyObject::Type {
+                name: "PathLike".to_string(),
+                dict: Box::new(crate::object::str_map_to_typedict(d)),
+                bases: vec![],
+                mro: vec![],
+            });
+            if let PyObject::Type { mro, .. } = &mut *pathlike_type.borrow_mut() {
+                *mro = vec![pathlike_type.clone()];
+            }
+            if let PyObject::Module { dict, .. } = &mut *os_mod.borrow_mut() {
+                dict.insert_str("PathLike", pathlike_type.clone());
+            }
+        }
         modules.insert_str("os", os_mod.clone());
         // posix is the C extension behind os — alias it for importlib compatibility
         modules.insert_str("posix", os_mod.clone());

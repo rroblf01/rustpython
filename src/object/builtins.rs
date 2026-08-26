@@ -5722,6 +5722,31 @@ pub fn builtin_issubclass(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         }
         return Ok(py_bool(false));
     }
+    // Custom __subclasscheck__ (e.g. os.PathLike virtual subclass)
+    {
+        let maybe_sc = {
+            let base_b = args[1].borrow();
+            if let PyObject::Type { dict, .. } = &*base_b {
+                dict.get_str("__subclasscheck__").cloned()
+            } else {
+                None
+            }
+        };
+        if let Some(sc) = maybe_sc {
+            if !matches!(&*sc.borrow(), PyObject::None) {
+                let result = call_bound_method(sc, args[1].clone(), vec![args[0].clone()])?;
+                return Ok(result);
+            }
+        }
+        if let Some(meta) = crate::object::metatype_of(&args[1]) {
+            if !meta.is(&args[1]) {
+                if let Some(f) = crate::object::lookup_dunder_via_mro(&meta, "__subclasscheck__") {
+                    let result = call_bound_method(f, args[1].clone(), vec![args[0].clone()])?;
+                    return Ok(result);
+                }
+            }
+        }
+    }
     // Handle tuple of types: issubclass(cls, (type1, type2, ...))
     let base = args[1].borrow();
     if let PyObject::Tuple(types) = &*base {
