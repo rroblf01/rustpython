@@ -409,8 +409,228 @@ pub fn builtin_compile(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // `compile("def f(...): pass", "<t>", "single")` raise a spurious
     // SyntaxError (test_keywordonlyarg::testSyntaxForManyArguments, which
     // compiles a 300-argument `def` in "single" mode).
+    // Helper to detect incomplete input for PyCF_ALLOW_INCOMPLETE_INPUT
+    fn has_unclosed_brackets(src: &str) -> bool {
+        let mut depth_paren: i32 = 0;
+        let mut depth_brack: i32 = 0;
+        let mut depth_brace: i32 = 0;
+        let mut in_single = false;
+        let mut in_double = false;
+        let mut in_triple_single = false;
+        let mut in_triple_double = false;
+        let mut escaped = false;
+        let chars: Vec<char> = src.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            let c = chars[i];
+            if escaped {
+                escaped = false;
+                i += 1;
+                continue;
+            }
+            if c == '\\' {
+                escaped = true;
+                i += 1;
+                continue;
+            }
+            if !in_single && !in_double && !in_triple_single && !in_triple_double {
+                if c == '\'' && i + 2 < chars.len() && chars[i + 1] == '\'' && chars[i + 2] == '\'' {
+                    in_triple_single = true;
+                    i += 3;
+                    continue;
+                }
+                if c == '"' && i + 2 < chars.len() && chars[i + 1] == '"' && chars[i + 2] == '"' {
+                    in_triple_double = true;
+                    i += 3;
+                    continue;
+                }
+                if c == '\'' {
+                    in_single = true;
+                } else if c == '"' {
+                    in_double = true;
+                } else if c == '(' {
+                    depth_paren += 1;
+                } else if c == ')' {
+                    depth_paren -= 1;
+                } else if c == '[' {
+                    depth_brack += 1;
+                } else if c == ']' {
+                    depth_brack -= 1;
+                } else if c == '{' {
+                    depth_brace += 1;
+                } else if c == '}' {
+                    depth_brace -= 1;
+                }
+            } else if in_triple_single {
+                if c == '\'' && i + 2 < chars.len() && chars[i + 1] == '\'' && chars[i + 2] == '\'' {
+                    in_triple_single = false;
+                    i += 3;
+                    continue;
+                }
+            } else if in_triple_double {
+                if c == '"' && i + 2 < chars.len() && chars[i + 1] == '"' && chars[i + 2] == '"' {
+                    in_triple_double = false;
+                    i += 3;
+                    continue;
+                }
+            } else if in_single {
+                if c == '\'' {
+                    in_single = false;
+                }
+            } else if in_double {
+                if c == '"' {
+                    in_double = false;
+                }
+            }
+            i += 1;
+        }
+        depth_paren > 0 || depth_brack > 0 || depth_brace > 0 || in_single || in_double || in_triple_single || in_triple_double
+    }
+
+    fn has_bare_newline_in_unclosed_single(src: &str) -> bool {
+        // Detect a single-quoted (non-triple) string that contains a bare newline
+        // without escaping backslash. In that case, unterminated string is a real
+        // syntax error, not incomplete input.
+        let mut in_single = false;
+        let mut in_double = false;
+        let mut escaped = false;
+        let chars: Vec<char> = src.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            let c = chars[i];
+            if escaped {
+                escaped = false;
+                i += 1;
+                continue;
+            }
+            if c == '\\' {
+                escaped = true;
+                i += 1;
+                continue;
+            }
+            if !in_single && !in_double {
+                if c == '\'' && !(i + 2 < chars.len() && chars[i + 1] == '\'' && chars[i + 2] == '\'') {
+                    in_single = true;
+                } else if c == '"' && !(i + 2 < chars.len() && chars[i + 1] == '"' && chars[i + 2] == '"') {
+                    in_double = true;
+                }
+            } else if in_single {
+                if c == '\n' {
+                    return true;
+                }
+                if c == '\'' {
+                    in_single = false;
+                }
+            } else if in_double {
+                if c == '\n' {
+                    return true;
+                }
+                if c == '"' {
+                    in_double = false;
+                }
+            }
+            i += 1;
+        }
+        false
+    }
+
+    fn has_indented_last_line(src: &str) -> bool {
+        if let Some(last) = src.lines().last() {
+            // Last line is indented (starts with space/tab) and non-empty
+            let trimmed = last.trim_start();
+            if trimmed.is_empty() {
+                return false;
+            }
+            return last.starts_with(' ') || last.starts_with('\t');
+        }
+        false
+    }
+
+    fn is_incomplete_source(src: &str, err: &str, mode: &str) -> bool {
+        let lower = err.to_lowercase();
+        if lower.contains("unterminated triple-quoted") {
+            return true;
+        }
+        if lower.contains("unterminated string literal") {
+            if has_bare_newline_in_unclosed_single(src) {
+                return false;
+            }
+            return true;
+        }
+        if lower.contains("unexpected character after line continuation") {
+            return true;
+        }
+        if lower.contains("expected an indented block") {
+            // Only incomplete if source ends with ':' (e.g. "def x():"), not for
+            // cases like "def x():\n\npass\n" where pass is at wrong indent (invalid)
+            let trimmed = src.trim_end();
+            if trimmed.ends_with(':') {
+                return true;
+            }
+            return false;
+        }
+        if lower.contains("endoffile") || lower.contains("eof") {
+            if has_unclosed_brackets(src) {
+                return true;
+            }
+            let trimmed = src.trim_end();
+            if trimmed.is_empty() && mode == "eval" {
+                return true;
+            }
+            if trimmed.ends_with(':') || trimmed.ends_with('\\') || trimmed.ends_with(',') || trimmed.ends_with('(') || trimmed.ends_with('[') || trimmed.ends_with('{') {
+                return true;
+            }
+            // For eval, empty parentheses etc. already handled via brackets
+            // Check for incomplete keywords that expect suite
+            let lower_trim = trimmed.to_lowercase();
+            if lower_trim.ends_with("else:") || lower_trim.ends_with("elif") || lower_trim.ends_with("except:") || lower_trim.ends_with("finally:") || lower_trim.ends_with("try:") || lower_trim.ends_with("while") || lower_trim.ends_with("for") || lower_trim.ends_with("with") || lower_trim.ends_with("class") || lower_trim.ends_with("def") {
+                return true;
+            }
+            return false;
+        }
+        false
+    }
+
     let program = if mode == "eval" {
-        crate::parser::try_parse_as_expression(&source).map_err(|e| PyError::syntax_error(e))?
+        match crate::parser::try_parse_as_expression(&source) {
+            Ok(p) => p,
+            Err(e) => {
+                // Check incomplete flag even for eval mode
+                let compile_flags = |args: &[PyObjectRef]| -> i64 {
+                    let mut flags = 0;
+                    if args.len() >= 4 {
+                        flags |= args[3].as_i64().unwrap_or(0);
+                    }
+                    for a in args {
+                        if let PyObject::Dict(kw) = &*a.borrow() {
+                            flags |= kw
+                                .get(&py_str("flags"))
+                                .ok()
+                                .flatten()
+                                .and_then(|f| f.as_i64())
+                                .unwrap_or(0);
+                        }
+                    }
+                    flags
+                };
+                let flags = compile_flags(args);
+                if flags & 0x4000 != 0 && is_incomplete_source(&source, &e, &mode) {
+                    return Err(PyError::Exception(
+                        "_IncompleteInputError".to_string(),
+                        PyObjectRef::new(PyObject::Exception {
+                            typ: "_IncompleteInputError".to_string(),
+                            args: vec![py_str(&e)],
+                            cause: None,
+                            suppress_context: false,
+                            context: None,
+                            traceback: None,
+                            extra: None,
+                        }),
+                    ));
+                }
+                return Err(PyError::syntax_error_with_filename(e, &filename, &source));
+            }
+        }
     } else {
         // `flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT` (0x8000) permits
         // `await`/`async for`/`async with` at module scope — test_builtin's
@@ -442,9 +662,47 @@ pub fn builtin_compile(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         let mut parser = crate::parser::Parser::new(&source);
         parser.allow_top_level_await = allow_top_level_await;
         parser.barry_as_bdfl = barry_as_bdfl;
-        parser
-            .parse_program()
-            .map_err(|e| PyError::syntax_error_with_filename(e, &filename, &source))?
+        let program = match parser.parse_program() {
+            Ok(p) => {
+                // For single mode with DONT_IMPLY_DEDENT, a final line without trailing
+                // newline that is inside a block is incomplete (needs extra newline to dedent)
+                if (flags & 0x200 != 0) && (flags & 0x4000 != 0) && mode == "single" {
+                    if !source.ends_with('\n') && (source.contains(":\n") || source.contains(":\r\n")) {
+                        return Err(PyError::Exception(
+                            "_IncompleteInputError".to_string(),
+                            PyObjectRef::new(PyObject::Exception {
+                                typ: "_IncompleteInputError".to_string(),
+                                args: vec![py_str("incomplete input")],
+                                cause: None,
+                                suppress_context: false,
+                                context: None,
+                                traceback: None,
+                                extra: None,
+                            }),
+                        ));
+                    }
+                }
+                p
+            }
+            Err(e) => {
+                if flags & 0x4000 != 0 && is_incomplete_source(&source, &e, &mode) {
+                    return Err(PyError::Exception(
+                        "_IncompleteInputError".to_string(),
+                        PyObjectRef::new(PyObject::Exception {
+                            typ: "_IncompleteInputError".to_string(),
+                            args: vec![py_str(&e)],
+                            cause: None,
+                            suppress_context: false,
+                            context: None,
+                            traceback: None,
+                            extra: None,
+                        }),
+                    ));
+                }
+                return Err(PyError::syntax_error_with_filename(e, &filename, &source));
+            }
+        };
+        program
     };
     let mut compiler = crate::compiler::Compiler::new();
     let code = compiler

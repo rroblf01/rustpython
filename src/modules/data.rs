@@ -548,6 +548,61 @@ pub fn create_collections_dict(object_type: PyObjectRef) -> HashMap<String, PyOb
             }))
         }
 
+        fn nt_lt(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+            if args.len() < 2 {
+                return Ok(py_bool(false));
+            }
+            let a_vals = nt_field_values(&args[0])?;
+            let b_vals = match &*args[1].borrow() {
+                PyObject::Tuple(t) => t.clone(),
+                PyObject::Instance { dict, .. } if dict.get_str("_fields").is_some() => nt_field_values(&args[1])?,
+                _ => return Ok(py_not_implemented()),
+            };
+            Ok(py_bool(crate::object::py_compare(&py_tuple(a_vals), &py_tuple(b_vals), 0)?.truthy()))
+        }
+        fn nt_le(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+            if args.len() < 2 {
+                return Ok(py_bool(false));
+            }
+            let a_vals = nt_field_values(&args[0])?;
+            let b_vals = match &*args[1].borrow() {
+                PyObject::Tuple(t) => t.clone(),
+                PyObject::Instance { dict, .. } if dict.get_str("_fields").is_some() => nt_field_values(&args[1])?,
+                _ => return Ok(py_not_implemented()),
+            };
+            Ok(py_bool(crate::object::py_compare(&py_tuple(a_vals), &py_tuple(b_vals), 1)?.truthy()))
+        }
+        fn nt_gt(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+            if args.len() < 2 {
+                return Ok(py_bool(false));
+            }
+            let a_vals = nt_field_values(&args[0])?;
+            let b_vals = match &*args[1].borrow() {
+                PyObject::Tuple(t) => t.clone(),
+                PyObject::Instance { dict, .. } if dict.get_str("_fields").is_some() => nt_field_values(&args[1])?,
+                _ => return Ok(py_not_implemented()),
+            };
+            Ok(py_bool(crate::object::py_compare(&py_tuple(a_vals), &py_tuple(b_vals), 4)?.truthy()))
+        }
+        fn nt_ge(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+            if args.len() < 2 {
+                return Ok(py_bool(false));
+            }
+            let a_vals = nt_field_values(&args[0])?;
+            let b_vals = match &*args[1].borrow() {
+                PyObject::Tuple(t) => t.clone(),
+                PyObject::Instance { dict, .. } if dict.get_str("_fields").is_some() => nt_field_values(&args[1])?,
+                _ => return Ok(py_not_implemented()),
+            };
+            Ok(py_bool(crate::object::py_compare(&py_tuple(a_vals), &py_tuple(b_vals), 3)?.truthy()))
+        }
+        fn nt_ne(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+            let eq = nt_eq(args)?;
+            if crate::object::is_not_implemented(&eq) {
+                return Ok(eq);
+            }
+            Ok(py_bool(!eq.truthy()))
+        }
         macro_rules! nt_method {
             ($name:expr, $f:expr) => {
                 type_dict.insert_str(
@@ -561,6 +616,11 @@ pub fn create_collections_dict(object_type: PyObjectRef) -> HashMap<String, PyOb
         }
         nt_method!("__repr__", nt_repr);
         nt_method!("__eq__", nt_eq);
+        nt_method!("__lt__", nt_lt);
+        nt_method!("__le__", nt_le);
+        nt_method!("__gt__", nt_gt);
+        nt_method!("__ge__", nt_ge);
+        nt_method!("__ne__", nt_ne);
         nt_method!("__iter__", nt_iter);
         nt_method!("__getitem__", nt_getitem);
         nt_method!("__len__", nt_len);

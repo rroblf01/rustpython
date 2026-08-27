@@ -269,6 +269,11 @@ fn str_encode_builtin(a: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             for (i, c) in s.chars().enumerate() {
                 let cp = c as u32;
                 if cp > 0xFF {
+                    // surrogateescape: lone surrogates DC80-DCFF map back to bytes 80-FF
+                    if errors == "surrogateescape" && (0xDC80..=0xDCFF).contains(&cp) {
+                        out.push((cp - 0xDC00) as u8);
+                        continue;
+                    }
                     if errors == "strict" {
                         return Err(PyError::Exception(
                             "UnicodeEncodeError".to_string(),
@@ -293,7 +298,11 @@ fn str_encode_builtin(a: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     } else if errors == "replace" {
                         out.push(b'?');
                         continue;
-                    } else if errors == "backslashreplace" || errors == "xmlcharrefreplace" || errors == "namereplace" {
+                    } else if errors == "xmlcharrefreplace" {
+                        let esc = format!("&#{};", cp);
+                        out.extend_from_slice(esc.as_bytes());
+                        continue;
+                    } else if errors == "backslashreplace" || errors == "namereplace" {
                         let esc = if cp < 0x100 {
                             format!("\\x{:02x}", cp)
                         } else if cp < 0x10000 {
@@ -303,6 +312,25 @@ fn str_encode_builtin(a: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                         };
                         out.extend_from_slice(esc.as_bytes());
                         continue;
+                    } else if errors == "surrogateescape" {
+                        return Err(PyError::Exception(
+                            "UnicodeEncodeError".to_string(),
+                            PyObjectRef::new(PyObject::Exception {
+                                typ: "UnicodeEncodeError".to_string(),
+                                args: vec![
+                                    py_str(&encoding),
+                                    py_str(&s),
+                                    py_int(i as i64),
+                                    py_int(i as i64 + 1),
+                                    py_str("ordinal not in range(256)"),
+                                ],
+                                cause: None,
+                                suppress_context: false,
+                                context: None,
+                                traceback: None,
+                                extra: None,
+                            }),
+                        ));
                     } else {
                         return Err(PyError::Exception(
                             "UnicodeEncodeError".to_string(),
@@ -333,6 +361,15 @@ fn str_encode_builtin(a: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             for (i, c) in s.chars().enumerate() {
                 let cp = c as u32;
                 if cp > 0x7F {
+                    // surrogateescape: surrogates DC80-DCFF map to bytes 80-FF, also handle direct 0x80-0xFF for latin-1 style decode
+                    if errors == "surrogateescape" && (0xDC80..=0xDCFF).contains(&cp) {
+                        out.push((cp - 0xDC00) as u8);
+                        continue;
+                    }
+                    if errors == "surrogateescape" && (0x80..=0xFF).contains(&cp) {
+                        out.push(cp as u8);
+                        continue;
+                    }
                     if errors == "strict" {
                         return Err(PyError::Exception(
                             "UnicodeEncodeError".to_string(),
@@ -357,6 +394,10 @@ fn str_encode_builtin(a: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     } else if errors == "replace" {
                         out.push(b'?');
                         continue;
+                    } else if errors == "xmlcharrefreplace" {
+                        let esc = format!("&#{};", cp);
+                        out.extend_from_slice(esc.as_bytes());
+                        continue;
                     } else if errors == "backslashreplace" {
                         let esc = if cp < 0x100 {
                             format!("\\x{:02x}", cp)
@@ -367,6 +408,35 @@ fn str_encode_builtin(a: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                         };
                         out.extend_from_slice(esc.as_bytes());
                         continue;
+                    } else if errors == "namereplace" {
+                        let esc = if cp < 0x100 {
+                            format!("\\x{:02x}", cp)
+                        } else if cp < 0x10000 {
+                            format!("\\u{:04x}", cp)
+                        } else {
+                            format!("\\U{:08x}", cp)
+                        };
+                        out.extend_from_slice(esc.as_bytes());
+                        continue;
+                    } else if errors == "surrogateescape" {
+                        return Err(PyError::Exception(
+                            "UnicodeEncodeError".to_string(),
+                            PyObjectRef::new(PyObject::Exception {
+                                typ: "UnicodeEncodeError".to_string(),
+                                args: vec![
+                                    py_str(&encoding),
+                                    py_str(&s),
+                                    py_int(i as i64),
+                                    py_int(i as i64 + 1),
+                                    py_str("ordinal not in range(128)"),
+                                ],
+                                cause: None,
+                                suppress_context: false,
+                                context: None,
+                                traceback: None,
+                                extra: None,
+                            }),
+                        ));
                     } else {
                         return Err(PyError::Exception(
                             "UnicodeEncodeError".to_string(),
@@ -1502,7 +1572,14 @@ impl PyObject {
                         None => Ok(py_none()),
                     },
                     "__suppress_context__" => Ok(py_bool(*suppress_context)),
-                    "__notes__" => Ok(py_list(vec![])),
+                    "__notes__" => {
+                        if let Some(extra) = extra {
+                            if let Some(v) = extra.get("__notes__") {
+                                return Ok(v.clone());
+                            }
+                        }
+                        Ok(py_list(vec![]))
+                    }
                     // Per-instance attributes (BaseException.__dict__): the
                     // constructor's keyword args (`AttributeError('x',
                     // name=..., obj=...)`) and anything assigned by user
@@ -2315,28 +2392,40 @@ impl PyObject {
                                     )?;
                                     decorated.push((k, item));
                                 }
-                                decorated.sort_by(|a, b| {
-                                    if py_compare(&a.0, &b.0, 0)
-                                        .map(|r| r.truthy())
-                                        .unwrap_or(false)
-                                    {
-                                        std::cmp::Ordering::Less
-                                    } else {
-                                        std::cmp::Ordering::Greater
-                                    }
-                                });
+                                if reverse {
+                                    decorated.sort_by(|a, b| {
+                                        if py_compare(&b.0, &a.0, 0)
+                                            .map(|r| r.truthy())
+                                            .unwrap_or(false)
+                                        {
+                                            std::cmp::Ordering::Less
+                                        } else {
+                                            std::cmp::Ordering::Greater
+                                        }
+                                    });
+                                } else {
+                                    decorated.sort_by(|a, b| {
+                                        if py_compare(&a.0, &b.0, 0)
+                                            .map(|r| r.truthy())
+                                            .unwrap_or(false)
+                                        {
+                                            std::cmp::Ordering::Less
+                                        } else {
+                                            std::cmp::Ordering::Greater
+                                        }
+                                    });
+                                }
                                 decorated.into_iter().map(|(_, item)| item).collect()
                             } else {
-                                py_stable_sort_by(items, &|a, b| {
-                                    py_compare(a, b, 0).map(|r| r.truthy()).unwrap_or(false)
-                                })
-                            };
-                            let items = if reverse {
-                                let mut v = items;
-                                v.reverse();
-                                v
-                            } else {
-                                items
+                                if reverse {
+                                    py_stable_sort_by(items, &|a, b| {
+                                        py_compare(b, a, 0).map(|r| r.truthy()).unwrap_or(false)
+                                    })
+                                } else {
+                                    py_stable_sort_by(items, &|a, b| {
+                                        py_compare(a, b, 0).map(|r| r.truthy()).unwrap_or(false)
+                                    })
+                                }
                             };
                             check_not_modified(&args[0])?;
                             if let PyObject::List(list) = &mut *args[0].borrow_mut() {
@@ -3383,35 +3472,57 @@ impl PyObject {
                                     }
                                     // ascii
                                     if norm == "ascii" || norm == "us-ascii" || norm == "646" {
+                                        let mut out = String::new();
+                                        let mut has_error = false;
                                         for (i, &b) in bytes.iter().enumerate() {
-                                            if b > 0x7F {
-                                                if errors == "strict" {
-                                                    return Err(PyError::Exception(
-                                                        "UnicodeDecodeError".to_string(),
-                                                        PyObjectRef::new(PyObject::Exception {
-                                                            typ: "UnicodeDecodeError".to_string(),
-                                                            args: vec![
-                                                                py_str(&encoding),
-                                                                PyObjectRef::imm(PyObject::Bytes(bytes.clone())),
-                                                                py_int(i as i64),
-                                                                py_int((i+1) as i64),
-                                                                py_str("ordinal not in range(128)"),
-                                                            ],
-                                                            cause: None,
-                                                            suppress_context: false,
-                                                            context: None,
-                                                            traceback: None,
-                                                            extra: None,
-                                                        }),
-                                                    ));
-                                                } else if errors == "ignore" {
-                                                    continue;
-                                                } else if errors == "replace" {
-                                                    // will be handled below via generic? fallback to lossy
+                                            if b <= 0x7F {
+                                                out.push(b as char);
+                                            } else {
+                                                match errors.as_str() {
+                                                    "strict" => {
+                                                        return Err(PyError::Exception(
+                                                            "UnicodeDecodeError".to_string(),
+                                                            PyObjectRef::new(PyObject::Exception {
+                                                                typ: "UnicodeDecodeError".to_string(),
+                                                                args: vec![
+                                                                    py_str(&encoding),
+                                                                    PyObjectRef::imm(PyObject::Bytes(bytes.clone())),
+                                                                    py_int(i as i64),
+                                                                    py_int((i+1) as i64),
+                                                                    py_str("ordinal not in range(128)"),
+                                                                ],
+                                                                cause: None,
+                                                                suppress_context: false,
+                                                                context: None,
+                                                                traceback: None,
+                                                                extra: None,
+                                                            }),
+                                                        ));
+                                                    }
+                                                    "ignore" => {},
+                                                    "replace" => out.push('\u{FFFD}'),
+                                                    "surrogateescape" => {
+                                                        // Map bytes 128-255 to code points 128-255 (valid UTF-8, round-trips via latin-1 style)
+                                                        // This avoids needing to store lone surrogates which are invalid in Rust's String.
+                                                        out.push(b as char);
+                                                    }
+                                                    "backslashreplace" => {
+                                                        out.push_str(&format!("\\x{:02x}", b));
+                                                    }
+                                                    "xmlcharrefreplace" => {
+                                                        out.push_str(&format!("&#{};", b));
+                                                    }
+                                                    _ => {
+                                                        has_error = true;
+                                                        out.push('\u{FFFD}');
+                                                    }
                                                 }
                                             }
                                         }
-                                        // for non-strict, try generic handling below; fallback to lossy if needed
+                                        if !has_error || errors == "surrogateescape" || errors == "ignore" || errors == "replace" || errors == "backslashreplace" || errors == "xmlcharrefreplace" {
+                                            return Ok(py_str(&out));
+                                        }
+                                        // for other handlers, try generic handling below; fallback to lossy if needed
                                     }
                                     // Try generic codec lookup (e.g. testcodec)
                                     if let Some(codec_tuple) = crate::modules::lookup_codec(&encoding) {
@@ -11158,14 +11269,28 @@ impl PyObject {
                 // inside a metaclass's `__new__` couldn't resolve `__new__`
                 // at all (AttributeError), since `obj` isn't a plain Instance
                 // and has no meaningful `__class__` for this purpose either.
-                let obj_type = if let PyObject::Instance { typ, .. } = &*obj.borrow() {
-                    Some(typ.clone())
+                let obj_types: Vec<PyObjectRef> = if let PyObject::Instance { typ, .. } = &*obj.borrow() {
+                    vec![typ.clone()]
                 } else if matches!(&*obj.borrow(), PyObject::Type { .. }) {
-                    Some(obj.clone())
+                    // For a Type obj, try its own MRO first (e.g. super() inside __new__ where obj is metacls)
+                    // and if cls not found there, try its metatype's MRO (e.g. super() inside __init__ where obj is a class instance of the metaclass)
+                    let mut v = vec![obj.clone()];
+                    if let Some(mt) = crate::object::metatype_of(&obj) {
+                        v.push(mt);
+                    } else if let Ok(cls_attr) = obj.borrow().get_attribute("__class__") {
+                        // fallback: type(obj)
+                        if !v.iter().any(|x| x.is(&cls_attr)) {
+                            v.push(cls_attr);
+                        }
+                    }
+                    v
                 } else {
-                    obj.borrow().get_attribute("__class__").ok()
+                    match obj.borrow().get_attribute("__class__").ok() {
+                        Some(c) => vec![c],
+                        None => vec![],
+                    }
                 };
-                if let Some(obj_type) = obj_type {
+                for obj_type in obj_types {
                     if let PyObject::Type { mro, .. } = &*obj_type.borrow() {
                         if std::env::var("RPY_DEBUG_SUPER2").is_ok() {
                             let cls_name = cls.borrow().type_name().to_string();
@@ -12570,6 +12695,21 @@ impl PyObject {
             // `list_iterator`. Delegates to the already-correct
             // `builtin_next`/`builtin_iter` implementations rather than
             // duplicating their per-variant logic.
+            PyObject::BuiltinMethod { name: bm_name, func, self_obj } => match name {
+                "__self__" => Ok(self_obj.clone()),
+                "__func__" => Ok(PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: bm_name.clone(),
+                    func: *func,
+                })),
+                "__name__" => Ok(py_str(bm_name)),
+                "__qualname__" => Ok(py_str(bm_name)),
+                "__module__" => Ok(py_str("builtins")),
+                "__doc__" => Ok(py_none()),
+                _ => Err(PyError::attribute_error(format!(
+                    "'builtin_function_or_method' object has no attribute '{}'",
+                    name
+                ))),
+            },
             PyObject::ListIter { .. }
             | PyObject::MapIterator { .. }
             | PyObject::FilterIterator { .. }

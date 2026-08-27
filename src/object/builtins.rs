@@ -3948,6 +3948,7 @@ pub fn builtin_sorted(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let len = v.len();
     if len > 1 {
         let key_fn_ref = key_fn.clone();
+        let reverse_flag = reverse;
         v = py_stable_sort_by(v, &|a, b| {
             let a_val = if let Some(ref kf) = key_fn_ref {
                 call_bound_method(kf.clone(), a.clone(), vec![]).unwrap_or_else(|_| a.clone())
@@ -3962,13 +3963,16 @@ pub fn builtin_sorted(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             // Route through py_compare (not the raw Compare trait methods)
             // so user-defined classes' __lt__/__gt__ are consulted — the
             // trait impl alone has no notion of Instance dunder dispatch.
-            py_compare(&a_val, &b_val, 0)
-                .map(|r| r.truthy())
-                .unwrap_or(false)
+            // When reverse is true, compare b < a instead of a < b to keep
+            // stability for equal keys (CPython's sort is stable even with reverse;
+            // simply reversing after sort would invert equal-key order).
+            let cmp = if reverse_flag {
+                py_compare(&b_val, &a_val, 0)
+            } else {
+                py_compare(&a_val, &b_val, 0)
+            };
+            cmp.map(|r| r.truthy()).unwrap_or(false)
         });
-        if reverse {
-            v.reverse();
-        }
     }
     Ok(py_list(v))
 }
@@ -4857,13 +4861,107 @@ fn compare_gt(a: &PyObjectRef, b: &PyObjectRef) -> std::cmp::Ordering {
     }
 }
 
-pub fn builtin_max(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+fn parse_max_min_kwargs(args: &[PyObjectRef]) -> PyResult<(Vec<PyObjectRef>, Option<PyObjectRef>, Option<PyObjectRef>, bool)> {
     if args.is_empty() {
+        return Ok((Vec::new(), None, None, false));
+    }
+    let last = args.last().unwrap();
+    let is_kwargs = if let PyObject::Dict(d) = &*last.borrow() {
+        let mut has_key = false;
+        let mut has_default = false;
+        for (k, _) in d.iter() {
+            let ks = k.str();
+            if ks == "key" {
+                has_key = true;
+            } else if ks == "default" {
+                has_default = true;
+            }
+        }
+        has_key || has_default
+    } else {
+        false
+    };
+    if !is_kwargs {
+        return Ok((args.to_vec(), None, None, false));
+    }
+    let dict = if let PyObject::Dict(d) = &*last.borrow() {
+        (**d).clone()
+    } else {
+        unreachable!()
+    };
+    let mut key_fn: Option<PyObjectRef> = None;
+    let mut default_val: Option<PyObjectRef> = None;
+    let mut has_default = false;
+    for (k, v) in dict.items() {
+        let ks = k.str();
+        if ks == "key" {
+            if !matches!(&*v.borrow(), PyObject::None) {
+                key_fn = Some(v.clone());
+            } else {
+                key_fn = None;
+            }
+        } else if ks == "default" {
+            default_val = Some(v.clone());
+            has_default = true;
+        } else {
+            return Err(PyError::type_error(format!(
+                "max() got an unexpected keyword argument '{}'",
+                ks
+            )));
+        }
+    }
+    let pos_args = args[..args.len() - 1].to_vec();
+    Ok((pos_args, key_fn, default_val, has_default))
+}
+
+fn max_min_with_key(items: Vec<PyObjectRef>, key_fn: Option<PyObjectRef>, is_max: bool) -> PyResult<PyObjectRef> {
+    if items.is_empty() {
+        return Err(PyError::value_error("max() arg is an empty sequence"));
+    }
+    if key_fn.is_none() {
+        if is_max {
+            return items.into_iter().max_by(compare_gt)
+                .ok_or_else(|| PyError::value_error("max() arg is an empty sequence"));
+        } else {
+            return items.into_iter().min_by(compare_gt)
+                .ok_or_else(|| PyError::value_error("min() arg is an empty sequence"));
+        }
+    }
+    let kf = key_fn.unwrap();
+    let mut best: Option<PyObjectRef> = None;
+    let mut best_key: Option<PyObjectRef> = None;
+    for item in items {
+        let k = call_bound_method(kf.clone(), item.clone(), vec![])?;
+        match best {
+            None => {
+                best_key = Some(k);
+                best = Some(item);
+            }
+            Some(_) => {
+                let bk = best_key.as_ref().unwrap();
+                let should_replace = if is_max {
+                    py_compare(bk, &k, 0)?.truthy()
+                } else {
+                    py_compare(&k, bk, 0)?.truthy()
+                };
+                if should_replace {
+                    best_key = Some(k);
+                    best = Some(item);
+                }
+            }
+        }
+    }
+    Ok(best.unwrap())
+}
+
+pub fn builtin_max(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    let (pos_args, key_fn, default_val, has_default) = parse_max_min_kwargs(args)?;
+    if pos_args.is_empty() {
         return Err(PyError::type_error("max() requires at least 1 argument"));
     }
-    let items: Vec<PyObjectRef> = if args.len() == 1 {
+    let items: Vec<PyObjectRef> = if pos_args.len() == 1 {
         let mut v = Vec::new();
-        let iterable = builtin_iter(&[args[0].clone()])?;
+        let iterable = builtin_iter(&[pos_args[0].clone()])?;
         loop {
             match builtin_next(&[iterable.clone()]) {
                 Ok(val) => v.push(val),
@@ -4873,21 +4971,25 @@ pub fn builtin_max(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         }
         v
     } else {
-        args.to_vec()
+        pos_args.clone()
     };
-    items
-        .into_iter()
-        .max_by(compare_gt)
-        .ok_or_else(|| PyError::value_error("max() arg is an empty sequence"))
+    if items.is_empty() {
+        if has_default {
+            return Ok(default_val.unwrap());
+        }
+        return Err(PyError::value_error("max() arg is an empty sequence"));
+    }
+    max_min_with_key(items, key_fn, true)
 }
 
 pub fn builtin_min(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.is_empty() {
+    let (pos_args, key_fn, default_val, has_default) = parse_max_min_kwargs(args)?;
+    if pos_args.is_empty() {
         return Err(PyError::type_error("min() requires at least 1 argument"));
     }
-    let items: Vec<PyObjectRef> = if args.len() == 1 {
+    let items: Vec<PyObjectRef> = if pos_args.len() == 1 {
         let mut v = Vec::new();
-        let iterable = builtin_iter(&[args[0].clone()])?;
+        let iterable = builtin_iter(&[pos_args[0].clone()])?;
         loop {
             match builtin_next(&[iterable.clone()]) {
                 Ok(val) => v.push(val),
@@ -4897,12 +4999,15 @@ pub fn builtin_min(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         }
         v
     } else {
-        args.to_vec()
+        pos_args.clone()
     };
-    items
-        .into_iter()
-        .min_by(compare_gt)
-        .ok_or_else(|| PyError::value_error("min() arg is an empty sequence"))
+    if items.is_empty() {
+        if has_default {
+            return Ok(default_val.unwrap());
+        }
+        return Err(PyError::value_error("min() arg is an empty sequence"));
+    }
+    max_min_with_key(items, key_fn, false)
 }
 
 pub fn builtin_id(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {

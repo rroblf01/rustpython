@@ -1122,8 +1122,8 @@ def unified_diff(a, b, fromfile='', tofile='', fromfiledate='',
     ...             '2005-01-26 23:30:50', '2010-04-02 10:20:52',
     ...             lineterm=''):
     ...     print(line)                 # doctest: +NORMALIZE_WHITESPACE
-    --- Original        2005-01-26 23:30:50
-    +++ Current         2010-04-02 10:20:52
+    --- Original	2005-01-26 23:30:50
+    +++ Current	2010-04-02 10:20:52
     @@ -1,4 +1,4 @@
     +zero
      one

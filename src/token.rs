@@ -682,6 +682,7 @@ impl Lexer {
     fn read_bytes(&mut self, quote: char, raw: bool) -> Token {
         let mut bytes = Vec::new();
         let triple = self.peek() == Some(quote) && self.peek_ahead(1) == Some(quote);
+        let mut terminated = false;
 
         if triple {
             self.advance();
@@ -746,6 +747,7 @@ impl Lexer {
                         if self.peek() == Some(quote) && self.peek_ahead(1) == Some(quote) {
                             self.advance();
                             self.advance();
+                            terminated = true;
                             break;
                         }
                         bytes.push(c as u8);
@@ -755,10 +757,22 @@ impl Lexer {
                     }
                 }
             }
+            if !terminated {
+                return Token::LexerError(format!(
+                    "unterminated triple-quoted string literal (detected at line {})",
+                    self.line
+                ));
+            }
         } else {
             loop {
                 match self.advance() {
                     None => break,
+                    Some(c) if c == '\n' => {
+                        return Token::LexerError(format!(
+                            "unterminated string literal (detected at line {})",
+                            self.line - 1
+                        ));
+                    }
                     Some(c) if c == '\\' && !raw => {
                         let next = self.advance();
                         match next {
@@ -807,11 +821,20 @@ impl Lexer {
                             bytes.push(next as u8);
                         }
                     }
-                    Some(c) if c == quote => break,
+                    Some(c) if c == quote => {
+                        terminated = true;
+                        break;
+                    }
                     Some(c) => {
                         bytes.push(c as u8);
                     }
                 }
+            }
+            if !terminated {
+                return Token::LexerError(format!(
+                    "unterminated string literal (detected at line {})",
+                    self.line
+                ));
             }
         }
 
@@ -821,6 +844,8 @@ impl Lexer {
     fn read_string(&mut self, quote: char, raw: bool, fstring: bool) -> Token {
         let mut s = String::new();
         let triple = self.peek() == Some(quote) && self.peek_ahead(1) == Some(quote);
+        let mut terminated = false;
+        let mut invalid_escapes: Vec<char> = Vec::new();
 
         if triple {
             self.advance();
@@ -904,6 +929,7 @@ impl Lexer {
                             }
                             Some(c) if c == '\n' => {}
                             Some(c) => {
+                                invalid_escapes.push(c);
                                 s.push('\\');
                                 s.push(c);
                             }
@@ -924,6 +950,7 @@ impl Lexer {
                         if self.peek() == Some(quote) && self.peek_ahead(1) == Some(quote) {
                             self.advance();
                             self.advance();
+                            terminated = true;
                             break;
                         }
                         s.push(c);
@@ -932,6 +959,12 @@ impl Lexer {
                         s.push(c);
                     }
                 }
+            }
+            if !terminated {
+                return Token::LexerError(format!(
+                    "unterminated triple-quoted string literal (detected at line {})",
+                    self.line
+                ));
             }
         } else {
             loop {
@@ -1013,6 +1046,7 @@ impl Lexer {
                             }
                             Some(c) if c == '\n' => {}
                             Some(c) => {
+                                invalid_escapes.push(c);
                                 s.push('\\');
                                 s.push(c);
                             }
@@ -1060,9 +1094,35 @@ impl Lexer {
                             self.advance();
                         }
                     }
-                    Some(c) if c == quote => break,
+                    Some(c) if c == quote => {
+                        terminated = true;
+                        break;
+                    }
                     Some(c) => s.push(c),
                 }
+            }
+            if !terminated {
+                return Token::LexerError(format!(
+                    "unterminated string literal (detected at line {})",
+                    self.line
+                ));
+            }
+        }
+
+        // Emit SyntaxWarning for invalid escape sequences (non-raw only)
+        if crate::modules::warning_is_error_mode() {
+            if let Some(&esc) = invalid_escapes.first() {
+                return Token::LexerError(format!(
+                    "\"\\{}\" is an invalid escape sequence. Did you mean \"\\\\{}\"? A raw string is also an option.",
+                    esc, esc
+                ));
+            }
+        } else {
+            for esc in invalid_escapes {
+                crate::modules::warnings_emit(
+                    &format!("\"\\{}\" is an invalid escape sequence. Did you mean \"\\\\{}\"? A raw string is also an option.", esc, esc),
+                    "SyntaxWarning",
+                );
             }
         }
 
@@ -1185,6 +1245,11 @@ impl Lexer {
                     if self.peek() == Some('\n') {
                         self.advance();
                         continue;
+                    }
+                    if self.peek().is_none() {
+                        return Token::LexerError(
+                            "unexpected character after line continuation character".to_string(),
+                        );
                     }
                     return Token::Name("\\".to_string());
                 }
@@ -1610,6 +1675,7 @@ impl Lexer {
         }
         let mut parts: Vec<(String, String, String, u8)> = Vec::new();
         let mut literal = String::new();
+        let mut terminated = false;
         loop {
             match self.advance() {
                 None => break,
@@ -1881,14 +1947,29 @@ impl Lexer {
                         if self.peek() == Some(quote) && self.peek_ahead(1) == Some(quote) {
                             self.advance();
                             self.advance();
+                            terminated = true;
                             break;
                         }
                         literal.push(c);
                     } else {
+                        terminated = true;
                         break;
                     }
                 }
                 Some(c) => literal.push(c),
+            }
+        }
+        if !terminated {
+            if triple {
+                return Token::LexerError(format!(
+                    "unterminated triple-quoted string literal (detected at line {})",
+                    self.line
+                ));
+            } else {
+                return Token::LexerError(format!(
+                    "unterminated string literal (detected at line {})",
+                    self.line
+                ));
             }
         }
         parts.push((literal, String::new(), String::new(), 0));

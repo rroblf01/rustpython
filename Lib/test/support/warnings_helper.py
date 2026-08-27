@@ -174,8 +174,8 @@ def _filterwarnings(filters, quiet=False):
         for w in reraise[:]:
             warning = w.message
             # Filter out the matching messages
-            if (re.match(msg, str(warning), re.I) and
-                issubclass(warning.__class__, cat)):
+            if ((msg in str(warning) or re.search(re.escape(msg), str(warning), re.I) or re.match(msg, str(warning), re.I)) and
+                (issubclass(warning.__class__, cat) or issubclass(type(warning), cat) or isinstance(warning, cat))):
                 seen = True
                 reraise.remove(w)
         if not seen and not quiet:

@@ -717,12 +717,36 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
             },
         }),
     );
-    // __init_subclass__(cls, **kwargs): no-op (PEP 487)
+    // __init_subclass__(cls, **kwargs): no-op (PEP 487) but must reject unexpected kwargs
     object_dict.insert_str(
         "__init_subclass__",
         PyObjectRef::new(PyObject::BuiltinFunction {
             name: "__init_subclass__".to_string(),
-            func: |_args| Ok(py_none()),
+            func: |args| {
+                if args.len() > 1 {
+                    // Keywords are packed into trailing dict by call_function
+                    if let Some(last) = args.last() {
+                        if let PyObject::Dict(d) = &*last.borrow() {
+                            if d.len() > 0 {
+                                return Err(PyError::type_error(
+                                    "object.__init_subclass__() takes no keyword arguments",
+                                ));
+                            }
+                        }
+                    }
+                }
+                // Also handle direct **kwargs dict as second arg
+                if args.len() == 2 {
+                    if let PyObject::Dict(d) = &*args[1].borrow() {
+                        if d.len() > 0 {
+                            return Err(PyError::type_error(
+                                "object.__init_subclass__() takes no keyword arguments",
+                            ));
+                        }
+                    }
+                }
+                Ok(py_none())
+            },
         }),
     );
     // __class_getitem__(cls, item): for generic types like List[int] (PEP 560)

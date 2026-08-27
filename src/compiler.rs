@@ -4033,6 +4033,31 @@ impl Compiler {
                         CmpOp::Gt => 4,
                         CmpOp::GtE => 3,
                         CmpOp::Is => {
+                            // Emit SyntaxWarning for "is" with literal (PEP 8)
+                            let actual_left: &Expr = if i == 0 { left } else { &comparators[i - 1] };
+                            let is_none_or_bool = |e: &Expr| matches!(e, Expr::Constant(Constant::None) | Expr::Constant(Constant::Bool(_)) | Expr::Constant(Constant::Ellipsis));
+                            let left_is_lit = matches!(actual_left, Expr::Constant(_)) && !is_none_or_bool(actual_left);
+                            let right_is_lit = matches!(right, Expr::Constant(_)) && !is_none_or_bool(right);
+                            if left_is_lit || right_is_lit {
+                                let lit_expr = if left_is_lit { actual_left } else { right };
+                                let typ_str = match lit_expr {
+                                    Expr::Constant(Constant::String(_)) => "str",
+                                    Expr::Constant(Constant::Bytes(_)) => "bytes",
+                                    Expr::Constant(Constant::Int(_)) => "int",
+                                    Expr::Constant(Constant::Float(_)) => "float",
+                                    Expr::Constant(Constant::Complex { .. }) => "complex",
+                                    Expr::Constant(Constant::Bool(_)) => "bool",
+                                    Expr::Constant(Constant::None) => "None",
+                                    Expr::Constant(Constant::Ellipsis) => "ellipsis",
+                                    _ => "literal",
+                                };
+                                let msg = format!("\"is\" with '{}' literal. Did you mean \"==\"?", typ_str);
+                                if crate::modules::warning_is_error_mode() {
+                                    return Err(msg);
+                                } else {
+                                    crate::modules::warnings_emit(&msg, "SyntaxWarning");
+                                }
+                            }
                             // CPython 3.11+ has a dedicated IS_OP for
                             // identity (arg 0 = is, 1 = is not); COMPARE_OP
                             // 8/9 were the pre-3.11 encodings.
@@ -4045,6 +4070,30 @@ impl Compiler {
                             continue;
                         }
                         CmpOp::IsNot => {
+                            let actual_left: &Expr = if i == 0 { left } else { &comparators[i - 1] };
+                            let is_none_or_bool = |e: &Expr| matches!(e, Expr::Constant(Constant::None) | Expr::Constant(Constant::Bool(_)) | Expr::Constant(Constant::Ellipsis));
+                            let left_is_lit = matches!(actual_left, Expr::Constant(_)) && !is_none_or_bool(actual_left);
+                            let right_is_lit = matches!(right, Expr::Constant(_)) && !is_none_or_bool(right);
+                            if left_is_lit || right_is_lit {
+                                let lit_expr = if left_is_lit { actual_left } else { right };
+                                let typ_str = match lit_expr {
+                                    Expr::Constant(Constant::String(_)) => "str",
+                                    Expr::Constant(Constant::Bytes(_)) => "bytes",
+                                    Expr::Constant(Constant::Int(_)) => "int",
+                                    Expr::Constant(Constant::Float(_)) => "float",
+                                    Expr::Constant(Constant::Complex { .. }) => "complex",
+                                    Expr::Constant(Constant::Bool(_)) => "bool",
+                                    Expr::Constant(Constant::None) => "None",
+                                    Expr::Constant(Constant::Ellipsis) => "ellipsis",
+                                    _ => "literal",
+                                };
+                                let msg = format!("\"is\" with '{}' literal. Did you mean \"==\"?", typ_str);
+                                if crate::modules::warning_is_error_mode() {
+                                    return Err(msg);
+                                } else {
+                                    crate::modules::warnings_emit(&msg, "SyntaxWarning");
+                                }
+                            }
                             self.emit(Opcode::IS_OP, 1);
                             if i < ops.len() - 1 {
                                 self.emit(Opcode::DUP_TOP, 0);

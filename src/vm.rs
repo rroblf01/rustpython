@@ -4409,15 +4409,21 @@ impl VirtualMachine {
                     let dict = &mut inner_f.dict;
                     dict.insert_str("__code__", PyObjectRef::imm(PyObject::Code(code_obj)));
                 }
-                if let Some(ref mg) = self.frames[fi].module_globals {
+                let module_name_opt: Option<String> = if let Some(ref mg) = self.frames[fi].module_globals {
                     let mg = mg.borrow();
-                    if let Some(module_name) = mg.get(&interner::intern("__name__")) {
-                        if let PyObject::Str(s) = &*module_name.borrow() {
-                            if let PyObject::Function(ref mut inner_f) = &mut *func.borrow_mut() {
-                                let dict = &mut inner_f.dict;
-                                dict.insert_str("__module__", py_str(s));
-                            }
-                        }
+                    mg.get(&interner::intern("__name__")).and_then(|v| {
+                        if let PyObject::Str(s) = &*v.borrow() { Some(s.to_string()) } else { None }
+                    })
+                } else {
+                    let g = self.frames[fi].globals.borrow();
+                    g.get(&interner::intern("__name__")).and_then(|v| {
+                        if let PyObject::Str(s) = &*v.borrow() { Some(s.to_string()) } else { None }
+                    })
+                };
+                if let Some(s) = module_name_opt {
+                    if let PyObject::Function(ref mut inner_f) = &mut *func.borrow_mut() {
+                        let dict = &mut inner_f.dict;
+                        dict.insert_str("__module__", py_str(&s));
                     }
                 }
                 self.frames[fi].push(func);
@@ -10128,6 +10134,13 @@ impl VirtualMachine {
                 if !callable_is_bare_type && callable_is_metaclass {
                     let mut new_args = vec![callable.clone()];
                     new_args.extend(args.iter().cloned());
+                    if !keywords.is_empty() {
+                        let mut d = crate::object::PyDict::new();
+                        for (k, v) in &keywords {
+                            d.set(crate::object::py_str(k), v.clone())?;
+                        }
+                        new_args.push(crate::object::PyObjectRef::new(crate::object::PyObject::Dict(Box::new(d))));
+                    }
                     let built = self.type_new_impl(&new_args)?;
                     if std::env::var("RPY_TRACE_MC").is_ok() {
                         let tn = built.borrow().type_name();
@@ -11517,6 +11530,11 @@ impl VirtualMachine {
             .get(&interner::intern("type"))
             .map(|t| t.is(&metacls))
             .unwrap_or(false);
+        if is_bare_type && !kwargs.is_empty() {
+            return Err(PyError::type_error(
+                "type.__new__() takes no keyword arguments",
+            ));
+        }
         let metatype = if is_bare_type { None } else { Some(metacls) };
         self.default_build_class(name_str, bases_vec, namespace_dict, kwargs, metatype)
     }
@@ -11638,11 +11656,74 @@ impl VirtualMachine {
                 if let Some(t) = typ {
                     let set_name_method = t.borrow().get_attribute("__set_name__").unwrap();
                     // Call with explicit self=value, then owner=class, name=attr_name
-                    let _ = self.call_function(
+                    if let Err(e) = self.call_function(
                         set_name_method,
                         vec![value.clone(), class.clone(), py_str(attr_name)],
                         vec![],
-                    );
+                    ) {
+                        // Add __notes__ to the exception: CPython adds a note like
+                        // "Error calling __set_name__ on 'Descriptor' instance 'attr' in 'Class'"
+                        let class_name = if let PyObject::Type { name, .. } = &*class.borrow() {
+                            name.clone()
+                        } else {
+                            "unknown".to_string()
+                        };
+                        let descr_name = if let PyObject::Type { name, .. } = &*t.borrow() {
+                            name.clone()
+                        } else {
+                            value.borrow().type_name().to_string()
+                        };
+                        let note = format!(
+                            "Error calling __set_name__ on '{}' instance '{}' in '{}'",
+                            descr_name, attr_name, class_name
+                        );
+                        let exc_obj = match &e {
+                            crate::object::PyError::Exception(_, obj) => obj.clone(),
+                            _ => {
+                                // Synthesize exception object from PyError
+                                let typ = e.type_name_for_display();
+                                let msg = e.message();
+                                crate::object::PyObjectRef::new(crate::object::PyObject::Exception {
+                                    typ: typ.clone(),
+                                    args: vec![crate::object::py_str(&msg)],
+                                    cause: None,
+                                    suppress_context: false,
+                                    context: None,
+                                    traceback: None,
+                                    extra: None,
+                                })
+                            }
+                        };
+                        {
+                            let mut borrowed = exc_obj.borrow_mut();
+                            if let crate::object::PyObject::Exception { extra, .. } = &mut *borrowed {
+                                let map = extra.get_or_insert_with(|| std::collections::HashMap::new());
+                                let old = map.get("__notes__").cloned().unwrap_or_else(|| crate::object::py_list(vec![]));
+                                let mut items = if let crate::object::PyObject::List(v) = &*old.borrow() {
+                                    v.clone()
+                                } else {
+                                    vec![]
+                                };
+                                items.push(crate::object::py_str(&note));
+                                map.insert("__notes__".to_string(), crate::object::py_list(items));
+                            } else if let crate::object::PyObject::Instance { dict, .. } = &mut *borrowed {
+                                let notes = dict.get("__notes__").cloned().unwrap_or_else(|| crate::object::py_list(vec![]));
+                                let mut items = if let crate::object::PyObject::List(v) = &*notes.borrow() { v.clone() } else { vec![] };
+                                items.push(crate::object::py_str(&note));
+                                dict.insert("__notes__".to_string(), crate::object::py_list(items));
+                            }
+                        }
+                        // Re-raise with notes attached
+                        match &e {
+                            crate::object::PyError::Exception(typ, _) => {
+                                return Err(crate::object::PyError::Exception(typ.clone(), exc_obj));
+                            }
+                            _ => {
+                                let typ = e.type_name_for_display();
+                                return Err(crate::object::PyError::Exception(typ, exc_obj));
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -11706,11 +11787,11 @@ impl VirtualMachine {
                 };
                 eprintln!("INIT_SUBCLASS: class={}", class_name);
             }
-            let _ = self.call_function(
+            self.call_function(
                 init_subclass,
                 vec![class.clone()],
                 init_subclass_kwargs.clone(),
-            );
+            )?;
         }
 
         Ok(class)
@@ -11818,11 +11899,11 @@ impl VirtualMachine {
                 None
             };
             let init_fn = unwrapped.unwrap_or(init_fn);
-            let _ = self.call_function(
+            self.call_function(
                 init_fn,
                 vec![cls.clone(), name_obj, bases_tuple, namespace_py_dict],
                 init_subclass_kwargs,
-            );
+            )?;
         }
 
         // ABC support: same as default_build_class — trigger when any MRO

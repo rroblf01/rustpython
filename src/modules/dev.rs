@@ -20,6 +20,18 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
+thread_local! {
+    static WARN_FILTER: std::cell::RefCell<String> = std::cell::RefCell::new("default".to_string());
+}
+
+thread_local! {
+    static WARN_FILTER_STACK: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+thread_local! {
+    static WARN_AS_ERROR: std::cell::RefCell<Option<(String, String)>> = const { std::cell::RefCell::new(None) };
+}
+
 fn warning_message_obj(message: PyObjectRef) -> PyObjectRef {
     let mut dict = AttrMap::new();
     dict.insert_str("message", message);
@@ -36,11 +48,47 @@ fn warning_message_obj(message: PyObjectRef) -> PyObjectRef {
 }
 
 pub(crate) fn warnings_emit(msg: &str, category: &str) {
+    let filter = WARN_FILTER.with(|f| f.borrow().clone());
+    if filter == "ignore" {
+        return;
+    }
+    if filter == "error" {
+        WARN_AS_ERROR.with(|c| {
+            *c.borrow_mut() = Some((msg.to_string(), category.to_string()));
+        });
+        return;
+    }
     let mut recorded = false;
     WARN_RECORD_STACK.with(|s| {
         if let Some(Some(list)) = s.borrow().last() {
             if let PyObject::List(items) = &mut *list.borrow_mut() {
-                let ex = PyObjectRef::new(PyObject::Exception {
+                let cat_obj = {
+                    let mut found: Option<PyObjectRef> = None;
+                    let result = std::panic::catch_unwind(|| {
+                        crate::vm::get_shared_builtins_module()
+                    });
+                    if let Ok(bmod) = result {
+                        if let PyObject::Module { dict, .. } = &*bmod.borrow() {
+                            if let Some(obj) = dict.get_str(category) {
+                                found = Some(obj.clone());
+                            }
+                        }
+                    }
+                    found.unwrap_or_else(|| {
+                        PyObjectRef::new(PyObject::Type {
+                            name: category.to_string(),
+                            dict: Box::new(str_map_to_typedict(HashMap::new())),
+                            bases: vec![],
+                            mro: vec![],
+                        })
+                    })
+                };
+                let mut dict = AttrMap::new();
+                // Create message as an Exception with `typ` being the warning category
+                // and `__class__` set to the actual category type (e.g., SyntaxWarning
+                // from builtins) so that `issubclass(message.__class__, SyntaxWarning)`
+                // is True via identity and `str(message)` is the warning text.
+                let mut msg_obj = PyObjectRef::new(PyObject::Exception {
                     typ: category.to_string(),
                     args: vec![py_str(msg)],
                     cause: None,
@@ -49,7 +97,23 @@ pub(crate) fn warnings_emit(msg: &str, category: &str) {
                     traceback: None,
                     extra: None,
                 });
-                items.push(warning_message_obj(ex));
+                let _ = msg_obj.borrow_mut().set_attribute("__class__", cat_obj.clone());
+                dict.insert_str("message", msg_obj);
+                dict.insert_str("category", cat_obj.clone());
+                dict.insert_str("filename", py_str("<input>"));
+                dict.insert_str("lineno", py_int(1));
+                dict.insert_str("line", py_str(""));
+                let warn_type = PyObjectRef::new(PyObject::Type {
+                    name: "WarningMessage".to_string(),
+                    dict: Box::new(str_map_to_typedict(HashMap::new())),
+                    bases: vec![],
+                    mro: vec![],
+                });
+                let warn_obj = PyObjectRef::new(PyObject::Instance {
+                    typ: warn_type,
+                    dict,
+                });
+                items.push(warn_obj);
                 recorded = true;
             }
         }
@@ -59,13 +123,30 @@ pub(crate) fn warnings_emit(msg: &str, category: &str) {
     }
 }
 
+pub(crate) fn warning_should_error() -> Option<(String, String)> {
+    WARN_AS_ERROR.with(|c| c.borrow_mut().take())
+}
+
+pub(crate) fn warning_is_error_mode() -> bool {
+    WARN_FILTER.with(|f| f.borrow().as_str() == "error")
+}
+
 pub(crate) fn warnings_push_record(list: Option<PyObjectRef>) {
     WARN_RECORD_STACK.with(|s| s.borrow_mut().push(list));
+    WARN_FILTER_STACK.with(|st| {
+        let cur = WARN_FILTER.with(|f| f.borrow().clone());
+        st.borrow_mut().push(cur);
+    });
 }
 
 pub(crate) fn warnings_pop_record() {
     WARN_RECORD_STACK.with(|s| {
         s.borrow_mut().pop();
+    });
+    WARN_FILTER_STACK.with(|st| {
+        if let Some(prev) = st.borrow_mut().pop() {
+            WARN_FILTER.with(|f| *f.borrow_mut() = prev);
+        }
     });
 }
 
@@ -128,13 +209,7 @@ pub fn create_warnings_dict() -> HashMap<String, PyObjectRef> {
             );
         };
     }
-
-    // Store simplefilter state in a thread-local
-    thread_local! {
-        static WARN_FILTER: std::cell::RefCell<String> = std::cell::RefCell::new("default".to_string());
-    }
-
-    // Real, shared `warnings.filters` state — was previously a fixed,
+// Real, shared `warnings.filters` state — was previously a fixed,
     // disconnected empty list (`d.insert_str("filters", py_list(vec![]))`
     // below) with `filterwarnings`/`_get_filters` both no-ops, so nothing
     // ever actually got recorded. `Lib/test/support/__init__.py`'s
@@ -167,7 +242,14 @@ pub fn create_warnings_dict() -> HashMap<String, PyObjectRef> {
             String::new()
         };
         let category = if args.len() > 1 {
-            args[1].borrow().type_name()
+            let cat_obj = &args[1];
+            let borrowed = cat_obj.borrow();
+            match &*borrowed {
+                PyObject::BuiltinFunction { name, .. } => name.clone(),
+                PyObject::Type { name, .. } => name.clone(),
+                PyObject::Exception { typ, .. } => typ.clone(),
+                _ => borrowed.type_name().to_string(),
+            }
         } else {
             "UserWarning".to_string()
         };
