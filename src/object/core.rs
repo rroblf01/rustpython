@@ -1003,6 +1003,13 @@ impl PyObjectRef {
         self.borrow().str()
     }
     pub fn truthy(&self) -> bool {
+        if let PyObject::WeakProxy { target, .. } = &*self.borrow() {
+            if let Some(rc) = target.upgrade() {
+                return PyObjectRef::Imm(rc).truthy();
+            } else {
+                return false;
+            }
+        }
         match self {
             PyObjectRef::SmallInt(n) => *n != 0,
             PyObjectRef::SmallBool(b) => *b,
@@ -1061,6 +1068,13 @@ impl PyObjectRef {
     /// swallowed). The infallible `truthy()` above is intentionally kept
     /// for places that genuinely cannot error (and would hang instead).
     pub fn try_truthy(&self) -> PyResult<bool> {
+        if let PyObject::WeakProxy { target, .. } = &*self.borrow() {
+            if let Some(rc) = target.upgrade() {
+                return PyObjectRef::Imm(rc).try_truthy();
+            } else {
+                return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+            }
+        }
         match self {
             PyObjectRef::SmallInt(n) => Ok(*n != 0),
             PyObjectRef::SmallBool(b) => Ok(*b),
@@ -1115,6 +1129,13 @@ impl PyObjectRef {
     }
 
     pub fn hash(&self) -> PyResult<usize> {
+        if let PyObject::WeakProxy { target, .. } = &*self.borrow() {
+            if let Some(rc) = target.upgrade() {
+                return PyObjectRef::Imm(rc).hash();
+            } else {
+                return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+            }
+        }
         match self {
             // `hash_bigint` (also used by boxed `PyObject::Int`/whole-number
             // `PyObject::Float`) — MUST stay identical to those so a value

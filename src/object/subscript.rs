@@ -281,6 +281,13 @@ pub(crate) fn extract_slice_fields(
 }
 
 pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRef> {
+    if let PyObject::WeakProxy { target, .. } = &*obj.borrow() {
+        if let Some(rc) = target.upgrade() {
+            return py_getitem(&PyObjectRef::Imm(rc), index);
+        } else {
+            return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+        }
+    }
     // Check for __getitem__ on custom classes and __class_getitem__ on types (PEP 560)
     let f = {
         let o = obj.borrow();
@@ -801,6 +808,13 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
 }
 
 pub fn py_setitem(obj: &PyObjectRef, index: &PyObjectRef, value: PyObjectRef) -> PyResult<()> {
+    if let PyObject::WeakProxy { target, .. } = &*obj.borrow() {
+        if let Some(rc) = target.upgrade() {
+            return py_setitem(&PyObjectRef::Imm(rc), index, value);
+        } else {
+            return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+        }
+    }
     // Check for __setitem__ on custom classes
     let f = {
         let o = obj.borrow();
@@ -1115,6 +1129,13 @@ pub fn py_setitem(obj: &PyObjectRef, index: &PyObjectRef, value: PyObjectRef) ->
 }
 
 pub fn py_delitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<()> {
+    if let PyObject::WeakProxy { target, .. } = &*obj.borrow() {
+        if let Some(rc) = target.upgrade() {
+            return py_delitem(&PyObjectRef::Imm(rc), index);
+        } else {
+            return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+        }
+    }
     // Check for __delitem__ on custom classes
     let f = {
         let o = obj.borrow();

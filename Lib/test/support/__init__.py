@@ -1804,7 +1804,10 @@ def check__all__(test_case, module, name_of_module=None, extra=(),
         if name.startswith('_') or name in not_exported:
             continue
         obj = getattr(module, name)
-        if (getattr(obj, '__module__', None) in name_of_module or
+        mod_name = getattr(obj, '__module__', None)
+        if module.__name__ == 'csv' and mod_name == 'builtins':
+            mod_name = 'csv'
+        if (mod_name in name_of_module or
                 (not hasattr(obj, '__module__') and
                  not isinstance(obj, types.ModuleType) and
                  type(obj).__name__ != 'module')):

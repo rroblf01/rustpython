@@ -78,6 +78,8 @@ pub(crate) fn is_recognized_native_base_name(name: &str) -> bool {
             | "bytearray"
             | "frozenset"
             | "deque"
+            | "SimpleNamespace"
+            | "types.SimpleNamespace"
     )
 }
 

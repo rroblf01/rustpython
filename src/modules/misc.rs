@@ -10,6 +10,105 @@ thread_local! {
     pub static LOG_LEVEL: std::cell::RefCell<String> = std::cell::RefCell::new("WARNING".to_string());
 }
 
+// ---- weakref registry ----
+use std::rc::Weak as RcWeak;
+use std::cell::RefCell as StdRefCell;
+
+thread_local! {
+    static WEAKREF_REGISTRY: StdRefCell<HashMap<usize, Vec<WeakEntry>>> = StdRefCell::new(HashMap::new());
+}
+struct WeakEntry {
+    weakref: RcWeak<StdRefCell<PyObject>>,
+    callback: Option<PyObjectRef>,
+}
+fn is_weakrefable(obj: &PyObjectRef) -> bool {
+    !matches!(
+        &*obj.borrow(),
+        PyObject::None
+            | PyObject::Bool(_)
+            | PyObject::Int(_)
+            | PyObject::Float(_)
+            | PyObject::Complex(..)
+            | PyObject::Str(_)
+            | PyObject::Bytes(_)
+            | PyObject::Tuple(_)
+            | PyObject::Code { .. }
+            | PyObject::BuiltinFunction { .. }
+    ) && matches!(obj, PyObjectRef::Mut(_) | PyObjectRef::Imm(_))
+}
+fn target_ptr(obj: &PyObjectRef) -> Option<usize> {
+    match obj {
+        PyObjectRef::Mut(rc) | PyObjectRef::Imm(rc) => Some(std::rc::Rc::as_ptr(rc) as usize),
+        _ => None,
+    }
+}
+fn register_weakref(target: usize, weakref_obj: &PyObjectRef, callback: Option<PyObjectRef>) {
+    let weak = match weakref_obj {
+        PyObjectRef::Mut(rc) | PyObjectRef::Imm(rc) => std::rc::Rc::downgrade(rc),
+        _ => return,
+    };
+    WEAKREF_REGISTRY.with(|r| {
+        let mut m = r.borrow_mut();
+        let entry = WeakEntry { weakref: weak, callback };
+        m.entry(target).or_default().push(entry);
+    });
+}
+fn find_shared_weakref(target: usize) -> Option<PyObjectRef> {
+    WEAKREF_REGISTRY.with(|r| {
+        let mut m = r.borrow_mut();
+        if let Some(vec) = m.get_mut(&target) {
+            vec.retain(|e| e.weakref.upgrade().is_some());
+            for e in vec.iter() {
+                if e.callback.is_none() {
+                    if let Some(rc) = e.weakref.upgrade() {
+                        return Some(PyObjectRef::Imm(rc));
+                    }
+                }
+            }
+        }
+        None
+    })
+}
+pub fn run_weakref_callbacks() {
+    let mut to_call: Vec<(PyObjectRef, PyObjectRef)> = Vec::new();
+    WEAKREF_REGISTRY.with(|r| {
+        let mut m = r.borrow_mut();
+        let keys: Vec<usize> = m.keys().cloned().collect();
+        for k in keys {
+            let mut live_entries = Vec::new();
+            if let Some(vec) = m.get(&k) {
+                for e in vec {
+                    if let Some(rc) = e.weakref.upgrade() {
+                        let target_alive = {
+                            let b = rc.borrow();
+                            match &*b {
+                                PyObject::WeakRef { target, .. } | PyObject::WeakProxy { target, .. } => target.upgrade().is_some(),
+                                _ => true,
+                            }
+                        };
+                        if target_alive {
+                            live_entries.push(WeakEntry { weakref: std::rc::Rc::downgrade(&rc), callback: e.callback.clone() });
+                        } else {
+                            if let Some(cb) = e.callback.clone() {
+                                let wr_obj = PyObjectRef::Imm(rc.clone());
+                                to_call.push((wr_obj, cb));
+                            }
+                        }
+                    }
+                }
+            }
+            if live_entries.is_empty() {
+                m.remove(&k);
+            } else {
+                m.insert(k, live_entries);
+            }
+        }
+    });
+    for (wr, cb) in to_call {
+        let _ = crate::object::builtins::call_function_disposable(&cb, vec![wr.clone()], vec![]);
+    }
+}
+
 pub fn logging_debug(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() < 2 {
         return Ok(py_none());
@@ -894,30 +993,77 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         if args.len() < 2 {
             return Err(PyError::type_error("split() takes at least 2 arguments"));
         }
-        let pattern = args[0].str();
-        let string = args[1].str();
-        let limit = if args.len() > 2 {
-            args[2].as_i64().unwrap_or(0) as usize
+        // Support `re.split(compiled_pat, string)` where pattern is already CompiledRegex
+        let is_compiled = matches!(&*args[0].borrow(), PyObject::CompiledRegex { .. });
+        let (re, string, maxsplit) = if is_compiled {
+            let re = if let PyObject::CompiledRegex { regex, .. } = &*args[0].borrow() {
+                (**regex).clone()
+            } else {
+                unreachable!()
+            };
+            let string = args[1].str();
+            let maxsplit = {
+                let has_kwargs = args.last().map_or(false, |a| matches!(&*a.borrow(), PyObject::Dict(_)));
+                if has_kwargs {
+                    if let PyObject::Dict(d) = &*args.last().unwrap().borrow() {
+                        d.get(&py_str("maxsplit")).ok().flatten().and_then(|v| v.as_i64()).unwrap_or(0) as usize
+                    } else { 0 }
+                } else if args.len() > 2 {
+                    args[2].as_i64().unwrap_or(0) as usize
+                } else { 0 }
+            };
+            (re, string, maxsplit)
         } else {
-            0
+            let pattern = args[0].str();
+            let has_kwargs = args.last().map_or(false, |a| matches!(&*a.borrow(), PyObject::Dict(_)));
+            let (string, maxsplit, flags) = if has_kwargs {
+                let d = if let PyObject::Dict(d) = &*args.last().unwrap().borrow() { d.clone() } else { Box::new(crate::object::PyDict::new()) };
+                let ms = d.get(&py_str("maxsplit")).ok().flatten().and_then(|v| v.as_i64()).unwrap_or(0) as usize;
+                let fl = d.get(&py_str("flags")).ok().flatten().and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                (args[1].str(), ms, fl)
+            } else {
+                let ms = if args.len() > 2 { args[2].as_i64().unwrap_or(0) as usize } else { 0 };
+                let fl = if args.len() > 3 { args[3].as_i64().unwrap_or(0) as i32 } else { 0 };
+                (args[1].str(), ms, fl)
+            };
+            let re = match compile_python_regex_flags(&pattern, flags) {
+                Ok(r) => r,
+                Err(e) => return Err(PyError::ValueError(format!("invalid regex: {}", e))),
+            };
+            (re, string, maxsplit)
         };
-        match compile_python_regex(&pattern) {
-            Ok(re) => {
-                let parts: Vec<PyObjectRef> = if limit > 0 {
-                    re.splitn(&string, limit)
-                        .filter_map(|r| r.ok())
-                        .map(|s| py_str(s))
-                        .collect()
-                } else {
-                    re.split(&string)
-                        .filter_map(|r| r.ok())
-                        .map(|s| py_str(s))
-                        .collect()
-                };
-                Ok(py_list(parts))
+        // Python's re.split includes captured groups; manual loop over captures
+        let mut result: Vec<PyObjectRef> = Vec::new();
+        let mut last_end = 0usize;
+        let mut n = 0usize;
+        let mut caps_iter = re.captures_iter(&string);
+        while let Some(caps_res) = caps_iter.next() {
+            let caps = match caps_res { Ok(c) => c, Err(_) => break };
+            if maxsplit != 0 && n >= maxsplit { break; }
+            let m = caps.get(0).unwrap();
+            let (s, e) = (m.start(), m.end());
+            if s == e {
+                if s == string.len() { break; }
+                if s == last_end {
+                    result.push(py_str(&string[last_end..s]));
+                    for i in 1..caps.len() {
+                        if let Some(g) = caps.get(i) { result.push(py_str(g.as_str())); } else { result.push(py_none()); }
+                    }
+                    let next_len = string[s..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+                    last_end = s + next_len;
+                    n += 1;
+                    continue;
+                }
             }
-            Err(e) => Err(PyError::ValueError(format!("invalid regex: {}", e))),
+            result.push(py_str(&string[last_end..s]));
+            for i in 1..caps.len() {
+                if let Some(g) = caps.get(i) { result.push(py_str(g.as_str())); } else { result.push(py_none()); }
+            }
+            last_end = e;
+            n += 1;
         }
+        result.push(py_str(&string[last_end..]));
+        Ok(py_list(result))
     });
 
     re_func!("compile", |args| {
@@ -1617,8 +1763,18 @@ pub fn create_weakref_dict() -> HashMap<String, PyObjectRef> {
     d.insert_str("ProxyType", py_str("weakproxy"));
     d.insert_str("CallableProxyType", py_str("weakcallableproxy"));
 
-    // Internal function used by weakrefset
-    wr_func!("_remove_dead_weakref", |_| Ok(py_none()));
+    // Internal function used by weakrefset: _remove_dead_weakref(dict, key)
+    wr_func!("_remove_dead_weakref", |args| {
+        if args.len() >= 2 {
+            let dict = &args[0];
+            let key = &args[1];
+            let mut b = dict.borrow_mut();
+            if let PyObject::Dict(d) = &mut *b {
+                let _ = d.remove(key);
+            }
+        }
+        Ok(py_none())
+    });
 
     d
 }
@@ -10099,10 +10255,11 @@ pub fn create_array_dict() -> HashMap<String, PyObjectRef> {
                 // typecodes are ACCEPTED (and read back as `int` vs `float` per
                 // `array_typecode_is_float` below) fixes the far more common
                 // "construction rejected outright" failure mode.
-                if !"bBuhHiIlLqQfd".contains(typecode) {
+                if !"bBuhHiIlLqQfdwu".contains(typecode) {
                     return Err(PyError::value_error(format!("bad typecode '{}'", typecode)));
                 }
                 let is_float = array_typecode_is_float(typecode);
+                let is_unicode = typecode == 'w' || typecode == 'u';
                 let mut data: Vec<f64> = Vec::new();
                 if args.len() > 1 {
                     let init = &args[1];
@@ -10112,6 +10269,10 @@ pub fn create_array_dict() -> HashMap<String, PyObjectRef> {
                             for item in items {
                                 if is_float {
                                     data.push(item.as_f64().unwrap_or(0.0));
+                                } else if is_unicode {
+                                    let s = item.str();
+                                    let ch = s.chars().next().unwrap_or('\0') as u32 as f64;
+                                    data.push(ch);
                                 } else {
                                     data.push(item.as_i64().unwrap_or(0) as f64);
                                 }
@@ -10121,9 +10282,18 @@ pub fn create_array_dict() -> HashMap<String, PyObjectRef> {
                             for item in items {
                                 if is_float {
                                     data.push(item.as_f64().unwrap_or(0.0));
+                                } else if is_unicode {
+                                    let s = item.str();
+                                    let ch = s.chars().next().unwrap_or('\0') as u32 as f64;
+                                    data.push(ch);
                                 } else {
                                     data.push(item.as_i64().unwrap_or(0) as f64);
                                 }
+                            }
+                        }
+                        PyObject::Str(s) if is_unicode => {
+                            for ch in s.chars() {
+                                data.push(ch as u32 as f64);
                             }
                         }
                         _ => {
@@ -10134,6 +10304,10 @@ pub fn create_array_dict() -> HashMap<String, PyObjectRef> {
                                     Ok(item) => {
                                         if is_float {
                                             data.push(item.as_f64().unwrap_or(0.0));
+                                        } else if is_unicode {
+                                            let s = item.str();
+                                            let ch = s.chars().next().unwrap_or('\0') as u32 as f64;
+                                            data.push(ch);
                                         } else {
                                             data.push(item.as_i64().unwrap_or(0) as f64);
                                         }
@@ -10495,6 +10669,7 @@ pub fn create_gc_dict() -> HashMap<String, PyObjectRef> {
     // not wired into the object model at all).
     gc_func!("collect", |args| {
         let collected = crate::cycle_gc::collect();
+        run_weakref_callbacks();
         let _ = crate::object::with_vm_mut(|vm| vm.run_pending_finalizers());
         let _ = args;
         Ok(py_int(collected as i64))

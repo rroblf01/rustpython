@@ -1983,7 +1983,7 @@ pub fn builtin_str(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         ));
     } else {
         // WeakProxy: str(proxy) forwards to str(target) if alive, else ReferenceError.
-        if let PyObject::WeakProxy { target } = &*args[0].borrow() {
+        if let PyObject::WeakProxy { target, .. } = &*args[0].borrow() {
             if let Some(rc) = target.upgrade() {
                 let target_ref = PyObjectRef::Mut(rc);
                 return builtin_str(&[target_ref]);
@@ -4156,6 +4156,15 @@ pub fn builtin_enumerate(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 }
 
 pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() == 1 {
+        if let PyObject::WeakProxy { target, .. } = &*args[0].borrow() {
+            if let Some(rc) = target.upgrade() {
+                return builtin_iter(&[PyObjectRef::Imm(rc)]);
+            } else {
+                return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+            }
+        }
+    }
     // Two-argument form: `iter(callable, sentinel)` — calls `callable()`
     // repeatedly, yielding each result until one equals `sentinel`. Real,
     // commonly-used Python (`iter(file.readline, '')` is the classic
@@ -4239,6 +4248,9 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 .map(|v| {
                     if crate::object::array_typecode_is_float(arr.typecode) {
                         py_float(*v)
+                    } else if arr.typecode == 'w' || arr.typecode == 'u' {
+                        let ch = (*v as u32).try_into().ok().and_then(char::from_u32).unwrap_or('\0');
+                        py_str(&ch.to_string())
                     } else {
                         py_int(*v as i64)
                     }

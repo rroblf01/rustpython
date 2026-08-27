@@ -338,6 +338,18 @@ fn unbound_local_msg(f: &Frame, idx: usize) -> PyError {
     ))
 }
 
+fn deref_proxy(obj: &PyObjectRef) -> PyResult<PyObjectRef> {
+    if let PyObject::WeakProxy { target, .. } = &*obj.borrow() {
+        if let Some(rc) = target.upgrade() {
+            Ok(PyObjectRef::Imm(rc))
+        } else {
+            Err(PyError::reference_error("weakly-referenced object no longer exists"))
+        }
+    } else {
+        Ok(obj.clone())
+    }
+}
+
 /// In-place (`arg >= 100`) BINARY_OP semantics shared by the opcode handler
 /// and fused superinstructions. Returns `Ok(None)` when the operation has no
 /// dedicated in-place form and must fall through to `plain_binary_op`.
@@ -346,6 +358,8 @@ pub(crate) fn inplace_binary_op(
     right: &PyObjectRef,
     op: u32,
 ) -> PyResult<Option<PyObjectRef>> {
+    let left = deref_proxy(left)?;
+    let right = deref_proxy(right)?;
                 let right = right.clone();
                 let in_place = true;
                 if in_place {
@@ -539,33 +553,35 @@ pub(crate) fn plain_binary_op(
     right: &PyObjectRef,
     op: u32,
 ) -> PyResult<PyObjectRef> {
+    let left_d = deref_proxy(left)?;
+    let right_d = deref_proxy(right)?;
     Ok(match op {
-        0 => py_add(left, right)?,
-        1 => py_sub(left, right)?,
-        2 => py_mul(left, right)?,
-        3 => py_div(left, right)?,
-        4 => py_floor_div(left, right)?,
-        5 => py_mod(left, right)?,
-        6 => py_pow(left, right)?,
-        7 => py_lshift(left, right)?,
-        8 => py_rshift(left, right)?,
-        9 => py_bit_or(left, right)?,
-        10 => py_bit_xor(left, right)?,
-        11 => py_bit_and(left, right)?,
+        0 => py_add(&left_d, &right_d)?,
+        1 => py_sub(&left_d, &right_d)?,
+        2 => py_mul(&left_d, &right_d)?,
+        3 => py_div(&left_d, &right_d)?,
+        4 => py_floor_div(&left_d, &right_d)?,
+        5 => py_mod(&left_d, &right_d)?,
+        6 => py_pow(&left_d, &right_d)?,
+        7 => py_lshift(&left_d, &right_d)?,
+        8 => py_rshift(&left_d, &right_d)?,
+        9 => py_bit_or(&left_d, &right_d)?,
+        10 => py_bit_xor(&left_d, &right_d)?,
+        11 => py_bit_and(&left_d, &right_d)?,
         12 => {
-            if let Some(r) = crate::object::try_dunder_binop(left, right, "__matmul__")? {
+            if let Some(r) = crate::object::try_dunder_binop(&left_d, &right_d, "__matmul__")? {
                 r
-            } else if let Some(r) = crate::object::try_dunder_binop(right, left, "__rmatmul__")? {
+            } else if let Some(r) = crate::object::try_dunder_binop(&right_d, &left_d, "__rmatmul__")? {
                 r
             } else {
                 return Err(PyError::type_error(format!(
                     "unsupported operand type(s) for @: '{}' and '{}'",
-                    left.borrow().type_name(),
-                    right.borrow().type_name()
+                    left_d.borrow().type_name(),
+                    right_d.borrow().type_name()
                 )));
             }
         }
-        13 => py_getitem(left, right)?,
+        13 => py_getitem(&left_d, &right_d)?,
         _ => return Err(PyError::runtime_error(format!("unknown binary op: {}", op))),
     })
 }
@@ -1186,13 +1202,12 @@ impl VirtualMachine {
             create_module("collections.abc", collections_abc_dict),
         );
 
-        // Native weakref module (replaces CPython weakref.py)
-        let mut weakref_mod_dict = weakref_dict; // Start from _weakref
-                                                 // Add WeakValueDictionary and WeakKeyDictionary as dict-like stubs
-        weakref_mod_dict.insert_str("WeakValueDictionary", create_weakref_weak_val_dict());
-        weakref_mod_dict.insert_str("WeakKeyDictionary", create_weakref_weak_key_dict());
-        weakref_mod_dict.insert_str("WeakSet", create_weakref_weak_set());
-        modules.insert_str("weakref", create_module("weakref", weakref_mod_dict));
+        // Native weakref module DISABLED: use Lib/weakref.py (needs only _weakref primitives)
+        // let mut weakref_mod_dict = weakref_dict; // Start from _weakref
+        // weakref_mod_dict.insert_str("WeakValueDictionary", create_weakref_weak_val_dict());
+        // weakref_mod_dict.insert_str("WeakKeyDictionary", create_weakref_weak_key_dict());
+        // weakref_mod_dict.insert_str("WeakSet", create_weakref_weak_set());
+        // modules.insert_str("weakref", create_module("weakref", weakref_mod_dict));
 
         // Native copy module DISABLED: use Lib/copy.py
         // modules.insert_str("copy", create_module("copy", create_copy_dict()));
@@ -1236,11 +1251,14 @@ impl VirtualMachine {
         // Native fnmatch module
         modules.insert_str("fnmatch", create_module("fnmatch", create_fnmatch_dict()));
 
-        // Native textwrap module
-        modules.insert_str(
-            "textwrap",
-            create_module("textwrap", create_textwrap_dict()),
-        );
+        // Native textwrap module DISABLED: use Lib/textwrap.py (CPython 3.14)
+        // The native implementation was incomplete (simple whitespace
+        // splitting, missing hyphen handling, dedent/indent bugs, missing
+        // _split, etc.) and shadowed the correct pure-Python stdlib.
+        // modules.insert_str(
+        //     "textwrap",
+        //     create_module("textwrap", create_textwrap_dict()),
+        // );
 
         // `pprint` and `reprlib` are loaded from the vendored real CPython
         // Lib/ modules (their class-based APIs — PrettyPrinter/Repr — are
@@ -1325,7 +1343,11 @@ impl VirtualMachine {
         modules.insert_str("sunau", create_module("sunau", create_sunau_dict()));
 
         // Native csv module
-        modules.insert_str("csv", create_module("csv", create_csv_dict()));
+        let csv_dict = create_csv_dict();
+        let csv_mod = create_module("csv", csv_dict.clone());
+        let csv_mod2 = create_module("_csv", csv_dict);
+        modules.insert_str("csv", csv_mod.clone());
+        modules.insert_str("_csv", csv_mod2);
 
         // Native io module — DISABLED: CPython io.py is used instead (imports from _io)
         // modules.insert_str("io", create_module("io", create_io_dict()));
@@ -4915,6 +4937,26 @@ impl VirtualMachine {
                                 index: 0,
                             }));
                         }
+                        PyObject::Array(arr) => {
+                            let items: Vec<PyObjectRef> = arr
+                                .data
+                                .iter()
+                                .map(|v| {
+                                    if crate::object::array_typecode_is_float(arr.typecode) {
+                                        py_float(*v)
+                                    } else if arr.typecode == 'w' || arr.typecode == 'u' {
+                                        let ch = (*v as u32).try_into().ok().and_then(char::from_u32).unwrap_or('\0');
+                                        py_str(&ch.to_string())
+                                    } else {
+                                        py_int(*v as i64)
+                                    }
+                                })
+                                .collect();
+                            self.frames[fi].push(PyObjectRef::new(PyObject::ListIter {
+                                list: items,
+                                index: 0,
+                            }));
+                        }
                         PyObject::MemoryView { .. } => {
                             drop(obj);
                             let iterator = crate::object::builtin_iter(&[val.clone()])?;
@@ -5052,10 +5094,17 @@ impl VirtualMachine {
                             }));
                         }
                         _ => {
-                            return Err(PyError::type_error(format!(
-                                "'{}' object is not iterable",
-                                obj.type_name()
-                            )))
+                            let type_name = obj.type_name();
+                            drop(obj);
+                            match crate::object::builtin_iter(&[val.clone()]) {
+                                Ok(it) => self.frames[fi].push(it),
+                                Err(_) => {
+                                    return Err(PyError::type_error(format!(
+                                        "'{}' object is not iterable",
+                                        type_name
+                                    )))
+                                }
+                            }
                         }
                     }
                 }
@@ -5240,6 +5289,7 @@ impl VirtualMachine {
                 let name_idx = arg as usize;
                 let name = crate::interner::lookup(self.frames[fi].code.names[name_idx]);
                 let obj = self.frames[fi].pop()?;
+                let obj = deref_proxy(&obj)?;
                 let result = {
                     let obj_borrowed = obj.borrow();
                     match &*obj_borrowed {
@@ -9571,7 +9621,7 @@ impl VirtualMachine {
         // Calling a weak reference (`w()`) dereferences it: yields the
         // referent while alive, otherwise `None` — or the caller-supplied
         // default when one is passed (`w(default)`), matching CPython.
-        if let PyObject::WeakRef { target } = &*callable.borrow() {
+        if let PyObject::WeakRef { target, .. } = &*callable.borrow() {
             return Ok(match target.upgrade() {
                 Some(rc) => PyObjectRef::Imm(rc),
                 None => {
@@ -9582,6 +9632,15 @@ impl VirtualMachine {
                     }
                 }
             });
+        }
+        // Callable proxy: proxy is callable if target is callable
+        if let PyObject::WeakProxy { target, .. } = &*callable.borrow() {
+            if let Some(rc) = target.upgrade() {
+                let target_ref = PyObjectRef::Imm(rc);
+                return self.call_function(target_ref, args.to_vec(), keywords);
+            } else {
+                return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+            }
         }
 
         if let PyObject::BoundMethod { func, self_obj } = &*callable.borrow() {

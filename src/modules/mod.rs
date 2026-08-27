@@ -14,7 +14,7 @@ pub use dev::*;
 
 mod files;
 pub use files::*;
-mod misc;
+pub mod misc;
 mod time;
 pub use misc::*;
 pub use time::*;

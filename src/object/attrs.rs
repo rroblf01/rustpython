@@ -768,6 +768,14 @@ impl PyObject {
                     name
                 ))),
             },
+            PyObject::WeakProxy { target, .. } => {
+                if let Some(rc) = target.upgrade() {
+                    let t = PyObjectRef::Imm(rc);
+                    return t.borrow().get_attribute(name);
+                } else {
+                    return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+                }
+            }
             PyObject::Module {
                 dict,
                 name: mod_name,
@@ -6901,22 +6909,40 @@ impl PyObject {
                             if a.len() < 2 || matches!(&*a[1].borrow(), PyObject::None) {
                                 return Ok(py_str(&s));
                             }
-                            // `str.translate(table)` — `table` is a mapping
-                            // produced by `str.maketrans`: {char:
-                            // replacement_str_or_None}. A `None` value DELETES
-                            // the char. Previously a no-op stub.
+                            // `str.translate(table)` — `table` maps Unicode ordinal (int) or
+                            // single-char string to ordinal, string, or None (delete). Must
+                            // handle both int and str keys, and int/str/None values.
                             let table = a[1].clone();
                             let mut result = String::new();
                             for ch in s.chars() {
-                                let key = py_str(&ch.to_string());
+                                let key_str = py_str(&ch.to_string());
+                                let key_int = py_int(ch as i64);
                                 let replacement = match &*table.borrow() {
-                                    PyObject::Dict(d) => d.get(&key).ok().flatten(),
+                                    PyObject::Dict(d) => {
+                                        if let Some(v) = d.get(&key_int).ok().flatten() {
+                                            Some(v)
+                                        } else {
+                                            d.get(&key_str).ok().flatten()
+                                        }
+                                    }
                                     _ => None,
                                 };
                                 match replacement {
                                     None => result.push(ch),
-                                    Some(r) if matches!(&*r.borrow(), PyObject::None) => {}
-                                    Some(r) => result.push_str(&r.str()),
+                                    Some(r) => {
+                                        if matches!(&*r.borrow(), PyObject::None) {
+                                        } else if let Some(ord) = r.as_i64() {
+                                            if let Some(c) = char::from_u32(ord as u32) {
+                                                result.push(c);
+                                            } else {
+                                                result.push_str(&r.str());
+                                            }
+                                        } else if let PyObject::Str(ss) = &*r.borrow() {
+                                            result.push_str(ss);
+                                        } else {
+                                            result.push_str(&r.str());
+                                        }
+                                    }
                                 }
                             }
                             Ok(py_str(&result))
@@ -11391,23 +11417,47 @@ impl PyObject {
                                 ));
                             }
                             let string = args[0].str();
-                            let limit = if args.len() > 1 {
-                                args[1].as_i64().unwrap_or(0) as usize
-                            } else {
-                                0
+                            let maxsplit = {
+                                let has_kwargs = args.last().map_or(false, |a| matches!(&*a.borrow(), PyObject::Dict(_)));
+                                if has_kwargs {
+                                    if let PyObject::Dict(d) = &*args.last().unwrap().borrow() {
+                                        d.get(&py_str("maxsplit")).ok().flatten().and_then(|v| v.as_i64()).unwrap_or(0) as usize
+                                    } else { 0 }
+                                } else if args.len() > 1 {
+                                    if matches!(&*args[1].borrow(), PyObject::Dict(_)) { 0 } else { args[1].as_i64().unwrap_or(0) as usize }
+                                } else { 0 }
                             };
-                            let parts: Vec<PyObjectRef> = if limit > 0 {
-                                re.splitn(&string, limit)
-                                    .filter_map(|r| r.ok())
-                                    .map(|s| py_str(s))
-                                    .collect()
-                            } else {
-                                re.split(&string)
-                                    .filter_map(|r| r.ok())
-                                    .map(|s| py_str(s))
-                                    .collect()
-                            };
-                            Ok(py_list(parts))
+                            let mut result: Vec<PyObjectRef> = Vec::new();
+                            let mut last_end = 0usize;
+                            let mut n = 0usize;
+                            let mut caps_iter = re.captures_iter(&string);
+                            while let Some(caps_res) = caps_iter.next() {
+                                let caps = match caps_res { Ok(c) => c, Err(_) => break };
+                                if maxsplit != 0 && n >= maxsplit { break; }
+                                let m = caps.get(0).unwrap();
+                                let (s, e) = (m.start(), m.end());
+                                if s == e {
+                                    if s == string.len() { break; }
+                                    if s == last_end {
+                                        result.push(py_str(&string[last_end..s]));
+                                        for i in 1..caps.len() {
+                                            if let Some(g) = caps.get(i) { result.push(py_str(g.as_str())); } else { result.push(py_none()); }
+                                        }
+                                        let next_len = string[s..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+                                        last_end = s + next_len;
+                                        n += 1;
+                                        continue;
+                                    }
+                                }
+                                result.push(py_str(&string[last_end..s]));
+                                for i in 1..caps.len() {
+                                    if let Some(g) = caps.get(i) { result.push(py_str(g.as_str())); } else { result.push(py_none()); }
+                                }
+                                last_end = e;
+                                n += 1;
+                            }
+                            result.push(py_str(&string[last_end..]));
+                            Ok(py_list(result))
                         },
                     )))),
                     "fullmatch" => Ok(PyObjectRef::imm(PyObject::Closure(Rc::new(
@@ -13061,6 +13111,14 @@ impl ObjectAccess for PyObject {
                 // don't track those fields anywhere.
                 Ok(())
             }
+            PyObject::WeakProxy { target, .. } => {
+                if let Some(rc) = target.upgrade() {
+                    let t = PyObjectRef::Imm(rc);
+                    return t.borrow_mut().set_attribute(name, value);
+                } else {
+                    return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+                }
+            }
             _ => Err(PyError::attribute_error(format!(
                 "cannot set attribute '{}' on '{}'",
                 name,
@@ -13105,6 +13163,14 @@ impl ObjectAccess for PyObject {
                     PyError::attribute_error(format!("type has no attribute '{}'", name))
                 })?;
                 Ok(())
+            }
+            PyObject::WeakProxy { target, .. } => {
+                if let Some(rc) = target.upgrade() {
+                    let t = PyObjectRef::Imm(rc);
+                    return t.borrow_mut().del_attribute(name);
+                } else {
+                    return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+                }
             }
             _ => Err(PyError::attribute_error(format!(
                 "'{}' object has no attribute '{}'",
