@@ -570,6 +570,18 @@ pub fn py_div(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
         }
         return Ok(py_float(ai as f64 / bi as f64));
     }
+    // Float fast path including SmallFloat (e.g. 0.0 is SmallFloat, not
+    // PyObject::Float, so the match below would miss it and return nan
+    // instead of ZeroDivisionError for 0.0/0.0 – breaking
+    // linear_regression's constant-input check).
+    if a.is_float_typed() || b.is_float_typed() {
+        if let (Some(af), Some(bf)) = (a.as_f64(), b.as_f64()) {
+            if bf == 0.0 {
+                return Err(PyError::zero_division());
+            }
+            return Ok(py_float(af / bf));
+        }
+    }
     if let Some(r) = try_dunder_binop(a, b, "__truediv__")? {
         return Ok(r);
     }

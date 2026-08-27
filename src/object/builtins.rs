@@ -5171,7 +5171,24 @@ pub fn builtin_vars(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
     let obj = args[0].borrow();
     match &*obj {
-        PyObject::Instance { dict, .. } => {
+        PyObject::Instance { dict, typ } => {
+            // NormalDist and other __slots__ classes without __dict__ should
+            // raise TypeError for vars() – CPython's `test_statistics`
+            // expects `vars(NormalDist(...))` to fail. Our slotted instances
+            // still carry a dict for attribute storage, so vars() would
+            // incorrectly succeed. Check the type's __slots__.
+            if let PyObject::Type { dict: tdict, .. } = &*typ.borrow() {
+                if let Some(slots) = tdict.get_str("__slots__") {
+                    let is_slots_without_dict = match &*slots.borrow() {
+                        PyObject::Tuple(items) => !items.iter().any(|v| v.str() == "__dict__"),
+                        PyObject::Str(s) => s != "__dict__",
+                        _ => true,
+                    };
+                    if is_slots_without_dict {
+                        return Err(PyError::type_error("vars() argument must have __dict__ attribute"));
+                    }
+                }
+            }
             let mut pd = PyDict::new();
             for (k, v) in dict.iter() {
                 pd.set(py_str(k), v.clone())?;

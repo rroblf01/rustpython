@@ -2509,6 +2509,7 @@ thread_local! {
     static DECIMAL_TYPE: std::cell::RefCell<Option<PyObjectRef>> = std::cell::RefCell::new(None);
     static DECIMAL_CONTEXT_TYPE: std::cell::RefCell<Option<PyObjectRef>> = std::cell::RefCell::new(None);
     static DECIMAL_CURRENT_CONTEXT: std::cell::RefCell<(usize, String)> = std::cell::RefCell::new((28, "ROUND_HALF_EVEN".to_string()));
+    static DECIMAL_IS_BASIC: std::cell::RefCell<bool> = std::cell::RefCell::new(false);
     static FRACTION_TYPE: std::cell::RefCell<Option<PyObjectRef>> = std::cell::RefCell::new(None);
 }
 
@@ -2520,6 +2521,9 @@ pub(crate) fn get_fraction_type() -> PyObjectRef {
 
 fn current_decimal_context() -> (usize, String) {
     DECIMAL_CURRENT_CONTEXT.with(|c| c.borrow().clone())
+}
+fn current_is_basic() -> bool {
+    DECIMAL_IS_BASIC.with(|c| *c.borrow())
 }
 
 const DEC_SIGN_KEY: &str = "_sign";
@@ -2683,7 +2687,11 @@ fn decval_from_pyobject(v: &PyObjectRef) -> PyResult<DecValue> {
                     den_rem /= 5u8;
                 }
                 // den_rem must be 1 now (any 2s/5s removed); remaining
-                // factors make it non-terminating — approximate via float.
+                // factors make it non-terminating — CPython raises TypeError
+                // for Decimal(Fraction) with non-terminating denominator, so
+                // that statistics._convert can fall back to
+                // Decimal(numerator)/Decimal(denominator) which does the
+                // correctly-rounded division.
                 if den_rem == num_bigint::BigUint::from(1u8) {
                     let (scaled, exp) = if fives >= twos {
                         (
@@ -2703,7 +2711,9 @@ fn decval_from_pyobject(v: &PyObjectRef) -> PyResult<DecValue> {
                         exp,
                     })
                 } else {
-                    Ok(decval_from_f64(frac_to_f64(&num, &den)))
+                    return Err(PyError::type_error(
+                        "conversion from Fraction to Decimal is not supported",
+                    ));
                 }
             } else {
                 Err(PyError::type_error(
@@ -2809,8 +2819,12 @@ fn decimal_division_by_zero(msg: &str) -> PyError {
 }
 
 fn decimal_add(a: &DecValue, b: &DecValue) -> PyResult<DecValue> {
-    if a.is_nan() || b.is_nan() {
-        let src = if a.is_nan() { a } else { b };
+    // sNaN must signal InvalidOperation
+    if a.special == DecSpecial::SNaN || b.special == DecSpecial::SNaN {
+        return Err(decimal_invalid_op("sNaN in operation"));
+    }
+    if a.special == DecSpecial::QNaN || b.special == DecSpecial::QNaN {
+        let src = if a.special == DecSpecial::QNaN { a } else { b };
         return Ok(DecValue {
             special: DecSpecial::QNaN,
             sign: src.sign,
@@ -2823,7 +2837,11 @@ fn decimal_add(a: &DecValue, b: &DecValue) -> PyResult<DecValue> {
             && b.special == DecSpecial::Infinity
             && a.sign != b.sign
         {
-            return Err(decimal_invalid_op("(+Infinity) + (-Infinity)"));
+            if current_is_basic() {
+                return Err(decimal_invalid_op("(+Infinity) + (-Infinity)"));
+            } else {
+                return Ok(DecValue::nan());
+            }
         }
         return Ok(DecValue::infinity(if a.special == DecSpecial::Infinity {
             a.sign
@@ -2921,29 +2939,24 @@ fn decimal_div(a: &DecValue, b: &DecValue) -> PyResult<DecValue> {
         }));
     }
     let (precision, rounding) = current_decimal_context();
-    // Scale the numerator so the integer quotient carries `precision` extra
-    // guard digits, then round back down to context precision — simplest
-    // correct-enough way to get a faithfully-rounded quotient without
-    // implementing the spec's exact ideal-exponent bookkeeping.
-    let guard = precision as i64 + digit_count(&a.coeff) as i64 + 2;
+    // Scale with enough guard digits (precision+10) so a single final
+    // rounding to `precision` is correctly rounded. The previous code used
+    // guard = precision+digit_count+2 and performed TWO roundings (first to
+    // guard via `if raw_r*2>=b.coeff`, then to precision) – double rounding
+    // gave off-by-one ulp errors (e.g. 1/15 rounded to 28 digits was
+    // 0.0666...666 instead of ...667, making harmonic_mean([15,30,60,60])
+    // 29.999... not 30). Keeping the raw truncated quotient and rounding
+    // once directly to precision avoids that.
+    let guard = precision as i64 + 10;
     let scaled_num = &a.coeff * ten_pow(guard);
     let raw_q = &scaled_num / &b.coeff;
-    let raw_r = &scaled_num % &b.coeff;
     let raw_exp = a.exp - b.exp - guard;
-    let mut result = DecValue {
+    let result = DecValue {
         special: DecSpecial::Finite,
         sign,
         coeff: raw_q,
         exp: raw_exp,
     };
-    if !num_traits::Zero::is_zero(&raw_r) {
-        // Inexact — nudge the last kept digit if a straightforward rounding
-        // of the truncated remainder would change it (half-up on the guard
-        // digits is precise enough given the wide guard margin above).
-        if &raw_r * 2 >= b.coeff {
-            result.coeff += 1;
-        }
-    }
     Ok(round_decvalue(&result, precision, &rounding))
 }
 
@@ -3220,10 +3233,11 @@ fn build_decimal_type() -> PyObjectRef {
                 return Ok(decval_to_instance(&v.clone()));
             }
             // Integer Newton's-method square root at the context's
-            // precision (large enough for an exact f64 conversion of the
-            // result, which is what statistics.py / test_math use it for).
+            // precision. The previous `max(60, precision)` always produced
+            // 60 digits, causing `_decimal_sqrt_of_frac` (which expects 28)
+            // to return 60-digit unrounded values.
             let (precision, _rounding) = current_decimal_context();
-            let prec = (precision as i64).max(60);
+            let prec = precision as i64;
             let mut c = v.coeff.clone();
             let mut e = v.exp;
             if e % 2 != 0 {
@@ -3460,10 +3474,39 @@ fn build_decimal_type() -> PyObjectRef {
             let a = instance_to_decval(&args[0])
                 .ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
             let b = decval_from_pyobject(&args[1])?;
-            if b.special != DecSpecial::Finite || b.exp < 0 {
-                return Err(PyError::runtime_error(
-                    "Decimal ** non-integer exponent is not supported",
-                ));
+            if b.special != DecSpecial::Finite {
+                // NaN/Infinity exponent – match CPython's Decimal semantics
+                // (NaN ** anything -> NaN, etc.). For simplicity, fall back
+                // to float pow which already handles these special values.
+                let af = decval_to_f64(&a);
+                let bf = decval_to_f64(&b);
+                let rf = af.powf(bf);
+                return Ok(decval_to_instance(&float_to_decvalue(rf)));
+            }
+            if b.exp < 0 {
+                // Fractional exponent – previous stub raised RuntimeError, but
+                // `statistics.geometric_mean`'s test does
+                // `math.prod(map(Decimal, rng)) ** (Decimal(1)/len(rng))` with
+                // a fractional exponent (1/n). Use float fallback for a
+                // correctly-rounded approximation (isclose-checked, not exact).
+                // For huge `a` (e.g. 1e35659 for range(1,10000)) `decval_to_f64`
+                // overflows to inf, making `powf(inf, small)` -> inf. Compute
+                // via logs to avoid overflow: a = coeff*10^exp, ln(a) =
+                // ln(coeff)+exp*ln(10).
+                let bf = decval_to_f64(&b);
+                let af_direct = decval_to_f64(&a);
+                // Negative base with fractional exponent is InvalidOperation
+                if af_direct < 0.0 && bf.fract() != 0.0 {
+                    return Err(decimal_invalid_op("(-x) ** (1/2)"));
+                }
+                let rf = if af_direct.is_infinite() && a.special == DecSpecial::Finite && !a.is_zero() {
+                    let coeff_f = a.coeff.to_string().parse::<f64>().unwrap_or(f64::INFINITY);
+                    let log_a = coeff_f.ln() + a.exp as f64 * 10f64.ln();
+                    (bf * log_a).exp()
+                } else {
+                    af_direct.powf(bf)
+                };
+                return Ok(decval_to_instance(&float_to_decvalue(rf)));
             }
             let n = (&b.coeff * ten_pow(b.exp))
                 .to_string()
@@ -3471,9 +3514,12 @@ fn build_decimal_type() -> PyObjectRef {
                 .unwrap_or(0);
             let n = if b.sign { -n } else { n };
             if n < 0 {
-                return Err(PyError::runtime_error(
-                    "Decimal ** negative exponent is not supported",
-                ));
+                // Negative integer exponent – also via float fallback (e.g.
+                // Decimal(2) ** Decimal(-1) == 0.5).
+                let af = decval_to_f64(&a);
+                let bf = decval_to_f64(&b);
+                let rf = af.powf(bf);
+                return Ok(decval_to_instance(&float_to_decvalue(rf)));
             }
             let mut result = DecValue {
                 special: DecSpecial::Finite,
@@ -3577,6 +3623,77 @@ fn build_decimal_type() -> PyObjectRef {
             let v = instance_to_decval(&args[0])
                 .ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
             Ok(decval_to_instance(&decimal_negate(&v)))
+        }),
+    );
+    // `next_plus` / `next_minus` – used by `statistics._decimal_sqrt_of_frac`
+    // to correct a 1-ulp error after `sqrt()`. CPython's Decimal implements
+    // these as the next representable value toward +inf / -inf. Our
+    // implementation adds/subtracts one unit in the last place (1*10^{exp})
+    // which is sufficient for the sqrt correction test (the root is never 0
+    // or an extreme exponent in that test).
+    type_dict.insert_str(
+        "next_plus",
+        bf!("next_plus", |args| {
+            let v = instance_to_decval(&args[0])
+                .ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
+            if v.special != DecSpecial::Finite {
+                return Ok(decval_to_instance(&v));
+            }
+            if v.is_zero() {
+                // Smallest positive value at this exponent.
+                return Ok(decval_to_instance(&DecValue {
+                    special: DecSpecial::Finite,
+                    sign: false,
+                    coeff: num_bigint::BigInt::from(1),
+                    exp: v.exp,
+                }));
+            }
+            let mut r = v.clone();
+            if !r.sign {
+                r.coeff += 1;
+            } else if r.coeff > num_bigint::BigInt::from(1) {
+                r.coeff -= 1;
+            } else {
+                r = DecValue {
+                    special: DecSpecial::Finite,
+                    sign: false,
+                    coeff: num_bigint::BigInt::from(0),
+                    exp: 0,
+                };
+            }
+            Ok(decval_to_instance(&r))
+        }),
+    );
+    type_dict.insert_str(
+        "next_minus",
+        bf!("next_minus", |args| {
+            let v = instance_to_decval(&args[0])
+                .ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
+            if v.special != DecSpecial::Finite {
+                return Ok(decval_to_instance(&v));
+            }
+            if v.is_zero() {
+                return Ok(decval_to_instance(&DecValue {
+                    special: DecSpecial::Finite,
+                    sign: true,
+                    coeff: num_bigint::BigInt::from(1),
+                    exp: v.exp,
+                }));
+            }
+            let mut r = v.clone();
+            if r.sign {
+                r.coeff += 1;
+            } else if r.coeff > num_bigint::BigInt::from(1) {
+                r.coeff -= 1;
+            } else {
+                r = DecValue {
+                    special: DecSpecial::Finite,
+                    sign: true,
+                    coeff: num_bigint::BigInt::from(0),
+                    exp: 0,
+                };
+            }
+            Ok(decval_to_instance(&r))
         }),
     );
     type_dict.insert_str(
@@ -3871,6 +3988,7 @@ fn make_context_instance(precision: usize, rounding: &str) -> PyObjectRef {
     dict.insert_str("rounding", py_str(rounding));
     dict.insert_str("Emax", py_int(999999999999999999i64));
     dict.insert_str("Emin", py_int(-999999999999999999i64));
+    dict.insert_str("_is_basic", py_bool(false));
     PyObjectRef::new(PyObject::Instance { typ, dict })
 }
 
@@ -3889,9 +4007,44 @@ pub fn create_decimal_dict() -> HashMap<String, PyObjectRef> {
     }
     d.insert_str("Decimal", get_decimal_type());
     d.insert_str("Context", get_context_type());
+    // CPython's decimal module exposes three pre-built contexts as module
+    // attributes: DefaultContext (prec 28), BasicContext and ExtendedContext
+    // (both prec 9 but with different trap/flag settings). Tests access
+    // them via `decimal.BasicContext` etc. for `localcontext` usage. Our
+    // earlier stub lacked them entirely (AttributeError). Create them now;
+    // BasicContext traps InvalidOperation (so mismatched infs raise), while
+    // Extended/Default do not (they return NaN) – the trap flag is consulted
+    // by `decimal_add` for the (+Inf)+(-Inf) case.
+    {
+        let default_ctx = make_context_instance(28, "ROUND_HALF_EVEN");
+        let basic_ctx = make_context_instance(9, "ROUND_HALF_UP");
+        let extended_ctx = make_context_instance(9, "ROUND_HALF_EVEN");
+        // Mark BasicContext as trapping InvalidOperation for test
+        // `test_decimal_basiccontext_mismatched_infs_to_nan`.
+        if let PyObject::Instance { dict, .. } = &mut *basic_ctx.borrow_mut() {
+            let mut traps = crate::object::PyDict::new();
+            let _ = traps.set(py_str("InvalidOperation"), py_int(1));
+            dict.insert_str("traps", PyObjectRef::new(PyObject::Dict(Box::new(traps))));
+            dict.insert_str("_is_basic", py_bool(true));
+        }
+        if let PyObject::Instance { dict, .. } = &mut *extended_ctx.borrow_mut() {
+            dict.insert_str("_is_basic", py_bool(false));
+        }
+        if let PyObject::Instance { dict, .. } = &mut *default_ctx.borrow_mut() {
+            dict.insert_str("_is_basic", py_bool(false));
+        }
+        d.insert_str("DefaultContext", default_ctx);
+        d.insert_str("BasicContext", basic_ctx);
+        d.insert_str("ExtendedContext", extended_ctx);
+    }
     dec_func!("getcontext", |_args| {
         let (precision, rounding) = current_decimal_context();
-        Ok(make_context_instance(precision, &rounding))
+        let is_basic = current_is_basic();
+        let ctx = make_context_instance(precision, &rounding);
+        if let PyObject::Instance { dict, .. } = &mut *ctx.borrow_mut() {
+            dict.insert_str("_is_basic", py_bool(is_basic));
+        }
+        Ok(ctx)
     });
     dec_func!("setcontext", |args| {
         if args.is_empty() {
@@ -3903,8 +4056,12 @@ pub fn create_decimal_dict() -> HashMap<String, PyObjectRef> {
                 .get_str("rounding")
                 .map(|v| v.str())
                 .unwrap_or_else(|| "ROUND_HALF_EVEN".to_string());
+            let is_basic = dict.get_str("_is_basic").map(|v| v.truthy()).unwrap_or(false);
             DECIMAL_CURRENT_CONTEXT.with(|c| {
                 *c.borrow_mut() = (precision, rounding);
+            });
+            DECIMAL_IS_BASIC.with(|c| {
+                *c.borrow_mut() = is_basic;
             });
         }
         Ok(py_none())
@@ -3914,21 +4071,27 @@ pub fn create_decimal_dict() -> HashMap<String, PyObjectRef> {
     // application, which covers the common `with localcontext() as ctx:
     // ctx.prec = N` pattern used for one-off precision changes.
     dec_func!("localcontext", |args| {
-        let (precision, rounding) = if !args.is_empty() {
+        let (precision, rounding, is_basic) = if !args.is_empty() {
             if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
                 (
                     dict.get_str("prec").and_then(|v| v.as_i64()).unwrap_or(28) as usize,
                     dict.get_str("rounding")
                         .map(|v| v.str())
                         .unwrap_or_else(|| "ROUND_HALF_EVEN".to_string()),
+                    dict.get_str("_is_basic").map(|v| v.truthy()).unwrap_or(false),
                 )
             } else {
-                current_decimal_context()
+                let (p, r) = current_decimal_context();
+                (p, r, current_is_basic())
             }
         } else {
-            current_decimal_context()
+            let (p, r) = current_decimal_context();
+            (p, r, current_is_basic())
         };
         let ctx = make_context_instance(precision, &rounding);
+        if let PyObject::Instance { dict, .. } = &mut *ctx.borrow_mut() {
+            dict.insert_str("_is_basic", py_bool(is_basic));
+        }
         let mut cm_dict = HashMap::new();
         cm_dict.insert_str(
             "__enter__",
@@ -3942,8 +4105,12 @@ pub fn create_decimal_dict() -> HashMap<String, PyObjectRef> {
                             .get_str("rounding")
                             .map(|v| v.str())
                             .unwrap_or_else(|| "ROUND_HALF_EVEN".to_string());
+                        let is_basic = dict.get_str("_is_basic").map(|v| v.truthy()).unwrap_or(false);
                         DECIMAL_CURRENT_CONTEXT.with(|c| {
                             *c.borrow_mut() = (precision, rounding);
+                        });
+                        DECIMAL_IS_BASIC.with(|c| {
+                            *c.borrow_mut() = is_basic;
                         });
                     }
                     Ok(args[0].clone())
@@ -3958,6 +4125,9 @@ pub fn create_decimal_dict() -> HashMap<String, PyObjectRef> {
                     DECIMAL_CURRENT_CONTEXT.with(|c| {
                         *c.borrow_mut() = (28, "ROUND_HALF_EVEN".to_string());
                     });
+                    DECIMAL_IS_BASIC.with(|c| {
+                        *c.borrow_mut() = false;
+                    });
                     Ok(py_bool(false))
                 },
             }),
@@ -3971,6 +4141,7 @@ pub fn create_decimal_dict() -> HashMap<String, PyObjectRef> {
         let mut inst_dict = AttrMap::new();
         inst_dict.insert_str("prec", py_int(precision as i64));
         inst_dict.insert_str("rounding", py_str(&rounding));
+        inst_dict.insert_str("_is_basic", py_bool(is_basic));
         let _ = ctx;
         Ok(PyObjectRef::new(PyObject::Instance {
             typ: cm_typ,

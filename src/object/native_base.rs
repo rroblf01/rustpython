@@ -188,23 +188,30 @@ pub(crate) fn find_exception_base_name(typ: &PyObjectRef) -> Option<String> {
             return None;
         }
     };
-    // Direct name check: any type whose name maps to an exception
-    // (via the catch-all `Exception` default) should be considered
-    // exception-derived even if its bases list is empty (e.g.
+    // Direct name check: any *known builtin* exception name should be
+    // considered exception-derived even if its bases list is empty (e.g.
     // `subprocess.CalledProcessError` created in `net.rs` with empty
-    // bases/mro for historical reasons). Without this, `isinstance(e,
-    // BaseException)` failed for that type, breaking `mock`'s
-    // `_is_exception` detection and any `except Exception:` catching it.
-    if crate::vm::is_exception_subclass(&name, "BaseException") {
+    // bases/mro for historical reasons). The previous version used
+    // `is_exception_subclass(&name, "BaseException")` which due to the
+    // catch-all `_ => Some("Exception")` returns true for ANY unknown name
+    // (including user-defined StatisticsError), causing it to return its
+    // own name instead of its actual base (ValueError) and breaking
+    // `issubclass(StatisticsError, ValueError)`. Gate on the explicit
+    // builtin list instead.
+    if is_builtin_exception_class_name(&name) && crate::vm::is_exception_subclass(&name, "BaseException") {
         return Some(name.clone());
     }
-    let mut base_lists: Vec<Vec<PyObjectRef>> = vec![bases];
+    // For user-defined exception classes, prefer the actual base's
+    // exception name over the class's own unknown name. Search bases/MRO
+    // first so `class StatisticsError(ValueError): pass` returns
+    // "ValueError" not "StatisticsError".
+    let mut base_lists: Vec<Vec<PyObjectRef>> = vec![bases.clone()];
     for m in &mro {
         if let PyObject::Type { bases: b, .. } = &*m.borrow() {
             base_lists.push(b.clone());
         }
     }
-    for base_list in base_lists {
+    for base_list in &base_lists {
         for b in base_list {
             if let PyObject::BuiltinFunction { name, .. } = &*b.borrow() {
                 if crate::vm::is_exception_subclass(name, "BaseException") {
@@ -212,6 +219,12 @@ pub(crate) fn find_exception_base_name(typ: &PyObjectRef) -> Option<String> {
                 }
             }
         }
+    }
+    // No builtin base found – if the name itself is at least an
+    // exception (catch-all), return it as fallback for native types like
+    // subprocess.CalledProcessError with empty bases.
+    if crate::vm::is_exception_subclass(&name, "BaseException") {
+        return Some(name.clone());
     }
     None
 }
