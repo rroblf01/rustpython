@@ -217,8 +217,12 @@ class PrettyPrinter:
                     if is_set and typ is not set and typ is not frozenset:
                         # It's a subclass like set2, need to ensure correct prefix
                         rep_tmp = self._repr(object, context, level)
-                        # If rep is {1,2} without prefix but should be set2({1,2}), use handler
+                        # If rep is {1,2} without prefix but should be set2({1,2}), use handler or direct
                         if not rep_tmp.startswith(typ.__name__):
+                            expected_rep = f"{typ.__name__}({rep_tmp})"
+                            if len(expected_rep) <= self._width - indent - allowance:
+                                stream.write(expected_rep)
+                                return
                             if objid not in context:
                                 context[objid] = 1
                                 self._pprint_set(object, stream, indent, allowance, context, level + 1)

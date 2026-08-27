@@ -3514,8 +3514,18 @@ pub fn builtin_getattr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 }
 
 pub fn builtin_setattr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    eprintln!("builtin_setattr called for {}", args[0].borrow().type_name());
     if args.len() != 3 {
         return Err(PyError::type_error("setattr() takes exactly 3 arguments"));
+    }
+    if let PyObject::WeakProxy { target, .. } = &*args[0].borrow() {
+        eprintln!("builtin_setattr WeakProxy");
+        if let Some(rc) = target.upgrade() {
+            let target_ref = PyObjectRef::Mut(rc);
+            return builtin_setattr(&[target_ref, args[1].clone(), args[2].clone()]);
+        } else {
+            return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+        }
     }
     let attr_name = args[1].str();
     // `.borrow_mut()` panics unconditionally for anything that ISN'T
