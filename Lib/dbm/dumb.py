@@ -103,8 +103,15 @@ class _Database(collections.abc.MutableMapping):
         else:
             with f:
                 for line in f:
-                    line = line.rstrip()
-                    key, pos_and_siz_pair = _ast.literal_eval(line)
+                    line = line.strip()
+                    if not line:
+                        continue
+                    # ast.literal_eval in this interpreter does not support
+                    # top-level comma-separated tuple literals (e.g.
+                    # "'key', (pos, siz)"), it only parses a single literal.
+                    # Wrap the line in parentheses so it is parsed as a
+                    # proper tuple literal "(key, (pos, siz))".
+                    key, pos_and_siz_pair = _ast.literal_eval(f"({line})")
                     key = key.encode('Latin-1')
                     self._index[key] = pos_and_siz_pair
 
@@ -247,6 +254,72 @@ class _Database(collections.abc.MutableMapping):
     def items(self):
         self._verify_open()
         return [(key, self[key]) for key in self._index.keys()]
+
+    # MutableMapping mixin methods — native collections.abc in this
+    # interpreter does not inherit Mapping helpers, so provide them
+    # explicitly to satisfy dbm dumb API (get/setdefault/pop etc.).
+    def get(self, key, default=None):
+        if isinstance(key, str):
+            key = key.encode('utf-8')
+        self._verify_open()
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def setdefault(self, key, default=None):
+        if isinstance(key, str):
+            key = key.encode('utf-8')
+        elif not isinstance(key, (bytes, bytearray, str)):
+            raise TypeError("keys must be bytes or strings")
+        self._verify_open()
+        try:
+            return self[key]
+        except KeyError:
+            self[key] = default
+            return default
+
+    def pop(self, key, default=...):
+        if isinstance(key, str):
+            key = key.encode('utf-8')
+        self._verify_open()
+        try:
+            val = self[key]
+        except KeyError:
+            if default is ...:
+                raise
+            return default
+        del self[key]
+        return val
+
+    def popitem(self):
+        self._verify_open()
+        if not self._index:
+            raise KeyError
+        key = next(iter(self._index))
+        val = self[key]
+        del self[key]
+        return key, val
+
+    def clear(self):
+        self._verify_open()
+        for key in list(self._index.keys()):
+            del self[key]
+
+    def update(self, other=(), **kwds):
+        self._verify_open()
+        if hasattr(other, "keys"):
+            for k in other.keys():
+                self[k] = other[k]
+        else:
+            for k, v in other:
+                self[k] = v
+        for k, v in kwds.items():
+            self[k] = v
+
+    def values(self):
+        self._verify_open()
+        return [self[k] for k in self._index.keys()]
 
     def __contains__(self, key):
         if isinstance(key, str):

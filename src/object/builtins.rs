@@ -2511,6 +2511,15 @@ pub fn builtin_bytes(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
         Ok(PyObjectRef::imm(PyObject::Bytes(Vec::new())))
     } else {
+        // Buffer protocol: try memoryview first (e.g. bytes(MyBuffer()) where MyBuffer defines __buffer__)
+        {
+            let obj = args[0].clone();
+            if let Ok(mv) = crate::object::builtin_memoryview(&[obj.clone()]) {
+                if let Ok(bytes) = crate::object::mv_tobytes(&mv) {
+                    return Ok(PyObjectRef::imm(PyObject::Bytes(bytes)));
+                }
+            }
+        }
         // PickleBuffer and memoryview are bytes-like via buffer protocol
         {
             let b = args[0].borrow();
@@ -3547,6 +3556,36 @@ pub fn builtin_ord(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() != 1 {
         return Err(PyError::type_error("ord() takes exactly one argument"));
     }
+    // Handle bytes/bytearray of length 1 (ord(b'x') == 120)
+    {
+        let b = args[0].borrow();
+        match &*b {
+            PyObject::Bytes(v) => {
+                if v.len() == 1 {
+                    return Ok(py_int(v[0] as i64));
+                } else {
+                    return Err(PyError::type_error(format!("ord() expected a character, but string of length {} found", v.len())));
+                }
+            }
+            PyObject::ByteArray(v) => {
+                if v.len() == 1 {
+                    return Ok(py_int(v[0] as i64));
+                } else {
+                    return Err(PyError::type_error(format!("ord() expected a character, but string of length {} found", v.len())));
+                }
+            }
+            PyObject::Str(s) => {
+                let c = s.chars().next().ok_or_else(|| {
+                    PyError::type_error("ord() expected a character, but string of length 0 found")
+                })?;
+                if s.chars().count() != 1 {
+                    return Err(PyError::type_error(format!("ord() expected a character, but string of length {} found", s.chars().count())));
+                }
+                return Ok(py_int(c as u32 as i64));
+            }
+            _ => {}
+        }
+    }
     let s = args[0].str();
     let c = s.chars().next().ok_or_else(|| {
         PyError::type_error("ord() expected a character, but string of length 0 found")
@@ -3855,6 +3894,14 @@ pub fn call_bound_method(
                     }
                 }
                 frame.insert_local(vararg_name.as_str(), vararg_val);
+            }
+            if npos > named_params.saturating_sub(1) && code.vararg_name.is_none() {
+                return Err(PyError::type_error(format!(
+                    "{}() takes {} positional argument but {} was given",
+                    fname,
+                    code.arg_count,
+                    npos + 1
+                )));
             }
             if npos < named_params.saturating_sub(1) {
                 let num_defaults = code.num_defaults;

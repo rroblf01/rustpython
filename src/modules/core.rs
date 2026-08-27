@@ -6719,13 +6719,6 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
     });
 
     // --- os.utime(path, times=None) ---
-    // Was missing entirely (`AttributeError`), breaking `test_unicode_file.py`
-    // (which calls both the 1-arg "set to now" form and the explicit
-    // `(atime, mtime)` tuple form, but never reads either back afterward).
-    // Validates the path exists and accepts the real signature shape
-    // without an extra `filetime`/`libc` dependency to actually apply
-    // custom atime/mtime — good enough for callers that don't assert on
-    // the resulting timestamps.
     os_func!("utime", |args| {
         if args.is_empty() {
             return Err(PyError::type_error(
@@ -6738,6 +6731,93 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
                 "No such file or directory: '{}'",
                 path
             )));
+        }
+        // Parse optional positional `times` and keyword `ns`/`times`.
+        let mut times_val: Option<PyObjectRef> = None;
+        let mut ns_val: Option<PyObjectRef> = None;
+        if args.len() >= 2 && !matches!(&*args[1].borrow(), PyObject::Dict(_)) {
+            times_val = Some(args[1].clone());
+            // `None` positional means "now"
+            if matches!(&*times_val.as_ref().unwrap().borrow(), PyObject::None) {
+                times_val = None;
+            }
+        }
+        for arg in args.iter() {
+            if let PyObject::Dict(d) = &*arg.borrow() {
+                if let Ok(Some(v)) = d.get(&py_str("ns")) {
+                    if !matches!(&*v.borrow(), PyObject::None) {
+                        ns_val = Some(v.clone());
+                    } else {
+                        ns_val = None;
+                    }
+                }
+                if let Ok(Some(v)) = d.get(&py_str("times")) {
+                    if matches!(&*v.borrow(), PyObject::None) {
+                        times_val = None;
+                    } else {
+                        times_val = Some(v.clone());
+                    }
+                }
+            }
+        }
+        // Apply times via filetime crate.
+        if let Some(ns) = ns_val {
+            // ns is a 2-tuple of nanoseconds (int)
+            let (atime_ns, mtime_ns) = {
+                let b = ns.borrow();
+                match &*b {
+                    PyObject::Tuple(items) | PyObject::List(items) => {
+                        if items.len() != 2 {
+                            return Err(PyError::type_error("ns must be a 2-tuple"));
+                        }
+                        let a = items[0]
+                            .as_i64()
+                            .ok_or_else(|| PyError::type_error("ns values must be integers"))?;
+                        let m = items[1]
+                            .as_i64()
+                            .ok_or_else(|| PyError::type_error("ns values must be integers"))?;
+                        (a, m)
+                    }
+                    _ => return Err(PyError::type_error("ns must be a 2-tuple")),
+                }
+            };
+            let atime = filetime::FileTime::from_unix_time(atime_ns / 1_000_000_000, (atime_ns % 1_000_000_000) as u32);
+            let mtime = filetime::FileTime::from_unix_time(mtime_ns / 1_000_000_000, (mtime_ns % 1_000_000_000) as u32);
+            filetime::set_file_times(&path, atime, mtime)
+                .map_err(|e| PyError::os_error_from_io(&e))?;
+        } else if let Some(tv) = times_val {
+            let (atime_s, mtime_s) = {
+                let b = tv.borrow();
+                match &*b {
+                    PyObject::Tuple(items) | PyObject::List(items) => {
+                        if items.len() != 2 {
+                            return Err(PyError::type_error("times must be a 2-tuple"));
+                        }
+                        let a = items[0]
+                            .as_f64()
+                            .ok_or_else(|| PyError::type_error("times values must be numbers"))?;
+                        let m = items[1]
+                            .as_f64()
+                            .ok_or_else(|| PyError::type_error("times values must be numbers"))?;
+                        (a, m)
+                    }
+                    _ => return Err(PyError::type_error("times must be a 2-tuple")),
+                }
+            };
+            let to_ft = |secs: f64| {
+                let s = secs.trunc() as i64;
+                let n = ((secs - s as f64) * 1e9) as u32;
+                filetime::FileTime::from_unix_time(s, n)
+            };
+            let atime = to_ft(atime_s);
+            let mtime = to_ft(mtime_s);
+            filetime::set_file_times(&path, atime, mtime)
+                .map_err(|e| PyError::os_error_from_io(&e))?;
+        } else {
+            // No times/ns -> set to now.
+            let now = filetime::FileTime::now();
+            filetime::set_file_times(&path, now, now)
+                .map_err(|e| PyError::os_error_from_io(&e))?;
         }
         Ok(py_none())
     });

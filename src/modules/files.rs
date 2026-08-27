@@ -717,7 +717,16 @@ pub fn create_shutil_dict() -> HashMap<String, PyObjectRef> {
         let src = args[0].str();
         let dst = args[1].str();
         match std::fs::copy(&src, &dst) {
-            Ok(_) => Ok(py_str(&dst)),
+            Ok(_) => {
+                // Preserve metadata like CPython: permissions + atime/mtime
+                if let Ok(meta) = std::fs::metadata(&src) {
+                    let _ = std::fs::set_permissions(&dst, meta.permissions());
+                    let atime = filetime::FileTime::from_last_access_time(&meta);
+                    let mtime = filetime::FileTime::from_last_modification_time(&meta);
+                    let _ = filetime::set_file_times(&dst, atime, mtime);
+                }
+                Ok(py_str(&dst))
+            }
             Err(e) => Err(PyError::os_error_from_io(&e)),
         }
     });
@@ -727,9 +736,29 @@ pub fn create_shutil_dict() -> HashMap<String, PyObjectRef> {
             return Err(PyError::type_error("rmtree() requires 1 argument (path)"));
         }
         let path = args[0].str();
+        // Parse ignore_errors from positional or kwargs dict.
+        let mut ignore_errors = false;
+        if args.len() >= 2 && !matches!(&*args[1].borrow(), PyObject::Dict(_)) {
+            ignore_errors = args[1].truthy();
+        }
+        for arg in args.iter() {
+            if let PyObject::Dict(d) = &*arg.borrow() {
+                if let Ok(Some(v)) = d.get(&py_str("ignore_errors")) {
+                    ignore_errors = v.truthy();
+                }
+            }
+        }
         match std::fs::remove_dir_all(&path) {
             Ok(()) => Ok(py_none()),
-            Err(e) => Err(PyError::os_error_from_io(&e)),
+            Err(e) => {
+                if ignore_errors {
+                    Ok(py_none())
+                } else {
+                    // FileNotFoundError with ignore_errors=False should still raise,
+                    // but callers that pass True expect swallow.
+                    Err(PyError::os_error_from_io(&e))
+                }
+            }
         }
     });
 
@@ -770,10 +799,13 @@ pub fn create_shutil_dict() -> HashMap<String, PyObjectRef> {
         }
         let src = args[0].str();
         let dst = args[1].str();
-        let perms = std::fs::metadata(&src)
-            .map_err(|e| PyError::os_error_from_io(&e))?
-            .permissions();
-        std::fs::set_permissions(&dst, perms).map_err(|e| PyError::os_error_from_io(&e))?;
+        let meta = std::fs::metadata(&src).map_err(|e| PyError::os_error_from_io(&e))?;
+        std::fs::set_permissions(&dst, meta.permissions())
+            .map_err(|e| PyError::os_error_from_io(&e))?;
+        let atime = filetime::FileTime::from_last_access_time(&meta);
+        let mtime = filetime::FileTime::from_last_modification_time(&meta);
+        filetime::set_file_times(&dst, atime, mtime)
+            .map_err(|e| PyError::os_error_from_io(&e))?;
         Ok(py_none())
     });
     d

@@ -1792,6 +1792,37 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
     d.insert_str("CO_FUTURE_GENERATOR_STOP", py_int(0x80000));
     d.insert_str("CO_FUTURE_ANNOTATIONS", py_int(0x100000));
 
+    // BufferFlags for test_buffer.py (inspect.BufferFlags)
+    {
+        let mut bf_dict = HashMap::new();
+        bf_dict.insert_str("SIMPLE", py_int(0x0));
+        bf_dict.insert_str("WRITABLE", py_int(0x1));
+        bf_dict.insert_str("FORMAT", py_int(0x4));
+        bf_dict.insert_str("ND", py_int(0x8));
+        bf_dict.insert_str("STRIDES", py_int(0x10 | 0x8));
+        bf_dict.insert_str("C_CONTIGUOUS", py_int(0x20 | 0x10 | 0x8));
+        bf_dict.insert_str("F_CONTIGUOUS", py_int(0x40 | 0x10 | 0x8));
+        bf_dict.insert_str("ANY_CONTIGUOUS", py_int(0x80 | 0x10 | 0x8));
+        bf_dict.insert_str("INDIRECT", py_int(0x100 | 0x10 | 0x8));
+        bf_dict.insert_str("CONTIG", py_int(0x8 | 0x1));
+        bf_dict.insert_str("CONTIG_RO", py_int(0x8));
+        bf_dict.insert_str("STRIDED", py_int(0x10 | 0x8 | 0x1));
+        bf_dict.insert_str("STRIDED_RO", py_int(0x10 | 0x8));
+        bf_dict.insert_str("RECORDS", py_int(0x10 | 0x8 | 0x1 | 0x4));
+        bf_dict.insert_str("RECORDS_RO", py_int(0x10 | 0x8 | 0x4));
+        bf_dict.insert_str("FULL", py_int(0x100 | 0x10 | 0x8 | 0x1 | 0x4));
+        bf_dict.insert_str("FULL_RO", py_int(0x100 | 0x10 | 0x8 | 0x4));
+        bf_dict.insert_str("READ", py_int(0x100));
+        bf_dict.insert_str("WRITE", py_int(0x200));
+        let bf_type = PyObjectRef::new(PyObject::Type {
+            name: "BufferFlags".to_string(),
+            dict: Box::new(crate::object::str_map_to_typedict(bf_dict)),
+            bases: vec![],
+            mro: vec![],
+        });
+        d.insert_str("BufferFlags", bf_type);
+    }
+
     d
 }
 

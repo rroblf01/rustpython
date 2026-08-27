@@ -984,6 +984,128 @@ pub fn py_setitem(obj: &PyObjectRef, index: &PyObjectRef, value: PyObjectRef) ->
                 idx.type_name()
             )))
         }
+        PyObject::ByteArray(b) => {
+            let idx = index.borrow();
+            if let Some(i) = try_to_index(index) {
+                let i = i
+                    .to_isize()
+                    .ok_or_else(|| PyError::index_error("bytearray index out of range"))?;
+                let len = b.len() as isize;
+                let i = if i < 0 { len + i } else { i };
+                if i < 0 || i >= len {
+                    return Err(PyError::index_error("bytearray index out of range"));
+                }
+                let val = value
+                    .as_i64()
+                    .ok_or_else(|| PyError::type_error("an integer is required"))?;
+                if !(0..=255).contains(&val) {
+                    return Err(PyError::value_error("byte must be in range(0, 256)"));
+                }
+                b[i as usize] = val as u8;
+                return Ok(());
+            }
+            match &*idx {
+                PyObject::Slice { start, stop, step } => {
+                    let len = b.len();
+                    let (start_val, stop_val, step_val) =
+                        extract_slice_fields(start, stop, step)?;
+                    let (start_n, stop_n) =
+                        normalize_slice_bounds(start_val, stop_val, step_val, len);
+                    // Collect replacement bytes from value (bytes, bytearray, or iterable of ints)
+                    let new_bytes: Vec<u8> = {
+                        let vt = value.borrow();
+                        match &*vt {
+                            PyObject::Bytes(v) => v.clone(),
+                            PyObject::ByteArray(v) => v.clone(),
+                            PyObject::List(items) => {
+                                let mut vec = Vec::new();
+                                for item in items {
+                                    let v = item
+                                        .as_i64()
+                                        .ok_or_else(|| {
+                                            PyError::type_error("an integer is required")
+                                        })?;
+                                    if !(0..=255).contains(&v) {
+                                        return Err(PyError::value_error(
+                                            "byte must be in range(0, 256)",
+                                        ));
+                                    }
+                                    vec.push(v as u8);
+                                }
+                                vec
+                            }
+                            PyObject::Str(s) => s.as_bytes().to_vec(),
+                            _ => {
+                                // Generic iterable fallback
+                                drop(vt);
+                                let it = crate::object::builtin_iter(&[value.clone()])?;
+                                let mut vec = Vec::new();
+                                loop {
+                                    match crate::object::builtin_next(&[it.clone()]) {
+                                        Ok(item) => {
+                                            let v = item.as_i64().ok_or_else(|| {
+                                                PyError::type_error("an integer is required")
+                                            })?;
+                                            if !(0..=255).contains(&v) {
+                                                return Err(PyError::value_error(
+                                                    "byte must be in range(0, 256)",
+                                                ));
+                                            }
+                                            vec.push(v as u8);
+                                        }
+                                        Err(PyError::StopIteration) => break,
+                                        Err(e) => return Err(e),
+                                    }
+                                }
+                                vec
+                            }
+                        }
+                    };
+                    if step_val == 1 {
+                        let stop_n = stop_n.max(start_n);
+                        b.splice(start_n as usize..stop_n as usize, new_bytes);
+                        return Ok(());
+                    } else {
+                        let mut indices = Vec::new();
+                        let mut i = start_n;
+                        if step_val > 0 {
+                            while i < stop_n {
+                                indices.push(i as usize);
+                                match i.checked_add(step_val) {
+                                    Some(next) => i = next,
+                                    None => break,
+                                }
+                            }
+                        } else {
+                            while i > stop_n {
+                                indices.push(i as usize);
+                                match i.checked_add(step_val) {
+                                    Some(next) => i = next,
+                                    None => break,
+                                }
+                            }
+                        }
+                        if indices.len() != new_bytes.len() {
+                            return Err(PyError::value_error(format!(
+                                "attempt to assign sequence of size {} to extended slice of size {}",
+                                new_bytes.len(),
+                                indices.len()
+                            )));
+                        }
+                        for (idx, val) in indices.into_iter().zip(new_bytes) {
+                            b[idx] = val;
+                        }
+                        return Ok(());
+                    }
+                }
+                _ => {
+                    return Err(PyError::type_error(format!(
+                        "bytearray indices must be integers or slices, not {}",
+                        idx.type_name()
+                    )))
+                }
+            }
+        }
         // PyObject::Dict is handled above, before this borrow is taken.
         _ => Err(PyError::type_error(format!(
             "'{}' object does not support item assignment",

@@ -199,6 +199,36 @@ impl PyError {
             }),
         )
     }
+    pub fn buffer_error(msg: impl Into<String>) -> Self {
+        let msg = msg.into();
+        PyError::Exception(
+            "BufferError".to_string(),
+            PyObjectRef::new(PyObject::Exception {
+                typ: "BufferError".to_string(),
+                args: vec![py_str(&msg)],
+                cause: None,
+                suppress_context: false,
+                context: None,
+                traceback: None,
+                extra: None,
+            }),
+        )
+    }
+    pub fn system_error(msg: impl Into<String>) -> Self {
+        let msg = msg.into();
+        PyError::Exception(
+            "SystemError".to_string(),
+            PyObjectRef::new(PyObject::Exception {
+                typ: "SystemError".to_string(),
+                args: vec![py_str(&msg)],
+                cause: None,
+                suppress_context: false,
+                context: None,
+                traceback: None,
+                extra: None,
+            }),
+        )
+    }
     /// Same `PyError::Exception(name, obj)` pattern as `syntax_error`/
     /// `memory_error`/`overflow_error` above. Real CPython's
     /// `UnboundLocalError` (a `NameError` subclass, see `is_exception_subclass`

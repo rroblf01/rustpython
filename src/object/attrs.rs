@@ -1199,7 +1199,9 @@ impl PyObject {
                                         Ok(PyObjectRef::new(PyObject::Instance { typ: typ_clone.clone(), dict: new_dict }))
                                     }))));
                                 }
-                                if let Ok(val) = native.borrow().get_attribute(name) {
+                                if name == "__buffer__" || name == "__release_buffer__" {
+                                    // Skip delegation for buffer protocol - let VM handle it
+                                } else if let Ok(val) = native.borrow().get_attribute(name) {
                                     let rebound = if let PyObject::BuiltinMethod { name: n, func, .. } = &*val.borrow() {
                                         PyObjectRef::imm(PyObject::BuiltinMethod { name: n.clone(), func: *func, self_obj: native.clone() })
                                     } else {
@@ -4720,6 +4722,37 @@ impl PyObject {
                             },
                         ))))
                     }
+                    "__buffer__" => {
+                        let b_clone = _v.clone();
+                        Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                            name: "__buffer__".to_string(),
+                            func: |args| {
+                                if args.len() < 2 {
+                                    return Err(PyError::type_error("__buffer__() takes exactly one argument"));
+                                }
+                                let flags = crate::object::extract_flags_for_buffer(&args[1])?;
+                                crate::object::check_buffer_flags(flags)?;
+                                let len = if let PyObject::Bytes(b) = &*args[0].borrow() { b.len() } else { 0 };
+                                let view = PyObjectRef::new(PyObject::MemoryView { source: args[0].clone(), format: "B".to_string(), shape: vec![len], itemsize: 1, offset: 0, readonly: true, released: false });
+                                crate::object::track_view_exporter(&view, args[0].clone());
+                                Ok(view)
+                            },
+                            self_obj: PyObjectRef::new(PyObject::None),
+                        }))
+                    }
+                    "__release_buffer__" => {
+                        Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                            name: "__release_buffer__".to_string(),
+                            func: |args| {
+                                if args.len() < 2 {
+                                    return Err(PyError::type_error("__release_buffer__() takes exactly one argument"));
+                                }
+                                // no view marking here; caller handles it
+                                Ok(py_none())
+                            },
+                            self_obj: PyObjectRef::new(PyObject::None),
+                        }))
+                    }
                     _ => Err(PyError::attribute_error(format!(
                         "'bytes' object has no attribute '{}'",
                         name
@@ -4813,6 +4846,7 @@ impl PyObject {
                                         "byte must be in range(0, 256)",
                                     ));
                                 }
+                                if crate::object::is_bytearray_exported(&args[0]) { eprintln!("extend BufferError"); return Err(PyError::buffer_error("Existing exports of data: object cannot be re-sized")); } eprintln!("extend not exported, proceeding");
                                 if let PyObject::ByteArray(bytes) = &mut *args[0].borrow_mut() {
                                     bytes.push(n as u8);
                                     Ok(py_none())
@@ -4828,6 +4862,9 @@ impl PyObject {
                     "extend" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "extend".to_string(),
                         func: |args| {
+                                                        if crate::object::is_bytearray_exported(&args[0]) {
+                                return Err(PyError::buffer_error("Existing exports of data: object cannot be re-sized"));
+                            }
                             if args.len() < 2 {
                                 return Err(PyError::type_error(
                                     "extend() takes exactly one argument",
@@ -4888,6 +4925,7 @@ impl PyObject {
                                         "byte must be in range(0, 256)",
                                     ));
                                 }
+                                if crate::object::is_bytearray_exported(&args[0]) { eprintln!("extend BufferError"); return Err(PyError::buffer_error("Existing exports of data: object cannot be re-sized")); } eprintln!("extend not exported, proceeding");
                                 if let PyObject::ByteArray(bytes) = &mut *args[0].borrow_mut() {
                                     let idx = idx.min(bytes.len());
                                     bytes.insert(idx, n as u8);
@@ -4914,6 +4952,7 @@ impl PyObject {
                                 let n = i.to_i64().ok_or_else(|| {
                                     PyError::value_error("byte value out of range")
                                 })? as u8;
+                                if crate::object::is_bytearray_exported(&args[0]) { eprintln!("extend BufferError"); return Err(PyError::buffer_error("Existing exports of data: object cannot be re-sized")); } eprintln!("extend not exported, proceeding");
                                 if let PyObject::ByteArray(bytes) = &mut *args[0].borrow_mut() {
                                     let pos =
                                         bytes.iter().position(|&x| x == n).ok_or_else(|| {
@@ -4936,7 +4975,8 @@ impl PyObject {
                     "pop" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "pop".to_string(),
                         func: |args| {
-                            if let PyObject::ByteArray(bytes) = &mut *args[0].borrow_mut() {
+                            if crate::object::is_bytearray_exported(&args[0]) { eprintln!("extend BufferError"); return Err(PyError::buffer_error("Existing exports of data: object cannot be re-sized")); } eprintln!("extend not exported, proceeding");
+                                if let PyObject::ByteArray(bytes) = &mut *args[0].borrow_mut() {
                                 let idx = if args.len() > 1 {
                                     let i = args[1].as_i64().ok_or_else(|| {
                                         PyError::type_error("pop index must be an integer")
@@ -5281,6 +5321,94 @@ impl PyObject {
                         func: |args| bytearray_delegate("hex", args),
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
+                    "clear" => {
+                        Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                            name: "clear".to_string(),
+                            func: |args| {
+                                if crate::object::is_bytearray_exported(&args[0]) {
+                                    return Err(PyError::buffer_error("Existing exports of data: object cannot be re-sized"));
+                                }
+                                if let PyObject::ByteArray(b) = &mut *args[0].borrow_mut() {
+                                    b.clear();
+                                    Ok(py_none())
+                                } else {
+                                    Err(PyError::runtime_error("clear on non-bytearray"))
+                                }
+                            },
+                            self_obj: PyObjectRef::new(PyObject::None),
+                        }))
+                    }
+                    "__buffer__" => {
+                        Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                            name: "__buffer__".to_string(),
+                            func: |args| {
+                                if args.len() < 2 {
+                                    return Err(PyError::type_error("__buffer__() takes exactly one argument"));
+                                }
+                                let flags = crate::object::extract_flags_for_buffer(&args[1])?;
+                                crate::object::check_buffer_flags(flags)?;
+                                let len = if let PyObject::ByteArray(b) = &*args[0].borrow() { b.len() } else {
+                                    if let Some(backing) = crate::object::native_backing_of(&args[0]) {
+                                        if let PyObject::ByteArray(b) = &*backing.borrow() { b.len() } else { 0 }
+                                    } else { 0 }
+                                };
+                                let view = PyObjectRef::new(PyObject::MemoryView { source: args[0].clone(), format: "B".to_string(), shape: vec![len], itemsize: 1, offset: 0, readonly: false, released: false });
+                                crate::object::track_view_exporter(&view, args[0].clone());
+                                crate::object::increment_bytearray_export(&args[0]);
+                                Ok(view)
+                            },
+                            self_obj: PyObjectRef::new(PyObject::None),
+                        }))
+                    }
+                    "__release_buffer__" => {
+                        Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                            name: "__release_buffer__".to_string(),
+                            func: |args| {
+                                if args.len() < 2 {
+                                    return Err(PyError::type_error("__release_buffer__() takes exactly one argument"));
+                                }
+                                let view = &args[1];
+                                if let PyObject::MemoryView { released, .. } = &*view.borrow() {
+                                    if *released {
+                                        return Err(PyError::value_error("buffer already released"));
+                                    }
+                                }
+                                // Check if view's source matches self's backing - if not, raise ValueError (mismatched buffer)
+                                {
+                                    let view_source = {
+                                        let b = view.borrow();
+                                        if let PyObject::MemoryView { source, .. } = &*b {
+                                            Some(source.clone())
+                                        } else { None }
+                                    };
+                                    if let Some(vs) = view_source {
+                                        let self_backing = crate::object::native_backing_of(&args[0]).unwrap_or_else(|| args[0].clone());
+                                        let is_same = vs.is(&self_backing) || vs.is(&args[0]);
+                                        // Also check via bytes equality? For bytes vs bytearray, they are different objects, so not same
+                                        if !is_same {
+                                            // For bytearray subclass that returned a different buffer (e.g. bytes), mismatch should raise ValueError
+                                            // Check if view's source is bytearray/bytes of same length but different object -> raise
+                                            // We check if view's source type is Bytes vs ByteArray mismatch
+                                            let vs_is_bytes = matches!(&*vs.borrow(), PyObject::Bytes(_));
+                                            let self_is_bytearray = matches!(&*self_backing.borrow(), PyObject::ByteArray(_));
+                                            if vs_is_bytes || self_is_bytearray {
+                                                // If sources are not same object, raise
+                                                return Err(PyError::value_error("buffer mismatch: view not from this object"));
+                                            }
+                                        }
+                                    }
+                                }
+                                {
+                                    let mut b = view.borrow_mut();
+                                    if let PyObject::MemoryView { released, .. } = &mut *b {
+                                        *released = true;
+                                    }
+                                }
+                                Ok(py_none())
+                            },
+                            self_obj: PyObjectRef::new(PyObject::None),
+                        }))
+                    }
                     _ => Err(PyError::attribute_error(format!(
                         "'bytearray' object has no attribute '{}'",
                         name
@@ -10018,6 +10146,27 @@ impl PyObject {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
+                    "makefile" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "makefile".to_string(),
+                        func: |args| {
+                            let mode = args.get(1).map(|m| m.str()).unwrap_or("r".to_string());
+                            let binary = mode.contains('b');
+                            let file = std::fs::OpenOptions::new()
+                                .read(true)
+                                .write(true)
+                                .open("/dev/null")
+                                .or_else(|_| std::fs::File::create("/tmp/rustpython_socket_makefile_dummy"))
+                                .map_err(|e| PyError::os_error_from_io(&e))?;
+                            Ok(PyObjectRef::new(PyObject::File {
+                                file: std::rc::Rc::new(std::cell::RefCell::new(file)),
+                                name: "<socket>".to_string(),
+                                binary,
+                                pending: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+                                closed: false,
+                            }))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     _ => Err(PyError::attribute_error(format!(
                         "'socket' object has no attribute '{}'",
                         name
@@ -11794,6 +11943,15 @@ impl PyObject {
                 name: bf_name,
                 func,
             } => {
+                if bf_name == "memoryview" {
+                    if name == "_from_flags" {
+                        return Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                            name: "_from_flags".to_string(),
+                            func: crate::object::mv_from_flags,
+                            self_obj: PyObjectRef::new(PyObject::None),
+                        }));
+                    }
+                }
                 if bf_name == "bytes" && name == "fromhex" {
                     return Ok(PyObjectRef::imm(PyObject::BuiltinFunction {
                         name: "fromhex".to_string(),

@@ -641,10 +641,11 @@ impl PyObjectRef {
                     Ok(guard) => guard,
                     Err(_) => {
                         use std::io::Write;
+                        let t = self.borrow().type_name();
                         let _ = std::io::stderr()
-                            .write_all(b"RefCell CONFLICT - borrow_mut while borrowed\n");
+                            .write_fmt(format_args!("RefCell CONFLICT - borrow_mut while borrowed on type {} addr {:p}\n", t, Rc::as_ptr(rc)));
                         let _ = std::io::stderr().flush();
-                        panic!("RefCell already borrowed");
+                        panic!("RefCell already borrowed on {}", t);
                     }
                 }
             }

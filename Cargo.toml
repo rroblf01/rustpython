@@ -49,3 +49,4 @@ flate2 = "1"
 rustyline = "18"
 mimalloc = { version = "0.1", default-features = false }
 rusqlite = { version = "0.40.1", default-features = false, features = ["column_decltype"], optional = true }
+filetime = "0.2"

@@ -1826,19 +1826,18 @@ pub fn create_itertools_dict() -> HashMap<String, PyObjectRef> {
         } else {
             Some(args[0].clone())
         };
-        let iterable = args[1].clone();
+        let iterable = crate::object::builtin_iter(&[args[1].clone()])?;
         let mut result = Vec::new();
         loop {
             match builtin_next(&[iterable.clone()]) {
                 Ok(item) => {
-                    let should_keep = match &predicate {
+                     let should_keep = match &predicate {
                         Some(f) => {
-                            let callable = PyObjectRef::imm(PyObject::BoundMethod {
-                                func: f.clone(),
-                                self_obj: py_none(),
-                            });
+                            // Call predicate directly; it may already be a bound
+                            // method (e.g. `dict.__contains__` via `b.__contains__`)
+                            // so we must not re-wrap it with a placeholder self.
                             let mut vm = crate::vm::VirtualMachine::new();
-                            match vm.call_function(callable, vec![item.clone()], vec![]) {
+                            match vm.call_function(f.clone(), vec![item.clone()], vec![]) {
                                 Ok(val) => !val.truthy(),
                                 Err(_) => true,
                             }
