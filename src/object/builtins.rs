@@ -5614,6 +5614,51 @@ pub fn builtin_reversed(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             _ => unreachable!(),
         };
     }
+    // Native-backed sequence subclasses (e.g. `class A(tuple): ...`) store
+    // their value in `__native__` and have no explicit `__len__`/
+    // `__getitem__` in the type's MRO (tuple's own dunders are not in the
+    // type dict). `builtin_len` already falls back to the native backing,
+    // but the `lookup_dunder_via_mro` check below would still fail and raise
+    // "argument to reversed() must be a sequence" — real trigger:
+    // `test_tuple.py::test_free_after_iterating` which does `reversed(A())`
+    // where `A` is a tuple subclass.
+    if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+        if let Some(native) = dict.get(crate::object::NATIVE_BACKING_KEY).cloned() {
+            let kind2 = {
+                let nb = native.borrow();
+                match &*nb {
+                    PyObject::List(_) => 1,
+                    PyObject::Tuple(_) => 2,
+                    PyObject::Str(_) => 3,
+                    _ => 0,
+                }
+            };
+            if kind2 != 0 {
+                let nb = native.borrow();
+                return match &*nb {
+                    PyObject::List(v) => {
+                        let mut rev = v.clone();
+                        rev.reverse();
+                        Ok(PyObjectRef::new(PyObject::GetItemIter {
+                            obj: PyObjectRef::new(PyObject::List(rev)),
+                            index: 0,
+                        }))
+                    }
+                    PyObject::Tuple(v) => {
+                        let mut rev = v.clone();
+                        rev.reverse();
+                        Ok(PyObjectRef::new(PyObject::ListIter { list: rev, index: 0 }))
+                    }
+                    PyObject::Str(s) => {
+                        let chars: Vec<PyObjectRef> =
+                            s.chars().rev().map(|c| py_str(&c.to_string())).collect();
+                        Ok(PyObjectRef::new(PyObject::ListIter { list: chars, index: 0 }))
+                    }
+                    _ => unreachable!(),
+                };
+            }
+        }
+    }
     // Real Python's `reversed(obj)` protocol for a plain instance (no native
     // fast path above): use `obj.__reversed__()` if defined, else `obj[len(
     // obj)-1]`, `obj[len(obj)-2]`, ..., `obj[0]` via `__len__`+`__getitem__`

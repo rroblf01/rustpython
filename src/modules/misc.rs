@@ -6126,6 +6126,301 @@ fn pickle_serialize(
     Ok(())
 }
 
+/// Try to unpickle a CPython-compat range_iterator produced by
+/// `pickle.dumps(iter(range(...)))` with `__setstate__(index)` via the `b`
+/// (BUILD) opcode. CPython's test_range.py::test_iterator_unpickle_compat
+/// pins exactly this: 10 historical pickle byte strings (protocols 0-4,
+/// including Python 2's `xrange`) that all decode to `iter(range(10,20,2))`
+/// with index 2 and to a large-negative range variant. Our own pickle format
+/// uses `R`/`r` etc. and cannot parse these — `pickle_deserialize` would see
+/// the first `c` GLOBAL and return early with trailing bytes left over.
+fn try_unpickle_rangeiter_compat(data: &[u8]) -> Option<PyObjectRef> {
+    // Quick reject: must contain "iter" and ("xrange" or "range").
+    let has_iter = data.windows(4).any(|w| w == b"iter");
+    let has_range = data.windows(5).any(|w| w == b"range");
+    if !(has_iter && has_range) {
+        return None;
+    }
+    // Minimal pickle stack machine for the compat patterns.
+    #[derive(Clone, Debug)]
+    enum StackVal {
+        Mark,
+        Val(PyObjectRef),
+        GlobalRange,
+        GlobalIter,
+    }
+    let mut stack: Vec<StackVal> = Vec::new();
+    let mut pos = 0usize;
+    // Skip PROTO 0x80 0x?? and FRAME 0x95 ...
+    let mut _frame_end: Option<usize> = None;
+    // Helper to parse BigInt from decimal string.
+    let parse_bigint = |s: &str| -> Option<BigInt> {
+        let t = s.trim().trim_end_matches('L');
+        if t.is_empty() { return None; }
+        t.parse::<BigInt>().ok()
+    };
+    // Helper to decode LONG1 n bytes LE signed.
+    let decode_long1 = |n: usize, bytes: &[u8]| -> BigInt {
+        if n == 0 { return BigInt::from(0); }
+        let negative = bytes[n-1] & 0x80 != 0;
+        let mut mag = BigInt::from(0);
+        for &b in bytes.iter().rev() {
+            mag = (mag << 8) | BigInt::from(b);
+        }
+        if negative {
+            let bits = (n * 8) as u32;
+            let modulus = BigInt::from(1u32) << bits;
+            mag - modulus
+        } else { mag }
+    };
+    while pos < data.len() {
+        let op = data[pos];
+        pos += 1;
+        match op {
+            0x80 => {
+                // PROTO version byte
+                if pos < data.len() { pos += 1; }
+            }
+            0x95 => {
+                // FRAME: 8-byte LE length
+                if pos + 8 > data.len() { return None; }
+                let len = u64::from_le_bytes([
+                    data[pos], data[pos+1], data[pos+2], data[pos+3],
+                    data[pos+4], data[pos+5], data[pos+6], data[pos+7],
+                ]) as usize;
+                pos += 8;
+                _frame_end = Some(pos + len);
+            }
+            0x8c => {
+                // SHORT_BINUNICODE: 1-byte len + bytes
+                if pos >= data.len() { return None; }
+                let n = data[pos] as usize;
+                pos += 1;
+                if pos + n > data.len() { return None; }
+                let s = std::str::from_utf8(&data[pos..pos+n]).ok()?;
+                pos += n;
+                // This is a unicode string value; for our hack we just push Val
+                // It will be consumed by STACK_GLOBAL.
+                stack.push(StackVal::Val(py_str(s)));
+            }
+            0x8a => {
+                // LONG1: 1-byte n then n bytes LE
+                if pos >= data.len() { return None; }
+                let n = data[pos] as usize;
+                pos += 1;
+                if pos + n > data.len() { return None; }
+                let v = decode_long1(n, &data[pos..pos+n]);
+                pos += n;
+                stack.push(StackVal::Val(py_int(v)));
+            }
+            0x8b => {
+                // LONG4: 4-byte LE n then n bytes
+                if pos + 4 > data.len() { return None; }
+                let n = u32::from_le_bytes([data[pos],data[pos+1],data[pos+2],data[pos+3]]) as usize;
+                pos += 4;
+                if pos + n > data.len() { return None; }
+                let v = decode_long1(n, &data[pos..pos+n]);
+                pos += n;
+                stack.push(StackVal::Val(py_int(v)));
+            }
+            b'c' => {
+                // GLOBAL: module\n name\n
+                let start = pos;
+                while pos < data.len() && data[pos] != b'\n' { pos += 1; }
+                if pos >= data.len() { return None; }
+                let module = std::str::from_utf8(&data[start..pos]).ok()?.to_string();
+                pos += 1;
+                let start2 = pos;
+                while pos < data.len() && data[pos] != b'\n' { pos += 1; }
+                if pos >= data.len() { return None; }
+                let name = std::str::from_utf8(&data[start2..pos]).ok()?.to_string();
+                pos += 1;
+                match (module.as_str(), name.as_str()) {
+                    ("__builtin__", "iter") | ("builtins", "iter") => stack.push(StackVal::GlobalIter),
+                    ("__builtin__", "xrange") | ("__builtin__", "range") | ("builtins", "range") => stack.push(StackVal::GlobalRange),
+                    _ => return None,
+                }
+            }
+            0x93 => {
+                // STACK_GLOBAL: pops module and name (previously pushed by BINUNICODE)
+                if stack.len() < 2 { return None; }
+                let name_v = stack.pop().unwrap();
+                let module_v = stack.pop().unwrap();
+                let (module, name) = match (module_v, name_v) {
+                    (StackVal::Val(m), StackVal::Val(n)) => (m.str(), n.str()),
+                    _ => return None,
+                };
+                match (module.as_str(), name.as_str()) {
+                    ("builtins", "iter") => stack.push(StackVal::GlobalIter),
+                    ("builtins", "range") => stack.push(StackVal::GlobalRange),
+                    _ => return None,
+                }
+            }
+            b'(' => stack.push(StackVal::Mark),
+            b'I' => {
+                let start = pos;
+                while pos < data.len() && data[pos] != b'\n' { pos += 1; }
+                if pos >= data.len() { return None; }
+                let s = std::str::from_utf8(&data[start..pos]).ok()?;
+                pos += 1;
+                let v = parse_bigint(s)?;
+                stack.push(StackVal::Val(py_int(v)));
+            }
+            b'K' => {
+                if pos >= data.len() { return None; }
+                let v = data[pos] as i64;
+                pos += 1;
+                stack.push(StackVal::Val(py_int(v)));
+            }
+            b'M' => {
+                if pos + 2 > data.len() { return None; }
+                let v = u16::from_le_bytes([data[pos], data[pos+1]]) as i64;
+                pos += 2;
+                stack.push(StackVal::Val(py_int(v)));
+            }
+            b'J' => {
+                if pos + 4 > data.len() { return None; }
+                let v = i32::from_le_bytes([data[pos],data[pos+1],data[pos+2],data[pos+3]]) as i64;
+                pos += 4;
+                stack.push(StackVal::Val(py_int(v)));
+            }
+            b'L' => {
+                let start = pos;
+                while pos < data.len() && data[pos] != b'\n' { pos += 1; }
+                if pos >= data.len() { return None; }
+                let s = std::str::from_utf8(&data[start..pos]).ok()?;
+                pos += 1;
+                let v = parse_bigint(s)?;
+                stack.push(StackVal::Val(py_int(v)));
+            }
+            b't' => {
+                // TUPLE from MARK
+                let mut items = Vec::new();
+                while let Some(top) = stack.pop() {
+                    match top {
+                        StackVal::Mark => break,
+                        StackVal::Val(v) => items.push(v),
+                        _ => return None,
+                    }
+                }
+                items.reverse();
+                stack.push(StackVal::Val(py_tuple(items)));
+            }
+            0x85 => {
+                // TUPLE1
+                if let Some(StackVal::Val(v)) = stack.pop() {
+                    stack.push(StackVal::Val(py_tuple(vec![v])));
+                } else { return None; }
+            }
+            0x86 => {
+                // TUPLE2
+                if stack.len() < 2 { return None; }
+                let b = match stack.pop().unwrap() { StackVal::Val(v)=>v, _=>return None };
+                let a = match stack.pop().unwrap() { StackVal::Val(v)=>v, _=>return None };
+                stack.push(StackVal::Val(py_tuple(vec![a,b])));
+            }
+            0x87 => {
+                // TUPLE3
+                if stack.len() < 3 { return None; }
+                let c = match stack.pop().unwrap() { StackVal::Val(v)=>v, _=>return None };
+                let b = match stack.pop().unwrap() { StackVal::Val(v)=>v, _=>return None };
+                let a = match stack.pop().unwrap() { StackVal::Val(v)=>v, _=>return None };
+                stack.push(StackVal::Val(py_tuple(vec![a,b,c])));
+            }
+            b'R' => {
+                // REDUCE
+                let args_v = stack.pop()?;
+                let callable = stack.pop()?;
+                let args = match args_v {
+                    StackVal::Val(v) => {
+                        if let PyObject::Tuple(items) = &*v.borrow() { items.clone() } else { return None; }
+                    }
+                    _ => return None,
+                };
+                match callable {
+                    StackVal::GlobalRange => {
+                        // range(*args)
+                        let (start_v, stop_v, step_v) = match args.len() {
+                            1 => (py_int(0), args[0].clone(), py_int(1)),
+                            2 => (args[0].clone(), args[1].clone(), py_int(1)),
+                            3 => (args[0].clone(), args[1].clone(), args[2].clone()),
+                            _ => return None,
+                        };
+                        let s = crate::object::to_index(&start_v).ok()?;
+                        let e = crate::object::to_index(&stop_v).ok()?;
+                        let p = crate::object::to_index(&step_v).ok()?;
+                        let r = PyObjectRef::imm(PyObject::Range { start: s, stop: e, step: p });
+                        stack.push(StackVal::Val(r));
+                    }
+                    StackVal::GlobalIter => {
+                        if args.len() != 1 { return None; }
+                        let range_obj = args[0].clone();
+                        let (start, stop, step) = match &*range_obj.borrow() {
+                            PyObject::Range { start, stop, step } => (start.clone(), stop.clone(), step.clone()),
+                            _ => return None,
+                        };
+                        let iter = PyObjectRef::new(PyObject::RangeIter { current: start.clone(), stop, step });
+                        stack.push(StackVal::Val(iter));
+                    }
+                    _ => return None,
+                }
+            }
+            b'b' => {
+                // BUILD: pops state, then object, then calls __setstate__
+                let state_v = stack.pop()?;
+                let obj_v = stack.pop()?;
+                let state = match state_v {
+                    StackVal::Val(v) => crate::object::to_index(&v).ok()?,
+                    _ => return None,
+                };
+                let obj = match obj_v { StackVal::Val(v)=>v, _=>return None };
+                // RangeIter BUILD: state is index
+                let (cur, st, stop_c) = {
+                    let b = obj.borrow();
+                    if let PyObject::RangeIter { current, stop, step } = &*b {
+                        (current.clone(), step.clone(), stop.clone())
+                    } else {
+                        return None;
+                    }
+                };
+                let new_current = cur + &st * &state;
+                let new_iter = PyObjectRef::new(PyObject::RangeIter { current: new_current, stop: stop_c, step: st });
+                stack.push(StackVal::Val(new_iter));
+            }
+            0x81 => {
+                // NEWOBJ? not needed
+                return None;
+            }
+            b'.' => {
+                // STOP
+                break;
+            }
+            b'\n' | b' ' => { /* whitespace? */ }
+            _ => {
+                // Unknown opcode - fail to fall back to normal path
+                return None;
+            }
+        }
+    }
+    // After STOP, stack should contain single RangeIter
+    if stack.len() == 1 {
+        if let StackVal::Val(v) = &stack[0] {
+            if matches!(&*v.borrow(), PyObject::RangeIter { .. }) {
+                return Some(v.clone());
+            }
+        }
+    }
+    // Also handle case where there's extra marks? Try to find RangeIter in stack
+    for sv in stack.iter().rev() {
+        if let StackVal::Val(v) = sv {
+            if matches!(&*v.borrow(), PyObject::RangeIter { .. }) {
+                return Some(v.clone());
+            }
+        }
+    }
+    None
+}
+
 /// Deserialize a Python object from bytes using the custom pickle format.
 /// Deserialize a Python object from bytes using the custom pickle format.
 /// `memo` mirrors the serializer's container memo: each container's ref is
@@ -7019,6 +7314,12 @@ pub fn create_pickle_dict() -> HashMap<String, PyObjectRef> {
                 ))
             }
         };
+        // CPython compat: historical range_iterator pickles (protocols 0-4,
+        // including Python 2 `xrange`) are a different wire format from our
+        // own custom pickle. Try that first so `trailing bytes` doesn't fire.
+        if let Some(v) = try_unpickle_rangeiter_compat(&data) {
+            return Ok(v);
+        }
         let mut pos = 0;
         let mut memo: Vec<PyObjectRef> = Vec::new();
         let result = pickle_deserialize(&data, &mut pos, &mut memo)?;
@@ -9033,7 +9334,88 @@ pub fn create_gc_dict() -> HashMap<String, PyObjectRef> {
         Ok(py_tuple(vec![py_int(tracked as i64), py_int(0), py_int(0)]))
     });
 
-    gc_func!("is_tracked", |_| { Ok(py_bool(false)) });
+    gc_func!("is_tracked", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("is_tracked() missing required argument 'obj'"));
+        }
+        let obj = &args[0];
+        // Inline scalars are never tracked.
+        if matches!(
+            obj,
+            PyObjectRef::SmallInt(_)
+                | PyObjectRef::SmallBool(_)
+                | PyObjectRef::SmallFloat(_)
+                | PyObjectRef::SmallStr(_)
+                | PyObjectRef::None
+        ) {
+            return Ok(py_bool(false));
+        }
+        // Helper: true if this object itself would need GC tracking.
+        fn is_tracked_obj(o: &PyObjectRef) -> bool {
+            if matches!(
+                o,
+                PyObjectRef::SmallInt(_)
+                    | PyObjectRef::SmallBool(_)
+                    | PyObjectRef::SmallFloat(_)
+                    | PyObjectRef::SmallStr(_)
+                    | PyObjectRef::None
+            ) {
+                return false;
+            }
+            let borrowed = o.borrow();
+            match &*borrowed {
+                PyObject::Tuple(items) => {
+                    // CPython: tuple is tracked iff any element is tracked.
+                    items.iter().any(|el| is_tracked_obj(el))
+                }
+                PyObject::FrozenSet(s) => s.iter().any(|el| is_tracked_obj(el)),
+                // Mutable containers are always tracked.
+                PyObject::List(_)
+                | PyObject::Dict(_)
+                | PyObject::Set(_)
+                | PyObject::Deque { .. }
+                | PyObject::ByteArray(_) => true,
+                PyObject::Instance { typ, dict } => {
+                    // Tuple subtypes are always tracked (CPython rule).
+                    if let Some(kind) = crate::object::native_base_of_type(typ) {
+                        if kind == "tuple" {
+                            return true;
+                        }
+                    }
+                    // Also check via native backing's own trackability.
+                    if let Some(native) = dict.get(crate::object::NATIVE_BACKING_KEY) {
+                        if is_tracked_obj(native) {
+                            return true;
+                        }
+                    }
+                    let typ_name = {
+                        let tr = typ.borrow();
+                        if let PyObject::Type { name, .. } = &*tr {
+                            name.clone()
+                        } else {
+                            String::new()
+                        }
+                    };
+                    if typ_name == "object" {
+                        return false;
+                    }
+                    // Generic instance: tracked if any attribute value is tracked
+                    // or if it has a tracked native backing (already handled).
+                    dict.iter().any(|(_, v)| is_tracked_obj(v))
+                }
+                // Immutable scalars are untracked.
+                PyObject::None
+                | PyObject::Bool(_)
+                | PyObject::Int(_)
+                | PyObject::Float(_)
+                | PyObject::Str(_)
+                | PyObject::Bytes(_)
+                | PyObject::Complex(_, _) => false,
+                _ => false,
+            }
+        }
+        Ok(py_bool(is_tracked_obj(obj)))
+    });
 
     // `gc.set_threshold`/`gc.get_threshold` — were missing entirely
     // (`AttributeError`). This interpreter's cycle collector (`cycle_gc.rs`)

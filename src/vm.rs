@@ -10076,7 +10076,7 @@ impl VirtualMachine {
         }
         // Placeholder iterator types (range_iterator, etc.) are not directly constructible
         if let PyObject::Type { name, .. } = &*callable.borrow() {
-            if name.contains("iterator") {
+            if name.contains("iterator") || name == "select.poll" || name == "select.devpoll" || name == "select.epoll" || name == "select.kqueue" {
                 return Err(PyError::type_error(format!(
                     "cannot create '{}' instances",
                     name
@@ -10276,12 +10276,33 @@ impl VirtualMachine {
                 // element to a sequence" before `__init__` ever runs.
                 let custom_py_init =
                     matches!(&init_func, Some(f) if matches!(&*f.borrow(), PyObject::Function(_)));
-                let is_container = matches!(
+                let is_mutable_container = matches!(
                     kind.as_str(),
-                    "dict" | "list" | "set" | "tuple" | "deque" | "bytearray" | "frozenset"
+                    "dict" | "list" | "set" | "deque" | "bytearray"
                 );
-                let native = if custom_py_init && is_container {
+                let native = if custom_py_init && is_mutable_container {
                     crate::object::make_native_backing(kind)
+                } else if custom_py_init
+                    && matches!(
+                        kind.as_str(),
+                        "tuple" | "frozenset" | "bytes" | "str" | "int" | "float" | "complex"
+                    )
+                {
+                    // Immutable base: its value is created by __new__, not
+                    // __init__. When a subclass overrides __init__ with extra
+                    // args (e.g. `class S(tuple): def __init__(self, arg,
+                    // newarg=None)` → `S([1,2], newarg=3)`), those extra
+                    // args belong to __init__, not to tuple.__new__. CPython's
+                    // type_call slices them: __new__ receives only the
+                    // iterable, __init__ receives the full args. Without this,
+                    // passing extra kwargs to synthesize would either raise
+                    // "tuple() takes no keyword arguments" incorrectly or,
+                    // if skipped entirely, leave the backing empty (the
+                    // observed [] vs [1,2] failure in
+                    // test_keywords_in_subclass).
+                    let truncated_args: &[PyObjectRef] =
+                        if args.is_empty() { &[] } else { &args[0..1] };
+                    crate::object::synthesize_native_init(kind, truncated_args, &[])?
                 } else {
                     crate::object::synthesize_native_init(kind, &args, &keywords)?
                 };

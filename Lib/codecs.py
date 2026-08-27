@@ -120,16 +120,16 @@ class Codec:
         raise NotImplementedError
 
 def make_identity_dict(rng):
-    return {i: chr(i) for i in rng}
+    return {i: i for i in rng}
 
 def make_encoding_map(decoding_map):
-    encmap = {}
+    m = {}
     for k, v in decoding_map.items():
-        if not isinstance(k, int):
-            continue
-        if v is None or isinstance(v, str):
-            encmap[v] = k
-    return encmap
+        if v not in m:
+            m[v] = k
+        else:
+            m[v] = None
+    return m
 
 # Real `codecs.register`/`unregister`: a search function is appended to
 # (or removed from) `_codecs`'s own search-function list, consulted by
@@ -146,3 +146,7 @@ def register(search_function):
 
 def unregister(search_function):
     _codecs.unregister(search_function)
+
+charmap_encode = _codecs.charmap_encode
+charmap_decode = _codecs.charmap_decode
+charmap_build = _codecs.charmap_build

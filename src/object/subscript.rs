@@ -108,10 +108,14 @@ pub(crate) fn slice_indices_values(
     let one = BigInt::from(1);
     let zero = BigInt::from(0);
     let comp = |v: &PyObjectRef| -> PyResult<BigInt> {
-        crate::object::to_index(v).map_err(|_| {
-            PyError::type_error(
-                "slice indices must be integers or None or have an __index__ method",
-            )
+        crate::object::to_index(v).map_err(|e| {
+            if e.type_name() == "TypeError" {
+                PyError::type_error(
+                    "slice indices must be integers or None or have an __index__ method",
+                )
+            } else {
+                e
+            }
         })
     };
     let is_none = |v: &PyObjectRef| matches!(&*v.borrow(), PyObject::None);
