@@ -1517,7 +1517,7 @@ pub fn create_weakref_dict() -> HashMap<String, PyObjectRef> {
                 )))
             }
         };
-        Ok(PyObjectRef::imm(PyObject::WeakRef { target }))
+        Ok(PyObjectRef::imm(PyObject::WeakRef { target, callback: None }))
     });
 
     wr_func!("proxy", |args| {
@@ -1553,7 +1553,7 @@ pub fn create_weakref_dict() -> HashMap<String, PyObjectRef> {
                 )))
             }
         };
-        Ok(PyObjectRef::imm(PyObject::WeakProxy { target }))
+        Ok(PyObjectRef::imm(PyObject::WeakProxy { target, callback: None }))
     });
 
     wr_func!("getweakrefcount", |_| Ok(py_int(0)));
@@ -2132,7 +2132,25 @@ fn build_simple_namespace_type() -> PyObjectRef {
     type_dict.insert_str(
         "__repr__",
         bf!("__repr__", |args| {
-            if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+            if let PyObject::Instance { typ, dict } = &*args[0].borrow() {
+                let cls_name = {
+                    let tb = typ.borrow();
+                    if let PyObject::Type { name, .. } = &*tb {
+                        if name == "types.SimpleNamespace" {
+                            "namespace".to_string()
+                        } else {
+                            // For subclasses, use subclass name (e.g. AdvancedNamespace)
+                            // Strip "types." prefix if present
+                            if name.starts_with("types.") {
+                                name["types.".len()..].to_string()
+                            } else {
+                                name.clone()
+                            }
+                        }
+                    } else {
+                        "namespace".to_string()
+                    }
+                };
                 let mut items: Vec<(String, PyObjectRef)> = dict
                     .iter()
                     .map(|(k, v)| (k.to_string(), v.clone()))
@@ -2143,7 +2161,7 @@ fn build_simple_namespace_type() -> PyObjectRef {
                     .map(|(k, v)| format!("{}={}", k, v.repr()))
                     .collect::<Vec<_>>()
                     .join(", ");
-                Ok(py_str(&format!("namespace({})", body)))
+                Ok(py_str(&format!("{}({})", cls_name, body)))
             } else {
                 Ok(py_str("namespace()"))
             }
@@ -5028,7 +5046,7 @@ pub fn create_csv_dict() -> HashMap<String, PyObjectRef> {
             parts.push(formatted);
             let _ = idx;
         }
-        if parts.is_empty() { return Ok("".to_string()); }
+        if parts.is_empty() { return Ok(dialect.lineterminator.clone()); }
         // handle delimiter == ' ' and skipinitialspace etc? parts join with delimiter, but for space delimiter with skipinitialspace, need special?
         // For space delimiter, writer test expects ' ' vs '"" ""' etc. Our simple join will produce ' ' for two empty fields when delimiter=' ', which matches expected ' ' for skipinitialspace false, and '"" ""' for true? Need to check.
         // For delimiter=' ' and skipinitialspace false, ['', ''] -> ' ' (our code: two '""' -> '"",""'? No, we produce '""' for each empty, then join with ' ' -> '"" ""', not ' '

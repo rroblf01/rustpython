@@ -228,9 +228,11 @@ pub enum PyObject {
     /// target (or `None`, or a caller-supplied default once dead).
     WeakRef {
         target: std::rc::Weak<std::cell::RefCell<PyObject>>,
+        callback: Option<PyObjectRef>,
     },
     WeakProxy {
         target: std::rc::Weak<std::cell::RefCell<PyObject>>,
+        callback: Option<PyObjectRef>,
     },
     // Reserved for future C-extension capsule support (ffi_bridge.rs); not
     // constructed anywhere yet.
@@ -612,13 +614,21 @@ impl PyObject {
             }
             PyObject::Set(items) => {
                 let vec = items.to_vec();
-                let items: Vec<String> = vec.iter().map(|x| x.repr()).collect();
-                format!("{{{}}}", items.join(", "))
+                if vec.is_empty() {
+                    "set()".to_string()
+                } else {
+                    let items: Vec<String> = vec.iter().map(|x| x.repr()).collect();
+                    format!("{{{}}}", items.join(", "))
+                }
             }
             PyObject::FrozenSet(items) => {
                 let vec = items.to_vec();
-                let items: Vec<String> = vec.iter().map(|x| x.repr()).collect();
-                format!("frozenset({{{}}})", items.join(", "))
+                if vec.is_empty() {
+                    "frozenset()".to_string()
+                } else {
+                    let items: Vec<String> = vec.iter().map(|x| x.repr()).collect();
+                    format!("frozenset({{{}}})", items.join(", "))
+                }
             }
             PyObject::Range { start, stop, step } => {
                 if *step == num_bigint::BigInt::from(1) {
@@ -662,29 +672,140 @@ impl PyObject {
             }
             PyObject::Module { name, .. } => format!("<module '{}'>", name),
             PyObject::Type { name, .. } => format!("<class '{}'>", name),
-            PyObject::Instance { typ, .. } => {
-                // CPython: `<module.Class object at 0x...>` — dataclasses'
-                // repr=False instances and test_pprint's regex expect the
-                // module-qualified name, not the bare `<Class object>`.
-                let tb = typ.borrow();
-                let name = if let PyObject::Type { dict, name, .. } = &*tb {
-                    let module = dict
-                        .get_str("__module__")
-                        .map(|m| m.str())
-                        .unwrap_or_else(|| "builtins".to_string());
-                    format!("{}.{}", module, name)
+            PyObject::Instance { typ, dict } => {
+                // For native-base subclasses (e.g. class Foo(set): ...), the instance
+                // has a native backing (PyObject::Set/List/Dict etc) stored under
+                // NATIVE_BACKING_KEY. Its repr should delegate to the backing with
+                // the subclass name, not the generic "<Foo object at ...>".
+                if let Some(native) = dict.get(NATIVE_BACKING_KEY) {
+                    let native_borrow = native.borrow();
+                    let tb = typ.borrow();
+                    let cls_name = if let PyObject::Type { name, .. } = &*tb {
+                        name.clone()
+                    } else {
+                        tb.type_name().to_string()
+                    };
+                    match &*native_borrow {
+                        PyObject::Set(items) => {
+                            let vec = items.to_vec();
+                            if vec.is_empty() {
+                                if cls_name == "set" {
+                                    "set()".to_string()
+                                } else {
+                                    format!("{}()", cls_name)
+                                }
+                            } else {
+                                let items_str: Vec<String> =
+                                    vec.iter().map(|x| x.repr()).collect();
+                                let inner = items_str.join(", ");
+                                if cls_name == "set" {
+                                    format!("{{{}}}", inner)
+                                } else {
+                                    format!("{}({{{}}})", cls_name, inner)
+                                }
+                            }
+                        }
+                        PyObject::FrozenSet(items) => {
+                            let vec = items.to_vec();
+                            if vec.is_empty() {
+                                if cls_name == "frozenset" {
+                                    "frozenset()".to_string()
+                                } else {
+                                    format!("{}()", cls_name)
+                                }
+                            } else {
+                                let items_str: Vec<String> =
+                                    vec.iter().map(|x| x.repr()).collect();
+                                let inner = items_str.join(", ");
+                                format!("{}({{{}}})", cls_name, inner)
+                            }
+                        }
+                        PyObject::List(items) => {
+                            let items_str: Vec<String> =
+                                items.iter().map(|x| x.repr()).collect();
+                            let inner = items_str.join(", ");
+                            if cls_name == "list" {
+                                format!("[{}]", inner)
+                            } else {
+                                format!("{}([{}])", cls_name, inner)
+                            }
+                        }
+                        PyObject::Tuple(items) => {
+                            let items_str: Vec<String> =
+                                items.iter().map(|x| x.repr()).collect();
+                            let inner = items_str.join(", ");
+                            if cls_name == "tuple" {
+                                if items_str.len() == 1 {
+                                    format!("({},)", items_str[0])
+                                } else {
+                                    format!("({})", inner)
+                                }
+                            } else if items_str.len() == 1 {
+                                format!("{}(({},))", cls_name, items_str[0])
+                            } else {
+                                format!("{}(({}) )", cls_name, inner)
+                            }
+                        }
+                        PyObject::Dict(d) => {
+                            let items: Vec<String> = d
+                                .items()
+                                .iter()
+                                .map(|(k, v)| format!("{}: {}", k.repr(), v.repr()))
+                                .collect();
+                            let inner = items.join(", ");
+                            if cls_name == "dict" {
+                                format!("{{{}}}", inner)
+                            } else {
+                                format!("{}({{{}}})", cls_name, inner)
+                            }
+                        }
+                        PyObject::Str(s) => {
+                            if cls_name == "str" {
+                                format!("'{}'", escape_string(s))
+                            } else {
+                                format!("{}('{}')", cls_name, escape_string(s))
+                            }
+                        }
+                        _ => {
+                            let name = if let PyObject::Type { dict, name, .. } = &*tb {
+                                let module = dict
+                                    .get_str("__module__")
+                                    .map(|m| m.str())
+                                    .unwrap_or_else(|| "builtins".to_string());
+                                format!("{}.{}", module, name)
+                            } else {
+                                tb.type_name().to_string()
+                            };
+                            format!(
+                                "<{} object at 0x{:x}>",
+                                name, self as *const PyObject as usize
+                            )
+                        }
+                    }
                 } else {
-                    tb.type_name().to_string()
-                };
-                format!(
-                    "<{} object at 0x{:x}>",
-                    name, self as *const PyObject as usize
-                )
+                    // CPython: `<module.Class object at 0x...>` — dataclasses'
+                    // repr=False instances and test_pprint's regex expect the
+                    // module-qualified name, not the bare `<Class object>`.
+                    let tb = typ.borrow();
+                    let name = if let PyObject::Type { dict, name, .. } = &*tb {
+                        let module = dict
+                            .get_str("__module__")
+                            .map(|m| m.str())
+                            .unwrap_or_else(|| "builtins".to_string());
+                        format!("{}.{}", module, name)
+                    } else {
+                        tb.type_name().to_string()
+                    };
+                    format!(
+                        "<{} object at 0x{:x}>",
+                        name, self as *const PyObject as usize
+                    )
+                }
             }
             PyObject::Code(c) => format!("<code object {}>", c.name),
             PyObject::Cell { value: Some(v) } => v.repr(),
             PyObject::Cell { value: None } => "None".to_string(),
-            PyObject::WeakRef { target } => match target.upgrade() {
+            PyObject::WeakRef { target, .. } => match target.upgrade() {
                 Some(rc) => {
                     let (tname, tptr) = {
                         let b = rc.borrow();
@@ -703,7 +824,7 @@ impl PyObject {
                     std::ptr::from_ref::<PyObject>(self) as usize
                 ),
             },
-            PyObject::WeakProxy { target } => match target.upgrade() {
+            PyObject::WeakProxy { target, .. } => match target.upgrade() {
                 Some(rc) => rc.borrow().repr(),
                 None => format!(
                     "<weakproxy at {:#x}; dead>",
@@ -938,6 +1059,13 @@ impl PyObject {
             // an empty-bytes EOF sentinel from `readline()`).
             PyObject::Bytes(b) => !b.is_empty(),
             PyObject::ByteArray(b) => !b.is_empty(),
+            PyObject::WeakProxy { target, .. } => {
+                if let Some(rc) = target.upgrade() {
+                    return rc.borrow().truthy();
+                } else {
+                    return false;
+                }
+            }
             _ => true,
         }
     }
@@ -1107,6 +1235,13 @@ impl PyObject {
             // object_with_only___getitem__)` (this interpreter's own
             // `GetItemIter`), and `iter(callable, sentinel)` (`
             // CallSentinelIter`).
+            PyObject::WeakProxy { target, .. } => {
+                if let Some(rc) = target.upgrade() {
+                    return PyObjectRef::Imm(rc).hash();
+                } else {
+                    return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+                }
+            }
             PyObject::Function(_)
             | PyObject::BuiltinFunction { .. }
             | PyObject::BuiltinMethod { .. }
@@ -1163,6 +1298,20 @@ impl PyObject {
     }
 
     pub fn equals(&self, other_ref: &PyObjectRef) -> PyResult<bool> {
+        if let PyObject::WeakProxy { target, .. } = self {
+            if let Some(rc) = target.upgrade() {
+                return rc.borrow().equals(other_ref);
+            } else {
+                return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+            }
+        }
+        if let PyObject::WeakProxy { target, .. } = &*other_ref.borrow() {
+            if let Some(rc) = target.upgrade() {
+                return self.equals(&PyObjectRef::Imm(rc));
+            } else {
+                return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+            }
+        }
         // This structural-equality function is what PyDict/PySet actually
         // use to disambiguate a hash bucket — unlike py_compare's `==`
         // operator dispatch, it never checked a custom class's __eq__ at
