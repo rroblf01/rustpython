@@ -105,7 +105,7 @@ pub fn run_weakref_callbacks() {
         }
     });
     for (wr, cb) in to_call {
-        let _ = crate::object::builtins::call_function_disposable(&cb, vec![wr.clone()], vec![]);
+        let _ = crate::object::call_function_disposable(&cb, vec![wr.clone()], vec![]);
     }
 }
 
@@ -1633,37 +1633,28 @@ pub fn create_weakref_dict() -> HashMap<String, PyObjectRef> {
             return Err(PyError::type_error("ref() requires at least 1 argument"));
         }
         let obj = &args[0];
-        // Types that don't support weak references (matching CPython's list:
-        // atomics plus tuple/bytes and plain builtin functions).
-        let unsupported = matches!(
-            &*obj.borrow(),
-            PyObject::None
-                | PyObject::Bool(_)
-                | PyObject::Int(_)
-                | PyObject::Float(_)
-                | PyObject::Complex(..)
-                | PyObject::Str(_)
-                | PyObject::Bytes(_)
-                | PyObject::Tuple(_)
-                | PyObject::Code { .. }
-                | PyObject::BuiltinFunction { .. }
-        );
-        if unsupported {
+        if !is_weakrefable(obj) {
             return Err(PyError::type_error(format!(
                 "cannot create weak reference to '{}' object",
                 obj.borrow().type_name()
             )));
         }
+        let callback = if args.len() > 1 && !matches!(&*args[1].borrow(), PyObject::None) {
+            Some(args[1].clone())
+        } else { None };
+        let tptr = target_ptr(obj).unwrap();
+        if callback.is_none() {
+            if let Some(existing) = find_shared_weakref(tptr) {
+                return Ok(existing);
+            }
+        }
         let target = match obj {
             PyObjectRef::Mut(rc) | PyObjectRef::Imm(rc) => std::rc::Rc::downgrade(rc),
-            _ => {
-                return Err(PyError::type_error(format!(
-                    "cannot create weak reference to '{}' object",
-                    obj.borrow().type_name()
-                )))
-            }
+            _ => unreachable!(),
         };
-        Ok(PyObjectRef::imm(PyObject::WeakRef { target, callback: None }))
+        let wr = PyObjectRef::imm(PyObject::WeakRef { target, callback: callback.clone() });
+        register_weakref(tptr, &wr, callback);
+        Ok(wr)
     });
 
     wr_func!("proxy", |args| {
@@ -1671,39 +1662,91 @@ pub fn create_weakref_dict() -> HashMap<String, PyObjectRef> {
             return Err(PyError::type_error("proxy() requires at least 1 argument"));
         }
         let obj = &args[0];
-        let unsupported = matches!(
-            &*obj.borrow(),
-            PyObject::None
-                | PyObject::Bool(_)
-                | PyObject::Int(_)
-                | PyObject::Float(_)
-                | PyObject::Complex(..)
-                | PyObject::Str(_)
-                | PyObject::Bytes(_)
-                | PyObject::Tuple(_)
-                | PyObject::Code { .. }
-                | PyObject::BuiltinFunction { .. }
-        );
-        if unsupported {
+        if !is_weakrefable(obj) {
             return Err(PyError::type_error(format!(
                 "cannot create weak reference to '{}' object",
                 obj.borrow().type_name()
             )));
         }
+        let callback = if args.len() > 1 && !matches!(&*args[1].borrow(), PyObject::None) {
+            Some(args[1].clone())
+        } else { None };
+        let tptr = target_ptr(obj).unwrap();
+        if callback.is_none() {
+            let existing = WEAKREF_REGISTRY.with(|r| {
+                let m = r.borrow();
+                if let Some(vec) = m.get(&tptr) {
+                    for e in vec {
+                        if e.callback.is_none() {
+                            if let Some(rc) = e.weakref.upgrade() {
+                                let b = rc.borrow();
+                                if matches!(&*b, PyObject::WeakProxy { .. }) {
+                                    return Some(PyObjectRef::Imm(rc.clone()));
+                                }
+                            }
+                        }
+                    }
+                }
+                None
+            });
+            if let Some(e) = existing { return Ok(e); }
+        }
         let target = match obj {
             PyObjectRef::Mut(rc) | PyObjectRef::Imm(rc) => std::rc::Rc::downgrade(rc),
-            _ => {
-                return Err(PyError::type_error(format!(
-                    "cannot create weak reference to '{}' object",
-                    obj.borrow().type_name()
-                )))
-            }
+            _ => unreachable!(),
         };
-        Ok(PyObjectRef::imm(PyObject::WeakProxy { target, callback: None }))
+        let wr = PyObjectRef::imm(PyObject::WeakProxy { target, callback: callback.clone() });
+        register_weakref(tptr, &wr, callback);
+        Ok(wr)
     });
 
-    wr_func!("getweakrefcount", |_| Ok(py_int(0)));
-    wr_func!("getweakrefs", |_| Ok(py_list(vec![])));
+    wr_func!("getweakrefcount", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("getweakrefcount() requires 1 argument"));
+        }
+        let obj = &args[0];
+        let tptr = match target_ptr(obj) { Some(p) => p, None => return Ok(py_int(0)) };
+        run_weakref_callbacks();
+        let cnt = WEAKREF_REGISTRY.with(|r| {
+            let mut m = r.borrow_mut();
+            if let Some(vec) = m.get_mut(&tptr) {
+                vec.retain(|e| {
+                    if let Some(rc) = e.weakref.upgrade() {
+                        let b = rc.borrow();
+                        match &*b {
+                            PyObject::WeakRef { target, .. } | PyObject::WeakProxy { target, .. } => target.upgrade().is_some(),
+                            _ => false,
+                        }
+                    } else { false }
+                });
+                vec.len() as i64
+            } else { 0 }
+        });
+        Ok(py_int(cnt))
+    });
+    wr_func!("getweakrefs", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("getweakrefs() requires 1 argument"));
+        }
+        let obj = &args[0];
+        let tptr = match target_ptr(obj) { Some(p) => p, None => return Ok(py_list(vec![])) };
+        run_weakref_callbacks();
+        let refs = WEAKREF_REGISTRY.with(|r| {
+            let m = r.borrow();
+            if let Some(vec) = m.get(&tptr) {
+                vec.iter().filter_map(|e| {
+                    if let Some(rc) = e.weakref.upgrade() {
+                        let b = rc.borrow();
+                        match &*b {
+                            PyObject::WeakRef { target, .. } | PyObject::WeakProxy { target, .. } if target.upgrade().is_some() => Some(PyObjectRef::Imm(rc.clone())),
+                            _ => None,
+                        }
+                    } else { None }
+                }).collect::<Vec<_>>()
+            } else { vec![] }
+        });
+        Ok(py_list(refs))
+    });
 
     // finalize(obj, func, *args, **kwargs) — real semantics call `func` when
     // `obj` is garbage collected; this interpreter has no GC hooks to key

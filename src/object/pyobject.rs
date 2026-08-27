@@ -1630,7 +1630,7 @@ pub(crate) fn escape_string(s: &str) -> String {
             '\r' => out.push_str("\\r"),
             '\\' => out.push_str("\\\\"),
             '\'' => out.push_str("\\'"),
-            '\"' => out.push_str("\\\""),
+            '"' => out.push('"'),
             '\x00'..='\x1f' => out.push_str(&format!("\\x{:02x}", c as u8)),
             '\x7f' => out.push_str("\\x7f"),
             c if c.is_control() => match c as u32 {
