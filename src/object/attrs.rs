@@ -766,6 +766,12 @@ impl PyObject {
                 if name == "__qualname__" {
                     return Ok(py_str(type_name));
                 }
+                if name == "__annotations__" {
+                    if let Some(v) = dict.get_str("__annotations__").cloned() {
+                        return Ok(v);
+                    }
+                    return Ok(crate::object::py_dict());
+                }
                 // `__module__` — real user-defined classes already have this
                 // seeded into their own dict at class-creation time (the
                 // class body's implicit `__module__ = __name__` statement),

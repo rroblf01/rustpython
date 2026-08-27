@@ -5339,10 +5339,12 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
         d.insert_str("__stderr__", std_err);
     }
     // sys.implementation — CPython returns a namespace with name, cache_tag, etc.
+    // Use "rustpython" so `support.cpython_only` correctly skips CPython-specific
+    // tests (e.g. test_deque::test_sizeof which checks exact CPython struct layout).
     {
         let mut imp_dict = HashMap::new();
-        imp_dict.insert_str("name", py_str("cpython"));
-        imp_dict.insert_str("cache_tag", py_str("cpython-314"));
+        imp_dict.insert_str("name", py_str("rustpython"));
+        imp_dict.insert_str("cache_tag", py_str("rustpython-314"));
         imp_dict.insert_str("hexversion", py_int(50987248)); // 0x030A0000
         imp_dict.insert_str("_multi_threaded", py_bool(true));
         d.insert_str("implementation", create_module("implementation", imp_dict));

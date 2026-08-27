@@ -1,4 +1,5 @@
 use std::fmt;
+use unicode_normalization::UnicodeNormalization;
 
 fn unicode_name_to_char(name: &str) -> Option<char> {
     Some(match name {
@@ -1234,7 +1235,13 @@ impl Lexer {
                             return self.read_string(quote, raw, false);
                         }
                     }
-                    return match name.as_str() {
+                    // PEP 3131: identifiers are NFKC-normalized. This handles
+                    // compatibility characters (e.g. MICRO SIGN U+00B5 -> GREEK MU
+                    // U+03BC, and mathematical fraktur -> ASCII) so that
+                    // `µ` and `μ` are the same identifier, and
+                    // `𝔘𝔫𝔦𝔠𝔬𝔡𝔢` normalizes to `Unicode`.
+                    let normalized: String = name.nfkc().collect();
+                    return match normalized.as_str() {
                         "False" => Token::False,
                         "None" => Token::None,
                         "True" => Token::True,
@@ -1273,7 +1280,7 @@ impl Lexer {
                         "match" => Token::Name("match".to_string()),
                         "case" => Token::Name("case".to_string()),
                         "_" => Token::Underscore,
-                        _ => Token::Name(name),
+                        _ => Token::Name(normalized),
                     };
                 }
 
@@ -1464,7 +1471,14 @@ impl Lexer {
                     }
                 }
 
-                _ => return Token::Name(ch.to_string()),
+                _ => {
+                    let (line, _) = self.get_line_col();
+                    let col = if self.col > 1 { self.col - 1 } else { 1 };
+                    return Token::LexerError(format!(
+                        "L{}:{}: invalid character '{}' (U+{:04X})",
+                        line, col, ch, ch as u32
+                    ));
+                }
             }
         }
     }

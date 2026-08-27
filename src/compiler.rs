@@ -2407,6 +2407,7 @@ impl Compiler {
                     })?;
                     return Ok(());
                 }
+                let with_line = self.current_line;
                 for (_i, item) in items.iter().enumerate() {
                     self.compile_expr(&item.context_expr)?;
                     if *is_async {
@@ -2447,6 +2448,8 @@ impl Compiler {
                     self.emit(Opcode::POP_TOP, 0); // discard the manager itself (DUP_TOP'd above, never otherwise consumed)
                     self.emit_jump(Opcode::JUMP, end_label);
                     self.fix_label(finally_label);
+                    let saved_line = self.current_line;
+                    self.current_line = with_line;
                     self.emit(Opcode::PUSH_EXC_INFO, 0);
                     // Stack here is [manager, exception] — handle_exception()
                     // truncated to the depth right after SETUP_WITH (which
@@ -2479,6 +2482,7 @@ impl Compiler {
                     // TypeError). Must NOT POP_TOP first — POP_EXCEPT pops
                     // the value itself.
                     self.emit(Opcode::POP_EXCEPT, 0);
+                    self.current_line = saved_line;
                     self.fix_label(end_label);
                 } else {
                     self.compile_stmts(body)?;
@@ -2501,13 +2505,8 @@ impl Compiler {
                 // CPython doesn't expose local variable annotations anywhere
                 // either.
                 if let Expr::Name(name) = target.as_ref() {
-                    if self.scope == ScopeType::Module || self.scope == ScopeType::ClassBody {
-                        if !self.annotations_initialized {
-                            self.emit(Opcode::BUILD_MAP, 0);
-                            let ann_idx = self.get_name_index("__annotations__") as u32;
-                            self.emit(Opcode::STORE_NAME, ann_idx);
-                            self.annotations_initialized = true;
-                        }
+                    if self.scope == ScopeType::ClassBody {
+                        self.emit(Opcode::SETUP_ANNOTATIONS, 0);
                         let ann_idx = self.get_name_index("__annotations__") as u32;
                         self.emit(Opcode::LOAD_NAME, ann_idx);
                         let name_const =
@@ -2547,8 +2546,48 @@ impl Compiler {
                             finalbody: vec![],
                         };
                         self.compile_stmt(&try_stmt)?;
-                        self.compile_expr(&Expr::Name(tmp))?;
+                        self.compile_expr(&Expr::Name(tmp.clone()))?;
                         self.emit(Opcode::STORE_SUBSCR, 0);
+                        // Clean up the temporary variable so it doesn't leak
+                        // into the class namespace (every STORE_NAME in a
+                        // class body lands in the class dict).
+                        let tmp_idx = self.get_name_index(&tmp) as u32;
+                        self.emit(Opcode::DELETE_NAME, tmp_idx);
+                    } else if self.scope == ScopeType::Module {
+                        // Module-level annotations are deferred (PEP 649)
+                        // in CPython 3.14 and are NOT immediately stored
+                        // into `__annotations__`. Eagerly storing them
+                        // here would overwrite a pre-existing
+                        // `__annotations__` dict supplied by the caller
+                        // (e.g. `exec('x: int', {'__annotations__': {1:2}})`)
+                        // and also break the deferred expectation. We
+                        // still evaluate the annotation for side effects
+                        // (raising non-NameError errors), but do not
+                        // populate `__annotations__`.
+                        let tmp = "__annotation_tmp__".to_string();
+                        let try_stmt = Stmt::Try {
+                            body: vec![Stmt::Assign {
+                                targets: vec![Expr::Name(tmp.clone())],
+                                value: Box::new((**annotation).clone()),
+                            }],
+                            handlers: vec![ExceptHandler {
+                                typ: Some(Box::new(Expr::Name("NameError".to_string()))),
+                                name: None,
+                                body: vec![Stmt::Assign {
+                                    targets: vec![Expr::Name(tmp.clone())],
+                                    value: Box::new(Expr::Constant(Constant::None)),
+                                }],
+                            }],
+                            handlers_star: vec![],
+                            orelse: vec![],
+                            finalbody: vec![],
+                        };
+                        self.compile_stmt(&try_stmt)?;
+                        // Evaluate and discard, clean up tmp
+                        self.compile_expr(&Expr::Name(tmp.clone()))?;
+                        self.emit(Opcode::POP_TOP, 0);
+                        let tmp_idx = self.get_name_index(&tmp) as u32;
+                        self.emit(Opcode::DELETE_NAME, tmp_idx);
                     }
                 }
                 if let Some(val) = value {
@@ -3442,7 +3481,7 @@ impl Compiler {
 
         self.code.nlocals = self.code.varnames.len();
         self.code.name = crate::interner::intern(&name);
-        self.code.first_lineno = 1;
+        self.code.first_lineno = old_current_line;
 
         self.code.cellvars = inner_cell_vars;
         self.code.freevars = inner_free_vars.clone();
@@ -3733,7 +3772,7 @@ impl Compiler {
 
         self.code.nlocals = self.code.varnames.len();
         self.code.name = crate::interner::intern(&name);
-        self.code.first_lineno = 1;
+        self.code.first_lineno = old_current_line;
 
         let inner_free_vars = self.code.freevars.clone();
 

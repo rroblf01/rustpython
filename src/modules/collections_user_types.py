@@ -8,7 +8,7 @@ class UserList:
     def __init__(self, initlist=None):
         self.data = []
         if initlist is not None:
-            if isinstance(initlist, list):
+            if type(initlist) == type(self.data):
                 self.data[:] = initlist
             elif isinstance(initlist, UserList):
                 self.data[:] = initlist.data[:]
@@ -45,7 +45,17 @@ class UserList:
     def __getitem__(self, i):
         if isinstance(i, slice):
             return self.__class__(self.data[i])
-        return self.data[i]
+        else:
+            return self.data[i]
+
+    def __iter__(self):
+        i = 0
+        while True:
+            try:
+                yield self[i]
+            except IndexError:
+                return
+            i += 1
 
     def __setitem__(self, i, item):
         self.data[i] = item
@@ -56,21 +66,21 @@ class UserList:
     def __add__(self, other):
         if isinstance(other, UserList):
             return self.__class__(self.data + other.data)
-        elif isinstance(other, list):
+        elif isinstance(other, type(self.data)):
             return self.__class__(self.data + other)
         return self.__class__(self.data + list(other))
 
     def __radd__(self, other):
         if isinstance(other, UserList):
             return self.__class__(other.data + self.data)
-        elif isinstance(other, list):
+        elif isinstance(other, type(self.data)):
             return self.__class__(other + self.data)
         return self.__class__(list(other) + self.data)
 
     def __iadd__(self, other):
         if isinstance(other, UserList):
             self.data += other.data
-        elif isinstance(other, list):
+        elif isinstance(other, type(self.data)):
             self.data += other
         else:
             self.data += list(other)
@@ -85,8 +95,11 @@ class UserList:
         self.data *= n
         return self
 
-    def __iter__(self):
-        return iter(self.data)
+    def __copy__(self):
+        inst = self.__class__.__new__(self.__class__)
+        inst.__dict__.update(self.__dict__)
+        inst.__dict__["data"] = self.__dict__["data"][:]
+        return inst
 
     def append(self, item):
         self.data.append(item)
@@ -104,19 +117,19 @@ class UserList:
         self.data.clear()
 
     def copy(self):
-        return self.__class__(self.data)
+        return self.__class__(self)
 
     def count(self, item):
         return self.data.count(item)
 
-    def index(self, item):
-        return self.data.index(item)
+    def index(self, item, *args):
+        return self.data.index(item, *args)
 
     def reverse(self):
         self.data.reverse()
 
-    def sort(self):
-        self.data.sort()
+    def sort(self, *args, **kwds):
+        self.data.sort(*args, **kwds)
 
     def extend(self, other):
         if isinstance(other, UserList):

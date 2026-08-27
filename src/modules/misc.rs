@@ -1524,7 +1524,36 @@ pub fn create_weakref_dict() -> HashMap<String, PyObjectRef> {
         if args.is_empty() {
             return Err(PyError::type_error("proxy() requires at least 1 argument"));
         }
-        Ok(args[0].clone())
+        let obj = &args[0];
+        let unsupported = matches!(
+            &*obj.borrow(),
+            PyObject::None
+                | PyObject::Bool(_)
+                | PyObject::Int(_)
+                | PyObject::Float(_)
+                | PyObject::Complex(..)
+                | PyObject::Str(_)
+                | PyObject::Bytes(_)
+                | PyObject::Tuple(_)
+                | PyObject::Code { .. }
+                | PyObject::BuiltinFunction { .. }
+        );
+        if unsupported {
+            return Err(PyError::type_error(format!(
+                "cannot create weak reference to '{}' object",
+                obj.borrow().type_name()
+            )));
+        }
+        let target = match obj {
+            PyObjectRef::Mut(rc) | PyObjectRef::Imm(rc) => std::rc::Rc::downgrade(rc),
+            _ => {
+                return Err(PyError::type_error(format!(
+                    "cannot create weak reference to '{}' object",
+                    obj.borrow().type_name()
+                )))
+            }
+        };
+        Ok(PyObjectRef::imm(PyObject::WeakProxy { target }))
     });
 
     wr_func!("getweakrefcount", |_| Ok(py_int(0)));
@@ -3018,7 +3047,7 @@ fn struct_code_size(code: char) -> PyResult<usize> {
         'x' | 'c' | 'b' | 'B' | '?' | 's' | 'p' => 1,
         'h' | 'H' => 2,
         'i' | 'I' | 'l' | 'L' | 'f' => 4,
-        'q' | 'Q' | 'n' | 'N' | 'd' => 8,
+        'q' | 'Q' | 'n' | 'N' | 'd' | 'P' => 8,
         _ => {
             return Err(struct_error(format!(
                 "bad char in struct format: '{}'",

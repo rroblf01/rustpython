@@ -86,6 +86,12 @@ pub enum PyObject {
         index: usize,
         start_len: usize,
     },
+    /// Backing for `reversed(deque)` — reverse LIVE iterator with mutation detection.
+    DequeRevIter {
+        deque: PyObjectRef,
+        index: isize,
+        start_len: usize,
+    },
     /// Backing for the "old-style sequence iteration" fallback: real Python
     /// makes ANY object with `__getitem__` but no `__iter__` iterable by
     /// calling `obj[0]`, `obj[1]`, ... until `IndexError` (converted to
@@ -221,6 +227,9 @@ pub enum PyObject {
     /// target, so it never keeps the target alive. Calling it yields the
     /// target (or `None`, or a caller-supplied default once dead).
     WeakRef {
+        target: std::rc::Weak<std::cell::RefCell<PyObject>>,
+    },
+    WeakProxy {
         target: std::rc::Weak<std::cell::RefCell<PyObject>>,
     },
     // Reserved for future C-extension capsule support (ffi_bridge.rs); not
@@ -459,6 +468,7 @@ impl PyObject {
             PyObject::RangeIter { .. } => "range_iterator",
             PyObject::ListIter { .. } => "list_iterator",
             PyObject::DequeIter { .. } => "deque_iterator",
+            PyObject::DequeRevIter { .. } => "deque_reverse_iterator",
             PyObject::GetItemIter { .. } => "iterator",
             PyObject::CallSentinelIter { .. } => "callable_iterator",
             PyObject::EnumerateIter { .. } => "enumerate",
@@ -475,6 +485,7 @@ impl PyObject {
             PyObject::Instance { .. } => "instance",
             PyObject::Cell { .. } => "cell",
             PyObject::WeakRef { .. } => "weakref",
+            PyObject::WeakProxy { .. } => "weakproxy",
             PyObject::Capsule { .. } => "capsule",
             PyObject::Exception { typ, .. } => typ,
             PyObject::ExceptionGroup { typ, .. } => typ,
@@ -618,6 +629,7 @@ impl PyObject {
             PyObject::RangeIter { .. } => "<range_iterator object>".to_string(),
             PyObject::ListIter { .. } => "<list_iterator object>".to_string(),
             PyObject::DequeIter { .. } => "<deque_iterator object>".to_string(),
+            PyObject::DequeRevIter { .. } => "<deque_reverse_iterator object>".to_string(),
             PyObject::GetItemIter { .. } => "<iterator object>".to_string(),
             PyObject::CallSentinelIter { .. } => "<callable_iterator object>".to_string(),
             PyObject::EnumerateIter { .. } => "<enumerate object>".to_string(),
@@ -687,6 +699,13 @@ impl PyObject {
                 }
                 None => format!(
                     "<weakref at {:#x}; dead>",
+                    std::ptr::from_ref::<PyObject>(self) as usize
+                ),
+            },
+            PyObject::WeakProxy { target } => match target.upgrade() {
+                Some(rc) => rc.borrow().repr(),
+                None => format!(
+                    "<weakproxy at {:#x}; dead>",
                     std::ptr::from_ref::<PyObject>(self) as usize
                 ),
             },
@@ -1098,6 +1117,10 @@ impl PyObject {
             | PyObject::CallSentinelIter { .. }
             | PyObject::ListIter { .. }
             | PyObject::RangeIter { .. }
+            | PyObject::DequeIter { .. }
+            | PyObject::DequeRevIter { .. }
+            | PyObject::WeakRef { .. }
+            | PyObject::WeakProxy { .. }
             | PyObject::MapIterator { .. }
             | PyObject::FilterIterator { .. }
             | PyObject::ZipIterator { .. }

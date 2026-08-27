@@ -1979,6 +1979,15 @@ pub fn builtin_str(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             "decoding to str: need a bytes-like object, found type object",
         ));
     } else {
+        // WeakProxy: str(proxy) forwards to str(target) if alive, else ReferenceError.
+        if let PyObject::WeakProxy { target } = &*args[0].borrow() {
+            if let Some(rc) = target.upgrade() {
+                let target_ref = PyObjectRef::Mut(rc);
+                return builtin_str(&[target_ref]);
+            } else {
+                return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+            }
+        }
         let f = {
             let obj_borrowed = args[0].borrow();
             if let PyObject::Instance { typ, .. } = &*obj_borrowed {
@@ -2907,7 +2916,46 @@ pub fn builtin_slice(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 
 pub fn builtin_dir(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
-        return Ok(py_list(Vec::new()));
+        return crate::object::with_vm_mut(|vm| {
+            let frame = vm
+                .frames
+                .last()
+                .ok_or_else(|| crate::object::PyError::runtime_error("no frame"))?;
+            let mut names: Vec<PyObjectRef> = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+            // Locals via InternedMap (used for some scopes)
+            for (k, _) in frame.locals.iter() {
+                let s = crate::interner::lookup_str(k);
+                if seen.insert(s.to_string()) {
+                    names.push(py_str(s));
+                }
+            }
+            // Fast locals via varnames
+            for (idx, var_id) in frame.code.varnames.iter().enumerate() {
+                if frame
+                    .fast_locals
+                    .get(idx)
+                    .and_then(|v| v.as_ref())
+                    .is_some()
+                {
+                    let s = crate::interner::lookup_str(*var_id);
+                    if seen.insert(s.to_string()) {
+                        names.push(py_str(s));
+                    }
+                }
+            }
+            // For module frames, locals/varnames may be empty, but globals holds the module dict
+            if names.is_empty() {
+                for (k, _) in frame.globals.borrow().iter() {
+                    let s = crate::interner::lookup_str(*k);
+                    if seen.insert(s.to_string()) {
+                        names.push(py_str(s));
+                    }
+                }
+            }
+            names.sort_by(|a, b| a.str().cmp(&b.str()));
+            Ok(py_list(names))
+        })?;
     }
     let obj = args[0].borrow();
     let mut names = Vec::new();
@@ -4178,7 +4226,8 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         | PyObject::GroupByIter { .. }
         | PyObject::GetItemIter { .. }
         | PyObject::CallSentinelIter { .. }
-        | PyObject::DequeIter { .. } => Ok(args[0].clone()),
+        | PyObject::DequeIter { .. }
+        | PyObject::DequeRevIter { .. } => Ok(args[0].clone()),
         // Anything else (plain functions, ints, ...) is genuinely not
         // iterable. The previous fallback (`Ok(args[0].clone())`)
         // silently treated ANY object as if it were already a valid
@@ -4499,6 +4548,17 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 if matches!(e, PyError::IndexError(_))
                     || matches!(e, PyError::Exception(_, exc) if matches!(&*exc.borrow(), PyObject::Exception { typ, .. } if crate::vm::is_exception_subclass(typ, "IndexError"))) =>
             {
+                // Advance past the failed index so a subsequent append doesn't
+                // make an already-exhausted iterator appear to have more items
+                // (test_list::test_exhausted_iterator expects `exhit` to stay []
+                // after `a.append(9)` while `empit` at the same index does see
+                // the new item — the difference is that `exhit` has already
+                // attempted and failed at that index, while `empit` hasn't).
+                let mut obj = args[0].borrow_mut();
+                if let PyObject::GetItemIter { index, .. } = &mut *obj {
+                    *index += 1;
+                }
+                drop(obj);
                 if args.len() >= 2 {
                     Ok(args[1].clone())
                 } else {
@@ -4678,9 +4738,17 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             index,
             start_len,
         } => {
-            let (done, item) = {
+            let native = crate::object::native_backing_of(deque).or_else(|| {
                 let dq = deque.borrow();
-                if let PyObject::Deque { data, .. } = &*dq {
+                if matches!(&*dq, PyObject::Deque { .. }) {
+                    Some(deque.clone())
+                } else {
+                    None
+                }
+            }).ok_or_else(|| PyError::runtime_error("deque iterator over non-deque"))?;
+            let (is_done, maybe_item) = {
+                let nb = native.borrow();
+                if let PyObject::Deque { data, .. } = &*nb {
                     if data.len() != *start_len {
                         return Err(PyError::runtime_error("deque mutated during iteration"));
                     }
@@ -4693,15 +4761,58 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     (true, None)
                 }
             };
-            if done {
+            if is_done {
                 if args.len() >= 2 {
                     Ok(args[1].clone())
                 } else {
                     Err(PyError::stop_iteration())
                 }
-            } else if let Some(v) = item {
+            } else if let Some(v) = maybe_item {
                 if let PyObject::DequeIter { index, .. } = &mut *obj {
                     *index += 1;
+                }
+                Ok(v)
+            } else {
+                Err(PyError::runtime_error("deque iterator over non-deque"))
+            }
+        }
+        PyObject::DequeRevIter {
+            deque,
+            index,
+            start_len,
+        } => {
+            let native = crate::object::native_backing_of(deque).or_else(|| {
+                let dq = deque.borrow();
+                if matches!(&*dq, PyObject::Deque { .. }) {
+                    Some(deque.clone())
+                } else {
+                    None
+                }
+            }).ok_or_else(|| PyError::runtime_error("deque iterator over non-deque"))?;
+            let (is_done, maybe_item) = {
+                let nb = native.borrow();
+                if let PyObject::Deque { data, .. } = &*nb {
+                    if data.len() != *start_len {
+                        return Err(PyError::runtime_error("deque mutated during iteration"));
+                    }
+                    if *index < 0 || (*index as usize) >= data.len() {
+                        (true, None)
+                    } else {
+                        (false, Some(data[*index as usize].clone()))
+                    }
+                } else {
+                    (true, None)
+                }
+            };
+            if is_done {
+                if args.len() >= 2 {
+                    Ok(args[1].clone())
+                } else {
+                    Err(PyError::stop_iteration())
+                }
+            } else if let Some(v) = maybe_item {
+                if let PyObject::DequeRevIter { index, .. } = &mut *obj {
+                    *index -= 1;
                 }
                 Ok(v)
             } else {
@@ -5656,6 +5767,54 @@ pub fn builtin_reversed(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     }
                     _ => unreachable!(),
                 };
+            }
+        }
+    }
+    // Native deque: reversed(deque) returns a dedicated reverse iterator
+    // (deque_reverse_iterator) that is itself callable with a deque argument
+    // (test_deque::test_reversed_new: klass = type(reversed(deque())) ;
+    // list(klass(deque(s))) == list(reversed(s))). The generic drain fallback
+    // below would instead return a list_iterator which is not callable with a
+    // deque and fails that test.
+    {
+        let is_deque_native = matches!(&*args[0].borrow(), PyObject::Deque { .. });
+        if is_deque_native {
+            let (deque, start_len) = {
+                let b = args[0].borrow();
+                if let PyObject::Deque { data, .. } = &*b {
+                    (args[0].clone(), data.len())
+                } else {
+                    unreachable!()
+                }
+            };
+            let idx = if start_len == 0 { -1 } else { (start_len as isize) - 1 };
+            return Ok(PyObjectRef::new(PyObject::DequeRevIter {
+                deque,
+                index: idx,
+                start_len,
+            }));
+        }
+        // Deque subclass (Instance with native backing == Deque) — same behavior
+        // as the native case above (reversed(DequeSubclass(...)) must also be
+        // a deque_reverse_iterator, not a generic list_iterator).
+        if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+            if let Some(native) = dict.get(crate::object::NATIVE_BACKING_KEY).cloned() {
+                if matches!(&*native.borrow(), PyObject::Deque { .. }) {
+                    let start_len = {
+                        let nb = native.borrow();
+                        if let PyObject::Deque { data, .. } = &*nb {
+                            data.len()
+                        } else {
+                            0
+                        }
+                    };
+                    let idx = if start_len == 0 { -1 } else { (start_len as isize) - 1 };
+                    return Ok(PyObjectRef::new(PyObject::DequeRevIter {
+                        deque: args[0].clone(),
+                        index: idx,
+                        start_len,
+                    }));
+                }
             }
         }
     }

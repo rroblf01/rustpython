@@ -390,7 +390,41 @@ pub(crate) fn inplace_binary_op(
                             // `l += iterable` — extend in place (CPython's
                             // list.__iadd__); `u2 = u; u += [2,3]` must keep
                             // `u is u2` (test_list::test_iadd).
+                            // For `list += UserList` (or any UserList subclass), CPython's
+                            // list.__iadd__ returns NotImplemented so the reflected
+                            // UserList.__radd__ (which returns a UserList) wins and
+                            // the result becomes a UserList, not a list (test_userlist::
+                            // test_mixed_iadd). Detect that case and fall through to
+                            // plain_binary_op (which tries __radd__) instead of
+                            // unconditionally extending the list.
                             0 => {
+                                let is_instance_rhs = matches!(&*right.borrow(), PyObject::Instance { .. });
+                                if is_instance_rhs {
+                                    // Check if RHS is a UserList (or subclass) via its type name/MRO.
+                                    let is_userlist = if let PyObject::Instance { typ, .. } = &*right.borrow() {
+                                        let tb = typ.borrow();
+                                        if let PyObject::Type { mro, name, .. } = &*tb {
+                                            if name == "UserList" {
+                                                true
+                                            } else {
+                                                mro.iter().any(|base| {
+                                                    if let PyObject::Type { name, .. } = &*base.borrow() {
+                                                        name == "UserList"
+                                                    } else {
+                                                        false
+                                                    }
+                                                })
+                                            }
+                                        } else {
+                                            false
+                                        }
+                                    } else {
+                                        false
+                                    };
+                                    if is_userlist {
+                                        return Ok(None);
+                                    }
+                                }
                                 let it = crate::object::builtin_iter(&[right])?;
                                 let mut items = Vec::new();
                                 loop {
@@ -2807,14 +2841,16 @@ impl VirtualMachine {
             None => {
                 let mut parser = crate::parser::Parser::new(source);
                 let program = parser.parse_program().map_err(|e| {
-                    PyError::RuntimeError(format!("Parse error in '{}': {}", name, e))
+                    crate::object::PyError::syntax_error_with_filename(e, path, source)
                 })?;
                 drop(parser); // Free parser memory (AST is now in `program`)
 
                 let mut compiler = crate::compiler::Compiler::new();
                 let compiled = compiler
                     .compile(&program, path)
-                    .map_err(|e| PyError::RuntimeError(format!("Compile error: {}", e)))?;
+                    .map_err(|e| {
+                        crate::object::PyError::syntax_error_with_filename(e, path, source)
+                    })?;
                 drop(compiler); // Free compiler internal tables
                 drop(program); // Free AST — CodeObject is now self-contained
 
@@ -5051,7 +5087,8 @@ impl VirtualMachine {
                             | PyObject::GroupByIter { .. }
                             | PyObject::GetItemIter { .. }
                             | PyObject::CallSentinelIter { .. }
-                            | PyObject::DequeIter { .. } => {
+                            | PyObject::DequeIter { .. }
+                            | PyObject::DequeRevIter { .. } => {
                                 drop(obj);
                                 match crate::object::builtin_next(&[iter_val.clone()]) {
                                     Ok(val) => {
@@ -5848,7 +5885,8 @@ impl VirtualMachine {
                             // get_attribute path (which returns the raw
                             // unbound descriptor).
                             let is_type_obj = matches!(&*obj_borrowed, PyObject::Type { .. });
-                            let cached = if is_type_obj {
+                            let is_globals = matches!(&*obj_borrowed, PyObject::Globals(_));
+                            let cached = if is_type_obj || is_globals {
                                 None
                             } else {
                                 ATTR_CACHE.with(|c| {
@@ -6092,7 +6130,10 @@ impl VirtualMachine {
                                     // value-level one made `deque.__init__`
                                     // silently return the wrong function after
                                     // any `d.__init__(...)` call.
-                                    if n != "__init__" && n != "__new__" {
+                                    if n != "__init__"
+                                        && n != "__new__"
+                                        && !matches!(&*obj.borrow(), PyObject::Globals(_))
+                                    {
                                         ATTR_CACHE.with(|c| {
                                             c.borrow_mut()
                                                 .insert((type_name.clone(), n.clone()), func);
@@ -6778,14 +6819,48 @@ impl VirtualMachine {
             }
 
             Opcode::BEFORE_ASYNC_WITH => {
-                // async with: call __aenter__ and push __aexit__ for later
                 let mgr = self.frames[fi].pop()?;
-                let aenter_method = mgr.borrow().get_attribute("__aenter__").map_err(|_| {
-                    PyError::attribute_error("async context manager has no __aenter__")
-                })?;
-                let result = self.call_function(aenter_method, vec![mgr.clone()], vec![])?;
-                self.frames[fi].push(mgr);
-                self.frames[fi].push(result);
+                // Check __aexit__ first (mirroring SETUP_WITH's __exit__ check)
+                let aexit = mgr.borrow().get_attribute("__aexit__").ok();
+                if aexit.is_none() {
+                    let has_enter = mgr.borrow().get_attribute("__enter__").is_ok();
+                    let has_exit = mgr.borrow().get_attribute("__exit__").is_ok();
+                    let supports_sync = has_enter && has_exit;
+                    return Err(PyError::type_error(if supports_sync {
+                        "object does not support the asynchronous context manager protocol (missed __aexit__ method) but it supports the context manager protocol. Did you mean to use 'with'?"
+                    } else {
+                        "object does not support the asynchronous context manager protocol (missed __aexit__ method)"
+                    }));
+                }
+                let aenter_raw = mgr.borrow().get_attribute("__aenter__").ok();
+                if let Some(aenter_raw) = aenter_raw {
+                    let is_builtin = matches!(&*aenter_raw.borrow(), PyObject::BuiltinMethod { .. });
+                    let bound = if is_builtin {
+                        let b = aenter_raw.borrow();
+                        match &*b {
+                            PyObject::BuiltinMethod { name, func, .. } => {
+                                PyObjectRef::imm(PyObject::BuiltinMethod {
+                                    name: name.clone(),
+                                    func: *func,
+                                    self_obj: mgr.clone(),
+                                })
+                            }
+                            _ => unreachable!(),
+                        }
+                    } else {
+                        PyObjectRef::imm(PyObject::BoundMethod {
+                            func: aenter_raw,
+                            self_obj: mgr.clone(),
+                        })
+                    };
+                    let result = self.call_function(bound, vec![], vec![])?;
+                    self.frames[fi].push(mgr);
+                    self.frames[fi].push(result);
+                } else {
+                    return Err(PyError::type_error(
+                        "object does not support the asynchronous context manager protocol (missed __aenter__ method)",
+                    ));
+                }
             }
 
             Opcode::CHECK_EXC_MATCH => {
@@ -7796,7 +7871,26 @@ impl VirtualMachine {
                 self.frames[fi].push(py_dict());
             }
 
-            Opcode::SETUP_ANNOTATIONS => {}
+            Opcode::SETUP_ANNOTATIONS => {
+                let ann_id = crate::interner::intern("__annotations__");
+                let has = {
+                    let frame = &self.frames[fi];
+                    frame.locals.contains_key(ann_id)
+                        || frame.globals.borrow().contains_key(&ann_id)
+                        || frame
+                            .module_globals
+                            .as_ref()
+                            .map_or(false, |mg| mg.borrow().contains_key(&ann_id))
+                };
+                if !has {
+                    let ann_dict = crate::object::py_dict();
+                    // Class bodies store names in globals (the namespace dict),
+                    // while also keeping locals for fast access; insert into both
+                    // so LOAD_NAME finds it via either path.
+                    self.frames[fi].locals.insert(ann_id, ann_dict.clone());
+                    self.frames[fi].globals.borrow_mut().insert(ann_id, ann_dict);
+                }
+            }
 
             Opcode::POP_ITER => {
                 self.frames[fi].pop()?;
@@ -10074,6 +10168,55 @@ impl VirtualMachine {
                 }
             }
         }
+        // deque's iterators ARE constructible with a deque argument
+        // (test_deque::test_reversed_new: klass = type(reversed(deque())) ;
+        // list(klass(deque(s))) == list(reversed(s))). Handle before the
+        // generic placeholder check below.
+        if let PyObject::Type { name, .. } = &*callable.borrow() {
+            if name == "deque_iterator" || name == "deque_reverse_iterator" {
+                if args.len() != 1 {
+                    return Err(PyError::type_error(format!(
+                        "{} expected exactly one argument",
+                        name
+                    )));
+                }
+                let deque_obj = &args[0];
+                let is_deque = if matches!(&*deque_obj.borrow(), PyObject::Deque { .. }) {
+                    true
+                } else if let Some(n) = crate::object::native_backing_of(deque_obj) {
+                    matches!(&*n.borrow(), PyObject::Deque { .. })
+                } else {
+                    false
+                };
+                if !is_deque {
+                    return Err(PyError::type_error(format!(
+                        "{}() argument must be deque",
+                        name
+                    )));
+                }
+                let native = crate::object::native_backing_of(deque_obj)
+                    .unwrap_or_else(|| deque_obj.clone());
+                let len = if let PyObject::Deque { data, .. } = &*native.borrow() {
+                    data.len()
+                } else {
+                    0
+                };
+                if name == "deque_iterator" {
+                    return Ok(PyObjectRef::new(PyObject::DequeIter {
+                        deque: deque_obj.clone(),
+                        index: 0,
+                        start_len: len,
+                    }));
+                } else {
+                    let idx = if len == 0 { -1 } else { (len as isize) - 1 };
+                    return Ok(PyObjectRef::new(PyObject::DequeRevIter {
+                        deque: deque_obj.clone(),
+                        index: idx,
+                        start_len: len,
+                    }));
+                }
+            }
+        }
         // Placeholder iterator types (range_iterator, etc.) are not directly constructible
         if let PyObject::Type { name, .. } = &*callable.borrow() {
             if name.contains("iterator") || name == "select.poll" || name == "select.devpoll" || name == "select.epoll" || name == "select.kqueue" {
@@ -11184,10 +11327,11 @@ impl VirtualMachine {
             // Pop the innermost handler of this frame and set up control
             // transfer WITHOUT holding the frame borrow across
             // `prepend_traceback` (which needs `&mut self`).
-            let entered = {
+            let (entered, orig_ip, handler_addr) = {
                 let frame = &mut self.frames[i];
                 match frame.exception_handlers.pop() {
                     Some(handler) => {
+                        let orig = frame.ip;
                         // For any handler (Except or Finally), restore stack and
                         // transfer control.
                         frame.stack.truncate(handler.stack_depth);
@@ -11199,9 +11343,9 @@ impl VirtualMachine {
                         self.exc_context_stack
                             .retain(|(_, depth)| *depth < handler.stack_depth);
                         frame.ip = handler.instr_addr;
-                        true
+                        (true, orig, handler.instr_addr)
                     }
-                    None => false,
+                    None => (false, 0, 0),
                 }
             };
             if entered {
@@ -11211,7 +11355,17 @@ impl VirtualMachine {
                 // `error_to_exc_obj` call makes a FRESH object, so doing the
                 // prepend here (not in execute()'s else-branch) is what makes
                 // `except E as e: e.__traceback__` non-None.
+                // Use the ORIGINAL ip (where the exception was raised) for the
+                // traceback's lineno, not the handler's ip. The handler's line
+                // (e.g. `return e` inside `except`) is not where the exception
+                // occurred — the `with` or `for` line is. Using the handler's
+                // ip made `test_with::testExceptionLocation` report 822 (the
+                // `return e` line) instead of 819 (the `with` line), and made
+                // `test_dictcomps` similarly off before the `first_lineno` fix.
+                let saved_handler_ip = handler_addr;
+                self.frames[i].ip = orig_ip;
                 self.prepend_traceback(&exc_obj, i);
+                self.frames[i].ip = saved_handler_ip;
                 // The unwinding exception is now "in flight" — a `raise X`
                 // inside a `finally:` body chains it as __context__ (except
                 // handlers' PUSH_EXC_INFO immediately replaces this with the
@@ -11384,6 +11538,7 @@ impl VirtualMachine {
         init_subclass_kwargs: Vec<(String, PyObjectRef)>,
         metatype: Option<PyObjectRef>,
     ) -> PyResult<PyObjectRef> {
+        namespace_dict.remove("__annotation_tmp__");
         // Real CPython disallows subclassing `bool` outright (`TypeError:
         // type 'bool' is not an acceptable base type`) — unlike every other
         // migrated native type, `bool` is a real `PyObject::Type` (fixing
@@ -11575,12 +11730,13 @@ impl VirtualMachine {
         name_str: String,
         name_obj: PyObjectRef,
         bases_vec: Vec<PyObjectRef>,
-        namespace_dict: HashMap<String, PyObjectRef>,
+        mut namespace_dict: HashMap<String, PyObjectRef>,
         order: Vec<String>,
         metaclass: PyObjectRef,
         init_subclass_kwargs: Vec<(String, PyObjectRef)>,
         prepared_namespace: Option<PyObjectRef>,
     ) -> PyResult<PyObjectRef> {
+        namespace_dict.remove("__annotation_tmp__");
         // Ordered PyDict — class/metaclass namespace order is user-visible
         // (e.g. an enum's member definition order) and plain HashMap
         // iteration doesn't preserve it, so lay `order` down first. If the
