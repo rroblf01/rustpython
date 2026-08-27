@@ -9253,9 +9253,15 @@ impl PyObject {
                         func: |args| {
                             use std::io::Read;
                             if let PyObject::File { file, binary, .. } = &*args[0].borrow() {
+                                let limit = args.get(1).and_then(|a| a.as_i64()).filter(|&n| n >= 0).map(|n| n as usize);
                                 let mut buf = Vec::new();
                                 let mut byte = [0u8; 1];
                                 loop {
+                                    if let Some(lim) = limit {
+                                        if buf.len() >= lim {
+                                            break;
+                                        }
+                                    }
                                     match file.borrow_mut().read(&mut byte) {
                                         Ok(0) => break,
                                         Ok(_) => {
@@ -9536,6 +9542,26 @@ impl PyObject {
                     "writable" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "writable".to_string(),
                         func: |_| Ok(py_bool(true)),
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "truncate" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "truncate".to_string(),
+                        func: |args| {
+                            if let PyObject::File { file, .. } = &*args[0].borrow() {
+                                let size = args.get(1).and_then(|a| a.as_i64()).map(|n| n as u64);
+                                let mut f = file.borrow_mut();
+                                use std::io::Seek;
+                                let pos = f.stream_position().unwrap_or(0);
+                                let target = size.unwrap_or(pos);
+                                f.set_len(target).map_err(|e| PyError::os_error_from_io(&e))?;
+                                if pos > target {
+                                    f.seek(std::io::SeekFrom::Start(target)).ok();
+                                }
+                                Ok(py_int(target as i64))
+                            } else {
+                                Err(PyError::runtime_error("truncate on non-file"))
+                            }
+                        },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
                     "seekable" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {

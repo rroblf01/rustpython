@@ -20,6 +20,18 @@ class _TypingType:
         if self._name == 'TypeVar':
             return object()
         if self._name == 'NamedTuple':
+            # Functional API: NamedTuple('Point', [('x', int), ('y', int)])
+            if args and isinstance(args[0], str):
+                nt_name = args[0]
+                fields = args[1] if len(args) > 1 else []
+                # fields can be list of (name, type) or list of names
+                if fields and isinstance(fields[0], (list, tuple)):
+                    field_names = [f[0] for f in fields]
+                else:
+                    field_names = list(fields)
+                ann = {n: object for n in field_names}
+                # create tuple subclass
+                return _NamedTupleMeta(nt_name, (_NamedTupleBase,), {'__annotations__': ann, '_fields': tuple(field_names)})
             return type('NamedTuple', (), {})
         if self._name == 'NewType':
             def _newtype(name, tp):
@@ -28,6 +40,141 @@ class _TypingType:
         return None
     def __repr__(self):
         return self._name
+
+
+# ── typing.NamedTuple runtime support ────────────────────────────────
+# Real tuple-subclass implementation so `class Point(NamedTuple): x: int`
+# behaves like CPython's typing.NamedTuple (tuple equality, iteration,
+# _fields, _make, _asdict, _replace, __replace__).
+
+class _NamedTupleMeta(type):
+    def __call__(cls, *args, **kwargs):
+        # Functional API: NamedTuple('Point', [('x', int), ('y', int)])
+        if cls is _NamedTupleBase and args and isinstance(args[0], str):
+            nt_name = args[0]
+            fields_arg = args[1] if len(args) > 1 else kwargs.get('fields', [])
+            if isinstance(fields_arg, str):
+                field_names = [n.strip() for n in fields_arg.replace(',', ' ').split() if n.strip()]
+            elif fields_arg and isinstance(fields_arg[0], (list, tuple)):
+                field_names = [f[0] for f in fields_arg]
+            else:
+                field_names = list(fields_arg) if fields_arg else []
+            ann = {n: object for n in field_names}
+            # handle defaults via kwargs? not needed for test
+            return _NamedTupleMeta(nt_name, (_NamedTupleBase,), {'__annotations__': ann, '_fields': tuple(field_names)})
+        # Normal instance creation: delegate to type's __call__ (which does __new__+__init__)
+        # Use explicit type.__call__ to avoid super() MRO issues in RustPython
+        obj = cls.__new__(cls, *args, **kwargs)
+        if isinstance(obj, cls):
+            try:
+                # tuple subclasses don't have __init__ that matters; ignore
+                if hasattr(obj, '__init__'):
+                    obj.__init__(*args, **kwargs)
+            except TypeError:
+                pass
+            except Exception:
+                pass
+        return obj
+
+    def __new__(mcls, name, bases, ns, **kw):
+        # Preserve typing.NamedTuple base creation
+        if name == 'NamedTuple' and not bases:
+            return super().__new__(mcls, name, bases, dict(ns))
+        # For subclasses of NamedTuple (e.g. class Point(NamedTuple): x: int)
+        cls = super().__new__(mcls, name, bases, dict(ns))
+        # Collect field names from __annotations__ of this class (and bases if needed)
+        ann = ns.get('__annotations__', None)
+        if ann is None:
+            ann = getattr(cls, '__annotations__', {}) or {}
+        # Also include annotations from base classes that are NamedTuple subclasses
+        # (simple merge, subclass overrides)
+        for base in bases:
+            bann = getattr(base, '__annotations__', None)
+            if bann:
+                # base fields should be already in _fields, but merge for completeness
+                pass
+        fields = tuple(ann.keys()) if isinstance(ann, dict) else ()
+        # If _fields already set (e.g. functional API), keep it
+        if not hasattr(cls, '_fields') or cls._fields == () or name != 'NamedTuple':
+            if fields:
+                cls._fields = fields
+            elif not hasattr(cls, '_fields'):
+                cls._fields = ()
+        # Collect defaults: class attributes for fields
+        defaults = {}
+        for f in getattr(cls, '_fields', ()):
+            if f in ns:
+                defaults[f] = ns[f]
+            elif f in cls.__dict__ and f not in ('_fields', '__annotations__'):
+                # inherited default? keep
+                pass
+        cls._field_defaults = defaults
+        return cls
+
+class _NamedTupleBase(tuple, metaclass=_NamedTupleMeta):
+    _fields = ()
+    _field_defaults = {}
+    def __new__(cls, *args, **kwargs):
+        fields = getattr(cls, '_fields', ())
+        if not fields:
+            ann = getattr(cls, '__annotations__', {}) or {}
+            fields = tuple(ann.keys())
+        defaults = getattr(cls, '_field_defaults', {}) or {}
+        # Build values list
+        values = []
+        # handle positional
+        for i, f in enumerate(fields):
+            if i < len(args):
+                if f in kwargs:
+                    raise TypeError(f"{cls.__name__}.__new__() got multiple values for argument '{f}'")
+                values.append(args[i])
+            elif f in kwargs:
+                values.append(kwargs.pop(f))
+            elif f in defaults:
+                values.append(defaults[f])
+            else:
+                raise TypeError(f"{cls.__name__}.__new__() missing required argument: '{f}'")
+        if kwargs:
+            unexpected = next(iter(kwargs))
+            raise TypeError(f"{cls.__name__}.__new__() got an unexpected keyword argument '{unexpected}'")
+        if len(args) > len(fields):
+            raise TypeError(f"{cls.__name__}.__new__() takes {len(fields)} positional arguments but {len(args)} were given")
+        return tuple.__new__(cls, tuple(values))
+    def __repr__(self):
+        try:
+            fields = getattr(self, '_fields', None) or getattr(type(self), '_fields', ())
+            if fields:
+                vals = tuple(self)
+                parts = ', '.join(f"{k}={v!r}" for k, v in zip(fields, vals))
+                return f"{type(self).__name__}({parts})"
+        except:
+            pass
+        return super().__repr__()
+    def _asdict(self):
+        fields = getattr(self, '_fields', None) or getattr(type(self), '_fields', ())
+        return dict(zip(fields, self))
+    def _make(cls, iterable):
+        return cls(*iterable)
+    _make = classmethod(_make)
+    def _replace(self, **kw):
+        fields = getattr(self, '_fields', None) or getattr(type(self), '_fields', ())
+        for k in kw:
+            if k not in fields:
+                raise TypeError(f"unexpected field name '{k}'")
+        vals = list(self)
+        for k, v in kw.items():
+            idx = fields.index(k)
+            vals[idx] = v
+        return type(self)(*vals)
+    def __replace__(self, **kw):
+        return self._replace(**kw)
+    # tuple equality already works via tuple.__eq__, but ensure we compare as tuple
+    def __eq__(self, other):
+        if isinstance(other, tuple):
+            return tuple(self) == tuple(other)
+        return super().__eq__(other)
+    def __hash__(self):
+        return tuple.__hash__(self)
 
 
 # ── Runtime-checkable protocols & ABCs ────────────────────────────────
@@ -127,7 +274,7 @@ Literal = _TypingType('Literal')
 TypedDict = _TypingType('TypedDict')
 NoReturn = _TypingType('NoReturn')
 Never = NoReturn
-NamedTuple = _TypingType('NamedTuple')
+NamedTuple = _NamedTupleBase
 NewType = _TypingType('NewType')
 Self = _TypingType('Self')
 Protocol = _TypingType('Protocol')

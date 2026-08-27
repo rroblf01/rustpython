@@ -4509,7 +4509,8 @@ pub fn create_csv_dict() -> HashMap<String, PyObjectRef> {
 
     fn build_dialect(dialect_arg: Option<PyObjectRef>, kwargs: &StdHashMap<String, PyObjectRef>) -> PyResult<CsvDialect> {
         let mut base = CsvDialect::excel();
-        if let Some(darg) = dialect_arg {
+        let dialect_is_none = dialect_arg.is_none();
+        if let Some(darg) = dialect_arg.clone() {
             let is_str = matches!(&*darg.borrow(), PyObject::Str(_));
             let is_none = matches!(&*darg.borrow(), PyObject::None);
             if is_str {
@@ -4544,7 +4545,42 @@ pub fn create_csv_dict() -> HashMap<String, PyObjectRef> {
                     if let Ok(v) = obj.borrow().get_attribute("strict") { base.strict = v.truthy(); };
             }
         }
+        if dialect_is_none {
+            if let Some(dval) = kwargs.get("dialect") {
+                let is_str = matches!(&*dval.borrow(), PyObject::Str(_));
+                if is_str {
+                    let s = dval.str();
+                    if let Some(found) = CSV_DIALECTS.with(|c| c.borrow().get(s.as_str()).cloned()) {
+                        base = found;
+                    } else {
+                        return Err(PyError::Exception("Error".to_string(), PyObjectRef::new(PyObject::Exception{ typ: "Error".to_string(), args: vec![py_str(&format!("unknown dialect {}", s))], cause: None, suppress_context: false, context: None, traceback: None, extra: None })));
+                    }
+                } else {
+                    let obj = dval.clone();
+                    if let Ok(v) = obj.borrow().get_attribute("delimiter") {
+                        let vb = v.borrow();
+                        if let PyObject::Str(s) = &*vb { if s.chars().count()==1 { base.delimiter = s.chars().next().unwrap(); } }
+                    }
+                    if let Ok(v) = obj.borrow().get_attribute("quotechar") {
+                        let vb = v.borrow();
+                        if let PyObject::Str(s) = &*vb { if s.is_empty() { base.quotechar = None; } else if s.chars().count()==1 { base.quotechar = Some(s.chars().next().unwrap()); } }
+                        else if matches!(&*vb, PyObject::None) { base.quotechar = None; }
+                    }
+                    if let Ok(v) = obj.borrow().get_attribute("escapechar") {
+                        let vb = v.borrow();
+                        if let PyObject::Str(s) = &*vb { if s.is_empty() { base.escapechar = None; } else if s.chars().count()==1 { base.escapechar = Some(s.chars().next().unwrap()); } }
+                        else if matches!(&*vb, PyObject::None) { base.escapechar = None; }
+                    }
+                    if let Ok(v) = obj.borrow().get_attribute("doublequote") { base.doublequote = v.truthy(); }
+                    if let Ok(v) = obj.borrow().get_attribute("skipinitialspace") { base.skipinitialspace = v.truthy(); }
+                    if let Ok(v) = obj.borrow().get_attribute("lineterminator") { base.lineterminator = v.str(); }
+                    if let Ok(v) = obj.borrow().get_attribute("quoting") { if let Some(n) = v.as_i64() { base.quoting = n; } }
+                    if let Ok(v) = obj.borrow().get_attribute("strict") { base.strict = v.truthy(); };
+                }
+            }
+        }
         for (k,v) in kwargs.iter() {
+            if k=="dialect" { continue; }
             match k.as_str() {
                 "delimiter" => {
                     let vb = v.borrow();
@@ -4655,7 +4691,26 @@ pub fn create_csv_dict() -> HashMap<String, PyObjectRef> {
     }
 
     fn collect_lines(iterable: &PyObjectRef) -> PyResult<Vec<String>> {
-        let iter = crate::object::builtin_iter(&[iterable.clone()])?;
+        let actual = if let Ok(inner) = iterable.borrow().get_attribute("_file") {
+            inner
+        } else {
+            iterable.clone()
+        };
+        let read_try = crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &actual, "read", vec![]));
+        if let Ok(Ok(v)) = read_try {
+            if matches!(&*v.borrow(), PyObject::Str(_)) {
+                let s = v.str();
+                return Ok(s.lines().map(|l| {
+                    let mut t = l.to_string();
+                    while t.ends_with('\r') || t.ends_with('\n') { t.pop(); }
+                    t
+                }).collect());
+            } else if matches!(&*v.borrow(), PyObject::Bytes(_)) {
+                return Err(PyError::Exception("Error".to_string(), PyObjectRef::new(PyObject::Exception{ typ: "Error".to_string(), args: vec![py_str("iterator should return strings, not bytes")], cause: None, suppress_context: false, context: None, traceback: None, extra: None })));
+            }
+        }
+        let try_iter = crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &actual, "__iter__", vec![]));
+        let iter = if let Ok(Ok(it)) = try_iter { it } else { crate::object::builtin_iter(&[actual.clone()])? };
         let mut lines = Vec::new();
         loop {
             match crate::object::builtin_next(&[iter.clone()]) {
@@ -4664,7 +4719,6 @@ pub fn create_csv_dict() -> HashMap<String, PyObjectRef> {
                         return Err(PyError::Exception("Error".to_string(), PyObjectRef::new(PyObject::Exception{ typ: "Error".to_string(), args: vec![py_str("iterator should return strings, not bytes")], cause: None, suppress_context: false, context: None, traceback: None, extra: None })));
                     }
                     let mut s = val.str();
-                    // Strip trailing \r\n for reader (line terminators)
                     while s.ends_with('\r') || s.ends_with('\n') {
                         s.pop();
                     }
@@ -4845,8 +4899,7 @@ pub fn create_csv_dict() -> HashMap<String, PyObjectRef> {
             // quote if not numeric
             field.parse::<f64>().is_err()
         } else if quoting == 4 { // QUOTE_STRINGS
-            // quote if string (is_none false and field is string)
-            !is_none
+            field.parse::<f64>().is_err()
         } else if quoting == 5 { // QUOTE_NOTNULL
             !is_none
         } else { // QUOTE_MINIMAL
@@ -4932,6 +4985,15 @@ pub fn create_csv_dict() -> HashMap<String, PyObjectRef> {
     fn format_csv_row(cells: Vec<PyObjectRef>, dialect: &CsvDialect) -> PyResult<String> {
         let mut parts: Vec<String> = Vec::new();
         let is_single_none = cells.len()==1 && matches!(&*cells[0].borrow(), PyObject::None);
+        if cells.len() == 1 && !is_single_none {
+            let s_single = cells[0].str();
+            if s_single.is_empty() {
+                if dialect.quoting == 3 {
+                    return Err(PyError::Exception("Error".to_string(), PyObjectRef::new(PyObject::Exception{ typ: "Error".to_string(), args: vec![py_str("need to escape, but no escapechar set")], cause: None, suppress_context: false, context: None, traceback: None, extra: None })));
+                }
+                return Ok("\"\"".to_string() + &dialect.lineterminator);
+            }
+        }
         for (idx, cell) in cells.iter().enumerate() {
             let is_none = matches!(&*cell.borrow(), PyObject::None);
             let s = if is_none { "".to_string() } else { cell.str() };
@@ -4939,25 +5001,27 @@ pub fn create_csv_dict() -> HashMap<String, PyObjectRef> {
             // Also for single None case, we need to ensure '""' not ''
             // Use helper
             let formatted = if is_none && cells.len()==1 {
-                // single None -> '""'
                 "\"\"".to_string()
-            } else if is_none && s.is_empty() {
-                // None in multi-field row -> empty field (no quotes) unless quoting requires
-                // For QUOTE_ALL etc, it would be quoted, but our helper will quote
-                format_csv_field(&s, dialect, true)?
+            } else if is_none {
+                if dialect.delimiter == ' ' && dialect.skipinitialspace {
+                    "\"\"".to_string()
+                } else {
+                    "".to_string()
+                }
             } else {
                 format_csv_field(&s, dialect, false)?
             };
             // Special for QUOTE_NONE with empty string: should be '""'? Check test: _write_test([''], '""') for minimal, and _write_test([''], quoting=QUOTE_NONE) -> Error
             // For minimal, [''] -> '""' (quoted empty)
             if s.is_empty() && !is_none {
-                // empty string
-                if dialect.quoting == 3 {
-                    return Err(PyError::Exception("Error".to_string(), PyObjectRef::new(PyObject::Exception{ typ: "Error".to_string(), args: vec![py_str("need to escape, but no escapechar set")], cause: None, suppress_context: false, context: None, traceback: None, extra: None })));
-                }
-                // For minimal, empty should be '""'
+                // For QUOTE_NONE, empty fields are allowed (just empty)
+                // For minimal, empty handling below
                 if formatted.is_empty() {
-                    parts.push("\"\"".to_string());
+                    if dialect.delimiter == ' ' && dialect.skipinitialspace {
+                        parts.push("\"\"".to_string());
+                    } else {
+                        parts.push("".to_string());
+                    }
                     continue;
                 }
             }
@@ -5114,7 +5178,18 @@ pub fn create_csv_dict() -> HashMap<String, PyObjectRef> {
     csv_func!("writer", |args| {
         if args.is_empty() { return Err(PyError::type_error("writer() missing required argument")); }
         let fileobj = args[0].clone();
-        let _write_attr = fileobj.borrow().get_attribute("write").map_err(|e| e)?;
+        let has_write = fileobj.borrow().get_attribute("write").is_ok();
+        if !has_write {
+            let has_getattr = {
+                let b = fileobj.borrow();
+                if let PyObject::Instance { typ, .. } = &*b {
+                    crate::object::lookup_dunder_via_mro(typ, "__getattr__").is_some()
+                } else { false }
+            };
+            if !has_getattr {
+                return Err(PyError::AttributeError("'instance' object has no attribute 'write'".to_string()));
+            }
+        }
         let (dialect_arg, kwargs) = extract_kwargs(args, 1);
         let dialect = build_dialect(dialect_arg, &kwargs)?;
         let writer_type = PyObjectRef::new(PyObject::Type{ name: "writer".to_string(), dict: Box::new(str_map_to_typedict(StdHashMap::new())), bases: vec![], mro: vec![] });
@@ -5185,8 +5260,13 @@ pub fn create_csv_dict() -> HashMap<String, PyObjectRef> {
                     }
                 }
                 let out = format_csv_row(cells, &dialect)?;
-                let write_m = fobj.borrow().get_attribute("write").map_err(|e| e)?;
-                crate::object::call_function_disposable(&write_m, vec![py_str(&out)], vec![])?;
+                let actual_fobj = fobj.borrow().get_attribute("_file").unwrap_or_else(|_| fobj.clone());
+                let write_res = crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &actual_fobj, "write", vec![py_str(&out)]));
+                match write_res {
+                    Ok(Ok(_)) => {},
+                    Ok(Err(e)) => return Err(e),
+                    Err(e) => return Err(e),
+                }
                 Ok(py_int(out.len() as i64))
             }}));
             tdict.insert_str("writerows", PyObjectRef::new(PyObject::BuiltinFunction{ name: "writerows".to_string(), func: |a| {
@@ -5194,10 +5274,10 @@ pub fn create_csv_dict() -> HashMap<String, PyObjectRef> {
                 let self_obj = &a[0];
                 let rows_arg = &a[1];
                 let iter = crate::object::builtin_iter(&[rows_arg.clone()])?;
-                let wrow = self_obj.borrow().get_attribute("writerow").map_err(|_| PyError::runtime_error("no writerow"))?;
+                let wrow = self_obj.borrow().get_attribute("writerow").unwrap();
                 loop {
                     match crate::object::builtin_next(&[iter.clone()]) {
-                        Ok(row) => { crate::object::call_function_disposable(&wrow, vec![row], vec![])?; },
+                        Ok(row) => { crate::object::call_function_disposable(&wrow, vec![self_obj.clone(), row.clone()], vec![])?; },
                         Err(PyError::StopIteration) => break,
                         Err(e) => return Err(e),
                     }
@@ -5366,27 +5446,7 @@ pub fn create_csv_dict() -> HashMap<String, PyObjectRef> {
                 }
             }
             let dialect = build_dialect(dialect_arg, &kwargs)?;
-            let lines = match crate::object::builtin_iter(&[csvfile.clone()]) {
-                Ok(it) => {
-                    let mut out = Vec::new();
-                    loop {
-                        match crate::object::builtin_next(&[it.clone()]) {
-                            Ok(v) => out.push(v.str()),
-                            Err(PyError::StopIteration) => break,
-                            Err(e) => return Err(e),
-                        }
-                    }
-                    out
-                },
-                Err(_) => {
-                    if let Ok(read) = csvfile.borrow().get_attribute("read") {
-                        let v = crate::object::call_function_disposable(&read, vec![], vec![])?;
-                        v.str().lines().map(|s| s.to_string()).collect()
-                    } else {
-                        return Err(PyError::type_error("csvfile must be iterable"));
-                    }
-                }
-            };
+            let lines = collect_lines(csvfile)?;
             let mut rows: Vec<Vec<PyObjectRef>> = Vec::new();
             for line in lines {
                 if line.is_empty() { continue; }
@@ -5479,7 +5539,37 @@ pub fn create_csv_dict() -> HashMap<String, PyObjectRef> {
             if args.len()<3 { return Err(PyError::type_error("DictWriter() missing required argument: 'fieldnames'")); }
             let self_obj = &args[0];
             let fileobj = args[1].clone();
-            let fieldnames_arg = &args[2];
+            let mut restval: Option<PyObjectRef> = None;
+            let mut extrasaction = "raise".to_string();
+            let mut dialect_arg: Option<PyObjectRef> = None;
+            let mut kwargs: StdHashMap<String, PyObjectRef> = StdHashMap::new();
+            let fieldnames_arg_raw = &args[2];
+            let fieldnames_arg = if let PyObject::Dict(d) = &*fieldnames_arg_raw.borrow() {
+                let mut found = None;
+                for (k, v) in d.items() {
+                    if k.str() == "fieldnames" {
+                        found = Some(v.clone());
+                        break;
+                    }
+                }
+                if let Some(v) = found {
+                    for (k2, v2) in d.items() {
+                        let ks2 = k2.str();
+                        if ks2 == "fieldnames" { continue; }
+                        match ks2.as_str() {
+                            "restval" => restval = Some(v2.clone()),
+                            "extrasaction" => extrasaction = v2.str().to_lowercase(),
+                            "dialect" => dialect_arg = Some(v2.clone()),
+                            _ => { kwargs.insert(ks2.clone(), v2.clone()); }
+                        }
+                    }
+                    v
+                } else {
+                    fieldnames_arg_raw.clone()
+                }
+            } else {
+                fieldnames_arg_raw.clone()
+            };
             let mut fieldnames: Vec<PyObjectRef> = Vec::new();
             if let PyObject::List(items) = &*fieldnames_arg.borrow() { fieldnames = items.clone(); }
             else if let PyObject::Tuple(items) = &*fieldnames_arg.borrow() { fieldnames = items.clone(); }
@@ -5494,10 +5584,6 @@ pub fn create_csv_dict() -> HashMap<String, PyObjectRef> {
                     Err(_) => return Err(PyError::type_error("fieldnames must be iterable")),
                 }
             }
-            let mut restval: Option<PyObjectRef> = None;
-            let mut extrasaction = "raise".to_string();
-            let mut dialect_arg: Option<PyObjectRef> = None;
-            let mut kwargs: StdHashMap<String, PyObjectRef> = StdHashMap::new();
             let mut idx=3;
             if args.len()>idx {
                 let v = &args[idx];
@@ -5579,7 +5665,7 @@ pub fn create_csv_dict() -> HashMap<String, PyObjectRef> {
                 }
             }
             let wrow = self_obj.borrow().get_attribute("writerow").unwrap();
-            let ret = crate::object::call_function_disposable(&wrow, vec![header_dict], vec![])?;
+            let ret = crate::object::call_function_disposable(&wrow, vec![self_obj.clone(), header_dict.clone()], vec![])?;
             Ok(ret)
         }}));
         dict.insert_str("writerow", PyObjectRef::new(PyObject::BuiltinFunction{ name: "writerow".to_string(), func: |args| {
@@ -5607,7 +5693,11 @@ pub fn create_csv_dict() -> HashMap<String, PyObjectRef> {
             let mut cells: Vec<PyObjectRef> = Vec::new();
             for fname in &fieldnames {
                 let key = fname.str();
-                let val = rowdict.borrow().get_attribute(&key).unwrap_or_else(|_| restval.clone());
+                let val = if let PyObject::Dict(d) = &*rowdict.borrow() {
+                    d.get(&py_str(&key)).ok().flatten().unwrap_or_else(|| restval.clone())
+                } else {
+                    rowdict.borrow().get_attribute(&key).unwrap_or_else(|_| restval.clone())
+                };
                 cells.push(val);
             }
             let dialect_obj = self_obj.borrow().get_attribute("_dialect").unwrap();
@@ -5627,8 +5717,13 @@ pub fn create_csv_dict() -> HashMap<String, PyObjectRef> {
             };
             let out = format_csv_row(cells, &dialect)?;
             let fobj = self_obj.borrow().get_attribute("_fileobj").unwrap();
-            let write_m = fobj.borrow().get_attribute("write").map_err(|e| e)?;
-            crate::object::call_function_disposable(&write_m, vec![py_str(&out)], vec![])?;
+            let actual_fobj = fobj.borrow().get_attribute("_file").unwrap_or_else(|_| fobj.clone());
+            let write_res = crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &actual_fobj, "write", vec![py_str(&out)]));
+            match write_res {
+                Ok(Ok(_)) => {},
+                Ok(Err(e)) => return Err(e),
+                Err(e) => return Err(e),
+            }
             Ok(py_int(out.len() as i64))
         }}));
         dict.insert_str("writerows", PyObjectRef::new(PyObject::BuiltinFunction{ name: "writerows".to_string(), func: |args| {
@@ -5639,7 +5734,7 @@ pub fn create_csv_dict() -> HashMap<String, PyObjectRef> {
             let wrow = self_obj.borrow().get_attribute("writerow").unwrap();
             loop {
                 match crate::object::builtin_next(&[iter.clone()]) {
-                    Ok(row) => { crate::object::call_function_disposable(&wrow, vec![row], vec![])?; },
+                    Ok(row) => { crate::object::call_function_disposable(&wrow, vec![self_obj.clone(), row.clone()], vec![])?; },
                     Err(PyError::StopIteration) => break,
                     Err(e) => return Err(e),
                 }

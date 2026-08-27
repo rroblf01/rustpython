@@ -2717,15 +2717,21 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
         let p_readline = pos_rc.clone();
         type_dict.insert_str(
             "readline",
-            PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
+            PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| {
                 let data = b_readline.borrow();
                 let pos = (*p_readline.borrow()).min(data.len());
                 let remaining = &data[pos..];
-                let end = remaining
+                // Respect size limit if provided (CPython's readline(size) caps
+                // the returned bytes, even if the line is longer)
+                let size_limit = args.get(0).and_then(|a| a.as_i64()).filter(|&n| n >= 0).map(|n| n as usize);
+                let mut end = remaining
                     .iter()
                     .position(|&c| c == b'\n')
                     .map(|i| i + 1)
                     .unwrap_or(remaining.len());
+                if let Some(limit) = size_limit {
+                    end = end.min(limit);
+                }
                 let chunk = remaining[..end].to_vec();
                 *p_readline.borrow_mut() = pos + end;
                 Ok(PyObjectRef::imm(PyObject::Bytes(chunk)))
@@ -2811,10 +2817,46 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
         );
 
         type_dict.insert_str(
+            "truncate",
+            PyObjectRef::new(PyObject::Closure(Rc::new({
+                let b = buf_rc.clone();
+                let p = pos_rc.clone();
+                move |args: &[PyObjectRef]| {
+                    let size = args.get(0).and_then(|a| a.as_i64()).map(|n| n.max(0) as usize).unwrap_or(*p.borrow());
+                    let mut buf = b.borrow_mut();
+                    if size < buf.len() {
+                        buf.truncate(size);
+                    } else if size > buf.len() {
+                        buf.resize(size, 0);
+                    }
+                    if *p.borrow() > size {
+                        *p.borrow_mut() = size;
+                    }
+                    Ok(py_int(size as i64))
+                }
+            }))),
+        );
+
+        type_dict.insert_str(
             "close",
             PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
                 Ok(py_none())
             }))),
+        );
+
+        type_dict.insert_str(
+            "__enter__",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__enter__".to_string(),
+                func: |args: &[PyObjectRef]| Ok(args[0].clone()),
+            }),
+        );
+        type_dict.insert_str(
+            "__exit__",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__exit__".to_string(),
+                func: |_: &[PyObjectRef]| Ok(py_bool(false)),
+            }),
         );
 
         Ok(PyObjectRef::new(PyObject::Instance {
@@ -3137,9 +3179,11 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
     let text_cls_tiw = text_cls.clone(); // for TextIOWrapper below
     let stringio_closure: Rc<dyn Fn(&[PyObjectRef]) -> PyResult<PyObjectRef>> =
         Rc::new(move |args: &[PyObjectRef]| {
-            let initial_value = if !args.is_empty() && !matches!(&*args[0].borrow(), PyObject::None)
-            {
-                args[0].str()
+            let initial_value = if !args.is_empty() {
+                match &*args[0].borrow() {
+                    PyObject::Str(s) => s.to_string(),
+                    _ => String::new(),
+                }
             } else {
                 String::new()
             };
@@ -3308,6 +3352,14 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
                 }))),
             );
 
+            // flush — no-op (real StringIO flush does nothing)
+            type_dict.insert_str(
+                "flush",
+                PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
+                    Ok(py_none())
+                }))),
+            );
+
             // readlines(hint=-1) — split remaining content into lines (each
             // keeping its trailing '\n' except possibly the last).
             let (b, p) = (buffer.clone(), pos.clone());
@@ -3362,6 +3414,20 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
                     *p.borrow_mut() = end;
                     Ok(py_str(&chars[start..end].iter().collect::<String>()))
                 }))),
+            );
+            type_dict.insert_str(
+                "__enter__",
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "__enter__".to_string(),
+                    func: |args: &[PyObjectRef]| Ok(args[0].clone()),
+                }),
+            );
+            type_dict.insert_str(
+                "__exit__",
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "__exit__".to_string(),
+                    func: |_: &[PyObjectRef]| Ok(py_bool(false)),
+                }),
             );
 
             Ok(PyObjectRef::new(PyObject::Instance {
@@ -3421,6 +3487,16 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
             }
             Ok(data)
         }));
+        td.insert("readline".into(), bf("readline", |args: &[PyObjectRef]| {
+            io_ensure_open(args)?;
+            let raw = io_get_raw(args)?;
+            let n = args.get(1).cloned().unwrap_or_else(|| py_int(-1));
+            let data = crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "readline", vec![n]))??;
+            if let PyObject::Bytes(ref b) = &*data.borrow() {
+                return Ok(py_str(&String::from_utf8_lossy(&b[..])));
+            }
+            Ok(data)
+        }));
         td.insert("write".into(), bf("write", |args: &[PyObjectRef]| {
             io_ensure_open(args)?;
             let text = args.get(1).cloned().ok_or_else(|| PyError::type_error("write missing text"))?;
@@ -3471,6 +3547,17 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
         td.insert("readable".into(), bf("readable", |_a| Ok(py_bool(true))));
         td.insert("writable".into(), bf("writable", |_a| Ok(py_bool(true))));
         td.insert("seekable".into(), bf("seekable", |_a| Ok(py_bool(true))));
+        td.insert("detach".into(), bf("detach", |args: &[PyObjectRef]| {
+            io_ensure_open(args)?;
+            let raw = io_get_raw(args)?;
+            if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
+                dict.insert_str("_closed", py_bool(true));
+            }
+            Ok(raw)
+        }));
+        td.insert("buffer".into(), bf("buffer", |args: &[PyObjectRef]| {
+            Ok(io_get_raw(args)?)
+        }));
         td.insert("__enter__".into(), bf("__enter__", |args: &[PyObjectRef]| Ok(args[0].clone())));
         td.insert("__exit__".into(), bf("__exit__", |_a| Ok(py_bool(false))));
         td

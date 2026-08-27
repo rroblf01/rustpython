@@ -66,6 +66,10 @@ def header_encode(header_bytes, charset='iso-8859-1'):
         return ""
     if isinstance(header_bytes, str):
         header_bytes = header_bytes.encode(charset)
+    elif isinstance(header_bytes, bytearray):
+        header_bytes = bytes(header_bytes)
+    elif not isinstance(header_bytes, bytes):
+        header_bytes = bytes(header_bytes)
     encoded = b64encode(header_bytes).decode("ascii")
     return '=?%s?b?%s?=' % (charset, encoded)
 

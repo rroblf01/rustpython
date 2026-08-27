@@ -98,12 +98,12 @@ def _copy_shallow_fallback(x, cls):
                     except: pass
         return y
     if isinstance(x, dict):
-        if isinstance(x, weakref.WeakKeyDictionary):
+        if isinstance(x, _weakref.WeakKeyDictionary):
             y = cls.__new__(cls)
             for k,v in x.items():
                 y[k] = v
             return y
-        if isinstance(x, weakref.WeakValueDictionary):
+        if isinstance(x, _weakref.WeakValueDictionary):
             y = cls.__new__(cls)
             for k,v in x.items():
                 y[k] = v
@@ -360,13 +360,13 @@ def _deepcopy_fallback(x, cls, memo, d):
                 if isinstance(sl,str) and hasattr(x,sl): setattr(y,sl,deepcopy(getattr(x,sl),memo))
         return y
     if isinstance(x, dict):
-        if isinstance(x, weakref.WeakKeyDictionary):
+        if isinstance(x, _weakref.WeakKeyDictionary):
             y = cls.__new__(cls)
             memo[d]=y; _keep_alive(x,memo)
             for k,v in x.items():
                 y[k] = deepcopy(v, memo)
             return y
-        if isinstance(x, weakref.WeakValueDictionary):
+        if isinstance(x, _weakref.WeakValueDictionary):
             y = cls.__new__(cls)
             memo[d]=y; _keep_alive(x,memo)
             for k,v in x.items():
@@ -643,7 +643,7 @@ def _deepcopy_dict(x, memo, deepcopy=deepcopy):
 d[dict] = _deepcopy_dict
 
 def _deepcopy_method(x, memo):
-    return type(x)(x.__func__, deepcopy(x.__self__, memo))
+    return _types.MethodType(x.__func__, deepcopy(x.__self__, memo))
 d[types.MethodType] = _deepcopy_method
 try:
     class _Probe:
@@ -653,6 +653,10 @@ try:
 except: pass
 
 del d
+
+# Keep aliases for use after `del types, weakref` below (fallback helpers need them at call time)
+_types = types
+_weakref = weakref
 
 def _reconstruct(x, memo, func, args,
                  state=None, listiter=None, dictiter=None,

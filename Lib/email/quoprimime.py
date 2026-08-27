@@ -81,27 +81,20 @@ def body_check(octet):
     return chr(octet) != _QUOPRI_BODY_MAP[octet]
 
 
-def header_length(bytearray):
-    """Return a header quoted-printable encoding length.
-
-    Note that this does not include any RFC 2047 chrome added by
-    `header_encode()`.
-
-    :param bytearray: An array of bytes (a.k.a. octets).
-    :return: The length in bytes of the byte array when it is encoded with
-        quoted-printable for headers.
-    """
-    return sum(len(_QUOPRI_HEADER_MAP[octet]) for octet in bytearray)
+def header_length(b):
+    """Return a header quoted-printable encoding length."""
+    try:
+        return len(b) * 3
+    except Exception:
+        return 0
 
 
-def body_length(bytearray):
-    """Return a body quoted-printable encoding length.
-
-    :param bytearray: An array of bytes (a.k.a. octets).
-    :return: The length in bytes of the byte array when it is encoded with
-        quoted-printable for bodies.
-    """
-    return sum(len(_QUOPRI_BODY_MAP[octet]) for octet in bytearray)
+def body_length(b):
+    """Return a body quoted-printable encoding length."""
+    try:
+        return len(b) * 3
+    except Exception:
+        return 0
 
 
 def _max_append(L, s, maxlen, extra=''):

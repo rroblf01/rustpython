@@ -501,10 +501,20 @@ class _ValueFormatter:
         # where we would sometimes *introduce* FWS after a splitchar, or the
         # algorithm before that, where we would turn all white space runs into
         # single spaces or tabs.)
-        parts = re.split("(["+FWS+"]+)", fws+string)
-        if parts[0]:
-            parts[:0] = ['']
-        else:
+        # RustPython's re.split with capturing group doesn't include delimiters
+        # (fancy_regex bug), so implement manual split that keeps FWS.
+        text = fws+string
+        parts = []
+        last = 0
+        for m in re.finditer("["+FWS+"]+", text):
+            s, e = m.span()
+            parts.append(text[last:s])
+            parts.append(text[s:e])
+            last = e
+        parts.append(text[last:])
+        if parts and parts[0]:
+            parts.insert(0, '')
+        elif parts:
             parts.pop(0)
         for fws, part in zip(*[iter(parts)]*2):
             self._append_chunk(fws, part)

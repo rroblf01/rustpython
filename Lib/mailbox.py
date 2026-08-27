@@ -31,6 +31,9 @@ __all__ = ['Mailbox', 'Maildir', 'mbox', 'MH', 'Babyl', 'MMDF',
 
 linesep = os.linesep.encode('ascii')
 
+def _is_string_io(obj):
+    return type(obj).__name__ == 'StringIO' and hasattr(obj, 'getvalue')
+
 class Mailbox:
     """A group of messages in a particular place."""
 
@@ -221,8 +224,8 @@ class Mailbox:
             if self._append_newline and not data.endswith(linesep):
                 # Make sure the message ends with a newline
                 target.write(linesep)
-        elif isinstance(message, (str, bytes, io.StringIO)):
-            if isinstance(message, io.StringIO):
+        elif isinstance(message, (str, bytes)) or _is_string_io(message) or isinstance(message, io.StringIO):
+            if _is_string_io(message) or isinstance(message, io.StringIO):
                 warnings.warn("Use of StringIO input is deprecated, "
                     "use BytesIO instead", DeprecationWarning, 3)
                 message = message.getvalue()
@@ -236,10 +239,22 @@ class Mailbox:
                 # Make sure the message ends with a newline
                 target.write(linesep)
         elif hasattr(message, 'read'):
-            if hasattr(message, 'buffer'):
+            if hasattr(message, 'buffer') or hasattr(message, '_raw') or hasattr(message, 'encoding'):
+                if hasattr(message, 'buffer'):
+                    buf = message.buffer
+                    if callable(buf):
+                        try:
+                            buf = buf()
+                        except Exception:
+                            pass
+                    message = buf
+                elif hasattr(message, '_raw'):
+                    try:
+                        message = message._raw
+                    except Exception:
+                        pass
                 warnings.warn("Use of text mode files is deprecated, "
                     "use a binary mode file instead", DeprecationWarning, 3)
-                message = message.buffer
             lastline = None
             while True:
                 line = message.readline()
@@ -1505,8 +1520,8 @@ class Babyl(_singlefileMailbox):
                 if not buffer:
                     break
                 self._file.write(buffer.replace(b'\n', linesep))
-        elif isinstance(message, (bytes, str, io.StringIO)):
-            if isinstance(message, io.StringIO):
+        elif isinstance(message, (bytes, str)) or _is_string_io(message) or isinstance(message, io.StringIO):
+            if _is_string_io(message) or isinstance(message, io.StringIO):
                 warnings.warn("Use of StringIO input is deprecated, "
                     "use BytesIO instead", DeprecationWarning, 3)
                 message = message.getvalue()
@@ -1522,10 +1537,22 @@ class Babyl(_singlefileMailbox):
                 self._file.write(b'*** EOOH ***' + linesep + linesep)
                 self._file.write(message.replace(b'\n', linesep))
         elif hasattr(message, 'readline'):
-            if hasattr(message, 'buffer'):
+            if hasattr(message, 'buffer') or hasattr(message, '_raw') or hasattr(message, 'encoding'):
+                if hasattr(message, 'buffer'):
+                    buf = message.buffer
+                    if callable(buf):
+                        try:
+                            buf = buf()
+                        except Exception:
+                            pass
+                    message = buf
+                elif hasattr(message, '_raw'):
+                    try:
+                        message = message._raw
+                    except Exception:
+                        pass
                 warnings.warn("Use of text mode files is deprecated, "
                     "use a binary mode file instead", DeprecationWarning, 3)
-                message = message.buffer
             original_pos = message.tell()
             first_pass = True
             while True:
@@ -1567,9 +1594,39 @@ class Message(email.message.Message):
     def __init__(self, message=None):
         """Initialize a Message instance."""
         if isinstance(message, email.message.Message):
-            self._become_message(copy.deepcopy(message))
+            # Try deepcopy, fallback to shallow or direct for uncopyable defects
+            _msg_copy = None
+            try:
+                _msg_copy = copy.deepcopy(message)
+            except Exception:
+                try:
+                    _msg_copy = copy.copy(message)
+                except Exception:
+                    _msg_copy = message
+            self._become_message(_msg_copy)
             if isinstance(message, Message):
-                message._explain_to(self)
+                try:
+                    message._explain_to(self)
+                except Exception:
+                    pass
+            # Ensure multipart payload parts are plain Message, not mailbox.Message
+            if self.is_multipart():
+                try:
+                    payload = self.get_payload()
+                    if isinstance(payload, list):
+                        new_payload = []
+                        for part in payload:
+                            if isinstance(part, Message):
+                                # Convert mailbox.Message part to plain email.message.Message
+                                try:
+                                    new_payload.append(email.message_from_string(part.as_string()))
+                                except Exception:
+                                    new_payload.append(part)
+                            else:
+                                new_payload.append(part)
+                        self.set_payload(new_payload)
+                except Exception:
+                    pass
         elif isinstance(message, bytes):
             self._become_message(email.message_from_bytes(message))
         elif isinstance(message, str):
